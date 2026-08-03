@@ -29,11 +29,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.codex_task_orchestrator_spec import (  # noqa: E402
+    AcceptanceStatus,
+    AttentionKind,
+    AttentionStatus,
     CANONICAL_REPOSITORY,
     IncidentDisposition,
     IncidentStatus,
     RetryObservation,
     STRICT_HUMAN_REASONS,
+    SuccessionStatus,
     TaskStatus,
     canonical_digest,
     classify_incident,
@@ -41,9 +45,12 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     report_status,
     transition_allowed,
     validate_arbiter_decision,
+    validate_attention_event_id,
     validate_digest,
+    validate_envelope_id,
     validate_task_passport,
     validate_task_id,
+    validate_visible_text,
 )
 
 
@@ -99,6 +106,82 @@ CREATE TABLE IF NOT EXISTS task_threads (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_execution_thread
 ON task_threads(thread_id) WHERE active=1 AND role IN ('executor','arbiter');
+CREATE TABLE IF NOT EXISTS acceptance_envelopes (
+    envelope_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    curator_thread_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('OPEN','DONE_PENDING_HANDOFF','AWAITING_ACCEPTANCE','ACCEPTED')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+    owner_notification_digest TEXT NOT NULL DEFAULT '',
+    owner_notified_at TEXT,
+    accepted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS acceptance_envelope_members (
+    envelope_id TEXT NOT NULL REFERENCES acceptance_envelopes(envelope_id),
+    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+    role TEXT NOT NULL CHECK(role IN ('root','corrective','required-child')),
+    required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0,1)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(envelope_id,task_id)
+);
+CREATE TABLE IF NOT EXISTS attention_events (
+    event_id TEXT PRIMARY KEY,
+    event_digest TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    source_revision INTEGER NOT NULL CHECK(source_revision > 0),
+    task_revision INTEGER NOT NULL CHECK(task_revision > 0),
+    event_kind TEXT NOT NULL CHECK(event_kind IN ('TECHNICAL_COMPLETION','TERMINAL_FAILURE','STRICT_HUMAN_GATE','SERIOUS_STALL')),
+    curator_thread_id TEXT NOT NULL,
+    envelope_id TEXT REFERENCES acceptance_envelopes(envelope_id),
+    evidence_summary TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('PENDING','LEASED','SENT','RETRY','ACKED','STALE')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_expires_at REAL,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    transport_receipt_digest TEXT NOT NULL DEFAULT '',
+    ack_evidence_digest TEXT NOT NULL DEFAULT '',
+    acked_by_thread_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    first_sent_at TEXT,
+    last_sent_at TEXT,
+    acked_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id,source_revision,event_kind)
+);
+CREATE INDEX IF NOT EXISTS attention_delivery_queue
+ON attention_events(state,next_attempt_at,created_at);
+CREATE TABLE IF NOT EXISTS visible_report_state (
+    envelope_id TEXT PRIMARY KEY,
+    last_fingerprint TEXT NOT NULL,
+    last_rendered_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS executor_successions (
+    succession_id TEXT PRIMARY KEY,
+    envelope_id TEXT NOT NULL REFERENCES acceptance_envelopes(envelope_id),
+    predecessor_task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    predecessor_thread_id TEXT NOT NULL,
+    predecessor_generation INTEGER NOT NULL CHECK(predecessor_generation > 0),
+    successor_task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    successor_thread_id TEXT NOT NULL,
+    successor_generation INTEGER NOT NULL CHECK(successor_generation > 0),
+    reason TEXT NOT NULL,
+    checkpoint_digest TEXT NOT NULL,
+    target_readback_digest TEXT NOT NULL,
+    prompt_delivery_digest TEXT NOT NULL,
+    registry_link_digest TEXT NOT NULL,
+    successor_active_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('READY_TO_ARCHIVE','ARCHIVED')),
+    archive_readback_digest TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    archived_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(predecessor_thread_id,successor_thread_id)
+);
 CREATE TABLE IF NOT EXISTS task_prs (
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
     pr_number INTEGER NOT NULL CHECK(pr_number > 0),
@@ -251,6 +334,20 @@ class Registry:
                 )
             if "smoke_at" not in watcher_columns:
                 connection.execute("ALTER TABLE watchers ADD COLUMN smoke_at TEXT")
+            envelope_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(acceptance_envelopes)"
+                )
+            }
+            if "owner_notification_digest" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN owner_notification_digest TEXT NOT NULL DEFAULT ''"
+                )
+            if "owner_notified_at" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN owner_notified_at TEXT"
+                )
             task_threads_sql_row = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_threads'"
             ).fetchone()
@@ -295,7 +392,7 @@ class Registry:
                 "WHERE status IN ('OPEN','WAITING_RESOURCE','CLAIMED','DECIDED','DELIVERED','VERIFIED')"
             )
             connection.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version','3') "
+                "INSERT INTO meta(key,value) VALUES('schema_version','4') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         if self.db_path.exists():
@@ -393,6 +490,9 @@ class Registry:
         curator_thread_id: str,
         executor_thread_id: str,
         host_id: str,
+        acceptance_envelope_id: str = "",
+        acceptance_title: str = "",
+        acceptance_role: str = "root",
     ) -> dict[str, object]:
         identity = validate_task_id(task_id)
         if not all(
@@ -424,13 +524,21 @@ class Registry:
         )
         timestamp = _now()
         digest = canonical_digest(validated_passport)
+        visible_task_title = validate_visible_text(
+            title, field="task title", task_id=identity
+        )
+        envelope_id = validate_envelope_id(acceptance_envelope_id or identity)
+        if acceptance_role not in {"root", "corrective", "required-child"}:
+            raise ValueError("invalid acceptance envelope member role")
+        envelope_title = (acceptance_title or visible_task_title).strip()
+        validate_visible_text(envelope_title, field="acceptance title")
         with self.transaction() as connection:
             existing = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (identity,)
             ).fetchone()
             if existing is not None:
                 expected = (
-                    title.strip(),
+                    visible_task_title,
                     CANONICAL_REPOSITORY,
                     project_id.strip(),
                     objective.strip(),
@@ -457,7 +565,20 @@ class Registry:
                     "curator": (curator_thread_id.strip(), host_id.strip()),
                     "executor": (executor_thread_id.strip(), host_id.strip()),
                 }
-                if actual != expected or initial_threads != expected_threads:
+                membership = connection.execute(
+                    "SELECT envelope_id,role FROM acceptance_envelope_members WHERE task_id=?",
+                    (identity,),
+                ).fetchone()
+                expected_membership = (envelope_id, acceptance_role)
+                actual_membership = (
+                    None if membership is None else membership["envelope_id"],
+                    None if membership is None else membership["role"],
+                )
+                if (
+                    actual != expected
+                    or initial_threads != expected_threads
+                    or actual_membership != expected_membership
+                ):
                     raise RuntimeError(
                         "task id is already registered with a different immutable identity"
                     )
@@ -465,6 +586,7 @@ class Registry:
                     "task_id": identity,
                     "revision": int(existing["revision"]),
                     "passport_digest": digest,
+                    "acceptance_envelope_id": envelope_id,
                     "idempotent": True,
                 }
             connection.execute(
@@ -473,7 +595,7 @@ class Registry:
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     identity,
-                    title.strip(),
+                    visible_task_title,
                     CANONICAL_REPOSITORY,
                     project_id.strip(),
                     objective.strip(),
@@ -494,15 +616,61 @@ class Registry:
                     "VALUES(?,?,?,?,?,?)",
                     (identity, role, 1, thread_id.strip(), host_id.strip(), timestamp),
                 )
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?",
+                (envelope_id,),
+            ).fetchone()
+            if envelope is None:
+                if acceptance_role != "root":
+                    raise RuntimeError(
+                        "a corrective task requires an existing acceptance envelope root"
+                    )
+                connection.execute(
+                    "INSERT INTO acceptance_envelopes(envelope_id,title,curator_thread_id,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        envelope_id,
+                        envelope_title,
+                        curator_thread_id.strip(),
+                        AcceptanceStatus.OPEN.value,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                if (
+                    envelope["curator_thread_id"] != curator_thread_id.strip()
+                    or envelope["status"] == AcceptanceStatus.ACCEPTED.value
+                ):
+                    raise RuntimeError(
+                        "acceptance envelope curator/status does not allow this task"
+                    )
+                if acceptance_title and envelope["title"] != envelope_title:
+                    raise RuntimeError("acceptance envelope title does not match")
+            connection.execute(
+                "INSERT INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
+                "VALUES(?,?,?,?)",
+                (envelope_id, identity, acceptance_role, timestamp),
+            )
             self.event(
                 connection,
                 "task",
                 identity,
                 "registered",
-                {"passport_digest": digest, "executor_thread_id": executor_thread_id},
+                {
+                    "passport_digest": digest,
+                    "executor_thread_id": executor_thread_id,
+                    "acceptance_envelope_id": envelope_id,
+                    "acceptance_role": acceptance_role,
+                },
             )
         self.flush_events()
-        return {"task_id": identity, "revision": 1, "passport_digest": digest}
+        return {
+            "task_id": identity,
+            "revision": 1,
+            "passport_digest": digest,
+            "acceptance_envelope_id": envelope_id,
+        }
 
     def add_thread(
         self,
@@ -561,6 +729,107 @@ class Registry:
         self.flush_events()
         return {"task_id": identity, "role": role, "generation": generation}
 
+    def bind_acceptance_envelope(
+        self,
+        *,
+        envelope_id: str,
+        title: str,
+        curator_thread_id: str,
+        root_task_id: str,
+        corrective_task_ids: Iterable[str],
+    ) -> dict[str, object]:
+        identity = validate_envelope_id(envelope_id)
+        root = validate_task_id(root_task_id)
+        corrective = [validate_task_id(item) for item in corrective_task_ids]
+        if len(set(corrective)) != len(corrective) or root in corrective:
+            raise ValueError("acceptance envelope members must be unique")
+        if not curator_thread_id.strip():
+            raise ValueError("acceptance envelope requires the exact curator thread")
+        visible_title = validate_visible_text(title, field="acceptance title")
+        timestamp = _now()
+        members = [(root, "root"), *((item, "corrective") for item in corrective)]
+        for task_id, _ in members:
+            visible_title = validate_visible_text(
+                visible_title, field="acceptance title", task_id=task_id
+            )
+        with self.transaction() as connection:
+            rows = {
+                item["task_id"]: item
+                for item in connection.execute(
+                    "SELECT * FROM tasks WHERE task_id IN ({})".format(
+                        ",".join("?" for _ in members)
+                    ),
+                    tuple(item[0] for item in members),
+                ).fetchall()
+            }
+            if set(rows) != {item[0] for item in members}:
+                raise RuntimeError("acceptance envelope contains an unknown task")
+            if any(
+                row["curator_thread_id"] != curator_thread_id.strip()
+                for row in rows.values()
+            ):
+                raise RuntimeError("all acceptance envelope members must share one curator")
+            existing_memberships = connection.execute(
+                "SELECT task_id,envelope_id,role FROM acceptance_envelope_members "
+                "WHERE task_id IN ({})".format(",".join("?" for _ in members)),
+                tuple(item[0] for item in members),
+            ).fetchall()
+            for membership in existing_memberships:
+                expected_role = dict(members)[membership["task_id"]]
+                if (
+                    membership["envelope_id"] != identity
+                    or membership["role"] != expected_role
+                ):
+                    raise RuntimeError(
+                        "a task is already bound to a different acceptance envelope"
+                    )
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+            ).fetchone()
+            if envelope is None:
+                connection.execute(
+                    "INSERT INTO acceptance_envelopes(envelope_id,title,curator_thread_id,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        identity,
+                        visible_title,
+                        curator_thread_id.strip(),
+                        AcceptanceStatus.OPEN.value,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            elif (
+                envelope["title"] != visible_title
+                or envelope["curator_thread_id"] != curator_thread_id.strip()
+                or envelope["status"] == AcceptanceStatus.ACCEPTED.value
+            ):
+                raise RuntimeError("acceptance envelope identity does not match")
+            inserted = 0
+            for task_id, role in members:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
+                    "VALUES(?,?,?,?)",
+                    (identity, task_id, role, timestamp),
+                )
+                inserted += cursor.rowcount
+            self._recompute_envelope(connection, identity)
+            self.event(
+                connection,
+                "acceptance-envelope",
+                identity,
+                "members-bound",
+                {"root_task_id": root, "corrective_task_ids": corrective},
+            )
+        self.flush_events()
+        return {
+            "acceptance_envelope_id": identity,
+            "root_task_id": root,
+            "corrective_task_ids": corrective,
+            "members_inserted": inserted,
+            "idempotent": inserted == 0,
+        }
+
     def task(self, task_id: str, connection: sqlite3.Connection | None = None) -> sqlite3.Row:
         identity = validate_task_id(task_id)
         if connection is not None:
@@ -571,6 +840,72 @@ class Registry:
         if row is None:
             raise KeyError(f"unknown task: {identity}")
         return row
+
+    def _task_envelope(
+        self, connection: sqlite3.Connection, task_id: str
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT e.* FROM acceptance_envelopes e "
+            "JOIN acceptance_envelope_members m ON m.envelope_id=e.envelope_id "
+            "WHERE m.task_id=?",
+            (validate_task_id(task_id),),
+        ).fetchone()
+
+    def _recompute_envelope(
+        self, connection: sqlite3.Connection, envelope_id: str
+    ) -> sqlite3.Row:
+        identity = validate_envelope_id(envelope_id)
+        envelope = connection.execute(
+            "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+        ).fetchone()
+        if envelope is None:
+            raise KeyError(f"unknown acceptance envelope: {identity}")
+        if envelope["status"] == AcceptanceStatus.ACCEPTED.value:
+            return envelope
+        members = connection.execute(
+            "SELECT t.status FROM acceptance_envelope_members m "
+            "JOIN tasks t ON t.task_id=m.task_id "
+            "WHERE m.envelope_id=? AND m.required=1 ORDER BY m.task_id",
+            (identity,),
+        ).fetchall()
+        if not members:
+            raise RuntimeError("acceptance envelope must contain a required task")
+        statuses = {TaskStatus(row["status"]) for row in members}
+        terminal = {
+            TaskStatus.DONE_AWAITING_ACCEPTANCE,
+            TaskStatus.TERMINAL_FAILURE,
+        }
+        pending = {
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+        }
+        if statuses.issubset(terminal):
+            target = AcceptanceStatus.AWAITING_ACCEPTANCE
+        elif statuses.issubset(terminal | pending) and statuses & pending:
+            target = AcceptanceStatus.DONE_PENDING_HANDOFF
+        else:
+            target = AcceptanceStatus.OPEN
+        if envelope["status"] != target.value:
+            next_revision = int(envelope["revision"]) + 1
+            connection.execute(
+                "UPDATE acceptance_envelopes SET status=?,revision=?,updated_at=? WHERE envelope_id=?",
+                (target.value, next_revision, _now(), identity),
+            )
+            self.event(
+                connection,
+                "acceptance-envelope",
+                identity,
+                "state-changed",
+                {
+                    "from": envelope["status"],
+                    "to": target.value,
+                    "revision": next_revision,
+                },
+            )
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+            ).fetchone()
+        return envelope
 
     def update_task(
         self,
@@ -598,6 +933,17 @@ class Registry:
             current_status = TaskStatus(before["status"])
             if not transition_allowed(current_status, status):
                 raise RuntimeError(f"forbidden task transition: {current_status.value} -> {status.value}")
+            attention_managed = {
+                TaskStatus.DONE_PENDING_HANDOFF,
+                TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+                TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+                TaskStatus.DONE_AWAITING_ACCEPTANCE,
+                TaskStatus.TERMINAL_FAILURE,
+            }
+            if status in attention_managed and status != current_status:
+                raise RuntimeError(
+                    "attention-managed task states require enqueue-attention or curator acknowledgement"
+                )
             next_revision = expected_revision + 1
             values = {
                 "progress_percent": int(before["progress_percent"]) if progress is None else progress,
@@ -618,11 +964,32 @@ class Registry:
                 for field in ("eta_text", "last_delta", "current_action")
             ):
                 raise ValueError("eta, delta and current action must be non-empty")
-            if status == TaskStatus.AWAITING_HUMAN:
+            values["eta_text"] = validate_visible_text(
+                str(values["eta_text"]), field="eta", task_id=validate_task_id(task_id)
+            )
+            values["last_delta"] = validate_visible_text(
+                str(values["last_delta"]),
+                field="delta",
+                task_id=validate_task_id(task_id),
+            )
+            values["current_action"] = validate_visible_text(
+                str(values["current_action"]),
+                field="current action",
+                task_id=validate_task_id(task_id),
+            )
+            if status in {
+                TaskStatus.AWAITING_HUMAN,
+                TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            }:
                 if values["human_reason"] not in STRICT_HUMAN_REASONS:
                     raise ValueError("awaiting-human requires a strict v1 human reason")
                 if not values["blocker"]:
                     raise ValueError("awaiting-human requires an exact blocker")
+                values["blocker"] = validate_visible_text(
+                    str(values["blocker"]),
+                    field="blocker",
+                    task_id=validate_task_id(task_id),
+                )
                 if repo_owned_remediation_available or not remediation_exhausted:
                     raise ValueError(
                         "awaiting-human requires exhausted remediation and no repo-owned action"
@@ -675,9 +1042,700 @@ class Registry:
         self.flush_events()
         return {"task_id": identity, "pr": pr, "state": state}
 
+    def _ensure_task_envelope(
+        self, connection: sqlite3.Connection, task: sqlite3.Row
+    ) -> sqlite3.Row:
+        envelope = self._task_envelope(connection, task["task_id"])
+        if envelope is not None:
+            return envelope
+        envelope_id = validate_envelope_id(task["task_id"])
+        timestamp = _now()
+        connection.execute(
+            "INSERT INTO acceptance_envelopes(envelope_id,title,curator_thread_id,status,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                envelope_id,
+                validate_visible_text(task["title"], field="acceptance title"),
+                task["curator_thread_id"],
+                AcceptanceStatus.OPEN.value,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
+            "VALUES(?,?,?,?)",
+            (envelope_id, task["task_id"], "root", timestamp),
+        )
+        self.event(
+            connection,
+            "acceptance-envelope",
+            envelope_id,
+            "default-created",
+            {"root_task_id": task["task_id"]},
+        )
+        return connection.execute(
+            "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (envelope_id,)
+        ).fetchone()
+
+    def enqueue_attention(
+        self,
+        *,
+        task_id: str,
+        expected_revision: int,
+        kind: AttentionKind,
+        evidence_summary: str,
+        evidence_digest: str,
+        backfill: bool = False,
+        eta: str | None = None,
+        delta: str | None = None,
+        current: str | None = None,
+        blocker: str = "",
+        human_reason: str = "",
+        repo_owned_remediation_available: bool = False,
+        remediation_exhausted: bool = False,
+    ) -> dict[str, object]:
+        identity = validate_task_id(task_id)
+        digest = validate_digest(evidence_digest)
+        summary = evidence_summary.strip()
+        if not summary:
+            raise ValueError("attention event requires an evidence summary")
+        if expected_revision <= 0:
+            raise ValueError("expected_revision must be positive")
+        with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM attention_events WHERE task_id=? AND source_revision=? AND event_kind=?",
+                (identity, expected_revision, kind.value),
+            ).fetchone()
+            if existing is None and backfill:
+                existing = connection.execute(
+                    "SELECT * FROM attention_events WHERE task_id=? AND event_kind=? "
+                    "ORDER BY created_at,event_id LIMIT 1",
+                    (identity, kind.value),
+                ).fetchone()
+            if existing is not None:
+                if (
+                    existing["evidence_summary"] != summary
+                    or existing["evidence_digest"] != digest
+                ):
+                    raise RuntimeError("attention event identity already has different evidence")
+                return {
+                    "event_id": existing["event_id"],
+                    "event_digest": existing["event_digest"],
+                    "state": existing["state"],
+                    "task_revision": int(existing["task_revision"]),
+                    "idempotent": True,
+                }
+            task = self.task(identity, connection)
+            if int(task["revision"]) != expected_revision:
+                raise RuntimeError(
+                    f"stale task revision: expected {expected_revision}, actual {task['revision']}"
+                )
+            before_status = TaskStatus(task["status"])
+            pending_by_kind = {
+                AttentionKind.TECHNICAL_COMPLETION: TaskStatus.DONE_PENDING_HANDOFF,
+                AttentionKind.TERMINAL_FAILURE: TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+                AttentionKind.STRICT_HUMAN_GATE: TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+                AttentionKind.SERIOUS_STALL: TaskStatus.RECOVERING,
+            }
+            target_status = pending_by_kind[kind]
+            if backfill:
+                allowed_backfill = {
+                    AttentionKind.TECHNICAL_COMPLETION: TaskStatus.DONE_AWAITING_ACCEPTANCE,
+                    AttentionKind.TERMINAL_FAILURE: TaskStatus.TERMINAL_FAILURE,
+                    AttentionKind.STRICT_HUMAN_GATE: TaskStatus.AWAITING_HUMAN,
+                }
+                if kind not in allowed_backfill or before_status != allowed_backfill[kind]:
+                    raise RuntimeError("backfill requires the matching legacy terminal state")
+            elif not transition_allowed(before_status, target_status):
+                raise RuntimeError(
+                    f"forbidden attention transition: {before_status.value} -> {target_status.value}"
+                )
+            if kind == AttentionKind.STRICT_HUMAN_GATE:
+                if human_reason not in STRICT_HUMAN_REASONS or not blocker.strip():
+                    raise ValueError("strict HumanGate attention requires reason and blocker")
+                if repo_owned_remediation_available or not remediation_exhausted:
+                    raise ValueError(
+                        "strict HumanGate requires exhausted remediation and no repo-owned action"
+                    )
+            elif blocker.strip() or human_reason.strip():
+                raise ValueError("blocker and human reason are only valid for strict HumanGate")
+            values = {
+                "eta": task["eta_text"] if eta is None else eta,
+                "delta": task["last_delta"] if delta is None else delta,
+                "current": task["current_action"] if current is None else current,
+            }
+            for field, value in values.items():
+                values[field] = validate_visible_text(
+                    str(value), field=field, task_id=identity
+                )
+            visible_blocker = ""
+            if blocker.strip():
+                visible_blocker = validate_visible_text(
+                    blocker, field="blocker", task_id=identity
+                )
+            envelope = self._ensure_task_envelope(connection, task)
+            next_revision = expected_revision + 1
+            event_payload = {
+                "schema": "wb-core-attention-event/v1",
+                "task_id": identity,
+                "source_revision": expected_revision,
+                "task_revision": next_revision,
+                "event_kind": kind.value,
+                "curator_thread_id": task["curator_thread_id"],
+                "acceptance_envelope_id": envelope["envelope_id"],
+                "evidence_summary": summary,
+                "evidence_digest": digest,
+            }
+            event_digest = canonical_digest(event_payload)
+            event_id = "evt-" + event_digest.removeprefix("sha256:")[:24]
+            progress = 100 if kind == AttentionKind.TECHNICAL_COMPLETION else int(task["progress_percent"])
+            connection.execute(
+                "UPDATE tasks SET status=?,revision=?,progress_percent=?,eta_text=?,last_delta=?,"
+                "current_action=?,blocker=?,human_reason=?,updated_at=? WHERE task_id=?",
+                (
+                    target_status.value,
+                    next_revision,
+                    progress,
+                    values["eta"],
+                    values["delta"],
+                    values["current"],
+                    visible_blocker,
+                    human_reason.strip(),
+                    _now(),
+                    identity,
+                ),
+            )
+            timestamp = _now()
+            connection.execute(
+                "INSERT INTO attention_events(event_id,event_digest,task_id,source_revision,task_revision,"
+                "event_kind,curator_thread_id,envelope_id,evidence_summary,evidence_digest,state,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    event_id,
+                    event_digest,
+                    identity,
+                    expected_revision,
+                    next_revision,
+                    kind.value,
+                    task["curator_thread_id"],
+                    envelope["envelope_id"],
+                    summary,
+                    digest,
+                    AttentionStatus.PENDING.value,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self.event(
+                connection,
+                "attention-event",
+                event_id,
+                "backfilled" if backfill else "enqueued",
+                {
+                    "event_digest": event_digest,
+                    "task_id": identity,
+                    "task_revision": next_revision,
+                    "event_kind": kind.value,
+                    "acceptance_envelope_id": envelope["envelope_id"],
+                },
+            )
+            self._recompute_envelope(connection, envelope["envelope_id"])
+        self.flush_events()
+        return {
+            "event_id": validate_attention_event_id(event_id),
+            "event_digest": event_digest,
+            "state": AttentionStatus.PENDING.value,
+            "task_id": identity,
+            "task_revision": next_revision,
+            "acceptance_envelope_id": envelope["envelope_id"],
+        }
+
+    def reserve_attention(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        lease_seconds: int,
+        limit: int,
+    ) -> dict[str, object]:
+        if not owner.strip() or lease_seconds <= 0 or lease_seconds > 600:
+            raise ValueError("attention lease requires owner and 1-600 seconds")
+        if limit <= 0 or limit > 8:
+            raise ValueError("attention reservation limit must be between 1 and 8")
+        now = time.time()
+        reserved: list[dict[str, object]] = []
+        with self.transaction() as connection:
+            active = connection.execute(
+                "SELECT generation FROM watchers WHERE status='ACTIVE'"
+            ).fetchone()
+            if active is None or int(active["generation"]) != generation:
+                return {"reserved": [], "reason": "stale-watcher-generation"}
+            rows = connection.execute(
+                "SELECT * FROM attention_events WHERE "
+                "(state IN ('PENDING','RETRY','SENT') AND next_attempt_at<=?) OR "
+                "(state='LEASED' AND (lease_expires_at IS NULL OR lease_expires_at<=?)) "
+                "ORDER BY created_at,event_id LIMIT ?",
+                (now, now, limit),
+            ).fetchall()
+            for row in rows:
+                task = self.task(row["task_id"], connection)
+                if int(task["revision"]) != int(row["task_revision"]):
+                    connection.execute(
+                        "UPDATE attention_events SET state='STALE',lease_owner='',lease_expires_at=NULL,updated_at=? "
+                        "WHERE event_id=?",
+                        (_now(), row["event_id"]),
+                    )
+                    self.event(
+                        connection,
+                        "attention-event",
+                        row["event_id"],
+                        "stale",
+                        {"actual_task_revision": int(task["revision"])},
+                    )
+                    continue
+                attempt = int(row["attempt_count"]) + 1
+                connection.execute(
+                    "UPDATE attention_events SET state='LEASED',attempt_count=?,lease_owner=?,"
+                    "lease_expires_at=?,updated_at=? WHERE event_id=?",
+                    (attempt, owner.strip(), now + lease_seconds, _now(), row["event_id"]),
+                )
+                reserved.append(
+                    {
+                        "event_id": row["event_id"],
+                        "event_digest": row["event_digest"],
+                        "task_id": row["task_id"],
+                        "task_revision": int(row["task_revision"]),
+                        "event_kind": row["event_kind"],
+                        "curator_thread_id": row["curator_thread_id"],
+                        "acceptance_envelope_id": row["envelope_id"],
+                        "evidence_summary": row["evidence_summary"],
+                        "evidence_digest": row["evidence_digest"],
+                        "attempt": attempt,
+                    }
+                )
+                self.event(
+                    connection,
+                    "attention-event",
+                    row["event_id"],
+                    "reserved",
+                    {"owner": owner.strip(), "attempt": attempt},
+                )
+        self.flush_events()
+        return {"reserved": reserved, "generation": generation}
+
+    def mark_attention_sent(
+        self,
+        *,
+        event_id: str,
+        owner: str,
+        transport_receipt_digest: str,
+        ack_timeout_seconds: int,
+    ) -> dict[str, object]:
+        identity = validate_attention_event_id(event_id)
+        receipt = validate_digest(transport_receipt_digest)
+        if ack_timeout_seconds <= 0 or ack_timeout_seconds > 86400:
+            raise ValueError("ack timeout must be between 1 and 86400 seconds")
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM attention_events WHERE event_id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown attention event: {identity}")
+            if row["state"] == AttentionStatus.ACKED.value:
+                if (
+                    row["transport_receipt_digest"]
+                    and row["transport_receipt_digest"] != receipt
+                ):
+                    raise RuntimeError(
+                        "attention event already has a different transport receipt"
+                    )
+                if not row["transport_receipt_digest"]:
+                    timestamp = _now()
+                    connection.execute(
+                        "UPDATE attention_events SET transport_receipt_digest=?,"
+                        "first_sent_at=COALESCE(first_sent_at,?),last_sent_at=?,updated_at=? "
+                        "WHERE event_id=?",
+                        (receipt, timestamp, timestamp, timestamp, identity),
+                    )
+                    self.event(
+                        connection,
+                        "attention-event",
+                        identity,
+                        "send-confirmed-after-ack",
+                        {
+                            "attempt": int(row["attempt_count"]),
+                            "transport_receipt_digest": receipt,
+                        },
+                    )
+                result = {
+                    "event_id": identity,
+                    "state": row["state"],
+                    "idempotent": True,
+                }
+            else:
+                if row["state"] == AttentionStatus.SENT.value:
+                    if row["transport_receipt_digest"] != receipt:
+                        raise RuntimeError(
+                            "attention event already has a different transport receipt"
+                        )
+                    return {
+                        "event_id": identity,
+                        "state": row["state"],
+                        "idempotent": True,
+                    }
+                if (
+                    row["state"] != AttentionStatus.LEASED.value
+                    or row["lease_owner"] != owner.strip()
+                ):
+                    raise RuntimeError("attention event is not leased by this owner")
+                timestamp = _now()
+                connection.execute(
+                    "UPDATE attention_events SET state='SENT',lease_owner='',lease_expires_at=NULL,"
+                    "next_attempt_at=?,transport_receipt_digest=?,first_sent_at=COALESCE(first_sent_at,?),"
+                    "last_sent_at=?,updated_at=? WHERE event_id=?",
+                    (
+                        time.time() + ack_timeout_seconds,
+                        receipt,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                        identity,
+                    ),
+                )
+                self.event(
+                    connection,
+                    "attention-event",
+                    identity,
+                    "sent",
+                    {
+                        "attempt": int(row["attempt_count"]),
+                        "transport_receipt_digest": receipt,
+                    },
+                )
+                result = {"event_id": identity, "state": AttentionStatus.SENT.value}
+        self.flush_events()
+        return result
+
+    def retry_attention(
+        self,
+        *,
+        event_id: str,
+        owner: str,
+        error: str,
+        retry_after_seconds: int,
+    ) -> dict[str, object]:
+        identity = validate_attention_event_id(event_id)
+        if not error.strip() or retry_after_seconds < 0 or retry_after_seconds > 86400:
+            raise ValueError("attention retry requires error and bounded delay")
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM attention_events WHERE event_id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown attention event: {identity}")
+            if row["state"] == AttentionStatus.ACKED.value:
+                return {"event_id": identity, "state": row["state"], "idempotent": True}
+            if row["state"] != AttentionStatus.LEASED.value or row["lease_owner"] != owner.strip():
+                raise RuntimeError("attention event is not leased by this owner")
+            connection.execute(
+                "UPDATE attention_events SET state='RETRY',lease_owner='',lease_expires_at=NULL,"
+                "next_attempt_at=?,last_error=?,updated_at=? WHERE event_id=?",
+                (time.time() + retry_after_seconds, error.strip(), _now(), identity),
+            )
+            self.event(
+                connection,
+                "attention-event",
+                identity,
+                "send-failed",
+                {"attempt": int(row["attempt_count"]), "error": error.strip()},
+            )
+        self.flush_events()
+        return {"event_id": identity, "state": AttentionStatus.RETRY.value}
+
+    def attention_event(self, event_id: str) -> dict[str, object]:
+        identity = validate_attention_event_id(event_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM attention_events WHERE event_id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown attention event: {identity}")
+            envelope = connection.execute(
+                "SELECT envelope_id,title,status,revision,curator_thread_id,owner_notified_at "
+                "FROM acceptance_envelopes WHERE envelope_id=?",
+                (row["envelope_id"],),
+            ).fetchone()
+        return {"event": dict(row), "acceptance_envelope": dict(envelope)}
+
+    def ack_attention(
+        self,
+        *,
+        event_id: str,
+        event_digest: str,
+        curator_thread_id: str,
+        expected_task_revision: int,
+        ack_evidence_digest: str,
+    ) -> dict[str, object]:
+        identity = validate_attention_event_id(event_id)
+        digest = validate_digest(event_digest)
+        ack_digest = validate_digest(ack_evidence_digest)
+        if not curator_thread_id.strip():
+            raise ValueError("attention acknowledgement requires exact curator identity")
+        result: dict[str, object]
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM attention_events WHERE event_id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown attention event: {identity}")
+            if (
+                row["event_digest"] != digest
+                or row["curator_thread_id"] != curator_thread_id.strip()
+                or int(row["task_revision"]) != expected_task_revision
+            ):
+                raise RuntimeError("attention acknowledgement identity does not match")
+            if row["state"] == AttentionStatus.ACKED.value:
+                if (
+                    row["ack_evidence_digest"] != ack_digest
+                    or row["acked_by_thread_id"] != curator_thread_id.strip()
+                ):
+                    raise RuntimeError("attention event already has different acknowledgement")
+                envelope = connection.execute(
+                    "SELECT * FROM acceptance_envelopes WHERE envelope_id=?",
+                    (row["envelope_id"],),
+                ).fetchone()
+                return {
+                    "event_id": identity,
+                    "state": AttentionStatus.ACKED.value,
+                    "acceptance_envelope_id": envelope["envelope_id"],
+                    "acceptance_envelope_revision": int(envelope["revision"]),
+                    "acceptance_envelope_state": envelope["status"],
+                    "owner_notification_required": (
+                        envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
+                        and not envelope["owner_notified_at"]
+                    ),
+                    "idempotent": True,
+                }
+            task = self.task(row["task_id"], connection)
+            if int(task["revision"]) != expected_task_revision:
+                connection.execute(
+                    "UPDATE attention_events SET state='STALE',lease_owner='',lease_expires_at=NULL,updated_at=? "
+                    "WHERE event_id=?",
+                    (_now(), identity),
+                )
+                self.event(
+                    connection,
+                    "attention-event",
+                    identity,
+                    "stale",
+                    {"actual_task_revision": int(task["revision"]), "stage": "curator-ack"},
+                )
+                result = {"event_id": identity, "state": AttentionStatus.STALE.value}
+            elif row["state"] == AttentionStatus.STALE.value:
+                result = {"event_id": identity, "state": AttentionStatus.STALE.value}
+            else:
+                final_by_kind = {
+                    AttentionKind.TECHNICAL_COMPLETION.value: TaskStatus.DONE_AWAITING_ACCEPTANCE,
+                    AttentionKind.TERMINAL_FAILURE.value: TaskStatus.TERMINAL_FAILURE,
+                    AttentionKind.STRICT_HUMAN_GATE.value: TaskStatus.AWAITING_HUMAN,
+                }
+                target_status = final_by_kind.get(row["event_kind"])
+                next_revision = int(task["revision"])
+                if target_status is not None:
+                    if not transition_allowed(TaskStatus(task["status"]), target_status):
+                        raise RuntimeError("task is not in the matching pending-handoff state")
+                    next_revision += 1
+                    connection.execute(
+                        "UPDATE tasks SET status=?,revision=?,updated_at=? WHERE task_id=?",
+                        (target_status.value, next_revision, _now(), row["task_id"]),
+                    )
+                    self.event(
+                        connection,
+                        "task",
+                        row["task_id"],
+                        "handoff-acknowledged",
+                        {
+                            "event_id": identity,
+                            "status": target_status.value,
+                            "revision": next_revision,
+                        },
+                    )
+                timestamp = _now()
+                connection.execute(
+                    "UPDATE attention_events SET state='ACKED',lease_owner='',lease_expires_at=NULL,"
+                    "ack_evidence_digest=?,acked_by_thread_id=?,acked_at=?,updated_at=? WHERE event_id=?",
+                    (ack_digest, curator_thread_id.strip(), timestamp, timestamp, identity),
+                )
+                envelope = self._recompute_envelope(connection, row["envelope_id"])
+                self.event(
+                    connection,
+                    "attention-event",
+                    identity,
+                    "curator-acknowledged",
+                    {
+                        "ack_evidence_digest": ack_digest,
+                        "curator_thread_id": curator_thread_id.strip(),
+                        "task_revision": next_revision,
+                        "acceptance_envelope_revision": int(envelope["revision"]),
+                    },
+                )
+                result = {
+                    "event_id": identity,
+                    "state": AttentionStatus.ACKED.value,
+                    "task_id": row["task_id"],
+                    "task_revision": next_revision,
+                    "acceptance_envelope_id": envelope["envelope_id"],
+                    "acceptance_envelope_revision": int(envelope["revision"]),
+                    "acceptance_envelope_state": envelope["status"],
+                    "owner_notification_required": (
+                        envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
+                        and not envelope["owner_notified_at"]
+                    ),
+                }
+        self.flush_events()
+        return result
+
+    def confirm_owner_notification(
+        self,
+        *,
+        curator_thread_id: str,
+        envelope_id: str,
+        expected_revision: int,
+        notification_evidence_digest: str,
+    ) -> dict[str, object]:
+        identity = validate_envelope_id(envelope_id)
+        digest = validate_digest(notification_evidence_digest)
+        with self.transaction() as connection:
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+            ).fetchone()
+            if envelope is None:
+                raise KeyError(f"unknown acceptance envelope: {identity}")
+            if envelope["curator_thread_id"] != curator_thread_id.strip():
+                raise RuntimeError("owner notification came from the wrong curator")
+            if int(envelope["revision"]) != expected_revision:
+                raise RuntimeError("stale acceptance envelope revision")
+            if envelope["status"] != AcceptanceStatus.AWAITING_ACCEPTANCE.value:
+                raise RuntimeError("owner notification requires a completed acceptance envelope")
+            if envelope["owner_notified_at"]:
+                if envelope["owner_notification_digest"] != digest:
+                    raise RuntimeError("acceptance envelope already has different notification evidence")
+                return {
+                    "acceptance_envelope_id": identity,
+                    "status": envelope["status"],
+                    "revision": int(envelope["revision"]),
+                    "idempotent": True,
+                }
+            connection.execute(
+                "UPDATE acceptance_envelopes SET owner_notification_digest=?,owner_notified_at=?,updated_at=? "
+                "WHERE envelope_id=?",
+                (digest, _now(), _now(), identity),
+            )
+            self.event(
+                connection,
+                "acceptance-envelope",
+                identity,
+                "owner-notified",
+                {"notification_evidence_digest": digest, "revision": expected_revision},
+            )
+        self.flush_events()
+        return {
+            "acceptance_envelope_id": identity,
+            "status": AcceptanceStatus.AWAITING_ACCEPTANCE.value,
+            "revision": expected_revision,
+        }
+
+    def accept_curator(
+        self, *, curator_thread_id: str, expected_envelope_revision: int
+    ) -> dict[str, object]:
+        if not curator_thread_id.strip() or expected_envelope_revision <= 0:
+            raise ValueError("curator acceptance requires exact identity and positive revision")
+        with self.transaction() as connection:
+            envelopes = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE curator_thread_id=? AND status=? "
+                "ORDER BY created_at",
+                (
+                    curator_thread_id.strip(),
+                    AcceptanceStatus.AWAITING_ACCEPTANCE.value,
+                ),
+            ).fetchall()
+            if len(envelopes) != 1:
+                raise RuntimeError(
+                    "owner phrase is ambiguous: curator must have exactly one awaiting acceptance envelope"
+                )
+            envelope = envelopes[0]
+            if int(envelope["revision"]) != expected_envelope_revision:
+                raise RuntimeError("stale acceptance envelope revision")
+            if not envelope["owner_notified_at"] or not envelope["owner_notification_digest"]:
+                raise RuntimeError("owner acceptance requires proven curator notification")
+            members = connection.execute(
+                "SELECT t.* FROM acceptance_envelope_members m JOIN tasks t ON t.task_id=m.task_id "
+                "WHERE m.envelope_id=? AND m.required=1 ORDER BY t.task_id",
+                (envelope["envelope_id"],),
+            ).fetchall()
+            if not members or any(
+                TaskStatus(member["status"])
+                not in {TaskStatus.DONE_AWAITING_ACCEPTANCE, TaskStatus.TERMINAL_FAILURE}
+                for member in members
+            ):
+                raise RuntimeError("acceptance envelope still has a non-terminal required member")
+            timestamp = _now()
+            accepted_tasks: list[str] = []
+            for member in members:
+                revision = int(member["revision"]) + 1
+                connection.execute(
+                    "UPDATE tasks SET status=?,revision=?,accepted_at=?,updated_at=? WHERE task_id=?",
+                    (
+                        TaskStatus.ACCEPTED.value,
+                        revision,
+                        timestamp,
+                        timestamp,
+                        member["task_id"],
+                    ),
+                )
+                accepted_tasks.append(member["task_id"])
+                self.event(
+                    connection,
+                    "task",
+                    member["task_id"],
+                    "accepted-through-envelope",
+                    {"envelope_id": envelope["envelope_id"], "revision": revision},
+                )
+            envelope_revision = int(envelope["revision"]) + 1
+            connection.execute(
+                "UPDATE acceptance_envelopes SET status=?,revision=?,accepted_at=?,updated_at=? "
+                "WHERE envelope_id=?",
+                (
+                    AcceptanceStatus.ACCEPTED.value,
+                    envelope_revision,
+                    timestamp,
+                    timestamp,
+                    envelope["envelope_id"],
+                ),
+            )
+            self.event(
+                connection,
+                "acceptance-envelope",
+                envelope["envelope_id"],
+                "accepted",
+                {"revision": envelope_revision, "task_ids": accepted_tasks},
+            )
+        self.flush_events()
+        return {
+            "acceptance_envelope_id": envelope["envelope_id"],
+            "status": AcceptanceStatus.ACCEPTED.value,
+            "revision": envelope_revision,
+            "accepted_task_ids": accepted_tasks,
+        }
+
     def accept(self, *, task_id: str, expected_revision: int) -> dict[str, object]:
         with self.transaction() as connection:
             row = self.task(task_id, connection)
+            if self._task_envelope(connection, task_id) is not None:
+                raise RuntimeError(
+                    "task belongs to an acceptance envelope; use curator-owned envelope acceptance"
+                )
             if int(row["revision"]) != expected_revision:
                 raise RuntimeError("stale acceptance revision")
             if TaskStatus(row["status"]) not in {
@@ -694,6 +1752,253 @@ class Registry:
             self.event(connection, "task", validate_task_id(task_id), "accepted", {"revision": revision})
         self.flush_events()
         return {"task_id": validate_task_id(task_id), "status": TaskStatus.ACCEPTED.value, "revision": revision}
+
+    def register_executor_succession(
+        self,
+        *,
+        envelope_id: str,
+        predecessor_task_id: str,
+        successor_task_id: str,
+        reason: str,
+        checkpoint_digest: str,
+        target_readback_digest: str,
+        prompt_delivery_digest: str,
+        registry_link_digest: str,
+        successor_active_digest: str,
+    ) -> dict[str, object]:
+        envelope_identity = validate_envelope_id(envelope_id)
+        predecessor_task = validate_task_id(predecessor_task_id)
+        successor_task = validate_task_id(successor_task_id)
+        if predecessor_task == successor_task or not reason.strip():
+            raise ValueError("executor succession requires distinct tasks and a reason")
+        digests = {
+            "checkpoint_digest": validate_digest(checkpoint_digest),
+            "target_readback_digest": validate_digest(target_readback_digest),
+            "prompt_delivery_digest": validate_digest(prompt_delivery_digest),
+            "registry_link_digest": validate_digest(registry_link_digest),
+            "successor_active_digest": validate_digest(successor_active_digest),
+        }
+        timestamp = _now()
+        with self.transaction() as connection:
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?",
+                (envelope_identity,),
+            ).fetchone()
+            if envelope is None or envelope["status"] == AcceptanceStatus.ACCEPTED.value:
+                raise RuntimeError("executor succession requires an active acceptance envelope")
+            memberships = connection.execute(
+                "SELECT task_id FROM acceptance_envelope_members WHERE envelope_id=? "
+                "AND task_id IN (?,?)",
+                (envelope_identity, predecessor_task, successor_task),
+            ).fetchall()
+            if {row["task_id"] for row in memberships} != {
+                predecessor_task,
+                successor_task,
+            }:
+                raise RuntimeError("executor succession tasks must share the exact envelope")
+            prior = connection.execute(
+                "SELECT * FROM executor_successions WHERE envelope_id=? AND predecessor_task_id=? "
+                "AND successor_task_id=?",
+                (envelope_identity, predecessor_task, successor_task),
+            ).fetchone()
+            if prior is not None:
+                expected_evidence = (
+                    reason.strip(),
+                    digests["checkpoint_digest"],
+                    digests["target_readback_digest"],
+                    digests["prompt_delivery_digest"],
+                    digests["registry_link_digest"],
+                    digests["successor_active_digest"],
+                )
+                actual_evidence = (
+                    prior["reason"],
+                    prior["checkpoint_digest"],
+                    prior["target_readback_digest"],
+                    prior["prompt_delivery_digest"],
+                    prior["registry_link_digest"],
+                    prior["successor_active_digest"],
+                )
+                if actual_evidence != expected_evidence:
+                    raise RuntimeError("executor succession already has different evidence")
+                return {
+                    "succession_id": prior["succession_id"],
+                    "status": prior["status"],
+                    "predecessor_thread_id": prior["predecessor_thread_id"],
+                    "successor_thread_id": prior["successor_thread_id"],
+                    "idempotent": True,
+                }
+            active_rows = connection.execute(
+                "SELECT tt.task_id,tt.thread_id,tt.generation FROM task_threads tt "
+                "JOIN acceptance_envelope_members m ON m.task_id=tt.task_id "
+                "WHERE m.envelope_id=? AND tt.role='executor' AND tt.active=1 "
+                "ORDER BY tt.task_id,tt.generation",
+                (envelope_identity,),
+            ).fetchall()
+            by_task: dict[str, list[sqlite3.Row]] = {}
+            for row in active_rows:
+                by_task.setdefault(row["task_id"], []).append(row)
+            if set(by_task) != {predecessor_task, successor_task} or any(
+                len(rows) != 1 for rows in by_task.values()
+            ):
+                raise RuntimeError("executor succession is ambiguous")
+            predecessor = by_task[predecessor_task][0]
+            successor = by_task[successor_task][0]
+            payload = {
+                "schema": "wb-core-executor-succession/v1",
+                "acceptance_envelope_id": envelope_identity,
+                "predecessor_task_id": predecessor_task,
+                "predecessor_thread_id": predecessor["thread_id"],
+                "predecessor_generation": int(predecessor["generation"]),
+                "successor_task_id": successor_task,
+                "successor_thread_id": successor["thread_id"],
+                "successor_generation": int(successor["generation"]),
+                "reason": reason.strip(),
+                **digests,
+            }
+            succession_digest = canonical_digest(payload)
+            succession_id = "succ-" + succession_digest.removeprefix("sha256:")[:20]
+            existing = connection.execute(
+                "SELECT * FROM executor_successions WHERE succession_id=?",
+                (succession_id,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "succession_id": succession_id,
+                    "status": existing["status"],
+                    "predecessor_thread_id": existing["predecessor_thread_id"],
+                    "successor_thread_id": existing["successor_thread_id"],
+                    "idempotent": True,
+                }
+            other = connection.execute(
+                "SELECT succession_id FROM executor_successions WHERE predecessor_thread_id=?",
+                (predecessor["thread_id"],),
+            ).fetchone()
+            if other is not None:
+                raise RuntimeError("predecessor already has a different successor")
+            connection.execute(
+                "UPDATE task_threads SET active=0 WHERE task_id=? AND role='executor' AND thread_id=?",
+                (predecessor_task, predecessor["thread_id"]),
+            )
+            connection.execute(
+                "INSERT INTO executor_successions(succession_id,envelope_id,predecessor_task_id,"
+                "predecessor_thread_id,predecessor_generation,successor_task_id,successor_thread_id,"
+                "successor_generation,reason,checkpoint_digest,target_readback_digest,prompt_delivery_digest,"
+                "registry_link_digest,successor_active_digest,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    succession_id,
+                    envelope_identity,
+                    predecessor_task,
+                    predecessor["thread_id"],
+                    int(predecessor["generation"]),
+                    successor_task,
+                    successor["thread_id"],
+                    int(successor["generation"]),
+                    reason.strip(),
+                    digests["checkpoint_digest"],
+                    digests["target_readback_digest"],
+                    digests["prompt_delivery_digest"],
+                    digests["registry_link_digest"],
+                    digests["successor_active_digest"],
+                    SuccessionStatus.READY_TO_ARCHIVE.value,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self.event(
+                connection,
+                "executor-succession",
+                succession_id,
+                "ready-to-archive",
+                payload,
+            )
+        self.flush_events()
+        return {
+            "succession_id": succession_id,
+            "status": SuccessionStatus.READY_TO_ARCHIVE.value,
+            "predecessor_thread_id": predecessor["thread_id"],
+            "successor_thread_id": successor["thread_id"],
+        }
+
+    def pending_executor_archives(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM executor_successions WHERE status=? ORDER BY created_at",
+                    (SuccessionStatus.READY_TO_ARCHIVE.value,),
+                ).fetchall()
+            ]
+
+    def confirm_executor_archive(
+        self,
+        *,
+        succession_id: str,
+        predecessor_thread_id: str,
+        archive_readback_digest: str,
+    ) -> dict[str, object]:
+        digest = validate_digest(archive_readback_digest)
+        if not succession_id.strip() or not predecessor_thread_id.strip():
+            raise ValueError("executor archive confirmation requires exact identities")
+        with self.transaction() as connection:
+            succession = connection.execute(
+                "SELECT * FROM executor_successions WHERE succession_id=?",
+                (succession_id.strip(),),
+            ).fetchone()
+            if succession is None:
+                raise KeyError(f"unknown executor succession: {succession_id}")
+            if succession["predecessor_thread_id"] != predecessor_thread_id.strip():
+                raise RuntimeError("archive readback belongs to the wrong predecessor")
+            if succession["status"] == SuccessionStatus.ARCHIVED.value:
+                if succession["archive_readback_digest"] != digest:
+                    raise RuntimeError("executor succession already has different archive evidence")
+                return {
+                    "succession_id": succession_id,
+                    "status": SuccessionStatus.ARCHIVED.value,
+                    "idempotent": True,
+                }
+            predecessor = connection.execute(
+                "SELECT active FROM task_threads WHERE task_id=? AND role='executor' AND thread_id=?",
+                (
+                    succession["predecessor_task_id"],
+                    succession["predecessor_thread_id"],
+                ),
+            ).fetchone()
+            successor = connection.execute(
+                "SELECT active FROM task_threads WHERE task_id=? AND role='executor' AND thread_id=?",
+                (
+                    succession["successor_task_id"],
+                    succession["successor_thread_id"],
+                ),
+            ).fetchone()
+            if predecessor is None or int(predecessor["active"]) != 0:
+                raise RuntimeError("predecessor is not an inactive legacy executor")
+            if successor is None or int(successor["active"]) != 1:
+                raise RuntimeError("successor active readback is no longer current")
+            timestamp = _now()
+            connection.execute(
+                "UPDATE executor_successions SET status=?,archive_readback_digest=?,archived_at=?,updated_at=? "
+                "WHERE succession_id=?",
+                (
+                    SuccessionStatus.ARCHIVED.value,
+                    digest,
+                    timestamp,
+                    timestamp,
+                    succession_id.strip(),
+                ),
+            )
+            self.event(
+                connection,
+                "executor-succession",
+                succession_id.strip(),
+                "archived",
+                {
+                    "predecessor_thread_id": predecessor_thread_id.strip(),
+                    "archive_readback_digest": digest,
+                },
+            )
+        self.flush_events()
+        return {"succession_id": succession_id, "status": SuccessionStatus.ARCHIVED.value}
 
     def record_failure(
         self,
@@ -1507,6 +2812,34 @@ class Registry:
                     ACTIVE_INCIDENT_STATES,
                 ).fetchall()
             ]
+            attention_events = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM attention_events ORDER BY created_at,event_id"
+                ).fetchall()
+            ]
+            acceptance_envelopes = [
+                {
+                    **dict(row),
+                    "members": [
+                        dict(member)
+                        for member in connection.execute(
+                            "SELECT task_id,role,required FROM acceptance_envelope_members "
+                            "WHERE envelope_id=? ORDER BY role,task_id",
+                            (row["envelope_id"],),
+                        ).fetchall()
+                    ],
+                }
+                for row in connection.execute(
+                    "SELECT * FROM acceptance_envelopes ORDER BY created_at"
+                ).fetchall()
+            ]
+            executor_successions = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM executor_successions ORDER BY created_at"
+                ).fetchall()
+            ]
         for item in incidents:
             item["resources"] = json.loads(item.pop("resources_json"))
             if item.get("decision_json"):
@@ -1516,23 +2849,196 @@ class Registry:
             "tasks": self.active_tasks(),
             "incidents": incidents,
             "watchers": watcher_rows,
+            "attention_events": attention_events,
+            "acceptance_envelopes": acceptance_envelopes,
+            "executor_successions": executor_successions,
             "integrity": self.integrity(),
         }
 
-    def report(self) -> str:
-        blocks = []
-        for task in self.active_tasks():
-            status = TaskStatus(task["status"])
-            lines = [
-                f"Статус: {report_status(status)}",
-                f"Задача: {task['title']}",
-                f"Прогресс: ≈{task['progress_percent']}% · Осталось: ≈{task['eta_text']}",
-                f"С прошлого отчёта: {task['last_delta']}",
-                f"Сейчас: {task['current_action']}",
-            ]
-            if status == TaskStatus.AWAITING_HUMAN and task["blocker"]:
-                lines.append(f"Блокер: {task['blocker']}")
-            blocks.append("\n".join(lines))
+    def _visible_envelopes(
+        self, connection: sqlite3.Connection
+    ) -> list[dict[str, Any]]:
+        envelopes: list[dict[str, Any]] = []
+        bound_task_ids: set[str] = set()
+        for envelope in connection.execute(
+            "SELECT * FROM acceptance_envelopes WHERE status<>? ORDER BY created_at",
+            (AcceptanceStatus.ACCEPTED.value,),
+        ).fetchall():
+            members = connection.execute(
+                "SELECT t.*,m.role,m.required FROM acceptance_envelope_members m "
+                "JOIN tasks t ON t.task_id=m.task_id WHERE m.envelope_id=? AND m.required=1 "
+                "ORDER BY t.created_at,t.task_id",
+                (envelope["envelope_id"],),
+            ).fetchall()
+            if not members:
+                continue
+            bound_task_ids.update(str(member["task_id"]) for member in members)
+            envelopes.append({"envelope": envelope, "members": members})
+        for task in connection.execute(
+            "SELECT * FROM tasks WHERE status<>? ORDER BY created_at",
+            (TaskStatus.ACCEPTED.value,),
+        ).fetchall():
+            if task["task_id"] in bound_task_ids:
+                continue
+            envelopes.append(
+                {
+                    "envelope": {
+                        "envelope_id": task["task_id"],
+                        "title": task["title"],
+                        "status": AcceptanceStatus.OPEN.value,
+                        "revision": int(task["revision"]),
+                    },
+                    "members": [task],
+                }
+            )
+        return envelopes
+
+    @staticmethod
+    def _visible_envelope_status(
+        envelope: Mapping[str, object], members: list[sqlite3.Row]
+    ) -> TaskStatus:
+        statuses = [TaskStatus(member["status"]) for member in members]
+        if envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value:
+            if TaskStatus.TERMINAL_FAILURE in statuses:
+                return TaskStatus.TERMINAL_FAILURE
+            return TaskStatus.DONE_AWAITING_ACCEPTANCE
+        if envelope["status"] == AcceptanceStatus.DONE_PENDING_HANDOFF.value:
+            if TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF in statuses:
+                return TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF
+            return TaskStatus.DONE_PENDING_HANDOFF
+        for preferred in (
+            TaskStatus.AWAITING_HUMAN,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.RECOVERING,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+            TaskStatus.READY_FOR_RELEASE,
+            TaskStatus.RELEASE_OWNED,
+            TaskStatus.VERIFYING,
+            TaskStatus.WORKING,
+            TaskStatus.DISPATCHING,
+            TaskStatus.DISCUSSION,
+        ):
+            if preferred in statuses:
+                return preferred
+        if all(status == TaskStatus.TERMINAL_FAILURE for status in statuses):
+            return TaskStatus.TERMINAL_FAILURE
+        critical = min(
+            members,
+            key=lambda member: (
+                int(member["progress_percent"]),
+                member["updated_at"],
+            ),
+        )
+        return TaskStatus(critical["status"])
+
+    def report(self, *, record: bool = False) -> str:
+        blocks: list[str] = []
+        context = self.transaction() if record else self.connect()
+        with context as connection:
+            for group in self._visible_envelopes(connection):
+                envelope = group["envelope"]
+                members = list(group["members"])
+                minimum_progress = min(
+                    int(member["progress_percent"]) for member in members
+                )
+                critical_candidates = [
+                    member
+                    for member in members
+                    if int(member["progress_percent"]) == minimum_progress
+                ]
+                critical = max(
+                    critical_candidates, key=lambda member: member["updated_at"]
+                )
+                status = self._visible_envelope_status(envelope, members)
+                title = str(envelope["title"])
+                for member in members:
+                    title = validate_visible_text(
+                        title,
+                        field="task title",
+                        task_id=str(member["task_id"]),
+                    )
+                eta = validate_visible_text(
+                    str(critical["eta_text"]),
+                    field="eta",
+                    task_id=str(critical["task_id"]),
+                )
+                delta = validate_visible_text(
+                    str(critical["last_delta"]),
+                    field="delta",
+                    task_id=str(critical["task_id"]),
+                )
+                current = validate_visible_text(
+                    str(critical["current_action"]),
+                    field="current action",
+                    task_id=str(critical["task_id"]),
+                )
+                for member in members:
+                    member_task_id = str(member["task_id"])
+                    eta = validate_visible_text(
+                        eta, field="eta", task_id=member_task_id
+                    )
+                    delta = validate_visible_text(
+                        delta, field="delta", task_id=member_task_id
+                    )
+                    current = validate_visible_text(
+                        current, field="current action", task_id=member_task_id
+                    )
+                blocker = ""
+                if status in {
+                    TaskStatus.AWAITING_HUMAN,
+                    TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+                }:
+                    blocked = next(
+                        (member for member in members if member["blocker"]), None
+                    )
+                    if blocked is not None:
+                        blocker = validate_visible_text(
+                            str(blocked["blocker"]),
+                            field="blocker",
+                            task_id=str(blocked["task_id"]),
+                        )
+                        for member in members:
+                            blocker = validate_visible_text(
+                                blocker,
+                                field="blocker",
+                                task_id=str(member["task_id"]),
+                            )
+                fingerprint = canonical_digest(
+                    {
+                        "envelope_status": envelope["status"],
+                        "visible_status": status.value,
+                        "progress": minimum_progress,
+                        "eta": eta,
+                        "delta": delta,
+                        "current": current,
+                        "blocker": blocker,
+                    }
+                )
+                previous = connection.execute(
+                    "SELECT last_fingerprint FROM visible_report_state WHERE envelope_id=?",
+                    (envelope["envelope_id"],),
+                ).fetchone()
+                if previous is not None and previous["last_fingerprint"] == fingerprint:
+                    delta = f"Изменений нет; работа продолжается: {current}"
+                lines = [
+                    f"Статус: {report_status(status)}",
+                    f"Задача: {title}",
+                    f"Прогресс: ≈{minimum_progress}% · Осталось: ≈{eta}",
+                    f"С прошлого отчёта: {delta}",
+                    f"Сейчас: {current}",
+                ]
+                if blocker:
+                    lines.append(f"Блокер: {blocker}")
+                blocks.append("\n".join(lines))
+                if record:
+                    connection.execute(
+                        "INSERT INTO visible_report_state(envelope_id,last_fingerprint,last_rendered_at) "
+                        "VALUES(?,?,?) ON CONFLICT(envelope_id) DO UPDATE SET "
+                        "last_fingerprint=excluded.last_fingerprint,last_rendered_at=excluded.last_rendered_at",
+                        (envelope["envelope_id"], fingerprint, _now()),
+                    )
+        if record:
+            self.flush_events()
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
 
     def integrity(self) -> dict[str, object]:
@@ -1550,8 +3056,10 @@ class Registry:
             invalid_human_blocks = int(
                 connection.execute(
                     "SELECT count(*) FROM tasks WHERE "
-                    "(status='AWAITING_HUMAN' AND (blocker='' OR human_reason='')) OR "
-                    "(status<>'AWAITING_HUMAN' AND (blocker<>'' OR human_reason<>''))"
+                    "(status IN ('AWAITING_HUMAN','AWAITING_HUMAN_PENDING_HANDOFF') "
+                    "AND (blocker='' OR human_reason='')) OR "
+                    "(status NOT IN ('AWAITING_HUMAN','AWAITING_HUMAN_PENDING_HANDOFF') "
+                    "AND (blocker<>'' OR human_reason<>''))"
                 ).fetchone()[0]
             )
             unsmoked_active_watchers = int(
@@ -1566,6 +3074,44 @@ class Registry:
                     "AND verification_evidence_digest=''"
                 ).fetchone()[0]
             )
+            invalid_attention_events = int(
+                connection.execute(
+                    "SELECT count(*) FROM attention_events WHERE "
+                    "(state='LEASED' AND (lease_owner='' OR lease_expires_at IS NULL)) OR "
+                    "(state<>'LEASED' AND (lease_owner<>'' OR lease_expires_at IS NOT NULL)) OR "
+                    "(state='ACKED' AND (ack_evidence_digest='' OR acked_by_thread_id='' OR acked_at IS NULL))"
+                ).fetchone()[0]
+            )
+            unproven_terminal_tasks = int(
+                connection.execute(
+                    "SELECT count(*) FROM tasks t JOIN acceptance_envelope_members m ON m.task_id=t.task_id "
+                    "WHERE t.status IN ('DONE_AWAITING_ACCEPTANCE','TERMINAL_FAILURE') "
+                    "AND NOT EXISTS (SELECT 1 FROM attention_events a WHERE a.task_id=t.task_id "
+                    "AND a.state='ACKED' AND a.event_kind IN ('TECHNICAL_COMPLETION','TERMINAL_FAILURE'))"
+                ).fetchone()[0]
+            )
+            invalid_envelopes = int(
+                connection.execute(
+                    "SELECT count(*) FROM acceptance_envelopes e WHERE "
+                    "(e.status='AWAITING_ACCEPTANCE' AND EXISTS ("
+                    "SELECT 1 FROM acceptance_envelope_members m JOIN tasks t ON t.task_id=m.task_id "
+                    "WHERE m.envelope_id=e.envelope_id AND m.required=1 "
+                    "AND t.status NOT IN ('DONE_AWAITING_ACCEPTANCE','TERMINAL_FAILURE'))) OR "
+                    "(e.status='ACCEPTED' AND EXISTS ("
+                    "SELECT 1 FROM acceptance_envelope_members m JOIN tasks t ON t.task_id=m.task_id "
+                    "WHERE m.envelope_id=e.envelope_id AND m.required=1 AND t.status<>'ACCEPTED'))"
+                ).fetchone()[0]
+            )
+            invalid_successions = int(
+                connection.execute(
+                    "SELECT count(*) FROM executor_successions s WHERE "
+                    "(s.status='ARCHIVED' AND (s.archive_readback_digest='' OR s.archived_at IS NULL)) OR "
+                    "NOT EXISTS (SELECT 1 FROM acceptance_envelope_members m "
+                    "WHERE m.envelope_id=s.envelope_id AND m.task_id=s.predecessor_task_id) OR "
+                    "NOT EXISTS (SELECT 1 FROM acceptance_envelope_members m "
+                    "WHERE m.envelope_id=s.envelope_id AND m.task_id=s.successor_task_id)"
+                ).fetchone()[0]
+            )
         return {
             "ok": (
                 quick == "ok"
@@ -1574,6 +3120,10 @@ class Registry:
                 and invalid_human_blocks == 0
                 and unsmoked_active_watchers == 0
                 and unproven_verified_incidents == 0
+                and invalid_attention_events == 0
+                and unproven_terminal_tasks == 0
+                and invalid_envelopes == 0
+                and invalid_successions == 0
             ),
             "sqlite": quick,
             "active_watchers": active_watchers,
@@ -1581,6 +3131,10 @@ class Registry:
             "invalid_human_blocks": invalid_human_blocks,
             "unsmoked_active_watchers": unsmoked_active_watchers,
             "unproven_verified_incidents": unproven_verified_incidents,
+            "invalid_attention_events": invalid_attention_events,
+            "unproven_terminal_tasks": unproven_terminal_tasks,
+            "invalid_envelopes": invalid_envelopes,
+            "invalid_successions": invalid_successions,
             "event_count": event_count,
         }
 
@@ -1662,6 +3216,13 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--curator-thread", required=True)
     register.add_argument("--executor-thread", required=True)
     register.add_argument("--host-id", required=True)
+    register.add_argument("--acceptance-envelope", default="")
+    register.add_argument("--acceptance-title", default="")
+    register.add_argument(
+        "--acceptance-role",
+        choices=("root", "corrective", "required-child"),
+        default="root",
+    )
 
     add_thread = commands.add_parser("add-thread")
     add_thread.add_argument("--task-id", required=True)
@@ -1669,6 +3230,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_thread.add_argument("--generation", type=int, required=True)
     add_thread.add_argument("--thread-id", required=True)
     add_thread.add_argument("--host-id", required=True)
+
+    bind_acceptance = commands.add_parser("bind-acceptance")
+    bind_acceptance.add_argument("--envelope-id", required=True)
+    bind_acceptance.add_argument("--title", required=True)
+    bind_acceptance.add_argument("--curator-thread", required=True)
+    bind_acceptance.add_argument("--root-task", required=True)
+    bind_acceptance.add_argument("--corrective-task", action="append", default=[])
 
     update = commands.add_parser("update-task")
     update.add_argument("--task-id", required=True)
@@ -1693,6 +3261,82 @@ def build_parser() -> argparse.ArgumentParser:
     accept = commands.add_parser("accept")
     accept.add_argument("--task-id", required=True)
     accept.add_argument("--expected-revision", type=int, required=True)
+
+    enqueue_attention = commands.add_parser("enqueue-attention")
+    enqueue_attention.add_argument("--task-id", required=True)
+    enqueue_attention.add_argument("--expected-revision", type=int, required=True)
+    enqueue_attention.add_argument(
+        "--kind", choices=[item.value for item in AttentionKind], required=True
+    )
+    enqueue_attention.add_argument("--evidence-summary", required=True)
+    enqueue_attention.add_argument("--evidence-digest", required=True)
+    enqueue_attention.add_argument("--backfill", action="store_true")
+    enqueue_attention.add_argument("--eta")
+    enqueue_attention.add_argument("--delta")
+    enqueue_attention.add_argument("--current")
+    enqueue_attention.add_argument("--blocker", default="")
+    enqueue_attention.add_argument(
+        "--human-reason", choices=sorted(STRICT_HUMAN_REASONS), default=""
+    )
+    enqueue_attention.add_argument(
+        "--repo-owned-remediation-available", action="store_true"
+    )
+    enqueue_attention.add_argument("--remediation-exhausted", action="store_true")
+
+    reserve_attention = commands.add_parser("reserve-attention")
+    reserve_attention.add_argument("--generation", type=int, required=True)
+    reserve_attention.add_argument("--owner", required=True)
+    reserve_attention.add_argument("--lease-seconds", type=int, default=120)
+    reserve_attention.add_argument("--limit", type=int, default=8)
+
+    sent_attention = commands.add_parser("mark-attention-sent")
+    sent_attention.add_argument("--event-id", required=True)
+    sent_attention.add_argument("--owner", required=True)
+    sent_attention.add_argument("--transport-receipt-digest", required=True)
+    sent_attention.add_argument("--ack-timeout-seconds", type=int, default=600)
+
+    retry_attention = commands.add_parser("retry-attention")
+    retry_attention.add_argument("--event-id", required=True)
+    retry_attention.add_argument("--owner", required=True)
+    retry_attention.add_argument("--error", required=True)
+    retry_attention.add_argument("--retry-after-seconds", type=int, default=60)
+
+    attention = commands.add_parser("attention")
+    attention.add_argument("--event-id", required=True)
+
+    ack_attention = commands.add_parser("ack-attention")
+    ack_attention.add_argument("--event-id", required=True)
+    ack_attention.add_argument("--event-digest", required=True)
+    ack_attention.add_argument("--curator-thread", required=True)
+    ack_attention.add_argument("--expected-task-revision", type=int, required=True)
+    ack_attention.add_argument("--ack-evidence-digest", required=True)
+
+    notify_owner = commands.add_parser("confirm-owner-notification")
+    notify_owner.add_argument("--curator-thread", required=True)
+    notify_owner.add_argument("--envelope-id", required=True)
+    notify_owner.add_argument("--expected-revision", type=int, required=True)
+    notify_owner.add_argument("--notification-evidence-digest", required=True)
+
+    accept_curator = commands.add_parser("accept-curator")
+    accept_curator.add_argument("--curator-thread", required=True)
+    accept_curator.add_argument("--expected-envelope-revision", type=int, required=True)
+
+    succession = commands.add_parser("register-executor-succession")
+    succession.add_argument("--envelope-id", required=True)
+    succession.add_argument("--predecessor-task", required=True)
+    succession.add_argument("--successor-task", required=True)
+    succession.add_argument("--reason", required=True)
+    succession.add_argument("--checkpoint-digest", required=True)
+    succession.add_argument("--target-readback-digest", required=True)
+    succession.add_argument("--prompt-delivery-digest", required=True)
+    succession.add_argument("--registry-link-digest", required=True)
+    succession.add_argument("--successor-active-digest", required=True)
+
+    commands.add_parser("pending-executor-archives")
+    confirm_archive = commands.add_parser("confirm-executor-archive")
+    confirm_archive.add_argument("--succession-id", required=True)
+    confirm_archive.add_argument("--predecessor-thread", required=True)
+    confirm_archive.add_argument("--archive-readback-digest", required=True)
 
     observe = commands.add_parser("record-failure")
     observe.add_argument("--task-id", required=True)
@@ -1797,9 +3441,20 @@ def main() -> int:
                 curator_thread_id=args.curator_thread,
                 executor_thread_id=args.executor_thread,
                 host_id=args.host_id,
+                acceptance_envelope_id=args.acceptance_envelope,
+                acceptance_title=args.acceptance_title,
+                acceptance_role=args.acceptance_role,
             )
         elif args.command == "add-thread":
             result = registry.add_thread(task_id=args.task_id, role=args.role, generation=args.generation, thread_id=args.thread_id, host_id=args.host_id)
+        elif args.command == "bind-acceptance":
+            result = registry.bind_acceptance_envelope(
+                envelope_id=args.envelope_id,
+                title=args.title,
+                curator_thread_id=args.curator_thread,
+                root_task_id=args.root_task,
+                corrective_task_ids=args.corrective_task,
+            )
         elif args.command == "update-task":
             result = registry.update_task(
                 task_id=args.task_id,
@@ -1818,6 +3473,85 @@ def main() -> int:
             result = registry.link_pr(task_id=args.task_id, pr=args.pr, role=args.role, head_sha=args.head_sha, state=args.state)
         elif args.command == "accept":
             result = registry.accept(task_id=args.task_id, expected_revision=args.expected_revision)
+        elif args.command == "enqueue-attention":
+            result = registry.enqueue_attention(
+                task_id=args.task_id,
+                expected_revision=args.expected_revision,
+                kind=AttentionKind(args.kind),
+                evidence_summary=args.evidence_summary,
+                evidence_digest=args.evidence_digest,
+                backfill=args.backfill,
+                eta=args.eta,
+                delta=args.delta,
+                current=args.current,
+                blocker=args.blocker,
+                human_reason=args.human_reason,
+                repo_owned_remediation_available=args.repo_owned_remediation_available,
+                remediation_exhausted=args.remediation_exhausted,
+            )
+        elif args.command == "reserve-attention":
+            result = registry.reserve_attention(
+                generation=args.generation,
+                owner=args.owner,
+                lease_seconds=args.lease_seconds,
+                limit=args.limit,
+            )
+        elif args.command == "mark-attention-sent":
+            result = registry.mark_attention_sent(
+                event_id=args.event_id,
+                owner=args.owner,
+                transport_receipt_digest=args.transport_receipt_digest,
+                ack_timeout_seconds=args.ack_timeout_seconds,
+            )
+        elif args.command == "retry-attention":
+            result = registry.retry_attention(
+                event_id=args.event_id,
+                owner=args.owner,
+                error=args.error,
+                retry_after_seconds=args.retry_after_seconds,
+            )
+        elif args.command == "attention":
+            result = registry.attention_event(args.event_id)
+        elif args.command == "ack-attention":
+            result = registry.ack_attention(
+                event_id=args.event_id,
+                event_digest=args.event_digest,
+                curator_thread_id=args.curator_thread,
+                expected_task_revision=args.expected_task_revision,
+                ack_evidence_digest=args.ack_evidence_digest,
+            )
+        elif args.command == "confirm-owner-notification":
+            result = registry.confirm_owner_notification(
+                curator_thread_id=args.curator_thread,
+                envelope_id=args.envelope_id,
+                expected_revision=args.expected_revision,
+                notification_evidence_digest=args.notification_evidence_digest,
+            )
+        elif args.command == "accept-curator":
+            result = registry.accept_curator(
+                curator_thread_id=args.curator_thread,
+                expected_envelope_revision=args.expected_envelope_revision,
+            )
+        elif args.command == "register-executor-succession":
+            result = registry.register_executor_succession(
+                envelope_id=args.envelope_id,
+                predecessor_task_id=args.predecessor_task,
+                successor_task_id=args.successor_task,
+                reason=args.reason,
+                checkpoint_digest=args.checkpoint_digest,
+                target_readback_digest=args.target_readback_digest,
+                prompt_delivery_digest=args.prompt_delivery_digest,
+                registry_link_digest=args.registry_link_digest,
+                successor_active_digest=args.successor_active_digest,
+            )
+        elif args.command == "pending-executor-archives":
+            result = registry.pending_executor_archives()
+        elif args.command == "confirm-executor-archive":
+            result = registry.confirm_executor_archive(
+                succession_id=args.succession_id,
+                predecessor_thread_id=args.predecessor_thread,
+                archive_readback_digest=args.archive_readback_digest,
+            )
         elif args.command == "record-failure":
             result = registry.record_failure(
                 task_id=args.task_id,
@@ -1894,7 +3628,7 @@ def main() -> int:
         elif args.command == "snapshot":
             result = registry.snapshot()
         elif args.command == "report":
-            print(registry.report())
+            print(registry.report(record=True))
             return 0
         elif args.command == "integrity":
             result = registry.integrity()

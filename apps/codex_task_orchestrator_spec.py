@@ -15,7 +15,13 @@ from typing import Any, Iterable, Mapping
 
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
+ENVELOPE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
+ATTENTION_EVENT_ID_RE = re.compile(r"^evt-[0-9a-f]{24}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 CANONICAL_REPOSITORY = "orenvlad-ai/wb-core"
 TASK_PASSPORT_SCHEMA = "wb-core-task-passport/v1"
 WATCHER_CONFIG_SCHEMA = "wb-core-codex-watcher/v1"
@@ -51,10 +57,41 @@ class TaskStatus(str, Enum):
     RELEASE_OWNED = "RELEASE_OWNED"
     VERIFYING = "VERIFYING"
     RECOVERING = "RECOVERING"
+    DONE_PENDING_HANDOFF = "DONE_PENDING_HANDOFF"
+    TERMINAL_FAILURE_PENDING_HANDOFF = "TERMINAL_FAILURE_PENDING_HANDOFF"
+    AWAITING_HUMAN_PENDING_HANDOFF = "AWAITING_HUMAN_PENDING_HANDOFF"
     AWAITING_HUMAN = "AWAITING_HUMAN"
     DONE_AWAITING_ACCEPTANCE = "DONE_AWAITING_ACCEPTANCE"
     ACCEPTED = "ACCEPTED"
     TERMINAL_FAILURE = "TERMINAL_FAILURE"
+
+
+class AttentionKind(str, Enum):
+    TECHNICAL_COMPLETION = "TECHNICAL_COMPLETION"
+    TERMINAL_FAILURE = "TERMINAL_FAILURE"
+    STRICT_HUMAN_GATE = "STRICT_HUMAN_GATE"
+    SERIOUS_STALL = "SERIOUS_STALL"
+
+
+class AttentionStatus(str, Enum):
+    PENDING = "PENDING"
+    LEASED = "LEASED"
+    SENT = "SENT"
+    RETRY = "RETRY"
+    ACKED = "ACKED"
+    STALE = "STALE"
+
+
+class AcceptanceStatus(str, Enum):
+    OPEN = "OPEN"
+    DONE_PENDING_HANDOFF = "DONE_PENDING_HANDOFF"
+    AWAITING_ACCEPTANCE = "AWAITING_ACCEPTANCE"
+    ACCEPTED = "ACCEPTED"
+
+
+class SuccessionStatus(str, Enum):
+    READY_TO_ARCHIVE = "READY_TO_ARCHIVE"
+    ARCHIVED = "ARCHIVED"
 
 
 class IncidentStatus(str, Enum):
@@ -91,15 +128,19 @@ STRICT_HUMAN_REASONS = frozenset(reason.value for reason in HumanReason)
 TASK_TRANSITIONS = {
     TaskStatus.DISCUSSION: frozenset({TaskStatus.DISPATCHING}),
     TaskStatus.DISPATCHING: frozenset(
-        {TaskStatus.WORKING, TaskStatus.RECOVERING, TaskStatus.AWAITING_HUMAN}
+        {
+            TaskStatus.WORKING,
+            TaskStatus.RECOVERING,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+        }
     ),
     TaskStatus.WORKING: frozenset(
         {
             TaskStatus.READY_FOR_RELEASE,
             TaskStatus.RECOVERING,
-            TaskStatus.AWAITING_HUMAN,
-            TaskStatus.DONE_AWAITING_ACCEPTANCE,
-            TaskStatus.TERMINAL_FAILURE,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
     TaskStatus.READY_FOR_RELEASE: frozenset(
@@ -107,15 +148,17 @@ TASK_TRANSITIONS = {
             TaskStatus.RELEASE_OWNED,
             TaskStatus.WORKING,
             TaskStatus.RECOVERING,
-            TaskStatus.AWAITING_HUMAN,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
     TaskStatus.RELEASE_OWNED: frozenset(
         {
             TaskStatus.VERIFYING,
             TaskStatus.RECOVERING,
-            TaskStatus.AWAITING_HUMAN,
-            TaskStatus.DONE_AWAITING_ACCEPTANCE,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
     TaskStatus.VERIFYING: frozenset(
@@ -123,8 +166,9 @@ TASK_TRANSITIONS = {
             TaskStatus.WORKING,
             TaskStatus.READY_FOR_RELEASE,
             TaskStatus.RECOVERING,
-            TaskStatus.AWAITING_HUMAN,
-            TaskStatus.DONE_AWAITING_ACCEPTANCE,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
     TaskStatus.RECOVERING: frozenset(
@@ -133,20 +177,30 @@ TASK_TRANSITIONS = {
             TaskStatus.READY_FOR_RELEASE,
             TaskStatus.RELEASE_OWNED,
             TaskStatus.VERIFYING,
-            TaskStatus.AWAITING_HUMAN,
-            TaskStatus.TERMINAL_FAILURE,
+            TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
+    ),
+    TaskStatus.DONE_PENDING_HANDOFF: frozenset(
+        {TaskStatus.DONE_AWAITING_ACCEPTANCE}
+    ),
+    TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF: frozenset(
+        {TaskStatus.TERMINAL_FAILURE}
+    ),
+    TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF: frozenset(
+        {TaskStatus.AWAITING_HUMAN}
     ),
     TaskStatus.AWAITING_HUMAN: frozenset(
         {
             TaskStatus.WORKING,
             TaskStatus.READY_FOR_RELEASE,
             TaskStatus.RECOVERING,
-            TaskStatus.TERMINAL_FAILURE,
+            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
     TaskStatus.DONE_AWAITING_ACCEPTANCE: frozenset(
-        {TaskStatus.WORKING, TaskStatus.ACCEPTED}
+        {TaskStatus.ACCEPTED}
     ),
     TaskStatus.ACCEPTED: frozenset(),
     TaskStatus.TERMINAL_FAILURE: frozenset({TaskStatus.ACCEPTED}),
@@ -161,6 +215,9 @@ REPORT_STATUS = {
     TaskStatus.RELEASE_OWNED: "Выпуск и проверка",
     TaskStatus.VERIFYING: "Выпуск и проверка",
     TaskStatus.RECOVERING: "Техническое восстановление",
+    TaskStatus.DONE_PENDING_HANDOFF: "Завершена — передаётся куратору",
+    TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF: "Остановлена — передаётся куратору",
+    TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF: "Требует владельца — передаётся куратору",
     TaskStatus.AWAITING_HUMAN: "Требует владельца",
     TaskStatus.DONE_AWAITING_ACCEPTANCE: "Завершена — ждёт приёмки",
     TaskStatus.TERMINAL_FAILURE: "Остановлена",
@@ -182,6 +239,77 @@ def validate_task_id(task_id: str) -> str:
     normalized = task_id.strip().lower()
     if not TASK_ID_RE.fullmatch(normalized):
         raise ValueError("task_id must contain 8-64 lowercase letters, digits or hyphens")
+    return normalized
+
+
+def validate_envelope_id(envelope_id: str) -> str:
+    normalized = envelope_id.strip().lower()
+    if not ENVELOPE_ID_RE.fullmatch(normalized):
+        raise ValueError(
+            "acceptance envelope id must contain 8-64 lowercase letters, digits or hyphens"
+        )
+    return normalized
+
+
+def validate_attention_event_id(event_id: str) -> str:
+    normalized = event_id.strip().lower()
+    if not ATTENTION_EVENT_ID_RE.fullmatch(normalized):
+        raise ValueError("attention event id must use evt- followed by 24 lowercase hex characters")
+    return normalized
+
+
+VISIBLE_INTERNAL_TOKENS = frozenset(
+    {
+        "registry",
+        "integrity",
+        "queue",
+        "lease",
+        "follow-up",
+        "bounded",
+        "exact",
+        "wait_threads",
+        "task_id",
+        "revision",
+        "thread uuid",
+        "done_awaiting_acceptance",
+        "done_pending_handoff",
+        "working",
+        "release_owned",
+        "verifying",
+    }
+    | {item.value.casefold() for item in TaskStatus}
+    | {item.value.casefold() for item in AttentionKind}
+    | {item.value.casefold() for item in AttentionStatus}
+    | {item.value.casefold() for item in AcceptanceStatus}
+    | {item.value.casefold() for item in SuccessionStatus}
+)
+
+
+def validate_visible_text(text: str, *, field: str, task_id: str = "") -> str:
+    """Fail closed instead of leaking machine diagnostics into the Watcher report."""
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f"{field} must be a non-empty user-facing string")
+    normalized = text.strip()
+    lowered = normalized.casefold()
+    if UUID_RE.search(normalized):
+        raise ValueError(f"{field} must not expose a thread UUID")
+    if re.search(r"\b(?:evt-[0-9a-f]{24}|succ-[0-9a-f]{20})\b", lowered):
+        raise ValueError(f"{field} must not expose an internal event identity")
+    if "sha256:" in lowered or re.search(r"\brevision\s*\d+\b", lowered):
+        raise ValueError(f"{field} must not expose a digest or revision")
+    if task_id and task_id.casefold() in lowered:
+        raise ValueError(f"{field} must not expose task_id")
+    leaked = sorted(
+        token
+        for token in VISIBLE_INTERNAL_TOKENS
+        if re.search(
+            rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+            lowered,
+        )
+    )
+    if leaked:
+        raise ValueError(f"{field} contains internal Watcher terms: {', '.join(leaked)}")
     return normalized
 
 

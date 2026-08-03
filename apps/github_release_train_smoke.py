@@ -3131,6 +3131,22 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     assert watcher_config["arbiter"]["model"] == "gpt-5.6-sol"
     assert watcher_config["watcher"]["target_batch_limit"] == 8
     assert watcher_config["feature_flag"]["default"] is False
+    assert watcher_config["report"]["renderer"] == (
+        "python3 apps/codex_task_orchestrator.py report"
+    )
+    assert watcher_config["report"]["unit"] == "acceptance-envelope"
+    assert watcher_config["attention_delivery"]["schema"] == (
+        "wb-core-attention-event/v1"
+    )
+    assert watcher_config["attention_delivery"]["transport_semantics"] == (
+        "at-least-once-with-stable-event-id"
+    )
+    assert watcher_config["acceptance"][
+        "fail_closed_when_curator_has_multiple_waiting_envelopes"
+    ] is True
+    assert watcher_config["executor_succession"][
+        "archive_only_after_successor_readback"
+    ] is True
     assert passport_schema["properties"]["schema"]["const"] == (
         "wb-core-task-passport/v1"
     )

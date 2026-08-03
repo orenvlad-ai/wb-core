@@ -105,7 +105,7 @@ Dispatch и постановка на глобальный учёт образу
 
 1. сформировать versioned Task Passport по [`codex_task_passport_v1.schema.json`](../../packages/contracts/codex_task_passport_v1.schema.json): цель, expected result, scope, constraints, acceptance/closure, autonomy envelope, exact source/curator/executor identities и initial resources;
 2. выполнить `TARGET_CREATE_READBACK`;
-3. переименовать и pin куратора/исполнителя, затем атомарно зарегистрировать exact identities в local registry через `apps/codex_task_orchestrator.py register-task`;
+3. переименовать и pin куратора/исполнителя, затем атомарно зарегистрировать exact identities и user-level acceptance envelope в local registry через `apps/codex_task_orchestrator.py register-task`; corrective executor явно присоединяется к незавершённому envelope исходной пользовательской цели;
 4. проверить, что ровно одно active generation глобального Watcher читает новую запись;
 5. только после target/readback/registry evidence сообщить пользователю exact target identity и статус monitoring.
 
@@ -184,18 +184,24 @@ Scope должен быть явным и bounded. Не добавляй unrelat
 
 Exact registration после dispatch является основным acquisition path. Fallback-discovery ограничен pinned tasks с доказанным project/repository `orenvlad-ai/wb-core`; совпадение имени, темы или текста не достаточно. Сторонние, projectless, личные и медицинские chats исключаются.
 
-Watcher публикует по каждой active task только contiguous формат:
+Watcher не конструирует visible report из raw snapshot. Он публикует без изменений stdout единственного repo-owned renderer `python3 apps/codex_task_orchestrator.py report`. Единица visible report — active user-level acceptance envelope: parent и required corrective children образуют один русский block, progress равен минимальному доказанному member progress без двойного учёта, а ETA/delta/current берутся из текущего critical member. Независимые envelopes остаются отдельными blocks. Task IDs, UUID, revisions, digests, enums и registry/queue/lease/follow-up/batch jargon остаются только в evidence/audit.
+
+Renderer публикует только contiguous формат:
 
 ```text
-Статус: <machine-grounded status>
-Задача: <короткое имя · Cn>
+Статус: <человекопонятный русский статус>
+Задача: <короткое русское имя user-level envelope>
 Прогресс: ≈<процент> · Осталось: ≈<оценка>
 С прошлого отчёта: <одно доказанное изменение>
 Сейчас: <следующее безопасное действие или ожидание>
 Блокер: <строгая human-only причина и минимальное действие>
 ```
 
-Строка `Блокер` существует только при registry state `AWAITING_HUMAN`, strict human-only причине из Task Passport, exact evidence, исчерпанной repo-owned remediation и отсутствии оставшихся safe phases. После exact фразы владельца «Задача принята» state становится `ACCEPTED`, и задача исключается из следующего отчёта. Watcher не снимает pin; пользовательский unpin всегда ручной.
+Строка `Блокер` существует только при strict human-only причине из Task Passport, exact evidence, исчерпанной repo-owned remediation и отсутствии оставшихся safe phases. Progress не меняется от cadence; при отсутствии meaningful change renderer кратко сообщает, что изменений нет. Visible delta/current/ETA/blocker остаются короткими русскими, а GitHub, Watcher, PR и C1/C2/C3 допустимы только когда полезны владельцу.
+
+Technical completion, terminal failure, strict HumanGate и доказанная серьёзная остановка создают durable revision-bound attention event со стабильным ID/digest, exact curator/evidence, attempts/lease/timestamps и state `PENDING/LEASED/SENT/RETRY/ACKED/STALE`. Desktop transport считается at-least-once: crash после send до confirm может повторить тот же event ID, но curator acknowledgement/dedupe идемпотентен. `DONE_AWAITING_ACCEPTANCE` нельзя выставить до exact curator ack; используются `DONE_PENDING_HANDOFF` и аналогичные pending states.
+
+Owner phrase `Задача принята` обрабатывает только exact curator, не Watcher. User-level envelope ждёт terminal+acked всех required parent/corrective members, затем curator пишет один итог владельцу, фиксирует notification evidence и revision-bound принимает sole awaiting envelope. Несколько независимых envelopes в одном curator fail closed. Curator/current executor никогда автоматически не unpin/archive; inactive legacy predecessor searchable-архивируется только после доказанных successor readback, prompt delivery, registry/envelope link, checkpoint transfer и отдельного archive readback digest. Terminal executor без successor остаётся current.
 
 Повтор failure fingerprint хранится в registry, а не в памяти чата. Для пустой system error первое наблюдение даёт bounded retry, второе открывает unclaimed incident и создаёт replacement executor, третье claim-ит этот case для свежего Sol-арбитра. Успешный replacement вызывает `resolve-failure` и переводит неclaim-нутый case в `STALE`. Для одинаковой содержательной ошибки первое и второе наблюдения дают bounded retry, третье открывает и claim-ит incident. Один active incident на task, resource locks и stale-revision/digest check запрещают конкурирующие решения.
 
@@ -205,7 +211,7 @@ Watcher публикует по каждой active task только contiguous
 
 Legacy PR из versioned migration manifest получают terminal `release:retired` только через trusted-main exact-evidence command; Watcher никогда не снимает их legacy labels вручную.
 
-Ротация Watcher выполняется по generation/run-count: prepare нового поколения → smoke exact registry/thread/automation contract → atomic activate → старое поколение теряет lease и становится no-op → pause старой automation → archive старой Watcher task. В registry остаются поколения и audit. Одновременно активна ровно одна generation и одна Watcher heartbeat automation.
+Ротация Watcher выполняется по generation/run-count из trusted `origin/main`: prepare нового Luna поколения → до activation smoke exact registry/thread/automation/outbox contract и канонического русского envelope-report без raw machine state → atomic activate → старое поколение теряет lease и становится no-op → pause старой automation → searchable archive старой Watcher task с readback. В registry остаются поколения и audit. Одновременно активна ровно одна generation и одна Watcher heartbeat automation.
 
 Repo-native contracts:
 

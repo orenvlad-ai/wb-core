@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from apps.codex_task_orchestrator import Registry
 from apps.codex_task_orchestrator_spec import (
+    AttentionKind,
     IncidentDisposition,
     RetryObservation,
     STRICT_HUMAN_REASONS,
@@ -62,6 +63,41 @@ def _register(registry: Registry, identity: str, suffix: str) -> None:
         curator_thread_id=f"curator-{suffix}",
         executor_thread_id=f"executor-{suffix}",
         host_id="host-1",
+    )
+
+
+def _register_with_curator(
+    registry: Registry,
+    *,
+    identity: str,
+    suffix: str,
+    curator: str,
+    executor: str,
+    envelope: str = "",
+    envelope_title: str = "",
+    role: str = "root",
+    title: str = "",
+) -> None:
+    passport = _passport(suffix, identity)
+    visible_title = title or f"Task {suffix}"
+    passport["title"] = visible_title
+    passport["source"] = {
+        "curator_thread_id": curator,
+        "executor_thread_id": executor,
+    }
+    registry.register_task(
+        task_id=identity,
+        title=visible_title,
+        repo="orenvlad-ai/wb-core",
+        project_id="wb-core",
+        objective=f"Complete task {suffix}",
+        passport=passport,
+        curator_thread_id=curator,
+        executor_thread_id=executor,
+        host_id="host-1",
+        acceptance_envelope_id=envelope,
+        acceptance_title=envelope_title,
+        acceptance_role=role,
     )
 
 
@@ -117,10 +153,29 @@ def run_smoke() -> None:
         "wait_threads(timeoutMs: 0)",
         "record-failure",
         "close-incident",
+        "reserve-attention",
+        "ack-attention",
+        "accept-curator",
+        "pending-executor-archives",
+        "python3 apps/codex_task_orchestrator.py report",
         "rotation_due=true",
         "Задача принята",
     ):
         assert required in watcher_prompt
+    assert watcher_contract["attention_delivery"]["transport_semantics"] == (
+        "at-least-once-with-stable-event-id"
+    )
+    assert watcher_contract["report"]["unit"] == "acceptance-envelope"
+    assert watcher_contract["acceptance"][
+        "fail_closed_when_curator_has_multiple_waiting_envelopes"
+    ] is True
+    assert watcher_contract["executor_succession"][
+        "archive_only_after_successor_readback"
+    ] is True
+    assert watcher_contract["rotation"]["activate_only_after_smoke"] is True
+    assert watcher_contract["rotation"]["smoke_visible_report"][
+        "forbid_raw_machine_state"
+    ] is True
     assert "wb-core-arbiter-brief/v1" in arbiter_prompt
     assert "Do not request or reconstruct the full chat" in arbiter_prompt
 
@@ -482,6 +537,589 @@ def run_smoke() -> None:
             executor_thread_id="executor-charlie",
             host_id="host-1",
         )
+
+    # Attention routing, acceptance envelopes, localized report rendering and
+    # executor succession are independent from the incident smoke above.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "attention-registry")
+        registry.initialize()
+        curator = "curator-shared"
+        envelope_id = "global-orchestration-v1"
+        _register_with_curator(
+            registry,
+            identity="routing-root-v1",
+            suffix="routing-root",
+            curator=curator,
+            executor="executor-c2",
+            envelope=envelope_id,
+            envelope_title="Глобальная оркестрация",
+            role="root",
+            title="Техническая основа оркестрации",
+        )
+        _register_with_curator(
+            registry,
+            identity="routing-child-v1",
+            suffix="routing-child",
+            curator=curator,
+            executor="executor-c3",
+            envelope=envelope_id,
+            envelope_title="Глобальная оркестрация",
+            role="corrective",
+            title="Адресная доставка результата",
+        )
+        _register_with_curator(
+            registry,
+            identity="independent-v1",
+            suffix="independent",
+            curator="curator-independent",
+            executor="executor-independent",
+            title="Независимая задача",
+        )
+        registry.prepare_watcher(
+            generation=1,
+            thread_id="watcher-attention-1",
+            host_id="host-1",
+            automation_id="attention-auto-1",
+        )
+        registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "1" * 64
+        )
+        registry.activate_watcher(generation=1)
+
+        registry.update_task(
+            task_id="routing-root-v1",
+            expected_revision=1,
+            status=TaskStatus.WORKING,
+            progress=100,
+            eta="готово",
+            delta="Основная реализация завершена.",
+            current="Проверяется передача результата куратору.",
+            blocker=None,
+        )
+        registry.update_task(
+            task_id="routing-child-v1",
+            expected_revision=1,
+            status=TaskStatus.WORKING,
+            progress=35,
+            eta="около часа",
+            delta="Добавлен надёжный маршрут уведомления.",
+            current="Проверяется PR в GitHub; Watcher продолжает наблюдение C3.",
+            blocker=None,
+        )
+        localized = registry.report()
+        assert localized.count("Статус:") == 2
+        assert localized.count("Задача: Глобальная оркестрация") == 1
+        assert "Задача: Независимая задача" in localized
+        assert "Прогресс: ≈35%" in localized
+        assert "routing-root-v1" not in localized
+        assert "routing-child-v1" not in localized
+        assert "DONE_AWAITING_ACCEPTANCE" not in localized
+        assert "curator-shared" not in localized
+        for hidden in (
+            "Registry",
+            "integrity",
+            "queue",
+            "lease",
+            "bounded",
+            "revision",
+            "wait_threads",
+        ):
+            assert hidden.casefold() not in localized.casefold()
+        assert "GitHub" in localized and "Watcher" in localized and "C3" in localized
+        first_recorded = registry.report(record=True)
+        unchanged = registry.report(record=True)
+        assert "Изменений нет; работа продолжается:" not in first_recorded
+        assert "Изменений нет; работа продолжается:" in unchanged
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET revision=revision+1 WHERE task_id='routing-child-v1'"
+            )
+        diagnostic_only_change = registry.report(record=True)
+        assert "Изменений нет; работа продолжается:" in diagnostic_only_change
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET revision=revision-1 WHERE task_id='routing-child-v1'"
+            )
+        try:
+            registry.update_task(
+                task_id="routing-child-v1",
+                expected_revision=2,
+                status=TaskStatus.WORKING,
+                progress=35,
+                eta="около часа",
+                delta="Registry revision 2 сохранена.",
+                current="Работа продолжается.",
+                blocker=None,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("visible report fields must reject raw machine diagnostics")
+
+        # TARGET_CREATE_READBACK + prompt delivery + registry link + successor
+        # active evidence make C2 an inactive legacy executor. Missing evidence,
+        # a wrong envelope and archiving the current successor all fail closed.
+        try:
+            registry.register_executor_succession(
+                envelope_id=envelope_id,
+                predecessor_task_id="routing-root-v1",
+                successor_task_id="routing-child-v1",
+                reason="corrective executor",
+                checkpoint_digest="",
+                target_readback_digest="sha256:" + "2" * 64,
+                prompt_delivery_digest="sha256:" + "3" * 64,
+                registry_link_digest="sha256:" + "4" * 64,
+                successor_active_digest="sha256:" + "5" * 64,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing successor readback must fail closed")
+        try:
+            registry.register_executor_succession(
+                envelope_id="independent-v1",
+                predecessor_task_id="routing-root-v1",
+                successor_task_id="routing-child-v1",
+                reason="wrong envelope",
+                checkpoint_digest="sha256:" + "1" * 64,
+                target_readback_digest="sha256:" + "2" * 64,
+                prompt_delivery_digest="sha256:" + "3" * 64,
+                registry_link_digest="sha256:" + "4" * 64,
+                successor_active_digest="sha256:" + "5" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("cross-envelope executor succession must fail closed")
+        succession = registry.register_executor_succession(
+            envelope_id=envelope_id,
+            predecessor_task_id="routing-root-v1",
+            successor_task_id="routing-child-v1",
+            reason="C3 корректирует незавершённую владельцем цель C2.",
+            checkpoint_digest="sha256:" + "1" * 64,
+            target_readback_digest="sha256:" + "2" * 64,
+            prompt_delivery_digest="sha256:" + "3" * 64,
+            registry_link_digest="sha256:" + "4" * 64,
+            successor_active_digest="sha256:" + "5" * 64,
+        )
+        assert succession["status"] == "READY_TO_ARCHIVE"
+        assert registry.register_executor_succession(
+            envelope_id=envelope_id,
+            predecessor_task_id="routing-root-v1",
+            successor_task_id="routing-child-v1",
+            reason="C3 корректирует незавершённую владельцем цель C2.",
+            checkpoint_digest="sha256:" + "1" * 64,
+            target_readback_digest="sha256:" + "2" * 64,
+            prompt_delivery_digest="sha256:" + "3" * 64,
+            registry_link_digest="sha256:" + "4" * 64,
+            successor_active_digest="sha256:" + "5" * 64,
+        )["idempotent"] is True
+        try:
+            registry.confirm_executor_archive(
+                succession_id=str(succession["succession_id"]),
+                predecessor_thread_id="executor-c3",
+                archive_readback_digest="sha256:" + "6" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the current successor executor must never be archived")
+        archived = registry.confirm_executor_archive(
+            succession_id=str(succession["succession_id"]),
+            predecessor_thread_id="executor-c2",
+            archive_readback_digest="sha256:" + "6" * 64,
+        )
+        assert archived["status"] == "ARCHIVED"
+        assert registry.confirm_executor_archive(
+            succession_id=str(succession["succession_id"]),
+            predecessor_thread_id="executor-c2",
+            archive_readback_digest="sha256:" + "6" * 64,
+        )["idempotent"] is True
+        assert '"event_type":"archived"' in registry.event_path.read_text(
+            encoding="utf-8"
+        )
+
+        root_event = registry.enqueue_attention(
+            task_id="routing-root-v1",
+            expected_revision=2,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Основная реализация доказанно завершена.",
+            evidence_digest="sha256:" + "a" * 64,
+            eta="готово",
+            delta="Основная реализация завершена.",
+            current="Куратор подтверждает получение результата.",
+        )
+        duplicate_event = registry.enqueue_attention(
+            task_id="routing-root-v1",
+            expected_revision=2,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Основная реализация доказанно завершена.",
+            evidence_digest="sha256:" + "a" * 64,
+            eta="готово",
+            delta="Основная реализация завершена.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert duplicate_event["event_id"] == root_event["event_id"]
+        assert duplicate_event["idempotent"] is True
+        reserved = registry.reserve_attention(
+            generation=1, owner="watcher-send-1", lease_seconds=60, limit=8
+        )
+        assert [item["event_id"] for item in reserved["reserved"]] == [
+            root_event["event_id"]
+        ]
+        assert registry.reserve_attention(
+            generation=1, owner="duplicate-heartbeat", lease_seconds=60, limit=8
+        )["reserved"] == []
+        try:
+            registry.ack_attention(
+                event_id=str(root_event["event_id"]),
+                event_digest=str(root_event["event_digest"]),
+                curator_thread_id="wrong-curator",
+                expected_task_revision=3,
+                ack_evidence_digest="sha256:" + "b" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("wrong curator acknowledgement must fail closed")
+        assert registry.retry_attention(
+            event_id=str(root_event["event_id"]),
+            owner="watcher-send-1",
+            error="Desktop send temporarily failed",
+            retry_after_seconds=0,
+        )["state"] == "RETRY"
+        retry_reserved = registry.reserve_attention(
+            generation=1, owner="watcher-send-2", lease_seconds=60, limit=8
+        )
+        assert retry_reserved["reserved"][0]["attempt"] == 2
+        registry.mark_attention_sent(
+            event_id=str(root_event["event_id"]),
+            owner="watcher-send-2",
+            transport_receipt_digest="sha256:" + "c" * 64,
+            ack_timeout_seconds=600,
+        )
+        root_ack = registry.ack_attention(
+            event_id=str(root_event["event_id"]),
+            event_digest=str(root_event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=3,
+            ack_evidence_digest="sha256:" + "d" * 64,
+        )
+        assert root_ack["owner_notification_required"] is False
+        assert root_ack["acceptance_envelope_state"] == "OPEN"
+
+        child_event = registry.enqueue_attention(
+            task_id="routing-child-v1",
+            expected_revision=2,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Корректирующая доставка доказанно завершена.",
+            evidence_digest="sha256:" + "e" * 64,
+            eta="готово",
+            delta="Адресная доставка результата завершена.",
+            current="Куратор готовит единый итог владельцу.",
+        )
+        child_reserved = registry.reserve_attention(
+            generation=1, owner="watcher-crash-window", lease_seconds=60, limit=8
+        )
+        assert child_reserved["reserved"][0]["event_id"] == child_event["event_id"]
+        child_ack = registry.ack_attention(
+            event_id=str(child_event["event_id"]),
+            event_digest=str(child_event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=3,
+            ack_evidence_digest="sha256:" + "f" * 64,
+        )
+        assert child_ack["acceptance_envelope_state"] == "AWAITING_ACCEPTANCE"
+        assert child_ack["owner_notification_required"] is True
+        # Crash window send -> confirm: curator acknowledgement may win before
+        # the Watcher records transport success; the late confirmation is safe.
+        assert registry.mark_attention_sent(
+            event_id=str(child_event["event_id"]),
+            owner="watcher-crash-window",
+            transport_receipt_digest="sha256:" + "0" * 64,
+            ack_timeout_seconds=600,
+        )["idempotent"] is True
+        assert registry.attention_event(str(child_event["event_id"]))["event"][
+            "transport_receipt_digest"
+        ] == "sha256:" + "0" * 64
+        registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id=envelope_id,
+            expected_revision=int(child_ack["acceptance_envelope_revision"]),
+            notification_evidence_digest="sha256:" + "9" * 64,
+        )
+        accepted = registry.accept_curator(
+            curator_thread_id=curator,
+            expected_envelope_revision=int(child_ack["acceptance_envelope_revision"]),
+        )
+        assert set(accepted["accepted_task_ids"]) == {
+            "routing-root-v1",
+            "routing-child-v1",
+        }
+        after_accept = registry.report()
+        assert "Глобальная оркестрация" not in after_accept
+        assert "Независимая задача" in after_accept
+
+        human_event = registry.enqueue_attention(
+            task_id="independent-v1",
+            expected_revision=1,
+            kind=AttentionKind.STRICT_HUMAN_GATE,
+            evidence_summary="Требуется интерактивная авторизация владельца.",
+            evidence_digest="sha256:" + "8" * 64,
+            eta="после входа",
+            delta="Все безопасные технические шаги завершены.",
+            current="Ожидается вход владельца.",
+            blocker="Нужно войти в систему и подтвердить авторизацию.",
+            human_reason="interactive-auth",
+            repo_owned_remediation_available=False,
+            remediation_exhausted=True,
+        )
+        human_reserved = registry.reserve_attention(
+            generation=1, owner="watcher-human", lease_seconds=60, limit=8
+        )
+        assert human_reserved["reserved"][0]["event_id"] == human_event["event_id"]
+        human_ack = registry.ack_attention(
+            event_id=str(human_event["event_id"]),
+            event_digest=str(human_event["event_digest"]),
+            curator_thread_id="curator-independent",
+            expected_task_revision=2,
+            ack_evidence_digest="sha256:" + "7" * 64,
+        )
+        assert human_ack["task_revision"] == 3
+        assert "Блокер: Нужно войти" in registry.report()
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+    # Multiple independent user-level envelopes in one curator are visible as
+    # separate blocks and make the owner phrase ambiguous until one is named by
+    # a new explicit user decision. The phrase alone never picks a random task.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "ambiguity-registry")
+        registry.initialize()
+        for index in (1, 2):
+            _register_with_curator(
+                registry,
+                identity=f"ambiguity-task-{index}",
+                suffix=f"ambiguity-{index}",
+                curator="curator-ambiguous",
+                executor=f"executor-ambiguous-{index}",
+                title=f"Независимая цель {index}",
+            )
+        registry.prepare_watcher(
+            generation=1,
+            thread_id="watcher-ambiguous",
+            host_id="host-1",
+            automation_id="ambiguous-auto",
+        )
+        registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "1" * 64
+        )
+        registry.activate_watcher(generation=1)
+        envelope_revisions = []
+        for index in (1, 2):
+            event = registry.enqueue_attention(
+                task_id=f"ambiguity-task-{index}",
+                expected_revision=1,
+                kind=AttentionKind.TECHNICAL_COMPLETION,
+                evidence_summary=f"Независимая цель {index} завершена.",
+                evidence_digest="sha256:" + str(index) * 64,
+                eta="готово",
+                delta="Работа завершена.",
+                current="Куратор готовит итог владельцу.",
+            )
+            ack = registry.ack_attention(
+                event_id=str(event["event_id"]),
+                event_digest=str(event["event_digest"]),
+                curator_thread_id="curator-ambiguous",
+                expected_task_revision=2,
+                ack_evidence_digest="sha256:" + str(index + 2) * 64,
+            )
+            registry.confirm_owner_notification(
+                curator_thread_id="curator-ambiguous",
+                envelope_id=f"ambiguity-task-{index}",
+                expected_revision=int(ack["acceptance_envelope_revision"]),
+                notification_evidence_digest="sha256:" + str(index + 4) * 64,
+            )
+            envelope_revisions.append(int(ack["acceptance_envelope_revision"]))
+        assert registry.report().count("Статус:") == 2
+        try:
+            registry.accept_curator(
+                curator_thread_id="curator-ambiguous",
+                expected_envelope_revision=envelope_revisions[0],
+            )
+        except RuntimeError as exc:
+            assert "ambiguous" in str(exc)
+        else:
+            raise AssertionError("ambiguous owner acceptance must fail closed")
+
+    # Stale-revision and generation rotation preserve the outbox while old
+    # Watchers become no-op. An event whose task advanced is never delivered.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "rotation-registry")
+        registry.initialize()
+        _register_with_curator(
+            registry,
+            identity="stale-route-v1",
+            suffix="stale-route",
+            curator="curator-stale",
+            executor="executor-stale",
+            title="Проверка устаревшего события",
+        )
+        registry.prepare_watcher(
+            generation=1,
+            thread_id="watcher-old",
+            host_id="host-1",
+            automation_id="old-auto",
+        )
+        registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "1" * 64
+        )
+        registry.activate_watcher(generation=1)
+        stale_event = registry.enqueue_attention(
+            task_id="stale-route-v1",
+            expected_revision=1,
+            kind=AttentionKind.SERIOUS_STALL,
+            evidence_summary="Серьёзная остановка зафиксирована.",
+            evidence_digest="sha256:" + "2" * 64,
+            eta="уточняется",
+            delta="Остановка подтверждена.",
+            current="Выполняется техническое восстановление.",
+        )
+        registry.update_task(
+            task_id="stale-route-v1",
+            expected_revision=2,
+            status=TaskStatus.WORKING,
+            progress=10,
+            eta="около часа",
+            delta="Техническое восстановление завершено.",
+            current="Работа продолжается.",
+            blocker=None,
+        )
+        registry.prepare_watcher(
+            generation=2,
+            thread_id="watcher-new",
+            host_id="host-1",
+            automation_id="new-auto",
+        )
+        registry.smoke_watcher(
+            generation=2, evidence_digest="sha256:" + "3" * 64
+        )
+        registry.activate_watcher(generation=2)
+        assert registry.reserve_attention(
+            generation=1, owner="old-run", lease_seconds=60, limit=8
+        )["reason"] == "stale-watcher-generation"
+        assert registry.reserve_attention(
+            generation=2, owner="new-run", lease_seconds=60, limit=8
+        )["reserved"] == []
+        assert registry.attention_event(str(stale_event["event_id"]))["event"][
+            "state"
+        ] == "STALE"
+
+    # Ambiguous successor identity is rejected before either executor is made
+    # inactive; terminal executors without a proven successor remain current.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "succession-ambiguity")
+        registry.initialize()
+        envelope = "ambiguous-successor-v1"
+        for identity, role in (
+            ("successor-root-v1", "root"),
+            ("successor-child-a", "corrective"),
+            ("successor-child-b", "corrective"),
+        ):
+            _register_with_curator(
+                registry,
+                identity=identity,
+                suffix=identity,
+                curator="curator-successor",
+                executor=f"executor-{identity}",
+                envelope=envelope,
+                envelope_title="Проверка преемника",
+                role=role,
+                title="Проверка преемника",
+            )
+        try:
+            registry.register_executor_succession(
+                envelope_id=envelope,
+                predecessor_task_id="successor-root-v1",
+                successor_task_id="successor-child-a",
+                reason="ambiguous successor",
+                checkpoint_digest="sha256:" + "1" * 64,
+                target_readback_digest="sha256:" + "2" * 64,
+                prompt_delivery_digest="sha256:" + "3" * 64,
+                registry_link_digest="sha256:" + "4" * 64,
+                successor_active_digest="sha256:" + "5" * 64,
+            )
+        except RuntimeError as exc:
+            assert "ambiguous" in str(exc)
+        else:
+            raise AssertionError("multiple active successor candidates must fail closed")
+        assert registry.pending_executor_archives() == []
+
+    # A task already parked in the legacy terminal state without delivery
+    # evidence is moved back to pending handoff exactly once and keeps audit.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "backfill-registry")
+        registry.initialize()
+        _register_with_curator(
+            registry,
+            identity="legacy-terminal-v1",
+            suffix="legacy-terminal",
+            curator="curator-backfill",
+            executor="executor-backfill",
+            title="Исторический результат",
+        )
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET status='DONE_AWAITING_ACCEPTANCE',revision=8,progress_percent=100,"
+                "eta_text='готово',last_delta='Работа завершена.',"
+                "current_action='Требуется подтверждение доставки.' WHERE task_id='legacy-terminal-v1'"
+            )
+        assert registry.integrity()["unproven_terminal_tasks"] == 1
+        event = registry.enqueue_attention(
+            task_id="legacy-terminal-v1",
+            expected_revision=8,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
+            evidence_digest="sha256:" + "a" * 64,
+            backfill=True,
+            eta="готово",
+            delta="Результат подготовлен к адресной передаче.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert event["task_revision"] == 9
+        assert registry.enqueue_attention(
+            task_id="legacy-terminal-v1",
+            expected_revision=8,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
+            evidence_digest="sha256:" + "a" * 64,
+            backfill=True,
+            eta="готово",
+            delta="Результат подготовлен к адресной передаче.",
+            current="Куратор подтверждает получение результата.",
+        )["idempotent"] is True
+        ack = registry.ack_attention(
+            event_id=str(event["event_id"]),
+            event_digest=str(event["event_digest"]),
+            curator_thread_id="curator-backfill",
+            expected_task_revision=9,
+            ack_evidence_digest="sha256:" + "b" * 64,
+        )
+        assert ack["task_revision"] == 10
+        assert ack["acceptance_envelope_state"] == "AWAITING_ACCEPTANCE"
+        repeated_after_ack = registry.enqueue_attention(
+            task_id="legacy-terminal-v1",
+            expected_revision=10,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
+            evidence_digest="sha256:" + "a" * 64,
+            backfill=True,
+            eta="готово",
+            delta="Результат подготовлен к адресной передаче.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert repeated_after_ack["event_id"] == event["event_id"]
+        assert repeated_after_ack["idempotent"] is True
+        assert registry.integrity()["ok"] is True, registry.integrity()
 
 
 def main() -> int:
