@@ -2107,7 +2107,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const header = document.querySelector('[data-table-header]');
           const pageMeta = header ? header.querySelector('[data-page-meta]') : null;
           const tableMeta = header ? header.querySelector('[data-table-meta]') : null;
+          const snapshotSummary = header ? header.querySelector('[data-table-snapshot-summary]') : null;
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
+          const updated = summary ? summary.querySelector('[data-table-summary-updated]') : null;
+          const quality = header ? header.querySelector('[data-vitrina-incident-quality-badge]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
@@ -2122,6 +2125,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
           const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const rightRect = rightZone ? rightZone.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const snapshotRect = snapshotSummary ? snapshotSummary.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const qualityRect = quality ? quality.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const updatedRect = updated ? updated.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const snapshotStyles = snapshotSummary ? getComputedStyle(snapshotSummary) : null;
           const historyButton = header ? header.querySelector('[data-history-toggle]') : null;
           const historyLabel = header ? header.querySelector('[data-history-label]') : null;
           const historyIcon = header ? header.querySelector('.history-control-icon') : null;
@@ -2164,7 +2171,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const historyRect = historyButton ? historyButton.getBoundingClientRect() : {width: 0, right: 0};
           const historyLabelRect = historyLabel ? historyLabel.getBoundingClientRect() : {width: 0, right: 0};
           const historyIconRect = historyIcon ? historyIcon.getBoundingClientRect() : {left: 0, right: 0};
-          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть данных', 'today_current', 'yesterday_closed', 'load window'];
+          const forbidden = ['sheet_vitrina_v1', 'Основная web-витрина', 'В выбранном периоде', 'grid library', 'rows:', 'columns:', 'Вчера:', 'Сегодня:', 'TZ:', 'Статус последней загрузки', 'Последняя загрузка', 'Обновлено:', 'Свежесть', 'свеж:', 'today_current', 'yesterday_closed', 'load window'];
           const visibleFilterLabels = Array.from(header ? header.querySelectorAll('.filter-label') : [])
             .filter((node) => {
               const rect = node.getBoundingClientRect();
@@ -2187,6 +2194,19 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             right_zone_exists: !!rightZone,
             right_zone_anchored: !!rightZone && Math.abs(headerRect.right - rightRect.right) <= 16,
             right_zone_near_button: !!rightZone && !!loadButton && Math.abs(rightRect.right - buttonRect.right) <= 4,
+            snapshot_summary_exists: !!snapshotSummary,
+            snapshot_summary_visible: !!snapshotSummary && snapshotRect.width > 2,
+            snapshot_updated_grouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
+            snapshot_updated_adjacent: !!quality && !!updated && !quality.hidden && updatedRect.left >= qualityRect.right && updatedRect.left - qualityRect.right <= 12,
+            snapshot_group_visual: !!snapshotStyles && ['flex', 'inline-flex'].includes(snapshotStyles.display) && parseFloat(snapshotStyles.borderTopWidth || '0') >= 1 && parseFloat(snapshotStyles.borderTopLeftRadius || '0') >= 10,
+            snapshot_badge_count: header ? header.querySelectorAll('[data-vitrina-incident-quality-badge]').length : 0,
+            updated_token_count: header ? header.querySelectorAll('[data-table-summary-updated]').length : 0,
+            summary_separator_count: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : 0,
+            visible_freshness_count: header ? Array.from(header.querySelectorAll('*')).filter(node => {
+              const rect = node.getBoundingClientRect();
+              const styles = getComputedStyle(node);
+              return rect.width > 2 && rect.height > 2 && styles.display !== 'none' && styles.visibility !== 'hidden' && /(?:Свежесть|свеж:)/i.test(node.textContent || '');
+            }).length : 0,
             old_toolbar_count: document.querySelectorAll('[data-table-toolbar]').length,
             search_count: document.querySelectorAll('[data-filter-control="search"]').length,
             columns_visible_count: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
@@ -2241,6 +2261,15 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or not payload["right_zone_exists"]
         or not payload["right_zone_anchored"]
         or not payload["right_zone_near_button"]
+        or not payload["snapshot_summary_exists"]
+        or not payload["snapshot_summary_visible"]
+        or not payload["snapshot_updated_grouped"]
+        or not payload["snapshot_updated_adjacent"]
+        or not payload["snapshot_group_visual"]
+        or int(payload["snapshot_badge_count"]) != 1
+        or int(payload["updated_token_count"]) != 1
+        or int(payload["summary_separator_count"]) != 0
+        or int(payload["visible_freshness_count"]) != 0
         or int(payload["old_toolbar_count"]) != 0
         or int(payload["search_count"]) != 0
         or int(payload["columns_visible_count"]) != 0
@@ -2262,8 +2291,8 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"table header must not expose old technical/source text, got {payload}")
     if payload["visible_filter_labels"]:
         raise AssertionError(f"compact header controls must not show field labels, got {payload}")
-    if "обн:" not in payload["summary_text"] or "свеж:" not in payload["summary_text"]:
-        raise AssertionError(f"table header summary must expose short ob/fresh timestamps, got {payload}")
+    if "обн:" not in payload["summary_text"] or "свеж:" in payload["summary_text"].lower():
+        raise AssertionError(f"table header summary must expose only the short updated timestamp, got {payload}")
     if int(payload["asia_yekaterinburg_in_summary"]) != 0 or payload["seconds_in_summary"]:
         raise AssertionError(f"compact header timestamps must omit visible timezone and seconds, got {payload}")
     if payload["load_status_visible_text"] or int(payload["load_status_dot_count"]) != 1 or int(payload["load_status_width"]) > 32:
@@ -2317,16 +2346,27 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                   const right = header && header.querySelector('[data-table-heading-right]');
                   const load = header && header.querySelector('[data-load-refresh-button]');
                   const metrics = header && header.querySelector('[data-metrics-settings-open]');
+                  const snapshotSummary = header && header.querySelector('[data-table-snapshot-summary]');
+                  const quality = header && header.querySelector('[data-vitrina-incident-quality-badge]');
+                  const updated = header && header.querySelector('[data-table-summary-updated]');
                   const rect = node => node ? node.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
                   const headerRect = rect(header);
                   const leftRect = rect(left);
                   const rightRect = rect(right);
+                  const snapshotRect = rect(snapshotSummary);
+                  const qualityRect = rect(quality);
+                  const updatedRect = rect(updated);
                   return {
                     documentWidth: document.documentElement.scrollWidth,
                     viewportWidth: window.innerWidth,
                     leftInside: leftRect.left >= headerRect.left - 1 && leftRect.right <= headerRect.right + 1,
                     rightInside: rightRect.left >= headerRect.left - 1 && rightRect.right <= headerRect.right + 1,
                     wrapped: rightRect.top >= leftRect.bottom - 2,
+                    snapshotInside: snapshotRect.left >= headerRect.left - 1 && snapshotRect.right <= headerRect.right + 1,
+                    snapshotUpdatedGrouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
+                    snapshotUpdatedAdjacent: !!quality && !!updated && !quality.hidden && updatedRect.left >= qualityRect.right && updatedRect.left - qualityRect.right <= 12,
+                    freshnessVisible: /(?:Свежесть|свеж:)/i.test(header ? (header.innerText || '') : ''),
+                    separatorCount: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : -1,
                     sellerBadgeCount: header ? header.querySelectorAll('[data-seller-top-session]').length : -1,
                     incidentText: ((header && header.querySelector('[data-vitrina-incident-policy-badge]')) || {}).textContent || '',
                     qualityText: ((header && header.querySelector('[data-vitrina-incident-quality-badge]')) || {}).textContent || '',
@@ -2340,6 +2380,11 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                 or not layout["leftInside"]
                 or not layout["rightInside"]
                 or not layout["wrapped"]
+                or not layout["snapshotInside"]
+                or not layout["snapshotUpdatedGrouped"]
+                or not layout["snapshotUpdatedAdjacent"]
+                or layout["freshnessVisible"]
+                or int(layout["separatorCount"]) != 0
                 or int(layout["sellerBadgeCount"]) != 0
                 or layout["metricsText"] != "Метрики"
                 or not layout["loadVisible"]
@@ -3279,7 +3324,8 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
           const node = document.querySelector('[data-table-summary-line]');
           const loadStatusNode = document.querySelector('[data-table-load-status]');
           const updatedNode = node ? node.querySelector('[data-table-summary-updated]') : null;
-          const freshnessNode = node ? node.querySelector('[data-table-summary-freshness]') : null;
+          const snapshotSummaryNode = document.querySelector('[data-table-snapshot-summary]');
+          const qualityNode = document.querySelector('[data-vitrina-incident-quality-badge]');
           const trimPrefix = (value, prefix) => {
             const text = String(value || '').trim();
             return text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
@@ -3294,9 +3340,9 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             load_status_dot_count: loadStatusNode ? loadStatusNode.querySelectorAll('.table-load-status-dot').length : 0,
             updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'обн:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
-            freshness: trimPrefix(freshnessNode ? freshnessNode.textContent : '', 'свеж:'),
-            freshness_at: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-at') || '').trim() : '',
-            freshness_source: freshnessNode ? String(freshnessNode.getAttribute('data-table-summary-freshness-source') || '').trim() : '',
+            snapshot_updated_grouped: !!snapshotSummaryNode && !!qualityNode && !!updatedNode && snapshotSummaryNode.contains(qualityNode) && snapshotSummaryNode.contains(updatedNode),
+            freshness_node_count: document.querySelectorAll('[data-table-summary-freshness], .table-summary-freshness').length,
+            separator_count: snapshotSummaryNode ? snapshotSummaryNode.querySelectorAll('.table-summary-separator').length : 0,
             status: String((loadStatusNode && loadStatusNode.getAttribute('data-load-status-text')) || '').trim(),
             status_detail: ''
           };
@@ -3308,8 +3354,17 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         raise AssertionError(f"load status must be visible inline with the load button, got {payload}")
     text = str(payload.get("text") or "")
     load_status_text = str(payload.get("load_status_text") or "")
-    if "обн:" not in text or "свеж:" not in text or "Обновлено:" in text or "Свежесть данных:" in text or "Статус:" in text:
-        raise AssertionError(f"table header summary must include only short updated/freshness labels, got {payload}")
+    if (
+        "обн:" not in text
+        or "свеж:" in text.lower()
+        or "Свежесть" in text
+        or "Обновлено:" in text
+        or "Статус:" in text
+        or not payload.get("snapshot_updated_grouped")
+        or int(payload.get("freshness_node_count") or 0) != 0
+        or int(payload.get("separator_count") or 0) != 0
+    ):
+        raise AssertionError(f"table header summary must contain one grouped snapshot/updated block without freshness, got {payload}")
     if payload.get("load_status_visible_text") or int(payload.get("load_status_dot_count") or 0) != 1:
         raise AssertionError(f"load status must be an icon-only lamp, got {payload}")
     if not str(payload.get("load_status_title") or "").startswith("Загрузка: "):
@@ -3325,12 +3380,6 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             "detail": "",
             "updated_at": str(payload.get("updated_at") or ""),
         },
-        "data_freshness": {
-            "label": "Свежесть",
-            "value": str(payload.get("freshness") or ""),
-            "detail": str(payload.get("freshness_source") or ""),
-            "updated_at": str(payload.get("freshness_at") or ""),
-        },
         "status": {
             "label": "Статус",
             "value": str(payload.get("status") or ""),
@@ -3340,7 +3389,6 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
     }
     for required_card_id, required_label in {
         "page_refresh": "Обновлено",
-        "data_freshness": "Свежесть",
         "status": "Статус",
     }.items():
         card = cards.get(required_card_id)
@@ -3354,8 +3402,6 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         raise AssertionError(f"period summary card must not be visible, got {cards}")
     if not cards["page_refresh"]["updated_at"]:
         raise AssertionError(f"page refresh card must expose an exact browser timestamp marker, got {cards['page_refresh']}")
-    if not cards["data_freshness"]["value"]:
-        raise AssertionError(f"data freshness line must expose a value or unknown state, got {cards['data_freshness']}")
     return cards
 
 

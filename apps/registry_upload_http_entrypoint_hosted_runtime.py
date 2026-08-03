@@ -10953,7 +10953,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Отзывы",
             "Загрузить",
             "обн:",
-            "свеж:",
+            "data-table-snapshot-summary",
+            "data-table-summary-updated",
             "Загрузка данных",
             "Действия и состояния",
             "С инцидентами",
@@ -10981,6 +10982,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "stockReportToggle",
             "report-accordion",
             "<h1>",
+            "data-table-summary-freshness",
+            "свеж:",
         ]
         present_forbidden = [token for token in forbidden_tokens if token in body]
         evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens and not present_forbidden
@@ -11084,7 +11087,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Web-витрина",
             "Загрузить",
             "обн:",
-            "свеж:",
+            "data-table-snapshot-summary",
+            "data-table-summary-updated",
             DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
             route_paths["SHEET_VITRINA_OPERATOR_UI_PATH"],
             "surface=page_composition",
@@ -11124,6 +11128,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
                 "data-session-launcher",
                 "JSON Connect",
                 "Обновление данных",
+                "data-table-summary-freshness",
+                "свеж:",
             )
             if token in body
         ]
