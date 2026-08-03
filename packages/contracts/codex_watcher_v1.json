@@ -33,7 +33,55 @@
   "report": {
     "lines": ["Статус", "Задача", "Прогресс · Осталось", "С прошлого отчёта", "Сейчас", "Блокер"],
     "blocker_only_for_strict_human_reason": true,
-    "accepted_phrase": "Задача принята"
+    "renderer": "python3 apps/codex_task_orchestrator.py report",
+    "unit": "acceptance-envelope",
+    "localized_statuses_only": true,
+    "forbid_raw_machine_state": true,
+    "accepted_phrase": "Задача принята",
+    "accepted_by": "exact-curator-thread"
+  },
+  "attention_delivery": {
+    "schema": "wb-core-attention-event/v1",
+    "transport_semantics": "at-least-once-with-stable-event-id",
+    "event_kinds": [
+      "TECHNICAL_COMPLETION",
+      "TERMINAL_FAILURE",
+      "STRICT_HUMAN_GATE",
+      "SERIOUS_STALL"
+    ],
+    "states": ["PENDING", "LEASED", "SENT", "RETRY", "ACKED", "STALE"],
+    "curator_ack_required_before_terminal_acceptance_state": true,
+    "reserve_batch_limit": 8,
+    "stable_event_id_across_rotation": true
+  },
+  "acceptance": {
+    "schema": "wb-core-acceptance-envelope/v1",
+    "unit": "user-level-envelope",
+    "states": ["OPEN", "DONE_PENDING_HANDOFF", "AWAITING_ACCEPTANCE", "ACCEPTED"],
+    "single_phrase_without_task_name": true,
+    "fail_closed_when_curator_has_multiple_waiting_envelopes": true,
+    "required_members_must_all_be_terminal_and_acked": true
+  },
+  "executor_succession": {
+    "schema": "wb-core-executor-succession/v1",
+    "archive_only_after_successor_readback": true,
+    "archive_is_searchable_and_audited": true,
+    "never_auto_unpin": ["curator", "current-executor"],
+    "terminal_executor_without_successor_stays_current": true
+  },
+  "rotation": {
+    "activate_only_after_smoke": true,
+    "atomic_generation_switch": true,
+    "old_generation_must_be_stale_noop": true,
+    "pause_old_heartbeat_after_activation": true,
+    "archive_old_watcher_after_readback": true,
+    "smoke_visible_report": {
+      "renderer": "python3 apps/codex_task_orchestrator.py report",
+      "unit": "acceptance-envelope",
+      "localized_russian": true,
+      "forbid_raw_machine_state": true,
+      "require_meaningful_progress": true
+    }
   },
   "feature_flag": {
     "name": "WB_CORE_ORCHESTRATION_REQUIRED",
