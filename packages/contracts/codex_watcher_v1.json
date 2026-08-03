@@ -30,6 +30,14 @@
     "require_repository_remote": "orenvlad-ai/wb-core",
     "exclude_projectless_and_non_repository_threads": true
   },
+  "role_pinning": {
+    "assignment_time_only": true,
+    "curator_and_current_executor_required_before_registration": true,
+    "watcher_title_pin_and_automation_readback_required_before_smoke": true,
+    "heartbeat_repin": false,
+    "manual_owner_unpin_preserved": true,
+    "final_acceptance_unpins_roles": false
+  },
   "report": {
     "lines": ["Статус", "Задача", "Прогресс · Осталось", "С прошлого отчёта", "Сейчас", "Блокер"],
     "blocker_only_for_strict_human_reason": true,
@@ -60,7 +68,23 @@
     "states": ["OPEN", "DONE_PENDING_HANDOFF", "AWAITING_ACCEPTANCE", "ACCEPTED"],
     "single_phrase_without_task_name": true,
     "fail_closed_when_curator_has_multiple_waiting_envelopes": true,
-    "required_members_must_all_be_terminal_and_acked": true
+    "required_members_must_all_be_terminal_and_acked": true,
+    "required_member_addition_reopens_envelope": true,
+    "owner_notification_is_revision_bound": true,
+    "accepted_envelopes_excluded_from_report": true,
+    "owner_handoff": {
+      "schema": "wb-core-owner-handoff/v1",
+      "commentary_delivery_before_confirmation": true,
+      "repeat_same_digest_on_final_surface": true,
+      "duplicate_final_surface_is_not_second_logical_notification": true,
+      "required_lines": [
+        "Статус: Завершена — требуется приёмка",
+        "Сделано",
+        "Проверено",
+        "Ответьте ровно: «Задача принята»"
+      ],
+      "limitations_only_when_real": true
+    }
   },
   "executor_succession": {
     "schema": "wb-core-executor-succession/v1",
@@ -75,6 +99,7 @@
     "old_generation_must_be_stale_noop": true,
     "pause_old_heartbeat_after_activation": true,
     "archive_old_watcher_after_readback": true,
+    "old_watcher_retirement_evidence_required": true,
     "smoke_visible_report": {
       "renderer": "python3 apps/codex_task_orchestrator.py report",
       "unit": "acceptance-envelope",

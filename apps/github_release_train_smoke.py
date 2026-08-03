@@ -3110,6 +3110,9 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         "REPLACE_EXECUTOR",
         "close-incident",
         "archive readback",
+        "prepare-owner-handoff",
+        "confirm-watcher-retirement",
+        "Ожидается приёмка владельца",
         "rotation_due=true",
         "Задача принята",
         "Блокер",
@@ -3143,6 +3146,13 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     )
     assert watcher_config["acceptance"][
         "fail_closed_when_curator_has_multiple_waiting_envelopes"
+    ] is True
+    assert watcher_config["acceptance"][
+        "required_member_addition_reopens_envelope"
+    ] is True
+    assert watcher_config["role_pinning"]["heartbeat_repin"] is False
+    assert watcher_config["rotation"][
+        "old_watcher_retirement_evidence_required"
     ] is True
     assert watcher_config["executor_succession"][
         "archive_only_after_successor_readback"

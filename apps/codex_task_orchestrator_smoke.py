@@ -63,6 +63,8 @@ def _register(registry: Registry, identity: str, suffix: str) -> None:
         curator_thread_id=f"curator-{suffix}",
         executor_thread_id=f"executor-{suffix}",
         host_id="host-1",
+        curator_pin_readback_digest="sha256:" + "c" * 64,
+        executor_pin_readback_digest="sha256:" + "e" * 64,
     )
 
 
@@ -95,9 +97,31 @@ def _register_with_curator(
         curator_thread_id=curator,
         executor_thread_id=executor,
         host_id="host-1",
+        curator_pin_readback_digest="sha256:" + "c" * 64,
+        executor_pin_readback_digest="sha256:" + "e" * 64,
         acceptance_envelope_id=envelope,
         acceptance_title=envelope_title,
         acceptance_role=role,
+    )
+
+
+def _prepare_watcher(
+    registry: Registry,
+    *,
+    generation: int,
+    thread_id: str,
+    automation_id: str,
+    max_runs: int = 720,
+) -> dict[str, object]:
+    return registry.prepare_watcher(
+        generation=generation,
+        thread_id=thread_id,
+        host_id="host-1",
+        automation_id=automation_id,
+        title_readback_digest="sha256:" + "1" * 64,
+        pin_readback_digest="sha256:" + "2" * 64,
+        automation_readback_digest="sha256:" + "3" * 64,
+        max_runs=max_runs,
     )
 
 
@@ -157,6 +181,8 @@ def run_smoke() -> None:
         "ack-attention",
         "accept-curator",
         "pending-executor-archives",
+        "prepare-owner-handoff",
+        "confirm-watcher-retirement",
         "python3 apps/codex_task_orchestrator.py report",
         "rotation_due=true",
         "Задача принята",
@@ -173,6 +199,15 @@ def run_smoke() -> None:
         "archive_only_after_successor_readback"
     ] is True
     assert watcher_contract["rotation"]["activate_only_after_smoke"] is True
+    assert watcher_contract["role_pinning"]["assignment_time_only"] is True
+    assert watcher_contract["role_pinning"]["heartbeat_repin"] is False
+    assert watcher_contract["acceptance"]["required_member_addition_reopens_envelope"] is True
+    assert watcher_contract["acceptance"]["owner_handoff"][
+        "repeat_same_digest_on_final_surface"
+    ] is True
+    assert watcher_contract["rotation"][
+        "old_watcher_retirement_evidence_required"
+    ] is True
     assert watcher_contract["rotation"]["smoke_visible_report"][
         "forbid_raw_machine_state"
     ] is True
@@ -184,6 +219,24 @@ def run_smoke() -> None:
         registry.initialize()
         _register(registry, "t-task-alpha", "alpha")
         _register(registry, "t-task-bravo", "bravo")
+        try:
+            registry.register_task(
+                task_id="missing-pin-v1",
+                title="Task missing-pin",
+                repo="orenvlad-ai/wb-core",
+                project_id="wb-core",
+                objective="Complete task missing-pin",
+                passport=_passport("missing-pin", "missing-pin-v1"),
+                curator_thread_id="curator-missing-pin",
+                executor_thread_id="executor-missing-pin",
+                host_id="host-1",
+                curator_pin_readback_digest="",
+                executor_pin_readback_digest="sha256:" + "e" * 64,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("launch registration must fail without curator pin readback")
         repeated_registration = registry.register_task(
             task_id="t-task-alpha",
             title="Task alpha",
@@ -194,6 +247,8 @@ def run_smoke() -> None:
             curator_thread_id="curator-alpha",
             executor_thread_id="executor-alpha",
             host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
         )
         assert repeated_registration["idempotent"] is True
         assert registry.add_thread(
@@ -202,7 +257,23 @@ def run_smoke() -> None:
             generation=1,
             thread_id="executor-alpha",
             host_id="host-1",
+            pin_readback_digest="sha256:" + "e" * 64,
         )["idempotent"] is True
+        assert registry.confirm_role_pin(
+            thread_id="curator-alpha",
+            role="curator",
+            pin_readback_digest="sha256:" + "c" * 64,
+        )["idempotent"] is True
+        try:
+            registry.confirm_role_pin(
+                thread_id="curator-alpha",
+                role="curator",
+                pin_readback_digest="sha256:" + "d" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("assignment-time pin evidence must not become heartbeat re-pin")
 
         updated = registry.update_task(
             task_id="t-task-alpha",
@@ -408,17 +479,63 @@ def run_smoke() -> None:
             ).fetchone()
         assert resolved_case["status"] == "STALE"
 
-        registry.prepare_watcher(
+        try:
+            registry.prepare_watcher(
+                generation=1,
+                thread_id="watcher-missing-pin",
+                host_id="host-1",
+                automation_id="auto-missing-pin",
+                title_readback_digest="sha256:" + "1" * 64,
+                pin_readback_digest="",
+                automation_readback_digest="sha256:" + "3" * 64,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("watcher preparation must fail without pin readback")
+        _prepare_watcher(
+            registry,
+            generation=99,
+            thread_id="watcher-legacy-missing-pin",
+            automation_id="auto-legacy-missing-pin",
+        )
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET pin_readback_digest='' WHERE generation=99"
+            )
+        try:
+            registry.smoke_watcher(
+                generation=99,
+                evidence_digest="sha256:" + "9" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("watcher smoke must fail without pin readback")
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET smoke_digest=?,smoke_at=? WHERE generation=99",
+                ("sha256:" + "9" * 64, "2026-08-03T00:00:00+00:00"),
+            )
+        try:
+            registry.activate_watcher(generation=99)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("watcher activation must fail without pin readback")
+        with registry.connect() as connection:
+            connection.execute("DELETE FROM watchers WHERE generation=99")
+        _prepare_watcher(
+            registry,
             generation=1,
             thread_id="watcher-1",
-            host_id="host-1",
             automation_id="auto-1",
             max_runs=1,
         )
-        assert registry.prepare_watcher(
+        assert _prepare_watcher(
+            registry,
             generation=1,
             thread_id="watcher-1",
-            host_id="host-1",
             automation_id="auto-1",
             max_runs=1,
         )["idempotent"] is True
@@ -441,10 +558,10 @@ def run_smoke() -> None:
         assert registry.begin_run(
             generation=1, owner="rotation-old", lease_seconds=60
         )["acquired"] is True
-        registry.prepare_watcher(
+        _prepare_watcher(
+            registry,
             generation=2,
             thread_id="watcher-2",
-            host_id="host-1",
             automation_id="auto-1",
         )
         registry.smoke_watcher(
@@ -457,6 +574,20 @@ def run_smoke() -> None:
             "reason": "stale-watcher-generation",
         }
         assert registry.begin_run(generation=2, owner="fresh", lease_seconds=60)["acquired"] is True
+        pending_retirements = registry.pending_watcher_retirements()
+        assert [item["generation"] for item in pending_retirements] == [1]
+        assert registry.confirm_watcher_retirement(
+            generation=1,
+            successor_generation=2,
+            automation_paused_digest="sha256:" + "4" * 64,
+            archive_readback_digest="sha256:" + "5" * 64,
+        )["status"] == "ARCHIVED"
+        assert registry.confirm_watcher_retirement(
+            generation=1,
+            successor_generation=2,
+            automation_paused_digest="sha256:" + "4" * 64,
+            archive_readback_digest="sha256:" + "5" * 64,
+        )["idempotent"] is True
 
         assert classify_incident(
             RetryObservation("transport", 2, transient=True)
@@ -513,7 +644,9 @@ def run_smoke() -> None:
                 "UNIQUE(task_id,role,generation))"
             )
             connection.execute(
-                "INSERT INTO task_threads SELECT * FROM task_threads_v2"
+                "INSERT INTO task_threads(id,task_id,role,generation,thread_id,host_id,active,created_at) "
+                "SELECT id,task_id,role,generation,thread_id,host_id,active,created_at "
+                "FROM task_threads_v2"
             )
             connection.execute("DROP TABLE task_threads_v2")
         registry.initialize()
@@ -536,6 +669,8 @@ def run_smoke() -> None:
             curator_thread_id="curator-alpha",
             executor_thread_id="executor-charlie",
             host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
         )
 
     # Attention routing, acceptance envelopes, localized report rendering and
@@ -575,10 +710,10 @@ def run_smoke() -> None:
             executor="executor-independent",
             title="Независимая задача",
         )
-        registry.prepare_watcher(
+        _prepare_watcher(
+            registry,
             generation=1,
             thread_id="watcher-attention-1",
-            host_id="host-1",
             automation_id="attention-auto-1",
         )
         registry.smoke_watcher(
@@ -659,6 +794,32 @@ def run_smoke() -> None:
         # TARGET_CREATE_READBACK + prompt delivery + registry link + successor
         # active evidence make C2 an inactive legacy executor. Missing evidence,
         # a wrong envelope and archiving the current successor all fail closed.
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE task_threads SET pin_readback_digest='',pin_confirmed_at=NULL "
+                "WHERE task_id='routing-child-v1' AND role='executor'"
+            )
+        try:
+            registry.register_executor_succession(
+                envelope_id=envelope_id,
+                predecessor_task_id="routing-root-v1",
+                successor_task_id="routing-child-v1",
+                reason="successor without pin evidence",
+                checkpoint_digest="sha256:" + "1" * 64,
+                target_readback_digest="sha256:" + "2" * 64,
+                prompt_delivery_digest="sha256:" + "3" * 64,
+                registry_link_digest="sha256:" + "4" * 64,
+                successor_active_digest="sha256:" + "5" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("executor succession must fail without successor pin evidence")
+        registry.confirm_role_pin(
+            thread_id="executor-c3",
+            role="executor",
+            pin_readback_digest="sha256:" + "e" * 64,
+        )
         try:
             registry.register_executor_succession(
                 envelope_id=envelope_id,
@@ -842,12 +1003,58 @@ def run_smoke() -> None:
         assert registry.attention_event(str(child_event["event_id"]))["event"][
             "transport_receipt_digest"
         ] == "sha256:" + "0" * 64
+        try:
+            registry.prepare_owner_handoff(
+                curator_thread_id=curator,
+                envelope_id=envelope_id,
+                expected_revision=int(child_ack["acceptance_envelope_revision"]),
+                done=["routing-child-v1 завершён."],
+                verified="Проверки завершены.",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("owner handoff must reject raw task identities")
+        handoff = registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id=envelope_id,
+            expected_revision=int(child_ack["acceptance_envelope_revision"]),
+            done=[
+                "Выпуск завершён, адресная доставка результата работает.",
+                "Текущий исполнитель передал проверенный итог куратору.",
+            ],
+            verified="Тесты, выпуск и текущее состояние подтверждены.",
+        )
+        assert handoff["handoff_text"] == (
+            "Статус: Завершена — требуется приёмка\n"
+            "Сделано: Выпуск завершён, адресная доставка результата работает. "
+            "Текущий исполнитель передал проверенный итог куратору.\n"
+            "Проверено: Тесты, выпуск и текущее состояние подтверждены.\n"
+            "Ответьте ровно: «Задача принята»"
+        )
+        assert registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id=envelope_id,
+            expected_revision=int(child_ack["acceptance_envelope_revision"]),
+            done=[
+                "Выпуск завершён, адресная доставка результата работает.",
+                "Текущий исполнитель передал проверенный итог куратору.",
+            ],
+            verified="Тесты, выпуск и текущее состояние подтверждены.",
+        )["idempotent"] is True
         registry.confirm_owner_notification(
             curator_thread_id=curator,
             envelope_id=envelope_id,
             expected_revision=int(child_ack["acceptance_envelope_revision"]),
-            notification_evidence_digest="sha256:" + "9" * 64,
+            notification_evidence_digest=str(handoff["handoff_digest"]),
         )
+        assert "Сейчас: Ожидается приёмка владельца." in registry.report()
+        assert registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id=envelope_id,
+            expected_revision=int(child_ack["acceptance_envelope_revision"]),
+            notification_evidence_digest=str(handoff["handoff_digest"]),
+        )["idempotent"] is True
         accepted = registry.accept_curator(
             curator_thread_id=curator,
             expected_envelope_revision=int(child_ack["acceptance_envelope_revision"]),
@@ -889,6 +1096,150 @@ def run_smoke() -> None:
         assert "Блокер: Нужно войти" in registry.report()
         assert registry.integrity()["ok"] is True, registry.integrity()
 
+    # A new required corrective member reopens an already owner-notified
+    # envelope atomically. The previous summary is revision-stale and cannot
+    # authorize acceptance; the corrective terminal ack requires a new handoff.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "reopen-registry")
+        registry.initialize()
+        curator = "curator-reopen"
+        envelope = "reopen-envelope-v1"
+        _register_with_curator(
+            registry,
+            identity="reopen-root-v1",
+            suffix="reopen-root",
+            curator=curator,
+            executor="executor-reopen-root",
+            envelope=envelope,
+            envelope_title="Проверка повторной сдачи",
+            role="root",
+            title="Проверка повторной сдачи",
+        )
+        root_event = registry.enqueue_attention(
+            task_id="reopen-root-v1",
+            expected_revision=1,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Первый этап завершён и проверен.",
+            evidence_digest="sha256:" + "1" * 64,
+            eta="готово",
+            delta="Первый этап завершён.",
+            current="Куратор готовит итог владельцу.",
+        )
+        root_ack = registry.ack_attention(
+            event_id=str(root_event["event_id"]),
+            event_digest=str(root_event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=2,
+            ack_evidence_digest="sha256:" + "2" * 64,
+        )
+        first_revision = int(root_ack["acceptance_envelope_revision"])
+        first_handoff = registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id=envelope,
+            expected_revision=first_revision,
+            done=["Первый этап завершён."],
+            verified="Проверки первого этапа успешны.",
+        )
+        registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id=envelope,
+            expected_revision=first_revision,
+            notification_evidence_digest=str(first_handoff["handoff_digest"]),
+        )
+        _register_with_curator(
+            registry,
+            identity="reopen-child-v1",
+            suffix="reopen-child",
+            curator=curator,
+            executor="executor-reopen-child",
+            envelope=envelope,
+            envelope_title="Проверка повторной сдачи",
+            role="corrective",
+            title="Корректирующий этап",
+        )
+        snapshot = registry.snapshot()
+        reopened = next(
+            item
+            for item in snapshot["acceptance_envelopes"]
+            if item["envelope_id"] == envelope
+        )
+        assert reopened["status"] == "OPEN"
+        assert reopened["owner_notified_at"] is None
+        assert reopened["owner_notification_digest"] == ""
+        assert reopened["owner_notification_revision"] == 0
+        assert int(reopened["revision"]) > first_revision
+        assert registry.bind_acceptance_envelope(
+            envelope_id=envelope,
+            title="Проверка повторной сдачи",
+            curator_thread_id=curator,
+            root_task_id="reopen-root-v1",
+            corrective_task_ids=["reopen-child-v1"],
+        )["idempotent"] is True
+        assert registry.integrity()["ok"] is True, registry.integrity()
+        try:
+            registry.accept_curator(
+                curator_thread_id=curator,
+                expected_envelope_revision=first_revision,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("stale owner notification must not accept a reopened envelope")
+        child_event = registry.enqueue_attention(
+            task_id="reopen-child-v1",
+            expected_revision=1,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            evidence_summary="Корректирующий этап завершён и проверен.",
+            evidence_digest="sha256:" + "3" * 64,
+            eta="готово",
+            delta="Корректирующий этап завершён.",
+            current="Куратор готовит новый итог владельцу.",
+        )
+        child_ack = registry.ack_attention(
+            event_id=str(child_event["event_id"]),
+            event_digest=str(child_event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=2,
+            ack_evidence_digest="sha256:" + "4" * 64,
+        )
+        assert child_ack["acceptance_envelope_state"] == "AWAITING_ACCEPTANCE"
+        assert child_ack["owner_notification_required"] is True
+        second_revision = int(child_ack["acceptance_envelope_revision"])
+        try:
+            registry.confirm_owner_notification(
+                curator_thread_id=curator,
+                envelope_id=envelope,
+                expected_revision=second_revision,
+                notification_evidence_digest=str(first_handoff["handoff_digest"]),
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("old handoff digest must not cover a corrective child")
+        second_handoff = registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id=envelope,
+            expected_revision=second_revision,
+            done=["Первый и корректирующий этапы завершены."],
+            verified="Повторные проверки успешны.",
+        )
+        assert second_handoff["handoff_digest"] != first_handoff["handoff_digest"]
+        registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id=envelope,
+            expected_revision=second_revision,
+            notification_evidence_digest=str(second_handoff["handoff_digest"]),
+        )
+        accepted = registry.accept_curator(
+            curator_thread_id=curator,
+            expected_envelope_revision=second_revision,
+        )
+        assert set(accepted["accepted_task_ids"]) == {
+            "reopen-root-v1",
+            "reopen-child-v1",
+        }
+        assert "Проверка повторной сдачи" not in registry.report()
+
     # Multiple independent user-level envelopes in one curator are visible as
     # separate blocks and make the owner phrase ambiguous until one is named by
     # a new explicit user decision. The phrase alone never picks a random task.
@@ -904,10 +1255,10 @@ def run_smoke() -> None:
                 executor=f"executor-ambiguous-{index}",
                 title=f"Независимая цель {index}",
             )
-        registry.prepare_watcher(
+        _prepare_watcher(
+            registry,
             generation=1,
             thread_id="watcher-ambiguous",
-            host_id="host-1",
             automation_id="ambiguous-auto",
         )
         registry.smoke_watcher(
@@ -933,11 +1284,18 @@ def run_smoke() -> None:
                 expected_task_revision=2,
                 ack_evidence_digest="sha256:" + str(index + 2) * 64,
             )
+            handoff = registry.prepare_owner_handoff(
+                curator_thread_id="curator-ambiguous",
+                envelope_id=f"ambiguity-task-{index}",
+                expected_revision=int(ack["acceptance_envelope_revision"]),
+                done=[f"Независимая цель {index} завершена."],
+                verified="Проверки завершены успешно.",
+            )
             registry.confirm_owner_notification(
                 curator_thread_id="curator-ambiguous",
                 envelope_id=f"ambiguity-task-{index}",
                 expected_revision=int(ack["acceptance_envelope_revision"]),
-                notification_evidence_digest="sha256:" + str(index + 4) * 64,
+                notification_evidence_digest=str(handoff["handoff_digest"]),
             )
             envelope_revisions.append(int(ack["acceptance_envelope_revision"]))
         assert registry.report().count("Статус:") == 2
@@ -964,10 +1322,10 @@ def run_smoke() -> None:
             executor="executor-stale",
             title="Проверка устаревшего события",
         )
-        registry.prepare_watcher(
+        _prepare_watcher(
+            registry,
             generation=1,
             thread_id="watcher-old",
-            host_id="host-1",
             automation_id="old-auto",
         )
         registry.smoke_watcher(
@@ -994,10 +1352,10 @@ def run_smoke() -> None:
             current="Работа продолжается.",
             blocker=None,
         )
-        registry.prepare_watcher(
+        _prepare_watcher(
+            registry,
             generation=2,
             thread_id="watcher-new",
-            host_id="host-1",
             automation_id="new-auto",
         )
         registry.smoke_watcher(
