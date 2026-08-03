@@ -3137,7 +3137,13 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     assert watcher_config["report"]["renderer"] == (
         "python3 apps/codex_task_orchestrator.py report"
     )
-    assert watcher_config["report"]["unit"] == "acceptance-envelope"
+    assert watcher_config["report"]["unit"] == "acceptance-envelope-workstream"
+    assert watcher_config["report"][
+        "owner_acceptance_unit"
+    ] == "acceptance-envelope"
+    assert watcher_config["heartbeat_driver"][
+        "all_planned_targets_required_before_actuation"
+    ] is True
     assert watcher_config["attention_delivery"]["schema"] == (
         "wb-core-attention-event/v1"
     )
