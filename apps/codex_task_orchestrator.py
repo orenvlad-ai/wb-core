@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS task_threads (
     thread_id TEXT NOT NULL,
     host_id TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    pin_readback_digest TEXT NOT NULL DEFAULT '',
+    pin_confirmed_at TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(task_id, role, generation),
     UNIQUE(task_id, thread_id)
@@ -113,7 +115,12 @@ CREATE TABLE IF NOT EXISTS acceptance_envelopes (
     status TEXT NOT NULL CHECK(status IN ('OPEN','DONE_PENDING_HANDOFF','AWAITING_ACCEPTANCE','ACCEPTED')),
     revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
     owner_notification_digest TEXT NOT NULL DEFAULT '',
+    owner_notification_revision INTEGER NOT NULL DEFAULT 0 CHECK(owner_notification_revision >= 0),
     owner_notified_at TEXT,
+    prepared_handoff_text TEXT NOT NULL DEFAULT '',
+    prepared_handoff_digest TEXT NOT NULL DEFAULT '',
+    prepared_handoff_revision INTEGER NOT NULL DEFAULT 0 CHECK(prepared_handoff_revision >= 0),
+    prepared_handoff_at TEXT,
     accepted_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -244,6 +251,14 @@ CREATE TABLE IF NOT EXISTS watchers (
     last_run_at TEXT,
     smoke_digest TEXT NOT NULL DEFAULT '',
     smoke_at TEXT,
+    title_readback_digest TEXT NOT NULL DEFAULT '',
+    pin_readback_digest TEXT NOT NULL DEFAULT '',
+    automation_readback_digest TEXT NOT NULL DEFAULT '',
+    retirement_required INTEGER NOT NULL DEFAULT 0 CHECK(retirement_required IN (0,1)),
+    successor_generation INTEGER,
+    automation_paused_digest TEXT NOT NULL DEFAULT '',
+    archive_readback_digest TEXT NOT NULL DEFAULT '',
+    archived_at TEXT,
     created_at TEXT NOT NULL,
     activated_at TEXT,
     retired_at TEXT
@@ -348,6 +363,44 @@ class Registry:
                 connection.execute(
                     "ALTER TABLE acceptance_envelopes ADD COLUMN owner_notified_at TEXT"
                 )
+            if "owner_notification_revision" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN owner_notification_revision "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "prepared_handoff_text" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_text "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            if "prepared_handoff_digest" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_digest "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            if "prepared_handoff_revision" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_revision "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "prepared_handoff_at" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_at TEXT"
+                )
+            for column, definition in (
+                ("title_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("pin_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("automation_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("retirement_required", "INTEGER NOT NULL DEFAULT 0"),
+                ("successor_generation", "INTEGER"),
+                ("automation_paused_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("archive_readback_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("archived_at", "TEXT"),
+            ):
+                if column not in watcher_columns:
+                    connection.execute(
+                        f"ALTER TABLE watchers ADD COLUMN {column} {definition}"
+                    )
             task_threads_sql_row = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_threads'"
             ).fetchone()
@@ -386,13 +439,26 @@ class Registry:
                     "ON task_threads(thread_id) "
                     "WHERE active=1 AND role IN ('executor','arbiter')"
                 )
+            task_thread_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(task_threads)")
+            }
+            if "pin_readback_digest" not in task_thread_columns:
+                connection.execute(
+                    "ALTER TABLE task_threads ADD COLUMN pin_readback_digest "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            if "pin_confirmed_at" not in task_thread_columns:
+                connection.execute(
+                    "ALTER TABLE task_threads ADD COLUMN pin_confirmed_at TEXT"
+                )
             connection.execute("DROP INDEX IF EXISTS one_active_incident_per_task")
             connection.execute(
                 "CREATE UNIQUE INDEX one_active_incident_per_task ON incidents(task_id) "
                 "WHERE status IN ('OPEN','WAITING_RESOURCE','CLAIMED','DECIDED','DELIVERED','VERIFIED')"
             )
             connection.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version','4') "
+                "INSERT INTO meta(key,value) VALUES('schema_version','5') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         if self.db_path.exists():
@@ -490,6 +556,8 @@ class Registry:
         curator_thread_id: str,
         executor_thread_id: str,
         host_id: str,
+        curator_pin_readback_digest: str,
+        executor_pin_readback_digest: str,
         acceptance_envelope_id: str = "",
         acceptance_title: str = "",
         acceptance_role: str = "root",
@@ -522,6 +590,10 @@ class Registry:
             curator_thread_id=curator_thread_id,
             executor_thread_id=executor_thread_id,
         )
+        role_pin_digests = {
+            "curator": validate_digest(curator_pin_readback_digest),
+            "executor": validate_digest(executor_pin_readback_digest),
+        }
         timestamp = _now()
         digest = canonical_digest(validated_passport)
         visible_task_title = validate_visible_text(
@@ -554,16 +626,28 @@ class Registry:
                     existing["curator_thread_id"],
                 )
                 initial_threads = {
-                    row["role"]: (row["thread_id"], row["host_id"])
+                    row["role"]: (
+                        row["thread_id"],
+                        row["host_id"],
+                        row["pin_readback_digest"],
+                    )
                     for row in connection.execute(
-                        "SELECT role,thread_id,host_id FROM task_threads "
+                        "SELECT role,thread_id,host_id,pin_readback_digest FROM task_threads "
                         "WHERE task_id=? AND generation=1 AND role IN ('curator','executor')",
                         (identity,),
                     ).fetchall()
                 }
                 expected_threads = {
-                    "curator": (curator_thread_id.strip(), host_id.strip()),
-                    "executor": (executor_thread_id.strip(), host_id.strip()),
+                    "curator": (
+                        curator_thread_id.strip(),
+                        host_id.strip(),
+                        role_pin_digests["curator"],
+                    ),
+                    "executor": (
+                        executor_thread_id.strip(),
+                        host_id.strip(),
+                        role_pin_digests["executor"],
+                    ),
                 }
                 membership = connection.execute(
                     "SELECT envelope_id,role FROM acceptance_envelope_members WHERE task_id=?",
@@ -612,9 +696,18 @@ class Registry:
                 ("executor", executor_thread_id),
             ):
                 connection.execute(
-                    "INSERT INTO task_threads(task_id,role,generation,thread_id,host_id,created_at) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (identity, role, 1, thread_id.strip(), host_id.strip(), timestamp),
+                    "INSERT INTO task_threads(task_id,role,generation,thread_id,host_id,"
+                    "pin_readback_digest,pin_confirmed_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        identity,
+                        role,
+                        1,
+                        thread_id.strip(),
+                        host_id.strip(),
+                        role_pin_digests[role],
+                        timestamp,
+                        timestamp,
+                    ),
                 )
             envelope = connection.execute(
                 "SELECT * FROM acceptance_envelopes WHERE envelope_id=?",
@@ -652,6 +745,12 @@ class Registry:
                 "VALUES(?,?,?,?)",
                 (envelope_id, identity, acceptance_role, timestamp),
             )
+            if envelope is not None:
+                self._recompute_envelope(
+                    connection,
+                    envelope_id,
+                    required_membership_changed=True,
+                )
             self.event(
                 connection,
                 "task",
@@ -680,6 +779,7 @@ class Registry:
         generation: int,
         thread_id: str,
         host_id: str,
+        pin_readback_digest: str = "",
     ) -> dict[str, object]:
         identity = validate_task_id(task_id)
         if (
@@ -689,6 +789,11 @@ class Registry:
             or not host_id.strip()
         ):
             raise ValueError("invalid thread identity")
+        pin_digest = ""
+        if role in {"curator", "executor"}:
+            pin_digest = validate_digest(pin_readback_digest)
+        elif pin_readback_digest:
+            raise ValueError("arbiter threads do not use persistent role pin evidence")
         timestamp = _now()
         with self.transaction() as connection:
             existing = connection.execute(
@@ -699,6 +804,7 @@ class Registry:
                 if (
                     existing["thread_id"] != thread_id.strip()
                     or existing["host_id"] != host_id.strip()
+                    or existing["pin_readback_digest"] != pin_digest
                 ):
                     raise RuntimeError(
                         "thread generation is already registered with a different identity"
@@ -715,9 +821,18 @@ class Registry:
                     (identity, role),
                 )
             connection.execute(
-                "INSERT INTO task_threads(task_id,role,generation,thread_id,host_id,created_at) "
-                "VALUES(?,?,?,?,?,?)",
-                (identity, role, generation, thread_id.strip(), host_id.strip(), timestamp),
+                "INSERT INTO task_threads(task_id,role,generation,thread_id,host_id,"
+                "pin_readback_digest,pin_confirmed_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    identity,
+                    role,
+                    generation,
+                    thread_id.strip(),
+                    host_id.strip(),
+                    pin_digest,
+                    timestamp if pin_digest else None,
+                    timestamp,
+                ),
             )
             self.event(
                 connection,
@@ -813,7 +928,11 @@ class Registry:
                     (identity, task_id, role, timestamp),
                 )
                 inserted += cursor.rowcount
-            self._recompute_envelope(connection, identity)
+            self._recompute_envelope(
+                connection,
+                identity,
+                required_membership_changed=inserted > 0,
+            )
             self.event(
                 connection,
                 "acceptance-envelope",
@@ -828,6 +947,64 @@ class Registry:
             "corrective_task_ids": corrective,
             "members_inserted": inserted,
             "idempotent": inserted == 0,
+        }
+
+    def confirm_role_pin(
+        self,
+        *,
+        thread_id: str,
+        role: str,
+        pin_readback_digest: str,
+    ) -> dict[str, object]:
+        if role not in {"curator", "executor"} or not thread_id.strip():
+            raise ValueError("role pin confirmation requires an exact curator/executor thread")
+        digest = validate_digest(pin_readback_digest)
+        timestamp = _now()
+        with self.transaction() as connection:
+            rows = connection.execute(
+                "SELECT tt.* FROM task_threads tt JOIN tasks t ON t.task_id=tt.task_id "
+                "WHERE tt.thread_id=? AND tt.role=? AND tt.active=1 AND t.status<>? "
+                "ORDER BY tt.task_id,tt.generation",
+                (thread_id.strip(), role, TaskStatus.ACCEPTED.value),
+            ).fetchall()
+            if not rows:
+                raise RuntimeError("role pin readback does not match an active assignment")
+            conflicting = {
+                str(row["pin_readback_digest"])
+                for row in rows
+                if row["pin_readback_digest"]
+                and row["pin_readback_digest"] != digest
+            }
+            if conflicting:
+                raise RuntimeError("active role already has different assignment-time pin evidence")
+            updated = 0
+            for row in rows:
+                if row["pin_readback_digest"] == digest and row["pin_confirmed_at"]:
+                    continue
+                connection.execute(
+                    "UPDATE task_threads SET pin_readback_digest=?,pin_confirmed_at=? WHERE id=?",
+                    (digest, timestamp, int(row["id"])),
+                )
+                updated += 1
+                self.event(
+                    connection,
+                    "task",
+                    str(row["task_id"]),
+                    "role-pin-confirmed",
+                    {
+                        "role": role,
+                        "thread_id": thread_id.strip(),
+                        "pin_readback_digest": digest,
+                    },
+                )
+        self.flush_events()
+        return {
+            "thread_id": thread_id.strip(),
+            "role": role,
+            "pin_readback_digest": digest,
+            "active_assignments": len(rows),
+            "updated_assignments": updated,
+            "idempotent": updated == 0,
         }
 
     def task(self, task_id: str, connection: sqlite3.Connection | None = None) -> sqlite3.Row:
@@ -852,7 +1029,11 @@ class Registry:
         ).fetchone()
 
     def _recompute_envelope(
-        self, connection: sqlite3.Connection, envelope_id: str
+        self,
+        connection: sqlite3.Connection,
+        envelope_id: str,
+        *,
+        required_membership_changed: bool = False,
     ) -> sqlite3.Row:
         identity = validate_envelope_id(envelope_id)
         envelope = connection.execute(
@@ -885,10 +1066,31 @@ class Registry:
             target = AcceptanceStatus.DONE_PENDING_HANDOFF
         else:
             target = AcceptanceStatus.OPEN
-        if envelope["status"] != target.value:
+        notification_stale = bool(envelope["owner_notified_at"]) and (
+            required_membership_changed
+            or target != AcceptanceStatus.AWAITING_ACCEPTANCE
+            or int(envelope["owner_notification_revision"])
+            != int(envelope["revision"])
+        )
+        prepared_handoff_stale = bool(envelope["prepared_handoff_digest"]) and (
+            required_membership_changed
+            or target != AcceptanceStatus.AWAITING_ACCEPTANCE
+            or int(envelope["prepared_handoff_revision"])
+            != int(envelope["revision"])
+        )
+        if (
+            envelope["status"] != target.value
+            or required_membership_changed
+            or notification_stale
+            or prepared_handoff_stale
+        ):
             next_revision = int(envelope["revision"]) + 1
             connection.execute(
-                "UPDATE acceptance_envelopes SET status=?,revision=?,updated_at=? WHERE envelope_id=?",
+                "UPDATE acceptance_envelopes SET status=?,revision=?,"
+                "owner_notification_digest='',owner_notification_revision=0,owner_notified_at=NULL,"
+                "prepared_handoff_text='',prepared_handoff_digest='',"
+                "prepared_handoff_revision=0,prepared_handoff_at=NULL,updated_at=? "
+                "WHERE envelope_id=?",
                 (target.value, next_revision, _now(), identity),
             )
             self.event(
@@ -900,6 +1102,8 @@ class Registry:
                     "from": envelope["status"],
                     "to": target.value,
                     "revision": next_revision,
+                    "required_membership_changed": required_membership_changed,
+                    "owner_notification_invalidated": notification_stale,
                 },
             )
             envelope = connection.execute(
@@ -1024,6 +1228,37 @@ class Registry:
             )
         self.flush_events()
         return {"task_id": validate_task_id(task_id), "status": status.value, "revision": next_revision}
+
+    def reconcile_acceptance(self, *, envelope_id: str) -> dict[str, object]:
+        identity = validate_envelope_id(envelope_id)
+        with self.transaction() as connection:
+            before = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+            ).fetchone()
+            if before is None:
+                raise KeyError(f"unknown acceptance envelope: {identity}")
+            after = self._recompute_envelope(connection, identity)
+            changed = int(after["revision"]) != int(before["revision"])
+            if changed:
+                self.event(
+                    connection,
+                    "acceptance-envelope",
+                    identity,
+                    "reconciled",
+                    {
+                        "from_revision": int(before["revision"]),
+                        "to_revision": int(after["revision"]),
+                    },
+                )
+        self.flush_events()
+        return {
+            "acceptance_envelope_id": identity,
+            "status": after["status"],
+            "revision": int(after["revision"]),
+            "owner_notification_current": bool(after["owner_notified_at"])
+            and int(after["owner_notification_revision"]) == int(after["revision"]),
+            "changed": changed,
+        }
 
     def link_pr(self, *, task_id: str, pr: int, role: str, head_sha: str, state: str) -> dict[str, object]:
         if pr <= 0:
@@ -1618,8 +1853,20 @@ class Registry:
                 raise RuntimeError("stale acceptance envelope revision")
             if envelope["status"] != AcceptanceStatus.AWAITING_ACCEPTANCE.value:
                 raise RuntimeError("owner notification requires a completed acceptance envelope")
+            if (
+                int(envelope["prepared_handoff_revision"]) != expected_revision
+                or not envelope["prepared_handoff_text"]
+                or envelope["prepared_handoff_digest"] != digest
+            ):
+                raise RuntimeError(
+                    "owner notification must match the prepared handoff for this envelope revision"
+                )
             if envelope["owner_notified_at"]:
-                if envelope["owner_notification_digest"] != digest:
+                if (
+                    envelope["owner_notification_digest"] != digest
+                    or int(envelope["owner_notification_revision"])
+                    != expected_revision
+                ):
                     raise RuntimeError("acceptance envelope already has different notification evidence")
                 return {
                     "acceptance_envelope_id": identity,
@@ -1628,9 +1875,10 @@ class Registry:
                     "idempotent": True,
                 }
             connection.execute(
-                "UPDATE acceptance_envelopes SET owner_notification_digest=?,owner_notified_at=?,updated_at=? "
+                "UPDATE acceptance_envelopes SET owner_notification_digest=?,"
+                "owner_notification_revision=?,owner_notified_at=?,updated_at=? "
                 "WHERE envelope_id=?",
-                (digest, _now(), _now(), identity),
+                (digest, expected_revision, _now(), _now(), identity),
             )
             self.event(
                 connection,
@@ -1644,6 +1892,137 @@ class Registry:
             "acceptance_envelope_id": identity,
             "status": AcceptanceStatus.AWAITING_ACCEPTANCE.value,
             "revision": expected_revision,
+        }
+
+    def prepare_owner_handoff(
+        self,
+        *,
+        curator_thread_id: str,
+        envelope_id: str,
+        expected_revision: int,
+        done: Iterable[str],
+        verified: str,
+        limitations: str = "",
+    ) -> dict[str, object]:
+        identity = validate_envelope_id(envelope_id)
+        done_items = [item.strip() for item in done if item.strip()]
+        if not 1 <= len(done_items) <= 2:
+            raise ValueError("owner handoff requires one or two concise done statements")
+        if expected_revision <= 0:
+            raise ValueError("owner handoff requires a positive envelope revision")
+        for item in done_items:
+            validate_visible_text(item, field="owner handoff done")
+        verified_text = validate_visible_text(verified, field="owner handoff verification")
+        limitations_text = ""
+        if limitations.strip():
+            limitations_text = validate_visible_text(
+                limitations, field="owner handoff limitations"
+            )
+        lines = [
+            "Статус: Завершена — требуется приёмка",
+            "Сделано: " + " ".join(done_items),
+            "Проверено: " + verified_text,
+        ]
+        if limitations_text:
+            lines.append("Ограничения: " + limitations_text)
+        lines.append("Ответьте ровно: «Задача принята»")
+        handoff_text = "\n".join(lines)
+        with self.transaction() as connection:
+            envelope = connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id=?", (identity,)
+            ).fetchone()
+            if envelope is None:
+                raise KeyError(f"unknown acceptance envelope: {identity}")
+            if envelope["curator_thread_id"] != curator_thread_id.strip():
+                raise RuntimeError("owner handoff came from the wrong curator")
+            if int(envelope["revision"]) != expected_revision:
+                raise RuntimeError("stale acceptance envelope revision")
+            if envelope["status"] != AcceptanceStatus.AWAITING_ACCEPTANCE.value:
+                raise RuntimeError("owner handoff requires a completed acceptance envelope")
+            member_task_ids = [
+                str(row["task_id"])
+                for row in connection.execute(
+                    "SELECT task_id FROM acceptance_envelope_members "
+                    "WHERE envelope_id=? AND required=1 ORDER BY task_id",
+                    (identity,),
+                ).fetchall()
+            ]
+            for member_task_id in member_task_ids:
+                for item in done_items:
+                    validate_visible_text(
+                        item,
+                        field="owner handoff done",
+                        task_id=member_task_id,
+                    )
+                validate_visible_text(
+                    verified_text,
+                    field="owner handoff verification",
+                    task_id=member_task_id,
+                )
+                if limitations_text:
+                    validate_visible_text(
+                        limitations_text,
+                        field="owner handoff limitations",
+                        task_id=member_task_id,
+                    )
+            payload = {
+                "schema": "wb-core-owner-handoff/v1",
+                "acceptance_envelope_id": identity,
+                "acceptance_envelope_revision": expected_revision,
+                "handoff_text": handoff_text,
+            }
+            digest = canonical_digest(payload)
+            if envelope["owner_notified_at"]:
+                if (
+                    int(envelope["owner_notification_revision"])
+                    == expected_revision
+                    and envelope["owner_notification_digest"] == digest
+                ):
+                    return {
+                        "acceptance_envelope_id": identity,
+                        "revision": expected_revision,
+                        "handoff_text": handoff_text,
+                        "handoff_digest": digest,
+                        "owner_notified": True,
+                        "idempotent": True,
+                    }
+                raise RuntimeError("owner handoff revision already has different notification")
+            if envelope["prepared_handoff_digest"]:
+                if (
+                    int(envelope["prepared_handoff_revision"]) == expected_revision
+                    and envelope["prepared_handoff_text"] == handoff_text
+                    and envelope["prepared_handoff_digest"] == digest
+                ):
+                    return {
+                        "acceptance_envelope_id": identity,
+                        "revision": expected_revision,
+                        "handoff_text": handoff_text,
+                        "handoff_digest": digest,
+                        "owner_notified": False,
+                        "idempotent": True,
+                    }
+                raise RuntimeError("owner handoff revision already has a different prepared summary")
+            timestamp = _now()
+            connection.execute(
+                "UPDATE acceptance_envelopes SET prepared_handoff_text=?,"
+                "prepared_handoff_digest=?,prepared_handoff_revision=?,prepared_handoff_at=?,"
+                "updated_at=? WHERE envelope_id=?",
+                (handoff_text, digest, expected_revision, timestamp, timestamp, identity),
+            )
+            self.event(
+                connection,
+                "acceptance-envelope",
+                identity,
+                "owner-handoff-prepared",
+                {"handoff_digest": digest, "revision": expected_revision},
+            )
+        self.flush_events()
+        return {
+            "acceptance_envelope_id": identity,
+            "revision": expected_revision,
+            "handoff_text": handoff_text,
+            "handoff_digest": digest,
+            "owner_notified": False,
         }
 
     def accept_curator(
@@ -1667,7 +2046,16 @@ class Registry:
             envelope = envelopes[0]
             if int(envelope["revision"]) != expected_envelope_revision:
                 raise RuntimeError("stale acceptance envelope revision")
-            if not envelope["owner_notified_at"] or not envelope["owner_notification_digest"]:
+            if (
+                not envelope["owner_notified_at"]
+                or not envelope["owner_notification_digest"]
+                or int(envelope["owner_notification_revision"])
+                != expected_envelope_revision
+                or int(envelope["prepared_handoff_revision"])
+                != expected_envelope_revision
+                or envelope["prepared_handoff_digest"]
+                != envelope["owner_notification_digest"]
+            ):
                 raise RuntimeError("owner acceptance requires proven curator notification")
             members = connection.execute(
                 "SELECT t.* FROM acceptance_envelope_members m JOIN tasks t ON t.task_id=m.task_id "
@@ -1828,7 +2216,8 @@ class Registry:
                     "idempotent": True,
                 }
             active_rows = connection.execute(
-                "SELECT tt.task_id,tt.thread_id,tt.generation FROM task_threads tt "
+                "SELECT tt.task_id,tt.thread_id,tt.generation,tt.pin_readback_digest,"
+                "tt.pin_confirmed_at FROM task_threads tt "
                 "JOIN acceptance_envelope_members m ON m.task_id=tt.task_id "
                 "WHERE m.envelope_id=? AND tt.role='executor' AND tt.active=1 "
                 "ORDER BY tt.task_id,tt.generation",
@@ -1843,6 +2232,13 @@ class Registry:
                 raise RuntimeError("executor succession is ambiguous")
             predecessor = by_task[predecessor_task][0]
             successor = by_task[successor_task][0]
+            if (
+                not successor["pin_readback_digest"]
+                or not successor["pin_confirmed_at"]
+            ):
+                raise RuntimeError(
+                    "successor must have assignment-time pin readback before succession"
+                )
             payload = {
                 "schema": "wb-core-executor-succession/v1",
                 "acceptance_envelope_id": envelope_identity,
@@ -2620,6 +3016,9 @@ class Registry:
         thread_id: str,
         host_id: str,
         automation_id: str,
+        title_readback_digest: str,
+        pin_readback_digest: str,
+        automation_readback_digest: str,
         max_runs: int = 720,
     ) -> dict[str, object]:
         if (
@@ -2632,6 +3031,11 @@ class Registry:
             raise ValueError(
                 "watcher generation, exact thread/host identity and automation id are required"
             )
+        readback_digests = {
+            "title_readback_digest": validate_digest(title_readback_digest),
+            "pin_readback_digest": validate_digest(pin_readback_digest),
+            "automation_readback_digest": validate_digest(automation_readback_digest),
+        }
         with self.transaction() as connection:
             existing = connection.execute(
                 "SELECT * FROM watchers WHERE generation=?", (generation,)
@@ -2642,12 +3046,18 @@ class Registry:
                     host_id.strip(),
                     automation_id.strip(),
                     max_runs,
+                    readback_digests["title_readback_digest"],
+                    readback_digests["pin_readback_digest"],
+                    readback_digests["automation_readback_digest"],
                 )
                 actual = (
                     existing["thread_id"],
                     existing["host_id"],
                     existing["automation_id"],
                     int(existing["max_runs"]),
+                    existing["title_readback_digest"],
+                    existing["pin_readback_digest"],
+                    existing["automation_readback_digest"],
                 )
                 if actual != expected:
                     raise RuntimeError("watcher generation already has different immutable identity")
@@ -2657,8 +3067,9 @@ class Registry:
                     "idempotent": True,
                 }
             connection.execute(
-                "INSERT INTO watchers(generation,thread_id,host_id,automation_id,status,max_runs,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO watchers(generation,thread_id,host_id,automation_id,status,max_runs,"
+                "title_readback_digest,pin_readback_digest,automation_readback_digest,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     generation,
                     thread_id.strip(),
@@ -2666,12 +3077,77 @@ class Registry:
                     automation_id.strip(),
                     "PREPARED",
                     max_runs,
+                    readback_digests["title_readback_digest"],
+                    readback_digests["pin_readback_digest"],
+                    readback_digests["automation_readback_digest"],
                     _now(),
                 ),
             )
             self.event(connection, "watcher", str(generation), "prepared", {"thread_id": thread_id})
         self.flush_events()
         return {"generation": generation, "status": "PREPARED"}
+
+    def confirm_watcher_readback(
+        self,
+        *,
+        generation: int,
+        thread_id: str,
+        automation_id: str,
+        title_readback_digest: str,
+        pin_readback_digest: str,
+        automation_readback_digest: str,
+    ) -> dict[str, object]:
+        if generation <= 0 or not thread_id.strip() or not automation_id.strip():
+            raise ValueError("watcher readback requires exact generation identities")
+        evidence = {
+            "title_readback_digest": validate_digest(title_readback_digest),
+            "pin_readback_digest": validate_digest(pin_readback_digest),
+            "automation_readback_digest": validate_digest(automation_readback_digest),
+        }
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if watcher is None:
+                raise KeyError(f"unknown watcher generation: {generation}")
+            if (
+                watcher["thread_id"] != thread_id.strip()
+                or watcher["automation_id"] != automation_id.strip()
+            ):
+                raise RuntimeError("watcher readback belongs to a different generation")
+            existing = {
+                key: str(watcher[key])
+                for key in evidence
+                if watcher[key]
+            }
+            if any(existing[key] != evidence[key] for key in existing):
+                raise RuntimeError("watcher generation already has different UI readback evidence")
+            updated = any(not watcher[key] for key in evidence)
+            if updated:
+                connection.execute(
+                    "UPDATE watchers SET title_readback_digest=?,pin_readback_digest=?,"
+                    "automation_readback_digest=? WHERE generation=?",
+                    (
+                        evidence["title_readback_digest"],
+                        evidence["pin_readback_digest"],
+                        evidence["automation_readback_digest"],
+                        generation,
+                    ),
+                )
+                self.event(
+                    connection,
+                    "watcher",
+                    str(generation),
+                    "ui-readback-confirmed",
+                    evidence,
+                )
+        self.flush_events()
+        return {
+            "generation": generation,
+            "status": watcher["status"],
+            **evidence,
+            "idempotent": not updated,
+        }
 
     def smoke_watcher(self, *, generation: int, evidence_digest: str) -> dict[str, object]:
         digest = validate_digest(evidence_digest)
@@ -2681,6 +3157,17 @@ class Registry:
             ).fetchone()
             if watcher is None or watcher["status"] not in {"PREPARED", "ACTIVE"}:
                 raise RuntimeError("watcher smoke requires a prepared generation")
+            if any(
+                not watcher[field]
+                for field in (
+                    "title_readback_digest",
+                    "pin_readback_digest",
+                    "automation_readback_digest",
+                )
+            ):
+                raise RuntimeError(
+                    "watcher smoke requires title, pin and automation readback evidence"
+                )
             connection.execute(
                 "UPDATE watchers SET smoke_digest=?,smoke_at=? WHERE generation=?",
                 (digest, _now(), generation),
@@ -2702,7 +3189,20 @@ class Registry:
                 raise RuntimeError("watcher must be prepared before activation")
             if not prepared["smoke_digest"] or not prepared["smoke_at"]:
                 raise RuntimeError("watcher must pass a recorded smoke before activation")
-            connection.execute("UPDATE watchers SET status='RETIRED',retired_at=? WHERE status='ACTIVE' AND generation<>?", (_now(), generation))
+            if any(
+                not prepared[field]
+                for field in (
+                    "title_readback_digest",
+                    "pin_readback_digest",
+                    "automation_readback_digest",
+                )
+            ):
+                raise RuntimeError("watcher activation requires UI readback evidence")
+            connection.execute(
+                "UPDATE watchers SET status='RETIRED',retired_at=?,retirement_required=1,"
+                "successor_generation=? WHERE status='ACTIVE' AND generation<>?",
+                (_now(), generation, generation),
+            )
             connection.execute(
                 "DELETE FROM runtime_leases WHERE name='watcher-run' AND generation<>?",
                 (generation,),
@@ -2711,6 +3211,78 @@ class Registry:
             self.event(connection, "watcher", str(generation), "activated", {"previous_retired": True})
         self.flush_events()
         return {"generation": generation, "status": "ACTIVE"}
+
+    def pending_watcher_retirements(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM watchers WHERE retirement_required=1 AND archived_at IS NULL "
+                    "ORDER BY generation"
+                ).fetchall()
+            ]
+
+    def confirm_watcher_retirement(
+        self,
+        *,
+        generation: int,
+        successor_generation: int,
+        automation_paused_digest: str,
+        archive_readback_digest: str,
+    ) -> dict[str, object]:
+        paused_digest = validate_digest(automation_paused_digest)
+        archive_digest = validate_digest(archive_readback_digest)
+        with self.transaction() as connection:
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            successor = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (successor_generation,)
+            ).fetchone()
+            if watcher is None or successor is None:
+                raise KeyError("watcher retirement requires both exact generations")
+            if (
+                watcher["status"] != "RETIRED"
+                or int(watcher["retirement_required"]) != 1
+                or int(watcher["successor_generation"] or 0) != successor_generation
+                or successor["status"] != "ACTIVE"
+            ):
+                raise RuntimeError("watcher retirement does not follow an active successor")
+            if watcher["archived_at"]:
+                if (
+                    watcher["automation_paused_digest"] != paused_digest
+                    or watcher["archive_readback_digest"] != archive_digest
+                ):
+                    raise RuntimeError("watcher retirement already has different evidence")
+                return {
+                    "generation": generation,
+                    "successor_generation": successor_generation,
+                    "status": "ARCHIVED",
+                    "idempotent": True,
+                }
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET automation_paused_digest=?,archive_readback_digest=?,"
+                "archived_at=? WHERE generation=?",
+                (paused_digest, archive_digest, timestamp, generation),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "retirement-confirmed",
+                {
+                    "successor_generation": successor_generation,
+                    "automation_paused_digest": paused_digest,
+                    "archive_readback_digest": archive_digest,
+                },
+            )
+        self.flush_events()
+        return {
+            "generation": generation,
+            "successor_generation": successor_generation,
+            "status": "ARCHIVED",
+        }
 
     def begin_run(self, *, generation: int, owner: str, lease_seconds: int) -> dict[str, object]:
         if lease_seconds <= 0 or lease_seconds > 600:
@@ -2972,6 +3544,19 @@ class Registry:
                     field="current action",
                     task_id=str(critical["task_id"]),
                 )
+                owner_notification_current = (
+                    envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
+                    and bool(envelope["owner_notified_at"])
+                    and int(envelope["owner_notification_revision"])
+                    == int(envelope["revision"])
+                    and bool(envelope["owner_notification_digest"])
+                )
+                if envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value:
+                    current = (
+                        "Ожидается приёмка владельца."
+                        if owner_notification_current
+                        else "Куратор готовит короткий итог владельцу."
+                    )
                 for member in members:
                     member_task_id = str(member["task_id"])
                     eta = validate_visible_text(
@@ -3012,6 +3597,7 @@ class Registry:
                         "delta": delta,
                         "current": current,
                         "blocker": blocker,
+                        "owner_notification_current": owner_notification_current,
                     }
                 )
                 previous = connection.execute(
@@ -3112,6 +3698,43 @@ class Registry:
                     "WHERE m.envelope_id=s.envelope_id AND m.task_id=s.successor_task_id)"
                 ).fetchone()[0]
             )
+            invalid_active_role_pins = int(
+                connection.execute(
+                    "SELECT count(*) FROM task_threads tt JOIN tasks t ON t.task_id=tt.task_id "
+                    "WHERE tt.active=1 AND tt.role IN ('curator','executor') AND t.status<>'ACCEPTED' "
+                    "AND (tt.pin_readback_digest='' OR tt.pin_confirmed_at IS NULL)"
+                ).fetchone()[0]
+            )
+            invalid_owner_notifications = int(
+                connection.execute(
+                    "SELECT count(*) FROM acceptance_envelopes WHERE status<>'ACCEPTED' AND ("
+                    "(owner_notified_at IS NOT NULL AND (owner_notification_digest='' "
+                    "OR owner_notification_revision<>revision "
+                    "OR prepared_handoff_digest<>owner_notification_digest "
+                    "OR prepared_handoff_revision<>revision)) OR "
+                    "(owner_notified_at IS NULL AND (owner_notification_digest<>'' "
+                    "OR owner_notification_revision<>0)) OR "
+                    "(prepared_handoff_digest<>'' AND (prepared_handoff_text='' "
+                    "OR prepared_handoff_revision<>revision OR prepared_handoff_at IS NULL "
+                    "OR status<>'AWAITING_ACCEPTANCE')) OR "
+                    "(prepared_handoff_digest='' AND (prepared_handoff_text<>'' "
+                    "OR prepared_handoff_revision<>0 OR prepared_handoff_at IS NOT NULL)))"
+                ).fetchone()[0]
+            )
+            invalid_active_watcher_readbacks = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers WHERE status='ACTIVE' AND "
+                    "(title_readback_digest='' OR pin_readback_digest='' "
+                    "OR automation_readback_digest='')"
+                ).fetchone()[0]
+            )
+            incomplete_watcher_retirements = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers WHERE retirement_required=1 AND "
+                    "(successor_generation IS NULL OR automation_paused_digest='' "
+                    "OR archive_readback_digest='' OR archived_at IS NULL)"
+                ).fetchone()[0]
+            )
         return {
             "ok": (
                 quick == "ok"
@@ -3124,6 +3747,10 @@ class Registry:
                 and unproven_terminal_tasks == 0
                 and invalid_envelopes == 0
                 and invalid_successions == 0
+                and invalid_active_role_pins == 0
+                and invalid_owner_notifications == 0
+                and invalid_active_watcher_readbacks == 0
+                and incomplete_watcher_retirements == 0
             ),
             "sqlite": quick,
             "active_watchers": active_watchers,
@@ -3135,6 +3762,10 @@ class Registry:
             "unproven_terminal_tasks": unproven_terminal_tasks,
             "invalid_envelopes": invalid_envelopes,
             "invalid_successions": invalid_successions,
+            "invalid_active_role_pins": invalid_active_role_pins,
+            "invalid_owner_notifications": invalid_owner_notifications,
+            "invalid_active_watcher_readbacks": invalid_active_watcher_readbacks,
+            "incomplete_watcher_retirements": incomplete_watcher_retirements,
             "event_count": event_count,
         }
 
@@ -3216,6 +3847,8 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--curator-thread", required=True)
     register.add_argument("--executor-thread", required=True)
     register.add_argument("--host-id", required=True)
+    register.add_argument("--curator-pin-readback-digest", required=True)
+    register.add_argument("--executor-pin-readback-digest", required=True)
     register.add_argument("--acceptance-envelope", default="")
     register.add_argument("--acceptance-title", default="")
     register.add_argument(
@@ -3230,6 +3863,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_thread.add_argument("--generation", type=int, required=True)
     add_thread.add_argument("--thread-id", required=True)
     add_thread.add_argument("--host-id", required=True)
+    add_thread.add_argument("--pin-readback-digest", default="")
+
+    confirm_role_pin = commands.add_parser("confirm-role-pin")
+    confirm_role_pin.add_argument("--thread-id", required=True)
+    confirm_role_pin.add_argument(
+        "--role", choices=("curator", "executor"), required=True
+    )
+    confirm_role_pin.add_argument("--pin-readback-digest", required=True)
 
     bind_acceptance = commands.add_parser("bind-acceptance")
     bind_acceptance.add_argument("--envelope-id", required=True)
@@ -3237,6 +3878,8 @@ def build_parser() -> argparse.ArgumentParser:
     bind_acceptance.add_argument("--curator-thread", required=True)
     bind_acceptance.add_argument("--root-task", required=True)
     bind_acceptance.add_argument("--corrective-task", action="append", default=[])
+    reconcile_acceptance = commands.add_parser("reconcile-acceptance")
+    reconcile_acceptance.add_argument("--envelope-id", required=True)
 
     update = commands.add_parser("update-task")
     update.add_argument("--task-id", required=True)
@@ -3316,6 +3959,14 @@ def build_parser() -> argparse.ArgumentParser:
     notify_owner.add_argument("--envelope-id", required=True)
     notify_owner.add_argument("--expected-revision", type=int, required=True)
     notify_owner.add_argument("--notification-evidence-digest", required=True)
+
+    prepare_handoff = commands.add_parser("prepare-owner-handoff")
+    prepare_handoff.add_argument("--curator-thread", required=True)
+    prepare_handoff.add_argument("--envelope-id", required=True)
+    prepare_handoff.add_argument("--expected-revision", type=int, required=True)
+    prepare_handoff.add_argument("--done", action="append", required=True)
+    prepare_handoff.add_argument("--verified", required=True)
+    prepare_handoff.add_argument("--limitations", default="")
 
     accept_curator = commands.add_parser("accept-curator")
     accept_curator.add_argument("--curator-thread", required=True)
@@ -3398,7 +4049,17 @@ def build_parser() -> argparse.ArgumentParser:
     watcher.add_argument("--thread-id", required=True)
     watcher.add_argument("--host-id", required=True)
     watcher.add_argument("--automation-id", required=True)
+    watcher.add_argument("--title-readback-digest", required=True)
+    watcher.add_argument("--pin-readback-digest", required=True)
+    watcher.add_argument("--automation-readback-digest", required=True)
     watcher.add_argument("--max-runs", type=int, default=720)
+    watcher_readback = commands.add_parser("confirm-watcher-readback")
+    watcher_readback.add_argument("--generation", type=int, required=True)
+    watcher_readback.add_argument("--thread-id", required=True)
+    watcher_readback.add_argument("--automation-id", required=True)
+    watcher_readback.add_argument("--title-readback-digest", required=True)
+    watcher_readback.add_argument("--pin-readback-digest", required=True)
+    watcher_readback.add_argument("--automation-readback-digest", required=True)
     smoke = commands.add_parser("smoke-watcher")
     smoke.add_argument("--generation", type=int, required=True)
     smoke.add_argument("--evidence-digest", required=True)
@@ -3411,6 +4072,14 @@ def build_parser() -> argparse.ArgumentParser:
     end = commands.add_parser("end-run")
     end.add_argument("--generation", type=int, required=True)
     end.add_argument("--owner", required=True)
+    commands.add_parser("pending-watcher-retirements")
+    watcher_retirement = commands.add_parser("confirm-watcher-retirement")
+    watcher_retirement.add_argument("--generation", type=int, required=True)
+    watcher_retirement.add_argument(
+        "--successor-generation", type=int, required=True
+    )
+    watcher_retirement.add_argument("--automation-paused-digest", required=True)
+    watcher_retirement.add_argument("--archive-readback-digest", required=True)
 
     commands.add_parser("list")
     commands.add_parser("snapshot")
@@ -3441,12 +4110,27 @@ def main() -> int:
                 curator_thread_id=args.curator_thread,
                 executor_thread_id=args.executor_thread,
                 host_id=args.host_id,
+                curator_pin_readback_digest=args.curator_pin_readback_digest,
+                executor_pin_readback_digest=args.executor_pin_readback_digest,
                 acceptance_envelope_id=args.acceptance_envelope,
                 acceptance_title=args.acceptance_title,
                 acceptance_role=args.acceptance_role,
             )
         elif args.command == "add-thread":
-            result = registry.add_thread(task_id=args.task_id, role=args.role, generation=args.generation, thread_id=args.thread_id, host_id=args.host_id)
+            result = registry.add_thread(
+                task_id=args.task_id,
+                role=args.role,
+                generation=args.generation,
+                thread_id=args.thread_id,
+                host_id=args.host_id,
+                pin_readback_digest=args.pin_readback_digest,
+            )
+        elif args.command == "confirm-role-pin":
+            result = registry.confirm_role_pin(
+                thread_id=args.thread_id,
+                role=args.role,
+                pin_readback_digest=args.pin_readback_digest,
+            )
         elif args.command == "bind-acceptance":
             result = registry.bind_acceptance_envelope(
                 envelope_id=args.envelope_id,
@@ -3455,6 +4139,8 @@ def main() -> int:
                 root_task_id=args.root_task,
                 corrective_task_ids=args.corrective_task,
             )
+        elif args.command == "reconcile-acceptance":
+            result = registry.reconcile_acceptance(envelope_id=args.envelope_id)
         elif args.command == "update-task":
             result = registry.update_task(
                 task_id=args.task_id,
@@ -3526,6 +4212,15 @@ def main() -> int:
                 envelope_id=args.envelope_id,
                 expected_revision=args.expected_revision,
                 notification_evidence_digest=args.notification_evidence_digest,
+            )
+        elif args.command == "prepare-owner-handoff":
+            result = registry.prepare_owner_handoff(
+                curator_thread_id=args.curator_thread,
+                envelope_id=args.envelope_id,
+                expected_revision=args.expected_revision,
+                done=args.done,
+                verified=args.verified,
+                limitations=args.limitations,
             )
         elif args.command == "accept-curator":
             result = registry.accept_curator(
@@ -3610,7 +4305,19 @@ def main() -> int:
                 thread_id=args.thread_id,
                 host_id=args.host_id,
                 automation_id=args.automation_id,
+                title_readback_digest=args.title_readback_digest,
+                pin_readback_digest=args.pin_readback_digest,
+                automation_readback_digest=args.automation_readback_digest,
                 max_runs=args.max_runs,
+            )
+        elif args.command == "confirm-watcher-readback":
+            result = registry.confirm_watcher_readback(
+                generation=args.generation,
+                thread_id=args.thread_id,
+                automation_id=args.automation_id,
+                title_readback_digest=args.title_readback_digest,
+                pin_readback_digest=args.pin_readback_digest,
+                automation_readback_digest=args.automation_readback_digest,
             )
         elif args.command == "smoke-watcher":
             result = registry.smoke_watcher(
@@ -3623,6 +4330,15 @@ def main() -> int:
             result = registry.begin_run(generation=args.generation, owner=args.owner, lease_seconds=args.lease_seconds)
         elif args.command == "end-run":
             result = registry.end_run(generation=args.generation, owner=args.owner)
+        elif args.command == "pending-watcher-retirements":
+            result = registry.pending_watcher_retirements()
+        elif args.command == "confirm-watcher-retirement":
+            result = registry.confirm_watcher_retirement(
+                generation=args.generation,
+                successor_generation=args.successor_generation,
+                automation_paused_digest=args.automation_paused_digest,
+                archive_readback_digest=args.archive_readback_digest,
+            )
         elif args.command == "list":
             result = registry.active_tasks()
         elif args.command == "snapshot":

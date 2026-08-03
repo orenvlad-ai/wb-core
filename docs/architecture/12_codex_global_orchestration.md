@@ -26,12 +26,12 @@ Post-plan команда запуска из `discussion-only` остаётся 
 
 1. сформировать Task Passport `wb-core-task-passport/v1` по [`codex_task_passport_v1.schema.json`](../../packages/contracts/codex_task_passport_v1.schema.json);
 2. создать exact executor task и выполнить bounded `wait_threads(timeoutMs: 0)` readback;
-3. дать короткие titles `<тема> · C1` curator и `<тема> · C2` executor, закрепить оба; unpin остаётся только пользовательским действием;
-4. атомарно зарегистрировать exact task/curator/executor/host identities, passport digest, initial resources и acceptance envelope через `apps/codex_task_orchestrator.py register-task`; обычная задача создаёт собственный root, а corrective child явно присоединяется к существующему незавершённому user-level envelope;
+3. дать короткие titles `<тема> · C1` curator и `<тема> · C2` executor, закрепить оба и получить exact pin/readback evidence; missing pin/readback останавливает launch fail closed;
+4. только после readback атомарно зарегистрировать exact task/curator/executor/host identities, assignment-time pin digests, passport digest, initial resources и acceptance envelope через `apps/codex_task_orchestrator.py register-task`; обычная задача создаёт собственный root, а corrective child явно присоединяется к существующему незавершённому user-level envelope и атомарно переоткрывает его;
 5. проверить registry readback и ровно одно active Watcher generation;
 6. только после этого сообщить успешный dispatch. Если target создан, но local Watcher временно недоступен, execution продолжается с явным `MONITORING_CAPABILITY_LIMITATION`; неподтверждённый target create остаётся fail closed.
 
-Passport фиксирует цель, expected result, execution contour, included/excluded scope, constraints, acceptance, closure, autonomy envelope, strict HumanGate allowlist, initial resource set и exact source identities. Registry принимает только canonical repository и не регистрирует сторонние задачи.
+Passport фиксирует цель, expected result, execution contour, included/excluded scope, constraints, acceptance, closure, autonomy envelope, strict HumanGate allowlist, initial resource set и exact source identities. Registry принимает только canonical repository и не регистрирует сторонние задачи. Pin выполняется один раз при назначении curator/current-executor role; Watcher heartbeat не делает постоянный re-pin, поэтому поздний ручной unpin владельца сохраняется.
 
 ## Registry и локальные интерфейсы
 
@@ -39,13 +39,13 @@ Passport фиксирует цель, expected result, execution contour, includ
 
 Основные операции:
 
-- `init`, `register-task`, `add-thread`, `bind-acceptance`, `link-pr`, `update-task`;
+- `init`, `register-task`, `add-thread`, `confirm-role-pin`, `bind-acceptance`, `reconcile-acceptance`, `link-pr`, `update-task`;
 - `enqueue-attention`, `reserve-attention`, `mark-attention-sent`, `retry-attention`, `attention`, `ack-attention`;
-- `confirm-owner-notification`, `accept-curator`;
+- `prepare-owner-handoff`, `confirm-owner-notification`, `accept-curator`;
 - `register-executor-succession`, `pending-executor-archives`, `confirm-executor-archive`;
 - `record-failure`, `resolve-failure`;
 - `open-incident`, `claim-incident`, `attach-arbiter`, `decide`, `deliver`, `verify`, `close-incident`;
-- `prepare-watcher`, `smoke-watcher`, `activate-watcher`, `begin-run`, `end-run`;
+- `prepare-watcher`, `confirm-watcher-readback`, `smoke-watcher`, `activate-watcher`, `pending-watcher-retirements`, `confirm-watcher-retirement`, `begin-run`, `end-run`;
 - `list`, `snapshot`, `report`, `integrity`, `serve`.
 
 `serve` допускает только loopback bind и не имеет mutation endpoints. Registry не вызывает Codex или GitHub самостоятельно: действия исполняет Watcher через поддержанные Desktop/GitHub interfaces.
@@ -85,7 +85,9 @@ Attention kinds: техническое завершение, terminal failure, 
 
 Desktop thread transport предоставляет at-least-once, но не доказанное exactly-once. Watcher резервирует максимум восемь due events, отправляет каждое в exact `curator_thread_id` через supported Desktop capability и после call readback фиксирует `mark-attention-sent`; ошибка получает bounded `retry-attention`. Crash после send до confirm может дать повтор того же `event_id`. Curator `ack-attention` идемпотентен, поэтому повтор не создаёт вторую user-level приёмку.
 
-Техническое завершение атомарно создаёт `DONE_PENDING_HANDOFF`; только exact curator acknowledgement переводит member в `DONE_AWAITING_ACCEPTANCE`. Аналогично pending states защищают terminal failure и strict HumanGate. User-level envelope имеет `OPEN → DONE_PENDING_HANDOFF → AWAITING_ACCEPTANCE → ACCEPTED`: он ждёт terminal+acked state всех required parent/corrective members. Один C1 может содержать несколько technical tasks одного envelope, но получает один owner summary и одну просьбу `Задача принята` после последнего required ack. Curator фиксирует summary через `confirm-owner-notification`; затем `accept-curator` без task name допустим только при ровно одном awaiting envelope и exact current revision. При нескольких независимых envelopes операция fail closed. После ACCEPTED все member tasks исключаются из следующего report; unpin остаётся ручным.
+Техническое завершение атомарно создаёт `DONE_PENDING_HANDOFF`; только exact curator acknowledgement переводит member в `DONE_AWAITING_ACCEPTANCE`. Аналогично pending states защищают terminal failure и strict HumanGate. User-level envelope имеет `OPEN → DONE_PENDING_HANDOFF → AWAITING_ACCEPTANCE → ACCEPTED`: он ждёт terminal+acked state всех required parent/corrective members. Добавление нового required corrective member к ещё не принятому envelope атомарно возвращает его в `OPEN`, повышает revision и инвалидирует прежние owner notification/handoff evidence; старый summary больше не разрешает acceptance. Один C1 может содержать несколько technical tasks одного envelope, но получает один owner summary и одну просьбу `Задача принята` после последнего required ack.
+
+Curator вызывает `prepare-owner-handoff`, который материализует digest-bound короткий текст: `Статус: Завершена — требуется приёмка`, одна-две строки смысла в `Сделано`, `Проверено`, только реальное `Ограничения` и `Ответьте ровно: «Задача принята»`. Самый надёжный Desktop sequencing: показать exact текст владельцу в commentary, затем выполнить `confirm-owner-notification` с его digest и повторить тот же текст на final surface. Повтор с тем же digest не создаёт вторую logical notification, зато финальный ответ остаётся самодостаточным. После подтверждения renderer пишет `Ожидается приёмка владельца.`. `accept-curator` без task name допустим только при ровно одном awaiting envelope, current notification revision и exact curator. При нескольких независимых envelopes операция fail closed. После ACCEPTED все member tasks исключаются из следующего report; unpin/archive current curator/current executor не выполняются.
 
 ## Executor Succession И Searchable Archive
 
@@ -93,7 +95,7 @@ Curator и current active executor никогда автоматически н�
 
 Только после этого Watcher/curator вызывает supported `set_thread_archived` для exact predecessor, проверяет searchable exact readback и фиксирует digest через `confirm-executor-archive`. Archive не удаляет thread, GitHub или audit. Terminal executor без successor остаётся current; final acceptance не архивирует и не снимает pin у current curator/current executor.
 
-Generation rotation готовит новый Luna Watcher из trusted `origin/main` и durable prompt, но не считает его действующим до smoke. Smoke включает exact thread/automation readback, outbox capability и канонический report: один русский block на текущий acceptance envelope, доказанный meaningful progress и отсутствие raw enum/task ID/UUID/revision/digest/internal jargon. После `smoke-watcher` atomic activation делает старое поколение stale/no-op; только затем его heartbeat ставится на паузу, а старый Watcher searchable-архивируется с readback.
+Generation rotation готовит новый Luna Watcher из trusted `origin/main`, даёт ему title, закрепляет и получает exact title/pin/automation readbacks до `prepare-watcher`. Smoke fail closed без любого readback и включает outbox capability и канонический report: один русский block на текущий acceptance envelope, доказанный meaningful progress и отсутствие raw enum/task ID/UUID/revision/digest/internal jargon. После `smoke-watcher` atomic activation делает старое поколение stale/no-op; только затем его heartbeat ставится на паузу, старый Watcher searchable-архивируется с readback, а оба evidence фиксируются через `confirm-watcher-retirement`.
 
 ## Retry, replacement и Sol-арбитр
 
@@ -151,7 +153,7 @@ Actions сверяет manifest digest, exact PR/head/merge, merged blocked stat
 
 `prepare new Luna thread/automation → immediate readback smoke → record smoke digest → atomic activate → old begin-run returns stale-generation → archive old thread`
 
-Activate без smoke запрещён. Unique active Watcher index и generation-bound lease исключают overlap. Chat context не переносится; новый Watcher восстанавливается только из registry, JSONL, current GitHub и current repo contracts. Old generation и arbiter threads можно архивировать автоматически после readback, но curator/executor unpin никогда не автоматизируется.
+Activate без smoke и title/pin/automation readback запрещён. Unique active Watcher index и generation-bound lease исключают overlap. Chat context не переносится; новый Watcher восстанавливается только из registry, JSONL, current GitHub и current repo contracts. Active Watcher остаётся pinned до безопасной rotation; old generation и arbiter threads можно архивировать автоматически только после successor activation/readback, но curator/executor unpin никогда не автоматизируется.
 
 ## Rollout и rollback
 
@@ -159,7 +161,7 @@ Rollout v1:
 
 1. merge code/docs through current Release Train with enforcement still false;
 2. initialize local registry from trusted `origin/main`;
-3. create/pin/title one Luna Watcher, attach one 10-minute heartbeat, prepare/smoke/activate generation;
+3. create/title/pin one Luna Watcher, capture exact title/pin/automation readbacks, attach one 10-minute heartbeat, prepare/smoke/activate generation;
 4. register a bounded pilot task and verify exact readback, fallback repository filtering, report format, retry counts, incident/arbiter lifecycle, rotation no-op and acceptance exclusion;
 5. pause legacy per-chat heartbeat automations only after the global Watcher owns both periodic reporting and durable attention delivery; corrective predecessor archive требует отдельного succession/readback proof и не выводится из самого запуска Watcher;
 6. retire manifest PRs through trusted-main exact commands;
