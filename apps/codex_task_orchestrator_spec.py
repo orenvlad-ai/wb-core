@@ -25,6 +25,23 @@ UUID_RE = re.compile(
 CANONICAL_REPOSITORY = "orenvlad-ai/wb-core"
 TASK_PASSPORT_SCHEMA = "wb-core-task-passport/v1"
 WATCHER_CONFIG_SCHEMA = "wb-core-codex-watcher/v1"
+WATCHER_RUN_PLAN_SCHEMA = "wb-core-watcher-run-plan/v1"
+WATCHER_TARGET_OBSERVATION_SCHEMA = "wb-core-watcher-target-observation/v1"
+WATCHER_RUN_PHASES = (
+    "snapshot-integrity-queue",
+    "target-coverage",
+    "progress-state",
+    "objective-evidence",
+    "apply-progress",
+    "failure-incident",
+    "terminal-evidence",
+    "attention-delivery",
+    "end-run",
+    "heartbeat-response",
+)
+WATCHER_TARGET_READBACK_STATUSES = frozenset(
+    {"active", "idle", "completed", "failed"}
+)
 ARBITER_BRIEF_SCHEMA = "wb-core-arbiter-brief/v1"
 ARBITER_DECISION_SCHEMA = "wb-core-arbiter-decision/v1"
 ARBITER_ACTIONS = frozenset(

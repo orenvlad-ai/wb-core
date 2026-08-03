@@ -25,6 +25,9 @@ from apps.codex_task_orchestrator_spec import (
     RetryObservation,
     STRICT_HUMAN_REASONS,
     TaskStatus,
+    WATCHER_RUN_PHASES,
+    WATCHER_RUN_PLAN_SCHEMA,
+    WATCHER_TARGET_OBSERVATION_SCHEMA,
     classify_incident,
 )
 
@@ -684,6 +687,351 @@ def _run_progress_smoke() -> None:
         assert after_quiet["automation_paused_digest"] == ""
 
 
+def _read_only_passport(
+    name: str, identity: str, curator: str, executor: str
+) -> dict[str, object]:
+    passport = _passport(name, identity)
+    passport["title"] = name
+    passport["objective"] = f"Complete {name}"
+    passport["scope"]["execution_contour"] = "read-only"
+    passport["source"] = {
+        "curator_thread_id": curator,
+        "executor_thread_id": executor,
+    }
+    return passport
+
+
+def _target_observation(
+    *,
+    task_id: str,
+    revision: int,
+    executor: str,
+    status: str,
+    evidence_digit: str,
+    completion: bool = False,
+) -> dict[str, object]:
+    return {
+        "schema": WATCHER_TARGET_OBSERVATION_SCHEMA,
+        "task_id": task_id,
+        "task_revision": revision,
+        "executor_thread_id": executor,
+        "executor_generation": 1,
+        "host_id": "host-1",
+        "readback_status": status,
+        "readback_digest": "sha256:" + evidence_digit * 64,
+        "readback_at": _fresh_evidence_time(),
+        "turn_id": f"turn-{evidence_digit}" if completion else "",
+        "final_item_id": f"item-{evidence_digit}" if completion else "",
+        "completion": (
+            {
+                "evidence_class": "diagnostic-complete",
+                "marker": "diagnostic-complete",
+                "evidence_digest": "sha256:" + evidence_digit * 64,
+                "evidence_summary": "Диагностический результат завершён и привязан к readback.",
+                "eta": "готово",
+                "delta": "Диагностическая проверка завершена.",
+                "current": "Куратор получает подтверждённый результат.",
+            }
+            if completion
+            else None
+        ),
+        "failure": None,
+        "observed_progress": None,
+        "objective_prs": [],
+    }
+
+
+def _run_watcher_driver_smoke() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "driver-registry")
+        registry.initialize()
+        curator = "curator-driver"
+        envelope = "driver-envelope-v1"
+        for identity, executor, role, title in (
+            ("driver-root-v1", "executor-driver-root", "root", "Поток ролей"),
+            (
+                "driver-parallel-v1",
+                "executor-driver-parallel",
+                "required-child",
+                "Поток отчёта",
+            ),
+        ):
+            registry.register_task(
+                task_id=identity,
+                title=title,
+                repo="orenvlad-ai/wb-core",
+                project_id="wb-core",
+                objective=f"Complete {title}",
+                passport=_read_only_passport(
+                    title, identity, curator, executor
+                ),
+                curator_thread_id=curator,
+                executor_thread_id=executor,
+                host_id="host-1",
+                curator_pin_readback_digest="sha256:" + "c" * 64,
+                executor_pin_readback_digest="sha256:" + "e" * 64,
+                acceptance_envelope_id=envelope,
+                acceptance_title="Пилот драйвера",
+                acceptance_role=role,
+            )
+            registry.record_progress_checkpoint(
+                task_id=identity,
+                expected_revision=1,
+                stage=ProgressStage.PREFLIGHT_COMPLETE,
+                evidence_digest="sha256:" + ("1" if role == "root" else "2") * 64,
+                eta="несколько минут",
+                delta="Preflight подтверждён точным evidence.",
+                current="Проверяется heartbeat driver.",
+            )
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="watcher-driver",
+            automation_id="driver-auto",
+        )
+        registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "3" * 64
+        )
+        registry.activate_watcher(generation=1)
+
+        first_begin = registry.begin_run(
+            generation=1, owner="watcher-driver-owner", lease_seconds=540
+        )
+        assert first_begin["run_id"] == "watcher-g1-r1"
+        first_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-driver-owner",
+            queue_evidence_digest="sha256:" + "4" * 64,
+        )
+        assert first_plan["schema"] == WATCHER_RUN_PLAN_SCHEMA
+        assert tuple(first_plan["ordered_phases"]) == WATCHER_RUN_PHASES
+        assert first_plan["ordered_phases"][-2:] == [
+            "end-run",
+            "heartbeat-response",
+        ]
+        assert len(first_plan["pending_target_ids"]) == 2
+        assert all(
+            len(item["action"]["targets"]) == 1
+            for item in first_plan["target_coverage"]
+        )
+        registry.record_watcher_target(
+            generation=1,
+            owner="watcher-driver-owner",
+            task_id="driver-root-v1",
+            observation=_target_observation(
+                task_id="driver-root-v1",
+                revision=1,
+                executor="executor-driver-root",
+                status="completed",
+                evidence_digit="5",
+                completion=True,
+            ),
+        )
+        try:
+            registry.actuate_watcher_run(
+                generation=1, owner="watcher-driver-owner"
+            )
+        except RuntimeError as exc:
+            assert "driver-parallel-v1" in str(exc)
+        else:
+            raise AssertionError("early wake must not hide remaining target coverage")
+        remaining = registry.record_watcher_target(
+            generation=1,
+            owner="watcher-driver-owner",
+            task_id="driver-parallel-v1",
+            observation=_target_observation(
+                task_id="driver-parallel-v1",
+                revision=1,
+                executor="executor-driver-parallel",
+                status="completed",
+                evidence_digit="6",
+                completion=True,
+            ),
+        )
+        assert remaining["pending_target_ids"] == []
+        first_actuation = registry.actuate_watcher_run(
+            generation=1, owner="watcher-driver-owner"
+        )
+        assert {item["action"] for item in first_actuation["results"]} == {
+            "checkpoint-applied-terminal-deferred"
+        }
+        assert all(
+            item["transition_count"] == 1
+            for item in first_actuation["results"]
+        )
+        assert {
+            registry.progress_state(task_id=identity)["progress_percent"]
+            for identity in ("driver-root-v1", "driver-parallel-v1")
+        } == {15}
+        first_wrapper = ET.fromstring(
+            registry.finish_watcher_run(
+                generation=1,
+                owner="watcher-driver-owner",
+                automation_id="driver-auto",
+            )
+        )
+        assert first_wrapper.findtext("decision") == "NOTIFY"
+        assert (first_wrapper.findtext("message") or "").count("Статус:") == 2
+
+        second_begin = registry.begin_run(
+            generation=1, owner="watcher-driver-owner", lease_seconds=540
+        )
+        assert second_begin["run_id"] == "watcher-g1-r2"
+        second_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-driver-owner",
+            queue_evidence_digest="sha256:" + "7" * 64,
+        )
+        assert len(second_plan["pending_target_ids"]) == 2
+        for identity, executor, digit in (
+            ("driver-root-v1", "executor-driver-root", "8"),
+            ("driver-parallel-v1", "executor-driver-parallel", "9"),
+        ):
+            registry.record_watcher_target(
+                generation=1,
+                owner="watcher-driver-owner",
+                task_id=identity,
+                observation=_target_observation(
+                    task_id=identity,
+                    revision=2,
+                    executor=executor,
+                    status="completed",
+                    evidence_digit=digit,
+                    completion=True,
+                ),
+            )
+        terminalized = registry.actuate_watcher_run(
+            generation=1, owner="watcher-driver-owner"
+        )
+        assert {item["action"] for item in terminalized["results"]} == {
+            "terminal-attention-enqueued"
+        }
+        repeated = registry.actuate_watcher_run(
+            generation=1, owner="watcher-driver-owner"
+        )
+        assert repeated["results"] == terminalized["results"]
+        snapshot = registry.snapshot()
+        assert len(snapshot["attention_events"]) == 2
+        assert len({item["event_id"] for item in snapshot["attention_events"]}) == 2
+        assert {
+            registry.progress_state(task_id=identity)["progress_percent"]
+            for identity in ("driver-root-v1", "driver-parallel-v1")
+        } == {100}
+        try:
+            registry.finish_watcher_run(
+                generation=1,
+                owner="watcher-driver-owner",
+                automation_id="driver-auto",
+            )
+        except RuntimeError as exc:
+            assert "deliver" in str(exc)
+        else:
+            raise AssertionError("pending attention must fail closed before finish")
+        reserved = registry.reserve_attention(
+            generation=1,
+            owner="watcher-driver-delivery",
+            lease_seconds=60,
+            limit=8,
+        )["reserved"]
+        assert len(reserved) == 2
+        for item in reserved:
+            registry.mark_attention_sent(
+                event_id=str(item["event_id"]),
+                owner="watcher-driver-delivery",
+                transport_receipt_digest="sha256:" + "a" * 64,
+                ack_timeout_seconds=600,
+            )
+        second_wrapper = ET.fromstring(
+            registry.finish_watcher_run(
+                generation=1,
+                owner="watcher-driver-owner",
+                automation_id="driver-auto",
+            )
+        )
+        assert second_wrapper.findtext("decision") == "NOTIFY"
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+    with tempfile.TemporaryDirectory() as temporary:
+        quiet_registry = Registry(Path(temporary) / "quiet-driver-registry")
+        quiet_registry.initialize()
+        _prepare_watcher(
+            quiet_registry,
+            generation=1,
+            thread_id="watcher-quiet-driver",
+            automation_id="quiet-driver-auto",
+        )
+        quiet_registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "b" * 64
+        )
+        quiet_registry.activate_watcher(generation=1)
+        quiet_registry.begin_run(
+            generation=1, owner="watcher-quiet-owner", lease_seconds=540
+        )
+        quiet_plan = quiet_registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_evidence_digest="sha256:" + "c" * 64,
+        )
+        assert quiet_plan["pending_target_ids"] == []
+        quiet_registry.actuate_watcher_run(
+            generation=1, owner="watcher-quiet-owner"
+        )
+        quiet_wrapper = ET.fromstring(
+            quiet_registry.finish_watcher_run(
+                generation=1,
+                owner="watcher-quiet-owner",
+                automation_id="quiet-driver-auto",
+            )
+        )
+        assert quiet_wrapper.findtext("decision") == "DONT_NOTIFY"
+        assert quiet_wrapper.findtext("message") == "Нет активных задач."
+
+
+def _run_workstream_report_smoke() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "workstream-registry")
+        registry.initialize()
+        curator = "curator-workstreams"
+        envelope = "workstream-envelope-v1"
+        for identity, executor, role, title in (
+            ("workstream-root-v1", "executor-root", "root", "Поток ролей"),
+            (
+                "workstream-parallel-v1",
+                "executor-parallel",
+                "required-child",
+                "Поток отчёта",
+            ),
+            (
+                "workstream-corrective-v1",
+                "executor-corrective",
+                "corrective",
+                "Исправление потока ролей",
+            ),
+        ):
+            _register_with_curator(
+                registry,
+                identity=identity,
+                suffix=identity,
+                curator=curator,
+                executor=executor,
+                envelope=envelope,
+                envelope_title="Общая приёмка",
+                role=role,
+                title=title,
+            )
+        report = registry.report()
+        assert report.count("Статус:") == 2
+        assert "Задача: Поток ролей" in report
+        assert "Задача: Поток отчёта" in report
+        assert "Исправление потока ролей" not in report
+        members = registry.snapshot()["acceptance_envelopes"][0]["members"]
+        mapping = {item["task_id"]: item["workstream_task_id"] for item in members}
+        assert mapping["workstream-root-v1"] == "workstream-root-v1"
+        assert mapping["workstream-parallel-v1"] == "workstream-parallel-v1"
+        assert mapping["workstream-corrective-v1"] == "workstream-root-v1"
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+
 def run_smoke() -> None:
     watcher_contract = json.loads(
         (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
@@ -714,6 +1062,10 @@ def run_smoke() -> None:
     ).read_text(encoding="utf-8")
     for required in (
         "begin-run",
+        "heartbeat-plan",
+        "heartbeat-record-target",
+        "heartbeat-actuate",
+        "heartbeat-finish",
         "checkpoint-progress",
         "progress-state",
         "apply-progress",
@@ -735,7 +1087,7 @@ def run_smoke() -> None:
         "record-watcher-liveness-failure",
         "record-watcher-context-compaction",
         "contextCompaction",
-        "python3 apps/codex_task_orchestrator.py heartbeat-response",
+        "python3 apps/codex_task_orchestrator.py heartbeat-finish",
         "rotation_due=true",
         "Задача принята",
     ):
@@ -743,7 +1095,17 @@ def run_smoke() -> None:
     assert watcher_contract["attention_delivery"]["transport_semantics"] == (
         "at-least-once-with-stable-event-id"
     )
-    assert watcher_contract["report"]["unit"] == "acceptance-envelope"
+    assert watcher_contract["report"]["unit"] == "acceptance-envelope-workstream"
+    assert watcher_contract["heartbeat_driver"]["ordered_phases"][-2:] == [
+        "end-run",
+        "heartbeat-response",
+    ]
+    assert watcher_contract["heartbeat_driver"][
+        "early_batch_wake_cannot_complete_remaining_targets"
+    ] is True
+    assert watcher_contract["report"][
+        "corrective_and_replacement_fold_into_workstream"
+    ] is True
     assert watcher_contract["acceptance"][
         "fail_closed_when_curator_has_multiple_waiting_envelopes"
     ] is True
@@ -805,6 +1167,8 @@ def run_smoke() -> None:
     assert "Do not request or reconstruct the full chat" in arbiter_prompt
 
     _run_progress_smoke()
+    _run_watcher_driver_smoke()
+    _run_workstream_report_smoke()
 
     with tempfile.TemporaryDirectory() as temporary:
         registry = Registry(Path(temporary) / "registry")
@@ -1459,7 +1823,7 @@ def run_smoke() -> None:
         )
         localized = registry.report()
         assert localized.count("Статус:") == 2
-        assert localized.count("Задача: Глобальная оркестрация") == 1
+        assert localized.count("Задача: Техническая основа оркестрации") == 1
         assert "Задача: Независимая задача" in localized
         assert "Прогресс: ≈40%" in localized
         assert "routing-root-v1" not in localized
@@ -1486,7 +1850,7 @@ def run_smoke() -> None:
         assert heartbeat_message == registry.report()
         assert heartbeat_message.count("Статус:") == 2
         assert heartbeat_message.count("Изменений нет; работа продолжается:") == 2
-        assert "Задача: Глобальная оркестрация" in heartbeat_message
+        assert "Задача: Техническая основа оркестрации" in heartbeat_message
         assert "Задача: Независимая задача" in heartbeat_message
         assert heartbeat.count("<heartbeat>") == 1
         assert heartbeat.count("</heartbeat>") == 1

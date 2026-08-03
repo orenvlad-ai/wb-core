@@ -42,6 +42,10 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     STRICT_HUMAN_REASONS,
     SuccessionStatus,
     TaskStatus,
+    WATCHER_RUN_PHASES,
+    WATCHER_RUN_PLAN_SCHEMA,
+    WATCHER_TARGET_OBSERVATION_SCHEMA,
+    WATCHER_TARGET_READBACK_STATUSES,
     canonical_digest,
     classify_incident,
     incident_key,
@@ -144,6 +148,7 @@ CREATE TABLE IF NOT EXISTS acceptance_envelope_members (
     envelope_id TEXT NOT NULL REFERENCES acceptance_envelopes(envelope_id),
     task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
     role TEXT NOT NULL CHECK(role IN ('root','corrective','required-child')),
+    workstream_task_id TEXT REFERENCES tasks(task_id),
     required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0,1)),
     created_at TEXT NOT NULL,
     PRIMARY KEY(envelope_id,task_id)
@@ -178,9 +183,11 @@ CREATE TABLE IF NOT EXISTS attention_events (
 CREATE INDEX IF NOT EXISTS attention_delivery_queue
 ON attention_events(state,next_attempt_at,created_at);
 CREATE TABLE IF NOT EXISTS visible_report_state (
-    envelope_id TEXT PRIMARY KEY,
+    envelope_id TEXT NOT NULL,
+    workstream_task_id TEXT NOT NULL,
     last_fingerprint TEXT NOT NULL,
-    last_rendered_at TEXT NOT NULL
+    last_rendered_at TEXT NOT NULL,
+    PRIMARY KEY(envelope_id,workstream_task_id)
 );
 CREATE TABLE IF NOT EXISTS executor_successions (
     succession_id TEXT PRIMARY KEY,
@@ -296,7 +303,40 @@ CREATE TABLE IF NOT EXISTS runtime_leases (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
     generation INTEGER NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
     expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watcher_run_plans (
+    run_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL REFERENCES watchers(generation),
+    lease_owner TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('PLANNED','ACTUATED','FINISHED')),
+    plan_digest TEXT NOT NULL UNIQUE,
+    snapshot_digest TEXT NOT NULL,
+    integrity_digest TEXT NOT NULL,
+    queue_evidence_digest TEXT NOT NULL,
+    task_set_digest TEXT NOT NULL,
+    heartbeat_xml TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    actuated_at TEXT,
+    finished_at TEXT
+);
+CREATE TABLE IF NOT EXISTS watcher_run_targets (
+    run_id TEXT NOT NULL REFERENCES watcher_run_plans(run_id),
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    task_revision INTEGER NOT NULL CHECK(task_revision > 0),
+    executor_thread_id TEXT NOT NULL,
+    executor_generation INTEGER NOT NULL CHECK(executor_generation > 0),
+    host_id TEXT NOT NULL,
+    observation_json TEXT NOT NULL DEFAULT '',
+    observation_digest TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '',
+    transition_count INTEGER NOT NULL DEFAULT 0 CHECK(transition_count BETWEEN 0 AND 1),
+    followup_required INTEGER NOT NULL DEFAULT 0 CHECK(followup_required IN (0,1)),
+    followup_receipt_digest TEXT NOT NULL DEFAULT '',
+    covered_at TEXT,
+    actuated_at TEXT,
+    PRIMARY KEY(run_id,task_id)
 );
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -425,6 +465,56 @@ class Registry:
                 connection.execute(
                     "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_at TEXT"
                 )
+            member_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(acceptance_envelope_members)"
+                )
+            }
+            if "workstream_task_id" not in member_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelope_members ADD COLUMN "
+                    "workstream_task_id TEXT REFERENCES tasks(task_id)"
+                )
+            connection.execute(
+                "UPDATE acceptance_envelope_members SET workstream_task_id=task_id "
+                "WHERE workstream_task_id IS NULL AND role IN ('root','required-child')"
+            )
+            connection.execute(
+                "UPDATE acceptance_envelope_members AS corrective "
+                "SET workstream_task_id=("
+                "SELECT COALESCE(root.workstream_task_id,root.task_id) "
+                "FROM acceptance_envelope_members AS root "
+                "WHERE root.envelope_id=corrective.envelope_id AND root.role='root' "
+                "ORDER BY root.created_at,root.task_id LIMIT 1) "
+                "WHERE corrective.workstream_task_id IS NULL AND corrective.role='corrective'"
+            )
+            report_state_columns = list(
+                connection.execute("PRAGMA table_info(visible_report_state)")
+            )
+            report_state_names = {str(row[1]) for row in report_state_columns}
+            report_state_primary_key = [
+                str(row[1])
+                for row in sorted(report_state_columns, key=lambda row: int(row[5]))
+                if int(row[5]) > 0
+            ]
+            if (
+                "workstream_task_id" not in report_state_names
+                or report_state_primary_key
+                != ["envelope_id", "workstream_task_id"]
+            ):
+                connection.execute(
+                    "ALTER TABLE visible_report_state RENAME TO visible_report_state_v7"
+                )
+                connection.execute(
+                    "CREATE TABLE visible_report_state ("
+                    "envelope_id TEXT NOT NULL,"
+                    "workstream_task_id TEXT NOT NULL,"
+                    "last_fingerprint TEXT NOT NULL,"
+                    "last_rendered_at TEXT NOT NULL,"
+                    "PRIMARY KEY(envelope_id,workstream_task_id))"
+                )
+                connection.execute("DROP TABLE visible_report_state_v7")
             for column, definition in (
                 ("context_compaction_item_id", "TEXT NOT NULL DEFAULT ''"),
                 ("context_compaction_readback_digest", "TEXT NOT NULL DEFAULT ''"),
@@ -507,13 +597,21 @@ class Registry:
                 connection.execute(
                     "ALTER TABLE task_threads ADD COLUMN pin_confirmed_at TEXT"
                 )
+            lease_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(runtime_leases)")
+            }
+            if "run_id" not in lease_columns:
+                connection.execute(
+                    "ALTER TABLE runtime_leases ADD COLUMN run_id TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute("DROP INDEX IF EXISTS one_active_incident_per_task")
             connection.execute(
                 "CREATE UNIQUE INDEX one_active_incident_per_task ON incidents(task_id) "
                 "WHERE status IN ('OPEN','WAITING_RESOURCE','CLAIMED','DECIDED','DELIVERED','VERIFIED')"
             )
             connection.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version','7') "
+                "INSERT INTO meta(key,value) VALUES('schema_version','8') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         if self.db_path.exists():
@@ -599,6 +697,46 @@ class Registry:
             if descriptor >= 0:
                 os.close(descriptor)
 
+    @staticmethod
+    def _resolve_workstream_task_id(
+        connection: sqlite3.Connection,
+        *,
+        envelope_id: str,
+        role: str,
+        task_id: str,
+        requested_task_id: str = "",
+    ) -> str:
+        requested = requested_task_id.strip()
+        if role in {"root", "required-child"}:
+            if requested and requested != task_id:
+                raise ValueError(
+                    "root and required-child tasks start their own workstream"
+                )
+            return task_id
+        if role != "corrective":
+            raise ValueError("invalid acceptance envelope member role")
+        if requested:
+            target = connection.execute(
+                "SELECT workstream_task_id FROM acceptance_envelope_members "
+                "WHERE envelope_id=? AND task_id=?",
+                (envelope_id, validate_task_id(requested)),
+            ).fetchone()
+            if target is None:
+                raise RuntimeError(
+                    "corrective workstream target must already belong to the envelope"
+                )
+            return str(target["workstream_task_id"] or requested)
+        root = connection.execute(
+            "SELECT task_id,workstream_task_id FROM acceptance_envelope_members "
+            "WHERE envelope_id=? AND role='root' ORDER BY created_at,task_id LIMIT 1",
+            (envelope_id,),
+        ).fetchone()
+        if root is None:
+            raise RuntimeError(
+                "a corrective task requires an existing acceptance envelope root"
+            )
+        return str(root["workstream_task_id"] or root["task_id"])
+
     def register_task(
         self,
         *,
@@ -616,6 +754,7 @@ class Registry:
         acceptance_envelope_id: str = "",
         acceptance_title: str = "",
         acceptance_role: str = "root",
+        acceptance_workstream_task_id: str = "",
     ) -> dict[str, object]:
         identity = validate_task_id(task_id)
         if not all(
@@ -660,6 +799,13 @@ class Registry:
         envelope_title = (acceptance_title or visible_task_title).strip()
         validate_visible_text(envelope_title, field="acceptance title")
         with self.transaction() as connection:
+            workstream_task_id = self._resolve_workstream_task_id(
+                connection,
+                envelope_id=envelope_id,
+                role=acceptance_role,
+                task_id=identity,
+                requested_task_id=acceptance_workstream_task_id,
+            )
             existing = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (identity,)
             ).fetchone()
@@ -705,13 +851,21 @@ class Registry:
                     ),
                 }
                 membership = connection.execute(
-                    "SELECT envelope_id,role FROM acceptance_envelope_members WHERE task_id=?",
+                    "SELECT envelope_id,role,workstream_task_id "
+                    "FROM acceptance_envelope_members WHERE task_id=?",
                     (identity,),
                 ).fetchone()
-                expected_membership = (envelope_id, acceptance_role)
+                expected_membership = (
+                    envelope_id,
+                    acceptance_role,
+                    workstream_task_id,
+                )
                 actual_membership = (
                     None if membership is None else membership["envelope_id"],
                     None if membership is None else membership["role"],
+                    None
+                    if membership is None
+                    else membership["workstream_task_id"],
                 )
                 if (
                     actual != expected
@@ -726,6 +880,7 @@ class Registry:
                     "revision": int(existing["revision"]),
                     "passport_digest": digest,
                     "acceptance_envelope_id": envelope_id,
+                    "acceptance_workstream_task_id": workstream_task_id,
                     "idempotent": True,
                 }
             connection.execute(
@@ -800,9 +955,16 @@ class Registry:
                 if acceptance_title and envelope["title"] != envelope_title:
                     raise RuntimeError("acceptance envelope title does not match")
             connection.execute(
-                "INSERT INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
-                "VALUES(?,?,?,?)",
-                (envelope_id, identity, acceptance_role, timestamp),
+                "INSERT INTO acceptance_envelope_members("
+                "envelope_id,task_id,role,workstream_task_id,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    envelope_id,
+                    identity,
+                    acceptance_role,
+                    workstream_task_id,
+                    timestamp,
+                ),
             )
             if envelope is not None:
                 self._recompute_envelope(
@@ -820,6 +982,7 @@ class Registry:
                     "executor_thread_id": executor_thread_id,
                     "acceptance_envelope_id": envelope_id,
                     "acceptance_role": acceptance_role,
+                    "acceptance_workstream_task_id": workstream_task_id,
                 },
             )
         self.flush_events()
@@ -828,6 +991,7 @@ class Registry:
             "revision": 1,
             "passport_digest": digest,
             "acceptance_envelope_id": envelope_id,
+            "acceptance_workstream_task_id": workstream_task_id,
         }
 
     def add_thread(
@@ -944,7 +1108,8 @@ class Registry:
             ):
                 raise RuntimeError("all acceptance envelope members must share one curator")
             existing_memberships = connection.execute(
-                "SELECT task_id,envelope_id,role FROM acceptance_envelope_members "
+                "SELECT task_id,envelope_id,role,workstream_task_id "
+                "FROM acceptance_envelope_members "
                 "WHERE task_id IN ({})".format(",".join("?" for _ in members)),
                 tuple(item[0] for item in members),
             ).fetchall()
@@ -953,6 +1118,7 @@ class Registry:
                 if (
                     membership["envelope_id"] != identity
                     or membership["role"] != expected_role
+                    or membership["workstream_task_id"] != root
                 ):
                     raise RuntimeError(
                         "a task is already bound to a different acceptance envelope"
@@ -982,9 +1148,10 @@ class Registry:
             inserted = 0
             for task_id, role in members:
                 cursor = connection.execute(
-                    "INSERT OR IGNORE INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
-                    "VALUES(?,?,?,?)",
-                    (identity, task_id, role, timestamp),
+                    "INSERT OR IGNORE INTO acceptance_envelope_members("
+                    "envelope_id,task_id,role,workstream_task_id,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (identity, task_id, role, root, timestamp),
                 )
                 inserted += cursor.rowcount
             self._recompute_envelope(
@@ -1767,9 +1934,16 @@ class Registry:
             ),
         )
         connection.execute(
-            "INSERT INTO acceptance_envelope_members(envelope_id,task_id,role,created_at) "
-            "VALUES(?,?,?,?)",
-            (envelope_id, task["task_id"], "root", timestamp),
+            "INSERT INTO acceptance_envelope_members("
+            "envelope_id,task_id,role,workstream_task_id,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (
+                envelope_id,
+                task["task_id"],
+                "root",
+                task["task_id"],
+                timestamp,
+            ),
         )
         self.event(
             connection,
@@ -4063,7 +4237,9 @@ class Registry:
             raise ValueError("lease_seconds must be between 1 and 600")
         now = time.time()
         with self.transaction() as connection:
-            active = connection.execute("SELECT generation FROM watchers WHERE status='ACTIVE'").fetchone()
+            active = connection.execute(
+                "SELECT * FROM watchers WHERE status='ACTIVE'"
+            ).fetchone()
             if active is None or int(active["generation"]) != generation:
                 return {"acquired": False, "reason": "stale-watcher-generation"}
             lease = connection.execute("SELECT * FROM runtime_leases WHERE name='watcher-run'").fetchone()
@@ -4075,6 +4251,13 @@ class Registry:
                 and lease["owner"] == owner
                 and int(lease["generation"]) == generation
             ):
+                run_id = str(lease["run_id"] or "")
+                if not run_id:
+                    run_id = f"watcher-g{generation}-r{int(active['run_count'])}"
+                    connection.execute(
+                        "UPDATE runtime_leases SET run_id=? WHERE name='watcher-run'",
+                        (run_id,),
+                    )
                 watcher = connection.execute(
                     "SELECT * FROM watchers WHERE generation=?",
                     (generation,),
@@ -4083,13 +4266,17 @@ class Registry:
                     "acquired": True,
                     "generation": generation,
                     "owner": owner,
+                    "run_id": run_id,
                     **self._watcher_rotation_state(watcher),
                     "idempotent": True,
                 }
+            run_id = f"watcher-g{generation}-r{int(active['run_count']) + 1}"
             connection.execute(
-                "INSERT INTO runtime_leases(name,owner,generation,expires_at) VALUES('watcher-run',?,?,?) "
-                "ON CONFLICT(name) DO UPDATE SET owner=excluded.owner,generation=excluded.generation,expires_at=excluded.expires_at",
-                (owner, generation, now + lease_seconds),
+                "INSERT INTO runtime_leases(name,owner,generation,run_id,expires_at) "
+                "VALUES('watcher-run',?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                "owner=excluded.owner,generation=excluded.generation,"
+                "run_id=excluded.run_id,expires_at=excluded.expires_at",
+                (owner, generation, run_id, now + lease_seconds),
             )
             connection.execute(
                 "UPDATE watchers SET run_count=run_count+1,last_run_at=? WHERE generation=?",
@@ -4102,6 +4289,7 @@ class Registry:
             "acquired": True,
             "generation": generation,
             "owner": owner,
+            "run_id": run_id,
             **self._watcher_rotation_state(watcher),
         }
 
@@ -4112,6 +4300,720 @@ class Registry:
                 (owner, generation),
             )
         return {"released": cursor.rowcount == 1}
+
+    @staticmethod
+    def _watcher_run_lease(
+        connection: sqlite3.Connection, *, generation: int, owner: str
+    ) -> sqlite3.Row:
+        lease = connection.execute(
+            "SELECT * FROM runtime_leases WHERE name='watcher-run'"
+        ).fetchone()
+        if (
+            lease is None
+            or int(lease["generation"]) != generation
+            or lease["owner"] != owner.strip()
+            or float(lease["expires_at"]) <= time.time()
+            or not lease["run_id"]
+        ):
+            raise RuntimeError(
+                "watcher run plan requires the current generation-bound lease"
+            )
+        return lease
+
+    @staticmethod
+    def _watcher_run_phases() -> list[str]:
+        return list(WATCHER_RUN_PHASES)
+
+    def _watcher_plan_payload(
+        self, connection: sqlite3.Connection, plan: sqlite3.Row
+    ) -> dict[str, object]:
+        targets = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT task_id,task_revision,executor_thread_id,"
+                "executor_generation,host_id,observation_digest,result_json,"
+                "transition_count,followup_required,followup_receipt_digest "
+                "FROM watcher_run_targets WHERE run_id=? ORDER BY task_id",
+                (plan["run_id"],),
+            ).fetchall()
+        ]
+        coverage = []
+        for target in targets:
+            coverage.append(
+                {
+                    "task_id": target["task_id"],
+                    "task_revision": int(target["task_revision"]),
+                    "thread_id": target["executor_thread_id"],
+                    "executor_generation": int(target["executor_generation"]),
+                    "host_id": target["host_id"],
+                    "status": (
+                        "covered" if target["observation_digest"] else "pending"
+                    ),
+                    "action": {
+                        "tool": "wait_threads",
+                        "targets": [
+                            {
+                                "threadId": target["executor_thread_id"],
+                                "hostId": target["host_id"],
+                            }
+                        ],
+                        "timeoutMs": 0,
+                    },
+                }
+            )
+        return {
+            "schema": WATCHER_RUN_PLAN_SCHEMA,
+            "run_id": plan["run_id"],
+            "generation": int(plan["generation"]),
+            "state": plan["state"],
+            "plan_digest": plan["plan_digest"],
+            "ordered_phases": self._watcher_run_phases(),
+            "coverage_mode": "one-exact-target-per-immediate-readback",
+            "target_coverage": coverage,
+            "pending_target_ids": [
+                target["task_id"]
+                for target in targets
+                if not target["observation_digest"]
+            ],
+            "pending_followup_task_ids": [
+                target["task_id"]
+                for target in targets
+                if int(target["followup_required"])
+                and not target["followup_receipt_digest"]
+            ],
+        }
+
+    def plan_watcher_run(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        queue_evidence_digest: str,
+    ) -> dict[str, object]:
+        queue_digest = validate_digest(queue_evidence_digest)
+        snapshot = self.snapshot()
+        integrity = self.integrity()
+        if not integrity["ok"]:
+            raise RuntimeError("watcher run plan requires registry integrity")
+        snapshot_digest = canonical_digest(snapshot)
+        integrity_digest = canonical_digest(integrity)
+        observable_statuses = (
+            TaskStatus.DISCUSSION.value,
+            TaskStatus.DISPATCHING.value,
+            TaskStatus.WORKING.value,
+            TaskStatus.READY_FOR_RELEASE.value,
+            TaskStatus.RELEASE_OWNED.value,
+            TaskStatus.VERIFYING.value,
+            TaskStatus.RECOVERING.value,
+        )
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            run_id = str(lease["run_id"])
+            existing = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["queue_evidence_digest"] != queue_digest:
+                    raise RuntimeError(
+                        "watcher run already has different queue evidence"
+                    )
+                return self._watcher_plan_payload(connection, existing)
+            targets = connection.execute(
+                "SELECT t.task_id,t.revision,tt.thread_id,tt.generation,tt.host_id "
+                "FROM tasks t JOIN task_threads tt ON tt.task_id=t.task_id "
+                "WHERE t.status IN ({}) AND tt.role='executor' AND tt.active=1 "
+                "ORDER BY t.task_id".format(
+                    ",".join("?" for _ in observable_statuses)
+                ),
+                observable_statuses,
+            ).fetchall()
+            target_payload = [
+                {
+                    "task_id": row["task_id"],
+                    "task_revision": int(row["revision"]),
+                    "executor_thread_id": row["thread_id"],
+                    "executor_generation": int(row["generation"]),
+                    "host_id": row["host_id"],
+                }
+                for row in targets
+            ]
+            task_set_digest = canonical_digest({"targets": target_payload})
+            plan_payload = {
+                "schema": WATCHER_RUN_PLAN_SCHEMA,
+                "run_id": run_id,
+                "generation": generation,
+                "lease_owner": owner.strip(),
+                "ordered_phases": self._watcher_run_phases(),
+                "snapshot_digest": snapshot_digest,
+                "integrity_digest": integrity_digest,
+                "queue_evidence_digest": queue_digest,
+                "task_set_digest": task_set_digest,
+                "targets": target_payload,
+            }
+            plan_digest = canonical_digest(plan_payload)
+            timestamp = _now()
+            connection.execute(
+                "INSERT INTO watcher_run_plans("
+                "run_id,generation,lease_owner,state,plan_digest,snapshot_digest,"
+                "integrity_digest,queue_evidence_digest,task_set_digest,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    generation,
+                    owner.strip(),
+                    "PLANNED",
+                    plan_digest,
+                    snapshot_digest,
+                    integrity_digest,
+                    queue_digest,
+                    task_set_digest,
+                    timestamp,
+                ),
+            )
+            for target in target_payload:
+                connection.execute(
+                    "INSERT INTO watcher_run_targets("
+                    "run_id,task_id,task_revision,executor_thread_id,"
+                    "executor_generation,host_id) VALUES(?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        target["task_id"],
+                        target["task_revision"],
+                        target["executor_thread_id"],
+                        target["executor_generation"],
+                        target["host_id"],
+                    ),
+                )
+            self.event(
+                connection,
+                "watcher-run",
+                run_id,
+                "planned",
+                {
+                    "generation": generation,
+                    "plan_digest": plan_digest,
+                    "task_set_digest": task_set_digest,
+                    "target_count": len(target_payload),
+                },
+            )
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
+            result = self._watcher_plan_payload(connection, plan)
+        self.flush_events()
+        return result
+
+    def record_watcher_target(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        task_id: str,
+        observation: Mapping[str, object],
+    ) -> dict[str, object]:
+        identity = validate_task_id(task_id)
+        required_keys = {
+            "schema",
+            "task_id",
+            "task_revision",
+            "executor_thread_id",
+            "executor_generation",
+            "host_id",
+            "readback_status",
+            "readback_digest",
+            "readback_at",
+            "turn_id",
+            "final_item_id",
+            "completion",
+            "failure",
+            "observed_progress",
+            "objective_prs",
+        }
+        if set(observation) != required_keys:
+            raise ValueError("target observation fields do not match the contract")
+        if observation["schema"] != WATCHER_TARGET_OBSERVATION_SCHEMA:
+            raise ValueError("unknown target observation schema")
+        readback_status = str(observation["readback_status"])
+        if readback_status not in WATCHER_TARGET_READBACK_STATUSES:
+            raise ValueError("invalid target readback status")
+        validate_digest(str(observation["readback_digest"]))
+        _parse_timestamp(str(observation["readback_at"]), field="readback_at")
+        objective_prs = observation["objective_prs"]
+        if not isinstance(objective_prs, list):
+            raise ValueError("objective_prs must be a list")
+        completion = observation["completion"]
+        failure = observation["failure"]
+        observed_progress = observation["observed_progress"]
+        if readback_status == "active" and (completion or failure):
+            raise ValueError("active target is observe-only")
+        if readback_status == "failed" and not isinstance(failure, Mapping):
+            raise ValueError("failed target requires failure evidence")
+        if failure is not None and set(failure) != {
+            "phase",
+            "error_class",
+            "evidence_fingerprint",
+            "empty_system_error",
+            "transient",
+            "human_reason",
+            "repo_owned_remediation_available",
+            "remediation_exhausted",
+        }:
+            raise ValueError("failure evidence fields do not match the contract")
+        if completion is not None:
+            if readback_status != "completed" or not isinstance(completion, Mapping):
+                raise ValueError("terminal evidence requires a completed target")
+            completion_keys = {
+                "evidence_class",
+                "marker",
+                "evidence_digest",
+                "evidence_summary",
+                "eta",
+                "delta",
+                "current",
+            }
+            if set(completion) != completion_keys:
+                raise ValueError("completion evidence fields do not match the contract")
+            if str(completion["marker"]) != str(completion["evidence_class"]):
+                raise ValueError("completion marker and evidence class must match")
+            validate_digest(str(completion["evidence_digest"]))
+            if not str(observation["turn_id"]).strip() or not str(
+                observation["final_item_id"]
+            ).strip():
+                raise ValueError(
+                    "terminal evidence requires exact turn and final item identities"
+                )
+        for payload, name in (
+            (failure, "failure"),
+            (observed_progress, "observed_progress"),
+        ):
+            if payload is not None and not isinstance(payload, Mapping):
+                raise ValueError(f"{name} must be an object or null")
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?",
+                (lease["run_id"],),
+            ).fetchone()
+            if plan is None or plan["state"] != "PLANNED":
+                raise RuntimeError("target observation requires a planned watcher run")
+            target = connection.execute(
+                "SELECT * FROM watcher_run_targets WHERE run_id=? AND task_id=?",
+                (lease["run_id"], identity),
+            ).fetchone()
+            if target is None:
+                raise RuntimeError("target is not part of this watcher run")
+            expected = (
+                identity,
+                int(target["task_revision"]),
+                target["executor_thread_id"],
+                int(target["executor_generation"]),
+                target["host_id"],
+            )
+            actual = (
+                str(observation["task_id"]),
+                int(observation["task_revision"]),
+                str(observation["executor_thread_id"]),
+                int(observation["executor_generation"]),
+                str(observation["host_id"]),
+            )
+            if actual != expected:
+                raise RuntimeError("target observation identity does not match the plan")
+            task = self.task(identity, connection)
+            if int(task["revision"]) != int(target["task_revision"]):
+                raise RuntimeError("target observation has a stale task revision")
+            if completion is not None:
+                validate_terminal_evidence(
+                    self._task_contour(task), str(completion["evidence_class"])
+                )
+                for field in ("evidence_summary", "eta", "delta", "current"):
+                    validate_visible_text(
+                        str(completion[field]), field=field, task_id=identity
+                    )
+            rendered = _json(observation)
+            digest = canonical_digest(observation)
+            if target["observation_digest"]:
+                if target["observation_digest"] != digest:
+                    raise RuntimeError("target already has different run evidence")
+                return {
+                    "run_id": lease["run_id"],
+                    "task_id": identity,
+                    "observation_digest": digest,
+                    "idempotent": True,
+                }
+            connection.execute(
+                "UPDATE watcher_run_targets SET observation_json=?,"
+                "observation_digest=?,covered_at=? WHERE run_id=? AND task_id=?",
+                (rendered, digest, _now(), lease["run_id"], identity),
+            )
+            self.event(
+                connection,
+                "watcher-run",
+                lease["run_id"],
+                "target-covered",
+                {
+                    "task_id": identity,
+                    "task_revision": int(target["task_revision"]),
+                    "readback_status": readback_status,
+                    "observation_digest": digest,
+                },
+            )
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?",
+                (lease["run_id"],),
+            ).fetchone()
+            result = self._watcher_plan_payload(connection, plan)
+        self.flush_events()
+        return result
+
+    def actuate_watcher_run(
+        self, *, generation: int, owner: str
+    ) -> dict[str, object]:
+        with self.connect() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            run_id = str(lease["run_id"])
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if plan is None or plan["state"] not in {"PLANNED", "ACTUATED"}:
+                raise RuntimeError("watcher actuation requires a planned run")
+            targets = connection.execute(
+                "SELECT * FROM watcher_run_targets WHERE run_id=? ORDER BY task_id",
+                (run_id,),
+            ).fetchall()
+        missing = [row["task_id"] for row in targets if not row["observation_digest"]]
+        if missing:
+            raise RuntimeError(
+                "target coverage is incomplete: " + ",".join(str(item) for item in missing)
+            )
+        results: list[dict[str, object]] = []
+        for target in targets:
+            if target["result_json"]:
+                results.append(json.loads(str(target["result_json"])))
+                continue
+            observation = json.loads(str(target["observation_json"]))
+            identity = str(target["task_id"])
+            task = self.task(identity)
+            if int(task["revision"]) != int(target["task_revision"]):
+                raise RuntimeError(f"stale task revision during actuation: {identity}")
+            for pr in observation["objective_prs"]:
+                if not isinstance(pr, Mapping) or set(pr) != {
+                    "pr_number",
+                    "head_sha",
+                    "state",
+                    "evidence_digest",
+                    "observed_at",
+                    "eta",
+                    "delta",
+                    "current",
+                }:
+                    raise ValueError("objective PR evidence fields do not match the contract")
+                validate_digest(str(pr["evidence_digest"]))
+                _parse_timestamp(str(pr["observed_at"]), field="objective observed_at")
+                self.link_pr(
+                    task_id=identity,
+                    pr=int(pr["pr_number"]),
+                    role="implementation",
+                    head_sha=str(pr["head_sha"]),
+                    state=str(pr["state"]),
+                )
+            if observation["observed_progress"] is not None and set(
+                observation["observed_progress"]
+            ) != {
+                "stage",
+                "evidence_digest",
+                "observed_at",
+                "eta",
+                "delta",
+                "current",
+            }:
+                raise ValueError("observed progress fields do not match the contract")
+            progress_state = self.progress_state(task_id=identity)
+            checkpoint = progress_state["latest_executor_checkpoint"]
+            checkpoint_fresh = bool(
+                checkpoint
+                and int(checkpoint["source_revision"])
+                == int(target["task_revision"])
+                and _parse_timestamp(
+                    str(checkpoint["recorded_at"]), field="checkpoint recorded_at"
+                )
+                > _parse_timestamp(str(task["updated_at"]), field="task updated_at")
+            )
+            objective_stage = objective_stage_from_pr_states(
+                [str(item["state"]) for item in observation["objective_prs"]]
+            )
+            objective_should_apply = bool(
+                objective_stage is not None
+                and (
+                    observation["completion"] is None
+                    or progress_percent(objective_stage)
+                    > int(task["progress_percent"])
+                )
+            )
+            observed_stage = (
+                None
+                if observation["observed_progress"] is None
+                else ProgressStage(str(observation["observed_progress"]["stage"]))
+            )
+            observed_should_apply = bool(
+                observed_stage is not None
+                and (
+                    observation["completion"] is None
+                    or progress_percent(observed_stage)
+                    > int(task["progress_percent"])
+                )
+            )
+            action = "observed-only"
+            transition_count = 0
+            detail: dict[str, object] = {}
+            if checkpoint_fresh:
+                applied = self.apply_progress(
+                    task_id=identity,
+                    expected_revision=int(target["task_revision"]),
+                    run_owner=run_id,
+                )
+                action = "checkpoint-applied"
+                transition_count = 1
+                detail = applied
+                if observation["completion"] is not None:
+                    action = "checkpoint-applied-terminal-deferred"
+            elif objective_should_apply:
+                strongest = max(
+                    observation["objective_prs"],
+                    key=lambda item: progress_percent(
+                        objective_stage_from_pr_states([str(item["state"])])
+                        or ProgressStage.EXECUTOR_STARTED
+                    ),
+                )
+                if objective_stage is not None:
+                    applied = self.apply_progress(
+                        task_id=identity,
+                        expected_revision=int(target["task_revision"]),
+                        run_owner=run_id,
+                        objective_stage=objective_stage,
+                        objective_evidence_digest=str(strongest["evidence_digest"]),
+                        objective_at=str(strongest["observed_at"]),
+                        eta=str(strongest["eta"]),
+                        delta=str(strongest["delta"]),
+                        current=str(strongest["current"]),
+                    )
+                    action = "objective-progress-applied"
+                    transition_count = 1
+                    detail = applied
+            elif observed_should_apply:
+                observed = observation["observed_progress"]
+                applied = self.apply_progress(
+                    task_id=identity,
+                    expected_revision=int(target["task_revision"]),
+                    run_owner=run_id,
+                    observed_stage=observed_stage,
+                    observed_evidence_digest=str(observed["evidence_digest"]),
+                    observed_at=str(observed["observed_at"]),
+                    eta=str(observed["eta"]),
+                    delta=str(observed["delta"]),
+                    current=str(observed["current"]),
+                )
+                action = "observed-progress-applied"
+                transition_count = 1
+                detail = applied
+            elif observation["completion"] is not None:
+                completion = observation["completion"]
+                event = self.enqueue_attention(
+                    task_id=identity,
+                    expected_revision=int(target["task_revision"]),
+                    kind=AttentionKind.TECHNICAL_COMPLETION,
+                    evidence_summary=str(completion["evidence_summary"]),
+                    evidence_digest=str(completion["evidence_digest"]),
+                    completion_evidence_class=str(completion["evidence_class"]),
+                    eta=str(completion["eta"]),
+                    delta=str(completion["delta"]),
+                    current=str(completion["current"]),
+                )
+                action = "terminal-attention-enqueued"
+                transition_count = 1
+                detail = event
+            elif observation["readback_status"] in {"failed", "completed"}:
+                failure = observation["failure"] or {
+                    "phase": "terminal-evidence",
+                    "error_class": "completed-without-bound-terminal-evidence",
+                    "evidence_fingerprint": observation["readback_digest"],
+                    "empty_system_error": False,
+                    "transient": False,
+                    "human_reason": "",
+                    "repo_owned_remediation_available": True,
+                    "remediation_exhausted": False,
+                }
+                detail = self.record_failure(
+                    task_id=identity,
+                    task_revision=int(target["task_revision"]),
+                    phase=str(failure["phase"]),
+                    error_class=str(failure["error_class"]),
+                    evidence_fingerprint=str(failure["evidence_fingerprint"]),
+                    empty_system_error=bool(failure["empty_system_error"]),
+                    transient=bool(failure["transient"]),
+                    human_reason=str(failure["human_reason"]),
+                    repo_owned_remediation_available=bool(
+                        failure["repo_owned_remediation_available"]
+                    ),
+                    remediation_exhausted=bool(failure["remediation_exhausted"]),
+                )
+                action = "failure-recorded"
+            followup_required = int(
+                observation["readback_status"] == "idle" and transition_count == 0
+            )
+            result = {
+                "task_id": identity,
+                "action": action,
+                "transition_count": transition_count,
+                "detail": detail,
+            }
+            with self.transaction() as connection:
+                connection.execute(
+                    "UPDATE watcher_run_targets SET result_json=?,transition_count=?,"
+                    "followup_required=?,actuated_at=? WHERE run_id=? AND task_id=?",
+                    (
+                        _json(result),
+                        transition_count,
+                        followup_required,
+                        _now(),
+                        run_id,
+                        identity,
+                    ),
+                )
+                self.event(
+                    connection,
+                    "watcher-run",
+                    run_id,
+                    "target-actuated",
+                    {
+                        "task_id": identity,
+                        "action": action,
+                        "transition_count": transition_count,
+                    },
+                )
+            self.flush_events()
+            results.append(result)
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE watcher_run_plans SET state='ACTUATED',actuated_at=? "
+                "WHERE run_id=? AND state='PLANNED'",
+                (_now(), run_id),
+            )
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
+            payload = self._watcher_plan_payload(connection, plan)
+        self.flush_events()
+        payload["results"] = results
+        return payload
+
+    def record_watcher_followup(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        task_id: str,
+        transport_receipt_digest: str,
+    ) -> dict[str, object]:
+        identity = validate_task_id(task_id)
+        digest = validate_digest(transport_receipt_digest)
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            target = connection.execute(
+                "SELECT * FROM watcher_run_targets WHERE run_id=? AND task_id=?",
+                (lease["run_id"], identity),
+            ).fetchone()
+            if target is None or not int(target["followup_required"]):
+                raise RuntimeError("this run does not require a target follow-up")
+            if target["followup_receipt_digest"]:
+                if target["followup_receipt_digest"] != digest:
+                    raise RuntimeError("follow-up already has different evidence")
+                return {
+                    "run_id": lease["run_id"],
+                    "task_id": identity,
+                    "idempotent": True,
+                }
+            connection.execute(
+                "UPDATE watcher_run_targets SET followup_receipt_digest=? "
+                "WHERE run_id=? AND task_id=?",
+                (digest, lease["run_id"], identity),
+            )
+            self.event(
+                connection,
+                "watcher-run",
+                lease["run_id"],
+                "followup-confirmed",
+                {"task_id": identity, "transport_receipt_digest": digest},
+            )
+        self.flush_events()
+        return {"run_id": lease["run_id"], "task_id": identity, "recorded": True}
+
+    def finish_watcher_run(
+        self, *, generation: int, owner: str, automation_id: str
+    ) -> str:
+        with self.connect() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            run_id = str(lease["run_id"])
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if plan is None or plan["state"] != "ACTUATED":
+                raise RuntimeError("watcher run must be fully actuated before finish")
+            missing = connection.execute(
+                "SELECT task_id FROM watcher_run_targets WHERE run_id=? AND ("
+                "observation_digest='' OR result_json='' OR "
+                "(followup_required=1 AND followup_receipt_digest='')) "
+                "ORDER BY task_id",
+                (run_id,),
+            ).fetchall()
+            if missing:
+                raise RuntimeError(
+                    "watcher run still has pending target actions: "
+                    + ",".join(str(row["task_id"]) for row in missing)
+                )
+            undelivered = connection.execute(
+                "SELECT event_id FROM attention_events WHERE "
+                "state IN ('PENDING','LEASED','RETRY') OR "
+                "(state='SENT' AND next_attempt_at<=?) "
+                "ORDER BY created_at,event_id LIMIT 1",
+                (time.time(),),
+            ).fetchone()
+            if undelivered is not None:
+                raise RuntimeError(
+                    "watcher run must deliver reserved attention before finish"
+                )
+        wrapper = self.heartbeat_response(automation_id=automation_id)
+        released = self.end_run(generation=generation, owner=owner)
+        if not released["released"]:
+            raise RuntimeError("watcher run lease was not released")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE watcher_run_plans SET state='FINISHED',heartbeat_xml=?,"
+                "finished_at=? WHERE run_id=?",
+                (wrapper, _now(), run_id),
+            )
+            self.event(
+                connection,
+                "watcher-run",
+                run_id,
+                "finished",
+                {
+                    "generation": generation,
+                    "heartbeat_digest": "sha256:"
+                    + hashlib.sha256(wrapper.encode("utf-8")).hexdigest(),
+                },
+            )
+        self.flush_events()
+        return wrapper
 
     def active_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -4169,7 +5071,8 @@ class Registry:
                     "members": [
                         dict(member)
                         for member in connection.execute(
-                            "SELECT task_id,role,required FROM acceptance_envelope_members "
+                            "SELECT task_id,role,workstream_task_id,required "
+                            "FROM acceptance_envelope_members "
                             "WHERE envelope_id=? ORDER BY role,task_id",
                             (row["envelope_id"],),
                         ).fetchall()
@@ -4185,6 +5088,28 @@ class Registry:
                     "SELECT * FROM executor_successions ORDER BY created_at"
                 ).fetchall()
             ]
+            watcher_run_plans = [
+                {
+                    **dict(row),
+                    "targets": [
+                        dict(target)
+                        for target in connection.execute(
+                            "SELECT task_id,task_revision,executor_thread_id,"
+                            "executor_generation,host_id,observation_digest,"
+                            "result_json,transition_count,followup_required,"
+                            "followup_receipt_digest,covered_at,actuated_at "
+                            "FROM watcher_run_targets WHERE run_id=? ORDER BY task_id",
+                            (row["run_id"],),
+                        ).fetchall()
+                    ],
+                }
+                for row in reversed(
+                    connection.execute(
+                        "SELECT * FROM watcher_run_plans "
+                        "ORDER BY created_at DESC,run_id DESC LIMIT 96"
+                    ).fetchall()
+                )
+            ]
         for item in incidents:
             item["resources"] = json.loads(item.pop("resources_json"))
             if item.get("decision_json"):
@@ -4197,20 +5122,22 @@ class Registry:
             "attention_events": attention_events,
             "acceptance_envelopes": acceptance_envelopes,
             "executor_successions": executor_successions,
+            "watcher_run_plans": watcher_run_plans,
             "integrity": self.integrity(),
         }
 
-    def _visible_envelopes(
+    def _visible_workstreams(
         self, connection: sqlite3.Connection
     ) -> list[dict[str, Any]]:
-        envelopes: list[dict[str, Any]] = []
+        workstreams: list[dict[str, Any]] = []
         bound_task_ids: set[str] = set()
         for envelope in connection.execute(
             "SELECT * FROM acceptance_envelopes WHERE status<>? ORDER BY created_at",
             (AcceptanceStatus.ACCEPTED.value,),
         ).fetchall():
             members = connection.execute(
-                "SELECT t.*,m.role,m.required FROM acceptance_envelope_members m "
+                "SELECT t.*,m.role,m.required,m.workstream_task_id "
+                "FROM acceptance_envelope_members m "
                 "JOIN tasks t ON t.task_id=m.task_id WHERE m.envelope_id=? AND m.required=1 "
                 "ORDER BY t.created_at,t.task_id",
                 (envelope["envelope_id"],),
@@ -4218,14 +5145,37 @@ class Registry:
             if not members:
                 continue
             bound_task_ids.update(str(member["task_id"]) for member in members)
-            envelopes.append({"envelope": envelope, "members": members})
+            grouped: dict[str, list[sqlite3.Row]] = {}
+            for member in members:
+                workstream_id = str(
+                    member["workstream_task_id"] or member["task_id"]
+                )
+                grouped.setdefault(workstream_id, []).append(member)
+            for workstream_id, workstream_members in grouped.items():
+                anchor = next(
+                    (
+                        member
+                        for member in workstream_members
+                        if str(member["task_id"]) == workstream_id
+                    ),
+                    workstream_members[0],
+                )
+                workstreams.append(
+                    {
+                        "envelope": envelope,
+                        "workstream_task_id": workstream_id,
+                        "title": str(anchor["title"]),
+                        "members": workstream_members,
+                        "created_at": str(anchor["created_at"]),
+                    }
+                )
         for task in connection.execute(
             "SELECT * FROM tasks WHERE status<>? ORDER BY created_at",
             (TaskStatus.ACCEPTED.value,),
         ).fetchall():
             if task["task_id"] in bound_task_ids:
                 continue
-            envelopes.append(
+            workstreams.append(
                 {
                     "envelope": {
                         "envelope_id": task["task_id"],
@@ -4233,10 +5183,19 @@ class Registry:
                         "status": AcceptanceStatus.OPEN.value,
                         "revision": int(task["revision"]),
                     },
+                    "workstream_task_id": task["task_id"],
+                    "title": task["title"],
                     "members": [task],
+                    "created_at": task["created_at"],
                 }
             )
-        return envelopes
+        return sorted(
+            workstreams,
+            key=lambda item: (
+                str(item["created_at"]),
+                str(item["workstream_task_id"]),
+            ),
+        )
 
     @staticmethod
     def _visible_envelope_status(
@@ -4280,9 +5239,10 @@ class Registry:
         blocks: list[str] = []
         context = self.transaction() if record else self.connect()
         with context as connection:
-            for group in self._visible_envelopes(connection):
+            for group in self._visible_workstreams(connection):
                 envelope = group["envelope"]
                 members = list(group["members"])
+                workstream_task_id = str(group["workstream_task_id"])
                 minimum_progress = min(
                     int(member["progress_percent"]) for member in members
                 )
@@ -4295,7 +5255,7 @@ class Registry:
                     critical_candidates, key=lambda member: member["updated_at"]
                 )
                 status = self._visible_envelope_status(envelope, members)
-                title = str(envelope["title"])
+                title = str(group["title"])
                 for member in members:
                     title = validate_visible_text(
                         title,
@@ -4371,11 +5331,14 @@ class Registry:
                         "current": current,
                         "blocker": blocker,
                         "owner_notification_current": owner_notification_current,
+                        "workstream_task_id": workstream_task_id,
+                        "title": title,
                     }
                 )
                 previous = connection.execute(
-                    "SELECT last_fingerprint FROM visible_report_state WHERE envelope_id=?",
-                    (envelope["envelope_id"],),
+                    "SELECT last_fingerprint FROM visible_report_state "
+                    "WHERE envelope_id=? AND workstream_task_id=?",
+                    (envelope["envelope_id"], workstream_task_id),
                 ).fetchone()
                 if previous is not None and previous["last_fingerprint"] == fingerprint:
                     delta = f"Изменений нет; работа продолжается: {current}"
@@ -4391,10 +5354,17 @@ class Registry:
                 blocks.append("\n".join(lines))
                 if record:
                     connection.execute(
-                        "INSERT INTO visible_report_state(envelope_id,last_fingerprint,last_rendered_at) "
-                        "VALUES(?,?,?) ON CONFLICT(envelope_id) DO UPDATE SET "
+                        "INSERT INTO visible_report_state("
+                        "envelope_id,workstream_task_id,last_fingerprint,last_rendered_at) "
+                        "VALUES(?,?,?,?) ON CONFLICT(envelope_id,workstream_task_id) "
+                        "DO UPDATE SET "
                         "last_fingerprint=excluded.last_fingerprint,last_rendered_at=excluded.last_rendered_at",
-                        (envelope["envelope_id"], fingerprint, _now()),
+                        (
+                            envelope["envelope_id"],
+                            workstream_task_id,
+                            fingerprint,
+                            _now(),
+                        ),
                     )
         if record:
             self.flush_events()
@@ -4408,7 +5378,7 @@ class Registry:
             raise ValueError("heartbeat response requires an automation id")
         report = self.report(record=True)
         with self.connect() as connection:
-            has_active_blocks = bool(self._visible_envelopes(connection))
+            has_active_blocks = bool(self._visible_workstreams(connection))
             has_owner_attention = bool(
                 connection.execute(
                     "SELECT 1 FROM attention_events WHERE state IN ('PENDING','LEASED','SENT','RETRY') LIMIT 1"
@@ -4497,6 +5467,19 @@ class Registry:
                     "WHERE m.envelope_id=e.envelope_id AND m.required=1 AND t.status<>'ACCEPTED'))"
                 ).fetchone()[0]
             )
+            invalid_workstreams = int(
+                connection.execute(
+                    "SELECT count(*) FROM acceptance_envelope_members m WHERE "
+                    "m.workstream_task_id IS NULL OR "
+                    "(m.role IN ('root','required-child') "
+                    "AND m.workstream_task_id<>m.task_id) OR "
+                    "NOT EXISTS (SELECT 1 FROM acceptance_envelope_members anchor "
+                    "WHERE anchor.envelope_id=m.envelope_id "
+                    "AND anchor.task_id=m.workstream_task_id "
+                    "AND anchor.role IN ('root','required-child') "
+                    "AND anchor.workstream_task_id=anchor.task_id)"
+                ).fetchone()[0]
+            )
             invalid_successions = int(
                 connection.execute(
                     "SELECT count(*) FROM executor_successions s WHERE "
@@ -4566,6 +5549,17 @@ class Registry:
                     "AND automation_paused_digest=''"
                 ).fetchone()[0]
             )
+            invalid_watcher_run_plans = int(
+                connection.execute(
+                    "SELECT count(*) FROM watcher_run_plans p WHERE "
+                    "(p.state='FINISHED' AND (p.heartbeat_xml='' OR p.finished_at IS NULL)) OR "
+                    "(p.state IN ('ACTUATED','FINISHED') AND EXISTS ("
+                    "SELECT 1 FROM watcher_run_targets t WHERE t.run_id=p.run_id "
+                    "AND (t.observation_digest='' OR t.result_json='' OR "
+                    "(p.state='FINISHED' AND t.followup_required=1 "
+                    "AND t.followup_receipt_digest=''))))"
+                ).fetchone()[0]
+            )
             active_generation_ok = watcher_count == 0 or active_watchers == 1
         return {
             "ok": (
@@ -4578,11 +5572,13 @@ class Registry:
                 and invalid_attention_events == 0
                 and unproven_terminal_tasks == 0
                 and invalid_envelopes == 0
+                and invalid_workstreams == 0
                 and invalid_successions == 0
                 and invalid_active_role_pins == 0
                 and invalid_owner_notifications == 0
                 and invalid_active_watcher_readbacks == 0
                 and invalid_watcher_handover == 0
+                and invalid_watcher_run_plans == 0
                 and (watcher_count == 0 or effective_enabled_automations >= 1)
             ),
             "sqlite": quick,
@@ -4596,12 +5592,14 @@ class Registry:
             "invalid_attention_events": invalid_attention_events,
             "unproven_terminal_tasks": unproven_terminal_tasks,
             "invalid_envelopes": invalid_envelopes,
+            "invalid_workstreams": invalid_workstreams,
             "invalid_successions": invalid_successions,
             "invalid_active_role_pins": invalid_active_role_pins,
             "invalid_owner_notifications": invalid_owner_notifications,
             "invalid_active_watcher_readbacks": invalid_active_watcher_readbacks,
             "incomplete_watcher_retirements": incomplete_watcher_retirements,
             "invalid_watcher_handover": invalid_watcher_handover,
+            "invalid_watcher_run_plans": invalid_watcher_run_plans,
             "event_count": event_count,
         }
 
@@ -4692,6 +5690,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("root", "corrective", "required-child"),
         default="root",
     )
+    register.add_argument("--acceptance-workstream-task", default="")
 
     add_thread = commands.add_parser("add-thread")
     add_thread.add_argument("--task-id", required=True)
@@ -4956,6 +5955,27 @@ def build_parser() -> argparse.ArgumentParser:
     end = commands.add_parser("end-run")
     end.add_argument("--generation", type=int, required=True)
     end.add_argument("--owner", required=True)
+    heartbeat_plan = commands.add_parser("heartbeat-plan")
+    heartbeat_plan.add_argument("--generation", type=int, required=True)
+    heartbeat_plan.add_argument("--owner", required=True)
+    heartbeat_plan.add_argument("--queue-evidence-digest", required=True)
+    heartbeat_target = commands.add_parser("heartbeat-record-target")
+    heartbeat_target.add_argument("--generation", type=int, required=True)
+    heartbeat_target.add_argument("--owner", required=True)
+    heartbeat_target.add_argument("--task-id", required=True)
+    heartbeat_target.add_argument("--observation-json", required=True)
+    heartbeat_actuate = commands.add_parser("heartbeat-actuate")
+    heartbeat_actuate.add_argument("--generation", type=int, required=True)
+    heartbeat_actuate.add_argument("--owner", required=True)
+    heartbeat_followup = commands.add_parser("heartbeat-record-followup")
+    heartbeat_followup.add_argument("--generation", type=int, required=True)
+    heartbeat_followup.add_argument("--owner", required=True)
+    heartbeat_followup.add_argument("--task-id", required=True)
+    heartbeat_followup.add_argument("--transport-receipt-digest", required=True)
+    heartbeat_finish = commands.add_parser("heartbeat-finish")
+    heartbeat_finish.add_argument("--generation", type=int, required=True)
+    heartbeat_finish.add_argument("--owner", required=True)
+    heartbeat_finish.add_argument("--automation-id", required=True)
     commands.add_parser("pending-watcher-retirements")
     watcher_retirement = commands.add_parser("confirm-watcher-retirement")
     watcher_retirement.add_argument("--generation", type=int, required=True)
@@ -5017,6 +6037,7 @@ def main() -> int:
                 acceptance_envelope_id=args.acceptance_envelope,
                 acceptance_title=args.acceptance_title,
                 acceptance_role=args.acceptance_role,
+                acceptance_workstream_task_id=args.acceptance_workstream_task,
             )
         elif args.command == "add-thread":
             result = registry.add_thread(
@@ -5276,6 +6297,41 @@ def main() -> int:
             result = registry.begin_run(generation=args.generation, owner=args.owner, lease_seconds=args.lease_seconds)
         elif args.command == "end-run":
             result = registry.end_run(generation=args.generation, owner=args.owner)
+        elif args.command == "heartbeat-plan":
+            result = registry.plan_watcher_run(
+                generation=args.generation,
+                owner=args.owner,
+                queue_evidence_digest=args.queue_evidence_digest,
+            )
+        elif args.command == "heartbeat-record-target":
+            result = registry.record_watcher_target(
+                generation=args.generation,
+                owner=args.owner,
+                task_id=args.task_id,
+                observation=_load_object(
+                    args.observation_json, field="observation-json"
+                ),
+            )
+        elif args.command == "heartbeat-actuate":
+            result = registry.actuate_watcher_run(
+                generation=args.generation, owner=args.owner
+            )
+        elif args.command == "heartbeat-record-followup":
+            result = registry.record_watcher_followup(
+                generation=args.generation,
+                owner=args.owner,
+                task_id=args.task_id,
+                transport_receipt_digest=args.transport_receipt_digest,
+            )
+        elif args.command == "heartbeat-finish":
+            print(
+                registry.finish_watcher_run(
+                    generation=args.generation,
+                    owner=args.owner,
+                    automation_id=args.automation_id,
+                )
+            )
+            return 0
         elif args.command == "pending-watcher-retirements":
             result = registry.pending_watcher_retirements()
         elif args.command == "confirm-watcher-retirement":
