@@ -4,25 +4,33 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.codex_task_orchestrator import Registry
+from apps.codex_task_orchestrator import DEFAULT_WATCHER_MAX_RUNS, Registry
 from apps.codex_task_orchestrator_spec import (
     AttentionKind,
     IncidentDisposition,
+    PROGRESS_PERCENT_BY_STAGE,
+    ProgressStage,
     RetryObservation,
     STRICT_HUMAN_REASONS,
     TaskStatus,
     classify_incident,
 )
+
+
+def _fresh_evidence_time() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
 
 
 def _passport(name: str, identity: str) -> dict[str, object]:
@@ -111,7 +119,7 @@ def _prepare_watcher(
     generation: int,
     thread_id: str,
     automation_id: str,
-    max_runs: int = 720,
+    max_runs: int = DEFAULT_WATCHER_MAX_RUNS,
 ) -> dict[str, object]:
     return registry.prepare_watcher(
         generation=generation,
@@ -122,6 +130,16 @@ def _prepare_watcher(
         pin_readback_digest="sha256:" + "2" * 64,
         automation_readback_digest="sha256:" + "3" * 64,
         max_runs=max_runs,
+    )
+
+
+def _prove_repo_done(registry: Registry, task_id: str, pr: int) -> None:
+    registry.link_pr(
+        task_id=task_id,
+        pr=pr,
+        role="implementation",
+        head_sha=f"{pr:040x}"[-40:],
+        state="done",
     )
 
 
@@ -149,6 +167,523 @@ def _decision(
     }
 
 
+def _run_progress_smoke() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "progress-registry")
+        registry.initialize()
+        identity = "progress-evidence-v1"
+        _register(registry, identity, "progress")
+        initial = registry.progress_state(task_id=identity)
+        assert initial["progress_percent"] == 5
+        assert initial["progress_stage"] == "executor-started"
+        task = registry.active_tasks()[0]
+        assert task["last_delta"] == "Исполнитель запущен и зарегистрирован."
+        assert task["current_action"] == "Выполняется первичный технический анализ."
+
+        # Heartbeat count and elapsed time are never evidence by themselves.
+        try:
+            registry.apply_progress(
+                task_id=identity,
+                expected_revision=1,
+                run_owner="heartbeat-no-evidence",
+            )
+        except RuntimeError as exc:
+            assert "no fresh progress evidence" in str(exc)
+        else:
+            raise AssertionError("time alone must not increase progress")
+        assert registry.progress_state(task_id=identity)["progress_percent"] == 5
+
+        # The executor records a stage, proof and bounded visible checkpoint;
+        # only the Watcher-owned mapper materializes its canonical percentage.
+        checkpoint = registry.record_progress_checkpoint(
+            task_id=identity,
+            expected_revision=1,
+            stage=ProgressStage.PREFLIGHT_COMPLETE,
+            evidence_digest="sha256:" + "1" * 64,
+            eta="два–три часа",
+            delta="Сверены документы, код и очередь выпуска.",
+            current="Реализуется единый контракт этапов.",
+        )
+        assert checkpoint["stage"] == "preflight-complete"
+        assert registry.progress_state(task_id=identity)["progress_percent"] == 5
+        applied = registry.apply_progress(
+            task_id=identity,
+            expected_revision=1,
+            run_owner="heartbeat-progress-1",
+        )
+        assert applied["progress_percent"] == 15
+        assert applied["revision"] == 2
+        assert registry.apply_progress(
+            task_id=identity,
+            expected_revision=1,
+            run_owner="heartbeat-progress-1",
+        )["idempotent"] is True
+        assert registry.apply_progress(
+            task_id=identity,
+            expected_revision=2,
+            run_owner="heartbeat-progress-1",
+            observed_stage=ProgressStage.PREFLIGHT_COMPLETE,
+            observed_evidence_digest="sha256:" + "2" * 64,
+            observed_at=_fresh_evidence_time(),
+            eta="два–три часа",
+            delta="Повторный факт того же запуска не создаёт новый этап.",
+            current="Реализуется единый контракт этапов.",
+        )["idempotent"] is True
+
+        registry.record_progress_checkpoint(
+            task_id=identity,
+            expected_revision=2,
+            stage=ProgressStage.PREFLIGHT_COMPLETE,
+            evidence_digest="sha256:" + "3" * 64,
+            eta="около двух часов",
+            delta="Уточнена семантика восстановления без смены этапа.",
+            current="Добавляются проверки ранних и поздних стадий.",
+        )
+        same_stage = registry.apply_progress(
+            task_id=identity,
+            expected_revision=2,
+            run_owner="heartbeat-progress-2",
+        )
+        assert same_stage["progress_percent"] == 15
+        assert registry.active_tasks()[0]["last_delta"].startswith("Уточнена")
+
+        # Fresh bounded file/test evidence is a floor, so even a legacy active
+        # zero cannot repeat the launch text for another report.
+        fallback = registry.apply_progress(
+            task_id=identity,
+            expected_revision=3,
+            run_owner="heartbeat-progress-3",
+            observed_stage=ProgressStage.IMPLEMENTATION_STARTED,
+            observed_evidence_digest="sha256:" + "4" * 64,
+            observed_at=_fresh_evidence_time(),
+            eta="около двух часов",
+            delta="В рабочем дереве подтверждены целевые изменения.",
+            current="Завершается основной diff.",
+        )
+        assert fallback["progress_percent"] == 25
+        legacy_identity = "legacy-zero-progress-v1"
+        _register(registry, legacy_identity, "legacy-zero")
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET progress_percent=0,last_delta='Задача зарегистрирована.',"
+                "current_action='Исполнитель начинает работу.' WHERE task_id=?",
+                (legacy_identity,),
+            )
+        recovered_zero = registry.apply_progress(
+            task_id=legacy_identity,
+            expected_revision=1,
+            run_owner="heartbeat-legacy-zero",
+            observed_stage=ProgressStage.IMPLEMENTATION_STARTED,
+            observed_evidence_digest="sha256:" + "5" * 64,
+            observed_at=_fresh_evidence_time(),
+            eta="около часа",
+            delta="Подтверждены изменения файлов и запуск проверок.",
+            current="Продолжаются проверки реализации.",
+        )
+        assert recovered_zero["progress_percent"] == 25
+
+        # Linked objective GitHub/Release states outrank executor self-report.
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="open",
+        )
+        pr_created = registry.apply_progress(
+            task_id=identity,
+            expected_revision=4,
+            run_owner="heartbeat-progress-4",
+            objective_stage=ProgressStage.PR_CREATED,
+            objective_evidence_digest="sha256:" + "6" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="до часа",
+            delta="Создан PR с проверяемым head.",
+            current="Ожидаются проверки и допуск выпуска.",
+        )
+        assert pr_created["progress_percent"] == 72
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="ready",
+        )
+        admitted = registry.apply_progress(
+            task_id=identity,
+            expected_revision=5,
+            run_owner="heartbeat-progress-5",
+            objective_stage=ProgressStage.RELEASE_ADMITTED,
+            objective_evidence_digest="sha256:" + "7" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="очередь выпуска",
+            delta="Проверки зелёные и допуск выпуска подтверждён.",
+            current="Ожидается своя очередь Release Train.",
+        )
+        assert admitted["progress_percent"] == 80
+        assert admitted["status"] == "READY_FOR_RELEASE"
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="deployed",
+        )
+        try:
+            registry.apply_progress(
+                task_id=identity,
+                expected_revision=6,
+                run_owner="heartbeat-invalid-repo-deploy",
+                objective_stage=ProgressStage.DEPLOYED_VERIFYING,
+                objective_evidence_digest="sha256:" + "8" * 64,
+                objective_at=_fresh_evidence_time(),
+                eta="финальная проверка",
+                delta="Deploy не применим к этой задаче.",
+                current="Проверяется контракт.",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("repo-only progress must not invent a deploy stage")
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="running",
+        )
+        releasing = registry.apply_progress(
+            task_id=identity,
+            expected_revision=6,
+            run_owner="heartbeat-progress-6",
+            objective_stage=ProgressStage.RELEASE_RUNNING,
+            objective_evidence_digest="sha256:" + "9" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="несколько минут",
+            delta="Merge и выпуск выполняются.",
+            current="Release Train завершает repo-only выпуск.",
+        )
+        assert releasing["progress_percent"] == 88
+        assert releasing["status"] == "RELEASE_OWNED"
+
+        # Ordinary findings refresh the visible work without a reset. Only an
+        # objective contradiction may move exactly one milestone backward.
+        finding = registry.apply_progress(
+            task_id=identity,
+            expected_revision=7,
+            run_owner="heartbeat-progress-finding",
+            observed_stage=ProgressStage.PRIMARY_CHECKS_PASSED,
+            observed_evidence_digest="sha256:" + "a" * 64,
+            observed_at=_fresh_evidence_time(),
+            eta="до часа",
+            delta="Semantic review нашёл локальную правку теста.",
+            current="Исправляется finding без отмены доказанного выпуска.",
+        )
+        assert finding["progress_percent"] == 88
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="ready",
+        )
+        try:
+            registry.apply_progress(
+                task_id=identity,
+                expected_revision=8,
+                run_owner="heartbeat-invalid-regression",
+                objective_stage=ProgressStage.PR_CREATED,
+                objective_evidence_digest="sha256:" + "b" * 64,
+                objective_at=_fresh_evidence_time(),
+                eta="до часа",
+                delta="Недостаточный возврат.",
+                current="Проверяется состояние.",
+                invalidate=True,
+                invalidation_reason="Ранее заявленный этап объективно опровергнут.",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("progress invalidation must be limited to one milestone")
+        invalidated = registry.apply_progress(
+            task_id=identity,
+            expected_revision=8,
+            run_owner="heartbeat-progress-7",
+            objective_stage=ProgressStage.RELEASE_ADMITTED,
+            objective_evidence_digest="sha256:" + "c" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="до часа",
+            delta="Этот текст заменяется явной причиной.",
+            current="Повторно подтверждается запуск выпуска.",
+            invalidate=True,
+            invalidation_reason="Ранее заявленный запуск выпуска объективно опровергнут.",
+        )
+        assert invalidated["progress_percent"] == 80
+        assert invalidated["status"] == "RECOVERING"
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="running",
+        )
+        recovered = registry.apply_progress(
+            task_id=identity,
+            expected_revision=9,
+            run_owner="heartbeat-progress-8",
+            objective_stage=ProgressStage.RELEASE_RUNNING,
+            objective_evidence_digest="sha256:" + "d" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="несколько минут",
+            delta="Запуск выпуска подтверждён повторно.",
+            current="Release Train завершает выпуск.",
+        )
+        assert recovered["progress_percent"] == 88
+
+        try:
+            registry.update_task(
+                task_id=identity,
+                expected_revision=10,
+                status=TaskStatus.RELEASE_OWNED,
+                progress=100,
+                eta="готово",
+                delta="Работа завершена.",
+                current="Куратор готовит итог.",
+                blocker=None,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("100% must remain terminal-only")
+        try:
+            registry.enqueue_attention(
+                task_id=identity,
+                expected_revision=10,
+                kind=AttentionKind.TECHNICAL_COMPLETION,
+                completion_evidence_class="release:done",
+                evidence_summary="Терминальное состояние ещё не доказано.",
+                evidence_digest="sha256:" + "e" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("100% must require linked terminal PR evidence")
+        registry.link_pr(
+            task_id=identity,
+            pr=920,
+            role="implementation",
+            head_sha="a" * 40,
+            state="done",
+        )
+        completion = registry.enqueue_attention(
+            task_id=identity,
+            expected_revision=10,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
+            evidence_summary="Repo-only выпуск и exact origin-main подтверждены.",
+            evidence_digest="sha256:" + "e" * 64,
+            eta="готово",
+            delta="Техническое завершение подтверждено.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert completion["task_revision"] == 11
+        assert registry.progress_state(task_id=identity)["progress_percent"] == 100
+
+        early_invalidation_id = "early-invalidation-v1"
+        _register(registry, early_invalidation_id, "early-invalidation")
+        registry.link_pr(
+            task_id=early_invalidation_id,
+            pr=923,
+            role="implementation",
+            head_sha="d" * 40,
+            state="open",
+        )
+        assert registry.apply_progress(
+            task_id=early_invalidation_id,
+            expected_revision=1,
+            run_owner="heartbeat-early-pr",
+            objective_stage=ProgressStage.PR_CREATED,
+            objective_evidence_digest="sha256:" + "f" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="до часа",
+            delta="Создан PR.",
+            current="Ожидаются проверки.",
+        )["progress_percent"] == 72
+        registry.link_pr(
+            task_id=early_invalidation_id,
+            pr=923,
+            role="implementation",
+            head_sha="d" * 40,
+            state="closed",
+        )
+        invalidated_pr = registry.apply_progress(
+            task_id=early_invalidation_id,
+            expected_revision=2,
+            run_owner="heartbeat-early-pr-invalidated",
+            objective_stage=ProgressStage.FULL_CHECKS_PASSED,
+            objective_evidence_digest="sha256:" + "0" * 64,
+            objective_at=_fresh_evidence_time(),
+            eta="около часа",
+            delta="Этот текст заменяется явной причиной.",
+            current="Готовится новый PR.",
+            invalidate=True,
+            invalidation_reason="Ранее заявленный PR больше не существует; проверки сохранены.",
+        )
+        assert invalidated_pr["progress_percent"] == 65
+        assert invalidated_pr["status"] == "RECOVERING"
+
+    # Closure mapping is contour-aware: a LOOP/live task needs production,
+    # while a diagnostic task never invents PR/deploy stages.
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "contour-registry")
+        registry.initialize()
+        live_id = "live-progress-v1"
+        live_passport = _passport("live-progress", live_id)
+        live_passport["scope"]["execution_contour"] = "live-runtime"
+        registry.register_task(
+            task_id=live_id,
+            title="Task live-progress",
+            repo="orenvlad-ai/wb-core",
+            project_id="wb-core",
+            objective="Complete task live-progress",
+            passport=live_passport,
+            curator_thread_id="curator-live-progress",
+            executor_thread_id="executor-live-progress",
+            host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
+        )
+        registry.link_pr(
+            task_id=live_id,
+            pr=921,
+            role="root",
+            head_sha="b" * 40,
+            state="release:production",
+        )
+        revision = 1
+        for index in range(3):
+            applied = registry.apply_progress(
+                task_id=live_id,
+                expected_revision=revision,
+                run_owner=f"heartbeat-live-{index}",
+                objective_stage=ProgressStage.DEPLOYED_VERIFYING,
+                objective_evidence_digest="sha256:" + str(index + 1) * 64,
+                objective_at=_fresh_evidence_time(),
+                eta="финальная UI-проверка",
+                delta="Deploy подтверждён; выполняется визуальная приёмка.",
+                current="Проверяется production UI Flow.",
+            )
+            revision = int(applied["revision"])
+        assert applied["progress_percent"] == 95
+        assert applied["status"] == "VERIFYING"
+        try:
+            registry.enqueue_attention(
+                task_id=live_id,
+                expected_revision=revision,
+                kind=AttentionKind.TECHNICAL_COMPLETION,
+                completion_evidence_class="release:done",
+                evidence_summary="Неверный класс завершения.",
+                evidence_digest="sha256:" + "4" * 64,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("live closure must require release:production")
+        live_completion = registry.enqueue_attention(
+            task_id=live_id,
+            expected_revision=revision,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:production",
+            evidence_summary="Deploy и production UI acceptance подтверждены.",
+            evidence_digest="sha256:" + "5" * 64,
+            eta="готово",
+            delta="Production UI Flow принят.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert registry.progress_state(task_id=live_id)["progress_percent"] == 100
+        assert live_completion["task_revision"] == revision + 1
+
+        diagnostic_id = "diagnostic-progress-v1"
+        diagnostic_passport = _passport("diagnostic-progress", diagnostic_id)
+        diagnostic_passport["scope"]["execution_contour"] = "read-only"
+        registry.register_task(
+            task_id=diagnostic_id,
+            title="Task diagnostic-progress",
+            repo="orenvlad-ai/wb-core",
+            project_id="wb-core",
+            objective="Complete task diagnostic-progress",
+            passport=diagnostic_passport,
+            curator_thread_id="curator-diagnostic-progress",
+            executor_thread_id="executor-diagnostic-progress",
+            host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
+        )
+        registry.link_pr(
+            task_id=diagnostic_id,
+            pr=922,
+            role="implementation",
+            head_sha="c" * 40,
+            state="ready",
+        )
+        try:
+            registry.apply_progress(
+                task_id=diagnostic_id,
+                expected_revision=1,
+                run_owner="heartbeat-diagnostic-invalid",
+                objective_stage=ProgressStage.RELEASE_ADMITTED,
+                objective_evidence_digest="sha256:" + "6" * 64,
+                objective_at=_fresh_evidence_time(),
+                eta="уточняется",
+                delta="Недопустимая стадия.",
+                current="Проверяется контракт.",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("diagnostic progress must not invent GitHub stages")
+        diagnostic_completion = registry.enqueue_attention(
+            task_id=diagnostic_id,
+            expected_revision=1,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="diagnostic-complete",
+            evidence_summary="Диагноз подтверждён доказательствами.",
+            evidence_digest="sha256:" + "7" * 64,
+            eta="готово",
+            delta="Диагностика завершена.",
+            current="Куратор подтверждает получение результата.",
+        )
+        assert diagnostic_completion["task_revision"] == 2
+        assert registry.progress_state(task_id=diagnostic_id)["progress_percent"] == 100
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "quiet-heartbeat-registry")
+        registry.initialize()
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="quiet-watcher",
+            automation_id="quiet-auto",
+        )
+        registry.smoke_watcher(
+            generation=1,
+            evidence_digest="sha256:" + "8" * 64,
+        )
+        registry.activate_watcher(generation=1)
+        before_quiet = registry.snapshot()["watchers"][0]
+        quiet = registry.heartbeat_response(automation_id="quiet-auto")
+        parsed_quiet = ET.fromstring(quiet)
+        assert parsed_quiet.findtext("decision") == "DONT_NOTIFY"
+        assert parsed_quiet.findtext("message") == "Нет активных задач."
+        assert len(parsed_quiet.findtext("message") or "") < 40
+        after_quiet = registry.snapshot()["watchers"][0]
+        assert after_quiet["status"] == "ACTIVE"
+        assert after_quiet["automation_enabled_readback_digest"] == before_quiet[
+            "automation_enabled_readback_digest"
+        ]
+        assert after_quiet["automation_paused_digest"] == ""
+
+
 def run_smoke() -> None:
     watcher_contract = json.loads(
         (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
@@ -157,6 +692,11 @@ def run_smoke() -> None:
     )
     assert watcher_contract["schema"] == "wb-core-codex-watcher/v1"
     assert watcher_contract["watcher"]["target_batch_limit"] == 8
+    assert watcher_contract["watcher"]["rotate_after_runs"] == 48
+    assert DEFAULT_WATCHER_MAX_RUNS == watcher_contract["watcher"]["rotate_after_runs"]
+    assert watcher_contract["watcher"]["automation_prompt_mode"] == (
+        "bounded-trusted-repo-entrypoint"
+    )
     assert watcher_contract["retry_policy"]["third_identical_fingerprint"] == "open-sol-arbiter"
     assert watcher_contract["fallback_discovery"]["require_pinned"] is True
     assert watcher_contract["feature_flag"]["default"] is False
@@ -174,6 +714,13 @@ def run_smoke() -> None:
     ).read_text(encoding="utf-8")
     for required in (
         "begin-run",
+        "checkpoint-progress",
+        "progress-state",
+        "apply-progress",
+        "completion-evidence-class",
+        "heartbeat-response",
+        "decision=NOTIFY",
+        "DONT_NOTIFY",
         "wait_threads(timeoutMs: 0)",
         "record-failure",
         "close-incident",
@@ -183,7 +730,12 @@ def run_smoke() -> None:
         "pending-executor-archives",
         "prepare-owner-handoff",
         "confirm-watcher-retirement",
-        "python3 apps/codex_task_orchestrator.py report",
+        "confirm-watcher-automation-enabled",
+        "confirm-watcher-liveness",
+        "record-watcher-liveness-failure",
+        "record-watcher-context-compaction",
+        "contextCompaction",
+        "python3 apps/codex_task_orchestrator.py heartbeat-response",
         "rotation_due=true",
         "Задача принята",
     ):
@@ -199,8 +751,46 @@ def run_smoke() -> None:
         "archive_only_after_successor_readback"
     ] is True
     assert watcher_contract["rotation"]["activate_only_after_smoke"] is True
+    assert watcher_contract["rotation"]["run_boundary"] == {
+        "not_due_run_count": 47,
+        "due_run_count": 48,
+    }
+    assert watcher_contract["rotation"]["early_trigger"]["heuristic_detection"] is False
+    assert watcher_contract["rotation"]["active_tasks_may_rotate"] is True
+    assert watcher_contract["rotation"]["old_automation_pause_gate"] == (
+        "successor-first-post-cutover-heartbeat-liveness"
+    )
+    assert watcher_contract["rotation"]["no_monitoring_gap"] is True
+    assert watcher_contract["rotation"][
+        "prepared_successor_task_github_attention_mutations"
+    ] is False
     assert watcher_contract["role_pinning"]["assignment_time_only"] is True
     assert watcher_contract["role_pinning"]["heartbeat_repin"] is False
+    assert watcher_contract["progress"]["initial_registered_percent"] == 5
+    assert watcher_contract["progress"]["executor_assigns_percentage"] is False
+    assert watcher_contract["progress"]["time_or_heartbeat_based_progress"] is False
+    assert watcher_contract["progress"]["terminal_only"] is True
+    assert watcher_contract["heartbeat_response"][
+        "unchanged_active_envelopes_decision"
+    ] == "NOTIFY"
+    assert watcher_contract["heartbeat_response"]["single_visible_output"] is True
+    assert watcher_contract["heartbeat_response"][
+        "dont_notify_requires_no_active_report_blocks"
+    ] is True
+    assert list(PROGRESS_PERCENT_BY_STAGE.values()) == [
+        0,
+        5,
+        15,
+        25,
+        40,
+        55,
+        65,
+        72,
+        80,
+        88,
+        95,
+        100,
+    ]
     assert watcher_contract["acceptance"]["required_member_addition_reopens_envelope"] is True
     assert watcher_contract["acceptance"]["owner_handoff"][
         "repeat_same_digest_on_final_surface"
@@ -213,6 +803,8 @@ def run_smoke() -> None:
     ] is True
     assert "wb-core-arbiter-brief/v1" in arbiter_prompt
     assert "Do not request or reconstruct the full chat" in arbiter_prompt
+
+    _run_progress_smoke()
 
     with tempfile.TemporaryDirectory() as temporary:
         registry = Registry(Path(temporary) / "registry")
@@ -279,7 +871,7 @@ def run_smoke() -> None:
             task_id="t-task-alpha",
             expected_revision=1,
             status=TaskStatus.READY_FOR_RELEASE,
-            progress=70,
+            progress=65,
             eta="30–60 минут",
             delta="Проверки завершены.",
             current="Ожидается допуск в Release Train.",
@@ -289,7 +881,7 @@ def run_smoke() -> None:
         report = registry.report()
         assert "Статус: Выпуск и проверка" in report
         assert "Статус: Выпуск и проверка\nЗадача:" in report
-        assert "Прогресс: ≈70% · Осталось: ≈30–60 минут" in report
+        assert "Прогресс: ≈65% · Осталось: ≈30–60 минут" in report
         assert "Блокер:" not in report
 
         def open_same() -> dict[str, object]:
@@ -530,50 +1122,175 @@ def run_smoke() -> None:
             generation=1,
             thread_id="watcher-1",
             automation_id="auto-1",
-            max_runs=1,
         )
         assert _prepare_watcher(
             registry,
             generation=1,
             thread_id="watcher-1",
             automation_id="auto-1",
-            max_runs=1,
         )["idempotent"] is True
         registry.smoke_watcher(
             generation=1,
             evidence_digest="sha256:" + "1" * 64,
         )
         registry.activate_watcher(generation=1)
-        first = registry.begin_run(generation=1, owner="run-a", lease_seconds=60)
+        first = None
+        for run_number in range(1, 48):
+            first = registry.begin_run(
+                generation=1, owner=f"run-{run_number}", lease_seconds=60
+            )
+            assert first["run_count"] == run_number
+            assert first["rotation_due"] is False
+            assert first["rotation_reasons"] == []
+            assert registry.end_run(
+                generation=1, owner=f"run-{run_number}"
+            )["released"] is True
+        first = registry.begin_run(generation=1, owner="run-48", lease_seconds=60)
+        assert first["run_count"] == 48
         assert first["rotation_due"] is True
+        assert first["rotation_reasons"] == ["run-limit"]
+        due_watcher_before_report = registry.snapshot()["watchers"][0]
+        registry.heartbeat_response(automation_id="auto-1")
+        due_watcher_after_report = registry.snapshot()["watchers"][0]
+        assert due_watcher_after_report["status"] == "ACTIVE"
+        assert due_watcher_after_report["automation_enabled_readback_digest"] == (
+            due_watcher_before_report["automation_enabled_readback_digest"]
+        )
         repeated_first = registry.begin_run(
-            generation=1, owner="run-a", lease_seconds=60
+            generation=1, owner="run-48", lease_seconds=60
         )
         assert repeated_first["idempotent"] is True
         assert repeated_first["run_count"] == first["run_count"]
         overlap = registry.begin_run(generation=1, owner="run-b", lease_seconds=60)
         assert first["acquired"] is True
-        assert overlap == {"acquired": False, "reason": "overlapping-run", "owner": "run-a"}
-        assert registry.end_run(generation=1, owner="run-a")["released"] is True
+        assert overlap == {"acquired": False, "reason": "overlapping-run", "owner": "run-48"}
+        assert registry.end_run(generation=1, owner="run-48")["released"] is True
         assert registry.begin_run(
             generation=1, owner="rotation-old", lease_seconds=60
         )["acquired"] is True
+        continuity_report = registry.report()
         _prepare_watcher(
             registry,
             generation=2,
             thread_id="watcher-2",
-            automation_id="auto-1",
+            automation_id="auto-2",
         )
+        prepared_watchers = registry.snapshot()["watchers"]
+        assert len(prepared_watchers) == 2
+        assert sum(bool(item["automation_enabled_readback_digest"]) for item in prepared_watchers) == 2
+        assert sum(item["status"] == "ACTIVE" for item in prepared_watchers) == 1
+        try:
+            registry.activate_watcher(generation=2)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("failed preactivation must not replace the active watcher")
+        assert registry.begin_run(generation=2, owner="too-early", lease_seconds=60) == {
+            "acquired": False,
+            "reason": "stale-watcher-generation",
+        }
+        assert registry.begin_run(
+            generation=1, owner="rotation-old", lease_seconds=60
+        )["idempotent"] is True
         registry.smoke_watcher(
             generation=2,
             evidence_digest="sha256:" + "2" * 64,
         )
         registry.activate_watcher(generation=2)
+        assert registry.report() == continuity_report
         assert registry.begin_run(generation=1, owner="stale", lease_seconds=60) == {
             "acquired": False,
             "reason": "stale-watcher-generation",
         }
-        assert registry.begin_run(generation=2, owner="fresh", lease_seconds=60)["acquired"] is True
+        fresh = registry.begin_run(generation=2, owner="fresh", lease_seconds=60)
+        assert fresh["acquired"] is True
+        assert fresh["rotation_due"] is False
+        liveness_failure = registry.record_watcher_liveness_failure(
+            generation=2,
+            automation_id="auto-2",
+            failure_digest="sha256:" + "f" * 64,
+        )
+        assert liveness_failure["recovery_action"] == (
+            "retry-active-successor-same-automation"
+        )
+        assert registry.end_run(generation=2, owner="fresh")["released"] is True
+        registry.confirm_watcher_automation_enabled(
+            generation=1,
+            automation_id="auto-1",
+            readback_digest="sha256:" + "a" * 64,
+        )
+        try:
+            registry.confirm_watcher_retirement(
+                generation=1,
+                successor_generation=2,
+                automation_paused_digest="sha256:" + "4" * 64,
+                archive_readback_digest="sha256:" + "5" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("old automation must remain enabled until successor liveness")
+        handover = registry.integrity()
+        assert handover["ok"] is True, handover
+        assert handover["active_watchers"] == 1
+        assert handover["effective_enabled_automations"] >= 1
+        assert handover["incomplete_watcher_retirements"] == 1
+        retry = registry.begin_run(
+            generation=2, owner="fresh-retry", lease_seconds=60
+        )
+        assert retry["acquired"] is True
+        heartbeat_readback = registry.heartbeat_response(automation_id="auto-2")
+        try:
+            registry.confirm_watcher_liveness(
+                generation=2,
+                automation_id="auto-2",
+                automation_enabled_readback_digest="sha256:" + "b" * 64,
+                heartbeat_readback_digest="sha256:" + "c" * 64,
+                end_run_readback_digest="sha256:" + "d" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("successor liveness requires a proven end-run")
+        assert registry.end_run(
+            generation=2, owner="fresh-retry"
+        )["released"] is True
+        liveness = registry.confirm_watcher_liveness(
+            generation=2,
+            automation_id="auto-2",
+            automation_enabled_readback_digest="sha256:" + "b" * 64,
+            heartbeat_readback_digest="sha256:" + "c" * 64,
+            end_run_readback_digest="sha256:" + "d" * 64,
+        )
+        assert heartbeat_readback.startswith("<heartbeat>")
+        assert liveness["liveness"] == "PROVEN"
+        assert registry.begin_run(
+            generation=2, owner="context-run", lease_seconds=60
+        )["acquired"] is True
+        context_rotation = registry.record_watcher_context_compaction(
+            generation=2,
+            owner="context-run",
+            thread_id="watcher-2",
+            item_id="item-context-compaction-1",
+            readback_digest="sha256:" + "6" * 64,
+        )
+        assert context_rotation["recorded"] is True
+        assert context_rotation["rotation_due"] is True
+        assert context_rotation["rotation_reasons"] == ["context-compaction"]
+        repeated_context = registry.record_watcher_context_compaction(
+            generation=2,
+            owner="context-run",
+            thread_id="watcher-2",
+            item_id="item-context-compaction-1",
+            readback_digest="sha256:" + "6" * 64,
+        )
+        assert repeated_context["idempotent"] is True
+        assert registry.begin_run(
+            generation=2, owner="context-run", lease_seconds=60
+        )["rotation_due"] is True
+        assert registry.end_run(
+            generation=2, owner="context-run"
+        )["released"] is True
         pending_retirements = registry.pending_watcher_retirements()
         assert [item["generation"] for item in pending_retirements] == [1]
         assert registry.confirm_watcher_retirement(
@@ -720,12 +1437,11 @@ def run_smoke() -> None:
             generation=1, evidence_digest="sha256:" + "1" * 64
         )
         registry.activate_watcher(generation=1)
-
         registry.update_task(
             task_id="routing-root-v1",
             expected_revision=1,
             status=TaskStatus.WORKING,
-            progress=100,
+            progress=88,
             eta="готово",
             delta="Основная реализация завершена.",
             current="Проверяется передача результата куратору.",
@@ -735,7 +1451,7 @@ def run_smoke() -> None:
             task_id="routing-child-v1",
             expected_revision=1,
             status=TaskStatus.WORKING,
-            progress=35,
+            progress=40,
             eta="около часа",
             delta="Добавлен надёжный маршрут уведомления.",
             current="Проверяется PR в GitHub; Watcher продолжает наблюдение C3.",
@@ -745,7 +1461,7 @@ def run_smoke() -> None:
         assert localized.count("Статус:") == 2
         assert localized.count("Задача: Глобальная оркестрация") == 1
         assert "Задача: Независимая задача" in localized
-        assert "Прогресс: ≈35%" in localized
+        assert "Прогресс: ≈40%" in localized
         assert "routing-root-v1" not in localized
         assert "routing-child-v1" not in localized
         assert "DONE_AWAITING_ACCEPTANCE" not in localized
@@ -762,9 +1478,23 @@ def run_smoke() -> None:
             assert hidden.casefold() not in localized.casefold()
         assert "GitHub" in localized and "Watcher" in localized and "C3" in localized
         first_recorded = registry.report(record=True)
-        unchanged = registry.report(record=True)
         assert "Изменений нет; работа продолжается:" not in first_recorded
-        assert "Изменений нет; работа продолжается:" in unchanged
+        heartbeat = registry.heartbeat_response(automation_id="watcher-attention-auto")
+        parsed_heartbeat = ET.fromstring(heartbeat)
+        assert parsed_heartbeat.findtext("decision") == "NOTIFY"
+        heartbeat_message = parsed_heartbeat.findtext("message") or ""
+        assert heartbeat_message == registry.report()
+        assert heartbeat_message.count("Статус:") == 2
+        assert heartbeat_message.count("Изменений нет; работа продолжается:") == 2
+        assert "Задача: Глобальная оркестрация" in heartbeat_message
+        assert "Задача: Независимая задача" in heartbeat_message
+        assert heartbeat.count("<heartbeat>") == 1
+        assert heartbeat.count("</heartbeat>") == 1
+        repeated_heartbeat = ET.fromstring(
+            registry.heartbeat_response(automation_id="watcher-attention-auto")
+        )
+        assert repeated_heartbeat.findtext("decision") == "NOTIFY"
+        assert (repeated_heartbeat.findtext("message") or "").count("Статус:") == 2
         with registry.connect() as connection:
             connection.execute(
                 "UPDATE tasks SET revision=revision+1 WHERE task_id='routing-child-v1'"
@@ -780,7 +1510,7 @@ def run_smoke() -> None:
                 task_id="routing-child-v1",
                 expected_revision=2,
                 status=TaskStatus.WORKING,
-                progress=35,
+                progress=40,
                 eta="около часа",
                 delta="Registry revision 2 сохранена.",
                 current="Работа продолжается.",
@@ -900,10 +1630,12 @@ def run_smoke() -> None:
             encoding="utf-8"
         )
 
+        _prove_repo_done(registry, "routing-root-v1", 901)
         root_event = registry.enqueue_attention(
             task_id="routing-root-v1",
             expected_revision=2,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Основная реализация доказанно завершена.",
             evidence_digest="sha256:" + "a" * 64,
             eta="готово",
@@ -914,6 +1646,7 @@ def run_smoke() -> None:
             task_id="routing-root-v1",
             expected_revision=2,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Основная реализация доказанно завершена.",
             evidence_digest="sha256:" + "a" * 64,
             eta="готово",
@@ -969,10 +1702,12 @@ def run_smoke() -> None:
         assert root_ack["owner_notification_required"] is False
         assert root_ack["acceptance_envelope_state"] == "OPEN"
 
+        _prove_repo_done(registry, "routing-child-v1", 902)
         child_event = registry.enqueue_attention(
             task_id="routing-child-v1",
             expected_revision=2,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Корректирующая доставка доказанно завершена.",
             evidence_digest="sha256:" + "e" * 64,
             eta="готово",
@@ -1115,10 +1850,12 @@ def run_smoke() -> None:
             role="root",
             title="Проверка повторной сдачи",
         )
+        _prove_repo_done(registry, "reopen-root-v1", 903)
         root_event = registry.enqueue_attention(
             task_id="reopen-root-v1",
             expected_revision=1,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Первый этап завершён и проверен.",
             evidence_digest="sha256:" + "1" * 64,
             eta="готово",
@@ -1185,10 +1922,12 @@ def run_smoke() -> None:
             pass
         else:
             raise AssertionError("stale owner notification must not accept a reopened envelope")
+        _prove_repo_done(registry, "reopen-child-v1", 904)
         child_event = registry.enqueue_attention(
             task_id="reopen-child-v1",
             expected_revision=1,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Корректирующий этап завершён и проверен.",
             evidence_digest="sha256:" + "3" * 64,
             eta="готово",
@@ -1267,10 +2006,12 @@ def run_smoke() -> None:
         registry.activate_watcher(generation=1)
         envelope_revisions = []
         for index in (1, 2):
+            _prove_repo_done(registry, f"ambiguity-task-{index}", 904 + index)
             event = registry.enqueue_attention(
                 task_id=f"ambiguity-task-{index}",
                 expected_revision=1,
                 kind=AttentionKind.TECHNICAL_COMPLETION,
+                completion_evidence_class="release:done",
                 evidence_summary=f"Независимая цель {index} завершена.",
                 evidence_digest="sha256:" + str(index) * 64,
                 eta="готово",
@@ -1332,6 +2073,10 @@ def run_smoke() -> None:
             generation=1, evidence_digest="sha256:" + "1" * 64
         )
         registry.activate_watcher(generation=1)
+        before_rotation_heartbeat = ET.fromstring(
+            registry.heartbeat_response(automation_id="old-auto")
+        )
+        assert before_rotation_heartbeat.findtext("decision") == "NOTIFY"
         stale_event = registry.enqueue_attention(
             task_id="stale-route-v1",
             expected_revision=1,
@@ -1346,7 +2091,7 @@ def run_smoke() -> None:
             task_id="stale-route-v1",
             expected_revision=2,
             status=TaskStatus.WORKING,
-            progress=10,
+            progress=15,
             eta="около часа",
             delta="Техническое восстановление завершено.",
             current="Работа продолжается.",
@@ -1362,6 +2107,13 @@ def run_smoke() -> None:
             generation=2, evidence_digest="sha256:" + "3" * 64
         )
         registry.activate_watcher(generation=2)
+        after_rotation_heartbeat = ET.fromstring(
+            registry.heartbeat_response(automation_id="new-auto")
+        )
+        assert after_rotation_heartbeat.findtext("decision") == "NOTIFY"
+        assert "Задача: Проверка устаревшего события" in (
+            after_rotation_heartbeat.findtext("message") or ""
+        )
         assert registry.reserve_attention(
             generation=1, owner="old-run", lease_seconds=60, limit=8
         )["reason"] == "stale-watcher-generation"
@@ -1431,11 +2183,13 @@ def run_smoke() -> None:
                 "eta_text='готово',last_delta='Работа завершена.',"
                 "current_action='Требуется подтверждение доставки.' WHERE task_id='legacy-terminal-v1'"
             )
+        _prove_repo_done(registry, "legacy-terminal-v1", 907)
         assert registry.integrity()["unproven_terminal_tasks"] == 1
         event = registry.enqueue_attention(
             task_id="legacy-terminal-v1",
             expected_revision=8,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
             evidence_digest="sha256:" + "a" * 64,
             backfill=True,
@@ -1448,6 +2202,7 @@ def run_smoke() -> None:
             task_id="legacy-terminal-v1",
             expected_revision=8,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
             evidence_digest="sha256:" + "a" * 64,
             backfill=True,
@@ -1468,6 +2223,7 @@ def run_smoke() -> None:
             task_id="legacy-terminal-v1",
             expected_revision=10,
             kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
             evidence_summary="Историческое завершение подтверждено и требует адресной доставки.",
             evidence_digest="sha256:" + "a" * 64,
             backfill=True,

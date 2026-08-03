@@ -9,7 +9,10 @@
     "reasoning_effort": "medium",
     "target_batch_limit": 8,
     "lease_seconds": 540,
-    "rotate_after_runs": 720
+    "rotate_after_runs": 48,
+    "planned_rotation_hours": 8,
+    "context_compaction_signal": "read_thread.items[type=contextCompaction]",
+    "automation_prompt_mode": "bounded-trusted-repo-entrypoint"
   },
   "arbiter": {
     "model": "gpt-5.6-sol",
@@ -38,6 +41,32 @@
     "manual_owner_unpin_preserved": true,
     "final_acceptance_unpins_roles": false
   },
+  "progress": {
+    "mapper": "apps/codex_task_orchestrator_spec.py:PROGRESS_PERCENT_BY_STAGE",
+    "initial_registered_stage": "executor-started",
+    "initial_registered_percent": 5,
+    "pre_executor_percent": 0,
+    "executor_checkpoint_command": "checkpoint-progress",
+    "watcher_state_command": "progress-state",
+    "watcher_apply_command": "apply-progress",
+    "executor_assigns_percentage": false,
+    "time_or_heartbeat_based_progress": false,
+    "objective_github_release_evidence_precedes_self_report": true,
+    "one_meaningful_transition_per_task_per_heartbeat": true,
+    "fresh_same_stage_delta_allowed": true,
+    "bounded_invalidation_levels": 1,
+    "ordinary_test_finding_resets_progress": false,
+    "terminal_percent": 100,
+    "terminal_only": true,
+    "terminal_evidence_by_contour": {
+      "read-only": "diagnostic-complete",
+      "user-artifact": "artifact-verified",
+      "repo-only": "release:done",
+      "live-runtime": "release:production",
+      "production-mutation": "release:production",
+      "archived-gas-guard": "release:done"
+    }
+  },
   "report": {
     "lines": ["Статус", "Задача", "Прогресс · Осталось", "С прошлого отчёта", "Сейчас", "Блокер"],
     "blocker_only_for_strict_human_reason": true,
@@ -47,6 +76,20 @@
     "forbid_raw_machine_state": true,
     "accepted_phrase": "Задача принята",
     "accepted_by": "exact-curator-thread"
+  },
+  "heartbeat_response": {
+    "command": "python3 apps/codex_task_orchestrator.py heartbeat-response --automation-id <AUTOMATION_ID>",
+    "wrapper": "heartbeat",
+    "active_envelopes_decision": "NOTIFY",
+    "unchanged_active_envelopes_decision": "NOTIFY",
+    "notify_message_source": "unmodified-canonical-report-stdout",
+    "single_visible_output": true,
+    "dont_notify_requires_no_active_report_blocks": true,
+    "dont_notify_requires_no_owner_relevant_attention_or_incident": true,
+    "quiet_message": "Нет активных задач.",
+    "compaction_and_rotation_invariant": true,
+    "changes_automation_state": false,
+    "dont_notify_changes_automation_state": false
   },
   "attention_delivery": {
     "schema": "wb-core-attention-event/v1",
@@ -94,7 +137,45 @@
     "terminal_executor_without_successor_stays_current": true
   },
   "rotation": {
+    "run_boundary": {
+      "not_due_run_count": 47,
+      "due_run_count": 48
+    },
+    "early_trigger": {
+      "source": "supported Desktop read_thread exact typed item",
+      "item_type": "contextCompaction",
+      "record_command": "record-watcher-context-compaction",
+      "heuristic_detection": false,
+      "fallback_when_signal_unavailable": "hard-run-cap"
+    },
+    "active_tasks_may_rotate": true,
+    "no_monitoring_gap": true,
+    "automation_state_readback_command": "confirm-watcher-automation-enabled",
+    "automation_enabled_evidence_sources": [
+      "Desktop automation_update mode=view",
+      "exact local automation.toml status=ACTIVE readback"
+    ],
+    "old_automation_pause_gate": "successor-first-post-cutover-heartbeat-liveness",
+    "successor_liveness_command": "confirm-watcher-liveness",
+    "successor_liveness_evidence": [
+      "active-begin-run",
+      "full-heartbeat-wrapper-readback",
+      "successful-end-run",
+      "enabled-successor-automation-readback"
+    ],
+    "first_run_failure_command": "record-watcher-liveness-failure",
+    "first_run_failure_recovery": "retry-active-successor-same-automation",
+    "old_automation_remains_enabled_during_recovery": true,
+    "dual_scheduled_generations_may_overlap_temporarily": true,
+    "dual_mutation_authority": false,
+    "prepared_successor_canary_read_only": true,
+    "prepared_successor_task_github_attention_mutations": false,
+    "state_sources": ["registry", "events.jsonl", "current-github", "trusted-origin-main"],
+    "chat_context_transfer": false,
     "activate_only_after_smoke": true,
+    "preactivation_failure_keeps_current_active": true,
+    "postactivation_old_authority_restorable": false,
+    "postactivation_cleanup_resumable": true,
     "atomic_generation_switch": true,
     "old_generation_must_be_stale_noop": true,
     "pause_old_heartbeat_after_activation": true,
@@ -105,7 +186,14 @@
       "unit": "acceptance-envelope",
       "localized_russian": true,
       "forbid_raw_machine_state": true,
-      "require_meaningful_progress": true
+      "require_meaningful_progress": true,
+      "require_initial_five_percent": true,
+      "require_two_independent_envelopes": true,
+      "forbid_time_based_progress": true,
+      "require_fresh_same_stage_delta": true,
+      "require_objective_late_stage": true,
+      "require_unchanged_active_notify": true,
+      "require_quiet_dont_notify": true
     }
   },
   "feature_flag": {
