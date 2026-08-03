@@ -1,0 +1,92 @@
+{
+  "schema": "wb-core-release-legacy-retirement/v1",
+  "created_at": "2026-08-03T00:00:00+05:00",
+  "reason": "owner-confirmed-complete-and-no-longer-active",
+  "policy": "Retire only the exact merged PR/head/merge tuples below. Preserve task, scope and audit history; do not claim missing production evidence.",
+  "pull_requests": [
+    {
+      "pr": 843,
+      "title": "Add durable Finance maintenance restore recovery",
+      "head_sha": "6ed1756b1de9555c4f522fdcc2156cd519be707d",
+      "merge_sha": "7e246c839203923c6775cbf1a6e34dc81cb7c036"
+    },
+    {
+      "pr": 844,
+      "title": "Preserve Finance restore barrier fingerprint",
+      "head_sha": "07d9a4ae931efb5392afe34ae65f1fbd7fc89427",
+      "merge_sha": "f070cf32f3b7c84bd6d366813dc2cd82b98287f7"
+    },
+    {
+      "pr": 845,
+      "title": "Resume the failed Finance restore without a second job",
+      "head_sha": "8bb5fd241563cf0409e9559c74b7875077cad2cb",
+      "merge_sha": "2705148cb6b14a4fef5f979ed86e929b37d87216"
+    },
+    {
+      "pr": 846,
+      "title": "Make Finance restore recovery time-coherent",
+      "head_sha": "9b5e41847df1106d290d89607286122b3b09c466",
+      "merge_sha": "5c43c87942f124c8b649b75d16d51bef167c4af2"
+    },
+    {
+      "pr": 892,
+      "title": "Recover Autoanswers to zero backlog safely",
+      "head_sha": "2b8546ad4373ae485c4cda54a0b3360aa59f783d",
+      "merge_sha": "bf5c5575bcdc908fa7fd7e5c02bc005f5b480150"
+    },
+    {
+      "pr": 893,
+      "title": "Pace Autoanswers recovery WB reads",
+      "head_sha": "490278c9b00d0fa1759b116165ca4b14287bd242",
+      "merge_sha": "28e8b95c8a6fec8a5d7d61fa95b3ea10829a6682"
+    },
+    {
+      "pr": 894,
+      "title": "Reconcile Autoanswers answered inventory",
+      "head_sha": "df6cbc1b078e7344877815fdf5c7650feecd2179",
+      "merge_sha": "bdb08b37299c7ebab24fa002efa9e780702b9bc1"
+    },
+    {
+      "pr": 895,
+      "title": "Handle WB processed feedback without answers",
+      "head_sha": "10a558f5c5058acb2639e752f10b4cd922b3ac0c",
+      "merge_sha": "da9fa4a090652a5b7274bd0539f6d92f166376ad"
+    },
+    {
+      "pr": 896,
+      "title": "Fix Autoanswers inventory backup preflight",
+      "head_sha": "949df5b0e3875a042bebb062f49a8e7a05ca4d98",
+      "merge_sha": "6f11faf23e9c0e19640cc556e7ffd67f00b9b07f"
+    },
+    {
+      "pr": 897,
+      "title": "Fix Autoanswers active admission race",
+      "head_sha": "4677c937b08a19c54db7086ae8b0320d9be2a679",
+      "merge_sha": "34dbd0c9c7cf14023e2212329004011b25e78edc"
+    },
+    {
+      "pr": 901,
+      "title": "Unify FF inventory, supply returns, costs and warehouse reads",
+      "head_sha": "5c46aa13b599a651da384312d27451708b57381c",
+      "merge_sha": "199fecf5d13dc1823bf833f0bda083668fb77fff"
+    },
+    {
+      "pr": 902,
+      "title": "Preserve quantities in cost-only warehouse replay",
+      "head_sha": "4ecb9afe9f7c928d402d5cee886fe87a6a31a27e",
+      "merge_sha": "99e10bf6eee9daff8fe93fb92c6f4a106355524d"
+    },
+    {
+      "pr": 903,
+      "title": "Close fully depleted FF cost pools exactly",
+      "head_sha": "121c2891ace8bebf1a5f93d420ef51fef26c0275",
+      "merge_sha": "441ec208a306e4f7b6551825a609f64ff6af0acb"
+    },
+    {
+      "pr": 904,
+      "title": "Register FF inventory T1 recovery",
+      "head_sha": "4e3b95aa0ff84d91fd4ca866d0acc1654cdb6ebe",
+      "merge_sha": "27f6f429b7adb21872653270e53d73653abe4167"
+    }
+  ]
+}

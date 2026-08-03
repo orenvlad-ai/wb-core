@@ -561,6 +561,7 @@ EXPLICIT_TASK_PROMPTS = {
 }
 
 READY_LABEL = "release:ready"
+STAGED_LABEL = "release:staged"
 RUNNING_LABEL = "release:running"
 AWAITING_AGENT_LABEL = "release:awaiting-agent"
 AWAITING_UI_LABEL = "release:awaiting-ui"
@@ -570,10 +571,13 @@ HALTED_LABEL = "release:halted"
 DONE_LABEL = "release:done"
 PRODUCTION_LABEL = "release:production"
 SUPERSEDED_LABEL = "release:superseded"
+RETIRED_LABEL = "release:retired"
+RELEASE_LANE_OWNER_LABEL = "release:lane-owner"
 
 ACTIVE_PRIMARY_LABELS = frozenset(
     {
         READY_LABEL,
+        STAGED_LABEL,
         RUNNING_LABEL,
         AWAITING_AGENT_LABEL,
         AWAITING_UI_LABEL,
@@ -582,7 +586,9 @@ ACTIVE_PRIMARY_LABELS = frozenset(
     }
 )
 OVERLAY_LABELS = frozenset({NEEDS_RESUME_LABEL})
-TERMINAL_LABELS = frozenset({DONE_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL})
+TERMINAL_LABELS = frozenset(
+    {DONE_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL, RETIRED_LABEL}
+)
 ACTIVE_STATE_LABELS = ACTIVE_PRIMARY_LABELS | OVERLAY_LABELS
 RESUMABLE_OWNER_LABELS = frozenset(
     {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL}
@@ -598,7 +604,8 @@ ALLOWED_PRIMARY_COMBINATIONS = frozenset(
 )
 
 TRANSITION_MATRIX = {
-    "release:none": frozenset({READY_LABEL}),
+    "release:none": frozenset({READY_LABEL, STAGED_LABEL}),
+    STAGED_LABEL: frozenset({READY_LABEL, BLOCKED_LABEL, RETIRED_LABEL}),
     READY_LABEL: frozenset({RUNNING_LABEL, BLOCKED_LABEL, SUPERSEDED_LABEL}),
     RUNNING_LABEL: frozenset(
         {
@@ -614,11 +621,14 @@ TRANSITION_MATRIX = {
     ),
     AWAITING_AGENT_LABEL: frozenset({READY_LABEL, BLOCKED_LABEL, SUPERSEDED_LABEL}),
     AWAITING_UI_LABEL: frozenset({PRODUCTION_LABEL, HALTED_LABEL, SUPERSEDED_LABEL}),
-    BLOCKED_LABEL: frozenset({READY_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL}),
+    BLOCKED_LABEL: frozenset(
+        {READY_LABEL, STAGED_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL, RETIRED_LABEL}
+    ),
     HALTED_LABEL: frozenset({AWAITING_UI_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL}),
     DONE_LABEL: frozenset(),
     PRODUCTION_LABEL: frozenset(),
     SUPERSEDED_LABEL: frozenset(),
+    RETIRED_LABEL: frozenset(),
 }
 
 CRITICAL_TRANSITIONS = frozenset(
@@ -631,14 +641,15 @@ CRITICAL_TRANSITIONS = frozenset(
         (HALTED_LABEL, AWAITING_UI_LABEL),
         (HALTED_LABEL, PRODUCTION_LABEL),
         (BLOCKED_LABEL, PRODUCTION_LABEL),
+        (BLOCKED_LABEL, RETIRED_LABEL),
     }
 )
 
 CANONICAL_MONITOR_QUERY = (
     'is:pr -label:release:superseded '
-    'label:"release:ready,release:running,release:awaiting-agent,release:awaiting-ui,'
+    'label:"release:staged,release:ready,release:running,release:awaiting-agent,release:awaiting-ui,'
     'release:needs-resume,release:blocked,release:halted,'
-    'finance:migration-deploy-lease" sort:created-asc'
+    'release:lane-owner,finance:migration-deploy-lease" sort:created-asc'
 )
 CANONICAL_MONITOR_URL = (
     "https://github.com/orenvlad-ai/wb-core/pulls?q=" + quote_plus(CANONICAL_MONITOR_QUERY)
@@ -668,6 +679,9 @@ NEW_ROOT_PROOF_MARKER = "wb-core-loop-new-root-proof"
 RECOVERY_PROOF_MARKER = "wb-core-loop-recovery-proof"
 CLASSIFICATION_BLOCKER_MARKER = "wb-core-loop-classification-blocker"
 IDENTITY_CORRECTION_PROOF_MARKER = "wb-core-loop-identity-correction-proof"
+ORCHESTRATION_ADMISSION_PROOF_MARKER = "wb-core-orchestration-admission-proof"
+RELEASE_LANE_PROOF_MARKER = "wb-core-release-lane-proof"
+LEGACY_RETIREMENT_PROOF_MARKER = "wb-core-legacy-retirement-proof"
 CANONICAL_PRODUCTION_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 
 TERMINAL_FORBIDDEN_INHERITANCE = frozenset(

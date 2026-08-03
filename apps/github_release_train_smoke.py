@@ -35,8 +35,11 @@ from apps.github_release_train import (  # noqa: E402
     PRODUCTION_LABEL,
     PRODUCTION_MUTATION_LABEL,
     READY_LABEL,
+    RELEASE_LANE_OWNER_LABEL,
     REPO_ONLY_LABEL,
+    RETIRED_LABEL,
     RUNNING_LABEL,
+    STAGED_LABEL,
     STANDARD_TASK_LABEL,
     SUPERSEDED_LABEL,
     ReleaseBlocked,
@@ -51,6 +54,7 @@ from apps.github_release_train import (  # noqa: E402
     enqueue_loop_new,
     enqueue_loop_recovery,
     handle_loop_comment,
+    handle_orchestration_comment,
     finance_deploy_lease_state,
     loop_ack_label,
     loop_root_label,
@@ -70,10 +74,12 @@ from apps.github_release_train import (  # noqa: E402
     resume_loop_owner,
     retry_blocked_release,
     require_deploy_environment,
+    release_lane_state,
     scope_from_labels,
     select_candidate,
     set_release_state,
     task_class_from_labels,
+    terminal_state_proven,
     terminalize_finance_deploy_lease,
     transition_label_set,
     upsert_status_comment,
@@ -461,6 +467,102 @@ def _assert_standard_repo_only_and_live() -> None:
     repeated = merge_candidate(api, candidate)
     assert repeated.skip_release
     assert len(api.merges) == 2
+
+
+def _assert_orchestration_lane_and_legacy_retirement() -> None:
+    api = FakeApi()
+    first = _pull(
+        60,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T01:00:00Z",
+    )
+    second = _pull(
+        61,
+        labels=[STAGED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T02:00:00Z",
+        sha=SHA_B,
+    )
+    direct_ready = _pull(
+        62,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-03T00:00:00Z",
+        sha=SHA_C,
+    )
+    api.pulls = {60: first, 61: second, 62: direct_ready}
+    api.checks = [
+        {"id": 1, "name": "baseline", "status": "completed", "conclusion": "success"}
+    ]
+    passport = "sha256:" + "1" * 64
+    evidence = "sha256:" + "2" * 64
+    assert handle_orchestration_comment(
+        api,
+        60,
+        f"/wb-core orchestration admit 60 head {SHA_A} task task-alpha-01 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    assert RELEASE_LANE_OWNER_LABEL in _labels(first)
+    assert READY_LABEL in _labels(first) and STAGED_LABEL not in _labels(first)
+    selected = select_candidate(api, orchestration_required=True)
+    assert selected["pr_number"] == 60
+    lane = release_lane_state(api)
+    assert lane["task_id"] == "task-alpha-01" and lane["owner_pr"] == 60
+
+    assert handle_orchestration_comment(
+        api,
+        61,
+        f"/wb-core orchestration admit 61 head {SHA_B} task task-bravo-02 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "waiting-other-task"
+    assert STAGED_LABEL in _labels(second)
+
+    set_release_state(api, 60, RUNNING_LABEL)
+    set_release_state(api, 60, DONE_LABEL)
+    assert handle_orchestration_comment(
+        api,
+        60,
+        f"/wb-core orchestration release-lane 60 task task-alpha-01 revision 2 outcome completed evidence {evidence}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "released"
+    assert release_lane_state(api) == {"status": "idle"}
+    assert handle_orchestration_comment(
+        api,
+        61,
+        f"/wb-core orchestration admit 61 head {SHA_B} task task-bravo-02 revision 1 passport {passport}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == "admitted"
+    assert select_candidate(api, orchestration_required=True)["pr_number"] == 61
+
+    manifest_path = ROOT / "migration" / "release_train_legacy_retirement_20260803.json"
+    manifest = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    legacy = _pull(
+        843,
+        labels=[BLOCKED_LABEL, STANDARD_TASK_LABEL, PRODUCTION_MUTATION_LABEL],
+        created_at="2026-07-28T06:40:00Z",
+        sha="6ed1756b1de9555c4f522fdcc2156cd519be707d",
+    )
+    legacy["merged"] = True
+    legacy["state"] = "closed"
+    legacy["merge_commit_sha"] = "7e246c839203923c6775cbf1a6e34dc81cb7c036"
+    api.pulls[843] = legacy
+    assert handle_orchestration_comment(
+        api,
+        843,
+        "/wb-core orchestration retire-legacy 843 head "
+        f"6ed1756b1de9555c4f522fdcc2156cd519be707d manifest {manifest}",
+        actor="orenvlad-ai",
+        association="OWNER",
+        actions_owned=True,
+    ) == RETIRED_LABEL
+    assert RETIRED_LABEL in _labels(legacy) and BLOCKED_LABEL not in _labels(legacy)
+    assert terminal_state_proven(api, legacy) is True
 
 
 def _assert_loop_handshake_and_gate() -> tuple[FakeApi, dict[str, Any]]:
@@ -3817,6 +3919,7 @@ def main() -> int:
         return 0
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
+    _assert_orchestration_lane_and_legacy_retirement()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
     _assert_foreign_gate_waiting_and_queue_progress()

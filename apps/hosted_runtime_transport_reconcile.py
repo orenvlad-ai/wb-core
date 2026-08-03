@@ -34,6 +34,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_RETRY_STAGES = frozenset({"daemon-reload", "restart", "probes", "readback"})
 TRANSPORT_INDETERMINATE_RETURN_CODES = frozenset({255})
 DEFAULT_ATTEMPTS = 3
+DEFAULT_BACKOFF_SECONDS = (0.0, 15.0, 45.0, 120.0, 300.0)
 
 
 @dataclass(frozen=True)
@@ -228,12 +229,15 @@ def reconcile(
                 or evidence.runtime_sha != expected
                 or evidence.mixed_deployment
                 or not evidence.auth_env_ok
-                or (
-                    require_deployment_complete
-                    and not evidence.deployment_complete
-                )
             ):
                 break
+            # Exact files can be visible before the deploy transaction writes its
+            # final completion marker.  This is a settling state, not proof of a
+            # wrong deployment and not a reason for an immediate global halt.
+            if require_deployment_complete and not evidence.deployment_complete:
+                if attempt < attempts:
+                    sleep(DEFAULT_BACKOFF_SECONDS[min(attempt, len(DEFAULT_BACKOFF_SECONDS) - 1)])
+                continue
             if allow_repairs and (
                 failed_stage in SAFE_RETRY_STAGES
                 or evidence.unit != "active"
@@ -252,7 +256,7 @@ def reconcile(
                 {"attempt": attempt, "operation": "readback", "returncode": readback.returncode}
             )
         if attempt < attempts:
-            sleep(min(float(attempt), 2.0))
+            sleep(DEFAULT_BACKOFF_SECONDS[min(attempt, len(DEFAULT_BACKOFF_SECONDS) - 1)])
 
     return {
         "status": "halted",
