@@ -6174,10 +6174,11 @@ def command_handle_comment(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_queue_status(args: argparse.Namespace) -> int:
-    """Read-only snapshot for the global Watcher; never refreshes owner state."""
+def queue_status_snapshot(
+    api: ReleaseApi, *, release_proof_prs: Iterable[int] = ()
+) -> dict[str, Any]:
+    """Return the bounded read-only queue snapshot used by Watcher preflight."""
 
-    api = _queue_status_api_from_env()
     labels = (
         STAGED_LABEL,
         READY_LABEL,
@@ -6213,21 +6214,30 @@ def command_queue_status(args: argparse.Namespace) -> int:
             )
             record["labels"].append(label)
     lane = release_lane_state(api)
+    return {
+        "status": "ok",
+        "queue": queue_gate_state(api),
+        "release_lane": lane,
+        "integrity": release_lane_integrity(lane),
+        "release_lane_proofs": release_lane_release_proofs(
+            api, release_proof_prs
+        ),
+        "counts": counts,
+        "active": [
+            {**active[number], "labels": sorted(active[number]["labels"])}
+            for number in sorted(active)
+        ],
+    }
+
+
+def command_queue_status(args: argparse.Namespace) -> int:
+    """Read-only snapshot for the global Watcher; never refreshes owner state."""
+
     _json_print(
-        {
-            "status": "ok",
-            "queue": queue_gate_state(api),
-            "release_lane": lane,
-            "integrity": release_lane_integrity(lane),
-            "release_lane_proofs": release_lane_release_proofs(
-                api, args.release_proof_pr
-            ),
-            "counts": counts,
-            "active": [
-                {**active[number], "labels": sorted(active[number]["labels"])}
-                for number in sorted(active)
-            ],
-        }
+        queue_status_snapshot(
+            _queue_status_api_from_env(),
+            release_proof_prs=args.release_proof_pr,
+        )
     )
     return 0
 
