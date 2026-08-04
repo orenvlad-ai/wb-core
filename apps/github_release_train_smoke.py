@@ -76,6 +76,8 @@ from apps.github_release_train import (  # noqa: E402
     resume_loop_owner,
     retry_blocked_release,
     require_deploy_environment,
+    release_lane_integrity,
+    release_lane_release_proofs,
     release_lane_state,
     scope_from_labels,
     select_candidate,
@@ -545,6 +547,23 @@ def _assert_orchestration_lane_and_legacy_retirement() -> None:
 
     set_release_state(api, 60, RUNNING_LABEL)
     set_release_state(api, 60, DONE_LABEL)
+    stale_signal = release_lane_integrity(release_lane_state(api))
+    assert stale_signal["status"] == "attention"
+    assert stale_signal["signals"][0] == {
+        "code": "terminal-release-lane-owner",
+        "owner_pr": 60,
+        "task_id": "task-alpha-01",
+        "minimum_revision": 1,
+        "owner_state": DONE_LABEL,
+        "required_operation": "orchestration release-lane",
+        "required_fields": [
+            "owner_pr",
+            "task",
+            "revision",
+            "outcome",
+            "evidence",
+        ],
+    }
     try:
         handle_orchestration_comment(
             api,
@@ -568,6 +587,20 @@ def _assert_orchestration_lane_and_legacy_retirement() -> None:
     ) == "admitted"
     set_release_state(api, 63, RUNNING_LABEL)
     set_release_state(api, 63, DONE_LABEL)
+    # PR #918 regression: the published no-revision shape must fail closed.
+    try:
+        handle_orchestration_comment(
+            api,
+            60,
+            f"/wb-core orchestration release-lane 60 task task-alpha-01 outcome completed evidence {evidence}",
+            actor="orenvlad-ai",
+            association="OWNER",
+            actions_owned=True,
+        )
+    except ReleaseBlocked as exc:
+        assert "revision" in str(exc)
+    else:
+        raise AssertionError("release-lane without an exact positive revision must fail")
     assert handle_orchestration_comment(
         api,
         60,
@@ -577,6 +610,17 @@ def _assert_orchestration_lane_and_legacy_retirement() -> None:
         actions_owned=True,
     ) == "released"
     assert release_lane_state(api) == {"status": "idle"}
+    assert release_lane_release_proofs(api, [60]) == [
+        {
+            "owner_pr": 60,
+            "task_id": "task-alpha-01",
+            "revision": 2,
+            "outcome": "completed",
+            "evidence_digest": evidence,
+        }
+    ]
+    released_comment_count = len(api.comments)
+    released_labels = set(_labels(first))
     assert handle_orchestration_comment(
         api,
         60,
@@ -585,6 +629,8 @@ def _assert_orchestration_lane_and_legacy_retirement() -> None:
         association="OWNER",
         actions_owned=True,
     ) == "already-released"
+    assert len(api.comments) == released_comment_count
+    assert _labels(first) == released_labels
     assert handle_orchestration_comment(
         api,
         61,
@@ -2961,6 +3007,7 @@ def _assert_workflow_contract() -> None:
         "WB_CORE_ORCHESTRATION_REQUIRED",
         "wb-core-orchestration-admission-proof",
         "wb-core-release-lane-proof",
+        "terminal-release-lane-owner",
         "wb-core-legacy-retirement-proof",
         "--read-only",
         'cron: "*/5 * * * *"',
@@ -3099,12 +3146,15 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
         assert "retired" in folded
     for source in (execution, release_train, orchestration):
         assert "release:retired" in source
+        assert "release-lane <ANCHOR_PR> task <TASK_ID> revision <POSITIVE_TASK_REVISION>" in source
     assert "## Глобальный Watcher И Арбитр" in execution
     assert "## Глобальный Watcher И Canonical Monitoring" in release_train
     assert "# Global Codex Orchestration v1" in orchestration
 
     for required in (
         "begin-run",
+        "heartbeat-record-release-lane",
+        "--queue-evidence-json",
         "wait_threads(timeoutMs: 0)",
         "record-failure",
         "REPLACE_EXECUTOR",

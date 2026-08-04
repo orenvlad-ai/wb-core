@@ -35,10 +35,15 @@ WATCHER_RUN_PHASES = (
     "apply-progress",
     "failure-incident",
     "terminal-evidence",
+    "release-lane-closure",
     "attention-delivery",
     "end-run",
     "heartbeat-response",
 )
+RELEASE_LANE_CLOSURE_STATES = frozenset(
+    {"PENDING", "DISPATCHED", "RETRY", "CONFIRMED", "EXHAUSTED", "STALE"}
+)
+RELEASE_LANE_CLOSURE_MAX_ATTEMPTS = 3
 WATCHER_TARGET_READBACK_STATUSES = frozenset(
     {"active", "idle", "completed", "failed"}
 )

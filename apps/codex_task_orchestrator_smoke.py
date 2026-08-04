@@ -28,12 +28,54 @@ from apps.codex_task_orchestrator_spec import (
     WATCHER_RUN_PHASES,
     WATCHER_RUN_PLAN_SCHEMA,
     WATCHER_TARGET_OBSERVATION_SCHEMA,
+    canonical_digest,
     classify_incident,
 )
 
 
 def _fresh_evidence_time() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+
+
+def _queue_evidence(
+    release_lane: dict[str, object] | None = None,
+    release_lane_proofs: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    lane = release_lane or {"status": "idle"}
+    signals: list[dict[str, object]] = []
+    if lane.get("status") == "owned" and lane.get("owner_state") in {
+        "release:done",
+        "release:production",
+    }:
+        signals.append(
+            {
+                "code": "terminal-release-lane-owner",
+                "owner_pr": int(lane["owner_pr"]),
+                "task_id": str(lane["task_id"]),
+                "minimum_revision": int(lane["revision"]),
+                "owner_state": str(lane["owner_state"]),
+                "required_operation": "orchestration release-lane",
+                "required_fields": [
+                    "owner_pr",
+                    "task",
+                    "revision",
+                    "outcome",
+                    "evidence",
+                ],
+            }
+        )
+    return {
+        "status": "ok",
+        "queue": {"status": "idle"},
+        "release_lane": lane,
+        "integrity": {
+            "status": "attention" if signals else "ok",
+            "signals": signals,
+        },
+        "release_lane_proofs": release_lane_proofs or [],
+        "counts": {},
+        "active": [],
+    }
 
 
 def _passport(name: str, identity: str) -> dict[str, object]:
@@ -798,10 +840,12 @@ def _run_watcher_driver_smoke() -> None:
             generation=1, owner="watcher-driver-owner", lease_seconds=540
         )
         assert first_begin["run_id"] == "watcher-g1-r1"
+        first_queue = _queue_evidence()
         first_plan = registry.plan_watcher_run(
             generation=1,
             owner="watcher-driver-owner",
-            queue_evidence_digest="sha256:" + "4" * 64,
+            queue_evidence_digest=canonical_digest(first_queue),
+            queue_evidence=first_queue,
         )
         assert first_plan["schema"] == WATCHER_RUN_PLAN_SCHEMA
         assert tuple(first_plan["ordered_phases"]) == WATCHER_RUN_PHASES
@@ -877,10 +921,12 @@ def _run_watcher_driver_smoke() -> None:
             generation=1, owner="watcher-driver-owner", lease_seconds=540
         )
         assert second_begin["run_id"] == "watcher-g1-r2"
+        second_queue = _queue_evidence()
         second_plan = registry.plan_watcher_run(
             generation=1,
             owner="watcher-driver-owner",
-            queue_evidence_digest="sha256:" + "7" * 64,
+            queue_evidence_digest=canonical_digest(second_queue),
+            queue_evidence=second_queue,
         )
         assert len(second_plan["pending_target_ids"]) == 2
         for identity, executor, digit in (
@@ -967,10 +1013,12 @@ def _run_watcher_driver_smoke() -> None:
         quiet_registry.begin_run(
             generation=1, owner="watcher-quiet-owner", lease_seconds=540
         )
+        quiet_queue = _queue_evidence()
         quiet_plan = quiet_registry.plan_watcher_run(
             generation=1,
             owner="watcher-quiet-owner",
-            queue_evidence_digest="sha256:" + "c" * 64,
+            queue_evidence_digest=canonical_digest(quiet_queue),
+            queue_evidence=quiet_queue,
         )
         assert quiet_plan["pending_target_ids"] == []
         quiet_registry.actuate_watcher_run(
@@ -985,6 +1033,311 @@ def _run_watcher_driver_smoke() -> None:
         )
         assert quiet_wrapper.findtext("decision") == "DONT_NOTIFY"
         assert quiet_wrapper.findtext("message") == "Нет активных задач."
+
+
+def _run_release_lane_closure_smoke() -> None:
+    """Reproduce PR #918: accepted terminal work still owns the lane."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "release-lane-registry")
+        registry.initialize()
+        task_id = "release-lane-regression-v1"
+        curator = "curator-release-lane"
+        executor = "executor-release-lane"
+        _register_with_curator(
+            registry,
+            identity=task_id,
+            suffix="release-lane",
+            curator=curator,
+            executor=executor,
+            envelope="release-lane-envelope-v1",
+            envelope_title="Закрытие линии",
+            title="Закрытие линии релиза",
+        )
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="watcher-release-lane",
+            automation_id="release-lane-auto",
+        )
+        registry.smoke_watcher(
+            generation=1, evidence_digest="sha256:" + "1" * 64
+        )
+        registry.activate_watcher(generation=1)
+        registry.link_pr(
+            task_id=task_id,
+            pr=918,
+            role="implementation",
+            head_sha="a" * 40,
+            state="done",
+        )
+        event = registry.enqueue_attention(
+            task_id=task_id,
+            expected_revision=1,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
+            evidence_summary="Terminal PR и проверенный результат доказанно завершены.",
+            evidence_digest="sha256:" + "2" * 64,
+            eta="готово",
+            delta="Выпуск завершён.",
+            current="Куратор получает подтверждённый результат.",
+        )
+        reserved = registry.reserve_attention(
+            generation=1,
+            owner="watcher-release-lane-delivery",
+            lease_seconds=60,
+            limit=8,
+        )["reserved"][0]
+        registry.mark_attention_sent(
+            event_id=str(reserved["event_id"]),
+            owner="watcher-release-lane-delivery",
+            transport_receipt_digest="sha256:" + "3" * 64,
+            ack_timeout_seconds=600,
+        )
+        acknowledgement = registry.ack_attention(
+            event_id=str(event["event_id"]),
+            event_digest=str(event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=int(event["task_revision"]),
+            ack_evidence_digest="sha256:" + "4" * 64,
+        )
+        handoff = registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id="release-lane-envelope-v1",
+            expected_revision=int(acknowledgement["acceptance_envelope_revision"]),
+            done=["Автоматическое завершение выпуска подтверждено."],
+            verified="Terminal PR и проверки подтверждены.",
+        )
+        registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id="release-lane-envelope-v1",
+            expected_revision=int(acknowledgement["acceptance_envelope_revision"]),
+            notification_evidence_digest=str(handoff["handoff_digest"]),
+        )
+        registry.accept_curator(
+            curator_thread_id=curator,
+            expected_envelope_revision=int(
+                acknowledgement["acceptance_envelope_revision"]
+            ),
+        )
+        accepted_revision = int(
+            registry.progress_state(task_id=task_id)["revision"]
+        )
+
+        owned_lane = {
+            "status": "owned",
+            "owner_pr": 918,
+            "task_id": task_id,
+            "revision": 1,
+            "owner_state": "release:done",
+        }
+        first_queue = _queue_evidence(owned_lane)
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        first_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(first_queue),
+            queue_evidence=first_queue,
+        )
+        assert first_plan["pending_target_ids"] == []
+        pending = first_plan["release_lane_closure"]["pending_actions"]
+        assert len(pending) == 1
+        action = pending[0]
+        assert f" revision {accepted_revision} " in action["command"]
+        assert action["command"].startswith(
+            f"/wb-core orchestration release-lane 918 task {task_id} "
+        )
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        try:
+            registry.finish_watcher_run(
+                generation=1,
+                owner="watcher-release-owner",
+                automation_id="release-lane-auto",
+            )
+        except RuntimeError as exc:
+            assert "release-lane" in str(exc)
+        else:
+            raise AssertionError("scheduled lane closure must have a durable receipt")
+        failed = registry.record_release_lane_attempt(
+            generation=1,
+            owner="watcher-release-owner",
+            action_id=str(action["action_id"]),
+            result="failed",
+            attempt_evidence_digest="sha256:" + "5" * 64,
+            error="GitHub comment transport failed",
+            retry_after_seconds=0,
+        )
+        assert failed["state"] == "RETRY" and failed["attempt_count"] == 1
+        assert registry.record_release_lane_attempt(
+            generation=1,
+            owner="watcher-release-owner",
+            action_id=str(action["action_id"]),
+            result="failed",
+            attempt_evidence_digest="sha256:" + "5" * 64,
+            error="GitHub comment transport failed",
+            retry_after_seconds=0,
+        )["idempotent"] is True
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+
+        second_queue = _queue_evidence(owned_lane)
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        second_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(second_queue),
+            queue_evidence=second_queue,
+        )
+        retry = second_plan["release_lane_closure"]["pending_actions"][0]
+        assert retry["action_id"] == action["action_id"] and retry["attempt"] == 2
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        sent = registry.record_release_lane_attempt(
+            generation=1,
+            owner="watcher-release-owner",
+            action_id=str(action["action_id"]),
+            result="sent",
+            attempt_evidence_digest="sha256:" + "6" * 64,
+            transport_receipt_digest="sha256:" + "7" * 64,
+            retry_after_seconds=0,
+        )
+        assert sent["state"] == "DISPATCHED" and sent["attempt_count"] == 2
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+
+        proofless_idle_queue = _queue_evidence()
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        proofless_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(proofless_idle_queue),
+            queue_evidence=proofless_idle_queue,
+        )
+        assert proofless_plan["release_lane_closure"]["pending_actions"] == []
+        assert proofless_plan["release_lane_closure"]["confirmation_signals"][0][
+            "code"
+        ] == "release-lane-confirmation-proof-missing"
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+        assert registry.snapshot()["release_lane_closures"][0]["state"] == (
+            "DISPATCHED"
+        )
+
+        idle_queue = _queue_evidence(
+            release_lane_proofs=[
+                {
+                    "owner_pr": 918,
+                    "task_id": task_id,
+                    "revision": int(action["task_revision"]),
+                    "outcome": "completed",
+                    "evidence_digest": str(action["evidence_digest"]),
+                }
+            ]
+        )
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        confirmed_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(idle_queue),
+            queue_evidence=idle_queue,
+        )
+        assert confirmed_plan["release_lane_closure"]["pending_actions"] == []
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+        snapshot = registry.snapshot()
+        assert snapshot["release_lane_closures"][0]["state"] == "CONFIRMED"
+        assert registry.integrity()["release_lane_closure_signals"] == []
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+        # A proven owner that reappears reuses the exact action; attempt three
+        # exhausts blind recovery and opens one incident, never a fourth send.
+        reappeared_queue = _queue_evidence(owned_lane)
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        reappeared_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(reappeared_queue),
+            queue_evidence=reappeared_queue,
+        )
+        third_attempt = reappeared_plan["release_lane_closure"]["pending_actions"][0]
+        assert third_attempt["action_id"] == action["action_id"]
+        assert third_attempt["attempt"] == 3
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        exhausted = registry.record_release_lane_attempt(
+            generation=1,
+            owner="watcher-release-owner",
+            action_id=str(action["action_id"]),
+            result="failed",
+            attempt_evidence_digest="sha256:" + "8" * 64,
+            error="Trusted command workflow failed",
+            retry_after_seconds=0,
+        )
+        assert exhausted["state"] == "EXHAUSTED"
+        assert exhausted["incident"]["status"] == "OPEN"
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+        assert registry.integrity()["release_lane_closure_signals"][0]["code"] == (
+            "release-lane-recovery-exhausted"
+        )
+
+        registry.begin_run(
+            generation=1, owner="watcher-release-owner", lease_seconds=540
+        )
+        recovered_plan = registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            queue_evidence_digest=canonical_digest(idle_queue),
+            queue_evidence=idle_queue,
+        )
+        assert recovered_plan["release_lane_closure"]["pending_actions"] == []
+        registry.actuate_watcher_run(
+            generation=1, owner="watcher-release-owner"
+        )
+        registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-release-owner",
+            automation_id="release-lane-auto",
+        )
+        final_snapshot = registry.snapshot()
+        assert final_snapshot["release_lane_closures"][0]["state"] == "CONFIRMED"
+        assert final_snapshot["incidents"] == []
+        assert registry.integrity()["release_lane_closure_signals"] == []
 
 
 def _run_workstream_report_smoke() -> None:
@@ -1064,6 +1417,7 @@ def run_smoke() -> None:
         "begin-run",
         "heartbeat-plan",
         "heartbeat-record-target",
+        "heartbeat-record-release-lane",
         "heartbeat-actuate",
         "heartbeat-finish",
         "checkpoint-progress",
@@ -1088,6 +1442,7 @@ def run_smoke() -> None:
         "record-watcher-context-compaction",
         "contextCompaction",
         "python3 apps/codex_task_orchestrator.py heartbeat-finish",
+        "--queue-evidence-json",
         "rotation_due=true",
         "Задача принята",
     ):
@@ -1096,6 +1451,12 @@ def run_smoke() -> None:
         "at-least-once-with-stable-event-id"
     )
     assert watcher_contract["report"]["unit"] == "acceptance-envelope-workstream"
+    assert watcher_contract["release_lane_closure"]["max_attempts"] == 3
+    assert watcher_contract["release_lane_closure"]["same_command_retry"] is True
+    assert watcher_contract["release_lane_closure"][
+        "confirmation_requires_actions_owned_release_proof"
+    ] is True
+    assert watcher_contract["release_lane_closure"]["exhaustion_opens_incident"] is True
     assert watcher_contract["heartbeat_driver"]["ordered_phases"][-2:] == [
         "end-run",
         "heartbeat-response",
@@ -1168,6 +1529,7 @@ def run_smoke() -> None:
 
     _run_progress_smoke()
     _run_watcher_driver_smoke()
+    _run_release_lane_closure_smoke()
     _run_workstream_report_smoke()
 
     with tempfile.TemporaryDirectory() as temporary:
