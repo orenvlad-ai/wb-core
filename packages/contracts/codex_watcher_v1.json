@@ -16,6 +16,7 @@
     "run_plan_command": "heartbeat-plan",
     "target_observation_command": "heartbeat-record-target",
     "actuation_command": "heartbeat-actuate",
+    "release_lane_attempt_command": "heartbeat-record-release-lane",
     "finish_command": "heartbeat-finish"
   },
   "heartbeat_driver": {
@@ -30,6 +31,7 @@
       "apply-progress",
       "failure-incident",
       "terminal-evidence",
+      "release-lane-closure",
       "attention-delivery",
       "end-run",
       "heartbeat-response"
@@ -52,8 +54,34 @@
       "completion-evidence-digest"
     ],
     "finish_requires_target_coverage": true,
+    "finish_requires_release_lane_attempt_receipt": true,
     "finish_requires_attention_delivery": true,
     "finish_emits_only_canonical_wrapper": true
+  },
+  "release_lane_closure": {
+    "queue_evidence_is_materialized": true,
+    "queue_status_proof_argument": "--release-proof-pr <OWNER_PR>",
+    "command_shape": "/wb-core orchestration release-lane <ANCHOR_PR> task <TASK_ID> revision <TASK_REVISION> outcome <completed|parked> evidence sha256:<EVIDENCE_HASH>",
+    "terminal_task_states": [
+      "DONE_PENDING_HANDOFF",
+      "DONE_AWAITING_ACCEPTANCE",
+      "ACCEPTED"
+    ],
+    "states": [
+      "PENDING",
+      "DISPATCHED",
+      "RETRY",
+      "CONFIRMED",
+      "EXHAUSTED",
+      "STALE"
+    ],
+    "max_attempts": 3,
+    "same_command_retry": true,
+    "queue_readback_confirms_release": true,
+    "confirmation_requires_actions_owned_release_proof": true,
+    "label_absence_alone_confirms_release": false,
+    "exhaustion_opens_incident": true,
+    "manual_label_removal": false
   },
   "arbiter": {
     "model": "gpt-5.6-sol",

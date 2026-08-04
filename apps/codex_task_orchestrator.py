@@ -38,6 +38,8 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     OBJECTIVE_PROGRESS_STAGES,
     OBSERVED_EARLY_STAGES,
     ProgressStage,
+    RELEASE_LANE_CLOSURE_MAX_ATTEMPTS,
+    RELEASE_LANE_CLOSURE_STATES,
     RetryObservation,
     STRICT_HUMAN_REASONS,
     SuccessionStatus,
@@ -315,6 +317,7 @@ CREATE TABLE IF NOT EXISTS watcher_run_plans (
     snapshot_digest TEXT NOT NULL,
     integrity_digest TEXT NOT NULL,
     queue_evidence_digest TEXT NOT NULL,
+    queue_evidence_json TEXT NOT NULL,
     task_set_digest TEXT NOT NULL,
     heartbeat_xml TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
@@ -338,6 +341,32 @@ CREATE TABLE IF NOT EXISTS watcher_run_targets (
     actuated_at TEXT,
     PRIMARY KEY(run_id,task_id)
 );
+CREATE TABLE IF NOT EXISTS release_lane_closures (
+    action_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    task_revision INTEGER NOT NULL CHECK(task_revision > 0),
+    owner_pr INTEGER NOT NULL CHECK(owner_pr > 0),
+    outcome TEXT NOT NULL CHECK(outcome IN ('completed','parked')),
+    evidence_digest TEXT NOT NULL,
+    command TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('PENDING','DISPATCHED','RETRY','CONFIRMED','EXHAUSTED','STALE')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    max_attempts INTEGER NOT NULL DEFAULT 3 CHECK(max_attempts > 0),
+    scheduled_run_id TEXT NOT NULL DEFAULT '',
+    last_attempt_run_id TEXT NOT NULL DEFAULT '',
+    transport_receipt_digest TEXT NOT NULL DEFAULT '',
+    last_attempt_evidence_digest TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_attempt_at TEXT,
+    confirmed_at TEXT,
+    UNIQUE(task_id,task_revision,owner_pr,outcome,evidence_digest)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_release_lane_closure_per_task
+ON release_lane_closures(task_id)
+WHERE state IN ('PENDING','DISPATCHED','RETRY','EXHAUSTED');
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at TEXT NOT NULL,
@@ -605,13 +634,24 @@ class Registry:
                 connection.execute(
                     "ALTER TABLE runtime_leases ADD COLUMN run_id TEXT NOT NULL DEFAULT ''"
                 )
+            watcher_plan_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(watcher_run_plans)"
+                )
+            }
+            if "queue_evidence_json" not in watcher_plan_columns:
+                connection.execute(
+                    "ALTER TABLE watcher_run_plans ADD COLUMN queue_evidence_json "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute("DROP INDEX IF EXISTS one_active_incident_per_task")
             connection.execute(
                 "CREATE UNIQUE INDEX one_active_incident_per_task ON incidents(task_id) "
                 "WHERE status IN ('OPEN','WAITING_RESOURCE','CLAIMED','DECIDED','DELIVERED','VERIFIED')"
             )
             connection.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version','8') "
+                "INSERT INTO meta(key,value) VALUES('schema_version','9') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         if self.db_path.exists():
@@ -4324,6 +4364,383 @@ class Registry:
     def _watcher_run_phases() -> list[str]:
         return list(WATCHER_RUN_PHASES)
 
+    @staticmethod
+    def _validated_queue_evidence(
+        queue_evidence: Mapping[str, object], *, expected_digest: str
+    ) -> dict[str, Any]:
+        required = {
+            "status",
+            "queue",
+            "release_lane",
+            "integrity",
+            "release_lane_proofs",
+            "counts",
+            "active",
+        }
+        if set(queue_evidence) != required:
+            raise ValueError("queue evidence fields do not match the contract")
+        if queue_evidence.get("status") != "ok":
+            raise ValueError("queue evidence must be a successful read-only snapshot")
+        for field in ("queue", "release_lane", "integrity", "counts"):
+            if not isinstance(queue_evidence.get(field), Mapping):
+                raise ValueError(f"queue evidence {field} must be an object")
+        if not isinstance(queue_evidence.get("active"), list):
+            raise ValueError("queue evidence active must be a list")
+        release_lane_proofs = queue_evidence.get("release_lane_proofs")
+        if not isinstance(release_lane_proofs, list):
+            raise ValueError("queue evidence release_lane_proofs must be a list")
+        proof_keys = {
+            "owner_pr",
+            "task_id",
+            "revision",
+            "outcome",
+            "evidence_digest",
+        }
+        for proof in release_lane_proofs:
+            if not isinstance(proof, Mapping) or set(proof) != proof_keys:
+                raise ValueError("release-lane proof fields do not match the contract")
+            if int(proof["owner_pr"]) <= 0 or int(proof["revision"]) <= 0:
+                raise ValueError("release-lane proof identities must be positive")
+            validate_task_id(str(proof["task_id"]))
+            validate_digest(str(proof["evidence_digest"]))
+            if proof["outcome"] not in {"completed", "parked"}:
+                raise ValueError("release-lane proof outcome is invalid")
+        integrity = queue_evidence["integrity"]
+        if set(integrity) != {"status", "signals"} or not isinstance(
+            integrity.get("signals"), list
+        ):
+            raise ValueError("queue integrity evidence fields do not match the contract")
+        rendered = dict(queue_evidence)
+        if canonical_digest(rendered) != expected_digest:
+            raise ValueError("queue evidence digest does not match the exact readback")
+        return rendered
+
+    @staticmethod
+    def _release_lane_action_payload(row: Mapping[str, object]) -> dict[str, object]:
+        return {
+            "action_id": str(row["action_id"]),
+            "task_id": str(row["task_id"]),
+            "task_revision": int(row["task_revision"]),
+            "owner_pr": int(row["owner_pr"]),
+            "outcome": str(row["outcome"]),
+            "evidence_digest": str(row["evidence_digest"]),
+            "command": str(row["command"]),
+            "state": str(row["state"]),
+            "attempt": int(row["attempt_count"]) + 1,
+            "max_attempts": int(row["max_attempts"]),
+        }
+
+    def _reconcile_release_lane_closure(
+        self, connection: sqlite3.Connection, plan: sqlite3.Row
+    ) -> None:
+        queue_evidence = _load_object(
+            str(plan["queue_evidence_json"]), field="queue-evidence-json"
+        )
+        lane = queue_evidence["release_lane"]
+        if not isinstance(lane, Mapping):
+            raise ValueError("queue release_lane must be an object")
+        run_id = str(plan["run_id"])
+        lane_status = str(lane.get("status") or "")
+        lane_task_id = str(lane.get("task_id") or "")
+        lane_owner_pr = int(lane.get("owner_pr") or 0)
+        lane_owner_state = str(lane.get("owner_state") or "")
+        release_proofs = queue_evidence["release_lane_proofs"]
+        timestamp = _now()
+
+        active_rows = connection.execute(
+            "SELECT * FROM release_lane_closures WHERE "
+            "state IN ('PENDING','DISPATCHED','RETRY','EXHAUSTED') ORDER BY created_at"
+        ).fetchall()
+        for row in active_rows:
+            proof_matches = any(
+                int(proof["owner_pr"]) == int(row["owner_pr"])
+                and proof["task_id"] == row["task_id"]
+                and int(proof["revision"]) == int(row["task_revision"])
+                and proof["outcome"] == row["outcome"]
+                and proof["evidence_digest"] == row["evidence_digest"]
+                for proof in release_proofs
+            )
+            lane_moved = lane_status == "idle" or (
+                lane_status == "owned" and row["task_id"] != lane_task_id
+            )
+            if proof_matches and lane_moved:
+                connection.execute(
+                    "UPDATE release_lane_closures SET state='CONFIRMED',confirmed_at=?,"
+                    "scheduled_run_id='',updated_at=? WHERE action_id=?",
+                    (timestamp, timestamp, row["action_id"]),
+                )
+                self.event(
+                    connection,
+                    "release-lane-closure",
+                    row["action_id"],
+                    "confirmed-by-queue-readback",
+                    {
+                        "run_id": run_id,
+                        "queue_evidence_digest": plan["queue_evidence_digest"],
+                    },
+                )
+                incidents = connection.execute(
+                    "SELECT case_id FROM incidents WHERE task_id=? "
+                    "AND phase='release-lane-closure' AND evidence_fingerprint=? "
+                    "AND status IN (?,?,?,?,?,?)",
+                    (
+                        row["task_id"],
+                        row["evidence_digest"],
+                        *ACTIVE_INCIDENT_STATES,
+                    ),
+                ).fetchall()
+                for incident in incidents:
+                    connection.execute(
+                        "UPDATE incidents SET status=?,updated_at=? WHERE case_id=?",
+                        (IncidentStatus.STALE.value, timestamp, incident["case_id"]),
+                    )
+                    connection.execute(
+                        "DELETE FROM resource_locks WHERE case_id=?",
+                        (incident["case_id"],),
+                    )
+                    self.event(
+                        connection,
+                        "incident",
+                        incident["case_id"],
+                        "resolved-by-release-lane-confirmation",
+                        {"action_id": row["action_id"], "run_id": run_id},
+                    )
+
+        if lane_status != "owned" or not lane_task_id or lane_owner_pr <= 0:
+            return
+        if lane_owner_state not in {"release:done", "release:production"}:
+            return
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE task_id=?", (lane_task_id,)
+        ).fetchone()
+        if task is None or TaskStatus(task["status"]) not in {
+            TaskStatus.DONE_PENDING_HANDOFF,
+            TaskStatus.DONE_AWAITING_ACCEPTANCE,
+            TaskStatus.ACCEPTED,
+        }:
+            return
+
+        action = connection.execute(
+            "SELECT * FROM release_lane_closures WHERE task_id=? AND "
+            "state IN ('PENDING','DISPATCHED','RETRY','EXHAUSTED') "
+            "ORDER BY created_at LIMIT 1",
+            (lane_task_id,),
+        ).fetchone()
+        if action is not None and int(action["owner_pr"]) != lane_owner_pr:
+            connection.execute(
+                "UPDATE release_lane_closures SET state='STALE',scheduled_run_id='',"
+                "updated_at=? WHERE action_id=?",
+                (timestamp, action["action_id"]),
+            )
+            self.event(
+                connection,
+                "release-lane-closure",
+                action["action_id"],
+                "owner-changed",
+                {"owner_pr": lane_owner_pr, "run_id": run_id},
+            )
+            action = None
+        if action is None:
+            task_revision = int(task["revision"])
+            evidence_digest = canonical_digest(
+                {
+                    "schema": "wb-core-release-lane-closure/v1",
+                    "task_id": lane_task_id,
+                    "task_revision": task_revision,
+                    "owner_pr": lane_owner_pr,
+                    "owner_state": lane_owner_state,
+                    "task_status": task["status"],
+                    "queue_evidence_digest": plan["queue_evidence_digest"],
+                }
+            )
+            action_identity = canonical_digest(
+                {
+                    "task_id": lane_task_id,
+                    "task_revision": task_revision,
+                    "owner_pr": lane_owner_pr,
+                    "outcome": "completed",
+                }
+            )
+            action_id = "lane-" + action_identity.removeprefix("sha256:")[:24]
+            command = (
+                f"/wb-core orchestration release-lane {lane_owner_pr} "
+                f"task {lane_task_id} revision {task_revision} outcome completed "
+                f"evidence {evidence_digest}"
+            )
+            previous = connection.execute(
+                "SELECT * FROM release_lane_closures WHERE action_id=?", (action_id,)
+            ).fetchone()
+            if previous is not None:
+                connection.execute(
+                    "UPDATE release_lane_closures SET state='RETRY',confirmed_at=NULL,"
+                    "scheduled_run_id='',next_attempt_at=0,updated_at=? WHERE action_id=?",
+                    (timestamp, action_id),
+                )
+                self.event(
+                    connection,
+                    "release-lane-closure",
+                    action_id,
+                    "owner-reappeared-after-confirmation",
+                    {"owner_pr": lane_owner_pr, "run_id": run_id},
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO release_lane_closures(action_id,task_id,task_revision,"
+                    "owner_pr,outcome,evidence_digest,command,state,max_attempts,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        lane_task_id,
+                        task_revision,
+                        lane_owner_pr,
+                        "completed",
+                        evidence_digest,
+                        command,
+                        "PENDING",
+                        RELEASE_LANE_CLOSURE_MAX_ATTEMPTS,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self.event(
+                    connection,
+                    "release-lane-closure",
+                    action_id,
+                    "enqueued",
+                    {
+                        "owner_pr": lane_owner_pr,
+                        "task_id": lane_task_id,
+                        "task_revision": task_revision,
+                        "run_id": run_id,
+                    },
+                )
+            action = connection.execute(
+                "SELECT * FROM release_lane_closures WHERE action_id=?", (action_id,)
+            ).fetchone()
+
+        attempts = int(action["attempt_count"])
+        if attempts >= int(action["max_attempts"]):
+            if action["state"] != "EXHAUSTED":
+                connection.execute(
+                    "UPDATE release_lane_closures SET state='EXHAUSTED',"
+                    "scheduled_run_id='',updated_at=? WHERE action_id=?",
+                    (timestamp, action["action_id"]),
+                )
+                self.event(
+                    connection,
+                    "release-lane-closure",
+                    action["action_id"],
+                    "recovery-exhausted",
+                    {"attempt_count": attempts, "run_id": run_id},
+                )
+            return
+        if action["state"] == "EXHAUSTED":
+            return
+        if float(action["next_attempt_at"] or 0) > time.time():
+            return
+        if action["last_attempt_run_id"] == run_id:
+            return
+        connection.execute(
+            "UPDATE release_lane_closures SET scheduled_run_id=?,updated_at=? "
+            "WHERE action_id=?",
+            (run_id, timestamp, action["action_id"]),
+        )
+
+    def _release_lane_plan_payload(
+        self, connection: sqlite3.Connection, plan: sqlite3.Row
+    ) -> dict[str, object]:
+        run_id = str(plan["run_id"])
+        pending = [
+            self._release_lane_action_payload(row)
+            for row in connection.execute(
+                "SELECT * FROM release_lane_closures WHERE scheduled_run_id=? "
+                "AND last_attempt_run_id<>? AND state IN ('PENDING','DISPATCHED','RETRY') "
+                "ORDER BY created_at,action_id",
+                (run_id, run_id),
+            ).fetchall()
+        ]
+        exhausted = [
+            {
+                "code": "release-lane-recovery-exhausted",
+                "action_id": row["action_id"],
+                "task_id": row["task_id"],
+                "task_revision": int(row["task_revision"]),
+                "owner_pr": int(row["owner_pr"]),
+                "attempt_count": int(row["attempt_count"]),
+                "evidence_digest": row["evidence_digest"],
+                "required_action": "incident-remediation",
+            }
+            for row in connection.execute(
+                "SELECT * FROM release_lane_closures WHERE state='EXHAUSTED' "
+                "ORDER BY created_at,action_id"
+            ).fetchall()
+        ]
+        queue_evidence = _load_object(
+            str(plan["queue_evidence_json"]), field="queue-evidence-json"
+        )
+        queue_integrity = queue_evidence["integrity"]
+        queue_signals = list(queue_integrity.get("signals") or [])
+        lane = queue_evidence["release_lane"]
+        lane_task_id = str(lane.get("task_id") or "")
+        lane_moved = lane.get("status") == "idle"
+        release_proofs = queue_evidence["release_lane_proofs"]
+        confirmation_signals: list[dict[str, object]] = []
+        for row in connection.execute(
+            "SELECT * FROM release_lane_closures WHERE "
+            "state IN ('PENDING','DISPATCHED','RETRY') ORDER BY created_at,action_id"
+        ).fetchall():
+            row_lane_moved = lane_moved or (
+                lane.get("status") == "owned" and row["task_id"] != lane_task_id
+            )
+            proof_matches = any(
+                int(proof["owner_pr"]) == int(row["owner_pr"])
+                and proof["task_id"] == row["task_id"]
+                and int(proof["revision"]) == int(row["task_revision"])
+                and proof["outcome"] == row["outcome"]
+                and proof["evidence_digest"] == row["evidence_digest"]
+                for proof in release_proofs
+            )
+            if row_lane_moved and not proof_matches:
+                confirmation_signals.append(
+                    {
+                        "code": "release-lane-confirmation-proof-missing",
+                        "action_id": row["action_id"],
+                        "task_id": row["task_id"],
+                        "task_revision": int(row["task_revision"]),
+                        "owner_pr": int(row["owner_pr"]),
+                        "required_action": "queue-status --release-proof-pr",
+                    }
+                )
+        return {
+            "status": (
+                "attention"
+                if queue_signals or exhausted or confirmation_signals
+                else "ok"
+            ),
+            "queue_signals": queue_signals,
+            "recovery_signals": exhausted,
+            "confirmation_signals": confirmation_signals,
+            "pending_actions": pending,
+            "pending_action_ids": [item["action_id"] for item in pending],
+        }
+
+    def _ensure_release_lane_recovery_incidents(
+        self, signals: Iterable[Mapping[str, object]]
+    ) -> None:
+        for signal in signals:
+            if signal.get("code") != "release-lane-recovery-exhausted":
+                continue
+            task_id = validate_task_id(str(signal["task_id"]))
+            task = self.task(task_id)
+            self.open_incident(
+                task_id=task_id,
+                task_revision=int(task["revision"]),
+                phase="release-lane-closure",
+                error_class="bounded-release-lane-recovery-exhausted",
+                evidence_fingerprint=str(signal["evidence_digest"]),
+                resources=["wb-core:release", "wb-core:orchestration-registry"],
+            )
+
     def _watcher_plan_payload(
         self, connection: sqlite3.Connection, plan: sqlite3.Row
     ) -> dict[str, object]:
@@ -4381,6 +4798,9 @@ class Registry:
                 if int(target["followup_required"])
                 and not target["followup_receipt_digest"]
             ],
+            "release_lane_closure": self._release_lane_plan_payload(
+                connection, plan
+            ),
         }
 
     def plan_watcher_run(
@@ -4389,8 +4809,13 @@ class Registry:
         generation: int,
         owner: str,
         queue_evidence_digest: str,
+        queue_evidence: Mapping[str, object],
     ) -> dict[str, object]:
         queue_digest = validate_digest(queue_evidence_digest)
+        queue_payload = self._validated_queue_evidence(
+            queue_evidence, expected_digest=queue_digest
+        )
+        queue_json = _json(queue_payload)
         snapshot = self.snapshot()
         integrity = self.integrity()
         if not integrity["ok"]:
@@ -4415,7 +4840,10 @@ class Registry:
                 "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
             ).fetchone()
             if existing is not None:
-                if existing["queue_evidence_digest"] != queue_digest:
+                if (
+                    existing["queue_evidence_digest"] != queue_digest
+                    or existing["queue_evidence_json"] != queue_json
+                ):
                     raise RuntimeError(
                         "watcher run already has different queue evidence"
                     )
@@ -4457,8 +4885,8 @@ class Registry:
             connection.execute(
                 "INSERT INTO watcher_run_plans("
                 "run_id,generation,lease_owner,state,plan_digest,snapshot_digest,"
-                "integrity_digest,queue_evidence_digest,task_set_digest,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "integrity_digest,queue_evidence_digest,queue_evidence_json,"
+                "task_set_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     generation,
@@ -4468,6 +4896,7 @@ class Registry:
                     snapshot_digest,
                     integrity_digest,
                     queue_digest,
+                    queue_json,
                     task_set_digest,
                     timestamp,
                 ),
@@ -4501,8 +4930,15 @@ class Registry:
             plan = connection.execute(
                 "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
             ).fetchone()
+            self._reconcile_release_lane_closure(connection, plan)
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
             result = self._watcher_plan_payload(connection, plan)
         self.flush_events()
+        self._ensure_release_lane_recovery_incidents(
+            result["release_lane_closure"]["recovery_signals"]
+        )
         return result
 
     def record_watcher_target(
@@ -4907,8 +5343,15 @@ class Registry:
             plan = connection.execute(
                 "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
             ).fetchone()
+            self._reconcile_release_lane_closure(connection, plan)
+            plan = connection.execute(
+                "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone()
             payload = self._watcher_plan_payload(connection, plan)
         self.flush_events()
+        self._ensure_release_lane_recovery_incidents(
+            payload["release_lane_closure"]["recovery_signals"]
+        )
         payload["results"] = results
         return payload
 
@@ -4955,6 +5398,121 @@ class Registry:
         self.flush_events()
         return {"run_id": lease["run_id"], "task_id": identity, "recorded": True}
 
+    def record_release_lane_attempt(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        action_id: str,
+        result: str,
+        attempt_evidence_digest: str,
+        transport_receipt_digest: str = "",
+        error: str = "",
+        retry_after_seconds: int = 60,
+    ) -> dict[str, object]:
+        identity = action_id.strip()
+        if not identity.startswith("lane-") or len(identity) != 29:
+            raise ValueError("release-lane action id is invalid")
+        if result not in {"sent", "failed"}:
+            raise ValueError("release-lane attempt result must be sent or failed")
+        evidence_digest = validate_digest(attempt_evidence_digest)
+        receipt_digest = (
+            validate_digest(transport_receipt_digest)
+            if transport_receipt_digest.strip()
+            else ""
+        )
+        if result == "sent" and (not receipt_digest or error.strip()):
+            raise ValueError("sent release-lane attempt requires only a transport receipt")
+        if result == "failed" and (receipt_digest or not error.strip()):
+            raise ValueError("failed release-lane attempt requires an exact error")
+        if retry_after_seconds < 0 or retry_after_seconds > 3600:
+            raise ValueError("release-lane retry delay must be between 0 and 3600 seconds")
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            run_id = str(lease["run_id"])
+            row = connection.execute(
+                "SELECT * FROM release_lane_closures WHERE action_id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown release-lane action: {identity}")
+            if row["scheduled_run_id"] != run_id:
+                raise RuntimeError("release-lane action is not scheduled for this run")
+            if row["last_attempt_run_id"] == run_id:
+                if (
+                    row["last_attempt_evidence_digest"] != evidence_digest
+                    or row["transport_receipt_digest"] != receipt_digest
+                    or row["last_error"] != error.strip()
+                ):
+                    raise RuntimeError("release-lane attempt already has different evidence")
+                return {
+                    "action_id": identity,
+                    "state": row["state"],
+                    "attempt_count": int(row["attempt_count"]),
+                    "idempotent": True,
+                }
+            if row["state"] not in {"PENDING", "DISPATCHED", "RETRY"}:
+                raise RuntimeError("release-lane action is no longer dispatchable")
+            attempt_count = int(row["attempt_count"]) + 1
+            state = "DISPATCHED"
+            if result == "failed":
+                state = (
+                    "EXHAUSTED"
+                    if attempt_count >= int(row["max_attempts"])
+                    else "RETRY"
+                )
+            timestamp = _now()
+            connection.execute(
+                "UPDATE release_lane_closures SET state=?,attempt_count=?,"
+                "last_attempt_run_id=?,transport_receipt_digest=?,"
+                "last_attempt_evidence_digest=?,last_error=?,next_attempt_at=?,"
+                "last_attempt_at=?,updated_at=? WHERE action_id=?",
+                (
+                    state,
+                    attempt_count,
+                    run_id,
+                    receipt_digest,
+                    evidence_digest,
+                    error.strip(),
+                    time.time() + retry_after_seconds,
+                    timestamp,
+                    timestamp,
+                    identity,
+                ),
+            )
+            self.event(
+                connection,
+                "release-lane-closure",
+                identity,
+                "attempt-recorded",
+                {
+                    "attempt_count": attempt_count,
+                    "result": result,
+                    "run_id": run_id,
+                    "state": state,
+                },
+            )
+        self.flush_events()
+        incident: dict[str, object] | None = None
+        if state == "EXHAUSTED":
+            current_task = self.task(str(row["task_id"]))
+            incident = self.open_incident(
+                task_id=str(row["task_id"]),
+                task_revision=int(current_task["revision"]),
+                phase="release-lane-closure",
+                error_class="bounded-release-lane-recovery-exhausted",
+                evidence_fingerprint=str(row["evidence_digest"]),
+                resources=["wb-core:release", "wb-core:orchestration-registry"],
+            )
+        return {
+            "action_id": identity,
+            "state": state,
+            "attempt_count": attempt_count,
+            "idempotent": False,
+            "incident": incident,
+        }
+
     def finish_watcher_run(
         self, *, generation: int, owner: str, automation_id: str
     ) -> str:
@@ -4979,6 +5537,16 @@ class Registry:
                 raise RuntimeError(
                     "watcher run still has pending target actions: "
                     + ",".join(str(row["task_id"]) for row in missing)
+                )
+            pending_lane_action = connection.execute(
+                "SELECT action_id FROM release_lane_closures WHERE scheduled_run_id=? "
+                "AND last_attempt_run_id<>? AND state IN ('PENDING','DISPATCHED','RETRY') "
+                "ORDER BY created_at,action_id LIMIT 1",
+                (run_id, run_id),
+            ).fetchone()
+            if pending_lane_action is not None:
+                raise RuntimeError(
+                    "watcher run must record the scheduled release-lane attempt before finish"
                 )
             undelivered = connection.execute(
                 "SELECT event_id FROM attention_events WHERE "
@@ -5110,6 +5678,12 @@ class Registry:
                     ).fetchall()
                 )
             ]
+            release_lane_closures = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM release_lane_closures ORDER BY created_at,action_id"
+                ).fetchall()
+            ]
         for item in incidents:
             item["resources"] = json.loads(item.pop("resources_json"))
             if item.get("decision_json"):
@@ -5123,6 +5697,7 @@ class Registry:
             "acceptance_envelopes": acceptance_envelopes,
             "executor_successions": executor_successions,
             "watcher_run_plans": watcher_run_plans,
+            "release_lane_closures": release_lane_closures,
             "integrity": self.integrity(),
         }
 
@@ -5557,9 +6132,62 @@ class Registry:
                     "SELECT 1 FROM watcher_run_targets t WHERE t.run_id=p.run_id "
                     "AND (t.observation_digest='' OR t.result_json='' OR "
                     "(p.state='FINISHED' AND t.followup_required=1 "
-                    "AND t.followup_receipt_digest=''))))"
+                    "AND t.followup_receipt_digest='')))) OR "
+                    "(p.state='FINISHED' AND EXISTS ("
+                    "SELECT 1 FROM release_lane_closures r WHERE "
+                    "r.scheduled_run_id=p.run_id AND r.last_attempt_run_id<>p.run_id "
+                    "AND r.state IN ('PENDING','DISPATCHED','RETRY')))"
                 ).fetchone()[0]
             )
+            invalid_release_lane_closures = int(
+                connection.execute(
+                    "SELECT count(*) FROM release_lane_closures WHERE "
+                    "attempt_count>max_attempts OR "
+                    "(state='CONFIRMED' AND confirmed_at IS NULL) OR "
+                    "(state<>'CONFIRMED' AND confirmed_at IS NOT NULL) OR "
+                    "(state='DISPATCHED' AND (transport_receipt_digest='' "
+                    "OR last_attempt_run_id='')) OR "
+                    "(state IN ('RETRY','EXHAUSTED') AND (last_error='' "
+                    "OR last_attempt_run_id='')) OR "
+                    "(scheduled_run_id<>'' AND NOT EXISTS ("
+                    "SELECT 1 FROM watcher_run_plans p WHERE p.run_id=scheduled_run_id))"
+                ).fetchone()[0]
+            )
+            release_lane_closure_counts = {
+                state: int(
+                    connection.execute(
+                        "SELECT count(*) FROM release_lane_closures WHERE state=?",
+                        (state,),
+                    ).fetchone()[0]
+                )
+                for state in sorted(RELEASE_LANE_CLOSURE_STATES)
+            }
+            release_lane_closure_signals = [
+                {
+                    "code": (
+                        "release-lane-recovery-exhausted"
+                        if row["state"] == "EXHAUSTED"
+                        else "release-lane-closure-pending"
+                    ),
+                    "action_id": row["action_id"],
+                    "task_id": row["task_id"],
+                    "task_revision": int(row["task_revision"]),
+                    "owner_pr": int(row["owner_pr"]),
+                    "state": row["state"],
+                    "attempt_count": int(row["attempt_count"]),
+                    "max_attempts": int(row["max_attempts"]),
+                    "required_action": (
+                        "incident-remediation"
+                        if row["state"] == "EXHAUSTED"
+                        else "automatic-release-lane-dispatch"
+                    ),
+                }
+                for row in connection.execute(
+                    "SELECT * FROM release_lane_closures WHERE "
+                    "state IN ('PENDING','DISPATCHED','RETRY','EXHAUSTED') "
+                    "ORDER BY created_at,action_id"
+                ).fetchall()
+            ]
             active_generation_ok = watcher_count == 0 or active_watchers == 1
         return {
             "ok": (
@@ -5579,6 +6207,7 @@ class Registry:
                 and invalid_active_watcher_readbacks == 0
                 and invalid_watcher_handover == 0
                 and invalid_watcher_run_plans == 0
+                and invalid_release_lane_closures == 0
                 and (watcher_count == 0 or effective_enabled_automations >= 1)
             ),
             "sqlite": quick,
@@ -5600,6 +6229,9 @@ class Registry:
             "incomplete_watcher_retirements": incomplete_watcher_retirements,
             "invalid_watcher_handover": invalid_watcher_handover,
             "invalid_watcher_run_plans": invalid_watcher_run_plans,
+            "invalid_release_lane_closures": invalid_release_lane_closures,
+            "release_lane_closure_counts": release_lane_closure_counts,
+            "release_lane_closure_signals": release_lane_closure_signals,
             "event_count": event_count,
         }
 
@@ -5959,6 +6591,7 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat_plan.add_argument("--generation", type=int, required=True)
     heartbeat_plan.add_argument("--owner", required=True)
     heartbeat_plan.add_argument("--queue-evidence-digest", required=True)
+    heartbeat_plan.add_argument("--queue-evidence-json", required=True)
     heartbeat_target = commands.add_parser("heartbeat-record-target")
     heartbeat_target.add_argument("--generation", type=int, required=True)
     heartbeat_target.add_argument("--owner", required=True)
@@ -5972,6 +6605,19 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat_followup.add_argument("--owner", required=True)
     heartbeat_followup.add_argument("--task-id", required=True)
     heartbeat_followup.add_argument("--transport-receipt-digest", required=True)
+    heartbeat_release_lane = commands.add_parser("heartbeat-record-release-lane")
+    heartbeat_release_lane.add_argument("--generation", type=int, required=True)
+    heartbeat_release_lane.add_argument("--owner", required=True)
+    heartbeat_release_lane.add_argument("--action-id", required=True)
+    heartbeat_release_lane.add_argument(
+        "--result", choices=["sent", "failed"], required=True
+    )
+    heartbeat_release_lane.add_argument("--attempt-evidence-digest", required=True)
+    heartbeat_release_lane.add_argument("--transport-receipt-digest", default="")
+    heartbeat_release_lane.add_argument("--error", default="")
+    heartbeat_release_lane.add_argument(
+        "--retry-after-seconds", type=int, default=60
+    )
     heartbeat_finish = commands.add_parser("heartbeat-finish")
     heartbeat_finish.add_argument("--generation", type=int, required=True)
     heartbeat_finish.add_argument("--owner", required=True)
@@ -6302,6 +6948,9 @@ def main() -> int:
                 generation=args.generation,
                 owner=args.owner,
                 queue_evidence_digest=args.queue_evidence_digest,
+                queue_evidence=_load_object(
+                    args.queue_evidence_json, field="queue-evidence-json"
+                ),
             )
         elif args.command == "heartbeat-record-target":
             result = registry.record_watcher_target(
@@ -6322,6 +6971,17 @@ def main() -> int:
                 owner=args.owner,
                 task_id=args.task_id,
                 transport_receipt_digest=args.transport_receipt_digest,
+            )
+        elif args.command == "heartbeat-record-release-lane":
+            result = registry.record_release_lane_attempt(
+                generation=args.generation,
+                owner=args.owner,
+                action_id=args.action_id,
+                result=args.result,
+                attempt_evidence_digest=args.attempt_evidence_digest,
+                transport_receipt_digest=args.transport_receipt_digest,
+                error=args.error,
+                retry_after_seconds=args.retry_after_seconds,
             )
         elif args.command == "heartbeat-finish":
             print(
