@@ -53,6 +53,10 @@ WATCHER_TARGET_READBACK_STATUSES = frozenset(
 WATCHER_PREFLIGHT_DECISIONS = frozenset(
     {"FULL", "QUIET", "OWNER_WAITING", "OWNER_REMINDER"}
 )
+WATCHER_OWNER_VISIBLE_SURFACES = frozenset(
+    {"manual", "service", "delegated", "recovery"}
+)
+WATCHER_SERVICE_OUTCOMES = frozenset({"completed", "continuing", "no-op"})
 WATCHER_BASELINE_MODEL_FACING_STEPS = (
     "begin-run",
     "protocol-doc-readback",
@@ -180,6 +184,34 @@ OBJECTIVE_PR_STATE_STAGE = {
     "done": ProgressStage.RELEASE_RUNNING,
     "production": ProgressStage.DEPLOYED_VERIFYING,
 }
+OBJECTIVE_PROGRESS_COPY = {
+    ProgressStage.PR_CREATED: {
+        "eta": "завершение проверок и допуск к выпуску",
+        "current": "PR проходит проверки перед выпуском.",
+    },
+    ProgressStage.RELEASE_ADMITTED: {
+        "eta": "очередь выпуска, выпуск и итоговая проверка",
+        "current": "PR допущен к выпуску и ожидает своей очереди.",
+    },
+    ProgressStage.RELEASE_RUNNING: {
+        "eta": "завершение выпуска и подтверждение результата в основной ветке",
+        "current": "Release Train выполняет выпуск и финальную проверку.",
+    },
+    ProgressStage.DEPLOYED_VERIFYING: {
+        "eta": "финальная проверка развёрнутого результата",
+        "current": "Проверяется развёрнутый результат.",
+    },
+    ProgressStage.TECHNICAL_COMPLETE: {
+        "eta": "передача подтверждённого результата куратору",
+        "current": "Watcher передаёт подтверждённый результат куратору.",
+    },
+}
+NONTERMINAL_COMPLETION_CLAIM_RE = re.compile(
+    r"\b(?:задач[аи]?|работ[аи]?|выпуск)\s+"
+    r"(?:заверш[её]н[ао]?|подтвержд[её]н[ао]?|готов[ао]?)\b|"
+    r"\b(?:выпущено|задача\s+готова|работа\s+готова)\b",
+    re.IGNORECASE,
+)
 TERMINAL_EVIDENCE_BY_CONTOUR = {
     "read-only": "diagnostic-complete",
     "user-artifact": "artifact-verified",
@@ -469,6 +501,28 @@ VISIBLE_INTERNAL_TOKENS = frozenset(
         "follow-up",
         "bounded",
         "exact",
+        "admission",
+        "baseline",
+        "canary",
+        "ci",
+        "head",
+        "head sha",
+        "live-runtime",
+        "origin/main",
+        "repo-only",
+        "rollout",
+        "rotation",
+        "smoke",
+        "trusted",
+        "curator-workspace",
+        "release:done",
+        "release:lane-owner",
+        "release:production",
+        "release:ready",
+        "release:running",
+        "release:staged",
+        "scope:repo-only",
+        "task:standard",
         "wait_threads",
         "task_id",
         "revision",
@@ -513,6 +567,127 @@ def validate_visible_text(text: str, *, field: str, task_id: str = "") -> str:
     if leaked:
         raise ValueError(f"{field} contains internal Watcher terms: {', '.join(leaked)}")
     return normalized
+
+
+def validate_owner_visible_output(text: str, *, field: str = "owner output") -> str:
+    """Reject machine serialization and internal receipts on final user surfaces."""
+
+    normalized = validate_visible_text(text, field=field)
+    if not re.search(r"[А-Яа-яЁё]", normalized):
+        raise ValueError(f"{field} must contain a Russian user-facing message")
+    if re.search(r"```\s*(?:json|xml)?", normalized, re.IGNORECASE):
+        raise ValueError(f"{field} must not expose a machine-readable code block")
+    if re.search(r"</?[a-z][^>]*>", normalized, re.IGNORECASE):
+        raise ValueError(f"{field} must not expose XML or HTML transport markup")
+    try:
+        parsed = json.loads(normalized)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, (dict, list)):
+        raise ValueError(f"{field} must not expose raw JSON")
+    if re.search(
+        r"(?:\"|')?(?:task|task_id|revision|digest|queue|lease|run|run_id|"
+        r"event_id|thread_id|command|receipt)(?:\"|')?\s*[:=]",
+        normalized,
+        re.IGNORECASE,
+    ):
+        raise ValueError(f"{field} must not expose internal machine fields")
+    return normalized
+
+
+def canonical_progress_copy(
+    *,
+    stage: ProgressStage,
+    execution_contour: str,
+    pr_states: Iterable[str],
+    eta: str,
+    delta: str,
+    current: str,
+) -> dict[str, str]:
+    """Project one evidence stage into coherent owner-visible ETA and action copy."""
+
+    validate_progress_stage_for_contour(stage, execution_contour)
+    visible = {
+        "eta": validate_visible_text(eta, field="eta"),
+        "delta": validate_visible_text(delta, field="delta"),
+        "current": validate_visible_text(current, field="current action"),
+    }
+    visible["eta"] = re.sub(r"^[≈~]+\s*", "", visible["eta"]).strip()
+    if stage not in OBJECTIVE_PROGRESS_COPY:
+        if stage != ProgressStage.TECHNICAL_COMPLETE:
+            for field in ("eta", "current"):
+                if NONTERMINAL_COMPLETION_CLAIM_RE.search(visible[field]):
+                    raise ValueError(
+                        f"{field} must not claim completion before terminal evidence"
+                    )
+        return visible
+    normalized_states = {
+        str(state).strip().casefold().removeprefix("release:") for state in pr_states
+    }
+    copy = dict(OBJECTIVE_PROGRESS_COPY[stage])
+    terminal_state = (
+        "done" if execution_contour in {"repo-only", "archived-gas-guard"} else "production"
+    )
+    active_states = normalized_states.intersection(
+        {
+            "open",
+            "draft",
+            "checks-pending",
+            "ci-green",
+            "staged",
+            "ready",
+            "admitted",
+            "awaiting-agent",
+            "blocked",
+            "running",
+            "release-running",
+            "merged",
+            "deployed",
+            "awaiting-ui",
+            "verifying",
+        }
+    )
+    if (
+        stage != ProgressStage.TECHNICAL_COMPLETE
+        and terminal_state in normalized_states
+        and not active_states
+    ):
+        copy = {
+            "eta": "оформление технического завершения",
+            "current": (
+                "Watcher сверяет подтверждённый выпуск и готовит передачу "
+                "результата куратору."
+            ),
+        }
+    return {
+        "eta": validate_visible_text(copy["eta"], field="eta"),
+        "delta": visible["delta"],
+        "current": validate_visible_text(copy["current"], field="current action"),
+    }
+
+
+def visible_status_for_progress(
+    status: TaskStatus, stage: ProgressStage
+) -> TaskStatus:
+    """Keep status derived from the same evidence stage as progress and remaining work."""
+
+    if status in {
+        TaskStatus.RECOVERING,
+        TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+        TaskStatus.AWAITING_HUMAN,
+        TaskStatus.DONE_PENDING_HANDOFF,
+        TaskStatus.DONE_AWAITING_ACCEPTANCE,
+        TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
+        TaskStatus.TERMINAL_FAILURE,
+    }:
+        return status
+    if stage == ProgressStage.DEPLOYED_VERIFYING:
+        return TaskStatus.VERIFYING
+    if progress_percent(stage) >= progress_percent(ProgressStage.RELEASE_RUNNING):
+        return TaskStatus.RELEASE_OWNED
+    if progress_percent(stage) >= progress_percent(ProgressStage.RELEASE_ADMITTED):
+        return TaskStatus.READY_FOR_RELEASE
+    return TaskStatus.WORKING
 
 
 def validate_digest(digest: str) -> str:

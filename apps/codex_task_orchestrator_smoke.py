@@ -33,6 +33,7 @@ from apps.codex_task_orchestrator_spec import (
     classify_incident,
     transition_allowed,
     validate_curator_lifecycle_observation,
+    validate_owner_visible_output,
 )
 
 
@@ -346,7 +347,7 @@ def _run_progress_smoke() -> None:
             objective_evidence_digest="sha256:" + "6" * 64,
             objective_at=_fresh_evidence_time(),
             eta="до часа",
-            delta="Создан PR с проверяемым head.",
+            delta="Создан PR с проверяемым коммитом.",
             current="Ожидаются проверки и допуск выпуска.",
         )
         assert pr_created["progress_percent"] == 72
@@ -409,7 +410,7 @@ def _run_progress_smoke() -> None:
             objective_at=_fresh_evidence_time(),
             eta="несколько минут",
             delta="Merge и выпуск выполняются.",
-            current="Release Train завершает repo-only выпуск.",
+            current="Release Train завершает выпуск.",
         )
         assert releasing["progress_percent"] == 88
         assert releasing["status"] == "RELEASE_OWNED"
@@ -1264,9 +1265,9 @@ def _run_release_ready_completion_smoke() -> None:
             "evidence_class": "release:done",
             "marker": "release:done",
             "evidence_digest": "sha256:" + "3" * 64,
-            "evidence_summary": "PR #921 и trusted origin/main подтверждают repo-only выпуск.",
+            "evidence_summary": "PR #921 и актуальная основная ветка подтверждают выпуск.",
             "eta": "готово",
-            "delta": "Repo-only выпуск подтверждён.",
+            "delta": "Выпуск подтверждён.",
             "current": "Куратор подтверждает получение результата.",
         }
         registry.record_watcher_target(
@@ -2132,7 +2133,7 @@ def _run_passport_revision_smoke() -> None:
             expected_revision=2,
             kind=AttentionKind.TECHNICAL_COMPLETION,
             completion_evidence_class="diagnostic-complete",
-            evidence_summary="Passport revision smoke завершён.",
+            evidence_summary="Проверка изменения паспорта завершена.",
             evidence_digest="sha256:" + "9" * 64,
             eta="готово",
             delta="Проверка завершена.",
@@ -2150,6 +2151,173 @@ def _run_passport_revision_smoke() -> None:
             assert "immutable" in str(exc)
         else:
             raise AssertionError("passport must be immutable after technical handoff")
+
+
+def _run_visible_output_regression_smoke() -> None:
+    fixture = json.loads(
+        (
+            ROOT
+            / "packages"
+            / "contracts"
+            / "fixtures"
+            / "codex_watcher_visible_output_g5.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert fixture["schema"] == "wb-core-watcher-visible-output-regression/v1"
+    cases = {case["id"]: case for case in fixture["cases"]}
+    for case_id in ("g5-r90-service-raw-json", "g5-quiet-handwritten-wrapper"):
+        try:
+            validate_owner_visible_output(cases[case_id]["legacy_final"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"legacy machine payload must be rejected: {case_id}")
+    for legacy_jargon in (
+        "Статус: release:ready. Сейчас: ожидается admission.",
+        "Статус: В работе. Сейчас: baseline проверяет head.",
+        "Статус: В работе. Сейчас: repo-only rotation smoke.",
+        "Статус: В работе. Сейчас: CI готовит rollout/canary на trusted origin/main.",
+    ):
+        try:
+            validate_owner_visible_output(legacy_jargon)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("owner output must reject release machinery jargon")
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "visible-output-registry")
+        registry.initialize()
+        identity = "visible-output-r90-v1"
+        _register_with_curator(
+            registry,
+            identity=identity,
+            suffix="visible-output-r90",
+            curator="curator-visible-output",
+            executor="executor-visible-output",
+            title="Экономный heartbeat",
+        )
+        mismatch = cases["g5-revision-9-progress-mismatch"]
+        legacy = mismatch["legacy_task"]
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET revision=9,status=?,progress_percent=?,eta_text=?,"
+                "last_delta=?,current_action=? WHERE task_id=?",
+                (
+                    legacy["status"],
+                    legacy["progress_percent"],
+                    legacy["eta"],
+                    legacy["delta"],
+                    legacy["current"],
+                    identity,
+                ),
+            )
+        registry.link_pr(
+            task_id=identity,
+            pr=923,
+            role="corrective",
+            head_sha="5ae72d1a2c73a4c9dccab0a0bcf47177325fe3cb",
+            state=legacy["pr_state"],
+        )
+        registry.link_pr(
+            task_id=identity,
+            pr=921,
+            role="implementation",
+            head_sha="761485c95e53989f96cb0c79fb9255960ac34d9e",
+            state="done",
+        )
+        before = registry.integrity()
+        service = registry.watcher_service_response(
+            surface="recovery", outcome="continuing", task_id=identity
+        )
+        after = registry.integrity()
+        assert before == after
+        expected = mismatch["expected"]
+        assert f"Статус: {expected['status']}" in service
+        assert f"Прогресс: ≈{expected['progress_percent']}%" in service
+        assert f"Осталось: ≈{expected['eta']}" in service
+        assert f"Сейчас: {expected['current']}" in service
+        assert legacy["eta"] not in service
+        assert "READY_FOR_RELEASE" not in service
+        assert "revision" not in service.casefold()
+        assert "<heartbeat>" not in service
+        validate_owner_visible_output(service)
+
+        wrapper = registry.heartbeat_response(automation_id="visible-output-g5")
+        parsed = ET.fromstring(wrapper)
+        assert parsed.findtext("decision") == "NOTIFY"
+        scheduled_message = parsed.findtext("message") or ""
+        assert f"Осталось: ≈{expected['eta']}" in scheduled_message
+        assert legacy["eta"] not in scheduled_message
+        validate_owner_visible_output(scheduled_message)
+
+        registry.link_pr(
+            task_id=identity,
+            pr=923,
+            role="corrective",
+            head_sha="5ae72d1a2c73a4c9dccab0a0bcf47177325fe3cb",
+            state="done",
+        )
+        registry.enqueue_attention(
+            task_id=identity,
+            expected_revision=9,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="release:done",
+            evidence_summary="Выпуск и актуальная основная ветка подтверждены.",
+            evidence_digest="sha256:" + "9" * 64,
+        )
+        terminal = registry.watcher_service_response(
+            surface="service", outcome="completed", task_id=identity
+        )
+        assert "Статус: Завершена — передаётся куратору" in terminal
+        assert "Прогресс: ≈100%" in terminal
+        assert "Осталось: ≈передача подтверждённого результата куратору" in terminal
+        assert "Сейчас: Watcher передаёт подтверждённый результат куратору." in terminal
+        validate_owner_visible_output(terminal)
+
+        corrective_id = "visible-output-corrective-v1"
+        _register_with_curator(
+            registry,
+            identity=corrective_id,
+            suffix="visible-output-corrective",
+            curator="curator-visible-output",
+            executor="executor-visible-output-corrective",
+            envelope=identity,
+            role="corrective",
+            title="Коррекция чистого вывода",
+        )
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET revision=2,status='WORKING',progress_percent=15,"
+                "eta_text='1–2 часа',last_delta='Завершён анализ коррекции.',"
+                "current_action='Исправляется формирование видимого ответа.' "
+                "WHERE task_id=?",
+                (corrective_id,),
+            )
+        corrective_report = registry.watcher_service_response(
+            surface="delegated", outcome="continuing", task_id=corrective_id
+        )
+        assert "Статус: В работе" in corrective_report
+        assert "Прогресс: ≈15%" in corrective_report
+        assert "Сейчас: Исправляется формирование видимого ответа." in corrective_report
+        assert "Статус: Выпуск и проверка" not in corrective_report
+
+    with tempfile.TemporaryDirectory() as temporary:
+        quiet_registry = Registry(Path(temporary) / "visible-output-quiet")
+        quiet_registry.initialize()
+        quiet_wrapper = ET.fromstring(
+            quiet_registry.heartbeat_response(automation_id="visible-output-quiet")
+        )
+        assert quiet_wrapper.findtext("decision") == "DONT_NOTIFY"
+        quiet_message = quiet_wrapper.findtext("message") or ""
+        assert quiet_message == cases["g5-quiet-handwritten-wrapper"]["expected_message"]
+        validate_owner_visible_output(quiet_message)
+        for surface in ("manual", "service", "delegated", "recovery"):
+            plain = quiet_registry.watcher_service_response(
+                surface=surface, outcome="no-op"
+            )
+            assert "Статус: Изменений нет." in plain
+            validate_owner_visible_output(plain)
 
 
 def run_smoke() -> None:
@@ -2193,6 +2361,7 @@ def run_smoke() -> None:
         "heartbeat-finish",
         "codex_watcher_heartbeat.py",
         "heartbeat-fast-finish",
+        "watcher-service-response",
         "confirm-watcher-protocol",
         "validate-curator-lifecycle",
         "FRONT_DOOR_CANARY_READY",
@@ -2293,6 +2462,12 @@ def run_smoke() -> None:
         "unchanged_active_envelopes_decision"
     ] == "NOTIFY"
     assert watcher_contract["heartbeat_response"]["single_visible_output"] is True
+    assert watcher_contract["owner_visible_output"]["service_command"] == (
+        "watcher-service-response"
+    )
+    assert watcher_contract["report"][
+        "status_progress_eta_current_share_one_critical_stage"
+    ] is True
     assert watcher_contract["heartbeat_response"][
         "dont_notify_requires_no_actionable_report_blocks"
     ] is True
@@ -2376,6 +2551,7 @@ def run_smoke() -> None:
     assert "Do not request or reconstruct the full chat" in arbiter_prompt
 
     _run_progress_smoke()
+    _run_visible_output_regression_smoke()
     _run_watcher_driver_smoke()
     _run_release_ready_completion_smoke()
     _run_release_lane_closure_smoke()
@@ -2457,8 +2633,8 @@ def run_smoke() -> None:
         )
         assert updated["revision"] == 2
         report = registry.report()
-        assert "Статус: Выпуск и проверка" in report
-        assert "Статус: Выпуск и проверка\nЗадача:" in report
+        assert "Статус: В работе" in report
+        assert "Статус: В работе\nЗадача:" in report
         assert "Прогресс: ≈65% · Осталось: ≈30–60 минут" in report
         assert "Блокер:" not in report
 

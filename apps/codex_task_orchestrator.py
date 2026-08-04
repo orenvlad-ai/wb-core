@@ -50,13 +50,16 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     WATCHER_BASELINE_MODEL_FACING_STEPS,
     WATCHER_FAST_MODEL_FACING_STEPS,
     WATCHER_MECHANICAL_PREFLIGHT_SCHEMA,
+    WATCHER_OWNER_VISIBLE_SURFACES,
     WATCHER_PREFLIGHT_DECISIONS,
     WATCHER_ROTATION_REMEDIATION_STATES,
     WATCHER_ROTATION_STATES,
     WATCHER_ROTATION_TERMINAL_STATES,
+    WATCHER_SERVICE_OUTCOMES,
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     WATCHER_TARGET_READBACK_STATUSES,
     canonical_digest,
+    canonical_progress_copy,
     classify_incident,
     incident_key,
     objective_stage_from_pr_states,
@@ -74,7 +77,9 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     validate_task_passport,
     validate_task_id,
     validate_terminal_evidence,
+    validate_owner_visible_output,
     validate_visible_text,
+    visible_status_for_progress,
 )
 
 
@@ -1916,6 +1921,20 @@ class Registry:
                 }[strongest[1]]
                 if progress_percent(target_stage) < progress_percent(current_stage):
                     target_stage = current_stage
+            chosen_visible = canonical_progress_copy(
+                stage=target_stage,
+                execution_contour=contour,
+                pr_states=(
+                    str(row["state"])
+                    for row in connection.execute(
+                        "SELECT state FROM task_prs WHERE task_id=? ORDER BY pr_number",
+                        (identity,),
+                    ).fetchall()
+                ),
+                eta=chosen_visible["eta"],
+                delta=chosen_visible["delta"],
+                current=chosen_visible["current"],
+            )
             target_status = self._progress_status_target(
                 TaskStatus(task["status"]), target_stage, invalidation=invalidate
             )
@@ -7111,7 +7130,9 @@ class Registry:
 
     @staticmethod
     def _visible_envelope_status(
-        envelope: Mapping[str, object], members: list[sqlite3.Row]
+        envelope: Mapping[str, object],
+        members: list[sqlite3.Row],
+        critical: sqlite3.Row,
     ) -> TaskStatus:
         statuses = [TaskStatus(member["status"]) for member in members]
         if envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value:
@@ -7125,26 +7146,9 @@ class Registry:
         for preferred in (
             TaskStatus.AWAITING_HUMAN,
             TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
-            TaskStatus.RECOVERING,
-            TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
-            TaskStatus.READY_FOR_RELEASE,
-            TaskStatus.RELEASE_OWNED,
-            TaskStatus.VERIFYING,
-            TaskStatus.WORKING,
-            TaskStatus.DISPATCHING,
-            TaskStatus.DISCUSSION,
         ):
             if preferred in statuses:
                 return preferred
-        if all(status == TaskStatus.TERMINAL_FAILURE for status in statuses):
-            return TaskStatus.TERMINAL_FAILURE
-        critical = min(
-            members,
-            key=lambda member: (
-                int(member["progress_percent"]),
-                member["updated_at"],
-            ),
-        )
         return TaskStatus(critical["status"])
 
     @staticmethod
@@ -7189,7 +7193,11 @@ class Registry:
                 critical = max(
                     critical_candidates, key=lambda member: member["updated_at"]
                 )
-                status = self._visible_envelope_status(envelope, members)
+                progress_stage = progress_stage_for_percent(minimum_progress)
+                status = visible_status_for_progress(
+                    self._visible_envelope_status(envelope, members, critical),
+                    progress_stage,
+                )
                 title = str(group["title"])
                 for member in members:
                     title = validate_visible_text(
@@ -7212,12 +7220,35 @@ class Registry:
                     field="current action",
                     task_id=str(critical["task_id"]),
                 )
+                pr_states = [
+                    str(row["state"])
+                    for row in connection.execute(
+                        "SELECT state FROM task_prs WHERE task_id=? ORDER BY pr_number",
+                        (critical["task_id"],),
+                    ).fetchall()
+                ]
+                coherent = canonical_progress_copy(
+                    stage=progress_stage,
+                    execution_contour=self._task_contour(critical),
+                    pr_states=pr_states,
+                    eta=eta,
+                    delta=delta,
+                    current=current,
+                )
+                eta = coherent["eta"]
+                delta = coherent["delta"]
+                current = coherent["current"]
                 owner_notification_current = self._owner_notification_current(envelope)
                 if envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value:
                     current = (
                         "Ожидается приёмка владельца."
                         if owner_notification_current
                         else "Куратор готовит короткий итог владельцу."
+                    )
+                    eta = (
+                        "приёмка владельца"
+                        if owner_notification_current
+                        else "передача результата владельцу"
                     )
                 for member in members:
                     member_task_id = str(member["task_id"])
@@ -7297,7 +7328,55 @@ class Registry:
                     )
         if record:
             self.flush_events()
-        return "\n\n".join(blocks) if blocks else "Активных задач нет."
+        rendered = "\n\n".join(blocks) if blocks else "Активных задач нет."
+        return validate_owner_visible_output(rendered, field="Watcher report")
+
+    def watcher_service_response(
+        self,
+        *,
+        surface: str,
+        outcome: str,
+        task_id: str = "",
+    ) -> str:
+        """Render the only supported plain final for non-scheduled Watcher turns."""
+
+        normalized_surface = surface.strip().casefold()
+        normalized_outcome = outcome.strip().casefold()
+        if normalized_surface not in WATCHER_OWNER_VISIBLE_SURFACES:
+            raise ValueError("unsupported Watcher owner-visible surface")
+        if normalized_outcome not in WATCHER_SERVICE_OUTCOMES:
+            raise ValueError("unsupported Watcher service outcome")
+        if task_id.strip():
+            identity = validate_task_id(task_id)
+            with self.connect() as connection:
+                self.task(identity, connection)
+                membership = connection.execute(
+                    "SELECT envelope_id FROM acceptance_envelope_members WHERE task_id=?",
+                    (identity,),
+                ).fetchone()
+            envelope_id = identity if membership is None else str(membership["envelope_id"])
+            rendered = self.report(record=False, envelope_ids={envelope_id})
+            if rendered != "Активных задач нет.":
+                return validate_owner_visible_output(
+                    rendered, field=f"Watcher {normalized_surface} response"
+                )
+        fixed = {
+            "completed": (
+                "Статус: Служебная операция завершена.\n"
+                "Сейчас: Машинные подтверждения сохранены; действий владельца не требуется."
+            ),
+            "continuing": (
+                "Статус: Служебная операция продолжается.\n"
+                "Сейчас: Watcher выполняет следующий безопасный этап."
+            ),
+            "no-op": (
+                "Статус: Изменений нет.\n"
+                "Сейчас: Watcher сохранил текущее безопасное состояние."
+            ),
+        }[normalized_outcome]
+        return validate_owner_visible_output(
+            fixed, field=f"Watcher {normalized_surface} response"
+        )
 
     def heartbeat_response(
         self, *, automation_id: str, now: datetime | None = None
@@ -7398,6 +7477,7 @@ class Registry:
                 else "Нет активных задач."
             )
         )
+        message = validate_owner_visible_output(message, field="heartbeat owner message")
         # XML escaping is transport serialization only: the parsed message text
         # is byte-for-byte the canonical report stdout for every NOTIFY run.
         return (
@@ -8204,6 +8284,14 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("list")
     commands.add_parser("snapshot")
     commands.add_parser("report")
+    service_response = commands.add_parser("watcher-service-response")
+    service_response.add_argument(
+        "--surface", choices=sorted(WATCHER_OWNER_VISIBLE_SURFACES), required=True
+    )
+    service_response.add_argument(
+        "--outcome", choices=sorted(WATCHER_SERVICE_OUTCOMES), required=True
+    )
+    service_response.add_argument("--task-id", default="")
     heartbeat_response = commands.add_parser("heartbeat-response")
     heartbeat_response.add_argument("--automation-id", required=True)
     curator_lifecycle = commands.add_parser("validate-curator-lifecycle")
@@ -8630,6 +8718,15 @@ def main() -> int:
             result = registry.snapshot()
         elif args.command == "report":
             print(registry.report(record=True))
+            return 0
+        elif args.command == "watcher-service-response":
+            print(
+                registry.watcher_service_response(
+                    surface=args.surface,
+                    outcome=args.outcome,
+                    task_id=args.task_id,
+                )
+            )
             return 0
         elif args.command == "heartbeat-response":
             print(registry.heartbeat_response(automation_id=args.automation_id))
