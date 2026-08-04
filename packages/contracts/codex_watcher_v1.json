@@ -50,6 +50,7 @@
       "docs/architecture/12_codex_global_orchestration.md",
       "docs/policies/codex_watcher_prompt_v1.md",
       "packages/contracts/codex_watcher_v1.json",
+      "packages/contracts/fixtures/codex_watcher_visible_output_g5.json",
       "apps/codex_task_orchestrator.py",
       "apps/codex_task_orchestrator_spec.py",
       "apps/codex_watcher_heartbeat.py"
@@ -227,6 +228,41 @@
       "archived-gas-guard": "release:done"
     }
   },
+  "owner_visible_output": {
+    "schema": "wb-core-watcher-owner-visible-output/v1",
+    "scheduled_surface": {
+      "machine_receipt": "exact-heartbeat-finish-wrapper",
+      "owner_message": "parsed-validated-heartbeat-message",
+      "raw_wrapper_is_owner_visible": false,
+      "second_report": false
+    },
+    "non_scheduled_surfaces": ["manual", "service", "delegated", "recovery"],
+    "service_command": "watcher-service-response",
+    "service_outcomes": ["completed", "continuing", "no-op"],
+    "task_bound_service_response": "canonical-workstream-report",
+    "taskless_service_response": "fixed-short-russian-result",
+    "machine_payload_channels": [
+      "local-registry",
+      "events-jsonl",
+      "github-evidence",
+      "tool-output",
+      "heartbeat-transport-wrapper"
+    ],
+    "owner_final_forbidden": [
+      "raw-json",
+      "raw-xml",
+      "enum",
+      "uuid",
+      "task-id",
+      "revision",
+      "digest",
+      "queue-jargon",
+      "lease-jargon",
+      "internal-command"
+    ],
+    "validator": "apps/codex_task_orchestrator_spec.py:validate_owner_visible_output",
+    "regression_fixture": "packages/contracts/fixtures/codex_watcher_visible_output_g5.json"
+  },
   "report": {
     "lines": ["Статус", "Задача", "Прогресс · Осталось", "С прошлого отчёта", "Сейчас", "Блокер"],
     "blocker_only_for_strict_human_reason": true,
@@ -238,6 +274,9 @@
     "owner_acceptance_unit": "acceptance-envelope",
     "localized_statuses_only": true,
     "forbid_raw_machine_state": true,
+    "status_progress_eta_current_share_one_critical_stage": true,
+    "objective_stage_copy_is_repo_owned": true,
+    "corrective_workstream_uses_lowest_proven_member": true,
     "accepted_phrase": "Задача принята",
     "accepted_by": "exact-curator-thread"
   },
