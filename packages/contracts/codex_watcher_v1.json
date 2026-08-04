@@ -13,11 +13,101 @@
     "planned_rotation_hours": 8,
     "context_compaction_signal": "read_thread.items[type=contextCompaction]",
     "automation_prompt_mode": "bounded-trusted-repo-entrypoint",
+    "mechanical_preflight_command": "python3 apps/codex_watcher_heartbeat.py --generation <GENERATION> --owner <RUN_OWNER>",
+    "protocol_confirmation_command": "confirm-watcher-protocol",
     "run_plan_command": "heartbeat-plan",
     "target_observation_command": "heartbeat-record-target",
     "actuation_command": "heartbeat-actuate",
     "release_lane_attempt_command": "heartbeat-record-release-lane",
-    "finish_command": "heartbeat-finish"
+    "finish_command": "heartbeat-finish",
+    "fast_finish_command": "heartbeat-fast-finish"
+  },
+  "quiet_fast_path": {
+    "schema": "wb-core-watcher-mechanical-preflight/v1",
+    "decisions": ["FULL", "QUIET", "OWNER_WAITING", "OWNER_REMINDER"],
+    "full_scan_interval_minutes": 60,
+    "full_scan_environment_override": "WB_CORE_WATCHER_FULL_SCAN_MINUTES",
+    "requires_fresh_release_queue_snapshot": true,
+    "raw_queue_snapshot_model_interpretation": false,
+    "fast_path_executor_thread_readbacks": 0,
+    "fast_path_requires_empty_exact_target_set": true,
+    "escalate_on": [
+      "active-task-or-target",
+      "attention-delivery",
+      "incident",
+      "failure-recovery",
+      "release-lane-action",
+      "executor-archive",
+      "watcher-operation",
+      "rotation-due",
+      "protocol-digest-change",
+      "periodic-fallback-discovery"
+    ],
+    "protocol_digest_paths": [
+      "AGENTS.md",
+      "docs/architecture/07_codex_execution_protocol.md",
+      "docs/architecture/11_github_release_train.md",
+      "docs/architecture/12_codex_global_orchestration.md",
+      "docs/policies/codex_watcher_prompt_v1.md",
+      "packages/contracts/codex_watcher_v1.json",
+      "apps/codex_task_orchestrator.py",
+      "apps/codex_task_orchestrator_spec.py",
+      "apps/codex_watcher_heartbeat.py"
+    ],
+    "protocol_reload": "digest-change-or-full-path-only",
+    "classification_is_durable": true,
+    "fast_finish_rechecks_local_state": true,
+    "classification_error_fallback": "FULL"
+  },
+  "owner_reminder": {
+    "interval_minutes": 240,
+    "configurable": true,
+    "environment_override": "WB_CORE_WATCHER_OWNER_REMINDER_MINUTES",
+    "baseline": "current-revision-owner-notification-or-last-reminder",
+    "durable_fields": ["last_owner_reminder_at", "owner_reminder_count"],
+    "suppressed_heartbeat_decision": "DONT_NOTIFY",
+    "due_heartbeat_decision": "NOTIFY",
+    "owner_acceptance_remains_available_while_suppressed": true
+  },
+  "curator_lifecycle": {
+    "schema": "wb-core-curator-lifecycle-observation/v1",
+    "dispatch_summary_count": 1,
+    "post_wake_dispatch_summary_count": 0,
+    "dispatch_turn_must_complete": true,
+    "steady_state": "idle-waiting-attention",
+    "normal_wake_sources": ["user-message", "watcher-attention"],
+    "bounded_actions_per_wake": 1,
+    "forbidden": [
+      "curator-progress-polling",
+      "curator-executor-read-loop",
+      "curator-periodic-github-review",
+      "curator-heartbeat",
+      "per-task-automation"
+    ],
+    "only_global_watcher_reads_executor_periodically": true,
+    "active_global_watcher_count": 1,
+    "front_door_source_project": "wb_core_3",
+    "executor_project": "wb-core - codex",
+    "machine_validation_command": "validate-curator-lifecycle",
+    "front_door_canary": {
+      "ready_marker": "FRONT_DOOR_CANARY_READY",
+      "required_surface": "fresh ordinary chat in ChatGPT project wb_core_3",
+      "owner_input": "one small natural task",
+      "service_prompt": false,
+      "manual_sleep_correction_is_proof": false,
+      "backend_pairs_are_load_evidence_only": true,
+      "programmatic_substitution_allowed": false,
+      "full_parity_requires_both_lifecycle_phases_and_registry_readbacks": true
+    }
+  },
+  "cost_proxy": {
+    "unit": "model-facing-readbacks-or-steps",
+    "basis": "explicit command/readback steps in the previous full-cycle prompt versus the mechanical fast path",
+    "baseline_quiet_full_path_count": 9,
+    "quiet_fast_path_count": 3,
+    "baseline_executor_or_watcher_thread_readbacks": 1,
+    "quiet_fast_path_thread_readbacks": 0,
+    "token_claims": false
   },
   "heartbeat_driver": {
     "schema": "wb-core-watcher-run-plan/v1",
@@ -155,11 +245,15 @@
     "wrapper": "heartbeat",
     "active_envelopes_decision": "NOTIFY",
     "unchanged_active_envelopes_decision": "NOTIFY",
+    "current_owner_awaiting_decision_before_reminder": "DONT_NOTIFY",
+    "current_owner_awaiting_decision_when_reminder_due": "NOTIFY",
     "notify_message_source": "unmodified-canonical-report-stdout",
     "single_visible_output": true,
-    "dont_notify_requires_no_active_report_blocks": true,
+    "dont_notify_requires_no_actionable_report_blocks": true,
+    "dont_notify_allows_current_owner_awaiting_before_reminder": true,
     "dont_notify_requires_no_owner_relevant_attention_or_incident": true,
     "quiet_message": "Нет активных задач.",
+    "owner_waiting_quiet_message": "Новых событий нет.",
     "compaction_and_rotation_invariant": true,
     "changes_automation_state": false,
     "dont_notify_changes_automation_state": false
@@ -268,7 +362,9 @@
       "require_fresh_same_stage_delta": true,
       "require_objective_late_stage": true,
       "require_unchanged_active_notify": true,
-      "require_quiet_dont_notify": true
+      "require_quiet_dont_notify": true,
+      "require_owner_reminder_boundaries": true,
+      "require_cost_proxy_reduction": true
     }
   },
   "feature_flag": {

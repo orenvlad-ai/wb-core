@@ -27,6 +27,8 @@ TASK_PASSPORT_SCHEMA = "wb-core-task-passport/v1"
 WATCHER_CONFIG_SCHEMA = "wb-core-codex-watcher/v1"
 WATCHER_RUN_PLAN_SCHEMA = "wb-core-watcher-run-plan/v1"
 WATCHER_TARGET_OBSERVATION_SCHEMA = "wb-core-watcher-target-observation/v1"
+WATCHER_MECHANICAL_PREFLIGHT_SCHEMA = "wb-core-watcher-mechanical-preflight/v1"
+CURATOR_LIFECYCLE_OBSERVATION_SCHEMA = "wb-core-curator-lifecycle-observation/v1"
 WATCHER_RUN_PHASES = (
     "snapshot-integrity-queue",
     "target-coverage",
@@ -46,6 +48,28 @@ RELEASE_LANE_CLOSURE_STATES = frozenset(
 RELEASE_LANE_CLOSURE_MAX_ATTEMPTS = 3
 WATCHER_TARGET_READBACK_STATUSES = frozenset(
     {"active", "idle", "completed", "failed"}
+)
+WATCHER_PREFLIGHT_DECISIONS = frozenset(
+    {"FULL", "QUIET", "OWNER_WAITING", "OWNER_REMINDER"}
+)
+WATCHER_BASELINE_MODEL_FACING_STEPS = (
+    "begin-run",
+    "protocol-doc-readback",
+    "watcher-thread-readback",
+    "queue-status",
+    "heartbeat-plan",
+    "heartbeat-actuate",
+    "attention-reservation",
+    "pending-executor-archives",
+    "heartbeat-finish",
+)
+WATCHER_FAST_MODEL_FACING_STEPS = (
+    "begin-run",
+    "mechanical-preflight",
+    "heartbeat-fast-finish",
+)
+CURATOR_WAKE_SOURCES = frozenset(
+    {"dispatch-complete", "user-message", "watcher-attention"}
 )
 ARBITER_BRIEF_SCHEMA = "wb-core-arbiter-brief/v1"
 ARBITER_DECISION_SCHEMA = "wb-core-arbiter-decision/v1"
@@ -487,6 +511,124 @@ def canonical_digest(payload: Mapping[str, object]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(rendered).hexdigest()
+
+
+def validate_curator_lifecycle_observation(
+    observation: Mapping[str, object],
+) -> dict[str, object]:
+    required = {
+        "schema",
+        "phase",
+        "source_surface",
+        "source_project",
+        "executor_project",
+        "service_prompt_present",
+        "dispatch_summary_count",
+        "turn_completed",
+        "curator_idle",
+        "curator_progress_poll_calls",
+        "curator_heartbeat_count",
+        "wake_source",
+        "bounded_action_count",
+        "exact_attention_binding",
+        "executor_is_only_watcher_target",
+        "active_watcher_count",
+        "per_task_automation_count",
+        "manual_sleep_correction",
+    }
+    if set(observation) != required:
+        raise ValueError("curator lifecycle observation fields do not match the contract")
+    if observation["schema"] != CURATOR_LIFECYCLE_OBSERVATION_SCHEMA:
+        raise ValueError("unknown curator lifecycle observation schema")
+    phase = str(observation["phase"])
+    if phase not in {"post-dispatch", "post-wake"}:
+        raise ValueError("unknown curator lifecycle phase")
+    source_surface = str(observation["source_surface"])
+    if source_surface not in {
+        "ordinary-chatgpt-project-chat",
+        "backend-load-fixture",
+    }:
+        raise ValueError("unknown curator source surface")
+    expected_source_project = (
+        "wb_core_3"
+        if source_surface == "ordinary-chatgpt-project-chat"
+        else "backend-load-fixture"
+    )
+    if observation["source_project"] != expected_source_project:
+        raise ValueError("curator lifecycle source project does not match its surface")
+    if observation["executor_project"] != "wb-core - codex":
+        raise ValueError("curator lifecycle requires the saved executor project")
+    integer_fields = {
+        "dispatch_summary_count",
+        "curator_progress_poll_calls",
+        "curator_heartbeat_count",
+        "bounded_action_count",
+        "active_watcher_count",
+        "per_task_automation_count",
+    }
+    boolean_fields = {
+        "service_prompt_present",
+        "turn_completed",
+        "curator_idle",
+        "exact_attention_binding",
+        "executor_is_only_watcher_target",
+        "manual_sleep_correction",
+    }
+    for field in integer_fields:
+        value = observation[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"curator lifecycle {field} must be a non-negative integer")
+    for field in boolean_fields:
+        if not isinstance(observation[field], bool):
+            raise ValueError(f"curator lifecycle {field} must be boolean")
+    wake_source = str(observation["wake_source"])
+    if wake_source not in CURATOR_WAKE_SOURCES:
+        raise ValueError("unknown curator wake source")
+    if not observation["turn_completed"] or not observation["curator_idle"]:
+        raise ValueError("curator must complete its bounded turn and become idle")
+    if int(observation["curator_progress_poll_calls"]) != 0:
+        raise ValueError("curator progress polling is forbidden")
+    if int(observation["curator_heartbeat_count"]) != 0:
+        raise ValueError("curator heartbeat automation is forbidden")
+    if int(observation["active_watcher_count"]) != 1:
+        raise ValueError("curator lifecycle requires exactly one active Global Watcher")
+    if int(observation["per_task_automation_count"]) != 0:
+        raise ValueError("per-task heartbeat automation is forbidden")
+    if not observation["executor_is_only_watcher_target"]:
+        raise ValueError("only the executor may enter the Watcher target contour")
+    if observation["manual_sleep_correction"]:
+        raise ValueError("manual sleep correction is not lifecycle evidence")
+    if phase == "post-dispatch":
+        if int(observation["dispatch_summary_count"]) != 1:
+            raise ValueError("dispatch must emit exactly one short summary")
+        if wake_source != "dispatch-complete" or int(
+            observation["bounded_action_count"]
+        ) != 1:
+            raise ValueError("dispatch lifecycle requires one bounded launch action")
+        if observation["exact_attention_binding"]:
+            raise ValueError("post-dispatch lifecycle cannot claim attention binding")
+    else:
+        if int(observation["dispatch_summary_count"]) != 0:
+            raise ValueError("post-wake action cannot emit another dispatch summary")
+        if wake_source not in {"user-message", "watcher-attention"}:
+            raise ValueError("post-wake lifecycle requires a normal wake source")
+        if int(observation["bounded_action_count"]) != 1:
+            raise ValueError("post-wake lifecycle requires one bounded curator action")
+        if (wake_source == "watcher-attention") != bool(
+            observation["exact_attention_binding"]
+        ):
+            raise ValueError("Watcher wake requires exact attention binding")
+    if (
+        source_surface == "ordinary-chatgpt-project-chat"
+        and observation["service_prompt_present"]
+    ):
+        raise ValueError("front-door canary cannot use a service prompt")
+    validated = dict(observation)
+    validated["front_door_surface_eligible"] = bool(
+        source_surface == "ordinary-chatgpt-project-chat"
+        and not observation["service_prompt_present"]
+    )
+    return validated
 
 
 def _exact_keys(value: Mapping[str, object], *, field: str, keys: set[str]) -> None:
