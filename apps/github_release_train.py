@@ -3340,6 +3340,72 @@ def release_lane_state(api: ReleaseApi) -> dict[str, Any]:
     return {"status": "conflict", "owners": [number], "reason": "owner-proof-missing"}
 
 
+def release_lane_integrity(lane: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an actionable read-only signal for a terminal lane owner."""
+
+    signals: list[dict[str, Any]] = []
+    owner_state = str(lane.get("owner_state") or "")
+    if lane.get("status") == "owned" and owner_state in TERMINAL_LABELS:
+        signals.append(
+            {
+                "code": "terminal-release-lane-owner",
+                "owner_pr": int(lane.get("owner_pr") or 0),
+                "task_id": str(lane.get("task_id") or ""),
+                "minimum_revision": int(lane.get("revision") or 0),
+                "owner_state": owner_state,
+                "required_operation": "orchestration release-lane",
+                "required_fields": [
+                    "owner_pr",
+                    "task",
+                    "revision",
+                    "outcome",
+                    "evidence",
+                ],
+            }
+        )
+    return {"status": "attention" if signals else "ok", "signals": signals}
+
+
+def release_lane_release_proofs(
+    api: ReleaseApi, owner_prs: Iterable[int]
+) -> list[dict[str, Any]]:
+    """Read exact Actions-owned lane-release proofs for requested anchor PRs."""
+
+    proofs: list[dict[str, Any]] = []
+    for owner_pr in sorted({int(item) for item in owner_prs if int(item) > 0}):
+        for fields in reversed(
+            _repo_owned_marker_fields(api, owner_pr, RELEASE_LANE_PROOF_MARKER)
+        ):
+            if fields.get("operation") != "release":
+                continue
+            try:
+                task_id = _orchestration_task_id(str(fields.get("task") or ""))
+                revision = int(fields.get("revision") or 0)
+                outcome = str(fields.get("outcome") or "")
+                evidence = _sha256_fingerprint(
+                    str(fields.get("evidence") or ""), "evidence"
+                )
+            except (ReleaseBlocked, TypeError, ValueError):
+                continue
+            if (
+                int(fields.get("owner_pr") or 0) != owner_pr
+                or revision <= 0
+                or outcome not in {"completed", "parked"}
+            ):
+                continue
+            proofs.append(
+                {
+                    "owner_pr": owner_pr,
+                    "task_id": task_id,
+                    "revision": revision,
+                    "outcome": outcome,
+                    "evidence_digest": evidence,
+                }
+            )
+            break
+    return proofs
+
+
 def _orchestration_active_for_task(
     api: ReleaseApi,
     task_id: str,
@@ -6108,7 +6174,7 @@ def command_handle_comment(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_queue_status(_: argparse.Namespace) -> int:
+def command_queue_status(args: argparse.Namespace) -> int:
     """Read-only snapshot for the global Watcher; never refreshes owner state."""
 
     api = _queue_status_api_from_env()
@@ -6146,11 +6212,16 @@ def command_queue_status(_: argparse.Namespace) -> int:
                 },
             )
             record["labels"].append(label)
+    lane = release_lane_state(api)
     _json_print(
         {
             "status": "ok",
             "queue": queue_gate_state(api),
-            "release_lane": release_lane_state(api),
+            "release_lane": lane,
+            "integrity": release_lane_integrity(lane),
+            "release_lane_proofs": release_lane_release_proofs(
+                api, args.release_proof_pr
+            ),
             "counts": counts,
             "active": [
                 {**active[number], "labels": sorted(active[number]["labels"])}
@@ -6183,6 +6254,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup.set_defaults(handler=command_setup)
 
     queue_status = subparsers.add_parser("queue-status")
+    queue_status.add_argument(
+        "--release-proof-pr", action="append", type=int, default=[]
+    )
     queue_status.set_defaults(handler=command_queue_status)
 
     select = subparsers.add_parser("select")
