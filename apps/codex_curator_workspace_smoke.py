@@ -1,0 +1,155 @@
+"""Deterministic smoke coverage for the canonical local C1 workspace."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from apps.codex_curator_workspace import (  # noqa: E402
+    load_contract,
+    validate_checkout,
+    validate_project_readback,
+)
+
+
+def main() -> None:
+    contract = load_contract()
+    validation = validate_checkout()
+    assert validation["status"] == "ok"
+    assert contract["project"]["label"] == "WB Core · Кураторы"
+    assert contract["curator"] == {
+        "role": "C1",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "max",
+        "task_surface": "discussion-only",
+    }
+    assert contract["instruction_discovery"]["project_doc_max_bytes"] == 65536
+    assert contract["instruction_discovery"]["current_role_source"].startswith(
+        "origin/main:workspaces/"
+    )
+    instruction_bytes = sum(
+        (ROOT / relative).stat().st_size
+        for relative in contract["instruction_discovery"]["expected_order"]
+    )
+    assert instruction_bytes < contract["instruction_discovery"]["project_doc_max_bytes"]
+
+    lifecycle = contract["lifecycle"]
+    assert lifecycle["ordered_states"][-2:] == [
+        "short-dispatch-summary",
+        "turn-ended-idle",
+    ]
+    assert set(lifecycle["post_dispatch_forbidden"]) == {
+        "wait_threads",
+        "read_thread",
+        "github-polling",
+        "curator-heartbeat",
+    }
+    assert lifecycle["wake_sources"] == [
+        "user-message",
+        "exact-watcher-attention",
+    ]
+    assert lifecycle["attention_action_limit"] == 1
+    assert lifecycle["return_to_idle_after_attention"] is True
+
+    watcher = contract["watcher"]
+    assert watcher["identity_source"] == "registry-active-generation"
+    assert watcher["hardcoded_generation_or_thread"] is False
+    assert watcher["additional_watcher_allowed"] is False
+    assert watcher["curator_heartbeat_allowed"] is False
+    assert contract["executor"]["inherits_curator_delta"] is False
+    assert contract["canary"]["requires_service_boilerplate"] is False
+
+    migration = contract["migration"]
+    assert migration["legacy_project"] == "wb_core_3"
+    assert migration["automatic_archive"] is False
+    for required in (
+        "no-active-pre-migration-tasks",
+        "initiating-curator-owner-accepted",
+        "registry-integrity-ok",
+        "exactly-one-active-watcher",
+        "new-front-door-proven",
+    ):
+        assert required in migration["legacy_archive_requires"]
+
+    readback = {
+        "schemaVersion": 2,
+        "projects": [
+            {
+                "projectId": "local-curators",
+                "projectKind": "local",
+                "label": contract["project"]["label"],
+                "path": str(
+                    (ROOT / contract["project"]["primary_relative_path"]).resolve()
+                ),
+                "hostId": "local",
+                "isGitRepository": True,
+            }
+        ],
+    }
+    project = validate_project_readback(readback, contract, ROOT)
+    assert project["status"] == "ok"
+    assert project["project_id"] == "local-curators"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "projects.json"
+        path.write_text(json.dumps(readback, ensure_ascii=False), encoding="utf-8")
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        assert validate_project_readback(loaded, contract, ROOT)["status"] == "ok"
+
+    bad_path = json.loads(json.dumps(readback))
+    bad_path["projects"][0]["path"] = str(ROOT)
+    try:
+        validate_project_readback(bad_path, contract, ROOT)
+    except ValueError as error:
+        assert "normalized" in str(error)
+    else:
+        raise AssertionError("normalized Git-root cwd must fail closed")
+
+    missing_project_id = json.loads(json.dumps(readback))
+    missing_project_id["projects"][0]["projectId"] = ""
+    try:
+        validate_project_readback(missing_project_id, contract, ROOT)
+    except ValueError as error:
+        assert "project ID" in str(error)
+    else:
+        raise AssertionError("missing Desktop project ID must fail closed")
+
+    sources = "\n".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "workspaces/WB Core · Кураторы/AGENTS.override.md",
+            "workspaces/WB Core · Кураторы/README.md",
+            "docs/architecture/13_codex_curator_workspace.md",
+        )
+    )
+    for required in (
+        "discussion-only",
+        "DISPATCH_REQUEST",
+        "короткий dispatch summary",
+        "exact attention",
+        "wb_core_3",
+        "Задача принята",
+    ):
+        assert required in sources
+    for forbidden in (
+        "watcher-g1",
+        "watcher-g2",
+        "watcher-g3",
+        "watcher-g4",
+        "watcher-g5",
+        "watcher-g6",
+    ):
+        assert forbidden not in sources.casefold()
+
+    print("codex_curator_workspace_smoke: ok")
+
+
+if __name__ == "__main__":
+    main()
