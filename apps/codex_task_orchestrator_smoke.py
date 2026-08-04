@@ -31,6 +31,7 @@ from apps.codex_task_orchestrator_spec import (
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     canonical_digest,
     classify_incident,
+    transition_allowed,
     validate_curator_lifecycle_observation,
 )
 
@@ -1201,6 +1202,97 @@ def _run_watcher_driver_smoke() -> None:
         quiet_registry.end_run(generation=1, owner="watcher-quiet-owner")
 
 
+def _run_release_ready_completion_smoke() -> None:
+    """Reproduce a release:done executor observed while the task is still release-ready."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "release-ready-completion-registry")
+        registry.initialize()
+        identity = "release-ready-completion-v1"
+        _register(registry, identity, "release-ready-completion")
+        registry.update_task(
+            task_id=identity,
+            expected_revision=1,
+            status=TaskStatus.READY_FOR_RELEASE,
+            progress=88,
+            eta="несколько минут",
+            delta="Выпуск завершён и ожидает terminal readback.",
+            current="Watcher подтверждает точное завершение выпуска.",
+            blocker=None,
+        )
+        _prove_repo_done(registry, identity, 921)
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="watcher-release-ready-completion",
+            automation_id="release-ready-completion-auto",
+        )
+        registry.smoke_watcher(
+            generation=1,
+            evidence_digest="sha256:" + "1" * 64,
+        )
+        registry.activate_watcher(generation=1)
+        registry.begin_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            lease_seconds=540,
+        )
+        preflight = registry.classify_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="f" * 40,
+            protocol_digest="sha256:" + "2" * 64,
+        )
+        assert preflight["decision"] == "FULL"
+        plan = registry.plan_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            queue_evidence_digest=str(preflight["queue_evidence_digest"]),
+        )
+        assert plan["pending_target_ids"] == [identity]
+        observation = _target_observation(
+            task_id=identity,
+            revision=2,
+            executor="executor-release-ready-completion",
+            status="completed",
+            evidence_digit="3",
+        )
+        observation["turn_id"] = "turn-release-ready-completion"
+        observation["final_item_id"] = "item-release-ready-completion"
+        observation["completion"] = {
+            "evidence_class": "release:done",
+            "marker": "release:done",
+            "evidence_digest": "sha256:" + "3" * 64,
+            "evidence_summary": "PR #921 и trusted origin/main подтверждают repo-only выпуск.",
+            "eta": "готово",
+            "delta": "Repo-only выпуск подтверждён.",
+            "current": "Куратор подтверждает получение результата.",
+        }
+        registry.record_watcher_target(
+            generation=1,
+            owner="release-ready-completion-owner",
+            task_id=identity,
+            observation=observation,
+        )
+        actuation = registry.actuate_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+        )
+        assert actuation["results"][0]["action"] == "terminal-attention-enqueued"
+        progress = registry.progress_state(task_id=identity)
+        assert progress["status"] == "DONE_PENDING_HANDOFF"
+        assert progress["revision"] == 3
+        assert progress["progress_percent"] == 100
+        assert transition_allowed(
+            TaskStatus.READY_FOR_RELEASE, TaskStatus.DONE_PENDING_HANDOFF
+        )
+        assert not transition_allowed(
+            TaskStatus.DISCUSSION, TaskStatus.DONE_PENDING_HANDOFF
+        )
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+
 def _run_release_lane_closure_smoke() -> None:
     """Reproduce PR #918: accepted terminal work still owns the lane."""
 
@@ -2031,6 +2123,7 @@ def run_smoke() -> None:
 
     _run_progress_smoke()
     _run_watcher_driver_smoke()
+    _run_release_ready_completion_smoke()
     _run_release_lane_closure_smoke()
     _run_workstream_report_smoke()
     _run_owner_reminder_smoke()
