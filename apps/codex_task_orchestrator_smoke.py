@@ -31,6 +31,7 @@ from apps.codex_task_orchestrator_spec import (
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     canonical_digest,
     classify_incident,
+    transition_allowed,
     validate_curator_lifecycle_observation,
 )
 
@@ -1201,6 +1202,97 @@ def _run_watcher_driver_smoke() -> None:
         quiet_registry.end_run(generation=1, owner="watcher-quiet-owner")
 
 
+def _run_release_ready_completion_smoke() -> None:
+    """Reproduce a release:done executor observed while the task is still release-ready."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "release-ready-completion-registry")
+        registry.initialize()
+        identity = "release-ready-completion-v1"
+        _register(registry, identity, "release-ready-completion")
+        registry.update_task(
+            task_id=identity,
+            expected_revision=1,
+            status=TaskStatus.READY_FOR_RELEASE,
+            progress=88,
+            eta="несколько минут",
+            delta="Выпуск завершён и ожидает terminal readback.",
+            current="Watcher подтверждает точное завершение выпуска.",
+            blocker=None,
+        )
+        _prove_repo_done(registry, identity, 921)
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="watcher-release-ready-completion",
+            automation_id="release-ready-completion-auto",
+        )
+        registry.smoke_watcher(
+            generation=1,
+            evidence_digest="sha256:" + "1" * 64,
+        )
+        registry.activate_watcher(generation=1)
+        registry.begin_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            lease_seconds=540,
+        )
+        preflight = registry.classify_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="f" * 40,
+            protocol_digest="sha256:" + "2" * 64,
+        )
+        assert preflight["decision"] == "FULL"
+        plan = registry.plan_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+            queue_evidence_digest=str(preflight["queue_evidence_digest"]),
+        )
+        assert plan["pending_target_ids"] == [identity]
+        observation = _target_observation(
+            task_id=identity,
+            revision=2,
+            executor="executor-release-ready-completion",
+            status="completed",
+            evidence_digit="3",
+        )
+        observation["turn_id"] = "turn-release-ready-completion"
+        observation["final_item_id"] = "item-release-ready-completion"
+        observation["completion"] = {
+            "evidence_class": "release:done",
+            "marker": "release:done",
+            "evidence_digest": "sha256:" + "3" * 64,
+            "evidence_summary": "PR #921 и trusted origin/main подтверждают repo-only выпуск.",
+            "eta": "готово",
+            "delta": "Repo-only выпуск подтверждён.",
+            "current": "Куратор подтверждает получение результата.",
+        }
+        registry.record_watcher_target(
+            generation=1,
+            owner="release-ready-completion-owner",
+            task_id=identity,
+            observation=observation,
+        )
+        actuation = registry.actuate_watcher_run(
+            generation=1,
+            owner="release-ready-completion-owner",
+        )
+        assert actuation["results"][0]["action"] == "terminal-attention-enqueued"
+        progress = registry.progress_state(task_id=identity)
+        assert progress["status"] == "DONE_PENDING_HANDOFF"
+        assert progress["revision"] == 3
+        assert progress["progress_percent"] == 100
+        assert transition_allowed(
+            TaskStatus.READY_FOR_RELEASE, TaskStatus.DONE_PENDING_HANDOFF
+        )
+        assert not transition_allowed(
+            TaskStatus.DISCUSSION, TaskStatus.DONE_PENDING_HANDOFF
+        )
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+
 def _run_release_lane_closure_smoke() -> None:
     """Reproduce PR #918: accepted terminal work still owns the lane."""
 
@@ -1506,6 +1598,240 @@ def _run_release_lane_closure_smoke() -> None:
         assert registry.pending_release_lane_owner_prs() == []
         assert final_snapshot["incidents"] == []
         assert registry.integrity()["release_lane_closure_signals"] == []
+
+
+def _run_watcher_rotation_enforcement_smoke() -> None:
+    def finish_empty_run(
+        registry: Registry, *, generation: int, owner: str, automation_id: str
+    ) -> str:
+        queue_evidence = _quiet_queue_snapshot()
+        plan = registry.plan_watcher_run(
+            generation=generation,
+            owner=owner,
+            queue_evidence_digest=canonical_digest(queue_evidence),
+            queue_evidence=queue_evidence,
+        )
+        assert plan["pending_target_ids"] == []
+        registry.actuate_watcher_run(generation=generation, owner=owner)
+        return registry.finish_watcher_run(
+            generation=generation,
+            owner=owner,
+            automation_id=automation_id,
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry_home = Path(temporary) / "overdue-g5-registry"
+        registry = Registry(registry_home)
+        registry.initialize()
+        _prepare_watcher(
+            registry,
+            generation=5,
+            thread_id="watcher-g5",
+            automation_id="wb-core-global-watcher-g5",
+            max_runs=48,
+        )
+        registry.smoke_watcher(
+            generation=5, evidence_digest="sha256:" + "5" * 64
+        )
+        registry.activate_watcher(generation=5)
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET run_count=67,context_compaction_item_id='item-72',"
+                "context_compaction_readback_digest=?,context_compaction_at=? "
+                "WHERE generation=5",
+                ("sha256:" + "c" * 64, "2026-08-04T07:00:00+00:00"),
+            )
+
+        unhealthy = registry.integrity()
+        assert unhealthy["ok"] is False
+        assert unhealthy["overdue_active_watchers"] == 1
+        assert unhealthy["overdue_watchers_without_rotation_operation"] == 1
+        try:
+            _prepare_watcher(
+                registry,
+                generation=6,
+                thread_id="watcher-g6",
+                automation_id="wb-core-global-watcher-g6",
+            )
+        except RuntimeError as exc:
+            assert "current-generation durable rotation operation" in str(exc)
+        else:
+            raise AssertionError("successor cannot bypass overdue predecessor initiation")
+        assert [item["generation"] for item in registry.snapshot()["watchers"]] == [5]
+
+        first = registry.begin_run(
+            generation=5, owner="overdue-g5-r68", lease_seconds=60
+        )
+        assert first["run_count"] == 68
+        assert first["rotation_reasons"] == ["run-limit", "context-compaction"]
+        assert first["rotation_operation"]["state"] == "REQUIRED"
+        assert first["rotation_operation"]["last_transition_run_id"] == first["run_id"]
+        remediating = registry.integrity()
+        assert remediating["ok"] is True
+        assert remediating["watcher_rotation_remediation_required"] == 1
+        first_wrapper = ET.fromstring(
+            finish_empty_run(
+                registry,
+                generation=5,
+                owner="overdue-g5-r68",
+                automation_id="wb-core-global-watcher-g5",
+            )
+        )
+        assert first_wrapper.findtext("decision") == "DONT_NOTIFY"
+
+        second = registry.begin_run(
+            generation=5, owner="overdue-g5-r69", lease_seconds=60
+        )
+        assert second["rotation_operation"]["last_transition_run_id"] != second["run_id"]
+        queue_evidence = _quiet_queue_snapshot()
+        registry.plan_watcher_run(
+            generation=5,
+            owner="overdue-g5-r69",
+            queue_evidence_digest=canonical_digest(queue_evidence),
+            queue_evidence=queue_evidence,
+        )
+        registry.actuate_watcher_run(generation=5, owner="overdue-g5-r69")
+        try:
+            registry.finish_watcher_run(
+                generation=5,
+                owner="overdue-g5-r69",
+                automation_id="wb-core-global-watcher-g5",
+            )
+        except RuntimeError as exc:
+            assert "current-run rotation progress" in str(exc)
+        else:
+            raise AssertionError("repeated overdue quiet heartbeat must fail closed")
+        retry_one = registry.record_watcher_rotation_retry(
+            generation=5,
+            owner="overdue-g5-r69",
+            phase="desktop-successor-create",
+            failure_digest="sha256:" + "a" * 64,
+        )
+        assert retry_one["state"] == "RETRY_PENDING"
+        assert retry_one["retry_count"] == 1
+        assert ET.fromstring(
+            registry.finish_watcher_run(
+                generation=5,
+                owner="overdue-g5-r69",
+                automation_id="wb-core-global-watcher-g5",
+            )
+        ).findtext("decision") == "DONT_NOTIFY"
+
+        for run_number, digest_character in ((70, "b"), (71, "d")):
+            owner = f"overdue-g5-r{run_number}"
+            registry.begin_run(generation=5, owner=owner, lease_seconds=60)
+            retry = registry.record_watcher_rotation_retry(
+                generation=5,
+                owner=owner,
+                phase="desktop-successor-readback",
+                failure_digest="sha256:" + digest_character * 64,
+            )
+            finish_empty_run(
+                registry,
+                generation=5,
+                owner=owner,
+                automation_id="wb-core-global-watcher-g5",
+            )
+        assert retry["state"] == "ATTENTION_REQUIRED"
+        assert retry["retry_count"] == 3
+        assert retry["retry_remaining"] == 0
+        assert retry["attention_evidence_digest"].startswith("sha256:")
+        attention_integrity = registry.integrity()
+        assert attention_integrity["ok"] is True
+        assert attention_integrity["watcher_rotation_attention_required"] == 1
+
+        registry.begin_run(
+            generation=5, owner="overdue-g5-attention", lease_seconds=60
+        )
+        finish_empty_run(
+            registry,
+            generation=5,
+            owner="overdue-g5-attention",
+            automation_id="wb-core-global-watcher-g5",
+        )
+
+        _prepare_watcher(
+            registry,
+            generation=6,
+            thread_id="watcher-g6",
+            automation_id="wb-core-global-watcher-g6",
+        )
+        assert registry.watcher_rotation_state(generation=5)["state"] == (
+            "SUCCESSOR_PREPARED"
+        )
+        registry.smoke_watcher(
+            generation=6, evidence_digest="sha256:" + "6" * 64
+        )
+        assert registry.watcher_rotation_state(generation=5)["state"] == (
+            "SUCCESSOR_SMOKED"
+        )
+        registry.activate_watcher(generation=6)
+        assert registry.begin_run(
+            generation=5, owner="stale-g5", lease_seconds=60
+        ) == {"acquired": False, "reason": "stale-watcher-generation"}
+        assert registry.watcher_rotation_state(generation=5)["state"] == "ACTIVATED"
+        assert [
+            item["generation"] for item in registry.pending_watcher_retirements()
+        ] == [5]
+        try:
+            registry.confirm_watcher_retirement(
+                generation=5,
+                successor_generation=6,
+                automation_paused_digest="sha256:" + "8" * 64,
+                archive_readback_digest="sha256:" + "9" * 64,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("G5 retirement must wait for G6 liveness")
+
+        registry.begin_run(generation=6, owner="g6-first", lease_seconds=60)
+        successor_heartbeat = finish_empty_run(
+            registry,
+            generation=6,
+            owner="g6-first",
+            automation_id="wb-core-global-watcher-g6",
+        )
+        registry.confirm_watcher_liveness(
+            generation=6,
+            automation_id="wb-core-global-watcher-g6",
+            automation_enabled_readback_digest="sha256:" + "e" * 64,
+            heartbeat_readback_digest="sha256:" + "f" * 64,
+            end_run_readback_digest="sha256:" + "0" * 64,
+        )
+        assert successor_heartbeat.startswith("<heartbeat>")
+        assert registry.watcher_rotation_state(generation=5)["state"] == (
+            "LIVENESS_PROVEN"
+        )
+        try:
+            registry.smoke_watcher(
+                generation=6, evidence_digest="sha256:" + "1" * 64
+            )
+        except RuntimeError as exc:
+            assert "smoke evidence is immutable" in str(exc)
+        else:
+            raise AssertionError("post-activation smoke evidence cannot change")
+
+        resumed_registry = Registry(registry_home)
+        resumed_registry.initialize()
+        assert [
+            item["generation"]
+            for item in resumed_registry.pending_watcher_retirements()
+        ] == [5]
+        resumed_registry.confirm_watcher_retirement(
+            generation=5,
+            successor_generation=6,
+            automation_paused_digest="sha256:" + "8" * 64,
+            archive_readback_digest="sha256:" + "9" * 64,
+        )
+        completed = resumed_registry.watcher_rotation_state(generation=5)
+        assert completed["state"] == "COMPLETED"
+        assert completed["completed_at"]
+        final_integrity = resumed_registry.integrity()
+        assert final_integrity["ok"] is True
+        assert final_integrity["active_watchers"] == 1
+        assert final_integrity["effective_enabled_automations"] == 1
+        assert final_integrity["incomplete_watcher_retirements"] == 0
 
 
 def _run_workstream_report_smoke() -> None:
@@ -1890,6 +2216,8 @@ def run_smoke() -> None:
         "confirm-watcher-liveness",
         "record-watcher-liveness-failure",
         "record-watcher-context-compaction",
+        "record-watcher-rotation-retry",
+        "wb-core-watcher-rotation-operation/v1",
         "contextCompaction",
         "python3 apps/codex_task_orchestrator.py heartbeat-finish",
         "--queue-evidence-json",
@@ -1907,7 +2235,8 @@ def run_smoke() -> None:
         "confirmation_requires_actions_owned_release_proof"
     ] is True
     assert watcher_contract["release_lane_closure"]["exhaustion_opens_incident"] is True
-    assert watcher_contract["heartbeat_driver"]["ordered_phases"][-2:] == [
+    assert watcher_contract["heartbeat_driver"]["ordered_phases"][-3:] == [
+        "rotation-operation",
         "end-run",
         "heartbeat-response",
     ]
@@ -1924,6 +2253,23 @@ def run_smoke() -> None:
         "archive_only_after_successor_readback"
     ] is True
     assert watcher_contract["rotation"]["activate_only_after_smoke"] is True
+    assert watcher_contract["rotation"]["due_is_durable_machine_operation"] is True
+    assert watcher_contract["rotation"][
+        "heartbeat_finish_requires_current_run_rotation_receipt"
+    ] is True
+    assert watcher_contract["rotation"]["retry_policy"][
+        "max_transient_retries"
+    ] == 3
+    assert watcher_contract["rotation"]["operation_states"] == [
+        "REQUIRED",
+        "RETRY_PENDING",
+        "ATTENTION_REQUIRED",
+        "SUCCESSOR_PREPARED",
+        "SUCCESSOR_SMOKED",
+        "ACTIVATED",
+        "LIVENESS_PROVEN",
+        "COMPLETED",
+    ]
     assert watcher_contract["rotation"]["run_boundary"] == {
         "not_due_run_count": 47,
         "due_run_count": 48,
@@ -2031,7 +2377,9 @@ def run_smoke() -> None:
 
     _run_progress_smoke()
     _run_watcher_driver_smoke()
+    _run_release_ready_completion_smoke()
     _run_release_lane_closure_smoke()
+    _run_watcher_rotation_enforcement_smoke()
     _run_workstream_report_smoke()
     _run_owner_reminder_smoke()
     _run_passport_revision_smoke()

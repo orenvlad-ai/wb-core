@@ -123,6 +123,7 @@
       "terminal-evidence",
       "release-lane-closure",
       "attention-delivery",
+      "rotation-operation",
       "end-run",
       "heartbeat-response"
     ],
@@ -304,6 +305,41 @@
     "terminal_executor_without_successor_stays_current": true
   },
   "rotation": {
+    "operation_schema": "wb-core-watcher-rotation-operation/v1",
+    "due_is_durable_machine_operation": true,
+    "due_transition_source": "begin-run",
+    "heartbeat_finish_requires_current_run_rotation_receipt": true,
+    "attention_required_satisfies_finish_with_durable_evidence": true,
+    "retry_policy": {
+      "command": "record-watcher-rotation-retry",
+      "max_transient_retries": 3,
+      "terminal_retry_state": "ATTENTION_REQUIRED",
+      "retry_and_attention_evidence_required": true
+    },
+    "operation_states": [
+      "REQUIRED",
+      "RETRY_PENDING",
+      "ATTENTION_REQUIRED",
+      "SUCCESSOR_PREPARED",
+      "SUCCESSOR_SMOKED",
+      "ACTIVATED",
+      "LIVENESS_PROVEN",
+      "COMPLETED"
+    ],
+    "topology_driven_transitions": [
+      "prepare-watcher",
+      "smoke-watcher",
+      "activate-watcher",
+      "confirm-watcher-liveness",
+      "confirm-watcher-retirement"
+    ],
+    "integrity_fields": [
+      "overdue_active_watchers",
+      "overdue_watchers_without_rotation_operation",
+      "watcher_rotation_remediation_required",
+      "watcher_rotation_attention_required",
+      "invalid_watcher_rotations"
+    ],
     "run_boundary": {
       "not_due_run_count": 47,
       "due_run_count": 48

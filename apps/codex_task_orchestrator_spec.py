@@ -39,6 +39,7 @@ WATCHER_RUN_PHASES = (
     "terminal-evidence",
     "release-lane-closure",
     "attention-delivery",
+    "rotation-operation",
     "end-run",
     "heartbeat-response",
 )
@@ -70,6 +71,23 @@ WATCHER_FAST_MODEL_FACING_STEPS = (
 )
 CURATOR_WAKE_SOURCES = frozenset(
     {"dispatch-complete", "user-message", "watcher-attention"}
+)
+
+WATCHER_ROTATION_STATES = frozenset(
+    {
+        "REQUIRED",
+        "RETRY_PENDING",
+        "ATTENTION_REQUIRED",
+        "SUCCESSOR_PREPARED",
+        "SUCCESSOR_SMOKED",
+        "ACTIVATED",
+        "LIVENESS_PROVEN",
+        "COMPLETED",
+    }
+)
+WATCHER_ROTATION_TERMINAL_STATES = frozenset({"COMPLETED"})
+WATCHER_ROTATION_REMEDIATION_STATES = frozenset(
+    {"REQUIRED", "RETRY_PENDING", "ATTENTION_REQUIRED"}
 )
 ARBITER_BRIEF_SCHEMA = "wb-core-arbiter-brief/v1"
 ARBITER_DECISION_SCHEMA = "wb-core-arbiter-decision/v1"
@@ -332,6 +350,7 @@ TASK_TRANSITIONS = {
             TaskStatus.WORKING,
             TaskStatus.RECOVERING,
             TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
             TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
