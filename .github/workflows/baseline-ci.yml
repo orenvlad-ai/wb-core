@@ -35,6 +35,7 @@ jobs:
 
       - name: Validate Release Train
         run: |
+          python3 apps/codex_curator_workspace_smoke.py
           python3 apps/codex_task_orchestrator_smoke.py
           python3 apps/github_release_train_smoke.py
           python3 apps/user_artifact_xlsx_smoke.py

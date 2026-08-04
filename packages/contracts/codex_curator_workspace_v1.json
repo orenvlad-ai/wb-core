@@ -1,0 +1,85 @@
+{
+  "schema": "wb-core-codex-curator-workspace/v1",
+  "repository": "orenvlad-ai/wb-core",
+  "project": {
+    "label": "WB Core · Кураторы",
+    "primary_relative_path": "workspaces/WB Core · Кураторы",
+    "host_id": "local",
+    "environment": "local",
+    "expected_git_repository": true,
+    "rollout_repository_path": "/Users/ovlmacbook/Projects/wb-core-curators",
+    "fallback_primary_path": "/Users/ovlmacbook/Projects/WB Core · Кураторы"
+  },
+  "instruction_discovery": {
+    "common_source": "origin/main:AGENTS.md",
+    "current_role_source": "origin/main:workspaces/WB Core · Кураторы/AGENTS.override.md",
+    "role_delta": "workspaces/WB Core · Кураторы/AGENTS.override.md",
+    "project_config": "workspaces/WB Core · Кураторы/.codex/config.toml",
+    "expected_order": [
+      "AGENTS.md",
+      "workspaces/WB Core · Кураторы/AGENTS.override.md"
+    ],
+    "project_doc_max_bytes": 65536,
+    "common_protocol_is_not_copied": true,
+    "secondary_folders_are_not_instruction_sources": true
+  },
+  "curator": {
+    "role": "C1",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "max",
+    "task_surface": "discussion-only"
+  },
+  "lifecycle": {
+    "common_contract_source": "origin/main:AGENTS.md",
+    "common_contract_sections": [
+      "Discussion → отдельная Codex-задача",
+      "Глобальный Watcher и арбитр"
+    ],
+    "inherit_without_override": true,
+    "role_entry_state": "discussion-only",
+    "role_specific_obligations": [
+      "before-action-current-origin-main-readback",
+      "c2-outside-curator-primary-folder"
+    ]
+  },
+  "executor": {
+    "role": "C2",
+    "separate_user_owned_thread": true,
+    "inherits_curator_delta": false,
+    "model_policy": "current-root-protocol"
+  },
+  "watcher": {
+    "common_contract_source": "origin/main:AGENTS.md",
+    "inherit_without_override": true,
+    "workspace_adds_watcher_or_heartbeat": false
+  },
+  "canary": {
+    "execution_contour": "read-only",
+    "user_prompt": "Запусти отдельную короткую диагностику: проверь, что новый кураторский контур следует актуальному протоколу и не создаёт второй Watcher.",
+    "requires_service_boilerplate": false,
+    "required_evidence": [
+      "exact-project-readback",
+      "primary-cwd-readback",
+      "root-and-role-instruction-discovery",
+      "separate-c2-create-readback",
+      "registry-task-readback",
+      "c1-turn-ended-after-summary",
+      "single-global-watcher-observation"
+    ]
+  },
+  "migration": {
+    "legacy_project": "wb_core_3",
+    "new_tasks_switch_after": [
+      "saved-project-readback",
+      "successful-natural-canary"
+    ],
+    "legacy_archive_requires": [
+      "no-active-pre-migration-tasks",
+      "initiating-curator-owner-accepted",
+      "registry-integrity-ok",
+      "exactly-one-active-watcher",
+      "new-front-door-proven"
+    ],
+    "automatic_archive": false
+  }
+}
