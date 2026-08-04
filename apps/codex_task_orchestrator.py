@@ -51,6 +51,9 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     WATCHER_FAST_MODEL_FACING_STEPS,
     WATCHER_MECHANICAL_PREFLIGHT_SCHEMA,
     WATCHER_PREFLIGHT_DECISIONS,
+    WATCHER_ROTATION_REMEDIATION_STATES,
+    WATCHER_ROTATION_STATES,
+    WATCHER_ROTATION_TERMINAL_STATES,
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     WATCHER_TARGET_READBACK_STATUSES,
     canonical_digest,
@@ -88,6 +91,9 @@ DEFAULT_OWNER_REMINDER_SECONDS = int(
 DEFAULT_FULL_SCAN_SECONDS = int(
     WATCHER_CONTRACT.get("quiet_fast_path", {}).get("full_scan_interval_minutes", 60)
 ) * 60
+DEFAULT_WATCHER_ROTATION_RETRY_LIMIT = int(
+    WATCHER_CONTRACT["rotation"]["retry_policy"]["max_transient_retries"]
+)
 ACTIVE_INCIDENT_STATES = (
     IncidentStatus.OPEN.value,
     IncidentStatus.WAITING_RESOURCE.value,
@@ -346,6 +352,29 @@ CREATE TABLE IF NOT EXISTS watchers (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_watcher
 ON watchers(status) WHERE status = 'ACTIVE';
+CREATE TABLE IF NOT EXISTS watcher_rotations (
+    predecessor_generation INTEGER PRIMARY KEY REFERENCES watchers(generation),
+    successor_generation INTEGER REFERENCES watchers(generation),
+    state TEXT NOT NULL CHECK(state IN (
+        'REQUIRED','RETRY_PENDING','ATTENTION_REQUIRED','SUCCESSOR_PREPARED',
+        'SUCCESSOR_SMOKED','ACTIVATED','LIVENESS_PROVEN','COMPLETED'
+    )),
+    trigger_reasons_json TEXT NOT NULL,
+    trigger_run_id TEXT NOT NULL,
+    last_transition_kind TEXT NOT NULL,
+    last_transition_run_id TEXT NOT NULL DEFAULT '',
+    last_transition_evidence_digest TEXT NOT NULL,
+    transition_count INTEGER NOT NULL DEFAULT 1 CHECK(transition_count > 0),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+    retry_limit INTEGER NOT NULL DEFAULT __DEFAULT_WATCHER_ROTATION_RETRY_LIMIT__
+        CHECK(retry_limit > 0),
+    last_failure_phase TEXT NOT NULL DEFAULT '',
+    last_failure_digest TEXT NOT NULL DEFAULT '',
+    attention_evidence_digest TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS runtime_leases (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
@@ -437,7 +466,12 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
-""".replace("__DEFAULT_WATCHER_MAX_RUNS__", str(DEFAULT_WATCHER_MAX_RUNS))
+""".replace(
+    "__DEFAULT_WATCHER_MAX_RUNS__", str(DEFAULT_WATCHER_MAX_RUNS)
+).replace(
+    "__DEFAULT_WATCHER_ROTATION_RETRY_LIMIT__",
+    str(DEFAULT_WATCHER_ROTATION_RETRY_LIMIT),
+)
 
 
 def _now() -> str:
@@ -3887,6 +3921,299 @@ class Registry:
         self.flush_events()
         return {"case_id": case_id, "status": IncidentStatus.CLOSED.value}
 
+    @staticmethod
+    def _watcher_rotation_payload(row: sqlite3.Row) -> dict[str, object]:
+        payload = dict(row)
+        payload["trigger_reasons"] = json.loads(
+            str(payload.pop("trigger_reasons_json"))
+        )
+        payload["retry_remaining"] = max(
+            0, int(payload["retry_limit"]) - int(payload["retry_count"])
+        )
+        payload["attention_required"] = (
+            payload["state"] == "ATTENTION_REQUIRED"
+        )
+        payload["remediation_required"] = (
+            payload["state"] in WATCHER_ROTATION_REMEDIATION_STATES
+        )
+        return payload
+
+    @staticmethod
+    def _watcher_rotation_run_id(
+        connection: sqlite3.Connection, *, generation: int
+    ) -> str:
+        lease = connection.execute(
+            "SELECT run_id FROM runtime_leases WHERE name='watcher-run' "
+            "AND generation=? AND expires_at>?",
+            (generation, time.time()),
+        ).fetchone()
+        return "" if lease is None else str(lease["run_id"])
+
+    def _ensure_watcher_rotation_operation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        watcher: sqlite3.Row,
+        run_id: str,
+    ) -> sqlite3.Row | None:
+        rotation_state = self._watcher_rotation_state(watcher)
+        if not rotation_state["rotation_due"]:
+            return None
+        generation = int(watcher["generation"])
+        existing = connection.execute(
+            "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+            (generation,),
+        ).fetchone()
+        if existing is not None:
+            if existing["state"] in WATCHER_ROTATION_TERMINAL_STATES:
+                raise RuntimeError(
+                    "an overdue active watcher cannot have a completed rotation"
+                )
+            return existing
+        reasons = list(rotation_state["rotation_reasons"])
+        evidence_digest = canonical_digest(
+            {
+                "schema": "wb-core-watcher-rotation-operation/v1",
+                "predecessor_generation": generation,
+                "trigger_reasons": reasons,
+                "trigger_run_id": run_id,
+                "run_count": int(watcher["run_count"]),
+                "max_runs": int(watcher["max_runs"]),
+            }
+        )
+        timestamp = _now()
+        connection.execute(
+            "INSERT INTO watcher_rotations("
+            "predecessor_generation,state,trigger_reasons_json,trigger_run_id,"
+            "last_transition_kind,last_transition_run_id,"
+            "last_transition_evidence_digest,retry_limit,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                generation,
+                "REQUIRED",
+                _json(reasons),
+                run_id,
+                "rotation-required",
+                run_id,
+                evidence_digest,
+                DEFAULT_WATCHER_ROTATION_RETRY_LIMIT,
+                timestamp,
+                timestamp,
+            ),
+        )
+        self.event(
+            connection,
+            "watcher-rotation",
+            str(generation),
+            "required",
+            {
+                "trigger_reasons": reasons,
+                "trigger_run_id": run_id,
+                "evidence_digest": evidence_digest,
+            },
+        )
+        return connection.execute(
+            "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+            (generation,),
+        ).fetchone()
+
+    def _transition_watcher_rotation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        predecessor_generation: int,
+        state: str,
+        transition_kind: str,
+        evidence_digest: str,
+        successor_generation: int | None = None,
+        run_id: str = "",
+    ) -> sqlite3.Row:
+        if state not in WATCHER_ROTATION_STATES:
+            raise ValueError(f"unknown watcher rotation state: {state}")
+        digest = validate_digest(evidence_digest)
+        operation = connection.execute(
+            "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+            (predecessor_generation,),
+        ).fetchone()
+        if operation is None:
+            raise RuntimeError("watcher rotation operation is not materialized")
+        existing_successor = int(operation["successor_generation"] or 0)
+        requested_successor = int(successor_generation or existing_successor or 0)
+        if existing_successor and requested_successor != existing_successor:
+            raise RuntimeError("watcher rotation already belongs to another successor")
+        topology_rank = {
+            "REQUIRED": 0,
+            "RETRY_PENDING": 0,
+            "ATTENTION_REQUIRED": 0,
+            "SUCCESSOR_PREPARED": 1,
+            "SUCCESSOR_SMOKED": 2,
+            "ACTIVATED": 3,
+            "LIVENESS_PROVEN": 4,
+            "COMPLETED": 5,
+        }
+        if topology_rank[state] < topology_rank[str(operation["state"])]:
+            allowed_retry_regression = (
+                state in {"RETRY_PENDING", "ATTENTION_REQUIRED"}
+                and topology_rank[str(operation["state"])] <= 2
+            )
+            if allowed_retry_regression:
+                pass
+            elif transition_kind in {"successor-prepared", "successor-smoked"}:
+                return operation
+            else:
+                raise RuntimeError("watcher rotation topology cannot regress")
+        if (
+            operation["state"] == state
+            and operation["last_transition_kind"] == transition_kind
+            and operation["last_transition_evidence_digest"] == digest
+            and existing_successor == requested_successor
+        ):
+            return operation
+        timestamp = _now()
+        completed_at = timestamp if state == "COMPLETED" else None
+        connection.execute(
+            "UPDATE watcher_rotations SET successor_generation=?,state=?,"
+            "last_transition_kind=?,last_transition_run_id=?,"
+            "last_transition_evidence_digest=?,transition_count=transition_count+1,"
+            "updated_at=?,completed_at=? WHERE predecessor_generation=?",
+            (
+                requested_successor or None,
+                state,
+                transition_kind,
+                run_id,
+                digest,
+                timestamp,
+                completed_at,
+                predecessor_generation,
+            ),
+        )
+        self.event(
+            connection,
+            "watcher-rotation",
+            str(predecessor_generation),
+            transition_kind,
+            {
+                "state": state,
+                "successor_generation": requested_successor or None,
+                "run_id": run_id,
+                "evidence_digest": digest,
+            },
+        )
+        return connection.execute(
+            "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+            (predecessor_generation,),
+        ).fetchone()
+
+    def watcher_rotation_state(self, *, generation: int) -> dict[str, object]:
+        with self.connect() as connection:
+            operation = connection.execute(
+                "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                (generation,),
+            ).fetchone()
+            if operation is None:
+                raise KeyError(f"unknown watcher rotation operation: {generation}")
+            return self._watcher_rotation_payload(operation)
+
+    def record_watcher_rotation_retry(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        phase: str,
+        failure_digest: str,
+    ) -> dict[str, object]:
+        failure_phase = phase.strip()
+        if not failure_phase:
+            raise ValueError("watcher rotation retry requires a failure phase")
+        digest = validate_digest(failure_digest)
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if watcher is None or watcher["status"] != "ACTIVE":
+                raise RuntimeError("watcher rotation retry requires the active predecessor")
+            operation = self._ensure_watcher_rotation_operation(
+                connection, watcher=watcher, run_id=str(lease["run_id"])
+            )
+            if operation is None:
+                raise RuntimeError("watcher rotation retry requires an overdue watcher")
+            if operation["state"] == "COMPLETED":
+                raise RuntimeError("completed watcher rotation cannot retry")
+            if operation["state"] == "ATTENTION_REQUIRED":
+                payload = self._watcher_rotation_payload(operation)
+                payload["idempotent"] = True
+                return payload
+            if (
+                operation["last_transition_run_id"] == str(lease["run_id"])
+                and operation["last_failure_phase"] == failure_phase
+                and operation["last_failure_digest"] == digest
+            ):
+                payload = self._watcher_rotation_payload(operation)
+                payload["idempotent"] = True
+                return payload
+            retry_count = int(operation["retry_count"]) + 1
+            retry_limit = int(operation["retry_limit"])
+            attention_required = retry_count >= retry_limit
+            attention_digest = (
+                canonical_digest(
+                    {
+                        "schema": "wb-core-watcher-rotation-attention/v1",
+                        "predecessor_generation": generation,
+                        "successor_generation": operation["successor_generation"],
+                        "retry_count": retry_count,
+                        "phase": failure_phase,
+                        "failure_digest": digest,
+                    }
+                )
+                if attention_required
+                else ""
+            )
+            state = "ATTENTION_REQUIRED" if attention_required else "RETRY_PENDING"
+            transition_digest = attention_digest or digest
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watcher_rotations SET state=?,last_transition_kind=?,"
+                "last_transition_run_id=?,last_transition_evidence_digest=?,"
+                "transition_count=transition_count+1,retry_count=?,"
+                "last_failure_phase=?,last_failure_digest=?,attention_evidence_digest=?,"
+                "updated_at=? WHERE predecessor_generation=?",
+                (
+                    state,
+                    "attention-required" if attention_required else "retry-recorded",
+                    str(lease["run_id"]),
+                    transition_digest,
+                    retry_count,
+                    failure_phase,
+                    digest,
+                    attention_digest,
+                    timestamp,
+                    generation,
+                ),
+            )
+            self.event(
+                connection,
+                "watcher-rotation",
+                str(generation),
+                "attention-required" if attention_required else "retry-recorded",
+                {
+                    "run_id": str(lease["run_id"]),
+                    "phase": failure_phase,
+                    "failure_digest": digest,
+                    "retry_count": retry_count,
+                    "retry_limit": retry_limit,
+                    "attention_evidence_digest": attention_digest,
+                },
+            )
+            operation = connection.execute(
+                "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                (generation,),
+            ).fetchone()
+        self.flush_events()
+        return self._watcher_rotation_payload(operation)
+
     def prepare_watcher(
         self,
         *,
@@ -3915,6 +4242,7 @@ class Registry:
             "automation_readback_digest": validate_digest(automation_readback_digest),
         }
         with self.transaction() as connection:
+            idempotent = False
             existing = connection.execute(
                 "SELECT * FROM watchers WHERE generation=?", (generation,)
             ).fetchone()
@@ -3939,35 +4267,79 @@ class Registry:
                 )
                 if actual != expected:
                     raise RuntimeError("watcher generation already has different immutable identity")
-                return {
-                    "generation": generation,
-                    "status": existing["status"],
-                    "idempotent": True,
-                }
-            connection.execute(
-                "INSERT INTO watchers(generation,thread_id,host_id,automation_id,status,max_runs,"
-                "title_readback_digest,pin_readback_digest,automation_readback_digest,"
-                "automation_enabled_readback_digest,automation_enabled_at,liveness_required,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    generation,
-                    thread_id.strip(),
-                    host_id.strip(),
-                    automation_id.strip(),
-                    "PREPARED",
-                    max_runs,
-                    readback_digests["title_readback_digest"],
-                    readback_digests["pin_readback_digest"],
-                    readback_digests["automation_readback_digest"],
-                    readback_digests["automation_readback_digest"],
-                    _now(),
-                    1,
-                    _now(),
-                ),
-            )
-            self.event(connection, "watcher", str(generation), "prepared", {"thread_id": thread_id})
+                idempotent = True
+            else:
+                connection.execute(
+                    "INSERT INTO watchers(generation,thread_id,host_id,automation_id,status,max_runs,"
+                    "title_readback_digest,pin_readback_digest,automation_readback_digest,"
+                    "automation_enabled_readback_digest,automation_enabled_at,liveness_required,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        generation,
+                        thread_id.strip(),
+                        host_id.strip(),
+                        automation_id.strip(),
+                        "PREPARED",
+                        max_runs,
+                        readback_digests["title_readback_digest"],
+                        readback_digests["pin_readback_digest"],
+                        readback_digests["automation_readback_digest"],
+                        readback_digests["automation_readback_digest"],
+                        _now(),
+                        1,
+                        _now(),
+                    ),
+                )
+                self.event(
+                    connection,
+                    "watcher",
+                    str(generation),
+                    "prepared",
+                    {"thread_id": thread_id},
+                )
+            active = connection.execute(
+                "SELECT * FROM watchers WHERE status='ACTIVE'"
+            ).fetchone()
+            if active is not None and int(active["generation"]) != generation:
+                predecessor_generation = int(active["generation"])
+                run_id = self._watcher_rotation_run_id(
+                    connection, generation=predecessor_generation
+                )
+                operation = connection.execute(
+                    "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                    (predecessor_generation,),
+                ).fetchone()
+                if self._watcher_rotation_state(active)["rotation_due"] and operation is None:
+                    raise RuntimeError(
+                        "overdue watcher successor requires a current-generation "
+                        "durable rotation operation"
+                    )
+                if operation is not None and not run_id:
+                    run_id = str(operation["last_transition_run_id"])
+                if operation is not None:
+                    evidence_digest = canonical_digest(
+                        {
+                            "generation": generation,
+                            "thread_id": thread_id.strip(),
+                            "automation_id": automation_id.strip(),
+                            **readback_digests,
+                        }
+                    )
+                    self._transition_watcher_rotation(
+                        connection,
+                        predecessor_generation=predecessor_generation,
+                        successor_generation=generation,
+                        state="SUCCESSOR_PREPARED",
+                        transition_kind="successor-prepared",
+                        evidence_digest=evidence_digest,
+                        run_id=run_id,
+                    )
         self.flush_events()
-        return {"generation": generation, "status": "PREPARED"}
+        return {
+            "generation": generation,
+            "status": existing["status"] if existing is not None else "PREPARED",
+            **({"idempotent": True} if idempotent else {}),
+        }
 
     def confirm_watcher_readback(
         self,
@@ -4053,6 +4425,25 @@ class Registry:
                 raise RuntimeError(
                     "watcher smoke requires title, pin and automation readback evidence"
                 )
+            operation = connection.execute(
+                "SELECT * FROM watcher_rotations WHERE successor_generation=?",
+                (generation,),
+            ).fetchone()
+            if operation is not None and operation["state"] in {
+                "ACTIVATED",
+                "LIVENESS_PROVEN",
+                "COMPLETED",
+            }:
+                if watcher["smoke_digest"] != digest:
+                    raise RuntimeError(
+                        "activated watcher rotation smoke evidence is immutable"
+                    )
+                return {
+                    "generation": generation,
+                    "status": "SMOKE_PASSED",
+                    "evidence_digest": digest,
+                    "idempotent": True,
+                }
             connection.execute(
                 "UPDATE watchers SET smoke_digest=?,smoke_at=? WHERE generation=?",
                 (digest, _now(), generation),
@@ -4064,6 +4455,19 @@ class Registry:
                 "smoke-passed",
                 {"evidence_digest": digest},
             )
+            if operation is not None:
+                predecessor_generation = int(operation["predecessor_generation"])
+                self._transition_watcher_rotation(
+                    connection,
+                    predecessor_generation=predecessor_generation,
+                    successor_generation=generation,
+                    state="SUCCESSOR_SMOKED",
+                    transition_kind="successor-smoked",
+                    evidence_digest=digest,
+                    run_id=self._watcher_rotation_run_id(
+                        connection, generation=predecessor_generation
+                    ),
+                )
         self.flush_events()
         return {"generation": generation, "status": "SMOKE_PASSED", "evidence_digest": digest}
 
@@ -4125,6 +4529,33 @@ class Registry:
                 )
             ):
                 raise RuntimeError("watcher activation requires UI readback evidence")
+            previous_active = connection.execute(
+                "SELECT * FROM watchers WHERE status='ACTIVE' AND generation<>?",
+                (generation,),
+            ).fetchone()
+            operation = None
+            if previous_active is not None:
+                predecessor_generation = int(previous_active["generation"])
+                run_id = self._watcher_rotation_run_id(
+                    connection, generation=predecessor_generation
+                )
+                operation = connection.execute(
+                    "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                    (predecessor_generation,),
+                ).fetchone()
+                if (
+                    self._watcher_rotation_state(previous_active)["rotation_due"]
+                    and operation is None
+                ):
+                    raise RuntimeError(
+                        "overdue watcher activation requires a durable rotation operation"
+                    )
+                if operation is not None and int(
+                    operation["successor_generation"] or 0
+                ) != generation:
+                    raise RuntimeError(
+                        "watcher activation does not match the durable rotation successor"
+                    )
             connection.execute(
                 "UPDATE watchers SET status='RETIRED',retired_at=?,retirement_required=1,"
                 "successor_generation=? WHERE status='ACTIVE' AND generation<>?",
@@ -4136,6 +4567,26 @@ class Registry:
             )
             connection.execute("UPDATE watchers SET status='ACTIVE',activated_at=?,retired_at=NULL WHERE generation=?", (_now(), generation))
             self.event(connection, "watcher", str(generation), "activated", {"previous_retired": True})
+            if previous_active is not None and operation is not None:
+                activation_digest = canonical_digest(
+                    {
+                        "predecessor_generation": int(previous_active["generation"]),
+                        "successor_generation": generation,
+                        "successor_smoke_digest": prepared["smoke_digest"],
+                        "successor_automation_enabled_readback_digest": prepared[
+                            "automation_enabled_readback_digest"
+                        ],
+                    }
+                )
+                self._transition_watcher_rotation(
+                    connection,
+                    predecessor_generation=int(previous_active["generation"]),
+                    successor_generation=generation,
+                    state="ACTIVATED",
+                    transition_kind="successor-activated",
+                    evidence_digest=activation_digest,
+                    run_id="",
+                )
         self.flush_events()
         return {"generation": generation, "status": "ACTIVE"}
 
@@ -4277,6 +4728,28 @@ class Registry:
                     "end_run_readback_digest": end_digest,
                 },
             )
+            operation = connection.execute(
+                "SELECT * FROM watcher_rotations WHERE successor_generation=? "
+                "AND state<>'COMPLETED'",
+                (generation,),
+            ).fetchone()
+            if operation is not None:
+                liveness_digest = canonical_digest(
+                    {
+                        "automation_enabled_readback_digest": enabled_digest,
+                        "heartbeat_readback_digest": heartbeat_digest,
+                        "end_run_readback_digest": end_digest,
+                    }
+                )
+                self._transition_watcher_rotation(
+                    connection,
+                    predecessor_generation=int(operation["predecessor_generation"]),
+                    successor_generation=generation,
+                    state="LIVENESS_PROVEN",
+                    transition_kind="successor-liveness-proven",
+                    evidence_digest=liveness_digest,
+                    run_id="",
+                )
         self.flush_events()
         return {"generation": generation, "liveness": "PROVEN"}
 
@@ -4339,6 +4812,28 @@ class Registry:
                     "archive_readback_digest": archive_digest,
                 },
             )
+            operation = connection.execute(
+                "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                (generation,),
+            ).fetchone()
+            if operation is not None:
+                retirement_digest = canonical_digest(
+                    {
+                        "predecessor_generation": generation,
+                        "successor_generation": successor_generation,
+                        "automation_paused_digest": paused_digest,
+                        "archive_readback_digest": archive_digest,
+                    }
+                )
+                self._transition_watcher_rotation(
+                    connection,
+                    predecessor_generation=generation,
+                    successor_generation=successor_generation,
+                    state="COMPLETED",
+                    transition_kind="predecessor-retired",
+                    evidence_digest=retirement_digest,
+                    run_id="",
+                )
         self.flush_events()
         return {
             "generation": generation,
@@ -4405,11 +4900,19 @@ class Registry:
                     and watcher["context_compaction_readback_digest"] == digest
                 )
                 state = self._watcher_rotation_state(watcher)
+                operation = self._ensure_watcher_rotation_operation(
+                    connection, watcher=watcher, run_id=str(lease["run_id"])
+                )
                 return {
                     "generation": generation,
                     "recorded": False,
                     "idempotent": same_evidence,
                     "already_due": True,
+                    "rotation_operation": (
+                        self._watcher_rotation_payload(operation)
+                        if operation is not None
+                        else None
+                    ),
                     **state,
                 }
             timestamp = _now()
@@ -4430,8 +4933,20 @@ class Registry:
                 "SELECT * FROM watchers WHERE generation=?", (generation,)
             ).fetchone()
             state = self._watcher_rotation_state(watcher)
+            operation = self._ensure_watcher_rotation_operation(
+                connection, watcher=watcher, run_id=str(lease["run_id"])
+            )
         self.flush_events()
-        return {"generation": generation, "recorded": True, **state}
+        return {
+            "generation": generation,
+            "recorded": True,
+            "rotation_operation": (
+                self._watcher_rotation_payload(operation)
+                if operation is not None
+                else None
+            ),
+            **state,
+        }
 
     def begin_run(self, *, generation: int, owner: str, lease_seconds: int) -> dict[str, object]:
         if lease_seconds <= 0 or lease_seconds > 600:
@@ -4463,12 +4978,20 @@ class Registry:
                     "SELECT * FROM watchers WHERE generation=?",
                     (generation,),
                 ).fetchone()
+                rotation_operation = self._ensure_watcher_rotation_operation(
+                    connection, watcher=watcher, run_id=run_id
+                )
                 return {
                     "acquired": True,
                     "generation": generation,
                     "owner": owner,
                     "run_id": run_id,
                     **self._watcher_rotation_state(watcher),
+                    "rotation_operation": (
+                        self._watcher_rotation_payload(rotation_operation)
+                        if rotation_operation is not None
+                        else None
+                    ),
                     "idempotent": True,
                 }
             run_id = f"watcher-g{generation}-r{int(active['run_count']) + 1}"
@@ -4486,12 +5009,21 @@ class Registry:
             watcher = connection.execute(
                 "SELECT * FROM watchers WHERE generation=?", (generation,)
             ).fetchone()
+            rotation_operation = self._ensure_watcher_rotation_operation(
+                connection, watcher=watcher, run_id=run_id
+            )
+        self.flush_events()
         return {
             "acquired": True,
             "generation": generation,
             "owner": owner,
             "run_id": run_id,
             **self._watcher_rotation_state(watcher),
+            "rotation_operation": (
+                self._watcher_rotation_payload(rotation_operation)
+                if rotation_operation is not None
+                else None
+            ),
         }
 
     def end_run(self, *, generation: int, owner: str) -> dict[str, object]:
@@ -5375,6 +5907,21 @@ class Registry:
                     },
                 }
             )
+        rotation = connection.execute(
+            "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+            (int(plan["generation"]),),
+        ).fetchone()
+        rotation_payload = (
+            self._watcher_rotation_payload(rotation) if rotation is not None else None
+        )
+        if rotation_payload is not None:
+            rotation_payload["current_run_receipt"] = (
+                rotation_payload["last_transition_run_id"] == plan["run_id"]
+                or (
+                    rotation_payload["state"] == "ATTENTION_REQUIRED"
+                    and bool(rotation_payload["attention_evidence_digest"])
+                )
+            )
         return {
             "schema": WATCHER_RUN_PLAN_SCHEMA,
             "run_id": plan["run_id"],
@@ -5383,6 +5930,7 @@ class Registry:
             "plan_digest": plan["plan_digest"],
             "ordered_phases": self._watcher_run_phases(),
             "coverage_mode": "one-exact-target-per-immediate-readback",
+            "rotation_operation": rotation_payload,
             "target_coverage": coverage,
             "pending_target_ids": [
                 target["task_id"]
@@ -6295,6 +6843,33 @@ class Registry:
                 raise RuntimeError(
                     "watcher run must deliver reserved attention before finish"
                 )
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            if watcher is None or watcher["status"] != "ACTIVE":
+                raise RuntimeError("watcher run finish requires the active generation")
+            rotation_state = self._watcher_rotation_state(watcher)
+            if rotation_state["rotation_due"]:
+                operation = connection.execute(
+                    "SELECT * FROM watcher_rotations WHERE predecessor_generation=?",
+                    (generation,),
+                ).fetchone()
+                if operation is None:
+                    raise RuntimeError(
+                        "overdue watcher heartbeat requires a durable rotation operation"
+                    )
+                has_attention_evidence = (
+                    operation["state"] == "ATTENTION_REQUIRED"
+                    and bool(operation["attention_evidence_digest"])
+                )
+                if (
+                    not has_attention_evidence
+                    and operation["last_transition_run_id"] != run_id
+                ):
+                    raise RuntimeError(
+                        "overdue watcher heartbeat requires current-run rotation "
+                        "progress, bounded retry or attention evidence"
+                    )
         wrapper = self.heartbeat_response(automation_id=automation_id)
         released = self.end_run(generation=generation, owner=owner)
         if not released["released"]:
@@ -6363,6 +6938,12 @@ class Registry:
                 dict(row)
                 for row in connection.execute(
                     "SELECT * FROM watchers ORDER BY generation"
+                ).fetchall()
+            ]
+            watcher_rotations = [
+                self._watcher_rotation_payload(row)
+                for row in connection.execute(
+                    "SELECT * FROM watcher_rotations ORDER BY predecessor_generation"
                 ).fetchall()
             ]
             incidents = [
@@ -6447,6 +7028,7 @@ class Registry:
             "tasks": self.active_tasks(),
             "incidents": incidents,
             "watchers": watcher_rows,
+            "watcher_rotations": watcher_rotations,
             "attention_events": attention_events,
             "acceptance_envelopes": acceptance_envelopes,
             "executor_successions": executor_successions,
@@ -6952,6 +7534,65 @@ class Registry:
                     "OR automation_enabled_at IS NULL OR automation_paused_digest<>'')"
                 ).fetchone()[0]
             )
+            overdue_active_watchers = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers WHERE status='ACTIVE' AND "
+                    "(run_count>=max_runs OR context_compaction_readback_digest<>'')"
+                ).fetchone()[0]
+            )
+            overdue_watchers_without_rotation_operation = int(
+                connection.execute(
+                    "SELECT count(*) FROM watchers w LEFT JOIN watcher_rotations r "
+                    "ON r.predecessor_generation=w.generation "
+                    "WHERE w.status='ACTIVE' "
+                    "AND (w.run_count>=w.max_runs OR w.context_compaction_readback_digest<>'') "
+                    "AND (r.predecessor_generation IS NULL OR r.state='COMPLETED')"
+                ).fetchone()[0]
+            )
+            watcher_rotation_remediation_required = int(
+                connection.execute(
+                    "SELECT count(*) FROM watcher_rotations r JOIN watchers w "
+                    "ON w.generation=r.predecessor_generation "
+                    "WHERE w.status='ACTIVE' AND r.state IN ('REQUIRED','RETRY_PENDING','ATTENTION_REQUIRED')"
+                ).fetchone()[0]
+            )
+            watcher_rotation_attention_required = int(
+                connection.execute(
+                    "SELECT count(*) FROM watcher_rotations r JOIN watchers w "
+                    "ON w.generation=r.predecessor_generation "
+                    "WHERE w.status='ACTIVE' AND r.state='ATTENTION_REQUIRED'"
+                ).fetchone()[0]
+            )
+            invalid_watcher_rotations = int(
+                connection.execute(
+                    "SELECT count(*) FROM watcher_rotations r "
+                    "LEFT JOIN watchers old ON old.generation=r.predecessor_generation "
+                    "LEFT JOIN watchers successor ON successor.generation=r.successor_generation "
+                    "WHERE old.generation IS NULL "
+                    "OR r.trigger_run_id='' OR r.last_transition_evidence_digest='' "
+                    "OR (r.state IN ('REQUIRED','RETRY_PENDING','ATTENTION_REQUIRED',"
+                    "'SUCCESSOR_PREPARED','SUCCESSOR_SMOKED') AND old.status<>'ACTIVE') "
+                    "OR (r.successor_generation IS NOT NULL "
+                    "AND r.successor_generation<=r.predecessor_generation) "
+                    "OR (r.state IN ('SUCCESSOR_PREPARED','SUCCESSOR_SMOKED','ACTIVATED',"
+                    "'LIVENESS_PROVEN','COMPLETED') AND successor.generation IS NULL) "
+                    "OR (r.state='SUCCESSOR_PREPARED' AND successor.status<>'PREPARED') "
+                    "OR (r.state='SUCCESSOR_SMOKED' AND (successor.status<>'PREPARED' "
+                    "OR successor.smoke_digest='')) "
+                    "OR (r.state IN ('ACTIVATED','LIVENESS_PROVEN') "
+                    "AND (old.status<>'RETIRED' OR successor.status<>'ACTIVE')) "
+                    "OR (r.state='LIVENESS_PROVEN' AND successor.liveness_confirmed_at IS NULL) "
+                    "OR (r.state='COMPLETED' AND (old.status<>'RETIRED' "
+                    "OR old.archived_at IS NULL OR old.automation_paused_digest='' "
+                    "OR old.archive_readback_digest='' OR successor.liveness_confirmed_at IS NULL "
+                    "OR r.completed_at IS NULL)) "
+                    "OR (r.state<>'COMPLETED' AND old.archived_at IS NOT NULL) "
+                    "OR (r.state='ATTENTION_REQUIRED' AND r.attention_evidence_digest='') "
+                    "OR (r.state='RETRY_PENDING' AND r.retry_count<1) "
+                    "OR (r.state='ATTENTION_REQUIRED' AND r.retry_count<r.retry_limit) "
+                    "OR (r.retry_count>r.retry_limit)"
+                ).fetchone()[0]
+            )
             incomplete_watcher_retirements = int(
                 connection.execute(
                     "SELECT count(*) FROM watchers WHERE retirement_required=1 AND "
@@ -7074,6 +7715,8 @@ class Registry:
                 and invalid_owner_notifications == 0
                 and invalid_owner_reminders == 0
                 and invalid_active_watcher_readbacks == 0
+                and overdue_watchers_without_rotation_operation == 0
+                and invalid_watcher_rotations == 0
                 and invalid_watcher_handover == 0
                 and invalid_watcher_run_plans == 0
                 and invalid_release_lane_closures == 0
@@ -7097,6 +7740,17 @@ class Registry:
             "invalid_owner_notifications": invalid_owner_notifications,
             "invalid_owner_reminders": invalid_owner_reminders,
             "invalid_active_watcher_readbacks": invalid_active_watcher_readbacks,
+            "overdue_active_watchers": overdue_active_watchers,
+            "overdue_watchers_without_rotation_operation": (
+                overdue_watchers_without_rotation_operation
+            ),
+            "watcher_rotation_remediation_required": (
+                watcher_rotation_remediation_required
+            ),
+            "watcher_rotation_attention_required": (
+                watcher_rotation_attention_required
+            ),
+            "invalid_watcher_rotations": invalid_watcher_rotations,
             "incomplete_watcher_retirements": incomplete_watcher_retirements,
             "invalid_watcher_handover": invalid_watcher_handover,
             "invalid_watcher_run_plans": invalid_watcher_run_plans,
@@ -7529,6 +8183,13 @@ def build_parser() -> argparse.ArgumentParser:
     compaction.add_argument("--thread-id", required=True)
     compaction.add_argument("--item-id", required=True)
     compaction.add_argument("--readback-digest", required=True)
+    rotation_state = commands.add_parser("watcher-rotation-state")
+    rotation_state.add_argument("--generation", type=int, required=True)
+    rotation_retry = commands.add_parser("record-watcher-rotation-retry")
+    rotation_retry.add_argument("--generation", type=int, required=True)
+    rotation_retry.add_argument("--owner", required=True)
+    rotation_retry.add_argument("--phase", required=True)
+    rotation_retry.add_argument("--failure-digest", required=True)
     liveness_failure = commands.add_parser("record-watcher-liveness-failure")
     liveness_failure.add_argument("--generation", type=int, required=True)
     liveness_failure.add_argument("--automation-id", required=True)
@@ -7939,6 +8600,15 @@ def main() -> int:
                 thread_id=args.thread_id,
                 item_id=args.item_id,
                 readback_digest=args.readback_digest,
+            )
+        elif args.command == "watcher-rotation-state":
+            result = registry.watcher_rotation_state(generation=args.generation)
+        elif args.command == "record-watcher-rotation-retry":
+            result = registry.record_watcher_rotation_retry(
+                generation=args.generation,
+                owner=args.owner,
+                phase=args.phase,
+                failure_digest=args.failure_digest,
             )
         elif args.command == "record-watcher-liveness-failure":
             result = registry.record_watcher_liveness_failure(
