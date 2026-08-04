@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import time
@@ -46,6 +47,10 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     TaskStatus,
     WATCHER_RUN_PHASES,
     WATCHER_RUN_PLAN_SCHEMA,
+    WATCHER_BASELINE_MODEL_FACING_STEPS,
+    WATCHER_FAST_MODEL_FACING_STEPS,
+    WATCHER_MECHANICAL_PREFLIGHT_SCHEMA,
+    WATCHER_PREFLIGHT_DECISIONS,
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     WATCHER_TARGET_READBACK_STATUSES,
     canonical_digest,
@@ -59,6 +64,7 @@ from apps.codex_task_orchestrator_spec import (  # noqa: E402
     transition_allowed,
     validate_arbiter_decision,
     validate_attention_event_id,
+    validate_curator_lifecycle_observation,
     validate_digest,
     validate_envelope_id,
     validate_progress_stage_for_contour,
@@ -76,6 +82,12 @@ WATCHER_CONTRACT = json.loads(
     )
 )
 DEFAULT_WATCHER_MAX_RUNS = int(WATCHER_CONTRACT["watcher"]["rotate_after_runs"])
+DEFAULT_OWNER_REMINDER_SECONDS = int(
+    WATCHER_CONTRACT.get("owner_reminder", {}).get("interval_minutes", 240)
+) * 60
+DEFAULT_FULL_SCAN_SECONDS = int(
+    WATCHER_CONTRACT.get("quiet_fast_path", {}).get("full_scan_interval_minutes", 60)
+) * 60
 ACTIVE_INCIDENT_STATES = (
     IncidentStatus.OPEN.value,
     IncidentStatus.WAITING_RESOURCE.value,
@@ -84,6 +96,33 @@ ACTIVE_INCIDENT_STATES = (
     IncidentStatus.DELIVERED.value,
     IncidentStatus.VERIFIED.value,
 )
+
+
+def _positive_interval_seconds(environment_name: str, default_seconds: int) -> int:
+    raw = os.environ.get(environment_name, "").strip()
+    if not raw:
+        return default_seconds
+    try:
+        minutes = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{environment_name} must be a positive number of minutes") from exc
+    if minutes <= 0:
+        raise ValueError(f"{environment_name} must be a positive number of minutes")
+    return max(1, int(minutes * 60))
+
+
+def owner_reminder_seconds() -> int:
+    return _positive_interval_seconds(
+        "WB_CORE_WATCHER_OWNER_REMINDER_MINUTES",
+        DEFAULT_OWNER_REMINDER_SECONDS,
+    )
+
+
+def full_scan_seconds() -> int:
+    return _positive_interval_seconds(
+        "WB_CORE_WATCHER_FULL_SCAN_MINUTES",
+        DEFAULT_FULL_SCAN_SECONDS,
+    )
 
 
 SCHEMA = """
@@ -138,6 +177,8 @@ CREATE TABLE IF NOT EXISTS acceptance_envelopes (
     owner_notification_digest TEXT NOT NULL DEFAULT '',
     owner_notification_revision INTEGER NOT NULL DEFAULT 0 CHECK(owner_notification_revision >= 0),
     owner_notified_at TEXT,
+    last_owner_reminder_at TEXT,
+    owner_reminder_count INTEGER NOT NULL DEFAULT 0 CHECK(owner_reminder_count >= 0),
     prepared_handoff_text TEXT NOT NULL DEFAULT '',
     prepared_handoff_digest TEXT NOT NULL DEFAULT '',
     prepared_handoff_revision INTEGER NOT NULL DEFAULT 0 CHECK(prepared_handoff_revision >= 0),
@@ -273,6 +314,10 @@ CREATE TABLE IF NOT EXISTS watchers (
     run_count INTEGER NOT NULL DEFAULT 0,
     max_runs INTEGER NOT NULL DEFAULT __DEFAULT_WATCHER_MAX_RUNS__ CHECK(max_runs > 0),
     last_run_at TEXT,
+    trusted_main_sha TEXT NOT NULL DEFAULT '',
+    protocol_digest TEXT NOT NULL DEFAULT '',
+    protocol_confirmed_at TEXT,
+    last_full_readback_at TEXT,
     context_compaction_item_id TEXT NOT NULL DEFAULT '',
     context_compaction_readback_digest TEXT NOT NULL DEFAULT '',
     context_compaction_at TEXT,
@@ -367,6 +412,23 @@ CREATE TABLE IF NOT EXISTS release_lane_closures (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_release_lane_closure_per_task
 ON release_lane_closures(task_id)
 WHERE state IN ('PENDING','DISPATCHED','RETRY','EXHAUSTED');
+CREATE TABLE IF NOT EXISTS watcher_run_classifications (
+    run_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL REFERENCES watchers(generation),
+    lease_owner TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('FULL','QUIET','OWNER_WAITING','OWNER_REMINDER')),
+    signals_json TEXT NOT NULL,
+    classification_digest TEXT NOT NULL,
+    queue_snapshot_json TEXT NOT NULL,
+    queue_evidence_digest TEXT NOT NULL,
+    trusted_main_sha TEXT NOT NULL,
+    protocol_digest TEXT NOT NULL,
+    cost_proxy_json TEXT NOT NULL,
+    reminder_envelope_ids_json TEXT NOT NULL DEFAULT '[]',
+    heartbeat_xml TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at TEXT NOT NULL,
@@ -475,6 +537,15 @@ class Registry:
                     "ALTER TABLE acceptance_envelopes ADD COLUMN owner_notification_revision "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            if "last_owner_reminder_at" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN last_owner_reminder_at TEXT"
+                )
+            if "owner_reminder_count" not in envelope_columns:
+                connection.execute(
+                    "ALTER TABLE acceptance_envelopes ADD COLUMN owner_reminder_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             if "prepared_handoff_text" not in envelope_columns:
                 connection.execute(
                     "ALTER TABLE acceptance_envelopes ADD COLUMN prepared_handoff_text "
@@ -548,6 +619,10 @@ class Registry:
                 ("context_compaction_item_id", "TEXT NOT NULL DEFAULT ''"),
                 ("context_compaction_readback_digest", "TEXT NOT NULL DEFAULT ''"),
                 ("context_compaction_at", "TEXT"),
+                ("trusted_main_sha", "TEXT NOT NULL DEFAULT ''"),
+                ("protocol_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("protocol_confirmed_at", "TEXT"),
+                ("last_full_readback_at", "TEXT"),
                 ("automation_enabled_readback_digest", "TEXT NOT NULL DEFAULT ''"),
                 ("automation_enabled_at", "TEXT"),
                 ("liveness_required", "INTEGER NOT NULL DEFAULT 0"),
@@ -1034,6 +1109,90 @@ class Registry:
             "acceptance_workstream_task_id": workstream_task_id,
         }
 
+    def revise_task_passport(
+        self,
+        *,
+        task_id: str,
+        expected_revision: int,
+        passport: Mapping[str, object],
+    ) -> dict[str, object]:
+        identity = validate_task_id(task_id)
+        if expected_revision <= 0:
+            raise ValueError("passport revision requires a positive task revision")
+        with self.transaction() as connection:
+            task = self.task(identity, connection)
+            source_threads = {
+                row["role"]: row["thread_id"]
+                for row in connection.execute(
+                    "SELECT role,thread_id FROM task_threads WHERE task_id=? "
+                    "AND generation=1 AND role IN ('curator','executor')",
+                    (identity,),
+                ).fetchall()
+            }
+            if set(source_threads) != {"curator", "executor"}:
+                raise RuntimeError("passport revision requires original role identities")
+            validated = validate_task_passport(
+                passport,
+                task_id=identity,
+                title=str(task["title"]),
+                objective=str(task["objective"]),
+                curator_thread_id=str(source_threads["curator"]),
+                executor_thread_id=str(source_threads["executor"]),
+            )
+            digest = canonical_digest(validated)
+            if int(task["revision"]) != expected_revision:
+                if task["passport_digest"] == digest:
+                    return {
+                        "task_id": identity,
+                        "revision": int(task["revision"]),
+                        "passport_digest": digest,
+                        "idempotent": True,
+                    }
+                raise RuntimeError("stale task revision for passport update")
+            if TaskStatus(task["status"]) not in {
+                TaskStatus.DISCUSSION,
+                TaskStatus.DISPATCHING,
+                TaskStatus.WORKING,
+                TaskStatus.READY_FOR_RELEASE,
+                TaskStatus.RELEASE_OWNED,
+                TaskStatus.VERIFYING,
+                TaskStatus.RECOVERING,
+            }:
+                raise RuntimeError("task passport is immutable after technical handoff")
+            if task["passport_digest"] == digest:
+                return {
+                    "task_id": identity,
+                    "revision": expected_revision,
+                    "passport_digest": digest,
+                    "idempotent": True,
+                }
+            next_revision = expected_revision + 1
+            timestamp = _now()
+            connection.execute(
+                "UPDATE tasks SET passport_json=?,passport_digest=?,revision=?,"
+                "updated_at=? WHERE task_id=?",
+                (_json(validated), digest, next_revision, timestamp, identity),
+            )
+            self.event(
+                connection,
+                "task",
+                identity,
+                "passport-revised",
+                {
+                    "from_revision": expected_revision,
+                    "to_revision": next_revision,
+                    "previous_passport_digest": task["passport_digest"],
+                    "passport_digest": digest,
+                },
+            )
+        self.flush_events()
+        return {
+            "task_id": identity,
+            "revision": next_revision,
+            "passport_digest": digest,
+            "updated": True,
+        }
+
     def add_thread(
         self,
         *,
@@ -1354,6 +1513,7 @@ class Registry:
             connection.execute(
                 "UPDATE acceptance_envelopes SET status=?,revision=?,"
                 "owner_notification_digest='',owner_notification_revision=0,owner_notified_at=NULL,"
+                "last_owner_reminder_at=NULL,owner_reminder_count=0,"
                 "prepared_handoff_text='',prepared_handoff_digest='',"
                 "prepared_handoff_revision=0,prepared_handoff_at=NULL,updated_at=? "
                 "WHERE envelope_id=?",
@@ -2593,7 +2753,8 @@ class Registry:
                 }
             connection.execute(
                 "UPDATE acceptance_envelopes SET owner_notification_digest=?,"
-                "owner_notification_revision=?,owner_notified_at=?,updated_at=? "
+                "owner_notification_revision=?,owner_notified_at=?,"
+                "last_owner_reminder_at=NULL,owner_reminder_count=0,updated_at=? "
                 "WHERE envelope_id=?",
                 (digest, expected_revision, _now(), _now(), identity),
             )
@@ -4361,6 +4522,442 @@ class Registry:
         return lease
 
     @staticmethod
+    def _observable_task_statuses() -> tuple[str, ...]:
+        return (
+            TaskStatus.DISCUSSION.value,
+            TaskStatus.DISPATCHING.value,
+            TaskStatus.WORKING.value,
+            TaskStatus.READY_FOR_RELEASE.value,
+            TaskStatus.RELEASE_OWNED.value,
+            TaskStatus.VERIFYING.value,
+            TaskStatus.RECOVERING.value,
+        )
+
+    @staticmethod
+    def _queue_snapshot_is_quiet(queue_snapshot: Mapping[str, object]) -> bool:
+        required = {
+            "status",
+            "queue",
+            "release_lane",
+            "integrity",
+            "release_lane_proofs",
+            "counts",
+            "active",
+        }
+        if not required.issubset(queue_snapshot):
+            raise ValueError("queue snapshot is missing required fields")
+        counts = queue_snapshot["counts"]
+        active = queue_snapshot["active"]
+        queue = queue_snapshot["queue"]
+        release_lane = queue_snapshot["release_lane"]
+        integrity = queue_snapshot["integrity"]
+        if (
+            queue_snapshot["status"] != "ok"
+            or not isinstance(counts, Mapping)
+            or not isinstance(active, list)
+            or not isinstance(queue, Mapping)
+            or not isinstance(release_lane, Mapping)
+            or not isinstance(integrity, Mapping)
+            or not isinstance(queue_snapshot["release_lane_proofs"], list)
+        ):
+            return False
+        return bool(
+            not active
+            and all(int(value) == 0 for value in counts.values())
+            and queue.get("status") == "idle"
+            and release_lane.get("status") == "idle"
+            and integrity.get("status") == "ok"
+            and integrity.get("signals") == []
+        )
+
+    @staticmethod
+    def _owner_reminder_due(
+        envelope: Mapping[str, object], *, now: datetime, interval_seconds: int
+    ) -> bool:
+        baseline_raw = str(
+            envelope["last_owner_reminder_at"]
+            or envelope["owner_notified_at"]
+            or ""
+        )
+        if not baseline_raw:
+            return False
+        baseline = _parse_timestamp(baseline_raw, field="owner reminder baseline")
+        return (now - baseline).total_seconds() >= interval_seconds
+
+    def _watcher_local_preflight_signals(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        watcher: sqlite3.Row,
+        now: datetime,
+        integrity_ok: bool,
+        trusted_main_sha: str,
+        protocol_digest: str,
+    ) -> tuple[dict[str, object], list[str], list[str]]:
+        observable = self._observable_task_statuses()
+        target_rows = connection.execute(
+            "SELECT task_id FROM tasks WHERE status IN ({}) ORDER BY task_id".format(
+                ",".join("?" for _ in observable)
+            ),
+            observable,
+        ).fetchall()
+        active_incidents = int(
+            connection.execute(
+                "SELECT count(*) FROM incidents WHERE status IN (?,?,?,?,?,?)",
+                ACTIVE_INCIDENT_STATES,
+            ).fetchone()[0]
+        )
+        attention_outstanding = int(
+            connection.execute(
+                "SELECT count(*) FROM attention_events "
+                "WHERE state IN ('PENDING','LEASED','SENT','RETRY')"
+            ).fetchone()[0]
+        )
+        unresolved_failures = int(
+            connection.execute(
+                "SELECT count(*) FROM retry_observations WHERE resolved_at IS NULL"
+            ).fetchone()[0]
+        )
+        pending_archives = int(
+            connection.execute(
+                "SELECT count(*) FROM executor_successions WHERE status='READY_TO_ARCHIVE'"
+            ).fetchone()[0]
+        )
+        pending_watcher_operations = int(
+            connection.execute(
+                "SELECT count(*) FROM watchers WHERE status='PREPARED' OR "
+                "(status='RETIRED' AND retirement_required=1 AND archived_at IS NULL) OR "
+                "(status='ACTIVE' AND liveness_required=1 AND liveness_confirmed_at IS NULL)"
+            ).fetchone()[0]
+        )
+        owner_waiting_ids: list[str] = []
+        non_owner_envelopes = 0
+        for envelope in connection.execute(
+            "SELECT * FROM acceptance_envelopes WHERE status<>? ORDER BY envelope_id",
+            (AcceptanceStatus.ACCEPTED.value,),
+        ).fetchall():
+            members = connection.execute(
+                "SELECT t.status FROM acceptance_envelope_members m "
+                "JOIN tasks t ON t.task_id=m.task_id "
+                "WHERE m.envelope_id=? AND m.required=1",
+                (envelope["envelope_id"],),
+            ).fetchall()
+            terminal_members = bool(members) and all(
+                TaskStatus(row["status"])
+                in {TaskStatus.DONE_AWAITING_ACCEPTANCE, TaskStatus.TERMINAL_FAILURE}
+                for row in members
+            )
+            notification_current = bool(
+                envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
+                and envelope["owner_notified_at"]
+                and envelope["owner_notification_digest"]
+                and int(envelope["owner_notification_revision"])
+                == int(envelope["revision"])
+            )
+            if terminal_members and notification_current:
+                owner_waiting_ids.append(str(envelope["envelope_id"]))
+            else:
+                non_owner_envelopes += 1
+        unbound_active_tasks = int(
+            connection.execute(
+                "SELECT count(*) FROM tasks t WHERE t.status<>? AND NOT EXISTS ("
+                "SELECT 1 FROM acceptance_envelope_members m WHERE m.task_id=t.task_id)",
+                (TaskStatus.ACCEPTED.value,),
+            ).fetchone()[0]
+        )
+        rotation_state = self._watcher_rotation_state(watcher)
+        protocol_changed = bool(
+            watcher["trusted_main_sha"] != trusted_main_sha
+            or watcher["protocol_digest"] != protocol_digest
+            or not watcher["protocol_confirmed_at"]
+        )
+        last_full = (
+            None
+            if not watcher["last_full_readback_at"]
+            else _parse_timestamp(
+                str(watcher["last_full_readback_at"]), field="last full readback"
+            )
+        )
+        full_scan_due = bool(
+            last_full is None
+            or (now - last_full).total_seconds() >= full_scan_seconds()
+        )
+        reminder_ids = [
+            str(envelope["envelope_id"])
+            for envelope in connection.execute(
+                "SELECT * FROM acceptance_envelopes WHERE envelope_id IN ({}) "
+                "ORDER BY envelope_id".format(
+                    ",".join("?" for _ in owner_waiting_ids) or "''"
+                ),
+                owner_waiting_ids,
+            ).fetchall()
+            if self._owner_reminder_due(
+                envelope, now=now, interval_seconds=owner_reminder_seconds()
+            )
+        ]
+        signals = {
+            "integrity_ok": integrity_ok,
+            "target_count": len(target_rows),
+            "attention_outstanding": attention_outstanding,
+            "active_incidents": active_incidents,
+            "unresolved_failures": unresolved_failures,
+            "pending_executor_archives": pending_archives,
+            "pending_watcher_operations": pending_watcher_operations,
+            "non_owner_envelopes": non_owner_envelopes,
+            "unbound_active_tasks": unbound_active_tasks,
+            "owner_waiting_count": len(owner_waiting_ids),
+            "owner_reminder_due_count": len(reminder_ids),
+            "rotation_due": bool(rotation_state["rotation_due"]),
+            "protocol_changed": protocol_changed,
+            "full_scan_due": full_scan_due,
+        }
+        reasons = [
+            name
+            for name, active in (
+                ("registry-integrity", not integrity_ok),
+                ("active-targets", bool(target_rows)),
+                ("attention-delivery", attention_outstanding > 0),
+                ("active-incident", active_incidents > 0),
+                ("failure-recovery", unresolved_failures > 0),
+                ("executor-archive", pending_archives > 0),
+                ("watcher-operation", pending_watcher_operations > 0),
+                ("active-non-owner-state", non_owner_envelopes > 0),
+                ("unbound-task", unbound_active_tasks > 0),
+                ("rotation", bool(rotation_state["rotation_due"])),
+                ("protocol-change", protocol_changed),
+                ("periodic-full-scan", full_scan_due),
+            )
+            if active
+        ]
+        return signals, reasons, reminder_ids
+
+    @staticmethod
+    def _watcher_cost_proxy() -> dict[str, object]:
+        baseline = list(WATCHER_BASELINE_MODEL_FACING_STEPS)
+        fast = list(WATCHER_FAST_MODEL_FACING_STEPS)
+        return {
+            "unit": "model-facing-readbacks-or-steps",
+            "baseline_steps": baseline,
+            "baseline_count": len(baseline),
+            "fast_path_steps": fast,
+            "fast_path_count": len(fast),
+            "saved_steps": len(baseline) - len(fast),
+            "thread_readbacks": {"baseline": 1, "fast_path": 0},
+            "token_claims": False,
+        }
+
+    def pending_release_lane_owner_prs(self) -> list[int]:
+        """Return exact anchors whose durable lane closure still needs proof."""
+
+        with self.connect() as connection:
+            return [
+                int(row["owner_pr"])
+                for row in connection.execute(
+                    "SELECT DISTINCT owner_pr FROM release_lane_closures "
+                    "WHERE state NOT IN ('CONFIRMED','STALE') ORDER BY owner_pr"
+                ).fetchall()
+            ]
+
+    def classify_watcher_run(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        queue_snapshot: Mapping[str, object],
+        trusted_main_sha: str,
+        protocol_digest: str,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"[0-9a-f]{40}", trusted_main_sha.strip().lower()):
+            raise ValueError("trusted main must be an exact 40-character SHA")
+        trusted_sha = trusted_main_sha.strip().lower()
+        protocol = validate_digest(protocol_digest)
+        queue_payload = dict(queue_snapshot)
+        queue_digest = canonical_digest(queue_payload)
+        queue_payload = self._validated_queue_evidence(
+            queue_payload, expected_digest=queue_digest
+        )
+        queue_quiet = self._queue_snapshot_is_quiet(queue_payload)
+        observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        integrity = self.integrity()
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            watcher = connection.execute(
+                "SELECT * FROM watchers WHERE generation=?", (generation,)
+            ).fetchone()
+            signals, reasons, reminder_ids = self._watcher_local_preflight_signals(
+                connection,
+                watcher=watcher,
+                now=observed_at,
+                integrity_ok=bool(integrity["ok"]),
+                trusted_main_sha=trusted_sha,
+                protocol_digest=protocol,
+            )
+            signals["queue_quiet"] = queue_quiet
+            if not queue_quiet:
+                reasons.append("release-lane")
+            if reasons:
+                decision = "FULL"
+            elif reminder_ids:
+                decision = "OWNER_REMINDER"
+            elif int(signals["owner_waiting_count"]) > 0:
+                decision = "OWNER_WAITING"
+            else:
+                decision = "QUIET"
+            if decision not in WATCHER_PREFLIGHT_DECISIONS:
+                raise RuntimeError("unknown Watcher preflight decision")
+            cost_proxy = self._watcher_cost_proxy()
+            payload = {
+                "schema": WATCHER_MECHANICAL_PREFLIGHT_SCHEMA,
+                "run_id": str(lease["run_id"]),
+                "generation": generation,
+                "decision": decision,
+                "full_path_reasons": sorted(set(reasons)),
+                "signals": signals,
+                "queue_evidence_digest": queue_digest,
+                "trusted_main_sha": trusted_sha,
+                "protocol_digest": protocol,
+                "reminder_envelope_ids": reminder_ids,
+                "cost_proxy": cost_proxy,
+            }
+            classification_digest = canonical_digest(payload)
+            existing = connection.execute(
+                "SELECT * FROM watcher_run_classifications WHERE run_id=?",
+                (lease["run_id"],),
+            ).fetchone()
+            timestamp = observed_at.isoformat()
+            if existing is not None:
+                if existing["finished_at"]:
+                    if existing["classification_digest"] != classification_digest:
+                        raise RuntimeError("finished Watcher run has different preflight evidence")
+                    payload["classification_digest"] = classification_digest
+                    payload["idempotent"] = True
+                    return payload
+                if existing["decision"] == "FULL" and decision != "FULL":
+                    decision = "FULL"
+                    reasons = sorted(
+                        set(json.loads(str(existing["signals_json"]))["full_path_reasons"])
+                    )
+                    payload["decision"] = decision
+                    payload["full_path_reasons"] = reasons
+                    classification_digest = canonical_digest(payload)
+                connection.execute(
+                    "UPDATE watcher_run_classifications SET decision=?,signals_json=?,"
+                    "classification_digest=?,queue_snapshot_json=?,queue_evidence_digest=?,"
+                    "trusted_main_sha=?,protocol_digest=?,cost_proxy_json=?,"
+                    "reminder_envelope_ids_json=? WHERE run_id=?",
+                    (
+                        decision,
+                        _json({"full_path_reasons": payload["full_path_reasons"], **signals}),
+                        classification_digest,
+                        _json(queue_payload),
+                        queue_digest,
+                        trusted_sha,
+                        protocol,
+                        _json(cost_proxy),
+                        _json(reminder_ids),
+                        lease["run_id"],
+                    ),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO watcher_run_classifications("
+                    "run_id,generation,lease_owner,decision,signals_json,"
+                    "classification_digest,queue_snapshot_json,queue_evidence_digest,"
+                    "trusted_main_sha,protocol_digest,cost_proxy_json,"
+                    "reminder_envelope_ids_json,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        lease["run_id"],
+                        generation,
+                        owner.strip(),
+                        decision,
+                        _json({"full_path_reasons": payload["full_path_reasons"], **signals}),
+                        classification_digest,
+                        _json(queue_payload),
+                        queue_digest,
+                        trusted_sha,
+                        protocol,
+                        _json(cost_proxy),
+                        _json(reminder_ids),
+                        timestamp,
+                    ),
+                )
+            self.event(
+                connection,
+                "watcher-run",
+                str(lease["run_id"]),
+                "mechanically-classified",
+                {
+                    "decision": decision,
+                    "classification_digest": classification_digest,
+                    "full_path_reasons": payload["full_path_reasons"],
+                },
+            )
+        self.flush_events()
+        payload["decision"] = decision
+        payload["classification_digest"] = classification_digest
+        payload["requires_full_path"] = decision == "FULL"
+        payload["requires_thread_readbacks"] = decision == "FULL"
+        payload["protocol_reload_required"] = "protocol-change" in payload["full_path_reasons"]
+        return payload
+
+    def confirm_watcher_protocol(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        trusted_main_sha: str,
+        protocol_digest: str,
+    ) -> dict[str, object]:
+        trusted_sha = trusted_main_sha.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", trusted_sha):
+            raise ValueError("trusted main must be an exact 40-character SHA")
+        protocol = validate_digest(protocol_digest)
+        with self.transaction() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            classification = connection.execute(
+                "SELECT * FROM watcher_run_classifications WHERE run_id=?",
+                (lease["run_id"],),
+            ).fetchone()
+            if (
+                classification is None
+                or classification["decision"] != "FULL"
+                or classification["trusted_main_sha"] != trusted_sha
+                or classification["protocol_digest"] != protocol
+            ):
+                raise RuntimeError("protocol confirmation requires matching full-path preflight")
+            timestamp = _now()
+            connection.execute(
+                "UPDATE watchers SET trusted_main_sha=?,protocol_digest=?,"
+                "protocol_confirmed_at=? WHERE generation=?",
+                (trusted_sha, protocol, timestamp, generation),
+            )
+            self.event(
+                connection,
+                "watcher",
+                str(generation),
+                "protocol-confirmed",
+                {
+                    "run_id": lease["run_id"],
+                    "trusted_main_sha": trusted_sha,
+                    "protocol_digest": protocol,
+                },
+            )
+        self.flush_events()
+        return {
+            "generation": generation,
+            "run_id": lease["run_id"],
+            "trusted_main_sha": trusted_sha,
+            "protocol_digest": protocol,
+            "confirmed": True,
+        }
+
+    @staticmethod
     def _watcher_run_phases() -> list[str]:
         return list(WATCHER_RUN_PHASES)
 
@@ -4809,9 +5406,25 @@ class Registry:
         generation: int,
         owner: str,
         queue_evidence_digest: str,
-        queue_evidence: Mapping[str, object],
+        queue_evidence: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         queue_digest = validate_digest(queue_evidence_digest)
+        if queue_evidence is None:
+            with self.connect() as connection:
+                lease = self._watcher_run_lease(
+                    connection, generation=generation, owner=owner
+                )
+                classification = connection.execute(
+                    "SELECT * FROM watcher_run_classifications WHERE run_id=?",
+                    (lease["run_id"],),
+                ).fetchone()
+                if classification is None:
+                    raise RuntimeError(
+                        "full Watcher plan requires exact queue evidence or mechanical preflight"
+                    )
+                queue_evidence = json.loads(
+                    str(classification["queue_snapshot_json"])
+                )
         queue_payload = self._validated_queue_evidence(
             queue_evidence, expected_digest=queue_digest
         )
@@ -4822,20 +5435,73 @@ class Registry:
             raise RuntimeError("watcher run plan requires registry integrity")
         snapshot_digest = canonical_digest(snapshot)
         integrity_digest = canonical_digest(integrity)
-        observable_statuses = (
-            TaskStatus.DISCUSSION.value,
-            TaskStatus.DISPATCHING.value,
-            TaskStatus.WORKING.value,
-            TaskStatus.READY_FOR_RELEASE.value,
-            TaskStatus.RELEASE_OWNED.value,
-            TaskStatus.VERIFYING.value,
-            TaskStatus.RECOVERING.value,
-        )
+        observable_statuses = self._observable_task_statuses()
         with self.transaction() as connection:
             lease = self._watcher_run_lease(
                 connection, generation=generation, owner=owner
             )
             run_id = str(lease["run_id"])
+            classification = connection.execute(
+                "SELECT * FROM watcher_run_classifications WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if classification is not None:
+                if classification["queue_evidence_digest"] != queue_digest:
+                    raise RuntimeError(
+                        "full Watcher plan must use the classified queue evidence"
+                    )
+                if classification["decision"] != "FULL":
+                    signals = json.loads(str(classification["signals_json"]))
+                    reasons = sorted(
+                        set(signals.get("full_path_reasons", []))
+                        | {"explicit-full-path"}
+                    )
+                    signal_values = {
+                        key: value
+                        for key, value in signals.items()
+                        if key != "full_path_reasons"
+                    }
+                    signals["full_path_reasons"] = reasons
+                    classification_payload = {
+                        "schema": WATCHER_MECHANICAL_PREFLIGHT_SCHEMA,
+                        "run_id": run_id,
+                        "generation": generation,
+                        "decision": "FULL",
+                        "full_path_reasons": reasons,
+                        "signals": signal_values,
+                        "queue_evidence_digest": str(
+                            classification["queue_evidence_digest"]
+                        ),
+                        "trusted_main_sha": str(classification["trusted_main_sha"]),
+                        "protocol_digest": str(classification["protocol_digest"]),
+                        "reminder_envelope_ids": json.loads(
+                            str(classification["reminder_envelope_ids_json"])
+                        ),
+                        "cost_proxy": json.loads(
+                            str(classification["cost_proxy_json"])
+                        ),
+                    }
+                    connection.execute(
+                        "UPDATE watcher_run_classifications SET decision='FULL',"
+                        "signals_json=?,classification_digest=? WHERE run_id=?",
+                        (
+                            _json(signals),
+                            canonical_digest(classification_payload),
+                            run_id,
+                        ),
+                    )
+                    self.event(
+                        connection,
+                        "watcher-run",
+                        run_id,
+                        "mechanically-escalated",
+                        {
+                            "reason": "explicit-full-path",
+                            "classification_digest": canonical_digest(
+                                classification_payload
+                            ),
+                        },
+                    )
             existing = connection.execute(
                 "SELECT * FROM watcher_run_plans WHERE run_id=?", (run_id,)
             ).fetchone()
@@ -5513,6 +6179,76 @@ class Registry:
             "incident": incident,
         }
 
+    def finish_fast_watcher_run(
+        self,
+        *,
+        generation: int,
+        owner: str,
+        automation_id: str,
+        now: datetime | None = None,
+    ) -> str:
+        observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        with self.connect() as connection:
+            lease = self._watcher_run_lease(
+                connection, generation=generation, owner=owner
+            )
+            run_id = str(lease["run_id"])
+            classification = connection.execute(
+                "SELECT * FROM watcher_run_classifications WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if classification is None:
+                raise RuntimeError("fast finish requires mechanical preflight")
+            if connection.execute(
+                "SELECT 1 FROM watcher_run_plans WHERE run_id=?", (run_id,)
+            ).fetchone():
+                raise RuntimeError("a full Watcher plan cannot use fast finish")
+            queue_snapshot = json.loads(str(classification["queue_snapshot_json"]))
+            trusted_main_sha = str(classification["trusted_main_sha"])
+            protocol_digest = str(classification["protocol_digest"])
+        refreshed = self.classify_watcher_run(
+            generation=generation,
+            owner=owner,
+            queue_snapshot=queue_snapshot,
+            trusted_main_sha=trusted_main_sha,
+            protocol_digest=protocol_digest,
+            now=observed_at,
+        )
+        if refreshed["decision"] == "FULL":
+            raise RuntimeError("fast path state changed; execute the full Watcher path")
+        wrapper = self.heartbeat_response(
+            automation_id=automation_id,
+            now=observed_at,
+        )
+        parsed_decision = "NOTIFY" if "<decision>NOTIFY</decision>" in wrapper else "DONT_NOTIFY"
+        expected_decision = (
+            "NOTIFY" if refreshed["decision"] == "OWNER_REMINDER" else "DONT_NOTIFY"
+        )
+        if parsed_decision != expected_decision:
+            raise RuntimeError("fast path wrapper disagrees with mechanical preflight")
+        released = self.end_run(generation=generation, owner=owner)
+        if not released["released"]:
+            raise RuntimeError("watcher run lease was not released")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE watcher_run_classifications SET heartbeat_xml=?,finished_at=? "
+                "WHERE run_id=?",
+                (wrapper, observed_at.isoformat(), run_id),
+            )
+            self.event(
+                connection,
+                "watcher-run",
+                run_id,
+                "fast-finished",
+                {
+                    "generation": generation,
+                    "decision": refreshed["decision"],
+                    "classification_digest": refreshed["classification_digest"],
+                },
+            )
+        self.flush_events()
+        return wrapper
+
     def finish_watcher_run(
         self, *, generation: int, owner: str, automation_id: str
     ) -> str:
@@ -5567,6 +6303,15 @@ class Registry:
             connection.execute(
                 "UPDATE watcher_run_plans SET state='FINISHED',heartbeat_xml=?,"
                 "finished_at=? WHERE run_id=?",
+                (wrapper, _now(), run_id),
+            )
+            connection.execute(
+                "UPDATE watchers SET last_full_readback_at=? WHERE generation=?",
+                (_now(), generation),
+            )
+            connection.execute(
+                "UPDATE watcher_run_classifications SET heartbeat_xml=?,finished_at=? "
+                "WHERE run_id=?",
                 (wrapper, _now(), run_id),
             )
             self.event(
@@ -5684,6 +6429,15 @@ class Registry:
                     "SELECT * FROM release_lane_closures ORDER BY created_at,action_id"
                 ).fetchall()
             ]
+            watcher_run_classifications = [
+                dict(row)
+                for row in reversed(
+                    connection.execute(
+                        "SELECT * FROM watcher_run_classifications "
+                        "ORDER BY created_at DESC,run_id DESC LIMIT 96"
+                    ).fetchall()
+                )
+            ]
         for item in incidents:
             item["resources"] = json.loads(item.pop("resources_json"))
             if item.get("decision_json"):
@@ -5698,6 +6452,7 @@ class Registry:
             "executor_successions": executor_successions,
             "watcher_run_plans": watcher_run_plans,
             "release_lane_closures": release_lane_closures,
+            "watcher_run_classifications": watcher_run_classifications,
             "integrity": self.integrity(),
         }
 
@@ -5810,12 +6565,35 @@ class Registry:
         )
         return TaskStatus(critical["status"])
 
-    def report(self, *, record: bool = False) -> str:
+    @staticmethod
+    def _owner_notification_current(envelope: Mapping[str, object]) -> bool:
+        return bool(
+            envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
+            and envelope["owner_notified_at"]
+            and envelope["owner_notification_digest"]
+            and int(envelope["owner_notification_revision"])
+            == int(envelope["revision"])
+        )
+
+    def report(
+        self,
+        *,
+        record: bool = False,
+        envelope_ids: Iterable[str] | None = None,
+    ) -> str:
         blocks: list[str] = []
+        selected_envelopes = (
+            None if envelope_ids is None else {str(item) for item in envelope_ids}
+        )
         context = self.transaction() if record else self.connect()
         with context as connection:
             for group in self._visible_workstreams(connection):
                 envelope = group["envelope"]
+                if (
+                    selected_envelopes is not None
+                    and str(envelope["envelope_id"]) not in selected_envelopes
+                ):
+                    continue
                 members = list(group["members"])
                 workstream_task_id = str(group["workstream_task_id"])
                 minimum_progress = min(
@@ -5852,13 +6630,7 @@ class Registry:
                     field="current action",
                     task_id=str(critical["task_id"]),
                 )
-                owner_notification_current = (
-                    envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value
-                    and bool(envelope["owner_notified_at"])
-                    and int(envelope["owner_notification_revision"])
-                    == int(envelope["revision"])
-                    and bool(envelope["owner_notification_digest"])
-                )
+                owner_notification_current = self._owner_notification_current(envelope)
                 if envelope["status"] == AcceptanceStatus.AWAITING_ACCEPTANCE.value:
                     current = (
                         "Ожидается приёмка владельца."
@@ -5945,15 +6717,42 @@ class Registry:
             self.flush_events()
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
 
-    def heartbeat_response(self, *, automation_id: str) -> str:
+    def heartbeat_response(
+        self, *, automation_id: str, now: datetime | None = None
+    ) -> str:
         """Wrap the sole canonical report in the Desktop heartbeat contract."""
 
         identity = automation_id.strip()
         if not identity:
             raise ValueError("heartbeat response requires an automation id")
-        report = self.report(record=True)
+        observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         with self.connect() as connection:
-            has_active_blocks = bool(self._visible_workstreams(connection))
+            workstreams = self._visible_workstreams(connection)
+            owner_waiting_ids = {
+                str(group["envelope"]["envelope_id"])
+                for group in workstreams
+                if self._owner_notification_current(group["envelope"])
+            }
+            actionable_blocks = [
+                group
+                for group in workstreams
+                if str(group["envelope"]["envelope_id"])
+                not in owner_waiting_ids
+            ]
+            due_owner_ids = {
+                str(envelope["envelope_id"])
+                for envelope in connection.execute(
+                    "SELECT * FROM acceptance_envelopes WHERE envelope_id IN ({})".format(
+                        ",".join("?" for _ in owner_waiting_ids) or "''"
+                    ),
+                    sorted(owner_waiting_ids),
+                ).fetchall()
+                if self._owner_reminder_due(
+                    envelope,
+                    now=observed_at,
+                    interval_seconds=owner_reminder_seconds(),
+                )
+            }
             has_owner_attention = bool(
                 connection.execute(
                     "SELECT 1 FROM attention_events WHERE state IN ('PENDING','LEASED','SENT','RETRY') LIMIT 1"
@@ -5965,11 +6764,58 @@ class Registry:
                     ACTIVE_INCIDENT_STATES,
                 ).fetchone()
             )
-        should_notify = (
-            has_active_blocks or has_owner_attention or has_owner_incident
+        should_notify = bool(
+            actionable_blocks or due_owner_ids or has_owner_attention or has_owner_incident
         )
+        selected_envelopes: set[str] | None = None
+        reminded_envelopes: set[str] = set()
+        if should_notify:
+            selected_envelopes = {
+                str(group["envelope"]["envelope_id"])
+                for group in actionable_blocks
+            } | due_owner_ids
+            reminded_envelopes = due_owner_ids
+            report = self.report(
+                record=True,
+                envelope_ids=selected_envelopes,
+            )
+            if reminded_envelopes:
+                with self.transaction() as connection:
+                    timestamp = observed_at.isoformat()
+                    for envelope_id in sorted(reminded_envelopes):
+                        envelope = connection.execute(
+                            "SELECT * FROM acceptance_envelopes WHERE envelope_id=?",
+                            (envelope_id,),
+                        ).fetchone()
+                        if envelope is None or not self._owner_notification_current(envelope):
+                            continue
+                        connection.execute(
+                            "UPDATE acceptance_envelopes SET last_owner_reminder_at=?,"
+                            "owner_reminder_count=owner_reminder_count+1,updated_at=? "
+                            "WHERE envelope_id=?",
+                            (timestamp, timestamp, envelope_id),
+                        )
+                        self.event(
+                            connection,
+                            "acceptance-envelope",
+                            envelope_id,
+                            "owner-reminder-rendered",
+                            {
+                                "interval_seconds": owner_reminder_seconds(),
+                                "reminded_at": timestamp,
+                            },
+                        )
+                self.flush_events()
         decision = "NOTIFY" if should_notify else "DONT_NOTIFY"
-        message = report if should_notify else "Нет активных задач."
+        message = (
+            report
+            if should_notify
+            else (
+                "Новых событий нет."
+                if owner_waiting_ids
+                else "Нет активных задач."
+            )
+        )
         # XML escaping is transport serialization only: the parsed message text
         # is byte-for-byte the canonical report stdout for every NOTIFY run.
         return (
@@ -6088,6 +6934,16 @@ class Registry:
                     "OR prepared_handoff_revision<>0 OR prepared_handoff_at IS NOT NULL)))"
                 ).fetchone()[0]
             )
+            invalid_owner_reminders = int(
+                connection.execute(
+                    "SELECT count(*) FROM acceptance_envelopes WHERE "
+                    "(last_owner_reminder_at IS NOT NULL AND "
+                    "(owner_reminder_count<=0 OR owner_notified_at IS NULL "
+                    "OR status<>'AWAITING_ACCEPTANCE' "
+                    "OR owner_notification_revision<>revision)) OR "
+                    "(last_owner_reminder_at IS NULL AND owner_reminder_count<>0)"
+                ).fetchone()[0]
+            )
             invalid_active_watcher_readbacks = int(
                 connection.execute(
                     "SELECT count(*) FROM watchers WHERE status='ACTIVE' AND "
@@ -6188,6 +7044,18 @@ class Registry:
                     "ORDER BY created_at,action_id"
                 ).fetchall()
             ]
+            invalid_watcher_classifications = int(
+                connection.execute(
+                    "SELECT count(*) FROM watcher_run_classifications c WHERE "
+                    "(c.finished_at IS NOT NULL AND c.heartbeat_xml='') OR "
+                    "(c.finished_at IS NULL AND c.heartbeat_xml<>'') OR "
+                    "(c.finished_at IS NOT NULL AND c.decision='FULL' AND NOT EXISTS ("
+                    "SELECT 1 FROM watcher_run_plans p WHERE p.run_id=c.run_id "
+                    "AND p.state='FINISHED')) OR "
+                    "(c.decision<>'FULL' AND EXISTS ("
+                    "SELECT 1 FROM watcher_run_plans p WHERE p.run_id=c.run_id))"
+                ).fetchone()[0]
+            )
             active_generation_ok = watcher_count == 0 or active_watchers == 1
         return {
             "ok": (
@@ -6204,10 +7072,12 @@ class Registry:
                 and invalid_successions == 0
                 and invalid_active_role_pins == 0
                 and invalid_owner_notifications == 0
+                and invalid_owner_reminders == 0
                 and invalid_active_watcher_readbacks == 0
                 and invalid_watcher_handover == 0
                 and invalid_watcher_run_plans == 0
                 and invalid_release_lane_closures == 0
+                and invalid_watcher_classifications == 0
                 and (watcher_count == 0 or effective_enabled_automations >= 1)
             ),
             "sqlite": quick,
@@ -6225,6 +7095,7 @@ class Registry:
             "invalid_successions": invalid_successions,
             "invalid_active_role_pins": invalid_active_role_pins,
             "invalid_owner_notifications": invalid_owner_notifications,
+            "invalid_owner_reminders": invalid_owner_reminders,
             "invalid_active_watcher_readbacks": invalid_active_watcher_readbacks,
             "incomplete_watcher_retirements": incomplete_watcher_retirements,
             "invalid_watcher_handover": invalid_watcher_handover,
@@ -6232,6 +7103,7 @@ class Registry:
             "invalid_release_lane_closures": invalid_release_lane_closures,
             "release_lane_closure_counts": release_lane_closure_counts,
             "release_lane_closure_signals": release_lane_closure_signals,
+            "invalid_watcher_classifications": invalid_watcher_classifications,
             "event_count": event_count,
         }
 
@@ -6323,6 +7195,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="root",
     )
     register.add_argument("--acceptance-workstream-task", default="")
+
+    revise_passport = commands.add_parser("revise-task-passport")
+    revise_passport.add_argument("--task-id", required=True)
+    revise_passport.add_argument("--expected-revision", type=int, required=True)
+    revise_passport.add_argument("--passport-file")
+    revise_passport.add_argument("--passport-json", default="{}")
 
     add_thread = commands.add_parser("add-thread")
     add_thread.add_argument("--task-id", required=True)
@@ -6587,11 +7465,22 @@ def build_parser() -> argparse.ArgumentParser:
     end = commands.add_parser("end-run")
     end.add_argument("--generation", type=int, required=True)
     end.add_argument("--owner", required=True)
+    mechanical_preflight = commands.add_parser("heartbeat-mechanical-preflight")
+    mechanical_preflight.add_argument("--generation", type=int, required=True)
+    mechanical_preflight.add_argument("--owner", required=True)
+    mechanical_preflight.add_argument("--queue-snapshot-json", required=True)
+    mechanical_preflight.add_argument("--trusted-main-sha", required=True)
+    mechanical_preflight.add_argument("--protocol-digest", required=True)
+    confirm_protocol = commands.add_parser("confirm-watcher-protocol")
+    confirm_protocol.add_argument("--generation", type=int, required=True)
+    confirm_protocol.add_argument("--owner", required=True)
+    confirm_protocol.add_argument("--trusted-main-sha", required=True)
+    confirm_protocol.add_argument("--protocol-digest", required=True)
     heartbeat_plan = commands.add_parser("heartbeat-plan")
     heartbeat_plan.add_argument("--generation", type=int, required=True)
     heartbeat_plan.add_argument("--owner", required=True)
     heartbeat_plan.add_argument("--queue-evidence-digest", required=True)
-    heartbeat_plan.add_argument("--queue-evidence-json", required=True)
+    heartbeat_plan.add_argument("--queue-evidence-json", default="")
     heartbeat_target = commands.add_parser("heartbeat-record-target")
     heartbeat_target.add_argument("--generation", type=int, required=True)
     heartbeat_target.add_argument("--owner", required=True)
@@ -6622,6 +7511,10 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat_finish.add_argument("--generation", type=int, required=True)
     heartbeat_finish.add_argument("--owner", required=True)
     heartbeat_finish.add_argument("--automation-id", required=True)
+    heartbeat_fast_finish = commands.add_parser("heartbeat-fast-finish")
+    heartbeat_fast_finish.add_argument("--generation", type=int, required=True)
+    heartbeat_fast_finish.add_argument("--owner", required=True)
+    heartbeat_fast_finish.add_argument("--automation-id", required=True)
     commands.add_parser("pending-watcher-retirements")
     watcher_retirement = commands.add_parser("confirm-watcher-retirement")
     watcher_retirement.add_argument("--generation", type=int, required=True)
@@ -6652,6 +7545,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("report")
     heartbeat_response = commands.add_parser("heartbeat-response")
     heartbeat_response.add_argument("--automation-id", required=True)
+    curator_lifecycle = commands.add_parser("validate-curator-lifecycle")
+    curator_lifecycle.add_argument("--observation-json", required=True)
     commands.add_parser("integrity")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -6684,6 +7579,12 @@ def main() -> int:
                 acceptance_title=args.acceptance_title,
                 acceptance_role=args.acceptance_role,
                 acceptance_workstream_task_id=args.acceptance_workstream_task,
+            )
+        elif args.command == "revise-task-passport":
+            result = registry.revise_task_passport(
+                task_id=args.task_id,
+                expected_revision=args.expected_revision,
+                passport=_passport(args),
             )
         elif args.command == "add-thread":
             result = registry.add_thread(
@@ -6943,13 +7844,34 @@ def main() -> int:
             result = registry.begin_run(generation=args.generation, owner=args.owner, lease_seconds=args.lease_seconds)
         elif args.command == "end-run":
             result = registry.end_run(generation=args.generation, owner=args.owner)
+        elif args.command == "heartbeat-mechanical-preflight":
+            result = registry.classify_watcher_run(
+                generation=args.generation,
+                owner=args.owner,
+                queue_snapshot=_load_object(
+                    args.queue_snapshot_json, field="queue-snapshot-json"
+                ),
+                trusted_main_sha=args.trusted_main_sha,
+                protocol_digest=args.protocol_digest,
+            )
+        elif args.command == "confirm-watcher-protocol":
+            result = registry.confirm_watcher_protocol(
+                generation=args.generation,
+                owner=args.owner,
+                trusted_main_sha=args.trusted_main_sha,
+                protocol_digest=args.protocol_digest,
+            )
         elif args.command == "heartbeat-plan":
             result = registry.plan_watcher_run(
                 generation=args.generation,
                 owner=args.owner,
                 queue_evidence_digest=args.queue_evidence_digest,
-                queue_evidence=_load_object(
-                    args.queue_evidence_json, field="queue-evidence-json"
+                queue_evidence=(
+                    _load_object(
+                        args.queue_evidence_json, field="queue-evidence-json"
+                    )
+                    if args.queue_evidence_json.strip()
+                    else None
                 ),
             )
         elif args.command == "heartbeat-record-target":
@@ -6986,6 +7908,15 @@ def main() -> int:
         elif args.command == "heartbeat-finish":
             print(
                 registry.finish_watcher_run(
+                    generation=args.generation,
+                    owner=args.owner,
+                    automation_id=args.automation_id,
+                )
+            )
+            return 0
+        elif args.command == "heartbeat-fast-finish":
+            print(
+                registry.finish_fast_watcher_run(
                     generation=args.generation,
                     owner=args.owner,
                     automation_id=args.automation_id,
@@ -7033,6 +7964,17 @@ def main() -> int:
         elif args.command == "heartbeat-response":
             print(registry.heartbeat_response(automation_id=args.automation_id))
             return 0
+        elif args.command == "validate-curator-lifecycle":
+            validated = validate_curator_lifecycle_observation(
+                _load_object(args.observation_json, field="observation-json")
+            )
+            result = {
+                "validated": True,
+                "front_door_surface_eligible": validated[
+                    "front_door_surface_eligible"
+                ],
+                "evidence_digest": canonical_digest(validated),
+            }
         elif args.command == "integrity":
             result = registry.integrity()
         elif args.command == "serve":

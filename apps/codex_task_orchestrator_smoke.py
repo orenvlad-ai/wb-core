@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.codex_task_orchestrator import DEFAULT_WATCHER_MAX_RUNS, Registry
+from apps.codex_watcher_heartbeat import trusted_protocol_identity
 from apps.codex_task_orchestrator_spec import (
     AttentionKind,
     IncidentDisposition,
@@ -30,6 +31,7 @@ from apps.codex_task_orchestrator_spec import (
     WATCHER_TARGET_OBSERVATION_SCHEMA,
     canonical_digest,
     classify_incident,
+    validate_curator_lifecycle_observation,
 )
 
 
@@ -783,6 +785,58 @@ def _target_observation(
     }
 
 
+def _quiet_queue_snapshot() -> dict[str, object]:
+    labels = (
+        "release:staged",
+        "release:ready",
+        "release:running",
+        "release:awaiting-agent",
+        "release:awaiting-ui",
+        "release:needs-resume",
+        "release:blocked",
+        "release:halted",
+        "release:lane-owner",
+    )
+    return {
+        "status": "ok",
+        "queue": {"status": "idle"},
+        "release_lane": {"status": "idle"},
+        "integrity": {"status": "ok", "signals": []},
+        "release_lane_proofs": [],
+        "counts": {label: 0 for label in labels},
+        "active": [],
+    }
+
+
+def _curator_lifecycle_observation(
+    *, phase: str, wake_source: str, source_surface: str
+) -> dict[str, object]:
+    return {
+        "schema": "wb-core-curator-lifecycle-observation/v1",
+        "phase": phase,
+        "source_surface": source_surface,
+        "source_project": (
+            "wb_core_3"
+            if source_surface == "ordinary-chatgpt-project-chat"
+            else "backend-load-fixture"
+        ),
+        "executor_project": "wb-core - codex",
+        "service_prompt_present": False,
+        "dispatch_summary_count": 1 if phase == "post-dispatch" else 0,
+        "turn_completed": True,
+        "curator_idle": True,
+        "curator_progress_poll_calls": 0,
+        "curator_heartbeat_count": 0,
+        "wake_source": wake_source,
+        "bounded_action_count": 1,
+        "exact_attention_binding": wake_source == "watcher-attention",
+        "executor_is_only_watcher_target": True,
+        "active_watcher_count": 1,
+        "per_task_automation_count": 0,
+        "manual_sleep_correction": False,
+    }
+
+
 def _run_watcher_driver_smoke() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         registry = Registry(Path(temporary) / "driver-registry")
@@ -840,12 +894,21 @@ def _run_watcher_driver_smoke() -> None:
             generation=1, owner="watcher-driver-owner", lease_seconds=540
         )
         assert first_begin["run_id"] == "watcher-g1-r1"
-        first_queue = _queue_evidence()
+        first_queue = _quiet_queue_snapshot()
+        active_preflight = registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-driver-owner",
+            queue_snapshot=first_queue,
+            trusted_main_sha="f" * 40,
+            protocol_digest="sha256:" + "3" * 64,
+        )
+        assert active_preflight["decision"] == "FULL"
+        assert active_preflight["signals"]["target_count"] == 2
+        assert "active-targets" in active_preflight["full_path_reasons"]
         first_plan = registry.plan_watcher_run(
             generation=1,
             owner="watcher-driver-owner",
-            queue_evidence_digest=canonical_digest(first_queue),
-            queue_evidence=first_queue,
+            queue_evidence_digest=str(active_preflight["queue_evidence_digest"]),
         )
         assert first_plan["schema"] == WATCHER_RUN_PLAN_SCHEMA
         assert tuple(first_plan["ordered_phases"]) == WATCHER_RUN_PHASES
@@ -1033,6 +1096,109 @@ def _run_watcher_driver_smoke() -> None:
         )
         assert quiet_wrapper.findtext("decision") == "DONT_NOTIFY"
         assert quiet_wrapper.findtext("message") == "Нет активных задач."
+        quiet_registry.confirm_watcher_liveness(
+            generation=1,
+            automation_id="quiet-driver-auto",
+            automation_enabled_readback_digest="sha256:" + "3" * 64,
+            heartbeat_readback_digest="sha256:" + "4" * 64,
+            end_run_readback_digest="sha256:" + "5" * 64,
+        )
+
+        quiet_registry.begin_run(
+            generation=1, owner="watcher-quiet-owner", lease_seconds=540
+        )
+        protocol_digest = "sha256:" + "d" * 64
+        protocol_change = quiet_registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="1" * 40,
+            protocol_digest=protocol_digest,
+        )
+        assert protocol_change["decision"] == "FULL"
+        assert protocol_change["protocol_reload_required"] is True
+        quiet_registry.confirm_watcher_protocol(
+            generation=1,
+            owner="watcher-quiet-owner",
+            trusted_main_sha="1" * 40,
+            protocol_digest=protocol_digest,
+        )
+        quiet_registry.plan_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_evidence_digest=str(protocol_change["queue_evidence_digest"]),
+        )
+        quiet_registry.actuate_watcher_run(
+            generation=1, owner="watcher-quiet-owner"
+        )
+        quiet_registry.finish_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            automation_id="quiet-driver-auto",
+        )
+
+        quiet_registry.begin_run(
+            generation=1, owner="watcher-quiet-owner", lease_seconds=540
+        )
+        cheap = quiet_registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="1" * 40,
+            protocol_digest=protocol_digest,
+        )
+        assert cheap["decision"] == "QUIET"
+        assert cheap["requires_thread_readbacks"] is False
+        proxy = cheap["cost_proxy"]
+        assert int(proxy["fast_path_count"]) * 2 < int(proxy["baseline_count"])
+        assert proxy["thread_readbacks"] == {"baseline": 1, "fast_path": 0}
+        cheap_wrapper = ET.fromstring(
+            quiet_registry.finish_fast_watcher_run(
+                generation=1,
+                owner="watcher-quiet-owner",
+                automation_id="quiet-driver-auto",
+            )
+        )
+        assert cheap_wrapper.findtext("decision") == "DONT_NOTIFY"
+        assert cheap_wrapper.findtext("message") == "Нет активных задач."
+        fast_runs = quiet_registry.snapshot()["watcher_run_classifications"]
+        assert fast_runs[-1]["decision"] == "QUIET"
+        assert fast_runs[-1]["heartbeat_xml"]
+
+        quiet_registry.begin_run(
+            generation=1, owner="watcher-quiet-owner", lease_seconds=540
+        )
+        lane_snapshot = _quiet_queue_snapshot()
+        lane_snapshot["release_lane"] = {"status": "owned", "pr": 999}
+        lane = quiet_registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_snapshot=lane_snapshot,
+            trusted_main_sha="1" * 40,
+            protocol_digest=protocol_digest,
+        )
+        assert lane["decision"] == "FULL"
+        assert "release-lane" in lane["full_path_reasons"]
+        quiet_registry.end_run(generation=1, owner="watcher-quiet-owner")
+
+        with quiet_registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET run_count=max_runs-1 WHERE generation=1"
+            )
+        rotation_begin = quiet_registry.begin_run(
+            generation=1, owner="watcher-quiet-owner", lease_seconds=540
+        )
+        assert rotation_begin["rotation_due"] is True
+        rotation = quiet_registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-quiet-owner",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="1" * 40,
+            protocol_digest=protocol_digest,
+        )
+        assert rotation["decision"] == "FULL"
+        assert "rotation" in rotation["full_path_reasons"]
+        quiet_registry.end_run(generation=1, owner="watcher-quiet-owner")
 
 
 def _run_release_lane_closure_smoke() -> None:
@@ -1144,6 +1310,7 @@ def _run_release_lane_closure_smoke() -> None:
         assert first_plan["pending_target_ids"] == []
         pending = first_plan["release_lane_closure"]["pending_actions"]
         assert len(pending) == 1
+        assert registry.pending_release_lane_owner_prs() == [918]
         action = pending[0]
         assert f" revision {accepted_revision} " in action["command"]
         assert action["command"].startswith(
@@ -1336,6 +1503,7 @@ def _run_release_lane_closure_smoke() -> None:
         )
         final_snapshot = registry.snapshot()
         assert final_snapshot["release_lane_closures"][0]["state"] == "CONFIRMED"
+        assert registry.pending_release_lane_owner_prs() == []
         assert final_snapshot["incidents"] == []
         assert registry.integrity()["release_lane_closure_signals"] == []
 
@@ -1385,7 +1553,284 @@ def _run_workstream_report_smoke() -> None:
         assert registry.integrity()["ok"] is True, registry.integrity()
 
 
+def _run_owner_reminder_smoke() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "owner-reminder-registry")
+        registry.initialize()
+        task_id = "owner-reminder-v1"
+        curator = "curator-owner-reminder"
+        executor = "executor-owner-reminder"
+        registry.register_task(
+            task_id=task_id,
+            title="Напоминание владельцу",
+            repo="orenvlad-ai/wb-core",
+            project_id="wb-core",
+            objective="Complete Напоминание владельцу",
+            passport=_read_only_passport(
+                "Напоминание владельцу", task_id, curator, executor
+            ),
+            curator_thread_id=curator,
+            executor_thread_id=executor,
+            host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
+        )
+        _prepare_watcher(
+            registry,
+            generation=1,
+            thread_id="watcher-owner-reminder",
+            automation_id="owner-reminder-auto",
+        )
+        registry.smoke_watcher(generation=1, evidence_digest="sha256:" + "1" * 64)
+        registry.activate_watcher(generation=1)
+        protocol_digest = "sha256:" + "5" * 64
+        preflight_now = datetime.now(timezone.utc)
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET trusted_main_sha=?,protocol_digest=?,"
+                "protocol_confirmed_at=?,last_full_readback_at=? WHERE generation=1",
+                ("6" * 40, protocol_digest, preflight_now.isoformat(), preflight_now.isoformat()),
+            )
+        registry.record_failure(
+            task_id=task_id,
+            task_revision=1,
+            phase="implementation",
+            error_class="deterministic-smoke-failure",
+            evidence_fingerprint="failure-owner-reminder-smoke",
+            empty_system_error=False,
+            transient=True,
+            human_reason="",
+            repo_owned_remediation_available=True,
+            remediation_exhausted=False,
+        )
+        registry.begin_run(
+            generation=1, owner="watcher-owner-run", lease_seconds=540
+        )
+        failure_preflight = registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-owner-run",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="6" * 40,
+            protocol_digest=protocol_digest,
+            now=preflight_now,
+        )
+        assert "failure-recovery" in failure_preflight["full_path_reasons"]
+        registry.end_run(generation=1, owner="watcher-owner-run")
+        registry.resolve_failure(
+            task_id=task_id,
+            phase="implementation",
+            evidence_fingerprint="failure-owner-reminder-smoke",
+        )
+        event = registry.enqueue_attention(
+            task_id=task_id,
+            expected_revision=1,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="diagnostic-complete",
+            evidence_summary="Проверенный read-only результат готов.",
+            evidence_digest="sha256:" + "2" * 64,
+            eta="готово",
+            delta="Проверка завершена.",
+            current="Куратор готовит итог владельцу.",
+        )
+        registry.begin_run(
+            generation=1, owner="watcher-owner-run", lease_seconds=540
+        )
+        attention_preflight = registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-owner-run",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="6" * 40,
+            protocol_digest=protocol_digest,
+            now=preflight_now,
+        )
+        assert attention_preflight["decision"] == "FULL"
+        assert "attention-delivery" in attention_preflight["full_path_reasons"]
+        registry.end_run(generation=1, owner="watcher-owner-run")
+        registry.confirm_watcher_liveness(
+            generation=1,
+            automation_id="owner-reminder-auto",
+            automation_enabled_readback_digest="sha256:" + "3" * 64,
+            heartbeat_readback_digest="sha256:" + "7" * 64,
+            end_run_readback_digest="sha256:" + "8" * 64,
+        )
+        reserved = registry.reserve_attention(
+            generation=1, owner="watcher-owner-send", lease_seconds=60, limit=8
+        )["reserved"][0]
+        registry.mark_attention_sent(
+            event_id=str(reserved["event_id"]),
+            owner="watcher-owner-send",
+            transport_receipt_digest="sha256:" + "3" * 64,
+            ack_timeout_seconds=600,
+        )
+        ack = registry.ack_attention(
+            event_id=str(event["event_id"]),
+            event_digest=str(event["event_digest"]),
+            curator_thread_id=curator,
+            expected_task_revision=2,
+            ack_evidence_digest="sha256:" + "4" * 64,
+        )
+        handoff = registry.prepare_owner_handoff(
+            curator_thread_id=curator,
+            envelope_id=task_id,
+            expected_revision=int(ack["acceptance_envelope_revision"]),
+            done=["Read-only результат подготовлен."],
+            verified="Lifecycle и evidence проверены.",
+        )
+        registry.confirm_owner_notification(
+            curator_thread_id=curator,
+            envelope_id=task_id,
+            expected_revision=int(ack["acceptance_envelope_revision"]),
+            notification_evidence_digest=str(handoff["handoff_digest"]),
+        )
+        envelope = registry.snapshot()["acceptance_envelopes"][0]
+        baseline = datetime.fromisoformat(str(envelope["owner_notified_at"]))
+        before_boundary = baseline + timedelta(hours=3, minutes=59, seconds=59)
+        with registry.connect() as connection:
+            connection.execute(
+                "UPDATE watchers SET trusted_main_sha=?,protocol_digest=?,"
+                "protocol_confirmed_at=?,last_full_readback_at=? WHERE generation=1",
+                ("6" * 40, protocol_digest, baseline.isoformat(), before_boundary.isoformat()),
+            )
+        registry.begin_run(
+            generation=1, owner="watcher-owner-run", lease_seconds=540
+        )
+        waiting = registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-owner-run",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="6" * 40,
+            protocol_digest=protocol_digest,
+            now=before_boundary,
+        )
+        assert waiting["decision"] == "OWNER_WAITING"
+        waiting_wrapper = ET.fromstring(
+            registry.finish_fast_watcher_run(
+                generation=1,
+                owner="watcher-owner-run",
+                automation_id="owner-reminder-auto",
+                now=before_boundary,
+            )
+        )
+        assert waiting_wrapper.findtext("decision") == "DONT_NOTIFY"
+        assert waiting_wrapper.findtext("message") == "Новых событий нет."
+
+        reminder_boundary = baseline + timedelta(hours=4)
+        registry.begin_run(
+            generation=1, owner="watcher-owner-run", lease_seconds=540
+        )
+        reminder = registry.classify_watcher_run(
+            generation=1,
+            owner="watcher-owner-run",
+            queue_snapshot=_quiet_queue_snapshot(),
+            trusted_main_sha="6" * 40,
+            protocol_digest=protocol_digest,
+            now=reminder_boundary,
+        )
+        assert reminder["decision"] == "OWNER_REMINDER"
+        reminder_wrapper = ET.fromstring(
+            registry.finish_fast_watcher_run(
+                generation=1,
+                owner="watcher-owner-run",
+                automation_id="owner-reminder-auto",
+                now=reminder_boundary,
+            )
+        )
+        assert reminder_wrapper.findtext("decision") == "NOTIFY"
+        assert "Ожидается приёмка владельца." in (
+            reminder_wrapper.findtext("message") or ""
+        )
+        after = registry.snapshot()["acceptance_envelopes"][0]
+        assert after["owner_reminder_count"] == 1
+        assert after["last_owner_reminder_at"] == reminder_boundary.isoformat()
+        assert registry.integrity()["ok"] is True, registry.integrity()
+
+        _register(registry, "active-alongside-owner-wait-v1", "active-alongside")
+        mixed_wrapper = ET.fromstring(
+            registry.heartbeat_response(
+                automation_id="owner-reminder-auto",
+                now=reminder_boundary + timedelta(minutes=1),
+            )
+        )
+        mixed_message = mixed_wrapper.findtext("message") or ""
+        assert mixed_wrapper.findtext("decision") == "NOTIFY"
+        assert "Task active-alongside" in mixed_message
+        assert "Напоминание владельцу" not in mixed_message
+        unchanged_owner = next(
+            item
+            for item in registry.snapshot()["acceptance_envelopes"]
+            if item["envelope_id"] == task_id
+        )
+        assert unchanged_owner["owner_reminder_count"] == 1
+
+
+def _run_passport_revision_smoke() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Registry(Path(temporary) / "passport-revision-registry")
+        registry.initialize()
+        task_id = "passport-revision-v1"
+        curator = "curator-passport-revision"
+        executor = "executor-passport-revision"
+        passport = _read_only_passport(
+            "Passport update", task_id, curator, executor
+        )
+        registry.register_task(
+            task_id=task_id,
+            title="Passport update",
+            repo="orenvlad-ai/wb-core",
+            project_id="wb-core",
+            objective="Complete Passport update",
+            passport=passport,
+            curator_thread_id=curator,
+            executor_thread_id=executor,
+            host_id="host-1",
+            curator_pin_readback_digest="sha256:" + "c" * 64,
+            executor_pin_readback_digest="sha256:" + "e" * 64,
+        )
+        revised = json.loads(json.dumps(passport))
+        revised["acceptance"].append("curator becomes idle after bounded action")
+        update = registry.revise_task_passport(
+            task_id=task_id,
+            expected_revision=1,
+            passport=revised,
+        )
+        assert update["revision"] == 2
+        repeated = registry.revise_task_passport(
+            task_id=task_id,
+            expected_revision=1,
+            passport=revised,
+        )
+        assert repeated["revision"] == 2
+        assert repeated["idempotent"] is True
+        registry.enqueue_attention(
+            task_id=task_id,
+            expected_revision=2,
+            kind=AttentionKind.TECHNICAL_COMPLETION,
+            completion_evidence_class="diagnostic-complete",
+            evidence_summary="Passport revision smoke завершён.",
+            evidence_digest="sha256:" + "9" * 64,
+            eta="готово",
+            delta="Проверка завершена.",
+            current="Куратор подтверждает evidence.",
+        )
+        post_handoff = json.loads(json.dumps(revised))
+        post_handoff["constraints"].append("late mutation")
+        try:
+            registry.revise_task_passport(
+                task_id=task_id,
+                expected_revision=3,
+                passport=post_handoff,
+            )
+        except RuntimeError as exc:
+            assert "immutable" in str(exc)
+        else:
+            raise AssertionError("passport must be immutable after technical handoff")
+
+
 def run_smoke() -> None:
+    trusted_protocol = trusted_protocol_identity(fetch=False)
+    assert len(str(trusted_protocol["trusted_main_sha"])) == 40
+    assert str(trusted_protocol["protocol_digest"]).startswith("sha256:")
+    assert trusted_protocol["protocol_digest_paths"]
     watcher_contract = json.loads(
         (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
             encoding="utf-8"
@@ -1420,6 +1865,11 @@ def run_smoke() -> None:
         "heartbeat-record-release-lane",
         "heartbeat-actuate",
         "heartbeat-finish",
+        "codex_watcher_heartbeat.py",
+        "heartbeat-fast-finish",
+        "confirm-watcher-protocol",
+        "validate-curator-lifecycle",
+        "FRONT_DOOR_CANARY_READY",
         "checkpoint-progress",
         "progress-state",
         "apply-progress",
@@ -1498,8 +1948,60 @@ def run_smoke() -> None:
     ] == "NOTIFY"
     assert watcher_contract["heartbeat_response"]["single_visible_output"] is True
     assert watcher_contract["heartbeat_response"][
-        "dont_notify_requires_no_active_report_blocks"
+        "dont_notify_requires_no_actionable_report_blocks"
     ] is True
+    assert watcher_contract["owner_reminder"]["interval_minutes"] == 240
+    assert watcher_contract["cost_proxy"]["quiet_fast_path_count"] * 2 < (
+        watcher_contract["cost_proxy"]["baseline_quiet_full_path_count"]
+    )
+    assert watcher_contract["cost_proxy"]["token_claims"] is False
+    assert watcher_contract["quiet_fast_path"]["fast_path_executor_thread_readbacks"] == 0
+    assert watcher_contract["curator_lifecycle"]["front_door_canary"][
+        "programmatic_substitution_allowed"
+    ] is False
+    assert watcher_contract["curator_lifecycle"]["steady_state"] == (
+        "idle-waiting-attention"
+    )
+    post_dispatch = validate_curator_lifecycle_observation(
+        _curator_lifecycle_observation(
+            phase="post-dispatch",
+            wake_source="dispatch-complete",
+            source_surface="ordinary-chatgpt-project-chat",
+        )
+    )
+    assert post_dispatch["front_door_surface_eligible"] is True
+    post_attention = validate_curator_lifecycle_observation(
+        _curator_lifecycle_observation(
+            phase="post-wake",
+            wake_source="watcher-attention",
+            source_surface="ordinary-chatgpt-project-chat",
+        )
+    )
+    assert post_attention["front_door_surface_eligible"] is True
+    invalid_curator = _curator_lifecycle_observation(
+        phase="post-dispatch",
+        wake_source="dispatch-complete",
+        source_surface="backend-load-fixture",
+    )
+    invalid_curator["curator_progress_poll_calls"] = 1
+    try:
+        validate_curator_lifecycle_observation(invalid_curator)
+    except ValueError as exc:
+        assert "polling" in str(exc)
+    else:
+        raise AssertionError("curator polling must fail lifecycle validation")
+    invalid_boolean = _curator_lifecycle_observation(
+        phase="post-dispatch",
+        wake_source="dispatch-complete",
+        source_surface="backend-load-fixture",
+    )
+    invalid_boolean["curator_idle"] = "true"
+    try:
+        validate_curator_lifecycle_observation(invalid_boolean)
+    except ValueError as exc:
+        assert "boolean" in str(exc)
+    else:
+        raise AssertionError("curator lifecycle booleans must be typed")
     assert list(PROGRESS_PERCENT_BY_STAGE.values()) == [
         0,
         5,
@@ -1531,6 +2033,8 @@ def run_smoke() -> None:
     _run_watcher_driver_smoke()
     _run_release_lane_closure_smoke()
     _run_workstream_report_smoke()
+    _run_owner_reminder_smoke()
+    _run_passport_revision_smoke()
 
     with tempfile.TemporaryDirectory() as temporary:
         registry = Registry(Path(temporary) / "registry")
