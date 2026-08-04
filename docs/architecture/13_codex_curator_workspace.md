@@ -18,14 +18,9 @@ Checkout служит bootstrap, но C1 не предполагает, что �
 
 ## Deterministic C1 lifecycle
 
-1. C1 обсуждает/проектирует и выполняет curator preflight.
-2. Обычная команда запуска классифицируется как `DISPATCH_REQUEST`.
-3. C1 выполняет единую launch operation из root contract: exact C2 create/readback, title/pin, registry registration/envelope и readback единственного active Watcher.
-4. C1 публикует один короткий dispatch summary и завершает turn.
-5. Steady state C1 — idle без model turn. Он не вызывает `wait_threads`/`read_thread`, не опрашивает GitHub и не создаёт heartbeat.
-6. C1 просыпается только от нового пользовательского сообщения либо exact Watcher attention. После одного bounded verify/ack/handoff action снова завершает turn.
+Authoritative lifecycle целиком остаётся в разделах `Discussion → отдельная Codex-задача` и `Глобальный Watcher и арбитр` корневого `AGENTS.md`. Workspace не содержит своей копии state machine: он только переводит свежую задачу в роль `discussion-only` C1, требует before-action readback current root+role sources и изолирует C2 от role folder. Machine contract ссылается на эти root sections через `inherit_without_override=true`, а smoke проверяет, что общий lifecycle по-прежнему присутствует в root truth.
 
-Watcher identity всегда читается из active registry generation; никакой thread/generation не hardcode-ится. Owner acceptance не выполняют ни C1 canary, ни C2, ни Watcher: exact curator только подготавливает handoff, а владелец отвечает `Задача принята`.
+Canary доказывает ожидаемый outcome общего lifecycle как внешний acceptance trace: естественная просьба приводит к отдельному C2, полному launch readback, короткому summary и завершённому C1 turn; дальнейшее наблюдение и attention принадлежат единственному Watcher. Никакой generation/thread не записывается в workspace contract, а owner acceptance остаётся действием владельца в exact curator task.
 
 ## Natural canary и closure evidence
 

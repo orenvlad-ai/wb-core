@@ -136,6 +136,14 @@ def validate_checkout(repository: Path = ROOT) -> dict[str, Any]:
     ):
         if forbidden_heading in role_text:
             raise ValueError("curator role delta copied a root protocol section")
+    for copied_common_rule in (
+        "`DISPATCH_REQUEST`",
+        "`wait_threads`",
+        "Нормальные wake sources",
+        "Задача принята",
+    ):
+        if copied_common_rule in role_text:
+            raise ValueError("curator role delta copied a common lifecycle rule")
 
     return {
         "schema": "wb-core-codex-curator-workspace-validation/v1",

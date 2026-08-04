@@ -41,28 +41,37 @@ def main() -> None:
     assert instruction_bytes < contract["instruction_discovery"]["project_doc_max_bytes"]
 
     lifecycle = contract["lifecycle"]
-    assert lifecycle["ordered_states"][-2:] == [
-        "short-dispatch-summary",
-        "turn-ended-idle",
-    ]
-    assert set(lifecycle["post_dispatch_forbidden"]) == {
-        "wait_threads",
-        "read_thread",
-        "github-polling",
-        "curator-heartbeat",
+    assert lifecycle == {
+        "common_contract_source": "origin/main:AGENTS.md",
+        "common_contract_sections": [
+            "Discussion → отдельная Codex-задача",
+            "Глобальный Watcher и арбитр",
+        ],
+        "inherit_without_override": True,
+        "role_entry_state": "discussion-only",
+        "role_specific_obligations": [
+            "before-action-current-origin-main-readback",
+            "c2-outside-curator-primary-folder",
+        ],
     }
-    assert lifecycle["wake_sources"] == [
-        "user-message",
-        "exact-watcher-attention",
-    ]
-    assert lifecycle["attention_action_limit"] == 1
-    assert lifecycle["return_to_idle_after_attention"] is True
+
+    root_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    for common_lifecycle_rule in (
+        "`DISPATCH_REQUEST`",
+        "выдать ровно один короткий dispatch summary и завершить текущий turn",
+        "steady state — завершённый turn/idle без model turn",
+        "не запускает циклы `wait_threads`/`read_thread`",
+        "Нормальные wake sources — новое сообщение пользователя или exact attention",
+        "Задача принята",
+    ):
+        assert common_lifecycle_rule in root_text
 
     watcher = contract["watcher"]
-    assert watcher["identity_source"] == "registry-active-generation"
-    assert watcher["hardcoded_generation_or_thread"] is False
-    assert watcher["additional_watcher_allowed"] is False
-    assert watcher["curator_heartbeat_allowed"] is False
+    assert watcher == {
+        "common_contract_source": "origin/main:AGENTS.md",
+        "inherit_without_override": True,
+        "workspace_adds_watcher_or_heartbeat": False,
+    }
     assert contract["executor"]["inherits_curator_delta"] is False
     assert contract["canary"]["requires_service_boilerplate"] is False
 
@@ -131,13 +140,22 @@ def main() -> None:
     )
     for required in (
         "discussion-only",
-        "DISPATCH_REQUEST",
-        "короткий dispatch summary",
-        "exact attention",
+        "inherit_without_override",
+        "before-action",
+        "origin/main:workspaces/",
         "wb_core_3",
-        "Задача принята",
     ):
         assert required in sources
+    role_text = (
+        ROOT / "workspaces/WB Core · Кураторы/AGENTS.override.md"
+    ).read_text(encoding="utf-8")
+    for common_rule in (
+        "`DISPATCH_REQUEST`",
+        "`wait_threads`",
+        "Нормальные wake sources",
+        "Задача принята",
+    ):
+        assert common_rule not in role_text
     for forbidden in (
         "watcher-g1",
         "watcher-g2",

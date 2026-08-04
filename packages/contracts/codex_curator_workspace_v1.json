@@ -30,30 +30,17 @@
     "task_surface": "discussion-only"
   },
   "lifecycle": {
-    "ordered_states": [
-      "discuss-design",
-      "dispatch-launch-operation",
-      "short-dispatch-summary",
-      "turn-ended-idle"
+    "common_contract_source": "origin/main:AGENTS.md",
+    "common_contract_sections": [
+      "Discussion → отдельная Codex-задача",
+      "Глобальный Watcher и арбитр"
     ],
-    "dispatch_requires": [
-      "target-create-readback",
-      "title-pin-readback",
-      "registry-registration",
-      "single-active-watcher-readback"
-    ],
-    "post_dispatch_forbidden": [
-      "wait_threads",
-      "read_thread",
-      "github-polling",
-      "curator-heartbeat"
-    ],
-    "wake_sources": [
-      "user-message",
-      "exact-watcher-attention"
-    ],
-    "attention_action_limit": 1,
-    "return_to_idle_after_attention": true
+    "inherit_without_override": true,
+    "role_entry_state": "discussion-only",
+    "role_specific_obligations": [
+      "before-action-current-origin-main-readback",
+      "c2-outside-curator-primary-folder"
+    ]
   },
   "executor": {
     "role": "C2",
@@ -62,10 +49,9 @@
     "model_policy": "current-root-protocol"
   },
   "watcher": {
-    "identity_source": "registry-active-generation",
-    "hardcoded_generation_or_thread": false,
-    "additional_watcher_allowed": false,
-    "curator_heartbeat_allowed": false
+    "common_contract_source": "origin/main:AGENTS.md",
+    "inherit_without_override": true,
+    "workspace_adds_watcher_or_heartbeat": false
   },
   "canary": {
     "execution_contour": "read-only",
