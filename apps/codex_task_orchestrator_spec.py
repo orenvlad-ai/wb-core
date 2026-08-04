@@ -332,6 +332,7 @@ TASK_TRANSITIONS = {
             TaskStatus.WORKING,
             TaskStatus.RECOVERING,
             TaskStatus.AWAITING_HUMAN_PENDING_HANDOFF,
+            TaskStatus.DONE_PENDING_HANDOFF,
             TaskStatus.TERMINAL_FAILURE_PENDING_HANDOFF,
         }
     ),
