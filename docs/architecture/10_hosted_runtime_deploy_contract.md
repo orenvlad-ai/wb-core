@@ -341,12 +341,7 @@ Repo-owned [GitHub Release Train](11_github_release_train.md) является o
 
 `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify`
 
-Все ordinary live-runtime PR используют один и тот же direct flow: trusted
-exact-head enqueue, final sync/baseline, merge exact head и этот единственный
-`deploy-and-verify`. Успешный runtime readback ставит `release:production`;
-agent/session handshake и UI-owned gate отсутствуют. Если цель требует UI,
-исполнитель собирает isolated UI evidence как обычную verification-фазу, не
-владеющую active Codex chat session.
+LOOP PR использует тот же единственный deploy command, но после final sync/baseline сначала обязан остановиться на `release:awaiting-agent`. Exact-head acknowledgement одноразово потребляется перед merge. Потерянный владелец может получить только fail-closed overlay `release:needs-resume`; auto-ack, skip и перехват gate запрещены, а время ожидания не является deploy blocker. После успешного deploy/verify LOOP получает `release:awaiting-ui`, а не terminal success; несвязанные releases ждут UI acceptance либо exact-linked recovery. Ни agent handshake, ни UI gate не меняют canonical deploy implementation или target.
 
 Production failure после merge ставит global `release:halted` и блокирует выбор следующего release. SSH exit `255` не считается доказанным deploy failure: это `transport-indeterminate`, после которого bounded reconciler читает exact metadata/runtime SHA, canonical EnvironmentFile key-presence без вывода values, systemd state/MainPID и mandatory status/operator probes. Healthy exact SHA продолжает transition; wrong/mixed SHA, invalid auth env, inactive systemd и failed probes сохраняют halted. Разрешены только safe retries `daemon-reload/restart/probes/readback`; rsync, metadata и dependencies не повторяются. Repo-owned `resume-halted` снимает label только по exact PR/head/merge/canonical-target evidence. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets остаются вне Git/logs.
 
@@ -1000,5 +995,6 @@ bounded; failed candidate retains last-good state.
 Historical production warehouse/capital correction is explicitly not part of
 deploy or UI acceptance. It requires a separate `scope:production-mutation`
 task with query-only diagnostic manifest, human gate, exact
-backup/reversibility and reconciliation. Production verification for this task
-is read-only schema/status/readback plus isolated UI revision-flow evidence.
+backup/reversibility and reconciliation. Production verification for this
+LOOP is read-only schema/status/readback plus isolated UI revision-flow
+evidence.

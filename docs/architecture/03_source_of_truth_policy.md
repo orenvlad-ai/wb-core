@@ -21,10 +21,10 @@ Authoritative docs должны описывать текущую реализа
 
 Корневой [`AGENTS.md`](../../AGENTS.md) — короткий самодостаточный execution/governance entrypoint для Codex и ChatGPT, читающего репозиторий. Он не дублирует доменные контракты и направляет к authoritative docs. Для текущей работы не требуется отдельный project pack или прежняя ChatGPT Project instruction.
 
-Локальный saved project или curator chat может быть удобным front door, но его
-metadata, pin, label и chat history не становятся source of truth. Куратор
-запускает отдельного исполнителя и получает ручной handoff; archived workspace
-contract сохранён только как [historical pointer](13_codex_curator_workspace.md).
+Исторический saved project `WB Core · Кураторы` и его workspace automation не
+являются active runtime или source of truth. Куратор использует корневой
+протокол и передаёт реализацию отдельному исполнителю; archive pointer:
+[retired curator workspace](13_codex_curator_workspace.md).
 
 ## Кураторский Протокол
 

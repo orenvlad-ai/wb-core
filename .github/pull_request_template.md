@@ -24,7 +24,7 @@
 ## Release
 
 Для ordinary PR используется `task:standard` и ровно одна `scope:*` метка.
-После successful `baseline` exact head ставится в очередь только trusted
-командой `/wb-core release enqueue <PR> head <HEAD_SHA>`. Manual
-`release:ready`, stale SHA, draft/fork PR и failed/missing baseline не дают
-eligibility. Технический terminal state не означает owner acceptance.
+После successful `baseline` PR получает `release:ready`. Release Train повторно
+проверяет open non-draft PR, same-repository head, labels и baseline, затем
+сериализует sync, merge и применимый deploy/verify. Технический terminal state
+не означает owner acceptance.
