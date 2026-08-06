@@ -51,6 +51,7 @@ from apps.github_release_train_spec import (
     PRODUCTION_LABEL,
     PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER,
     ORCHESTRATION_ADMISSION_PROOF_MARKER,
+    RELEASE_ENQUEUE_PROOF_MARKER,
     READY_LABEL,
     RECONCILE_PROOF_MARKER,
     RECOVERY_PROOF_MARKER,
@@ -87,6 +88,7 @@ LOOP_ACK_PREFIX = "loop:ack-"
 LOOP_ACCEPT_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 PRODUCTION_MUTATION_TERMINAL_ASSOCIATIONS = {"OWNER", "MEMBER"}
 ORCHESTRATION_ASSOCIATIONS = {"OWNER", "MEMBER"}
+RELEASE_ENQUEUE_ASSOCIATIONS = {"OWNER", "MEMBER"}
 DEFAULT_NEEDS_RESUME_AFTER_SECONDS = 30 * 60
 FINANCE_DEPLOY_LEASE_LABEL = "finance:migration-deploy-lease"
 FINANCE_DEPLOY_LEASE_AUDIT_LABEL = "finance:migration-deploy-lease-audit"
@@ -102,30 +104,20 @@ SCOPE_LABELS = {
 }
 TASK_LABELS = {
     STANDARD_TASK_LABEL,
-    LOOP_TASK_LABEL,
 }
 LABEL_DEFINITIONS = {
     READY_LABEL: ("0E8A16", "Проверки завершены; PR явно поставлен в очередь выпуска"),
-    STAGED_LABEL: ("BFDADC", "Исполнитель завершил проверки; выпуск допускает Watcher"),
     RUNNING_LABEL: ("FBCA04", "Release Train обрабатывает PR"),
-    AWAITING_AGENT_LABEL: ("D4C5F9", "LOOP ждёт acknowledgement активной Codex-сессии"),
-    AWAITING_UI_LABEL: ("A371F7", "LOOP задеплоен и ждёт production UI acceptance"),
-    NEEDS_RESUME_LABEL: ("F9D0C4", "LOOP acknowledgement требует возобновления Codex-сессии"),
     BLOCKED_LABEL: ("D93F0B", "PR остановлен до исправления конкретного blocker"),
     DONE_LABEL: ("5319E7", "Repo-only PR смёржен; deploy не применяется"),
     PRODUCTION_LABEL: ("1D76DB", "Merge SHA задеплоен и проверен в production"),
     HALTED_LABEL: ("B60205", "Production verify не прошёл; вся очередь остановлена"),
     SUPERSEDED_LABEL: ("D4C5F9", "Незамёрженная LOOP-итерация заменена завершённой recovery-chain"),
     RETIRED_LABEL: ("6E7781", "Историческая завершённая задача выведена из активного мониторинга"),
-    RELEASE_LANE_OWNER_LABEL: (
-        "0052CC",
-        "Логическая задача удерживает общую линию выпуска",
-    ),
     REPO_ONLY_LABEL: ("C5DEF5", "Execution-контур repo-only без deploy"),
     LIVE_RUNTIME_LABEL: ("BFDADC", "Execution-контур live/runtime с deploy и verify"),
     PRODUCTION_MUTATION_LABEL: ("E99695", "Production data mutation: обязательный human gate"),
     STANDARD_TASK_LABEL: ("D1D5DA", "Обычная задача с полным применимым closure"),
-    LOOP_TASK_LABEL: ("8B5CF6", "Итерационная задача с production UI Flow"),
     FINANCE_DEPLOY_LEASE_LABEL: (
         "B60205",
         "Global fail-closed Finance migration deploy lease",
@@ -307,6 +299,12 @@ class OrchestrationCommand:
     outcome: str = ""
     evidence_digest: str = ""
     manifest_digest: str = ""
+
+
+@dataclass(frozen=True)
+class ReleaseEnqueueCommand:
+    pr: int
+    head_sha: str
 
 
 class GitHubApi:
@@ -1024,6 +1022,25 @@ def parse_orchestration_command(command: str) -> OrchestrationCommand:
             manifest_digest=_sha256_fingerprint(parts[7], "manifest"),
         )
     raise ReleaseBlocked("orchestration operation must be admit, release-lane or retire-legacy")
+
+
+def parse_release_enqueue_command(command: str) -> ReleaseEnqueueCommand:
+    parts = command.strip().split()
+    if (
+        len(parts) != 6
+        or parts[:3] != ["/wb-core", "release", "enqueue"]
+        or parts[4] != "head"
+    ):
+        raise ReleaseBlocked(
+            "release enqueue must use /wb-core release enqueue <PR> head <HEAD_SHA>"
+        )
+    try:
+        number = int(parts[3])
+    except ValueError as exc:
+        raise ReleaseBlocked("release enqueue requires a positive PR number") from exc
+    if number <= 0:
+        raise ReleaseBlocked("release enqueue requires a positive PR number")
+    return ReleaseEnqueueCommand(pr=number, head_sha=_exact_sha(parts[5], "head"))
 
 
 def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: object) -> bool:
@@ -2213,6 +2230,115 @@ def _has_successful_check(
         and str(item.get("conclusion") or "") == "success"
         for item in api.list_check_runs(head_sha)
     )
+
+
+def release_enqueue_proof(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    check_name: str = "baseline",
+) -> dict[str, str] | None:
+    """Return the current Actions-owned enqueue proof for the exact PR head."""
+
+    number = int(pull.get("number") or 0)
+    head = str((pull.get("head") or {}).get("sha") or "").lower()
+    if number <= 0 or not head:
+        return None
+    for fields in reversed(
+        _repo_owned_marker_fields(api, number, RELEASE_ENQUEUE_PROOF_MARKER)
+    ):
+        if (
+            fields.get("pr") != str(number)
+            or fields.get("head") != head
+            or fields.get("check") != check_name
+            or fields.get("association") not in RELEASE_ENQUEUE_ASSOCIATIONS
+            or not fields.get("actor")
+            or fields.get("actor") in {"github-actions", "github-actions[bot]"}
+        ):
+            continue
+        return fields
+    return None
+
+
+def enqueue_release(
+    api: ReleaseApi,
+    command: ReleaseEnqueueCommand,
+    *,
+    actor: str,
+    association: str,
+    actions_owned: bool,
+    check_name: str = "baseline",
+) -> str:
+    """Admit one ordinary exact PR head into the serialized Release Train."""
+
+    normalized_association = association.upper()
+    if not actions_owned:
+        raise ReleaseBlocked("release enqueue is restricted to trusted-main Actions")
+    if normalized_association not in RELEASE_ENQUEUE_ASSOCIATIONS:
+        raise ReleaseBlocked("release enqueue requires OWNER or MEMBER association")
+    if not actor or actor in {"github-actions", "github-actions[bot]"}:
+        raise ReleaseBlocked("release enqueue requires a non-bot trusted actor")
+    pull = api.get_pull(command.pr)
+    labels = label_names(pull)
+    actual_head = str((pull.get("head") or {}).get("sha") or "").lower()
+    if actual_head != command.head_sha:
+        raise ReleaseBlocked("release enqueue head SHA is stale")
+    if (
+        str(pull.get("state") or "") != "open"
+        or bool(pull.get("draft"))
+        or bool(pull.get("merged"))
+    ):
+        raise ReleaseBlocked("release enqueue requires an open non-draft PR")
+    if str((pull.get("base") or {}).get("ref") or "") != "main":
+        raise ReleaseBlocked("release enqueue accepts only PRs targeting main")
+    head_repo = str((((pull.get("head") or {}).get("repo") or {}).get("full_name")) or "")
+    if head_repo != CANONICAL_GITHUB_REPOSITORY:
+        raise ReleaseBlocked("release enqueue accepts only same-repository branches")
+    if task_class_from_labels(labels) != STANDARD_TASK_LABEL:
+        raise ReleaseBlocked("release enqueue requires exactly task:standard")
+    scope = scope_from_labels(labels)
+    if scope not in {REPO_ONLY_LABEL, LIVE_RUNTIME_LABEL}:
+        raise ReleaseBlocked(
+            "ordinary release enqueue accepts only repo-only or live-runtime scope"
+        )
+    if RUNNING_LABEL in labels:
+        raise ReleaseBlocked("running PR cannot be enqueued again")
+    if labels & TERMINAL_LABELS:
+        raise ReleaseBlocked("terminal PR cannot be enqueued again")
+    if not _has_successful_check(api, actual_head, check_name):
+        raise ReleaseBlocked(
+            f"release enqueue requires successful {check_name!r} on exact head {actual_head}"
+        )
+    values = {
+        "actor": actor,
+        "association": normalized_association,
+        "check": check_name,
+        "head": actual_head,
+        "pr": command.pr,
+    }
+    if not _has_comment_proof(
+        api,
+        command.pr,
+        RELEASE_ENQUEUE_PROOF_MARKER,
+        **values,
+    ):
+        api.add_comment(
+            command.pr,
+            "Release Train accepted the trusted exact-head enqueue after baseline readback.\n\n"
+            + _proof_marker(RELEASE_ENQUEUE_PROOF_MARKER, **values),
+        )
+    set_release_state(
+        api,
+        command.pr,
+        READY_LABEL,
+        current_labels=labels,
+        comment=(
+            f"Exact head `{actual_head}` is queued for serialized release. "
+            "Technical completion will still require merge/deploy evidence and owner acceptance remains manual."
+        ),
+    )
+    api.dispatch_workflow("release-train.yml", "main")
+    return READY_LABEL
 
 
 def _require_loop_operator(association: str) -> None:
@@ -3714,20 +3840,8 @@ def handle_orchestration_comment(
 def select_candidate(
     api: ReleaseApi,
     *,
-    needs_resume_after_seconds: float = DEFAULT_NEEDS_RESUME_AFTER_SECONDS,
     now: float | None = None,
-    orchestration_required: bool = False,
 ) -> dict[str, Any]:
-    if needs_resume_after_seconds <= 0:
-        raise ValueError("needs-resume threshold must be positive")
-    try:
-        refresh_lost_loop_owners(
-            api,
-            threshold_seconds=needs_resume_after_seconds,
-            now=now,
-        )
-    except (ReleaseBlocked, ReleaseTrainError) as exc:
-        return {"status": "gate-conflict", "found": False, "reason": str(exc)}
     halted = [
         item
         for item in api.list_issues_by_label(HALTED_LABEL, state="all")
@@ -3741,22 +3855,9 @@ def select_candidate(
             "halted_pr_number": int(first.get("number") or 0),
         }
 
-    try:
-        agent_gate = _active_gate(api, AWAITING_AGENT_LABEL)
-        ui_gate = _active_gate(api, AWAITING_UI_LABEL)
-    except ReleaseTrainError as exc:
-        return {"status": "gate-conflict", "found": False, "reason": str(exc)}
     lease_state = finance_deploy_lease_state(api, now=now)
     lease_recovery_pr = 0
     if lease_state.get("global_release_blocked") is True:
-        if agent_gate is not None or ui_gate is not None:
-            return {
-                "status": "gate-conflict",
-                "found": False,
-                "reason": (
-                    "Finance deploy lease conflicts with an awaiting deploy/UI gate"
-                ),
-            }
         if lease_state.get("status") != "active":
             return {
                 "status": "finance-deploy-lease-fail-closed",
@@ -3798,65 +3899,15 @@ def select_candidate(
                 "reason": "multiple Finance owner-bound recovery PRs are authorized",
             }
         lease_recovery_pr = authorized[0] if authorized else 0
-    if agent_gate is not None:
-        agent_number = int(agent_gate.get("number") or 0)
-        try:
-            loop_registration_kind(api, api.get_pull(agent_number))
-        except ReleaseClassificationBlocked as exc:
-            mark_classification_blocked(api, agent_number, exc)
-            return {
-                "status": "gate-conflict",
-                "found": False,
-                "reason": f"classification error {exc.code}: {exc}",
-            }
-        try:
-            needs_resume = mark_needs_resume_if_stale(
-                api,
-                agent_gate,
-                threshold_seconds=needs_resume_after_seconds,
-                now=now,
-            )
-        except ReleaseTrainError as exc:
-            return {"status": "gate-conflict", "found": False, "reason": str(exc)}
-        return {
-            "status": "awaiting-agent",
-            "found": False,
-            "awaiting_agent_pr_number": int(agent_gate.get("number") or 0),
-            "needs_resume": needs_resume,
-        }
-
     ready = [
         item
         for item in api.list_issues_by_label(READY_LABEL, state="open")
         if "pull_request" in item
         and BLOCKED_LABEL not in label_names(item)
         and SUPERSEDED_LABEL not in label_names(item)
+        and release_enqueue_proof(api, api.get_pull(int(item.get("number") or 0)))
+        is not None
     ]
-    lane = release_lane_state(api)
-    if lane.get("status") == "conflict":
-        return {
-            "status": "gate-conflict",
-            "found": False,
-            "reason": "release lane owner is ambiguous or lacks trusted proof",
-        }
-    if orchestration_required or lane.get("status") == "owned":
-        admitted_ready: list[dict[str, Any]] = []
-        for item in ready:
-            number = int(item.get("number") or 0)
-            pull = api.get_pull(number)
-            labels = label_names(pull)
-            try:
-                task_class = task_class_from_labels(labels)
-            except ReleaseBlocked:
-                continue
-            admission = orchestration_admission(api, pull)
-            if (
-                admission is not None
-                and lane.get("status") == "owned"
-                and admission["task_id"] == lane.get("task_id")
-            ):
-                admitted_ready.append(item)
-        ready = admitted_ready
     if lease_state.get("global_release_blocked") is True:
         ready = [
             item
@@ -3876,52 +3927,7 @@ def select_candidate(
                     lease.get("revision") or 0
                 ),
             }
-    if ui_gate is not None:
-        try:
-            _, active_root = _validate_active_ui_gate_registration(api, ui_gate)
-        except ReleaseClassificationBlocked as exc:
-            gate_number = int(ui_gate.get("number") or 0)
-            upsert_status_comment(
-                api,
-                gate_number,
-                owner="classification-fail-closed",
-                reason=f"classification error `{exc.code}`: {exc}",
-                last_action="Release Train preserved labels on all other PRs and roots",
-                intervention=True,
-                root_override=0,
-                resume_override="classification proof must be repaired; `retry-blocked` is forbidden",
-            )
-            return {
-                "status": "gate-conflict",
-                "found": False,
-                "reason": f"classification error {exc.code}: {exc}",
-            }
-        except (ReleaseBlocked, ReleaseTrainError) as exc:
-            return {"status": "gate-conflict", "found": False, "reason": str(exc)}
-        linked: list[dict[str, Any]] = []
-        for item in ready:
-            try:
-                if loop_root_from_labels(label_names(item)) == active_root:
-                    linked.append(item)
-            except ReleaseBlocked:
-                continue
-        ready = linked
-        if not ready:
-            return {
-                "status": "awaiting-ui",
-                "found": False,
-                "awaiting_ui_pr_number": int(ui_gate.get("number") or 0),
-                "loop_root": active_root,
-            }
     if not ready:
-        if lane.get("status") == "owned":
-            return {
-                "status": "task-release-lane",
-                "found": False,
-                "release_lane_owner_pr": int(lane.get("owner_pr") or 0),
-                "release_lane_task_id": str(lane.get("task_id") or ""),
-                "release_lane_revision": int(lane.get("revision") or 0),
-            }
         return {"status": "empty", "found": False}
     issue = min(ready, key=lambda item: (str(item.get("created_at") or ""), int(item.get("number") or 0)))
     number = int(issue["number"])
@@ -4009,7 +4015,6 @@ def prepare_candidate(
     check_name: str,
     timeout_seconds: int,
     poll_seconds: float,
-    orchestration_required: bool = False,
 ) -> Candidate:
     pull = api.get_pull(number)
     labels = label_names(pull)
@@ -4034,17 +4039,8 @@ def prepare_candidate(
     head_ref = str((pull.get("head") or {}).get("ref") or "")
     if not head_sha or not head_ref:
         raise ReleaseBlocked("PR head identity is missing")
-    lane = release_lane_state(api)
-    orchestration_enforced = orchestration_required or lane.get("status") == "owned"
-    admission: dict[str, Any] | None = None
-    if orchestration_enforced:
-        if lane.get("status") != "owned":
-            raise ReleaseBlocked("orchestration enforcement requires a proven release lane owner")
-        admission = orchestration_admission(api, pull)
-        if admission is None:
-            raise ReleaseBlocked("exact-head orchestration admission proof is missing")
-        if admission["task_id"] != lane.get("task_id"):
-            raise ReleaseBlocked("orchestration admission does not match the release lane task")
+    if release_enqueue_proof(api, pull, check_name=check_name) is None:
+        raise ReleaseBlocked("exact-head trusted release enqueue proof is missing")
     set_release_state(
         api,
         number,
@@ -4097,35 +4093,10 @@ def prepare_candidate(
     final_task_class, final_loop_root = _validate_task_context(api, number, final_labels, scope)
     if final_task_class != task_class or final_loop_root != loop_root:
         raise ReleaseBlocked("PR task class or LOOP recovery link changed while baseline CI was running")
-    if orchestration_enforced:
-        final_lane = release_lane_state(api)
-        final_admission = orchestration_admission(api, pull)
-        if final_lane.get("status") != "owned" or final_lane.get("task_id") != admission["task_id"]:
-            raise ReleaseBlocked("release lane identity changed while baseline CI was running")
-        if final_admission is None:
-            if task_class == STANDARD_TASK_LABEL and final_head_sha != admission["head"]:
-                set_release_state(
-                    api,
-                    number,
-                    STAGED_LABEL,
-                    current_labels=final_labels,
-                    comment=(
-                        "Release Train синхронизировал PR с current `main`; новый exact head "
-                        f"`{final_head_sha}` должен быть повторно допущен Watcher без blocker."
-                    ),
-                )
-                raise ReleaseReadmissionRequired(
-                    head_sha=final_head_sha,
-                    task_id=str(admission["task_id"]),
-                    revision=int(admission["revision"]),
-                    passport_digest=str(admission["passport_digest"]),
-                )
-            raise ReleaseBlocked("exact-head orchestration admission became stale during prepare")
-        if any(
-            final_admission[key] != admission[key]
-            for key in ("task_id", "revision", "passport_digest")
-        ):
-            raise ReleaseBlocked("orchestration admission identity changed while baseline CI was running")
+    if release_enqueue_proof(api, pull, check_name=check_name) is None:
+        raise ReleaseBlocked(
+            "PR head changed during synchronization; trusted actor must enqueue the new exact head"
+        )
     if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
         raise ReleaseBlocked("PR is no longer an open non-draft change")
     if str((pull.get("base") or {}).get("ref") or "") != "main":
@@ -4165,8 +4136,6 @@ def require_deploy_environment(deploy_env: Mapping[str, str]) -> None:
 def merge_candidate(
     api: ReleaseApi,
     candidate: Candidate,
-    *,
-    orchestration_required: bool = False,
 ) -> MergeResult:
     pull = api.get_pull(candidate.number)
     labels = label_names(pull)
@@ -4192,16 +4161,8 @@ def merge_candidate(
     current_head = str((pull.get("head") or {}).get("sha") or "")
     if current_head != candidate.head_sha:
         raise ReleaseBlocked("PR head changed after CI; enqueue it again after fresh checks")
-    lane = release_lane_state(api)
-    if orchestration_required or lane.get("status") == "owned":
-        admission = orchestration_admission(api, pull)
-        if (
-            lane.get("status") != "owned"
-            or admission is None
-            or admission["task_id"] != lane.get("task_id")
-            or admission["head"] != candidate.head_sha
-        ):
-            raise ReleaseBlocked("merge requires current exact-head orchestration admission and lane")
+    if release_enqueue_proof(api, pull) is None:
+        raise ReleaseBlocked("merge requires current exact-head trusted enqueue proof")
     comparison = api.compare("main", candidate.head_sha)
     if int(comparison.get("behind_by") or 0) > 0:
         raise ReleaseBlocked("main advanced after CI; synchronize the PR and run fresh checks")
@@ -4577,7 +4538,6 @@ def retry_blocked_release(
     *,
     expected_head_sha: str,
     check_name: str,
-    orchestration_required: bool = False,
 ) -> str:
     """Requeue a fixed pre-merge blocker only after exact-head successful CI."""
 
@@ -4622,27 +4582,9 @@ def retry_blocked_release(
         number,
         f"Release Train retry accepted after `{check_name}` succeeded on exact head `{actual_head}`.\n\n{proof}",
     )
-    orchestration_enforced = (
-        orchestration_required
-        or release_lane_state(api).get("status") == "owned"
-        or bool(
-            _repo_owned_marker_fields(
-                api,
-                number,
-                ORCHESTRATION_ADMISSION_PROOF_MARKER,
-            )
-        )
+    raise ReleaseBlocked(
+        "blocked retry now requires a fresh trusted /wb-core release enqueue command"
     )
-    target = (
-        READY_LABEL
-        if task_class == LOOP_TASK_LABEL
-        or not orchestration_enforced
-        else STAGED_LABEL
-    )
-    set_release_state(api, number, target, current_labels=labels)
-    if target == READY_LABEL:
-        api.dispatch_workflow("release-train.yml", "main")
-    return target
 
 
 def production_mutation_terminal_state_proven(
@@ -5545,14 +5487,7 @@ def command_setup(_: argparse.Namespace) -> int:
 
 def command_select(args: argparse.Namespace) -> int:
     api = _api_from_env()
-    result = select_candidate(
-        api,
-        needs_resume_after_seconds=args.needs_resume_after_minutes * 60,
-        orchestration_required=os.environ.get(
-            "WB_CORE_ORCHESTRATION_REQUIRED", ""
-        ).strip().casefold()
-        in {"1", "true", "yes", "on"},
-    )
+    result = select_candidate(api)
     write_github_output(
         args.output_path,
         {
@@ -5561,8 +5496,6 @@ def command_select(args: argparse.Namespace) -> int:
             "halted": result.get("status") == "halted",
             "gate_conflict": result.get("status") == "gate-conflict",
             "halted_pr_number": result.get("halted_pr_number", ""),
-            "awaiting_agent_pr_number": result.get("awaiting_agent_pr_number", ""),
-            "awaiting_ui_pr_number": result.get("awaiting_ui_pr_number", ""),
             "finance_lease_pr_number": result.get(
                 "finance_lease_pr_number",
                 "",
@@ -5572,15 +5505,10 @@ def command_select(args: argparse.Namespace) -> int:
                 "finance_lease_revision",
                 "",
             ),
-            "release_lane_owner_pr": result.get("release_lane_owner_pr", ""),
-            "release_lane_task_id": result.get("release_lane_task_id", ""),
-            "release_lane_revision": result.get("release_lane_revision", ""),
-            "needs_resume": bool(result.get("needs_resume")),
             "pr_number": result.get("pr_number", ""),
             "head_sha": result.get("head_sha", ""),
             "head_ref": result.get("head_ref", ""),
             "scope": result.get("scope", ""),
-            "task_class": result.get("task_class", ""),
         },
     )
     _json_print(result)
@@ -5626,10 +5554,6 @@ def command_retry_blocked(args: argparse.Namespace) -> int:
             args.pr,
             expected_head_sha=args.expected_head_sha,
             check_name=args.check_name,
-            orchestration_required=os.environ.get(
-                "WB_CORE_ORCHESTRATION_REQUIRED", ""
-            ).strip().casefold()
-            in {"1", "true", "yes", "on"},
         )
     except ReleaseClassificationBlocked as exc:
         _json_print(
@@ -5723,10 +5647,6 @@ def command_prepare(args: argparse.Namespace) -> int:
             check_name=args.check_name,
             timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
-            orchestration_required=os.environ.get(
-                "WB_CORE_ORCHESTRATION_REQUIRED", ""
-            ).strip().casefold()
-            in {"1", "true", "yes", "on"},
         )
     except ReleaseReadmissionRequired as exc:
         write_github_output(
@@ -5777,9 +5697,6 @@ def command_prepare(args: argparse.Namespace) -> int:
             "head_ref": candidate.head_ref,
             "scope": candidate.scope,
             "deploy_required": candidate.deploy_required,
-            "task_class": candidate.task_class,
-            "loop_root": candidate.loop_root or 0,
-            "agent_acknowledged": candidate.agent_acknowledged,
         },
     )
     _json_print(
@@ -5788,8 +5705,6 @@ def command_prepare(args: argparse.Namespace) -> int:
             "pr_number": candidate.number,
             "head_sha": candidate.head_sha,
             "scope": candidate.scope,
-            "task_class": candidate.task_class,
-            "agent_acknowledged": candidate.agent_acknowledged,
         }
     )
     return 0
@@ -5820,19 +5735,10 @@ def command_merge(args: argparse.Namespace) -> int:
         head_sha=args.expected_head_sha,
         head_ref=args.head_ref,
         scope=args.scope,
-        task_class=args.task_class,
-        loop_root=args.loop_root or None,
-        agent_acknowledged=args.task_class == LOOP_TASK_LABEL,
+        task_class=STANDARD_TASK_LABEL,
     )
     try:
-        result = merge_candidate(
-            api,
-            candidate,
-            orchestration_required=os.environ.get(
-                "WB_CORE_ORCHESTRATION_REQUIRED", ""
-            ).strip().casefold()
-            in {"1", "true", "yes", "on"},
-        )
+        result = merge_candidate(api, candidate)
     except ReleaseClassificationBlocked as exc:
         mark_classification_blocked(api, args.pr, exc)
         _json_print(
@@ -6130,11 +6036,13 @@ def command_handle_comment(args: argparse.Namespace) -> int:
             os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("GITHUB_EVENT_NAME") == "issue_comment"
         )
-        if args.command.strip().startswith("/wb-core orchestration "):
-            status = handle_orchestration_comment(
+        if args.command.strip().startswith("/wb-core release enqueue "):
+            command = parse_release_enqueue_command(args.command)
+            if command.pr != args.pr:
+                raise ReleaseBlocked("release enqueue command must target the current PR")
+            status = enqueue_release(
                 api,
-                args.pr,
-                args.command,
+                command,
                 actor=args.actor,
                 association=args.association,
                 actions_owned=actions_owned,
@@ -6160,13 +6068,7 @@ def command_handle_comment(args: argparse.Namespace) -> int:
                 actions_owned=actions_owned,
             )
         else:
-            status = handle_loop_comment(
-                api,
-                args.pr,
-                args.command,
-                actor=args.actor,
-                association=args.association,
-            )
+            raise ReleaseBlocked("unsupported Release Train command")
     except ReleaseBlocked as exc:
         _json_print({"status": "rejected", "pr_number": args.pr, "reason": str(exc)})
         return 2
@@ -6271,11 +6173,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     select = subparsers.add_parser("select")
     select.add_argument("--output-path", default=os.environ.get("GITHUB_OUTPUT"))
-    select.add_argument(
-        "--needs-resume-after-minutes",
-        type=float,
-        default=_needs_resume_default_minutes(),
-    )
     select.set_defaults(handler=command_select)
 
     transition = subparsers.add_parser("transition")
@@ -6354,8 +6251,6 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--expected-head-sha", required=True)
     merge.add_argument("--head-ref", required=True)
     merge.add_argument("--scope", choices=sorted(SCOPE_LABELS), required=True)
-    merge.add_argument("--task-class", choices=sorted(TASK_LABELS), required=True)
-    merge.add_argument("--loop-root", type=int, default=0)
     merge.add_argument("--output-path", default=os.environ.get("GITHUB_OUTPUT"))
     merge.set_defaults(handler=command_merge)
 

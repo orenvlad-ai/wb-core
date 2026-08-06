@@ -1,9 +1,6 @@
 name: Release Train
 
 on:
-  pull_request_target:
-    types:
-      - labeled
   issue_comment:
     types:
       - created
@@ -40,20 +37,19 @@ permissions:
   pull-requests: write
 
 jobs:
-  orchestration_command:
-    name: Apply Watcher admission, lane release or legacy retirement
+  release_enqueue_command:
+    name: Enqueue trusted exact PR head
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/wb-core orchestration ')
+      startsWith(github.event.comment.body, '/wb-core release enqueue ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
-      ORCHESTRATION_COMMAND: ${{ github.event.comment.body }}
-      ORCHESTRATION_ACTOR: ${{ github.event.comment.user.login }}
-      ORCHESTRATION_ASSOCIATION: ${{ github.event.comment.author_association }}
+      RELEASE_COMMAND: ${{ github.event.comment.body }}
+      RELEASE_ACTOR: ${{ github.event.comment.user.login }}
+      RELEASE_ASSOCIATION: ${{ github.event.comment.author_association }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -62,42 +58,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Apply exact orchestration transition
+      - name: Apply trusted exact-head enqueue
         run: >-
           python3 apps/github_release_train.py handle-comment
           --pr "${{ github.event.issue.number }}"
-          --command "$ORCHESTRATION_COMMAND"
-          --actor "$ORCHESTRATION_ACTOR"
-          --association "$ORCHESTRATION_ASSOCIATION"
-
-  loop_command:
-    name: Handle LOOP enrollment, correction, acknowledgement or UI acceptance
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/wb-core loop ')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      LOOP_COMMAND: ${{ github.event.comment.body }}
-      LOOP_ACTOR: ${{ github.event.comment.user.login }}
-      LOOP_ASSOCIATION: ${{ github.event.comment.author_association }}
-    steps:
-      - name: Checkout trusted main
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Apply exact LOOP identity or gate command
-        run: >-
-          python3 apps/github_release_train.py handle-comment
-          --pr "${{ github.event.issue.number }}"
-          --command "$LOOP_COMMAND"
-          --actor "$LOOP_ACTOR"
-          --association "$LOOP_ASSOCIATION"
+          --command "$RELEASE_COMMAND"
+          --actor "$RELEASE_ACTOR"
+          --association "$RELEASE_ASSOCIATION"
 
   finance_lease_command:
     name: Apply global Finance migration deploy lease command
@@ -391,9 +358,7 @@ jobs:
     name: Select queued PR
     if: >-
       github.event_name != 'issue_comment' &&
-      (github.event_name != 'workflow_dispatch' || inputs.reconcile_pr == '') &&
-      (github.event_name != 'pull_request_target' ||
-      github.event.label.name == 'release:ready')
+      (github.event_name != 'workflow_dispatch' || inputs.reconcile_pr == '')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -405,11 +370,8 @@ jobs:
       halted_pr_number: ${{ steps.select.outputs.halted_pr_number }}
       pr_number: ${{ steps.select.outputs.pr_number }}
       scope: ${{ steps.select.outputs.scope }}
-      task_class: ${{ steps.select.outputs.task_class }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES: ${{ vars.WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -431,12 +393,6 @@ jobs:
           echo "Release Train is halted by PR #${{ steps.select.outputs.halted_pr_number }}."
           exit 1
 
-      - name: Refuse conflicting exclusive gates
-        if: steps.select.outputs.gate_conflict == 'true'
-        run: |
-          echo "Release Train found conflicting exclusive LOOP gates."
-          exit 1
-
       - name: Report empty queue
         if: >-
           steps.select.outputs.found != 'true' &&
@@ -454,12 +410,8 @@ jobs:
       head_sha: ${{ steps.prepare.outputs.head_sha }}
       head_ref: ${{ steps.prepare.outputs.head_ref }}
       scope: ${{ steps.prepare.outputs.scope }}
-      task_class: ${{ steps.prepare.outputs.task_class }}
-      loop_root: ${{ steps.prepare.outputs.loop_root }}
-      agent_acknowledged: ${{ steps.prepare.outputs.agent_acknowledged }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -492,62 +444,17 @@ jobs:
         if: steps.prepare.outcome == 'failure'
         run: exit 1
 
-  await_loop_agent:
-    name: Wait for active LOOP agent
-    needs:
-      - select
-      - prepare
-    if: >-
-      needs.prepare.outputs.task_class == 'task:loop' &&
-      needs.prepare.outputs.agent_acknowledged != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Checkout trusted main
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Open exact-head acknowledgement gate
-        id: request_agent
-        continue-on-error: true
-        run: >-
-          python3 apps/github_release_train.py request-agent
-          --pr "${{ needs.select.outputs.pr_number }}"
-          --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
-
-      - name: Mark handshake blocker
-        if: steps.request_agent.outcome == 'failure'
-        run: >-
-          python3 apps/github_release_train.py transition
-          --pr "${{ needs.select.outputs.pr_number }}"
-          --state release:blocked
-
-      - name: Dispatch after handshake blocker
-        if: steps.request_agent.outcome == 'failure'
-        run: python3 apps/github_release_train.py dispatch-next
-
-      - name: Fail handshake job after durable blocker
-        if: steps.request_agent.outcome == 'failure'
-        run: exit 1
-
   release_repo_only:
     name: Merge repo-only PR
     needs:
       - select
       - prepare
     if: >-
-      needs.prepare.outputs.scope == 'scope:repo-only' &&
-      needs.prepare.outputs.task_class == 'task:standard'
+      needs.prepare.outputs.scope == 'scope:repo-only'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -564,8 +471,6 @@ jobs:
           --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
           --head-ref "${{ needs.prepare.outputs.head_ref }}"
           --scope "${{ needs.prepare.outputs.scope }}"
-          --task-class "${{ needs.prepare.outputs.task_class }}"
-          --loop-root "${{ needs.prepare.outputs.loop_root }}"
           --output-path "$GITHUB_OUTPUT"
 
       - name: Mark repo-only completion
@@ -600,15 +505,12 @@ jobs:
       - select
       - prepare
     if: >-
-      needs.prepare.outputs.scope == 'scope:live-runtime' &&
-      (needs.prepare.outputs.task_class == 'task:standard' ||
-      needs.prepare.outputs.agent_acknowledged == 'true')
+      needs.prepare.outputs.scope == 'scope:live-runtime'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     environment: production
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
       WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
       WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
     steps:
@@ -654,8 +556,6 @@ jobs:
           --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
           --head-ref "${{ needs.prepare.outputs.head_ref }}"
           --scope "${{ needs.prepare.outputs.scope }}"
-          --task-class "${{ needs.prepare.outputs.task_class }}"
-          --loop-root "${{ needs.prepare.outputs.loop_root }}"
           --output-path "$GITHUB_OUTPUT"
 
       - name: Checkout exact merge SHA
@@ -681,22 +581,12 @@ jobs:
         run: python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
 
       - name: Mark production completion
-        if: >-
-          steps.merge.outputs.skip_release != 'true' &&
-          needs.prepare.outputs.task_class == 'task:standard'
+        if: steps.merge.outputs.skip_release != 'true'
         run: >-
           python3 apps/github_release_train.py complete-standard
           --pr "${{ needs.select.outputs.pr_number }}"
           --merge-sha "${{ steps.merge.outputs.merge_sha }}"
           --contour production-verified
-
-      - name: Open production UI gate for LOOP
-        if: >-
-          needs.prepare.outputs.task_class == 'task:loop'
-        run: >-
-          python3 apps/github_release_train.py await-ui
-          --pr "${{ needs.select.outputs.pr_number }}"
-          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
 
       - name: Delete merged feature branch
         if: always() && steps.merge.outputs.merge_sha != ''
@@ -732,6 +622,5 @@ jobs:
       - name: Continue release queue
         if: >-
           always() &&
-          ((success() && needs.prepare.outputs.task_class == 'task:standard') ||
-          (failure() && steps.merge.outputs.merge_sha == ''))
+          (success() || (failure() && steps.merge.outputs.merge_sha == ''))
         run: python3 apps/github_release_train.py dispatch-next
