@@ -1058,13 +1058,13 @@ def _has_comment_proof(api: ReleaseApi, number: int, marker: str, **values: obje
     return False
 
 
-def _repo_owned_marker_fields(
+def _repo_owned_marker_records(
     api: ReleaseApi,
     number: int,
     marker: str,
-) -> list[dict[str, str]]:
+) -> list[tuple[dict[str, str], float | None]]:
     prefix = f"<!-- {marker} "
-    matches: list[dict[str, str]] = []
+    matches: list[tuple[dict[str, str], float | None]] = []
     for item in api.list_comments(number):
         author = item.get("user")
         if not isinstance(author, Mapping) or str(author.get("login") or "") not in {
@@ -1080,8 +1080,19 @@ def _repo_owned_marker_fields(
                 key, separator, value = token.partition("=")
                 if separator:
                     fields[key] = value
-            matches.append(fields)
+            matches.append((fields, _github_timestamp(item.get("created_at"))))
     return matches
+
+
+def _repo_owned_marker_fields(
+    api: ReleaseApi,
+    number: int,
+    marker: str,
+) -> list[dict[str, str]]:
+    return [
+        fields
+        for fields, _ in _repo_owned_marker_records(api, number, marker)
+    ]
 
 
 def _finance_deploy_lease_items(api: ReleaseApi) -> list[dict[str, Any]]:
@@ -2244,16 +2255,49 @@ def release_enqueue_proof(
     head = str((pull.get("head") or {}).get("sha") or "").lower()
     if number <= 0 or not head:
         return None
-    for fields in reversed(
-        _repo_owned_marker_fields(api, number, RELEASE_ENQUEUE_PROOF_MARKER)
+    labels = label_names(pull)
+    try:
+        task_class = task_class_from_labels(labels)
+        scope = scope_from_labels(labels)
+    except ReleaseBlocked:
+        return None
+    invalidated_at = max(
+        (
+            timestamp
+            for label in (
+                BLOCKED_LABEL,
+                HALTED_LABEL,
+                SUPERSEDED_LABEL,
+                RETIRED_LABEL,
+                DONE_LABEL,
+                PRODUCTION_LABEL,
+            )
+            if (
+                timestamp := _latest_label_timestamp(
+                    api,
+                    number,
+                    label,
+                    fallback={},
+                )
+            )
+            is not None
+        ),
+        default=None,
+    )
+    for fields, created_at in reversed(
+        _repo_owned_marker_records(api, number, RELEASE_ENQUEUE_PROOF_MARKER)
     ):
         if (
             fields.get("pr") != str(number)
             or fields.get("head") != head
             or fields.get("check") != check_name
+            or fields.get("task") != task_class
+            or fields.get("scope") != scope
             or fields.get("association") not in RELEASE_ENQUEUE_ASSOCIATIONS
             or not fields.get("actor")
             or fields.get("actor") in {"github-actions", "github-actions[bot]"}
+            or created_at is None
+            or (invalidated_at is not None and created_at <= invalidated_at)
         ):
             continue
         return fields
@@ -2315,13 +2359,10 @@ def enqueue_release(
         "check": check_name,
         "head": actual_head,
         "pr": command.pr,
+        "scope": scope,
+        "task": STANDARD_TASK_LABEL,
     }
-    if not _has_comment_proof(
-        api,
-        command.pr,
-        RELEASE_ENQUEUE_PROOF_MARKER,
-        **values,
-    ):
+    if release_enqueue_proof(api, pull, check_name=check_name) is None:
         api.add_comment(
             command.pr,
             "Release Train accepted the trusted exact-head enqueue after baseline readback.\n\n"

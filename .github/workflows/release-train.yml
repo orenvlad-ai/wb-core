@@ -393,6 +393,12 @@ jobs:
           echo "Release Train is halted by PR #${{ steps.select.outputs.halted_pr_number }}."
           exit 1
 
+      - name: Refuse conflicting release gates
+        if: steps.select.outputs.gate_conflict == 'true'
+        run: |
+          echo "Release Train found conflicting exclusive Finance gates."
+          exit 1
+
       - name: Report empty queue
         if: >-
           steps.select.outputs.found != 'true' &&

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 from typing import Any, Iterable
@@ -32,7 +32,9 @@ from apps.github_release_train import (  # noqa: E402
     prepare_candidate,
     release_enqueue_proof,
     select_candidate,
+    set_release_state,
 )
+from apps.github_release_train_wait import evaluate_release  # noqa: E402
 
 
 SHA_A = "a" * 40
@@ -45,6 +47,9 @@ class FakeApi:
         self.checks: dict[str, list[dict[str, Any]]] = {}
         self.comparisons: list[dict[str, Any]] = [{"behind_by": 0}]
         self.comments: list[tuple[int, str, str]] = []
+        self.comment_times: list[str] = []
+        self.events: dict[int, list[dict[str, Any]]] = {}
+        self.clock = 0
         self.dispatched: list[tuple[str, str]] = []
         self.merges: list[tuple[int, str]] = []
         self.deleted: list[str] = []
@@ -60,7 +65,13 @@ class FakeApi:
         ]
 
     def list_issue_events(self, number: int) -> list[dict[str, Any]]:
-        return []
+        return list(self.events.get(number, []))
+
+    def _timestamp(self) -> str:
+        self.clock += 1
+        return (
+            datetime(2026, 8, 6, tzinfo=timezone.utc) + timedelta(seconds=self.clock)
+        ).isoformat()
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         return [
@@ -69,7 +80,7 @@ class FakeApi:
                 "body": body,
                 "user": {"login": actor},
                 "author_association": "CONTRIBUTOR",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": self.comment_times[index - 1],
             }
             for index, (pr, body, actor) in enumerate(self.comments, start=1)
             if pr == number
@@ -116,10 +127,26 @@ class FakeApi:
         return {"merged": True, "sha": merge_sha}
 
     def add_labels(self, number: int, values: Iterable[str]) -> None:
-        set_labels(self.pulls[number], labels(self.pulls[number]) | set(values))
+        before = labels(self.pulls[number])
+        after = before | set(values)
+        set_labels(self.pulls[number], after)
+        self._record_label_events(number, after - before)
 
     def set_labels(self, number: int, values: Iterable[str]) -> None:
-        set_labels(self.pulls[number], values)
+        before = labels(self.pulls[number])
+        after = set(values)
+        set_labels(self.pulls[number], after)
+        self._record_label_events(number, after - before)
+
+    def _record_label_events(self, number: int, added: Iterable[str]) -> None:
+        for label in sorted(added):
+            self.events.setdefault(number, []).append(
+                {
+                    "event": "labeled",
+                    "label": {"name": label},
+                    "created_at": self._timestamp(),
+                }
+            )
 
     def remove_label(self, number: int, label: str) -> None:
         current = labels(self.pulls[number])
@@ -128,6 +155,7 @@ class FakeApi:
 
     def add_comment(self, number: int, body: str) -> None:
         self.comments.append((number, body, "github-actions[bot]"))
+        self.comment_times.append(self._timestamp())
 
     def update_comment(self, comment_id: int, body: str) -> None:
         raise AssertionError("not used")
@@ -283,6 +311,27 @@ def test_manual_bypass_concurrency_and_empty_schedule() -> None:
     selected = select_candidate(api)
     assert selected["pr_number"] == 10
 
+    set_labels(
+        api.pulls[10],
+        {STANDARD_TASK_LABEL, LIVE_RUNTIME_LABEL, READY_LABEL},
+    )
+    assert release_enqueue_proof(api, api.pulls[10]) is None
+    assert select_candidate(api)["pr_number"] == 11
+
+    replay = FakeApi()
+    replay.pulls[12] = make_pull(12)
+    add_success(replay, SHA_A)
+    enqueue(replay, 12, SHA_A)
+    set_release_state(replay, 12, BLOCKED_LABEL)
+    replay.set_labels(
+        12,
+        {STANDARD_TASK_LABEL, REPO_ONLY_LABEL, READY_LABEL},
+    )
+    assert release_enqueue_proof(replay, replay.pulls[12]) is None
+    assert select_candidate(replay) == {"status": "empty", "found": False}
+    enqueue(replay, 12, SHA_A)
+    assert select_candidate(replay)["pr_number"] == 12
+
     empty = FakeApi()
     assert select_candidate(empty) == {"status": "empty", "found": False}
 
@@ -385,12 +434,67 @@ def test_workflow_and_docs_contract() -> None:
         assert "/wb-core release enqueue" in source
         assert "owner acceptance" in source.casefold() or "приёмк" in source.casefold()
 
+    assert "Refuse conflicting release gates" in workflow
+
+
+def test_waiter_requires_exact_terminal_evidence() -> None:
+    merge = "c" * 40
+    payload: dict[str, Any] = {
+        "number": 30,
+        "state": "MERGED",
+        "isDraft": False,
+        "headRefOid": SHA_A,
+        "mergeCommit": {"oid": merge},
+        "labels": [
+            {"name": DONE_LABEL},
+            {"name": STANDARD_TASK_LABEL},
+            {"name": REPO_ONLY_LABEL},
+        ],
+        "comments": [],
+    }
+    assert evaluate_release(payload)["disposition"] == "OWN_ACTION"
+    payload["comments"] = [
+        {
+            "author": {"login": "github-actions[bot]"},
+            "body": (
+                "<!-- wb-core-release-completion-proof "
+                f"contour=repo-only merge={merge} pr=30 -->"
+            ),
+        }
+    ]
+    assert evaluate_release(payload)["disposition"] == "TERMINAL_SUCCESS"
+
+    payload.update(state="OPEN", mergeCommit=None, comments=[])
+    payload["labels"] = [
+        {"name": BLOCKED_LABEL},
+        {"name": STANDARD_TASK_LABEL},
+        {"name": REPO_ONLY_LABEL},
+    ]
+    blocked = evaluate_release(payload)
+    assert blocked["disposition"] == "OWN_ACTION" and blocked["exit_code"] == 5
+
+    payload["labels"] = [
+        {"name": READY_LABEL},
+        {"name": RUNNING_LABEL},
+        {"name": STANDARD_TASK_LABEL},
+        {"name": REPO_ONLY_LABEL},
+    ]
+    assert evaluate_release(payload)["release_state"] == RUNNING_LABEL
+
+    payload["labels"] = [
+        {"name": "release:superseded"},
+        {"name": STANDARD_TASK_LABEL},
+        {"name": REPO_ONLY_LABEL},
+    ]
+    assert evaluate_release(payload)["disposition"] == "TERMINAL_INELIGIBLE"
+
 
 def main() -> int:
     test_enqueue_guards()
     test_manual_bypass_concurrency_and_empty_schedule()
     test_sync_merge_repo_only_and_halted_live_failure()
     test_workflow_and_docs_contract()
+    test_waiter_requires_exact_terminal_evidence()
     print("github_release_train_smoke: ok")
     return 0
 
