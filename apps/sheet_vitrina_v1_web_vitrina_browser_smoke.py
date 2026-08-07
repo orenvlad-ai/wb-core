@@ -116,7 +116,7 @@ def main() -> None:
         "compact_widths": ready_result["compact_widths"],
         "wb_contour_metric_label": ready_result["wb_contour_metric_label"],
         "percent_formatting": ready_result["percent_formatting"],
-        "cost_policy_tooltip": ready_result["cost_policy_tooltip"],
+        "cost_policy_help_absent": ready_result["cost_policy_help_absent"],
         "operator_screen_layout": ready_result["operator_screen_layout"],
         "unified_tab_navigation": ready_result["unified_tab_navigation"],
         "load_refresh_action": ready_result["load_refresh_action"],
@@ -715,7 +715,7 @@ def run_browser_checks(
             wb_contour_metric_label = _check_wb_contour_metric_label(page)
             sticky_section_offsets = _check_sticky_section_offsets(page)
             percent_formatting = _check_percent_formatting(page, expected_rows=expected_percent_rows)
-            cost_policy_tooltip = _check_cost_policy_tooltip(page)
+            cost_policy_help_absent = _check_cost_policy_help_absent(page)
             load_refresh_action = (
                 _check_load_refresh_action(
                     page,
@@ -870,7 +870,7 @@ def run_browser_checks(
         "wb_contour_metric_label": wb_contour_metric_label,
         "sticky_section_offsets": sticky_section_offsets,
         "percent_formatting": percent_formatting,
-        "cost_policy_tooltip": cost_policy_tooltip,
+        "cost_policy_help_absent": cost_policy_help_absent,
         "operator_screen_layout": operator_screen_layout,
         "unified_tab_navigation": unified_tab_navigation,
         "load_refresh_action": load_refresh_action,
@@ -940,8 +940,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "sticky_section_offsets" in result:
         print("web_vitrina_browser_sticky_section: ok ->", result["sticky_section_offsets"])
     print("web_vitrina_browser_percent_formatting: ok ->", result["percent_formatting"])
-    if "cost_policy_tooltip" in result:
-        print("web_vitrina_browser_cost_policy_tooltip: ok ->", result["cost_policy_tooltip"])
+    if "cost_policy_help_absent" in result:
+        print("web_vitrina_browser_cost_policy_help_absent: ok ->", result["cost_policy_help_absent"])
     print("web_vitrina_browser_operator_screen_layout: ok ->", result["operator_screen_layout"])
     if "unified_tab_navigation" in result:
         print("web_vitrina_browser_unified_tabs: ok ->", result["unified_tab_navigation"])
@@ -1002,6 +1002,41 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         raise AssertionError(f"operator route must default to the vitrina tab, got {tabs}")
     if page.locator("[data-unified-tab-button]", has_text="Обновление данных").count() != 0:
         raise AssertionError("operator route must not expose a separate Обновление данных tab")
+    shared_metric_rows = page.evaluate(
+        """() => {
+          const rows = Array.from(document.querySelectorAll('[data-table-body] tr.metric-data-row'));
+          const heights = rows.map((row) => Math.round(row.getBoundingClientRect().height));
+          const costCells = Array.from(document.querySelectorAll(
+            'td[data-col-id="metric_label"][data-metric-key="our_wb_unit_cost_rub"],'
+            + 'td[data-col-id="metric_label"][data-metric-key="total_our_wb_unit_cost_rub"]'
+          ));
+          return {
+            count: rows.length,
+            heights: Array.from(new Set(heights)).sort((left, right) => left - right),
+            costCellCount: costCells.length,
+            costHelpCount: costCells.reduce(
+              (count, cell) => count + cell.querySelectorAll(
+                '.metric-cost-policy-anchor, .metric-cost-policy-tooltip, [role="tooltip"]'
+              ).length,
+              0
+            ),
+            costFocusTargetCount: costCells.reduce(
+              (count, cell) => count + cell.querySelectorAll('button, a[href], [tabindex]').length,
+              0
+            )
+          };
+        }"""
+    )
+    if (
+        shared_metric_rows["count"] < 1
+        or shared_metric_rows["heights"] != [33]
+        or shared_metric_rows["costCellCount"] < 2
+        or shared_metric_rows["costHelpCount"] != 0
+        or shared_metric_rows["costFocusTargetCount"] != 0
+    ):
+        raise AssertionError(
+            f"operator compatibility route must reuse uniform metric rows without cost help UI, got {shared_metric_rows}"
+        )
     shared_time_pills = page.evaluate(
         """() => {
           const wrapper = document.querySelector('[data-table-snapshot-summary]');
@@ -1055,6 +1090,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "tabs": ", ".join(tab_texts),
         "actions": ", ".join(shell_actions),
         "default_active": active_tabs[0],
+        "metric_rows": json.dumps(shared_metric_rows, ensure_ascii=False),
         "time_pills": json.dumps(shared_time_pills, ensure_ascii=False),
         "columns": json.dumps(operator_columns, ensure_ascii=False),
     }
@@ -2003,21 +2039,143 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
             timeout=5000,
         )
 
-    def measure_plain_row() -> dict[str, object]:
+    def measure_metric_rows() -> dict[str, object]:
         return page.evaluate(
             """() => {
-              const rows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind]:not(.sku-separator-row)'));
-              const row = rows.find((node) => !node.querySelector('button')) || rows[0] || null;
-              const metricCell = row ? row.querySelector('[data-col-id="metric_label"]') : null;
-              return {
-                rowKind: row ? (row.getAttribute('data-row-kind') || '') : '',
-                metricKey: metricCell ? (metricCell.getAttribute('data-metric-key') || '') : '',
-                height: row ? Math.round(row.getBoundingClientRect().height) : 0
+              const keys = {
+                normal: 'total_orderSum',
+                parent: 'total_own_total_product_capital_rub',
+                child: 'total_own_avg_product_cost_rub',
+                cost: 'total_our_wb_unit_cost_rub'
               };
+              const measured = Object.fromEntries(Object.entries(keys).map(([kind, metricKey]) => {
+                const metricCell = document.querySelector(
+                  'td[data-col-id="metric_label"][data-metric-key="' + metricKey + '"]'
+                );
+                const row = metricCell ? metricCell.closest('tr') : null;
+                const valueCell = row ? row.querySelector('td[data-col-id^="date:"]') : null;
+                const rowRect = row ? row.getBoundingClientRect() : {top: 0, bottom: 0, height: 0};
+                const metricRect = metricCell ? metricCell.getBoundingClientRect() : {top: 0, bottom: 0};
+                const valueRect = valueCell ? valueCell.getBoundingClientRect() : {top: 0, bottom: 0};
+                return [kind, {
+                  metricKey,
+                  rowKind: row ? (row.getAttribute('data-row-kind') || '') : '',
+                  rowClass: row ? (row.className || '') : '',
+                  height: Math.round(rowRect.height),
+                  metricVerticalAlign: metricCell ? getComputedStyle(metricCell).verticalAlign : '',
+                  valueVerticalAlign: valueCell ? getComputedStyle(valueCell).verticalAlign : '',
+                  metricInsideRow: !!metricCell && metricRect.top >= rowRect.top - 1 && metricRect.bottom <= rowRect.bottom + 1,
+                  valueInsideRow: !!valueCell && valueRect.top >= rowRect.top - 1 && valueRect.bottom <= rowRect.bottom + 1,
+                  metricOverflow: !!metricCell && metricCell.scrollHeight > metricCell.clientHeight + 1,
+                  valueOverflow: !!valueCell && valueCell.scrollHeight > valueCell.clientHeight + 1,
+                  disclosureCount: row ? row.querySelectorAll('[data-metric-anchor-toggle]').length : 0,
+                  hierarchyGuideCount: row ? row.querySelectorAll('[data-metric-child-guide]').length : 0
+                }];
+              }));
+              const allMetricRows = Array.from(document.querySelectorAll(
+                '[data-table-body] tr.metric-data-row'
+              ));
+              const allHeights = allMetricRows.map((row) => Math.round(row.getBoundingClientRect().height));
+              measured.allMetricRows = {
+                count: allMetricRows.length,
+                heights: Array.from(new Set(allHeights)).sort((left, right) => left - right),
+                minHeight: allHeights.length ? Math.min(...allHeights) : 0,
+                maxHeight: allHeights.length ? Math.max(...allHeights) : 0
+              };
+              return measured;
             }"""
         )
 
-    default_row = measure_plain_row()
+    def assert_uniform_metric_rows(rows: dict[str, object], label: str) -> None:
+        reference = int((rows.get("child") or {}).get("height") or 0)
+        if reference != 33:
+            raise AssertionError(f"{label}: expanded child row must retain the 33px reference height, got {rows}")
+        all_metric_rows = rows.get("allMetricRows") or {}
+        if (
+            int(all_metric_rows.get("count") or 0) < 1
+            or abs(int(all_metric_rows.get("maxHeight") or 0) - reference) > 1
+            or abs(int(all_metric_rows.get("minHeight") or 0) - reference) > 1
+        ):
+            raise AssertionError(f"{label}: every rendered metric row must share the child reference, got {rows}")
+        for kind in ("normal", "parent", "child", "cost"):
+            row = rows.get(kind) or {}
+            if (
+                abs(int(row.get("height") or 0) - reference) > 1
+                or row.get("rowKind") != "total"
+                or "metric-data-row" not in str(row.get("rowClass") or "")
+                or row.get("metricVerticalAlign") != "middle"
+                or row.get("valueVerticalAlign") != "middle"
+                or not row.get("metricInsideRow")
+                or not row.get("valueInsideRow")
+                or row.get("metricOverflow")
+                or row.get("valueOverflow")
+            ):
+                raise AssertionError(
+                    f"{label}: {kind} metric row must match the expanded child reference without clipping, got {rows}"
+                )
+        if int((rows.get("parent") or {}).get("disclosureCount") or 0) != 1:
+            raise AssertionError(f"{label}: capital parent must keep one disclosure control, got {rows}")
+        if int((rows.get("child") or {}).get("hierarchyGuideCount") or 0) != 1:
+            raise AssertionError(f"{label}: expanded capital child must keep its hierarchy guide, got {rows}")
+
+    _set_metric_display_status(
+        page,
+        scope_id="total",
+        metric_key="total_own_total_product_capital_rub",
+        status="shown",
+    )
+    _set_metric_display_status(
+        page,
+        scope_id="total",
+        metric_key="total_own_avg_product_cost_rub",
+        status="collapsed",
+    )
+    page.wait_for_timeout(700)
+    capital_disclosure = page.locator(
+        '[data-metric-anchor-toggle][data-metric-anchor-scope="total"]'
+        '[data-metric-anchor-key="total_own_total_product_capital_rub"]'
+    )
+    if capital_disclosure.count() != 1:
+        raise AssertionError("Общий товарный капитал must expose one disclosure for its collapsed child")
+    if capital_disclosure.get_attribute("aria-expanded") == "true":
+        capital_disclosure.click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              '[data-metric-anchor-toggle][data-metric-anchor-scope="total"]'
+              + '[data-metric-anchor-key="total_own_total_product_capital_rub"]'
+            ).getAttribute('aria-expanded') === 'false'""",
+            timeout=5000,
+        )
+    collapsed_aria = capital_disclosure.get_attribute("aria-label") or ""
+    capital_disclosure.focus()
+    disclosure_focused = page.evaluate(
+        """() => document.activeElement === document.querySelector(
+          '[data-metric-anchor-toggle][data-metric-anchor-scope="total"]'
+          + '[data-metric-anchor-key="total_own_total_product_capital_rub"]'
+        )"""
+    )
+    capital_disclosure.click()
+    page.wait_for_selector(
+        'tr.metric-child-row td[data-col-id="metric_label"]'
+        '[data-metric-key="total_own_avg_product_cost_rub"]',
+        timeout=5000,
+    )
+    disclosure_state = {
+        "collapsed_aria": collapsed_aria,
+        "focused": disclosure_focused,
+        "expanded": capital_disclosure.get_attribute("aria-expanded"),
+        "glyph": capital_disclosure.inner_text().strip(),
+    }
+    if (
+        not disclosure_state["collapsed_aria"].startswith("Показать свернутые метрики:")
+        or not disclosure_state["focused"]
+        or disclosure_state["expanded"] != "true"
+        or disclosure_state["glyph"] != "▾"
+    ):
+        raise AssertionError(f"capital disclosure must remain focusable, labelled and functional, got {disclosure_state}")
+
+    default_rows = measure_metric_rows()
+    assert_uniform_metric_rows(default_rows, "Раздел on")
     default_disclosure_count = page.locator("[data-metric-anchor-toggle]").count()
     open_manager()
     menu_state = page.evaluate(
@@ -2100,7 +2258,8 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
           };
         }"""
     )
-    hidden_row = measure_plain_row()
+    hidden_rows = measure_metric_rows()
+    assert_uniform_metric_rows(hidden_rows, "Раздел off")
     if (
         hidden_state["headerIds"][0] != "metric_label"
         or not all(str(column_id).startswith("date:") for column_id in hidden_state["headerIds"][1:])
@@ -2114,14 +2273,40 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or (default_disclosure_count > 0 and not hidden_state["disclosureAria"])
         or not str(hidden_state["storageKey"]).endswith(":section-column-visibility:v1")
         or hidden_state["storageValue"] != {"section_visible": False}
-        or int(hidden_row["height"]) > int(default_row["height"]) - 4
     ):
         raise AssertionError(
-            f"hiding Section must remove its DOM width, compact rows and persist browser-locally, got default={default_row}, hidden={hidden_row}, state={hidden_state}"
+            f"hiding Section must remove only its DOM width and persist browser-locally, got default={default_rows}, hidden={hidden_rows}, state={hidden_state}"
         )
 
     page.reload(wait_until="domcontentloaded")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    reloaded_capital_disclosure = page.locator(
+        '[data-metric-anchor-toggle][data-metric-anchor-scope="total"]'
+        '[data-metric-anchor-key="total_own_total_product_capital_rub"]'
+    )
+    if reloaded_capital_disclosure.count() != 1:
+        _set_metric_display_status(
+            page,
+            scope_id="total",
+            metric_key="total_own_total_product_capital_rub",
+            status="shown",
+        )
+        _set_metric_display_status(
+            page,
+            scope_id="total",
+            metric_key="total_own_avg_product_cost_rub",
+            status="collapsed",
+        )
+        page.wait_for_timeout(300)
+    if reloaded_capital_disclosure.count() != 1:
+        raise AssertionError("capital disclosure must remain available after Section visibility reload")
+    if reloaded_capital_disclosure.get_attribute("aria-expanded") != "true":
+        reloaded_capital_disclosure.click()
+    page.wait_for_selector(
+        'tr.metric-child-row td[data-col-id="metric_label"]'
+        '[data-metric-key="total_own_avg_product_cost_rub"]',
+        timeout=5000,
+    )
     if page.locator('[data-table-head] [data-col-id="section"]').count() != 0:
         raise AssertionError("hidden Section must remain hidden after reload")
     open_manager()
@@ -2134,7 +2319,8 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
           && document.querySelector('[data-table-shell]').getAttribute('data-section-column-visible') === 'true'""",
         timeout=5000,
     )
-    restored_row = measure_plain_row()
+    restored_rows = measure_metric_rows()
+    assert_uniform_metric_rows(restored_rows, "Раздел restored")
     restored_state = page.evaluate(
         """() => {
           const storageKey = Object.keys(window.localStorage).find((key) => key.endsWith(':section-column-visibility:v1')) || '';
@@ -2153,16 +2339,16 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or restored_state["sectionBadgeCount"] < 1
         or restored_state["compactClass"]
         or restored_state["storageValue"] != {"section_visible": True}
-        or int(restored_row["height"]) < int(hidden_row["height"]) + 4
     ):
-        raise AssertionError(f"restoring Section must return the column, badges and normal density, got {restored_state}, row={restored_row}")
+        raise AssertionError(f"restoring Section must return the column and badges without a height jump, got {restored_state}, rows={restored_rows}")
     return {
         "menu": menu_state,
-        "default_row": default_row,
+        "disclosure": disclosure_state,
+        "default_rows": default_rows,
         "hidden": hidden_state,
-        "hidden_row": hidden_row,
+        "hidden_rows": hidden_rows,
         "restored": restored_state,
-        "restored_row": restored_row,
+        "restored_rows": restored_rows,
     }
 
 
@@ -4027,76 +4213,65 @@ def _check_percent_formatting(page: object, *, expected_rows: dict[str, str] | N
     }
 
 
-def _check_cost_policy_tooltip(page: object) -> dict[str, object]:
-    policy_text = (
-        "До 01.07 используется ретроспективная управленческая проекция себестоимости того же nmID на 01.07. "
-        "Начиная с 01.07 используется каноническая себестоимость на соответствующую дату."
-    )
+def _check_cost_policy_help_absent(page: object) -> dict[str, object]:
     _set_metric_display_status(
         page,
         scope_id="total",
         metric_key="total_our_wb_unit_cost_rub",
         status="shown",
     )
-    anchor = page.locator(".metric-cost-policy-anchor").first
-    anchor.scroll_into_view_if_needed()
-    anchor.focus()
-    desktop = page.evaluate(
-        """(expected) => {
-          const anchor = document.querySelector('.metric-cost-policy-anchor');
-          const tooltip = anchor && anchor.parentElement
-            ? anchor.parentElement.querySelector('.metric-cost-policy-tooltip')
-            : null;
-          return {
-            ariaLabel: anchor ? (anchor.getAttribute('aria-label') || '') : '',
-            tooltipText: tooltip ? (tooltip.textContent || '').trim() : '',
-            tooltipDisplay: tooltip ? getComputedStyle(tooltip).display : '',
-            focused: document.activeElement === anchor,
-            matchesExpected: !!tooltip && (tooltip.textContent || '').trim() === expected
-          };
-        }""",
-        policy_text,
-    )
-    if (
-        desktop["ariaLabel"] != policy_text
-        or desktop["tooltipText"] != policy_text
-        or desktop["tooltipDisplay"] == "none"
-        or not desktop["focused"]
-        or not desktop["matchesExpected"]
-    ):
-        raise AssertionError(f"cost policy tooltip must be keyboard-accessible and exact, got {desktop}")
-
-    page.set_viewport_size({"width": 390, "height": 850})
-    anchor.scroll_into_view_if_needed()
-    anchor.focus()
-    narrow = page.evaluate(
+    page.wait_for_timeout(150)
+    state = page.evaluate(
         """() => {
-          const anchor = document.querySelector('.metric-cost-policy-anchor');
-          const tooltip = anchor && anchor.parentElement
-            ? anchor.parentElement.querySelector('.metric-cost-policy-tooltip')
-            : null;
-          const rect = tooltip ? tooltip.getBoundingClientRect() : {left: -1, right: -1, width: 0};
+          const keys = ['our_wb_unit_cost_rub', 'total_our_wb_unit_cost_rub'];
+          const focusableSelector = 'button, a[href], input, select, textarea, [tabindex]';
+          const rows = Object.fromEntries(keys.map((metricKey) => {
+            const cells = Array.from(document.querySelectorAll(
+              'td[data-col-id="metric_label"][data-metric-key="' + metricKey + '"]'
+            ));
+            return [metricKey, {
+              count: cells.length,
+              labels: cells.map((cell) => (cell.textContent || '').trim()),
+              questionMarkCount: cells.reduce(
+                (count, cell) => count + ((cell.textContent || '').match(/[?]/g) || []).length,
+                0
+              ),
+              focusableCount: cells.reduce(
+                (count, cell) => count + cell.querySelectorAll(focusableSelector).length,
+                0
+              ),
+              tooltipRoleCount: cells.reduce(
+                (count, cell) => count + cell.querySelectorAll('[role="tooltip"]').length,
+                0
+              )
+            }];
+          }));
           return {
-            tooltipDisplay: tooltip ? getComputedStyle(tooltip).display : '',
-            left: Math.round(rect.left),
-            right: Math.round(rect.right),
-            width: Math.round(rect.width),
-            viewportWidth: window.innerWidth,
-            documentWidth: document.documentElement.scrollWidth,
-            focused: document.activeElement === anchor
+            rows,
+            legacyWrapCount: document.querySelectorAll('.metric-cost-policy-wrap').length,
+            legacyAnchorCount: document.querySelectorAll('.metric-cost-policy-anchor').length,
+            legacyTooltipCount: document.querySelectorAll('.metric-cost-policy-tooltip').length,
+            policyTextPresent: (document.body.textContent || '').includes('ретроспективная управленческая проекция себестоимости')
           };
         }"""
     )
-    page.set_viewport_size({"width": 1100, "height": 900})
+    for metric_key in ("our_wb_unit_cost_rub", "total_our_wb_unit_cost_rub"):
+        row_state = state["rows"].get(metric_key) or {}
+        if (
+            int(row_state.get("count") or 0) < 1
+            or int(row_state.get("questionMarkCount") or 0) != 0
+            or int(row_state.get("focusableCount") or 0) != 0
+            or int(row_state.get("tooltipRoleCount") or 0) != 0
+        ):
+            raise AssertionError(f"cost metric help UI must be absent for {metric_key}, got {state}")
     if (
-        narrow["tooltipDisplay"] == "none"
-        or not narrow["focused"]
-        or int(narrow["left"]) < 0
-        or int(narrow["right"]) > int(narrow["viewportWidth"])
-        or int(narrow["documentWidth"]) > int(narrow["viewportWidth"]) + 1
+        state["legacyWrapCount"]
+        or state["legacyAnchorCount"]
+        or state["legacyTooltipCount"]
+        or state["policyTextPresent"]
     ):
-        raise AssertionError(f"cost policy tooltip must remain visible without narrow overflow, got {narrow}")
-    return {"desktop": desktop, "narrow": narrow}
+        raise AssertionError(f"cost policy help markup and copy must be removed, got {state}")
+    return state
 
 
 def _check_right_edge_spacer(page: object) -> dict[str, object]:
@@ -4436,7 +4611,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C20",
+                write_rect="A1:C34",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -4461,6 +4636,12 @@ def _build_plan(
                     [f"SKU B: Акция", f"SKU:{second_nm_id}|promo_participation", second_in_promo],
                     [f"SKU A: WAC WB", f"SKU:{first_nm_id}|our_wb_unit_cost_rub", 100],
                     [f"SKU B: WAC WB", f"SKU:{second_nm_id}|our_wb_unit_cost_rub", 110],
+                    ["Итого: Общий товарный капитал", "TOTAL|total_own_total_product_capital_rub", 21000],
+                    ["Итого: Средневзвешенная себестоимость", "TOTAL|total_own_avg_product_cost_rub", 105],
+                    [f"SKU A: Общий товарный капитал", f"SKU:{first_nm_id}|own_total_product_capital_rub", 10000],
+                    [f"SKU B: Общий товарный капитал", f"SKU:{second_nm_id}|own_total_product_capital_rub", 11000],
+                    [f"SKU A: Средневзвешенная себестоимость", f"SKU:{first_nm_id}|own_avg_product_cost_rub", 100],
+                    [f"SKU B: Средневзвешенная себестоимость", f"SKU:{second_nm_id}|own_avg_product_cost_rub", 110],
                     ["Итого: WB contour", "TOTAL|total_own_capital_WB_qty", 42],
                     [f"SKU A: WB contour", f"SKU:{first_nm_id}|own_capital_WB_qty", 42],
                     ["Итого: Остаток WB факт", "TOTAL|total_wb_stock_fact_qty", 15],
@@ -4470,7 +4651,7 @@ def _build_plan(
                     [f"SKU A: Остаток WB инцидент", f"SKU:{first_nm_id}|wb_stock_incident_qty", 10],
                     [f"SKU A: Остаток WB effective", f"SKU:{first_nm_id}|wb_stock_effective_qty", 5],
                 ],
-                row_count=27,
+                row_count=33,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

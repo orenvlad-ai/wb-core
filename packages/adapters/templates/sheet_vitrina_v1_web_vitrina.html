@@ -3082,18 +3082,12 @@
       white-space: nowrap;
     }
 
-    .metric-cost-policy-wrap { position: relative; display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
-    .metric-cost-policy-wrap .metric-label-text { flex: 1 1 auto; }
-    .metric-cost-policy-anchor { width: 18px; height: 18px; min-width: 18px; border: 1px solid var(--border); border-radius: 50%; background: var(--panel-subtle); color: var(--muted-strong); font: inherit; font-size: 11px; line-height: 16px; text-align: center; cursor: help; }
-    .metric-cost-policy-anchor:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
-    .metric-cost-policy-tooltip { display: none; position: absolute; z-index: 40; left: 0; top: calc(100% + 7px); width: min(440px, calc(100vw - 72px)); padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-size: 11px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
-    .metric-cost-policy-wrap:hover .metric-cost-policy-tooltip,
-    .metric-cost-policy-wrap:focus-within .metric-cost-policy-tooltip { display: block; }
-
     .metric-disclosure-toggle {
       width: 18px;
       height: 18px;
       min-width: 18px;
+      min-height: 18px;
+      max-height: 18px;
       padding: 0;
       font-size: 11px;
       line-height: 1;
@@ -3512,17 +3506,9 @@
       text-overflow: ellipsis;
     }
 
-    .table-shell.is-section-hidden .vitrina-table th,
-    .table-shell.is-section-hidden .vitrina-table td {
-      height: auto;
-      min-height: 0;
-      padding-top: 2px;
-      padding-bottom: 2px;
-      line-height: 1.15;
-    }
-
-    .table-shell.is-section-hidden .metric-disclosure-toggle {
-      min-height: 18px;
+    .vitrina-table tbody tr.metric-data-row,
+    .vitrina-table tbody tr.metric-data-row > td {
+      height: 33px;
     }
 
     .vitrina-table thead th {
@@ -3686,6 +3672,16 @@
       background: #eef2f6;
       color: #445468;
       white-space: nowrap;
+    }
+
+    .vitrina-table tbody tr.metric-data-row td[data-col-id="section"] .cell-badge {
+      height: 24px;
+      min-height: 24px;
+      max-height: 24px;
+      padding: 3px 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .cell-row-kind.total {
@@ -14184,7 +14180,7 @@
 
     function buildDataRow(row, columns, stickyOffsets) {
       const scopeLabel = tableObjectLabelForRow(row);
-      const classes = [];
+      const classes = ["metric-data-row"];
       if (isMetricExpandedChildRow(row)) {
         classes.push("metric-child-row");
       }
@@ -14355,16 +14351,7 @@
       if (column.id === "metric_label") {
         const scopeId = rowMetricPresentationScopeId(row);
         const metricKey = String(cellValue(row, "metric_key") || "");
-        const labelText = '<span class="metric-label-text">' + escapeHtml(formatCellValue(cell)) + '</span>';
-        const costPolicy = "До 01.07 используется ретроспективная управленческая проекция себестоимости того же nmID на 01.07. Начиная с 01.07 используется каноническая себестоимость на соответствующую дату.";
-        const content = ["our_wb_unit_cost_rub", "total_our_wb_unit_cost_rub"].includes(metricKey)
-          ? [
-              '<span class="metric-cost-policy-wrap">', labelText,
-              '<button class="metric-cost-policy-anchor" type="button" aria-label="' + escapeHtml(costPolicy) + '">?</button>',
-              '<span class="metric-cost-policy-tooltip" role="tooltip">' + escapeHtml(costPolicy) + '</span>',
-              '</span>'
-            ].join("")
-          : labelText;
+        const content = '<span class="metric-label-text">' + escapeHtml(formatCellValue(cell)) + '</span>';
         const collapsedMetricKeys = metricAnchorCollapsedMetricKeys(scopeId, metricKey);
         const hiddenCount = collapsedMetricKeys.length;
         if (hiddenCount > 0) {
