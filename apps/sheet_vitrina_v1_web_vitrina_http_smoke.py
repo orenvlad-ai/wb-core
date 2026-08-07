@@ -435,6 +435,9 @@ def main() -> None:
                 "Повторить сбор",
                 "С инцидентами",
                 "Снимок:",
+                "обн:",
+                ">Столбцы</summary>",
+                "data-column-visibility-controls",
                 ">Метрики</button>",
                 "Лог",
             ):

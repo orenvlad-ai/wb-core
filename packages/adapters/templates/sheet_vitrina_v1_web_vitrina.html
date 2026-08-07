@@ -1920,20 +1920,23 @@
       align-items: center;
       gap: 6px;
       min-width: 0;
-      min-height: 22px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 2px 8px;
-      background: var(--panel-subtle);
       flex: 0 0 auto;
       white-space: nowrap;
     }
 
     .table-snapshot-summary [data-vitrina-incident-quality-badge] {
-      border-radius: 0;
-      padding: 0;
-      background: transparent;
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
       color: var(--muted-strong);
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.35;
+      white-space: nowrap;
     }
 
     .table-summary-line {
@@ -1941,9 +1944,15 @@
       align-items: center;
       gap: 5px;
       min-width: 0;
+      min-height: 22px;
       margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
       color: var(--muted);
       font-size: 11px;
+      font-weight: 400;
       line-height: 1.35;
       flex-wrap: nowrap;
       flex: 0 0 auto;
@@ -2174,6 +2183,45 @@
       flex: 0 0 178px;
       min-width: 158px;
       max-width: 220px;
+    }
+
+    .vitrina-column-manager {
+      flex: 0 0 132px;
+      min-width: 124px;
+      max-width: 160px;
+    }
+
+    .vitrina-column-manager .column-manager-toggle {
+      min-height: 28px;
+      border-radius: 4px;
+      padding: 5px 8px;
+      background: var(--control-bg);
+      color: var(--text);
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
+    .vitrina-column-manager .column-manager-panel {
+      right: 0;
+      left: auto;
+      width: min(220px, calc(100vw - 24px));
+      border-color: var(--border-strong);
+      background: var(--panel);
+      padding: 8px 10px;
+      box-shadow: var(--shadow);
+    }
+
+    .vitrina-column-manager .column-checkbox {
+      color: var(--text);
+      font-size: 11px;
+    }
+
+    .vitrina-column-manager .column-checkbox:has(input:disabled) {
+      cursor: default;
+    }
+
+    .vitrina-column-manager .column-checkbox input:disabled {
+      opacity: .58;
     }
 
     .table-filters-rail .filter-label {
@@ -3462,6 +3510,19 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    .table-shell.is-section-hidden .vitrina-table th,
+    .table-shell.is-section-hidden .vitrina-table td {
+      height: auto;
+      min-height: 0;
+      padding-top: 2px;
+      padding-bottom: 2px;
+      line-height: 1.15;
+    }
+
+    .table-shell.is-section-hidden .metric-disclosure-toggle {
+      min-height: 18px;
     }
 
     .vitrina-table thead th {
@@ -5002,7 +5063,8 @@
       }
 
       .table-filters-rail .toolbar-field,
-      .sku-metric-picker {
+      .sku-metric-picker,
+      .vitrina-column-manager {
         flex: 1 1 160px;
         min-width: 140px;
         max-width: none;
@@ -5321,7 +5383,7 @@
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
               <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>С инцидентами</span>
               <div class="table-snapshot-summary" data-table-snapshot-summary hidden>
-                <span class="status-pill tone-neutral" data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
+                <span data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
                 <p class="table-summary-line" data-table-summary-line hidden></p>
               </div>
             </div>
@@ -5406,6 +5468,12 @@
                   </div>
                 </div>
               </div>
+              <details class="column-manager vitrina-column-manager" data-column-manager>
+                <summary class="column-manager-toggle">Столбцы</summary>
+                <div class="column-manager-panel">
+                  <div class="column-checkbox-list" data-column-visibility-controls></div>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -5419,16 +5487,6 @@
           <p class="filter-summary" data-filter-summary hidden>Загрузка…</p>
           <p class="panel-meta" data-filter-meta hidden>загрузка фильтров…</p>
           <button class="is-hidden" type="button" data-reset-filters tabindex="-1" aria-hidden="true">Сброс</button>
-          <details class="column-manager is-hidden" data-column-manager aria-hidden="true">
-            <summary class="column-manager-toggle">Настроить</summary>
-            <div class="column-manager-panel">
-              <p class="column-manager-note" data-column-manager-note>Загрузка настроек столбцов…</p>
-              <div class="column-checkbox-list" data-column-visibility-controls>Загрузка настроек столбцов…</div>
-              <div class="column-manager-actions">
-                <button class="button secondary" type="button" data-columns-reset tabindex="-1">Сбросить столбцы</button>
-              </div>
-            </div>
-          </details>
         </div>
       </div>
 
@@ -6700,9 +6758,7 @@
     const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
     const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
-    const columnManagerNoteNode = document.querySelector("[data-column-manager-note]");
     const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
-    const columnVisibilityResetButton = document.querySelector("[data-columns-reset]");
     const metricsPresentationPanelNode = document.querySelector("[data-metrics-presentation]");
     const metricsPresentationBodyNode = document.querySelector("[data-metrics-presentation-body]");
     const metricsPresentationSummaryNode = document.querySelector("[data-metrics-presentation-summary]");
@@ -8083,13 +8139,6 @@
       resetMetricSelectionToAll(state.composition);
       syncControlValues();
       renderMetricPresentationPanel(state.composition);
-      renderTable();
-    });
-
-    columnVisibilityResetButton.addEventListener("click", function() {
-      state.columns.visibleIds = state.columns.defaultVisibleIds.slice();
-      persistColumnVisibility();
-      renderColumnVisibilityControls((state.composition && state.composition.table_surface && state.composition.table_surface.columns) || []);
       renderTable();
     });
 
@@ -9836,7 +9885,7 @@
 
     function buildColumnVisibilityStorageKey(payload) {
       const namespace = String((payload && payload.meta && payload.meta.state_namespace) || "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1");
-      return namespace + ":visible-columns:v1";
+      return namespace + ":section-column-visibility:v1";
     }
 
     function buildMetricSelectionStorageKey(payload) {
@@ -11939,7 +11988,7 @@
 
     function isColumnMandatory(column) {
       const columnId = String((column && column.id) || "");
-      return !isColumnForcedHidden(columnId) && (columnId === "metric_label" || columnId === "section" || columnId.indexOf("date:") === 0);
+      return !isColumnForcedHidden(columnId) && columnId !== "section";
     }
 
     function isColumnForcedHidden(columnId) {
@@ -11970,9 +12019,7 @@
           return null;
         }
         const payload = JSON.parse(raw);
-        return Array.isArray(payload.visible_column_ids) ? payload.visible_column_ids.map(function(columnId) {
-          return String(columnId || "");
-        }) : null;
+        return typeof payload.section_visible === "boolean" ? payload.section_visible : null;
       } catch (error) {
         return null;
       }
@@ -11984,20 +12031,11 @@
       }
       try {
         window.localStorage.setItem(state.columns.storageKey, JSON.stringify({
-          visible_column_ids: state.columns.visibleIds
+          section_visible: isColumnVisible("section")
         }));
       } catch (error) {
         // Ignore browser-local persistence failures and keep the current in-memory selection.
       }
-    }
-
-    function sameColumnList(left, right) {
-      if ((left || []).length !== (right || []).length) {
-        return false;
-      }
-      return (left || []).every(function(value, index) {
-        return value === right[index];
-      });
     }
 
     function isColumnVisible(columnId) {
@@ -12011,39 +12049,42 @@
     }
 
     function renderColumnVisibilityControls(columns) {
-      const optionalColumns = (columns || []).filter(function(column) {
-        return !isColumnForcedHidden(column.id) && !isColumnMandatory(column);
+      const columnIds = new Set((columns || []).map(function(column) {
+        return String((column && column.id) || "");
+      }));
+      const hasMetric = columnIds.has("metric_label");
+      const hasSection = columnIds.has("section");
+      const hasDates = Array.from(columnIds).some(function(columnId) {
+        return columnId.indexOf("date:") === 0;
       });
-      columnManagerNoteNode.textContent = optionalColumns.length
-        ? "Основные колонки и даты остаются видимыми. Остальные можно скрывать и вернуть обратно в этом браузере."
-        : "Для текущего вида нет дополнительных колонок.";
-      if (!optionalColumns.length) {
-        columnVisibilityControlsNode.innerHTML = '<p class="filter-summary">Дополнительных колонок нет.</p>';
-        columnVisibilityResetButton.disabled = true;
-        return;
-      }
-      columnVisibilityControlsNode.innerHTML = optionalColumns.map(function(column) {
-        const columnId = String(column.id || "");
-        return [
-          '<label class="column-checkbox">',
-          '<input type="checkbox" data-column-visibility-id="' + escapeHtml(columnId) + '"' + (isColumnVisible(columnId) ? " checked" : "") + ">",
-          '<span>',
-          '<span class="column-checkbox-text">' + escapeHtml(column.header || columnId) + "</span>",
-          '<span class="column-checkbox-meta">' + escapeHtml(columnId) + "</span>",
-          "</span>",
-          "</label>"
-        ].join("");
-      }).join("");
-      columnVisibilityControlsNode.querySelectorAll("[data-column-visibility-id]").forEach(function(node) {
-        node.addEventListener("change", function() {
-          updateColumnVisibility(String(node.getAttribute("data-column-visibility-id") || ""), !!node.checked);
+      columnVisibilityControlsNode.innerHTML = [
+        '<label class="column-checkbox">',
+        '<input type="checkbox" data-column-visibility-id="metric_label" checked disabled aria-label="Метрика — обязательный столбец">',
+        '<span class="column-checkbox-text">Метрика</span>',
+        '</label>',
+        '<label class="column-checkbox">',
+        '<input type="checkbox" data-column-visibility-id="section"' + (hasSection && isColumnVisible("section") ? " checked" : "") + (hasSection ? "" : " disabled") + ' aria-label="Показывать столбец Раздел">',
+        '<span class="column-checkbox-text">Раздел</span>',
+        '</label>',
+        '<label class="column-checkbox">',
+        '<input type="checkbox" data-column-visibility-id="dates" checked disabled aria-label="Даты — обязательные столбцы">',
+        '<span class="column-checkbox-text">Даты</span>',
+        '</label>'
+      ].join("");
+      const metricControl = columnVisibilityControlsNode.querySelector('[data-column-visibility-id="metric_label"]');
+      const datesControl = columnVisibilityControlsNode.querySelector('[data-column-visibility-id="dates"]');
+      if (metricControl) metricControl.checked = hasMetric;
+      if (datesControl) datesControl.checked = hasDates;
+      const sectionControl = columnVisibilityControlsNode.querySelector('[data-column-visibility-id="section"]');
+      if (sectionControl) {
+        sectionControl.addEventListener("change", function() {
+          updateColumnVisibility("section", !!sectionControl.checked);
         });
-      });
-      columnVisibilityResetButton.disabled = sameColumnList(state.columns.visibleIds, state.columns.defaultVisibleIds);
+      }
     }
 
     function updateColumnVisibility(columnId, visible) {
-      if (!columnId || state.columns.mandatoryIds.indexOf(columnId) !== -1) {
+      if (columnId !== "section" || state.columns.mandatoryIds.indexOf(columnId) !== -1) {
         return;
       }
       const visibleSet = new Set(state.columns.visibleIds);
@@ -12075,12 +12116,15 @@
         return String(column.id || "");
       });
       const storageKey = buildColumnVisibilityStorageKey(payload);
-      const restoredVisibleIds = readPersistedColumnVisibility(storageKey);
+      const restoredSectionVisible = readPersistedColumnVisibility(storageKey);
+      const restoredVisibleIds = defaultVisibleIds.filter(function(columnId) {
+        return columnId !== "section" || restoredSectionVisible !== false;
+      });
       state.columns.storageKey = storageKey;
       state.columns.defaultVisibleIds = defaultVisibleIds;
       state.columns.mandatoryIds = mandatoryIds;
       state.columns.visibleIds = sanitizeVisibleColumnIds(
-        restoredVisibleIds || defaultVisibleIds,
+        restoredVisibleIds,
         defaultVisibleIds,
         mandatoryIds
       );
@@ -14034,6 +14078,8 @@
       const columns = visibleColumns(payload.table_surface.columns || []);
       const stickyOffsets = buildStickyOffsets(columns);
       const tableColumnCount = columns.length + 1;
+      tableShellNode.classList.toggle("is-section-hidden", !isColumnVisible("section"));
+      tableShellNode.setAttribute("data-section-column-visible", isColumnVisible("section") ? "true" : "false");
       tableHeadNode.innerHTML = [
         "<tr>",
         columns.map(function(column) {
@@ -20579,9 +20625,7 @@
         historyResetButton.disabled = true;
         renderActivitySurface(null);
         filterControlsNode.innerHTML = "";
-        columnManagerNoteNode.textContent = "Управление колонками временно недоступно.";
         columnVisibilityControlsNode.innerHTML = '<p class="filter-summary">Управление колонками временно недоступно.</p>';
-        columnVisibilityResetButton.disabled = true;
         filterMetaNode.textContent = "page composition недоступен";
         filterSummaryNode.textContent = "Ошибка";
         tableMetaNode.textContent = "page composition недоступен";
