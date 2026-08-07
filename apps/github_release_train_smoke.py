@@ -2968,7 +2968,9 @@ def _assert_workflow_contract() -> None:
         )
     )
     assert "name: baseline" in baseline
-    assert "python3 apps/codex_task_orchestrator_smoke.py" in baseline
+    assert "python3 apps/codex_task_orchestrator_smoke.py" not in baseline
+    assert "/wb-core orchestration " not in release
+    assert "/wb-core loop " not in release
     for required in (
         "issue_comment:",
         "release:awaiting-agent",
@@ -2999,16 +3001,6 @@ def _assert_workflow_contract() -> None:
         "finance:migration-deploy-lease",
         "finance:migration-deploy-lease-audit",
         "wb-core-finance-migration-deploy-lease-binding",
-        "release:staged",
-        "release:lane-owner",
-        "release:retired",
-        "/wb-core orchestration ",
-        "admit, release-lane or retire-legacy",
-        "WB_CORE_ORCHESTRATION_REQUIRED",
-        "wb-core-orchestration-admission-proof",
-        "wb-core-release-lane-proof",
-        "terminal-release-lane-owner",
-        "wb-core-legacy-retirement-proof",
         "--read-only",
         'cron: "*/5 * * * *"',
         "group: wb-core-production-release",
@@ -4168,7 +4160,6 @@ def main() -> int:
     _assert_queue_status_local_auth_contract()
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
-    _assert_orchestration_lane_and_legacy_retirement()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
     _assert_foreign_gate_waiting_and_queue_progress()
@@ -4182,7 +4173,6 @@ def main() -> int:
     _assert_goal_shepherd_regressions()
     _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
-    _assert_codex_task_class_and_monitor_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()
     _assert_two_parallel_loop_roots()

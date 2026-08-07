@@ -1,5 +1,14 @@
 # GitHub Release Train
 
+> Orchestration cutover: `WB_CORE_ORCHESTRATION_REQUIRED=false`. Global Watcher,
+> external registry, Task Passport, acceptance envelope, lane ownership and LOOP
+> callbacks are not active admission requirements. Historical sections about
+> those mechanisms remain below only as migration evidence. Ordinary work uses
+> `task:standard`, one `scope:*`, successful `baseline` and `release:ready`; the
+> existing Release Train still owns sync, exact-head checks, merge and applicable
+> deploy/verify. Finance, storage and production-mutation safety contracts are
+> unchanged.
+
 ## Назначение
 
 GitHub Release Train — repo-owned сериализованная очередь для независимо подготовленных STANDARD и LOOP change-задач. Durable state хранится только в GitHub PR, labels, checks, comments и workflow runs. Очередь владеет критической секцией `sync -> baseline -> merge -> deploy -> verify`, но не заменяет task-level targeted checks, semantic review и docs sync.
@@ -24,8 +33,7 @@ Task class и task continuity независимы. `TaskContinuity` в `apps/gi
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
 - `apps/github_release_train_wait.py` — bounded CLI waiter и канонический Goal queue shepherd для Codex;
 - `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
-- `apps/codex_task_orchestrator.py` — local registry, Watcher lease, incidents, resource locks, reports и dashboard;
-- [`12_codex_global_orchestration.md`](12_codex_global_orchestration.md) — authoritative admission/lane и Desktop orchestration contract;
+- [`12_codex_global_orchestration.md`](12_codex_global_orchestration.md) — archive pointer для retired orchestration epoch;
 - `.github/pull_request_template.md` — PR closure checklist.
 
 ## Eligibility И Labels
@@ -39,7 +47,9 @@ Queue eligibility требует одновременно:
 - ровно одну известную `scope:*` label;
 - отсутствие `release:blocked`, `release:halted` и `release:superseded`.
 
-При `WB_CORE_ORCHESTRATION_REQUIRED=true` любой STANDARD и LOOP дополнительно требуют exact-head Actions-owned orchestration admission proof и совпадающий logical task на active `release:lane-owner`. LOOP также требует exact-head repo-owned new/recovery registration proof. Ручные `loop:root-*`, `release:ready`, admission marker или lane label eligibility не доказывают. Feature flag по умолчанию выключен до end-to-end Desktop пилота.
+`WB_CORE_ORCHESTRATION_REQUIRED` зафиксирован в `false`: ordinary STANDARD PR не
+требует Watcher admission, registry или lane proof. Release Train самостоятельно
+перепроверяет current head и required `baseline` перед merge.
 
 Основные state/lease labels:
 
@@ -430,7 +440,10 @@ halted только после healthy exact PR/head/merge/target JSON evidence;
 
 ## Baseline И Security Boundary
 
-`baseline-ci.yml` выполняет `compileall`, `git diff --check`, `apps/codex_task_orchestrator_smoke.py` и `apps/github_release_train_smoke.py`, затем остальные repository regression smokes. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
+`baseline-ci.yml` выполняет `compileall`, `git diff --check`,
+`apps/github_release_train_smoke.py`, затем остальные repository regression
+smokes. Task owner дополнительно выполняет применимые targeted checks и
+перечисляет их в PR.
 
 `pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP, Finance lease и production-mutation commands проходят exact parsing и association checks. Finance lease workflow использует production secrets только для `--read-only` exact deployed-SHA readback; acquire/rebind/release меняют лишь GitHub durable state и не запускают Finance runner. Production-mutation command preflight работает без production secrets; SSH material получает только следующий job с GitHub Environment `production` после успешного immutable-evidence preflight. Required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Production-mutation terminalizer выполняет только `--read-only` deploy readback и GitHub terminal state transition; Release Train не выполняет WB writes, backfill или production business mutation.
 

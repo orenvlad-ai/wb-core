@@ -40,65 +40,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  orchestration_command:
-    name: Apply Watcher admission, lane release or legacy retirement
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/wb-core orchestration ')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
-      ORCHESTRATION_COMMAND: ${{ github.event.comment.body }}
-      ORCHESTRATION_ACTOR: ${{ github.event.comment.user.login }}
-      ORCHESTRATION_ASSOCIATION: ${{ github.event.comment.author_association }}
-    steps:
-      - name: Checkout trusted main
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Apply exact orchestration transition
-        run: >-
-          python3 apps/github_release_train.py handle-comment
-          --pr "${{ github.event.issue.number }}"
-          --command "$ORCHESTRATION_COMMAND"
-          --actor "$ORCHESTRATION_ACTOR"
-          --association "$ORCHESTRATION_ASSOCIATION"
-
-  loop_command:
-    name: Handle LOOP enrollment, correction, acknowledgement or UI acceptance
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/wb-core loop ')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      LOOP_COMMAND: ${{ github.event.comment.body }}
-      LOOP_ACTOR: ${{ github.event.comment.user.login }}
-      LOOP_ASSOCIATION: ${{ github.event.comment.author_association }}
-    steps:
-      - name: Checkout trusted main
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Apply exact LOOP identity or gate command
-        run: >-
-          python3 apps/github_release_train.py handle-comment
-          --pr "${{ github.event.issue.number }}"
-          --command "$LOOP_COMMAND"
-          --actor "$LOOP_ACTOR"
-          --association "$LOOP_ASSOCIATION"
-
   finance_lease_command:
     name: Apply global Finance migration deploy lease command
     if: >-

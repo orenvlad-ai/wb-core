@@ -1,5 +1,13 @@
 # Codex Execution Protocol
 
+> Orchestration cutover: Global Watcher, external registry, Task Passport,
+> acceptance envelope, curator workspace automation and LOOP session ownership
+> are archived and are not active requirements. Historical passages about those
+> mechanisms below are retained only as migration evidence. The active ordinary
+> path is the simple curator -> separate executor -> PR -> existing Release Train
+> flow defined in root `AGENTS.md`; product/runtime safety contracts remain in
+> force.
+
 ## Назначение
 
 Корневой [`AGENTS.md`](../../AGENTS.md) — самодостаточный execution/governance entrypoint. Этот документ раскрывает устойчивый протокол и не создаёт второй независимый набор правил. Доменные contracts и runtime details остаются в релевантных architecture/module/migration docs.

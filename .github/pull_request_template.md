@@ -7,7 +7,6 @@
 <!-- Укажите bounded scope, запреты и один execution-контур. -->
 
 - [ ] `task:standard`
-- [ ] `task:loop` — только вместе с `scope:live-runtime`
 - [ ] `scope:repo-only`
 - [ ] `scope:live-runtime`
 - [ ] `scope:production-mutation` — автоматический выпуск запрещён до human gate
@@ -24,4 +23,8 @@
 
 ## Release
 
-Для STANDARD метка `release:ready` ставится только после завершения проверок, ровно с одной `task:*` и ровно одной `scope:*` меткой. Draft PR, production mutation и PR без successful `baseline` в автоматический выпуск не допускаются. LOOP root/ready вручную не назначаются: новый root регистрируется `/wb-core loop enqueue-new`, recovery — отдельной `/wb-core loop enqueue-recovery` с exact active gate/root proof. LOOP затем проходит exact-head `release:awaiting-agent` и после deploy остаётся на `release:awaiting-ui` до production UI acceptance.
+Для ordinary PR используется `task:standard` и ровно одна `scope:*` метка.
+После successful `baseline` PR получает `release:ready`. Release Train повторно
+проверяет open non-draft PR, same-repository head, labels и baseline, затем
+сериализует sync, merge и применимый deploy/verify. Технический terminal state
+не означает owner acceptance.

@@ -2,6 +2,33 @@
 
 Этот файл — самодостаточный entrypoint для Codex CLI, Codex в приложении ChatGPT для Mac, локального проекта Codex и обычного ChatGPT, читающего репозиторий. Доменные детали не дублируются здесь: они живут в authoritative docs.
 
+## Active orchestration cutover
+
+Этот раздел имеет приоритет над историческими orchestration-пассажами ниже.
+Обычная задача использует простой автономный flow:
+
+1. пользователь обсуждает цель с куратором;
+2. куратор создаёт отдельную исполняемую Codex-задачу;
+3. исполнитель работает в отдельной branch/worktree, запускает targeted checks
+   и создаёт open non-draft PR с `task:standard` и ровно одной `scope:*` label;
+4. после successful `baseline` PR получает `release:ready`;
+5. существующий GitHub Release Train повторно проверяет current head/checks,
+   сериализует sync/merge и выполняет применимый deploy/verify;
+6. исполнитель передаёт короткий технический отчёт, а владелец принимает
+   результат вручную.
+
+`WB_CORE_ORCHESTRATION_REQUIRED=false`. Global Watcher, external orchestration
+registry, Task Passport, acceptance envelope, curator workspace automation,
+logical lane ownership и обязательный LOOP/chat callback выведены из active
+flow. Они не требуются для PR eligibility, release или closure. Исторические
+описания этих механизмов в этом файле и документации остаются только migration
+evidence и не являются действующими требованиями. Не запускай их и не создавай
+заменяющий scheduler/reviewer/arbiter/control plane.
+
+GitHub Release Train core и все product safety contracts, включая Finance,
+storage, live deploy/verify и production mutation, остаются без функциональных
+изменений. Техническое завершение никогда не означает owner acceptance.
+
 ## Источники истины
 
 Приоритет источников:
