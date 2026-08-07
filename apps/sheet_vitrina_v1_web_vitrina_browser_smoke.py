@@ -985,6 +985,7 @@ def _route_page_composition_with_delay(route: object) -> None:
 def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     page.goto(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH, wait_until="domcontentloaded")
     page.wait_for_selector("[data-unified-tab-button='vitrina']", timeout=5000)
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     tabs = page.locator(".unified-tab-strip [data-unified-tab-button]").evaluate_all(
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
@@ -1001,11 +1002,61 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         raise AssertionError(f"operator route must default to the vitrina tab, got {tabs}")
     if page.locator("[data-unified-tab-button]", has_text="Обновление данных").count() != 0:
         raise AssertionError("operator route must not expose a separate Обновление данных tab")
+    shared_time_pills = page.evaluate(
+        """() => {
+          const wrapper = document.querySelector('[data-table-snapshot-summary]');
+          const snapshot = document.querySelector('[data-vitrina-incident-quality-badge]');
+          const updated = document.querySelector('[data-table-summary-line]');
+          const wrapperStyle = wrapper ? getComputedStyle(wrapper) : null;
+          const snapshotStyle = snapshot ? getComputedStyle(snapshot) : null;
+          const updatedStyle = updated ? getComputedStyle(updated) : null;
+          return {
+            visible: !!wrapper && !wrapper.hidden && !!snapshot && !snapshot.hidden && !!updated && !updated.hidden,
+            wrapperHasVisual: !!wrapperStyle && (parseFloat(wrapperStyle.borderTopWidth || '0') > 0 || wrapperStyle.backgroundColor !== 'rgba(0, 0, 0, 0)'),
+            independent: !!snapshotStyle && !!updatedStyle && parseFloat(snapshotStyle.borderTopWidth || '0') >= 1 && parseFloat(updatedStyle.borderTopWidth || '0') >= 1,
+            sameTone: !!snapshotStyle && !!updatedStyle && snapshotStyle.backgroundColor === updatedStyle.backgroundColor,
+            weights: [snapshotStyle ? snapshotStyle.fontWeight : '', updatedStyle ? updatedStyle.fontWeight : ''],
+            snapshotHasStatusSubstrate: !!snapshot && snapshot.classList.contains('status-pill')
+          };
+        }"""
+    )
+    if (
+        not shared_time_pills["visible"]
+        or shared_time_pills["wrapperHasVisual"]
+        or not shared_time_pills["independent"]
+        or not shared_time_pills["sameTone"]
+        or int(shared_time_pills["weights"][0]) < 700
+        or int(shared_time_pills["weights"][1]) > 500
+        or shared_time_pills["snapshotHasStatusSubstrate"]
+    ):
+        raise AssertionError(f"operator compatibility route must use the shared two-pill renderer, got {shared_time_pills}")
+    page.locator("[data-filters-toggle]").click()
+    operator_columns = page.evaluate(
+        """() => {
+          const manager = document.querySelector('[data-column-manager]');
+          return {
+            visible: !!manager && manager.offsetParent !== null,
+            insideRail: !!(manager && manager.closest('[data-filters-rail]')),
+            summary: ((manager && manager.querySelector('summary') || {}).textContent || '').trim(),
+            controlIds: Array.from(document.querySelectorAll('[data-column-visibility-id]')).map((node) => node.getAttribute('data-column-visibility-id') || '')
+          };
+        }"""
+    )
+    if operator_columns != {
+        "visible": True,
+        "insideRail": True,
+        "summary": "Столбцы",
+        "controlIds": ["metric_label", "section", "dates"],
+    }:
+        raise AssertionError(f"operator compatibility route must expose the shared bounded Columns control, got {operator_columns}")
+    page.locator("[data-filters-toggle]").click()
     return {
         "route": DEFAULT_SHEET_OPERATOR_UI_PATH,
         "tabs": ", ".join(tab_texts),
         "actions": ", ".join(shell_actions),
         "default_active": active_tabs[0],
+        "time_pills": json.dumps(shared_time_pills, ensure_ascii=False),
+        "columns": json.dumps(operator_columns, ensure_ascii=False),
     }
 
 
@@ -1940,41 +1991,178 @@ def _assert_details_open(locator: object, expected: bool, label: str) -> None:
 
 
 def _check_column_visibility_controls(page: object) -> dict[str, object]:
-    visual_state = page.evaluate(
+    def open_manager() -> None:
+        rail = page.locator("[data-filters-rail]")
+        if rail.get_attribute("hidden") is not None:
+            page.locator("[data-filters-toggle]").click()
+        manager = page.locator("[data-column-manager]")
+        if not manager.evaluate("node => !!node.open"):
+            manager.locator("summary").click()
+        page.wait_for_function(
+            "() => !!document.querySelector('[data-column-manager][open] [data-column-visibility-controls]')",
+            timeout=5000,
+        )
+
+    def measure_plain_row() -> dict[str, object]:
+        return page.evaluate(
+            """() => {
+              const rows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind]:not(.sku-separator-row)'));
+              const row = rows.find((node) => !node.querySelector('button')) || rows[0] || null;
+              const metricCell = row ? row.querySelector('[data-col-id="metric_label"]') : null;
+              return {
+                rowKind: row ? (row.getAttribute('data-row-kind') || '') : '',
+                metricKey: metricCell ? (metricCell.getAttribute('data-metric-key') || '') : '',
+                height: row ? Math.round(row.getBoundingClientRect().height) : 0
+              };
+            }"""
+        )
+
+    default_row = measure_plain_row()
+    default_disclosure_count = page.locator("[data-metric-anchor-toggle]").count()
+    open_manager()
+    menu_state = page.evaluate(
         """() => {
+          const manager = document.querySelector('[data-column-manager]');
+          const controls = Array.from(document.querySelectorAll('[data-column-visibility-id]')).map((node) => ({
+            id: node.getAttribute('data-column-visibility-id') || '',
+            label: ((node.closest('label') || {}).textContent || '').trim(),
+            checked: !!node.checked,
+            disabled: !!node.disabled,
+            aria: node.getAttribute('aria-label') || ''
+          }));
           return {
             managerCount: document.querySelectorAll('[data-column-manager]').length,
-            visibleManagerCount: Array.from(document.querySelectorAll('[data-column-manager]')).filter((node) => node.offsetParent !== null).length,
-            visibleResetCount: Array.from(document.querySelectorAll('[data-columns-reset]')).filter((node) => node.offsetParent !== null).length,
-            visibleColumnsLabel: Array.from(document.querySelectorAll('.filter-label')).some((node) => (node.textContent || '').trim() === 'Столбцы'),
-            missingMetricLabelToggle: document.querySelectorAll('[data-column-visibility-id="metric_label"]').length === 0,
-            missingScopeLabelToggle: document.querySelectorAll('[data-column-visibility-id="scope_label"]').length === 0,
-            missingMetricKeyToggle: document.querySelectorAll('[data-column-visibility-id="metric_key"]').length === 0,
-            missingScopeKindToggle: document.querySelectorAll('[data-column-visibility-id="scope_kind"]').length === 0,
-            missingSectionToggle: document.querySelectorAll('[data-column-visibility-id="section"]').length === 0,
-            missingUpdatedToggle: document.querySelectorAll('[data-column-visibility-id="row_last_updated_at"]').length === 0,
-            dateToggleCount: document.querySelectorAll('[data-column-visibility-id^="date:"]').length
+            insideFiltersRail: !!(manager && manager.closest('[data-filters-rail]')),
+            open: !!(manager && manager.open),
+            summary: ((manager && manager.querySelector('summary') || {}).textContent || '').trim(),
+            controls,
+            resetCount: document.querySelectorAll('[data-columns-reset]').length,
+            technicalToggleCount: document.querySelectorAll('[data-column-visibility-id="scope_label"], [data-column-visibility-id="scope_kind"], [data-column-visibility-id="metric_key"], [data-column-visibility-id="row_last_updated_at"], [data-column-visibility-id^="date:"]').length,
+            headerIds: Array.from(document.querySelectorAll('[data-table-head] [data-col-id]')).map((node) => node.getAttribute('data-col-id') || '').filter(Boolean),
+            sectionBadgeCount: document.querySelectorAll('[data-table-body] [data-col-id="section"] .cell-badge').length
+          };
+        }"""
+    )
+    expected_controls = [
+        {"id": "metric_label", "label": "Метрика", "checked": True, "disabled": True},
+        {"id": "section", "label": "Раздел", "checked": True, "disabled": False},
+        {"id": "dates", "label": "Даты", "checked": True, "disabled": True},
+    ]
+    normalized_controls = [
+        {key: item[key] for key in ("id", "label", "checked", "disabled")}
+        for item in menu_state["controls"]
+    ]
+    if (
+        menu_state["managerCount"] != 1
+        or not menu_state["insideFiltersRail"]
+        or not menu_state["open"]
+        or menu_state["summary"] != "Столбцы"
+        or normalized_controls != expected_controls
+        or any(not item["aria"] for item in menu_state["controls"])
+        or menu_state["resetCount"] != 0
+        or menu_state["technicalToggleCount"] != 0
+        or menu_state["headerIds"][:2] != ["metric_label", "section"]
+        or not menu_state["sectionBadgeCount"]
+    ):
+        raise AssertionError(f"bounded column menu must expose exactly Metric/Section/Dates with required states, got {menu_state}")
+
+    page.keyboard.press("Escape")
+    if page.locator("[data-column-manager]").evaluate("node => !!node.open"):
+        raise AssertionError("column menu must close on Escape")
+    open_manager()
+    page.locator('[data-column-visibility-id="section"]').uncheck()
+    page.wait_for_function(
+        """() => document.querySelectorAll('[data-table-head] [data-col-id="section"]').length === 0
+          && document.querySelector('[data-table-shell]').getAttribute('data-section-column-visible') === 'false'""",
+        timeout=5000,
+    )
+    hidden_state = page.evaluate(
+        """() => {
+          const headers = Array.from(document.querySelectorAll('[data-table-head] [data-col-id]'));
+          const metric = headers.find((node) => node.getAttribute('data-col-id') === 'metric_label') || null;
+          const firstDate = headers.find((node) => (node.getAttribute('data-col-id') || '').startsWith('date:')) || null;
+          const metricRect = metric ? metric.getBoundingClientRect() : {right: 0};
+          const dateRect = firstDate ? firstDate.getBoundingClientRect() : {left: 0};
+          const disclosure = document.querySelector('[data-metric-anchor-toggle]');
+          const storageKey = Object.keys(window.localStorage).find((key) => key.endsWith(':section-column-visibility:v1')) || '';
+          return {
+            headerIds: headers.map((node) => node.getAttribute('data-col-id') || '').filter(Boolean),
+            sectionHeaderCount: document.querySelectorAll('[data-table-head] [data-col-id="section"]').length,
+            sectionCellCount: document.querySelectorAll('[data-table-body] [data-col-id="section"]').length,
+            sectionBadgeCount: document.querySelectorAll('[data-table-body] .cell-badge').length,
+            compactClass: document.querySelector('[data-table-shell]').classList.contains('is-section-hidden'),
+            dateGap: Math.round(dateRect.left - metricRect.right),
+            disclosureCount: document.querySelectorAll('[data-metric-anchor-toggle]').length,
+            disclosureHeight: disclosure ? Math.round(disclosure.getBoundingClientRect().height) : 0,
+            disclosureAria: disclosure ? (disclosure.getAttribute('aria-label') || '') : '',
+            storageKey,
+            storageValue: storageKey ? JSON.parse(window.localStorage.getItem(storageKey) || '{}') : {}
+          };
+        }"""
+    )
+    hidden_row = measure_plain_row()
+    if (
+        hidden_state["headerIds"][0] != "metric_label"
+        or not all(str(column_id).startswith("date:") for column_id in hidden_state["headerIds"][1:])
+        or hidden_state["sectionHeaderCount"] != 0
+        or hidden_state["sectionCellCount"] != 0
+        or hidden_state["sectionBadgeCount"] != 0
+        or not hidden_state["compactClass"]
+        or abs(int(hidden_state["dateGap"])) > 2
+        or hidden_state["disclosureCount"] != default_disclosure_count
+        or (default_disclosure_count > 0 and hidden_state["disclosureHeight"] < 18)
+        or (default_disclosure_count > 0 and not hidden_state["disclosureAria"])
+        or not str(hidden_state["storageKey"]).endswith(":section-column-visibility:v1")
+        or hidden_state["storageValue"] != {"section_visible": False}
+        or int(hidden_row["height"]) > int(default_row["height"]) - 4
+    ):
+        raise AssertionError(
+            f"hiding Section must remove its DOM width, compact rows and persist browser-locally, got default={default_row}, hidden={hidden_row}, state={hidden_state}"
+        )
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    if page.locator('[data-table-head] [data-col-id="section"]').count() != 0:
+        raise AssertionError("hidden Section must remain hidden after reload")
+    open_manager()
+    section_control = page.locator('[data-column-visibility-id="section"]')
+    if section_control.is_checked():
+        raise AssertionError("column menu must restore the persisted unchecked Section state")
+    section_control.check()
+    page.wait_for_function(
+        """() => document.querySelectorAll('[data-table-head] [data-col-id="section"]').length === 1
+          && document.querySelector('[data-table-shell]').getAttribute('data-section-column-visible') === 'true'""",
+        timeout=5000,
+    )
+    restored_row = measure_plain_row()
+    restored_state = page.evaluate(
+        """() => {
+          const storageKey = Object.keys(window.localStorage).find((key) => key.endsWith(':section-column-visibility:v1')) || '';
+          return {
+            headerIds: Array.from(document.querySelectorAll('[data-table-head] [data-col-id]')).map((node) => node.getAttribute('data-col-id') || '').filter(Boolean),
+            sectionCellCount: document.querySelectorAll('[data-table-body] [data-col-id="section"]').length,
+            sectionBadgeCount: document.querySelectorAll('[data-table-body] [data-col-id="section"] .cell-badge').length,
+            compactClass: document.querySelector('[data-table-shell]').classList.contains('is-section-hidden'),
+            storageValue: storageKey ? JSON.parse(window.localStorage.getItem(storageKey) || '{}') : {}
           };
         }"""
     )
     if (
-        int(visual_state["managerCount"]) > 1
-        or int(visual_state["visibleManagerCount"]) != 0
-        or int(visual_state["visibleResetCount"]) != 0
-        or visual_state["visibleColumnsLabel"]
-        or not visual_state["missingMetricLabelToggle"]
-        or not visual_state["missingScopeLabelToggle"]
-        or not visual_state["missingMetricKeyToggle"]
-        or not visual_state["missingScopeKindToggle"]
-        or not visual_state["missingSectionToggle"]
-        or not visual_state["missingUpdatedToggle"]
-        or visual_state["dateToggleCount"] != 0
+        restored_state["headerIds"][:2] != ["metric_label", "section"]
+        or restored_state["sectionCellCount"] < 1
+        or restored_state["sectionBadgeCount"] < 1
+        or restored_state["compactClass"]
+        or restored_state["storageValue"] != {"section_visible": True}
+        or int(restored_row["height"]) < int(hidden_row["height"]) + 4
     ):
-        raise AssertionError(f"old visible column manager must be removed while forced-hidden columns stay non-restorable, got {visual_state}")
+        raise AssertionError(f"restoring Section must return the column, badges and normal density, got {restored_state}, row={restored_row}")
     return {
-        "visible_column_manager_removed": True,
-        "forced_hidden_columns_non_restorable": True,
-        "state": visual_state,
+        "menu": menu_state,
+        "default_row": default_row,
+        "hidden": hidden_state,
+        "hidden_row": hidden_row,
+        "restored": restored_state,
+        "restored_row": restored_row,
     }
 
 
@@ -2128,7 +2316,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const snapshotRect = snapshotSummary ? snapshotSummary.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const qualityRect = quality ? quality.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const updatedRect = updated ? updated.getBoundingClientRect() : {left: 0, right: 0, width: 0};
+          const summaryRect = summary ? summary.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const snapshotStyles = snapshotSummary ? getComputedStyle(snapshotSummary) : null;
+          const qualityStyles = quality ? getComputedStyle(quality) : null;
+          const summaryStyles = summary ? getComputedStyle(summary) : null;
           const historyButton = header ? header.querySelector('[data-history-toggle]') : null;
           const historyLabel = header ? header.querySelector('[data-history-label]') : null;
           const historyIcon = header ? header.querySelector('.history-control-icon') : null;
@@ -2197,8 +2388,12 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             snapshot_summary_exists: !!snapshotSummary,
             snapshot_summary_visible: !!snapshotSummary && snapshotRect.width > 2,
             snapshot_updated_grouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
-            snapshot_updated_adjacent: !!quality && !!updated && !quality.hidden && updatedRect.left >= qualityRect.right && updatedRect.left - qualityRect.right <= 12,
-            snapshot_group_visual: !!snapshotStyles && ['flex', 'inline-flex'].includes(snapshotStyles.display) && parseFloat(snapshotStyles.borderTopWidth || '0') >= 1 && parseFloat(snapshotStyles.borderTopLeftRadius || '0') >= 10,
+            snapshot_updated_adjacent: !!quality && !!summary && !quality.hidden && summaryRect.left >= qualityRect.right && summaryRect.left - qualityRect.right <= 12,
+            snapshot_group_visual: !!snapshotStyles && ['flex', 'inline-flex'].includes(snapshotStyles.display) && parseFloat(snapshotStyles.borderTopWidth || '0') === 0 && snapshotStyles.backgroundColor === 'rgba(0, 0, 0, 0)',
+            independent_time_pills: !!qualityStyles && !!summaryStyles && parseFloat(qualityStyles.borderTopWidth || '0') >= 1 && parseFloat(summaryStyles.borderTopWidth || '0') >= 1 && parseFloat(qualityStyles.borderTopLeftRadius || '0') >= 10 && parseFloat(summaryStyles.borderTopLeftRadius || '0') >= 10,
+            time_pills_same_tone: !!qualityStyles && !!summaryStyles && qualityStyles.backgroundColor === summaryStyles.backgroundColor && qualityStyles.borderTopColor === summaryStyles.borderTopColor,
+            snapshot_bold_updated_regular: !!qualityStyles && !!summaryStyles && parseInt(qualityStyles.fontWeight || '0', 10) >= 700 && parseInt(summaryStyles.fontWeight || '0', 10) <= 500,
+            snapshot_has_no_inner_substrate: !!quality && !quality.classList.contains('status-pill') && quality.children.length === 0,
             snapshot_badge_count: header ? header.querySelectorAll('[data-vitrina-incident-quality-badge]').length : 0,
             updated_token_count: header ? header.querySelectorAll('[data-table-summary-updated]').length : 0,
             summary_separator_count: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : 0,
@@ -2266,6 +2461,10 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or not payload["snapshot_updated_grouped"]
         or not payload["snapshot_updated_adjacent"]
         or not payload["snapshot_group_visual"]
+        or not payload["independent_time_pills"]
+        or not payload["time_pills_same_tone"]
+        or not payload["snapshot_bold_updated_regular"]
+        or not payload["snapshot_has_no_inner_substrate"]
         or int(payload["snapshot_badge_count"]) != 1
         or int(payload["updated_token_count"]) != 1
         or int(payload["summary_separator_count"]) != 0
@@ -2349,13 +2548,14 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                   const snapshotSummary = header && header.querySelector('[data-table-snapshot-summary]');
                   const quality = header && header.querySelector('[data-vitrina-incident-quality-badge]');
                   const updated = header && header.querySelector('[data-table-summary-updated]');
+                  const summaryLine = header && header.querySelector('[data-table-summary-line]');
                   const rect = node => node ? node.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
                   const headerRect = rect(header);
                   const leftRect = rect(left);
                   const rightRect = rect(right);
                   const snapshotRect = rect(snapshotSummary);
                   const qualityRect = rect(quality);
-                  const updatedRect = rect(updated);
+                  const updatedRect = rect(summaryLine);
                   return {
                     documentWidth: document.documentElement.scrollWidth,
                     viewportWidth: window.innerWidth,
@@ -2365,6 +2565,7 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                     snapshotInside: snapshotRect.left >= headerRect.left - 1 && snapshotRect.right <= headerRect.right + 1,
                     snapshotUpdatedGrouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
                     snapshotUpdatedAdjacent: !!quality && !!updated && !quality.hidden && updatedRect.left >= qualityRect.right && updatedRect.left - qualityRect.right <= 12,
+                    timePillsInside: qualityRect.left >= snapshotRect.left - 1 && qualityRect.right <= snapshotRect.right + 1 && updatedRect.left >= snapshotRect.left - 1 && updatedRect.right <= snapshotRect.right + 1,
                     freshnessVisible: /(?:Свежесть|свеж:)/i.test(header ? (header.innerText || '') : ''),
                     separatorCount: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : -1,
                     sellerBadgeCount: header ? header.querySelectorAll('[data-seller-top-session]').length : -1,
@@ -2383,6 +2584,7 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                 or not layout["snapshotInside"]
                 or not layout["snapshotUpdatedGrouped"]
                 or not layout["snapshotUpdatedAdjacent"]
+                or not layout["timePillsInside"]
                 or layout["freshnessVisible"]
                 or int(layout["separatorCount"]) != 0
                 or int(layout["sellerBadgeCount"]) != 0
