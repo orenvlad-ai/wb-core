@@ -26,6 +26,16 @@ Authoritative docs должны описывать текущую реализа
 протокол и передаёт реализацию отдельному исполнителю; archive pointer:
 [retired curator workspace](13_codex_curator_workspace.md).
 
+Тот же boundary применяется к retired Global Watcher, external orchestration
+registry, Task Passport, acceptance envelope, logical release lane,
+shepherd/takeover и persistent arbiter: они существуют только как migration
+history и retained fail-closed compatibility, но не являются current
+execution, PR admission, release или owner-acceptance path. Current flow
+определяют только root `AGENTS.md`,
+[`07_codex_execution_protocol.md`](07_codex_execution_protocol.md) и
+[`11_github_release_train.md`](11_github_release_train.md); archive pointer —
+[`12_codex_global_orchestration.md`](12_codex_global_orchestration.md).
+
 ## Кураторский Протокол
 
 Перед техническим выводом, формулированием задачи, реализацией или проверкой результата другого агента необходимо сверить:

@@ -8,10 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shlex
 import sys
 from typing import Any, Iterable
-from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +107,6 @@ from apps.github_release_train_wait import (  # noqa: E402
 from apps.github_release_train_spec import (  # noqa: E402
     ACTIVE_PRIMARY_LABELS,
     ACTIVE_STATE_LABELS,
-    CANONICAL_MONITOR_URL,
     CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
     EXPLICIT_TASK_PROMPTS,
@@ -2568,7 +2565,7 @@ def _assert_goal_shepherd_regressions() -> None:
     assert NEEDS_RESUME_LABEL in _labels(no_auto_predecessor)
     completed.append("12_takeover_never_acknowledges_or_accepts")
 
-    protocol_sources = [
+    active_protocol_sources = [
         (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
         (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
             encoding="utf-8"
@@ -2576,39 +2573,41 @@ def _assert_goal_shepherd_regressions() -> None:
         (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
             encoding="utf-8"
         ),
-        (ROOT / "apps" / "github_release_train_wait.py").read_text(encoding="utf-8"),
     ]
-    for source in protocol_sources:
+    waiter_source = (ROOT / "apps" / "github_release_train_wait.py").read_text(
+        encoding="utf-8"
+    )
+    for source in (*active_protocol_sources, waiter_source):
         lowered = source.casefold()
         assert "открой встроенный browser" not in lowered
         assert "open the embedded browser" not in lowered
-    for source in protocol_sources[:3]:
-        for required in (
-            "TERMINAL_SUCCESS",
-            "CONTINUE_WAITING",
-            "CONTINUE_SAFE_PHASES",
-            "AWAIT_PHASE_CAPABILITY",
-            "OWN_ACTION",
-            "TAKEOVER_PREDECESSOR",
-            "RECOVER_OWN_CHAIN",
-            "EXTERNAL_BLOCKER",
-            "TERMINAL_FAILURE",
-            "remediation_exhausted",
-            "current_phase",
-            "blocked_phase",
-            "safe_phases_remaining",
-            "required_capability",
-            "capability_evidence",
-            "next_executable_action",
-            "--shepherd",
-            "--playwright-preflight",
-        ):
-            assert required in source
-    assert all(
-        ("local" in source.casefold() or "локаль" in source.casefold())
-        and "playwright" in source.casefold()
-        for source in protocol_sources
-    )
+    for source in active_protocol_sources:
+        assert "--shepherd" not in source
+        assert "--resume-owner" not in source
+    for required in (
+        "TERMINAL_SUCCESS",
+        "CONTINUE_WAITING",
+        "CONTINUE_SAFE_PHASES",
+        "AWAIT_PHASE_CAPABILITY",
+        "OWN_ACTION",
+        "TAKEOVER_PREDECESSOR",
+        "RECOVER_OWN_CHAIN",
+        "EXTERNAL_BLOCKER",
+        "TERMINAL_FAILURE",
+        "remediation_exhausted",
+        "current_phase",
+        "blocked_phase",
+        "safe_phases_remaining",
+        "required_capability",
+        "capability_evidence",
+        "next_executable_action",
+        "--shepherd",
+        "--playwright-preflight",
+    ):
+        assert required in waiter_source
+    assert "playwright" in "\n".join(active_protocol_sources).casefold()
+    assert "playwright" in waiter_source.casefold()
+    assert "local" in waiter_source.casefold() or "локаль" in waiter_source.casefold()
     help_text = build_parser().format_help()
     for required in (
         "--shepherd",
@@ -2625,7 +2624,7 @@ def _assert_goal_shepherd_regressions() -> None:
         "never terminal",
     ):
         assert required in help_text
-    completed.append("13_cli_protocol_never_requires_embedded_browser")
+    completed.append("13_active_protocol_avoids_legacy_shepherd_and_embedded_browser")
 
     this_source = Path(__file__).read_text(encoding="utf-8")
     for real_pr_number in (600 + 84, 700 - 10):
@@ -2938,20 +2937,13 @@ def _assert_phase_local_goal_regressions() -> None:
             "PRODUCTION_READ_PREFLIGHT",
             "PRODUCTION_MUTATION_PREFLIGHT",
             "PRODUCTION_UI_PREFLIGHT",
-            "CONTINUE_SAFE_PHASES",
-            "AWAIT_PHASE_CAPABILITY",
-            "current_phase",
-            "blocked_phase",
-            "safe_phases_remaining",
-            "required_capability",
-            "capability_evidence",
-            "next_executable_action",
             "query-only",
-            "repo-owned runner",
             "dry-run",
             "fixtures/mocks",
         ):
             assert required in source
+        assert "--shepherd" not in source
+        assert "--resume-owner" not in source
     assert EXIT_CONTINUE_SAFE_PHASES == 8
     completed.append("10_capability_words_never_create_global_blocker")
 
@@ -3079,29 +3071,7 @@ def _assert_visible_codex_task_lifecycle_contract() -> None:
     )
 
 
-def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
-    """Evaluate the bounded qualifiers used by the canonical monitor regression."""
-
-    tokens = shlex.split(query)
-    if "is:pr" in tokens and item.get("kind") != "pr":
-        return False
-    if "is:open" in tokens and item.get("state") != "open":
-        return False
-    if "is:closed" in tokens and item.get("state") != "closed":
-        return False
-
-    labels = {str(label) for label in item.get("labels") or []}
-    for token in tokens:
-        if token.startswith("-label:") and token.removeprefix("-label:") in labels:
-            return False
-        if token.startswith("label:"):
-            alternatives = set(token.removeprefix("label:").split(","))
-            if not labels & alternatives:
-                return False
-    return True
-
-
-def _assert_codex_task_class_and_monitor_contract() -> None:
+def _assert_active_protocol_cutover_contract() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     execution = (
         ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
@@ -3109,205 +3079,117 @@ def _assert_codex_task_class_and_monitor_contract() -> None:
     release_train = (
         ROOT / "docs" / "architecture" / "11_github_release_train.md"
     ).read_text(encoding="utf-8")
-    orchestration = (
+    orchestration_archive = (
         ROOT / "docs" / "architecture" / "12_codex_global_orchestration.md"
     ).read_text(encoding="utf-8")
-    watcher_prompt = (
-        ROOT / "docs" / "policies" / "codex_watcher_prompt_v1.md"
+    source_policy = (
+        ROOT / "docs" / "architecture" / "03_source_of_truth_policy.md"
     ).read_text(encoding="utf-8")
-    arbiter_prompt = (
-        ROOT / "docs" / "policies" / "codex_arbiter_prompt_v1.md"
-    ).read_text(encoding="utf-8")
-    watcher_config = json.loads(
-        (ROOT / "packages" / "contracts" / "codex_watcher_v1.json").read_text(
-            encoding="utf-8"
-        )
+    pr_template = (ROOT / ".github" / "pull_request_template.md").read_text(
+        encoding="utf-8"
     )
-    passport_schema = json.loads(
-        (
-            ROOT
-            / "packages"
-            / "contracts"
-            / "codex_task_passport_v1.schema.json"
-        ).read_text(encoding="utf-8")
-    )
+    active_sources = (agents, execution, release_train)
+    active_joined = "\n".join(active_sources).casefold()
 
-    for source in (agents, execution):
-        folded = source.casefold()
+    for source in active_sources:
+        folded = re.sub(r"\s+", " ", source.casefold())
         for required in (
-            "DISPATCH_REQUEST",
-            "discussion-only",
-            "запускай/запусти задачу",
-            "передавай/отправляй в Codex",
-            "начинай/делай/реализуй по этому плану",
-            "текущей уже исполняемой Codex-задаче",
-            "exact non-terminal target",
-            "user-owned Codex task",
-            "create_thread",
-            "spawn_agent",
-            "TARGET_CREATE_READBACK",
-            "wait_threads(timeoutMs: 0)",
-            "Task Passport",
-            "register-task",
-            "MONITORING_CAPABILITY_LIMITATION",
-        ):
-            assert required.casefold() in folded
-        assert "ACTIVE_ADDITION" in source and "ACTIVE_LOOP_RECOVERY" in source
-        assert "ни одно исключение не разрешает `discussion-only` implementation" in folded
-
-    for source in (agents, execution):
-        folded = source.casefold()
-        assert "пользователь не выбирает" in folded
-        assert "не начинает prompt специальной строкой" in folded or (
-            "не начинает prompt" in folded and "специальной строкой" in folded
-        )
-        assert "неоднознач" in folded and "`стандарт`" in folded
-        for mode in ("диагностик", "стандарт", "loop"):
-            assert mode in folded
-
-    for source in (agents, execution, release_train):
-        folded = source.casefold()
-        for required in (
-            "NEW_TASK",
-            "ACTIVE_ADDITION",
-            "ACTIVE_LOOP_RECOVERY",
-            "TERMINAL_STALE_REFERENCE",
-            "одинаковый чат",
+            "task:standard",
+            "scope:repo-only",
+            "scope:live-runtime",
+            "scope:production-mutation",
+            "open non-draft",
+            "baseline",
+            "release:ready",
             "release:done",
             "release:production",
-            "enqueue-new",
-            "enqueue-recovery",
-            "correct-to-new",
-            "--resume-owner --no-ack-agent",
-            "deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>",
-        ):
-            assert required.casefold() in folded
-        assert "root > PR" in source or "root больше номера PR" in source
-        assert "retry-blocked" in source and "classification" in folded
-
-    for source in (agents, execution, release_train, orchestration):
-        folded = source.casefold()
-        for required in (
-            "глобальн",
-            "watcher",
-            "task passport",
-            "release:staged",
-            "release:lane-owner",
-            "strict human",
-            "задача принята",
+            "exact",
+            "github release train",
         ):
             assert required in folded
-        assert "10" in folded and "минут" in folded
-        assert "retired" in folded
-    for source in (execution, release_train, orchestration):
-        assert "release:retired" in source
-        assert "release-lane <ANCHOR_PR> task <TASK_ID> revision <POSITIVE_TASK_REVISION>" in source
-    assert "## Глобальный Watcher И Арбитр" in execution
-    assert "## Глобальный Watcher И Canonical Monitoring" in release_train
-    assert "# Global Codex Orchestration v1" in orchestration
+        for retired_command_surface in (
+            "apps/codex_task_orchestrator.py",
+            "/wb-core orchestration ",
+            "release:staged",
+            "release:lane-owner",
+            "--shepherd",
+            "--resume-owner",
+            "register-task",
+            "begin-run",
+            "heartbeat-finish",
+            "target_create_readback",
+        ):
+            assert retired_command_surface not in folded
+
+    for retired_term in (
+        "global watcher",
+        "registry",
+        "task passport",
+        "acceptance envelope",
+        "logical release lane",
+        "shepherd/takeover",
+        "arbiter",
+        "heartbeat",
+        "callback",
+    ):
+        assert retired_term in active_joined
+    for prohibition in (
+        "не запуска",
+        "не регистр",
+        "не восстанав",
+        "не являются current agent instructions",
+    ):
+        assert prohibition in active_joined
+
+    assert "WB_CORE_ORCHESTRATION_REQUIRED=false" in agents
+    assert "WB_CORE_ORCHESTRATION_REQUIRED=false" in execution
+    assert "WB_CORE_ORCHESTRATION_REQUIRED=false" in release_train
+    assert "добавляет `release:ready`" in re.sub(r"\s+", " ", agents)
+    assert "добавляет `release:ready`" in re.sub(r"\s+", " ", execution)
+    assert "добавляет `release:ready`" in re.sub(r"\s+", " ", release_train)
+    assert "только владелец пишет" in agents
+    assert "не являются owner acceptance" in re.sub(r"\s+", " ", execution)
+    assert "technical closure не является owner acceptance" in release_train.casefold()
+    assert "Задача принята" in agents
+    assert "Задача принята" in execution
+    assert "Задача принята" in release_train
+
+    archive_folded = re.sub(r"\s+", " ", orchestration_archive.casefold())
+    for required in (
+        "archived global codex orchestration",
+        "archive pointer",
+        "migration history",
+        "не является agent instruction",
+        "git history",
+        "retained compatibility",
+    ):
+        assert required in archive_folded
+    assert "e44f548982900e286a2c1a73fdf439d0c8a49843" in orchestration_archive
+    assert "не active flow" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "retired global watcher" in source_policy.casefold()
 
     for required in (
-        "begin-run",
-        "heartbeat-record-release-lane",
-        "--queue-evidence-json",
-        "wait_threads(timeoutMs: 0)",
-        "record-failure",
-        "REPLACE_EXECUTOR",
-        "close-incident",
-        "archive readback",
-        "prepare-owner-handoff",
-        "confirm-watcher-retirement",
-        "Ожидается приёмка владельца",
-        "rotation_due=true",
-        "Задача принята",
-        "Блокер",
+        "task:standard",
+        "ровно одна `scope:*`",
+        "successful `baseline`",
+        "release:ready",
+        "не означает owner acceptance",
     ):
-        assert required.casefold() in watcher_prompt.casefold()
-    for required in (
-        "wb-core-arbiter-brief/v1",
-        "Do not request or reconstruct the full chat",
-        "wb-core-arbiter-decision/v1",
-        "task_revision",
-        "evidence_digest",
-    ):
-        assert required in arbiter_prompt
+        assert required in pr_template
 
-    assert watcher_config["schema"] == "wb-core-codex-watcher/v1"
-    assert watcher_config["repository"] == "orenvlad-ai/wb-core"
-    assert watcher_config["cadence_minutes"] == 10
-    assert watcher_config["watcher"]["model"] == "gpt-5.6-luna"
-    assert watcher_config["arbiter"]["model"] == "gpt-5.6-sol"
-    assert watcher_config["watcher"]["target_batch_limit"] == 8
-    assert watcher_config["feature_flag"]["default"] is False
-    assert watcher_config["report"]["renderer"] == (
-        "python3 apps/codex_task_orchestrator.py report"
-    )
-    assert watcher_config["report"]["unit"] == "acceptance-envelope-workstream"
-    assert watcher_config["report"][
-        "owner_acceptance_unit"
-    ] == "acceptance-envelope"
-    assert watcher_config["heartbeat_driver"][
-        "all_planned_targets_required_before_actuation"
-    ] is True
-    assert watcher_config["attention_delivery"]["schema"] == (
-        "wb-core-attention-event/v1"
-    )
-    assert watcher_config["attention_delivery"]["transport_semantics"] == (
-        "at-least-once-with-stable-event-id"
-    )
-    assert watcher_config["acceptance"][
-        "fail_closed_when_curator_has_multiple_waiting_envelopes"
-    ] is True
-    assert watcher_config["acceptance"][
-        "required_member_addition_reopens_envelope"
-    ] is True
-    assert watcher_config["role_pinning"]["heartbeat_repin"] is False
-    assert watcher_config["rotation"][
-        "old_watcher_retirement_evidence_required"
-    ] is True
-    assert watcher_config["executor_succession"][
-        "archive_only_after_successor_readback"
-    ] is True
-    assert passport_schema["properties"]["schema"]["const"] == (
-        "wb-core-task-passport/v1"
-    )
-    assert passport_schema["additionalProperties"] is False
-
-    for source in (agents, release_train):
-        assert CANONICAL_MONITOR_URL in source
-        assert "apps/github_release_train_spec.py" in source
-    query = parse_qs(urlparse(CANONICAL_MONITOR_URL).query)["q"][0]
-    tokens = shlex.split(query)
-    assert "is:pr" in tokens
-    assert "is:open" not in tokens and "is:closed" not in tokens
-    assert "-label:release:superseded" in tokens
-    assert "sort:created-asc" in tokens
-    label_tokens = [token for token in tokens if token.startswith("label:")]
-    assert len(label_tokens) == 1
-    assert set(label_tokens[0].removeprefix("label:").split(",")) == (
-        MONITORED_RELEASE_LABELS
-        | {RELEASE_LANE_OWNER_LABEL, FINANCE_DEPLOY_LEASE_LABEL}
-    )
-    assert STAGED_LABEL in MONITORED_RELEASE_LABELS
-    assert DONE_LABEL not in MONITORED_RELEASE_LABELS
-    assert PRODUCTION_LABEL not in MONITORED_RELEASE_LABELS
-    assert RETIRED_LABEL in TERMINAL_LABELS
-
-    closed_merged_gate = {
-        "kind": "pr",
-        "state": "closed",
-        "merged": True,
-        "labels": {AWAITING_UI_LABEL, LOOP_TASK_LABEL, LIVE_RUNTIME_LABEL},
-    }
-    assert _monitor_query_matches(query, closed_merged_gate)
-    assert not _monitor_query_matches(
-        query,
-        {**closed_merged_gate, "labels": {AWAITING_UI_LABEL, SUPERSEDED_LABEL}},
-    )
-    assert not _monitor_query_matches(
-        query,
-        {"kind": "pr", "state": "closed", "merged": True, "labels": {PRODUCTION_LABEL}},
-    )
+    workflow = (
+        ROOT / ".github" / "workflows" / "release-train.yml"
+    ).read_text(encoding="utf-8")
+    implementation = (
+        ROOT / "apps" / "github_release_train.py"
+    ).read_text(encoding="utf-8")
+    assert "/wb-core orchestration " not in workflow
+    assert "apps/codex_task_orchestrator.py" not in workflow
+    assert "release:ready" in workflow
+    assert "WB_CORE_ORCHESTRATION_REQUIRED" in workflow
+    assert "exact" in implementation.casefold()
+    assert "DONE_LABEL" in implementation
+    assert "PRODUCTION_LABEL" in implementation
 
 def _assert_machine_classification_and_state_spec() -> None:
     for line, expected in EXPLICIT_TASK_PROMPTS.items():
@@ -4237,6 +4119,7 @@ def main() -> int:
     _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
     _assert_visible_codex_task_lifecycle_contract()
+    _assert_active_protocol_cutover_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()
     _assert_two_parallel_loop_roots()

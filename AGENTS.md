@@ -1,243 +1,240 @@
 # Рабочий протокол `wb-core`
 
-Этот файл — самодостаточный entrypoint для Codex CLI, Codex в приложении ChatGPT для Mac, локального проекта Codex и обычного ChatGPT, читающего репозиторий. Доменные детали не дублируются здесь: они живут в authoritative docs.
+Этот файл — самодостаточный operational entrypoint для Codex и ChatGPT,
+работающих с репозиторием. Доменная архитектура живёт в
+`docs/architecture/*`, `docs/modules/*` и `migration/*`; здесь находится ровно
+один действующий execution flow.
 
-## Active orchestration cutover
+## Действующий flow
 
-Этот раздел имеет приоритет над историческими orchestration-пассажами ниже.
-Обычная задача использует простой автономный flow:
+Обычная change-задача проходит один последовательный контур:
 
-1. новый куратор без напоминания задаёт себе короткое полностью видимое имя
-   `WBC · <короткая тема> · К<n>` и закрепляет задачу;
-2. пользователь обсуждает цель с куратором;
-3. после согласования куратор создаёт ровно одного прямого исполнителя, задаёт
-   ему связанное имя `WBC · <та же короткая тема> · И<n>` и закрепляет задачу;
-4. исполнитель работает в отдельной branch/worktree, запускает targeted checks
-   и создаёт open non-draft PR с `task:standard` и ровно одной `scope:*` label;
-5. после successful `baseline` PR получает `release:ready`;
-6. существующий GitHub Release Train повторно проверяет current head/checks,
-   сериализует sync/merge и выполняет применимый deploy/verify;
-7. исполнитель передаёт короткий технический отчёт куратору, куратор делает
-   owner handoff; только владелец пишет `Задача принята` и вручную открепляет
-   задачи.
+1. Новый куратор без напоминания задаёт себе короткое полностью видимое имя
+   `WBC · <короткая тема> · К<n>` и закрепляет задачу.
+2. Пользователь обсуждает с куратором цель, bounded scope, acceptance и closure.
+3. После согласования куратор создаёт ровно одного прямого user-owned
+   исполнителя, задаёт ему связанное имя
+   `WBC · <та же короткая тема> · И<n>` и закрепляет задачу. Куратор не
+   реализует change сам и не заменяет исполнителя subagent-ом.
+4. Исполнитель работает в отдельной branch/worktree от актуального
+   `origin/main`, обновляет только необходимые code/docs/tests и выполняет
+   targeted checks и semantic self-review.
+5. Исполнитель открывает один open non-draft PR в `main` из same-repository
+   branch, ставит `task:standard` и ровно одну label:
+   `scope:repo-only`, `scope:live-runtime` или, только для фактического apply,
+   `scope:production-mutation`.
+6. После successful required check `baseline` на current exact head исполнитель
+   добавляет `release:ready`. До этого label не ставится.
+7. GitHub Release Train повторно проверяет current head, labels, baseline,
+   mergeability и safety gates, при необходимости синхронизирует branch с
+   current `main`, запускает fresh baseline и сериализует merge и применимый
+   exact-SHA deploy/verify.
+8. `scope:repo-only` завершается только на `release:done`;
+   `scope:live-runtime` — только на `release:production` после canonical
+   deploy/verify. `scope:production-mutation` использует отдельный human-gated
+   terminalization contract и автоматически не выпускается.
+9. Исполнитель передаёт куратору короткий технический отчёт с PR, final SHA и
+   проверками. Куратор делает owner handoff. Техническое завершение, merge и
+   release label не являются owner acceptance: только владелец пишет
+   `Задача принята` и вручную открепляет задачи.
 
-Единственный подробный contract интерфейсных имён, нумерации, pin/unpin и
-owner acceptance находится в разделе [«Видимый Жизненный Цикл
-Codex-Задач»](docs/architecture/07_codex_execution_protocol.md#видимый-жизненный-цикл-codex-задач).
-Project/bootstrap instructions только направляют к этому `AGENTS.md` и current
-execution protocol, но не копируют шаблон как второй source of truth.
-Агенты не синтезируют owner acceptance и не открепляют задачи автоматически.
+Ветви, PR и release labels других задач не изменяй. Чужая активная release
+операция — штатное ожидание; она не разрешает снимать labels, обходить очередь
+или вмешиваться в live release.
+
+## Выключенная legacy-оркестрация
 
 `WB_CORE_ORCHESTRATION_REQUIRED=false`. Global Watcher, external orchestration
 registry, Task Passport, acceptance envelope, curator workspace automation,
-logical lane ownership и обязательный LOOP/chat callback выведены из active
-flow. Они не требуются для PR eligibility, release или closure. Исторические
-описания этих механизмов в этом файле и документации остаются только migration
-evidence и не являются действующими требованиями. Не запускай их и не создавай
-заменяющий scheduler/reviewer/arbiter/control plane.
+logical release lane, orchestration admission, shepherd/takeover, persistent
+arbiter и обязательные heartbeat/chat callback механизмы выведены из active
+flow.
 
-GitHub Release Train core и все product safety contracts, включая Finance,
-storage, live deploy/verify и production mutation, остаются без функциональных
-изменений. Техническое завершение никогда не означает owner acceptance.
+Не запускай, не регистрируй и не восстанавливай эти механизмы; не создавай им
+замену в виде scheduler, reviewer, reporter, arbiter или control plane. Они не
+нужны для dispatch, PR eligibility, `release:ready`, merge, deploy, closure или
+owner acceptance. Исторический contract доступен только через
+[`docs/architecture/12_codex_global_orchestration.md`](docs/architecture/12_codex_global_orchestration.md).
+Retained compatibility code и historical GitHub labels не являются agent
+instructions и не разрешают начинать новый legacy-контур.
 
-## Источники истины
+GitHub Release Train core, Finance/storage safety, exact-SHA deploy/verify,
+production-mutation gates и manual owner acceptance остаются действующими без
+ослабления.
+
+## Видимый lifecycle ролей
+
+Единственный подробный contract имён, нумерации, pin/unpin и owner acceptance
+находится в разделе [«Видимый жизненный цикл Codex-задач»](docs/architecture/07_codex_execution_protocol.md#видимый-жизненный-цикл-codex-задач).
+
+Короткие правила:
+
+- exact topic у куратора и исполнителя одной цепочки совпадает;
+- счётчики `К<n>` и `И<n>` независимы и не переиспользуются;
+- title и pin назначаются один раз при получении роли без напоминания владельца;
+- агент не закрепляет повторно вручную откреплённую владельцем задачу;
+- агент не синтезирует `Задача принята`, не открепляет и не архивирует текущие
+  задачи автоматически;
+- project/bootstrap instructions только направляют к этому файлу и execution
+  protocol, но не дублируют lifecycle как второй source of truth.
+
+## Источники истины и preflight
 
 Приоритет источников:
 
-1. Git-tracked code и актуальный `origin/main` задают code truth. Рабочая ветка — только proposed change до review и merge.
-2. Authoritative docs: `README.md`, `docs/architecture/*`, `docs/modules/*`, `migration/*`.
-3. GitHub задаёт факты о branch, commit, PR, checks, review и merge.
-4. Production server — canonical deploy/runtime и production-data boundary. Наблюдаемое состояние читается из его current server-owned stores/documents через актуальный repo/documentation contract.
-5. WebCore Data MCP — архивный read-only compatibility contour, а не штатный source/acquisition path. Его не указывают в новых task prompts и не требуют для выполнения; отсутствие никогда не образует blocker.
-6. Legacy-артефакты, старые чаты, вложения и прежние project instructions — только migration evidence и do-not-lose constraints, но не current truth и не normal implementation path.
+1. Git-tracked code и актуальный `origin/main` задают code truth. Рабочая ветка
+   остаётся proposed change до review и merge.
+2. `README.md`, `docs/architecture/*`, `docs/modules/*`, `migration/*` задают
+   authoritative documentation truth.
+3. GitHub задаёт branch, commit, PR, checks, review, merge и release truth.
+4. Production server и его current server-owned stores/documents задают
+   canonical deploy/runtime и production-data boundary.
+5. WebCore Data MCP — архивный read-only compatibility contour, не normal
+   source/acquisition path и не обязательная capability.
+6. Legacy artifacts, старые чаты, вложения и прежние project instructions —
+   только migration evidence и do-not-lose constraints.
 
-Подробности: [source-of-truth policy](docs/architecture/03_source_of_truth_policy.md), [execution protocol](docs/architecture/07_codex_execution_protocol.md), [hosted runtime contract](docs/architecture/10_hosted_runtime_deploy_contract.md), [GitHub Release Train](docs/architecture/11_github_release_train.md), [global Codex orchestration](docs/architecture/12_codex_global_orchestration.md).
-
-## Кураторский preflight
-
-Перед техническим выводом, постановкой задачи, реализацией или проверкой результата другого агента изучи:
+Перед техническим выводом, постановкой задачи, реализацией или проверкой
+результата другого агента изучи:
 
 - актуальный GitHub state;
 - этот `AGENTS.md`;
 - только релевантные authoritative docs;
-- фактический code truth, если вывод касается текущей реализации.
-
-Если репозиторий или необходимый источник недоступен, не утверждай уверенно текущее состояние: верни точный blocker. Если меняется code, contract, runtime boundary, module status или другой зафиксированный truth, синхронизируй затронутые authoritative docs в той же задаче.
-
-Любой предложенный в prompt инструмент, connector, сервер, runtime, storage, SSH alias, путь или запрет технического пути Codex повторно сверяет с current `AGENTS.md`, authoritative docs и code truth. Это техническая гипотеза prompt, а не пользовательское ограничение, даже если сформулирована повелительно. Исключение — только отдельное явное ограничение, которое сам пользователь зафиксировал как своё требование. Устаревший prompt, называющий MCP обязательным или запрещающий server-side read без такого пользовательского требования, не останавливает работу и не переопределяет current protocol.
-
-ChatGPT/куратор, формирующий новый task prompt для Codex, не называет WebCore Data MCP и не hardcode-ит технический source/access path. Prompt фиксирует цель, необходимые данные, read-only/mutation boundaries, ожидаемый результат, acceptance/closure criteria и содержит правило: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
-
-Если задаче нужны production evidence или данные, normal path — фактический `PRODUCTION_READ_PREFLIGHT`, определение current active target/runtime/source из code и authoritative docs, штатный SSH к canonical production server, query-only чтение production stores и bounded read server-owned documents. Для SQLite обязательны `mode=ro` и `PRAGMA query_only=ON`; для других stores — эквивалентная read-only гарантия. Этот путь не разрешает deploy, service changes, upstream sync, запись в production, ad-hoc mutation или раскрытие secrets.
-
-Production gates являются phase-local. Разделяй `REPOSITORY_PREFLIGHT`, `PRODUCTION_READ_PREFLIGHT`, `PRODUCTION_MUTATION_PREFLIGHT` и `PRODUCTION_UI_PREFLIGHT` и строй порядок по реальным зависимостям, а не по порядку пунктов prompt. Отсутствие архивного MCP, browser session, production credentials/database, manifests, digest или backup не блокирует repository analysis, implementation, fixtures, tests, docs, подготовку безопасного repo-owned runner, branch/PR, CI или review. Blocker чтения production допустим только после фактической проверки canonical server-side path и точной ошибки required access либо доказанного отсутствия необходимых данных. Перед blocked handoff выполни все независимые безопасные фазы и докажи, что недоступная capability нужна непосредственному следующему действию.
-
-Для будущей production-data mutation runner всё равно реализуется и тестируется на fixtures/mocks до максимально возможного repo-only состояния. Канонический runner обязан иметь dry-run по умолчанию, отдельный explicit apply, bounded scope, machine-readable manifest, pre-change digest, backup/evidence contract, expected affected records, non-target invariants, idempotency либо документированный recovery, post-apply readback и reconciliation. Случайные локальные scripts, ad-hoc SQL и mutation через архивный read-only MCP запрещены.
-
-## Discussion → отдельная Codex-задача
-
-`discussion-only` — это initiating Chat/кураторский thread, в котором пользователь обсуждает, уточняет или утверждает план, но ещё не выбрал текущий thread как exact исполняемую Codex-задачу. После такого обсуждения фразы «запускай/запусти задачу», «передавай/отправляй в Codex», «начинай/делай/реализуй по этому плану» и смысловые эквиваленты всегда классифицируются как `DISPATCH_REQUEST`. Неоднозначность разрешается в пользу отдельной user-owned Codex task/thread: команда запуска не означает implementation в initiating discussion thread и не даёт ему authority создавать branch, менять файлы или выполнять план.
-
-Допустимы только два явных исключения:
-
-- пользователь отдельно требует выполнить работу прямо в текущей уже исполняемой Codex-задаче;
-- пользователь явно продолжает exact non-terminal target, а его active identity подтверждена readback и continuity классифицирована как `ACTIVE_ADDITION` либо `ACTIVE_LOOP_RECOVERY`.
-
-Первое исключение действует только когда current thread сам является доказанной исполняемой target task. Во втором случае initiating discussion thread отправляет bounded follow-up в подтверждённый existing target, а не реализует задачу сам. Ни одно исключение не разрешает `discussion-only` implementation.
-
-При `DISPATCH_REQUEST` initiating thread останавливается на curator/dispatcher boundary, формирует полный task prompt и использует supported user-owned task/thread creation capability (`create_thread` или актуальный эквивалент). `spawn_agent`, subagent, internal multi-agent delegation, fork без отдельной user-owned task identity и реализация в initiating thread не являются dispatch.
-
-Dispatch и monitoring образуют одну неоткладываемую `launch operation` в том же turn:
-
-1. Сформировать versioned Task Passport: цель, acceptance/closure, границы, autonomy envelope и initial resource set.
-2. `TARGET_CREATE_READBACK`: создать отдельный target, получить exact target ID и bounded `wait_threads(timeoutMs: 0)` snapshot, подтверждающий доставку prompt и фактический status.
-3. Переименовать и закрепить curator/executor, доказать exact pin readback и только затем атомарно зарегистрировать identities, assignment-time pin evidence и user-level acceptance envelope через `apps/codex_task_orchestrator.py register-task`. Missing pin/readback fail closed. Обычная задача создаёт собственный root; corrective child явно связывается с незавершённым envelope родительской цели, атомарно переоткрывает его и инвалидирует прежнюю сдачу владельцу.
-4. Проверить, что ровно одно активное поколение глобального Watcher существует и читает новую запись. Отдельная heartbeat automation для каждой задачи не создаётся.
-5. Только после target/readback/registry evidence выдать ровно один короткий dispatch summary и завершить текущий turn. UI-card или create-call без exact readback не являются подтверждением.
-
-Если user-owned target creation недоступен, exact ID не получен либо `TARGET_CREATE_READBACK` не подтверждает доставку, dispatch fail closed. Если target подтверждён, но registry/Watcher временно недоступен, execution продолжается, а launch фиксирует `MONITORING_CAPABILITY_LIMITATION`; fallback-discovery глобального Watcher подхватывает только задачи проекта/repository `orenvlad-ai/wb-core`, никогда не сторонние или projectless chats.
-
-После launch curator работает только event-driven: steady state — завершённый turn/idle без model turn. Он не опрашивает executor, не запускает циклы `wait_threads`/`read_thread`, не делает периодический GitHub review и не создаёт собственный heartbeat. Нормальные wake sources — новое сообщение пользователя или exact attention от глобального Watcher. После одного bounded acknowledgement/decision/follow-up curator снова завершает turn. Только Watcher периодически читает executor; curator никогда не входит в target contour.
-
-Front-door parity относится только к свежему обычному чату внутри ChatGPT project `wb_core_3`, который владелец начинает естественной задачей без service prompt. Local/remote Codex task, cloud work, fork с унаследованной историей и manual «усни» не заменяют этот вход. Если Desktop capability не умеет программно создать такой чат, repository closure оставляет `FRONT_DOOR_CANARY_READY`: единственное действие владельца — создать этот чат и отправить одну небольшую естественную задачу; дальнейший dispatch/idle/attention/ack lifecycle обязан пройти без служебных инструкций. Существующие вручную исправленные пары являются только backend/load evidence.
-
-## Внутренний режим выполнения
-
-Пользователь не выбирает служебный класс и не начинает prompt специальной строкой. Codex определяет режим автоматически из требуемого результата:
-
-- исключительно read-only анализ работает как `diagnostic` и не меняет files/GitHub/production;
-- обычная реализация и пользовательский artifact работают как `standard` с полным применимым closure;
-- многократный deploy → production UI Flow → recovery до визуально принятого результата включает внутренний `loop`-контур.
-
-Неоднозначность всегда означает `standard`, а не уточняющий вопрос. GitHub labels `task:standard` и `task:loop` остаются внутренними machine states и не требуют служебной формулировки пользователя. Режим не расширяет requested scope или authority.
-
-Task class и task continuity — два разных решения. Class выбирает `STANDARD`/`LOOP`/`DIAGNOSTIC`, а continuity выбирает одну из машинных категорий `NEW_TASK`, `ACTIVE_ADDITION`, `ACTIVE_LOOP_RECOVERY`, `TERMINAL_STALE_REFERENCE`.
-
-- Только явное продолжение незавершённой активной задачи может наследовать её branch, PR и identity.
-- `release:done`, `release:production` и `release:superseded` — terminal boundary: после неё нельзя наследовать branch, PR, task identity, LOOP root, acknowledgement, heartbeat или recovery identity.
-- Новый дефект после terminal closure всегда получает новую задачу и новый PR, даже в том же чате, на том же экране или в том же функциональном разделе.
-- Формулировки «новая задача», «отдельная задача», «самостоятельная задача» и «новый LOOP» всегда означают `NEW_TASK`.
-- Одинаковый чат или функциональная область сами по себе ничего не доказывают. При любой неоднозначности выбирай независимую `NEW_TASK`.
-- Task class `LOOP` сам по себе не означает recovery. `ACTIVE_LOOP_RECOVERY` допустим только для дефекта, найденного во время текущего незавершённого `release:awaiting-ui`.
-
-### `ДИАГНОСТИКА`
-
-Строго `read-only`: разрешены чтение code/docs, GitHub state, логов и production evidence; запрещены изменения файлов, branch, commit, PR, labels, merge, deploy и production mutations. Итог содержит подтверждённый диагноз, доказательства и варианты решения. Найденное исправление выполняется только отдельной задачей `СТАНДАРТ` или `LOOP`.
-
-### `СТАНДАРТ`
-
-Для repo-changing и runtime-задач — полный применимый closure в отдельной branch/worktree и PR. Codex добавляет `task:standard`, ровно одну `scope:*` label и после pre-release proof ставит `release:staged`; только глобальный Watcher допускает exact head в `release:ready`. Release Train владеет `sync/checks/merge/deploy/verify`, а логическая задача удерживает `release:lane-owner` через все свои PR, deploy и recovery до технического завершения цели. `repo-only` завершается только на `release:done`, `live-runtime` — на `release:production`; human-gated `production-mutation` завершается на `release:production` только после Actions-owned exact-evidence terminalization ниже. Чужая линия выпуска — нормальное ожидание, а не blocker. Handoff содержит logical task ID, PR, merge SHA и проверки. Единственное исключение — `user-artifact`: он не создаёт GitHub-задачу.
-
-### `LOOP`
-
-Итерация с production UI Flow; пользователь обычно запускает её через `/goal`, но при неактивном формальном Goal Mode Loop-протокол всё равно обязателен. Используются отдельная branch/worktree и PR с `task:loop + scope:live-runtime`. `loop:root-*` и `release:ready` для LOOP вручную не назначаются.
-
-Новый самостоятельный LOOP после successful `baseline` регистрируется exact command `/wb-core loop enqueue-new <PR> head <HEAD_SHA>`: repo-owned handler создаёт `loop:root-<собственный PR>`, new-root proof и атомарно ставит `release:ready`. Recovery регистрируется отдельной командой `/wb-core loop enqueue-recovery <PR> head <HEAD_SHA> gate <ACTIVE_GATE_PR> root <ROOT>` и допускается только при active `release:awaiting-ui` exact root. Root меньше номера PR означает recovery, root равен номеру PR — новую цепочку, root больше номера PR запрещён. Чужой active gate для нового root — normal waiting, не blocker.
-
-Перед каждым LOOP merge/deploy Release Train после sync и baseline ставит `release:awaiting-agent`. Активная Codex-сессия подтверждает readiness GitHub-native acknowledgement, привязанным к номеру PR и exact head SHA. Ack одноразовый, потребляется непосредственно перед merge, становится недействительным после изменения head и обязателен заново для каждого recovery PR. Пока ack нет, production и остальная очередь не меняются. Просроченное ожидание получает overlay `release:needs-resume` и точную команду восстановления, но никакого автоматического ack или пропуска очереди.
-
-После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime`, затем repo-owned recovery registration связывает его с exact gate/root; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет `/wb-core loop accept-ui <PR> deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>`. Acceptance требует repo-owned deployed-SHA proof и допустим только для последнего задеплоенного PR. Только он получает `release:production`; предыдущие merged iterations теряют stale release states, а доказанно заменённые unmerged recovery PR получают `release:superseded` и закрываются. После terminal acceptance этот root нельзя возобновить.
-
-Чужие `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui` и занятый global production gate всегда являются normal waiting, а не blocker. Elapsed time, число polls/goal-turns и неизменность GitHub state эту классификацию не меняют. При живом owner продолжай waiter/heartbeat; если bounded goal-turn заканчивается, следующий turn продолжает тот же Goal, не завершая общую задачу.
-
-Потерянный LOOP owner на `ready/running/awaiting-agent/awaiting-ui` получает overlay `release:needs-resume`. Это не blocker, а takeover-path: после подтверждения machine status `owner=unowned`, exact head, deployed SHA/root и сохранения LOOP-root isolation новый владелец запускает `python3 apps/github_release_train_wait.py <PREDECESSOR_PR> --resume-owner --no-ack-agent`. Resume идемпотентен и сам не выполняет ack-agent или accept-ui. Код `4` означает ownership resumed/next action required, а не terminal handoff. Затем агент восстанавливает контекст predecessor из PR/status/diff/docs, завершает его точный этап, выполняет локальный UI Flow при `awaiting-ui`, принимает только exact deployed SHA с достаточным evidence, ждёт terminal predecessor и без напоминания возвращается к shepherd собственного PR. Без `release:needs-resume` и доказанного lost-owner takeover запрещён.
-
-## Глобальный Watcher и арбитр
-
-В проекте действует одна 10-минутная heartbeat automation в отдельной Luna-задаче. Она читает passive local registry `~/.wb-core/orchestrator/v1`, exact Codex threads и read-only Release Train state. Per-curator/per-executor monitors запрещены: новая задача регистрируется в общей системе launch operation, а fallback-discovery подбирает только pinned `orenvlad-ai/wb-core` tasks. Watcher сохраняет `gpt-5.6-luna` с medium reasoning; `gpt-5.6-sol` используется только свежим incident arbiter.
-
-Каждый run сначала получает generation-bound lease и уникальный `run_id` через `apps/codex_task_orchestrator.py begin-run`; overlap и устаревшее поколение являются no-op. До model-facing thread readback repo-owned `apps/codex_watcher_heartbeat.py` механически сверяет свежий trusted `origin/main`/protocol digest, registry integrity/signals и read-only Release Train snapshot. Любой active task/target, attention, incident, failure, lane action, watcher operation, archive, rotation, protocol change, periodic full scan или classifier error включает fail-safe `FULL`. Только exact empty target set без этих сигналов получает durable `QUIET`, `OWNER_WAITING` либо due `OWNER_REMINDER` и завершается `heartbeat-fast-finish` с нулём executor/Watcher thread readbacks. Baseline proxy — девять explicit model-facing command/readback steps против трёх на fast path; это измерение шагов, а не фиктивное утверждение о токенах. Full protocol/docs reload выполняется при trusted-main/protocol digest change, новом поколении либо когда конкретное действие full path действительно требует соответствующий раздел, а не на каждом quiet run.
-
-На `FULL` exact snapshot/integrity/queue evidence materialize-ится repo-owned `heartbeat-plan` с полным ordered phase list и exact target set. Каждый target покрывается отдельным `wait_threads(timeoutMs: 0)` и exact `heartbeat-record-target`; wake первого target не покрывает остальные, пока machine plan не вернёт `pending_target_ids=[]`. Только после полного coverage `heartbeat-actuate` обрабатывает progress/checkpoint, objective evidence, failure/incident и terminal evidence каждого task revision, не более одного meaningful transition на task/run. Тот же run материализует residual terminal release lane в durable closure action, записывает GitHub transport receipt через `heartbeat-record-release-lane`, повторяет только ту же exact command boundedly и подтверждает освобождение следующим queue readback с совпадающим Actions-owned release proof; отсутствие label само по себе недостаточно. Третья неуспешная попытка открывает incident вместо четвёртого blind retry. Active target только наблюдается; idle non-terminal получает не более одного bounded follow-up с transport receipt. Completed target terminalize-ится только по binding task/revision/executor/turn/final-item/readback/evidence и contour class, не по свободному слову. Одинаковая ошибка не перезапускается бесконечно: transient retry bounded, вторая подряд пустая system error открывает unclaimed incident и создаёт replacement executor, третий одинаковый fingerprint передаёт уже зарезервированный case свежему арбитру вместо четвёртого blind retry.
-
-Attention events (техническое завершение, terminal failure, strict HumanGate, доказанная серьёзная остановка) живут в durable revision-bound outbox. Watcher резервирует их generation-bound, доставляет через supported Desktop capability только в exact `curator_thread_id` и фиксирует send/retry; Desktop transport считается at-least-once со стабильным `event_id`, а curator ack идемпотентен. `DONE_AWAITING_ACCEPTANCE`, terminal failure и HumanGate нельзя выставить до соответствующего curator acknowledgement: сначала используется pending-handoff state. Rotation/restart не создают новый logical event.
-
-Временный per-task reporter допускается выключить только после доказанного global ownership именно periodic report и attention delivery/curator ack contract; сам факт запуска Watcher недостаточен. После устойчивого контура новые per-task reporters не создаются.
-
-Исполнитель никогда не выбирает адресата сложного запроса и не создаёт арбитра. Watcher регистрирует deterministic incident key, а затем создаёт свежую Sol-задачу только для этого case. Один active case на task и SQLite resource locks исключают дубли; `wb-core:release` сериализует решения о merge/deploy. Решение содержит exact task revision, действие, scope, expected transition и evidence digest. Перед доставкой Watcher повторно читает task revision; stale решение закрывается без применения. После доказанного transition арбитр архивируется, а audit остаётся в registry/event log.
-
-Watcher не формирует visible report из snapshot: full run после target actuation, release-lane attempt receipts и delivery всех due attention заканчивается единственным repo-owned `heartbeat-finish`, а механически доказанный fast run — единственным `heartbeat-fast-finish`. Full finish fail closed проверяет coverage/follow-up/release-lane/attention; второго visible report нет. Scheduled XML wrapper является только machine-owned transport receipt, а owner surface получает исключительно его parsed и repo-validated русский `message`. Manual/service/delegated/recovery turn завершает user-facing final только exact plain stdout `watcher-service-response`; raw JSON/XML receipt остаётся в registry/JSONL/GitHub/tool output и никогда не копируется владельцу. При любом actionable user-visible workstream wrapper имеет `decision=NOTIFY`, а parsed `message` в точности равен stdout canonical `report`; unchanged fingerprint остаётся видимым. После подтверждённой current-revision owner notification этот же дорогой owner-awaiting block подавляется между durable reminders: clock начинается от notification или последнего reminder, default `240` минут и настраивается `WB_CORE_WATCHER_OWNER_REMINDER_MINUTES`. До границы возвращается `DONT_NOTIFY`, на точной границе — `NOTIFY`; acceptance всё время остаётся доступна. Другой активный workstream не заставляет преждевременно повторять owner-awaiting block и не сдвигает его clock. `DONT_NOTIFY` допустим только когда actionable blocks и owner-relevant attention/incident delivery отсутствуют. Единица отчёта — workstream внутри acceptance envelope: root и каждый параллельный `required-child` дают отдельный русский block, corrective/replacement generations складываются в исходную workstream, независимые envelopes одного curator также остаются отдельными. Owner acceptance остаётся одна на envelope и ждёт все required workstreams. Формат: `Статус`, `Задача`, `Прогресс · Осталось`, `С прошлого отчёта`, `Сейчас`, и `Блокер` только при доказанном human-only состоянии. Task IDs, UUID, revision/digest/enum и registry/queue/lease/follow-up/batch jargon запрещены в visible layer.
-
-Зарегистрированная active задача уже имеет доказанный запущенный executor и поэтому начинается с 5%, а не с 0%. На meaningful ранних milestones executor вызывает repo-owned `checkpoint-progress` только со stage, evidence digest, реалистичным ETA range, свежим русским delta и следующим действием; произвольный процент он не назначает и по таймеру checkpoint не создаёт. `heartbeat-actuate` читает `progress-state`, exact bounded thread evidence и объективные GitHub/Release Train facts, обновляет их через `link-pr` и применяет максимум один meaningful transition на task/run. Если свежий checkpoint и terminal evidence пришли вместе, checkpoint materialize-ится, а terminalization детерминированно переносится на следующий run. Централизованная шкала, contour validation и objective-stage copy живут только в `apps/codex_task_orchestrator_spec.py`; статус, progress, ETA/остаток и current action выводятся из одного minimum proven stage критического member workstream, поэтому незавершённая corrective generation не наследует финальный смысл parent. Объективный PR/check/release state сильнее self-report. Fresh evidence может менять delta/current без роста процента. Обычный test finding не уменьшает progress; доказанное опровержение milestone допускает только explicit objective invalidation на один предыдущий уровень с русским объяснением. `100%` выставляет только `enqueue-attention` для `TECHNICAL_COMPLETION` после contour-specific terminal evidence: diagnostic complete, verified user artifact, `release:done` для repo-only либо `release:production` для live/runtime и LOOP. Это не заменяет curator acknowledgement и owner acceptance.
-
-Фразу владельца «Задача принята» обрабатывает exact curator thread, а не Watcher. Curator сверяет event/revision/evidence, делает idempotent ack, после terminal+acked всех required members материализует через `prepare-owner-handoff` короткий digest-bound итог: `Статус: Завершена — требуется приёмка`, 1–2 тезиса `Сделано`, `Проверено`, только реальное `Ограничения`, `Ответьте ровно: «Задача принята»`. Exact текст сначала показывается владельцу в commentary, затем фиксируется `confirm-owner-notification` и повторяется на final surface с тем же digest; это одна logical notification и самодостаточный финал. После notification report пишет `Ожидается приёмка владельца.`. Новый required corrective member до acceptance атомарно возвращает envelope в `OPEN` и инвалидирует прежнюю сдачу. Revision-bound принимается только единственный awaiting envelope; несколько независимых envelopes fail closed. ACCEPTED envelope исключается из следующего отчёта; unpin/archive current curator/current executor не выполняются.
-
-Curator и current executor pin выполняется один раз при назначении роли; heartbeat не делает re-pin и не отменяет ручной unpin владельца. Они никогда автоматически не unpin/archive. Predecessor executor становится inactive legacy и может быть searchable-архивирован только после доказанных successor `TARGET_CREATE_READBACK`, prompt delivery, registry/envelope link, checkpoint transfer, assignment-time pin и active readback; registry хранит обе identities, reason, timestamps и archive digest. Terminal executor без successor остаётся current. C1/current executor не архивируются после final acceptance. Chat history не является state. Между rotations heartbeat automation active generation непрерывно остаётся enabled: отсутствие задач, `DONT_NOTIFY` и сам `rotation_due` не pause/delete её. Blue-green rotation создаёт новый Luna Watcher из trusted `origin/main`, title+pin его и доказывает enabled 10-minute automation/readbacks и read-only smoke, пока прежний heartbeat работает штатно. Затем atomic activate делает old generation stale/no-op, но старая automation остаётся enabled до первого доказанного post-cutover цикла successor: active `begin-run` → полный canonical heartbeat readback → `end-run` → `confirm-watcher-liveness`. Только после этого разрешены pause старой automation, searchable archive старого Watcher и registry confirmation. Machine contract задаёт hard cap `48` запусков при 10-минутном cadence (планово около восьми часов). Только `FULL` path bounded-readback-ит собственные последние turns через supported Desktop `read_thread`; exact typed item `contextCompaction` с digest, записанный `record-watcher-context-compaction` под текущей generation lease, разрешает раннюю rotation. Fast path не читает Watcher thread. Размер текста, elapsed time и любые эвристики запрещены; если typed signal недоступен, действует hard cap и periodic full scan. Rotation выполняется и при активных задачах: successor восстанавливает state из registry/JSONL/current GitHub/trusted `origin/main`, а не из скопированного chat context. Failure до activation оставляет прежнее поколение active. После activation прежняя authority не восстанавливается: generation lease сохраняет old no-op, обе automations остаются scheduled, `record-watcher-liveness-failure` фиксирует сбой, а тот же successor получает bounded retry; pause/archive cleanup остаётся resumable. Curator/current executor и per-task heartbeat этот handover не затрагивает.
-
-`rotation_due` — не advisory. На hard-cap либо exact `contextCompaction` current `begin-run`/`record-watcher-context-compaction` атомарно создаёт durable `wb-core-watcher-rotation-operation/v1`. Первый due run имеет `REQUIRED` transition; каждый следующий overdue `heartbeat-finish` fail closed без topology progress текущего `run_id`, `record-watcher-rotation-retry` либо durable `ATTENTION_REQUIRED` evidence после трёх подтверждённых неудач Desktop capability/readback. `prepare-watcher → smoke-watcher → activate-watcher → confirm-watcher-liveness → confirm-watcher-retirement` двигают одну operation до `COMPLETED`. Integrity отдельно считает overdue без operation unhealthy и показывает remediation/attention state; quiet `DONT_NOTIFY` не может скрыто обходить эту machine phase.
-
-## Production UI-проверки
-
-HTTP `200`, успешный `curl`, наличие HTML и HTTP-only public probe не являются полноценной UI-проверкой. В Codex CLI сразу используй Playwright с новым изолированным непостоянным context локального Chrome/Chromium; встроенный Browser в CLI недоступен, поэтому не трать попытки на его запуск. В ChatGPT web/desktop встроенный Browser допустим, если доступен, при том же evidence contract.
-
-UI evidence обязано включать requested/final URL и document response/redirect chain, отсутствие `5xx`, `DOMContentLoaded` и фактический видимый render, непустые title/body, отсутствие `pageerror` и явной fatal-error surface, существенные console errors и визуально проверенный screenshot. По умолчанию не используй пользовательский browser profile, cookies или credentials; не выполняй клики, ввод и business mutations вне explicit scope. Для LOOP отправляй `accept-ui` только после успешной проверки. Если UI Flow не проходит, сохраняй `release:awaiting-ui` fail-closed. Browser blocker допустим только после фактического `--playwright-preflight`, ошибки import/launch изолированного context, исчерпания repo-owned восстановления и evidence, что следующий шаг требует новых полномочий пользователя; недоступность embedded Browser в CLI и неподтверждённое предположение об авторизации evidence не являются. Полный контракт и проверенный пример PR #616: [execution protocol](docs/architecture/07_codex_execution_protocol.md) и [GitHub Release Train](docs/architecture/11_github_release_train.md).
-
-## GOAL mode
-
-Change-задачу формулируй через проверяемый конечный результат. Зафиксируй цель, ожидаемый проверяемый итог, bounded scope, существенные ограничения, acceptance criteria, closure criteria и применимый execution-контур. Для data/artifact-задачи опиши необходимые данные и read-only границу, но не назначай MCP, сервер, connector или storage: technical path выбирает Codex после current preflight. Routine-шаги из этого файла и authoritative docs не нужно копировать в каждый prompt.
-
-Для `LOOP` предпочитай `/goal`; отсутствие формального Goal Mode не отменяет pre-deploy handshake, UI gate, recovery cycle и terminal closure.
-
-## Execution-контуры
-
-- `read-only`: анализ, диагностика или review без code, GitHub и production mutations. Итог — подтверждённый анализ либо точный внешний blocker.
-- `user-artifact`: единственная mutation — новый или изменённый пользовательский XLSX/CSV/DOCX/PDF/TXT либо аналогичный файл вне репозитория. Разрешены чтение источников, временные файлы вне repo и точный итоговый файл; branch, worktree, commit, PR, labels/comments, Release Train, repo files, production и business data не меняются. Фактическое изменение Git-tracked инструкций или helper про artifacts остаётся обычным `repo-only`, а не этим исключением.
-  Запись точно запрошенного файла в `user-artifact` не является `ДИАГНОСТИКОЙ`; GitHub label `scope:user-artifact` не существует и не создаётся.
-- `repo-only`: code/docs change без live/runtime эффекта. По умолчанию включает implementation, targeted checks, semantic review, fixes/recheck, docs sync и полный GitHub closure. Deploy не применяется.
-- `live/runtime`: изменение public route, service/process, operator UI, runtime behavior, deploy wiring или другого live-контура. Включает полный GitHub closure, canonical repo-owned deploy и live/service/public verify.
-- `production data mutation/backfill`: эта scope ставится только на PR/runner, который фактически выполняет bounded apply. Кодовые исправления, backup/readback helpers и inert deploy внутри той же бизнес-задачи остаются `repo-only` либо `live-runtime` и не создают новый HumanGate. Перед единственным apply T0 cohort замораживается: новые поступления обрабатываются последующим обычным циклом и не делают approval stale. Обязательны dry-run/plan, backup/reversibility, idempotency/resumability, audit, exact apply gate, canonical runner, reconciliation и non-target invariants. Terminalization выполняется trusted-main command `/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`. Ad-hoc SQL, server-only scripts и обход safety gates запрещены.
-- `archived GAS guard`: только явно заданное bounded изменение archive guard. Оно не восстанавливает Google Sheets/GAS как current runtime; обязательны targeted checks, bounded publish и guard verify.
-
-Production changes доставляются только repo-owned deploy/runbook path. Запрещены server-only drift, секреты в Git/docs/logs/PR и production mutations вне safety-контура.
-
-Для нового XLSX основной путь — активный Spreadsheets skill и `@oai/artifact-tool`: builder запускается через `CODEX_PRIMARY_RUNTIME_NODE` во временной директории вне repo с `node_modules -> CODEX_PRIMARY_RUNTIME_NODE_MODULES`. Отсутствие `load_workspace_dependencies` само по себе не blocker. После bounded recovery допустимы уже установленные `openpyxl`, затем `xlsxwriter`, затем dependency-free ZIP/XML `OOXML`; данные между попытками не собираются заново, новые зависимости из сети не устанавливаются. Подробный recovery/verification contract: [execution protocol](docs/architecture/07_codex_execution_protocol.md).
-
-## Выполнение и closure
-
-Если пользователь явно не ограничил closure, Codex самостоятельно ведёт задачу до полного применимого результата:
-
-- `user-artifact`: фактическое создание файла по точному пути → структурная/содержательная проверка → применимая визуальная проверка; подготовленные данные, свободный путь, CSV вместо запрошенного XLSX или описание будущих действий completion не являются;
-- `repo-only`: implementation → checks → semantic review → fixes/recheck → docs sync → commit → push → PR → checks/review → merge → удаление feature-ветки → подтверждение результата в актуальном `origin/main`;
-- `live/runtime`: весь `repo-only` closure → canonical deploy → live/service/public verify;
-- `production data mutation/backfill`: применимый GitHub/runtime closure плюс весь обязательный safety-контур и human gates.
-
-Явная граница пользователя имеет приоритет: например, «только ветка», «до commit», «до draft PR», «без merge», «без deploy» или «без production mutations». Остановись ровно на ней; отсутствие следующих стадий тогда не является ошибкой. Без такой границы не считай завершением план, гипотезу, незакоммиченный diff, только локальные проверки или открытый PR.
-
-Перед изменениями проверь status/branch/remotes/auth, выполни `git fetch --prune origin` и создай отдельную ветку от актуального `origin/main`. Не смешивай, не очищай и не теряй чужой dirty state; при необходимости используй отдельный worktree.
-
-Независимые change-задачи выполняются параллельно в отдельных branch/worktree и PR, но release critical section принадлежит одной логической задаче. STANDARD executor после checks/review ставит `release:staged`; Watcher публикует `/wb-core orchestration admit <PR> head <HEAD_SHA> task <TASK_ID> revision <N> passport sha256:<DIGEST>`. Actions-owned proof приобретает/проверяет `release:lane-owner` и только затем ставит `release:ready`. После всех PR/deploy/recovery Watcher освобождает линию только exact command `/wb-core orchestration release-lane <ANCHOR_PR> task <TASK_ID> revision <POSITIVE_TASK_REVISION> outcome <completed|parked> evidence sha256:<EVIDENCE_HASH>`; при безопасной парковке допускается outcome `parked`, но merged ambiguity, `running`, `awaiting-ui` или `halted` запрещают обход. `queue-status` выдаёт actionable `terminal-release-lane-owner`, если terminal anchor всё ещё владеет линией; ручное снятие label запрещено. `release:staged`, `release:ready`, `release:awaiting-agent`, `release:needs-resume`, `release:awaiting-ui` и открытый PR не являются closure.
-
-[Канонический монитор исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+-label%3Arelease%3Asuperseded+label%3A%22release%3Astaged%2Crelease%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%2Crelease%3Ablocked%2Crelease%3Ahalted%2Crelease%3Alane-owner%2Cfinance%3Amigration-deploy-lease%22+sort%3Acreated-asc) включает staged work и logical lane owner, но исключает terminal `done/production/superseded/retired` без отдельного active lease. Read-only machine snapshot для Watcher: `python3 apps/github_release_train.py queue-status`.
-
-Repo-owned waiter для Codex CLI:
-
-`python3 apps/github_release_train_wait.py <PR>`
-
-Канонический Goal/shepherd:
-
-`python3 apps/github_release_train_wait.py <OWN_PR> --shepherd`
-
-Он использует ту же Release Train machine specification, читает own PR и global gate, поддерживает heartbeat/status comment и выводит JSON с `disposition`, `own_pr`, `action_pr`, `canonical_github_state`, `reason_code`, `allowed_next_action`, `user_intervention_required`, `evidence`, `remediation_exhausted`, `current_phase`, `blocked_phase`, `safe_phases_remaining`, `required_capability`, `capability_evidence`, `next_executable_action`. Disposition: `TERMINAL_SUCCESS`, `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR`, `RECOVER_OWN_CHAIN`, `EXTERNAL_BLOCKER`, `TERMINAL_FAILURE`. `--phase-state <JSON>` добавляет phase/capability context в тот же shepherd; это не отдельный state machine. `--once` возвращает bounded snapshot, но не превращает waiting в terminal event. Коды shepherd: `0` terminal success; `2` доказанный `EXTERNAL_BLOCKER`; `3` own LOOP UI/recovery; `4` predecessor takeover/resume next action; `5` другое repo-owned own action; `6` одно наблюдение normal waiting; `7` доказанный `TERMINAL_FAILURE`; `8` `CONTINUE_SAFE_PHASES`; `9` `AWAIT_PHASE_CAPABILITY`; `130` interrupt. Только `0`, `2` и `7` terminal для Goal; phase-local `9`, elapsed/status timeout и неизменность состояния никогда не являются terminal failure всей цели.
-
-Перед любым handoff со словом `blocked` агент обязан вызвать `python3 apps/github_release_train_wait.py <OWN_PR> --shepherd --once`, при необходимости с `--phase-state`. Handoff допустим только при `EXTERNAL_BLOCKER` или `TERMINAL_FAILURE` и обязан приложить canonical reason code, конкретное evidence, выполненные recovery actions, `remediation_exhausted=true` и минимальное действие, доступное только пользователю. При `CONTINUE_WAITING`, `CONTINUE_SAFE_PHASES`, `AWAIT_PHASE_CAPABILITY`, `OWN_ACTION`, `TAKEOVER_PREDECESSOR` или `RECOVER_OWN_CHAIN` общий blocked handoff является нарушением протокола: `AWAIT_PHASE_CAPABILITY` означает только доказанное ожидание capability на непосредственной фазе. `EXTERNAL_BLOCKER` запрещён при любой доступной repo-owned команде или незавершённой безопасной фазе. Для UI runtime preflight используй `python3 apps/github_release_train_wait.py <ACTION_PR> --playwright-preflight`; успешный локальный Playwright продолжает UI Flow независимо от embedded Browser, а отсутствие browser/auth до UI-фазы не влияет на разработку и PR.
-
-Release states, continuity и transitions определены машинно в `apps/github_release_train_spec.py`: active — `staged/ready/running/awaiting-agent/awaiting-ui/needs-resume/blocked/halted`, terminal — `done/production/superseded/retired`; `release:lane-owner` — отдельный logical-task lease и может оставаться на terminal anchor. Ручной label не доказывает admission, lane ownership/release, legacy retirement, LOOP или production completion: критический transition требует trusted-main exact-evidence marker.
-
-После исправления own технического pre-merge blocker LOOP PR возвращается из `release:blocked` в `release:ready` только через trusted comment `/wb-core loop retry-blocked <PR> head <HEAD_SHA>` после successful baseline. Underlying runner `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>` выполняет GitHub Actions, чтобы exact-head proof имел repo-owned provenance; локальным user token его не запускают. Command не меняет task class, scope или LOOP root. Enqueue-команды технический blocker не снимают. Если fix изменил head LOOP PR, retry может обновить только exact-head proof уже доказанной identity; создать или переклассифицировать identity он не может. Локальный waiter при classification mismatch только останавливается fail-closed и не выставляет labels/comments. Classification blocker сохраняет свой тип через последующие смены head, обычным retry не лечится и снимается только последующим repo-owned identity proof. Ошибочная stale-terminal recovery identity исправляется только отдельной evidence-bound `/wb-core loop correct-to-new <PR> head <HEAD_SHA> old-root <ROOT>`; вручную root не переназначается. Отложенный повтор уже доказанной enqueue/correction команды на `ready/running/awaiting-agent/blocked` является no-op и не откатывает state.
-
-## Независимая проверка
-
-Отчёт Codex или другого агента не является доказательством сам по себе. Перед подтверждением результата проверь применимое:
-
-- фактический GitHub state, commit и branch;
-- semantic diff, а не только список файлов;
-- targeted tests/checks и исправление review findings;
-- отсутствие unresolved review threads;
-- согласованность с authoritative docs;
-- для live/runtime — deploy commit и live/service/public результат;
-- для production mutation — dry-run, backup/reversibility, audit, reconciliation и non-target invariants.
-
-Пользователь нужен только для strict human-only причины после исчерпания repo-owned remediation: отсутствующий credential; интерактивные login/2FA/captcha; доказанный необратимый риск потери данных; security/permission change; новое внешнее назначение данных; существенное изменение согласованного scope/risk; platform hard stop. «Новый риск», время ожидания, неизвестность агента, изменение технического fingerprint внутри bounded reversible envelope, Git/GitHub/test/review/merge/deploy/retry/reconciliation и доступная UI automation не являются HumanGate. Третий одинаковый failure направляется арбитру, а не пользователю.
+- фактический code truth, если вывод касается реализации.
+
+Перед изменениями проверь status/branch/remotes/auth, выполни
+`git fetch --prune origin`, создай отдельную branch/worktree от актуального
+`origin/main` и проверь открытые PR. Не смешивай, не очищай и не теряй чужой
+dirty state.
+
+Если меняется code, contract, runtime boundary, module status или другой
+зафиксированный truth, синхронизируй затронутые authoritative docs в той же
+задаче.
+
+## Prompt и technical path
+
+Любой connector, server, runtime, storage, SSH alias, путь или технический
+запрет из prompt повторно проверяется по current `AGENTS.md`, authoritative docs
+и code truth. Это гипотеза автора prompt, если пользователь отдельно и явно не
+зафиксировал её как своё ограничение.
+
+Новый task prompt не называет WebCore Data MCP и не hardcode-ит access path. Он
+фиксирует цель, необходимые данные, read-only/mutation boundaries, ожидаемый
+результат и acceptance/closure criteria и содержит правило:
+
+`Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
+
+Если нужны production evidence/data, используй canonical server-side path:
+сначала определи current target/runtime и конкретный source по code/docs, затем
+выполни фактический
+`PRODUCTION_READ_PREFLIGHT`: штатный SSH к canonical server, query-only чтение
+server-owned stores (`mode=ro` и `PRAGMA query_only=ON` для SQLite либо
+эквивалент) и bounded read server-owned documents. Этот read path не разрешает
+deploy, service changes, upstream sync, production writes, ad-hoc mutation или
+раскрытие secrets. Недоступность архивного MCP не является blocker.
+
+## Режимы и execution-контуры
+
+Пользователь не выбирает служебный класс специальной строкой. Codex определяет
+его по результату:
+
+- исключительно read-only анализ — `ДИАГНОСТИКА`, без files/GitHub/production
+  mutations;
+- обычная реализация, live change или неоднозначный случай — `СТАНДАРТ` и
+  действующий flow выше;
+- новый legacy `LOOP` из текущего protocol не запускается. Сохранившиеся LOOP
+  states/handlers относятся к compatibility и product fail-closed behavior, а
+  не к обязательному callback или отдельной orchestration-сессии.
+
+Execution contours:
+
+- `read-only` — подтверждённый анализ без mutations;
+- `user-artifact` — единственная mutation: запрошенный XLSX/CSV/DOCX/PDF/TXT
+  вне репозитория. Такая запись не является `ДИАГНОСТИКОЙ`; branch, worktree,
+  Release Train и label `scope:user-artifact` не создаются;
+- `repo-only` — code/docs/tests change без live/runtime эффекта;
+- `live/runtime` — public route, service/process, operator UI, runtime behavior
+  или deploy wiring, с canonical deploy и verify;
+- `production data mutation/backfill` — только PR/runner, который фактически
+  выполняет bounded apply;
+- `archived GAS guard` — только явно заданный bounded archive guard scope.
+
+Для нового XLSX основной путь — active Spreadsheets skill и
+`@oai/artifact-tool`. Runtime discovery предоставляет
+`CODEX_PRIMARY_RUNTIME_ROOT`, `CODEX_PRIMARY_RUNTIME_NODE`,
+`CODEX_PRIMARY_RUNTIME_NODE_MODULES` и `CODEX_PRIMARY_RUNTIME_PYTHON`.
+Отсутствие `load_workspace_dependencies` само по себе не blocker. После bounded
+recovery допустимы уже установленные `openpyxl`, затем `xlsxwriter`, затем
+dependency-free ZIP/XML `OOXML`; новые зависимости из сети не устанавливаются.
+
+## Phase-local production safety
+
+Production gates не являются одним глобальным барьером:
+
+1. `REPOSITORY_PREFLIGHT` покрывает repo/worktree/docs/code/tests/GitHub.
+2. Repository implementation, fixtures/mocks, review, PR и CI выполняются до
+   максимально возможного безопасного состояния.
+3. `PRODUCTION_READ_PREFLIGHT` выполняется только перед необходимым read-only
+   evidence.
+4. `PRODUCTION_MUTATION_PREFLIGHT` выполняется непосредственно перед apply.
+5. `PRODUCTION_UI_PREFLIGHT` выполняется только перед production UI verify.
+
+Отсутствие будущих credentials/database/browser/manifests/digest/backup не
+блокирует независимые repository phases. Blocker допустим только на
+непосредственной boundary после фактического preflight, исчерпанной repo-owned
+remediation и отсутствия оставшейся безопасной работы.
+
+Production mutation runner обязан иметь dry-run по умолчанию, отдельный
+explicit apply, bounded scope, machine-readable manifest, pre-change digest,
+backup/evidence contract, expected affected records, non-target invariants,
+idempotency либо документированный recovery, post-apply readback и
+reconciliation. Ad-hoc SQL, случайные local/server-only scripts и mutation
+через архивный read-only MCP запрещены.
+
+Human-gated `scope:production-mutation` закрывается только trusted-main exact
+command после merge, canonical deploy/apply и reconciliation:
+
+`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
+
+Finance/storage migrations дополнительно сохраняют все lease, snapshot,
+backup, restore, writer/timer, exact-SHA и non-target contracts из
+[`docs/architecture/10_hosted_runtime_deploy_contract.md`](docs/architecture/10_hosted_runtime_deploy_contract.md)
+и [GitHub Release Train](docs/architecture/11_github_release_train.md).
+
+## Проверка и closure
+
+Перед `release:ready` проверь:
+
+- изменены только requested и прямо необходимые support files;
+- semantic diff прочитан полностью, а не только список файлов;
+- targeted checks соответствуют риску;
+- findings исправлены, checks и semantic review повторены;
+- authoritative docs синхронизированы;
+- нет secrets, production data, generated dumps и unrelated edits;
+- PR open, non-draft, same-repository, направлен в `main`, current exact head
+  имеет successful `baseline`, выставлены `task:standard` и одна `scope:*`.
+
+Если пользователь не задал более раннюю границу, executor самостоятельно ведёт
+repo-backed задачу через commit, push, PR, checks/review, `release:ready` и
+Release Train до `release:done` либо `release:production`, затем fetch-ит
+`origin/main` и подтверждает merged result. Open PR, только local checks или
+merge без требуемого deploy/verify не являются completion.
+
+Production UI evidence не заменяется HTTP `200`. Оно включает requested/final
+URL и redirects, отсутствие `5xx`, `DOMContentLoaded`, видимый render,
+непустые title/body, `pageerror`/fatal/существенные console errors и визуально
+проверенный screenshot. По умолчанию используется новый isolated non-persistent
+Playwright context без пользовательского profile/cookies/credentials и без
+business mutations вне explicit scope.
+
+Отчёт другого агента не является доказательством. Перед handoff проверь GitHub
+state, final SHA, semantic diff, checks/reviews, unresolved threads, docs и,
+если применимо, canonical deploy/live/data evidence.
+
+Пользователь нужен только для strict human-only действия: отсутствующий
+credential/permission/approval, interactive login/2FA/captcha, доказанный
+необратимый data risk, security change, новая внешняя data destination,
+material scope/risk change или platform hard stop.
 
 ## Итоговый ответ
 
