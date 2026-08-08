@@ -6563,70 +6563,180 @@ def _ensure_business_data_write_allowed(
     return False
 
 
-def _inject_business_data_write_barrier_ui(body_text: str) -> str:
+def _inject_business_data_write_barrier_ui(
+    body_text: str,
+    *,
+    poll_interval_ms: int = 15_000,
+    request_timeout_ms: int = 5_000,
+    max_backoff_ms: int = 60_000,
+    hidden_poll_interval_ms: int = 60_000,
+    expose_test_api: bool = False,
+) -> str:
     if "</body>" not in body_text.lower():
         return body_text
+    poll_interval_ms = max(1, int(poll_interval_ms))
+    request_timeout_ms = max(1, int(request_timeout_ms))
+    max_backoff_ms = max(poll_interval_ms, int(max_backoff_ms))
+    hidden_poll_interval_ms = max(poll_interval_ms, int(hidden_poll_interval_ms))
     endpoint = json.dumps(
         DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
         ensure_ascii=False,
     )
+    expose_test_api_js = "true" if expose_test_api else "false"
     injection = f"""
 <style id="wbCoreMaintenanceBarrierStyle">
   #wbCoreMaintenanceBarrier {{
     position: fixed; inset: 0 0 auto 0; z-index: 2147483647;
-    padding: 12px 18px; background: #7f1d1d; color: #fff;
+    padding: 12px 18px;
     font: 600 14px/1.4 system-ui, sans-serif; text-align: center;
     box-shadow: 0 2px 12px rgba(0,0,0,.25);
+  }}
+  #wbCoreMaintenanceBarrier[data-tone="warning"] {{
+    background: #fffbeb; color: #92400e; border-bottom: 1px solid #fcd34d;
+  }}
+  #wbCoreMaintenanceBarrier[data-tone="danger"] {{
+    background: #7f1d1d; color: #fff; border-bottom: 1px solid #450a0a;
   }}
   body.wb-core-maintenance-held {{ padding-top: 52px !important; }}
   [data-wb-core-maintenance-disabled="1"] {{
     cursor: not-allowed !important; opacity: .55 !important;
+    pointer-events: none !important;
   }}
 </style>
-<div id="wbCoreMaintenanceBarrier" role="status" aria-live="assertive">
-  Проверяем доступность изменений…
-</div>
+<div id="wbCoreMaintenanceBarrier" role="status" aria-live="polite" hidden></div>
 <script>
 (() => {{
   const endpoint = {endpoint};
+  const pollIntervalMs = {poll_interval_ms};
+  const requestTimeoutMs = {request_timeout_ms};
+  const maxBackoffMs = {max_backoff_ms};
+  const hiddenPollIntervalMs = {hidden_poll_interval_ms};
   const banner = document.getElementById("wbCoreMaintenanceBarrier");
-  let blocked = true;
+  let confirmedStatus = null;
+  let blocked = false;
+  let inFlight = false;
+  let requestSequence = 0;
+  let lastCommittedSequence = 0;
+  let consecutiveFailures = 0;
+  let timer = null;
+  let controller = null;
   const controls = () => document.querySelectorAll(
     'button, input:not([type="hidden"]), select, textarea'
   );
-  const apply = (status) => {{
-    blocked = Boolean(status && status.active);
-    document.body.classList.toggle("wb-core-maintenance-held", blocked);
-    banner.hidden = !blocked;
-    banner.textContent = blocked
-      ? (status.message || "Техническое обслуживание: изменения временно заблокированы.")
-      : "";
-    controls().forEach((element) => {{
-      if (blocked) {{
-        if (!element.disabled) {{
-          element.dataset.wbCoreMaintenanceDisabled = "1";
-          element.disabled = true;
-        }}
-      }} else if (element.dataset.wbCoreMaintenanceDisabled === "1") {{
-        element.disabled = false;
-        delete element.dataset.wbCoreMaintenanceDisabled;
+
+  const normalize = (payload) => {{
+    if (!payload || payload.contract_name !== "wb_core_business_data_write_barrier_v1") {{
+      return null;
+    }}
+    if (typeof payload.active !== "boolean") return null;
+    const status = String(payload.status || "");
+    const phase = String(payload.phase || "");
+    if (payload.active) {{
+      if (status === "invalid_fail_closed" && phase === "invalid") {{
+        return {{active: true, tone: "danger", message: String(payload.message || "")}};
       }}
+      if (status !== "active" || !["acquiring", "held", "restoring"].includes(phase)) {{
+        return null;
+      }}
+      return {{active: true, tone: "warning", message: String(payload.message || "")}};
+    }}
+    if (status !== "inactive" || !["inactive", "released"].includes(phase)) {{
+      return null;
+    }}
+    return {{active: false, tone: "", message: ""}};
+  }};
+
+  const syncControls = () => {{
+    controls().forEach((element) => {{
+      if (blocked) element.dataset.wbCoreMaintenanceDisabled = "1";
+      else delete element.dataset.wbCoreMaintenanceDisabled;
     }});
   }};
+
+  const commit = (status, sequence) => {{
+    if (!status || sequence < lastCommittedSequence) return false;
+    lastCommittedSequence = sequence;
+    confirmedStatus = status;
+    blocked = status.active;
+    document.body.classList.toggle("wb-core-maintenance-held", blocked);
+    banner.hidden = !blocked;
+    if (blocked) {{
+      banner.dataset.tone = status.tone;
+      banner.textContent = status.message || (
+        status.tone === "danger"
+          ? "Техническое обслуживание: состояние защиты не подтверждено, изменения временно заблокированы."
+          : "Короткое техническое обслуживание: чтение доступно, изменения временно заблокированы."
+      );
+    }} else {{
+      delete banner.dataset.tone;
+      banner.textContent = "";
+    }}
+    syncControls();
+    return true;
+  }};
+
+  const schedule = (delayMs) => {{
+    if (timer !== null) window.clearTimeout(timer);
+    const delay = document.hidden ? hiddenPollIntervalMs : delayMs;
+    timer = window.setTimeout(() => {{
+      timer = null;
+      refresh();
+    }}, delay);
+  }};
+
   const refresh = async () => {{
+    if (inFlight) return false;
+    if (document.hidden) {{
+      schedule(hiddenPollIntervalMs);
+      return false;
+    }}
+    inFlight = true;
+    const sequence = ++requestSequence;
+    const requestController = new AbortController();
+    controller = requestController;
+    const timeout = window.setTimeout(
+      () => requestController.abort(),
+      requestTimeoutMs
+    );
+    let committed = false;
     try {{
       const response = await fetch(endpoint, {{
-        method: "GET", credentials: "same-origin", cache: "no-store"
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: requestController.signal
       }});
       if (!response.ok) throw new Error("maintenance status unavailable");
-      apply(await response.json());
+      const status = normalize(await response.json());
+      if (!status) throw new Error("invalid maintenance status response");
+      committed = commit(status, sequence);
+      if (committed) consecutiveFailures = 0;
     }} catch (_) {{
-      apply({{
-        active: true,
-        message: "Не удалось подтвердить доступность изменений. Чтение доступно; изменение данных временно заблокировано."
-      }});
+      consecutiveFailures = Math.min(consecutiveFailures + 1, 3);
+    }} finally {{
+      window.clearTimeout(timeout);
+      if (controller === requestController) controller = null;
+      inFlight = false;
+      const retryDelay = committed
+        ? pollIntervalMs
+        : Math.min(maxBackoffMs, pollIntervalMs * (2 ** consecutiveFailures));
+      schedule(retryDelay);
     }}
+    return committed;
   }};
+
+  const blockInteraction = (event) => {{
+    if (!blocked) return;
+    const target = event.target instanceof Element
+      ? event.target.closest('[data-wb-core-maintenance-disabled="1"]')
+      : null;
+    if (!target) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }};
+  ["click", "dblclick", "beforeinput", "change", "keydown"].forEach((name) => {{
+    document.addEventListener(name, blockInteraction, true);
+  }});
   document.addEventListener("submit", (event) => {{
     const method = String(event.target && event.target.method || "get").toLowerCase();
     if (blocked && method !== "get") {{
@@ -6634,13 +6744,48 @@ def _inject_business_data_write_barrier_ui(body_text: str) -> str:
       event.stopImmediatePropagation();
     }}
   }}, true);
-  apply({{active: true, message: "Проверяем доступность изменений…"}});
+
+  const observer = new MutationObserver((mutations) => {{
+    if (mutations.some((mutation) => mutation.addedNodes.length > 0)) syncControls();
+  }});
+  observer.observe(document.body, {{childList: true, subtree: true}});
+  document.addEventListener("visibilitychange", () => {{
+    if (timer !== null) {{
+      window.clearTimeout(timer);
+      timer = null;
+    }}
+    if (document.hidden) {{
+      if (controller !== null) controller.abort();
+      schedule(hiddenPollIntervalMs);
+    }} else {{
+      refresh();
+    }}
+  }});
+  window.addEventListener("pagehide", () => {{
+    if (timer !== null) window.clearTimeout(timer);
+    if (controller !== null) controller.abort();
+    observer.disconnect();
+  }}, {{once: true}});
+
+  if ({expose_test_api_js}) {{
+    window.__wbCoreMaintenanceBarrierTest = {{
+      commit: (payload, sequence) => {{
+        const status = normalize(payload);
+        return status ? commit(status, sequence) : false;
+      }},
+      refresh,
+      snapshot: () => ({{
+        blocked,
+        confirmed: confirmedStatus === null ? null : confirmedStatus.active,
+        inFlight,
+        requestSequence,
+        lastCommittedSequence,
+        consecutiveFailures
+      }})
+    }};
+  }}
+
   refresh();
-  window.setInterval(refresh, 3000);
-  window.setInterval(() => apply({{
-    active: blocked,
-    message: banner.textContent
-  }}), 1000);
 }})();
 </script>
 """
