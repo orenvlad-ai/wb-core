@@ -39,6 +39,7 @@ from packages.business_time import business_date_from_timestamp
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v3_signed_review_points"
 SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v4"
+CALCULATION_REFERENCE_CONTRACT_VERSION = "wb_finance_calculation_reference_v2"
 MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.0001")
@@ -59,6 +60,194 @@ RETRO_COST_FIRST_WEEK_START = date(2026, 4, 27)
 RETRO_COST_FORMULA_VERSION = CANONICAL_COST_FORMULA_VERSION
 PROFIT_METHOD_VERSION = "wb_finance_profit_attributed_capitalization_v3_signed_deductions"
 COST_METHOD_VERSION = CANONICAL_COST_FORMULA_VERSION
+
+
+# The calculation-parameters reference is a read projection of these canonical
+# weekly aggregate fields.  Keeping the row audit beside the aggregate contract
+# prevents Settings from inventing a second expense classifier or silently
+# changing field composition.
+CALCULATION_REFERENCE_ROWS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "agent_remuneration",
+        "label": "Агентское вознаграждение WB",
+        "group": "Ориентиры для процентных параметров Proxy 3",
+        "source_fields": ("agent_remuneration", "commission"),
+        "source_mode": "first_available",
+        "proxy_parameter_key": "wb_agent_and_other_rate",
+        "sign_rule": "Продажа +, возврат −; эквайринг не входит",
+        "proxy_treatment": "Ориентир для wb_agent_and_other_rate; значение не сохраняется автоматически",
+        "note": "Канонический agent_remuneration (commission — совместимый alias); эквайринг показан отдельно и не вычитается повторно.",
+    },
+    {
+        "key": "acquiring",
+        "label": "Эквайринг",
+        "group": "Ориентиры для процентных параметров Proxy 3",
+        "source_fields": ("acquiring",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "acquiring_rate",
+        "sign_rule": "Продажа +, возврат −",
+        "proxy_treatment": "Ориентир для acquiring_rate; учитывается отдельно от агентского вознаграждения",
+        "note": "Отдельный канонический acquiring; agent_remuneration + acquiring = combined_commission_control.",
+    },
+    {
+        "key": "logistics",
+        "label": "Логистика WB до покупателя",
+        "group": "Ориентиры для процентных параметров Proxy 3",
+        "source_fields": ("logistics",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "wb_logistics_rate",
+        "sign_rule": "Канонический signed expense; сторно уменьшает расход",
+        "proxy_treatment": "Ориентир для wb_logistics_rate",
+        "note": "Периодная логистика до покупателя; транзит FF → WB раскрыт отдельно.",
+    },
+    {
+        "key": "storage",
+        "label": "Хранение WB",
+        "group": "Ориентиры для процентных параметров Proxy 3",
+        "source_fields": ("storage",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "wb_storage_rate",
+        "sign_rule": "Канонический signed expense; сторно уменьшает расход",
+        "proxy_treatment": "Ориентир для wb_storage_rate",
+        "note": "Периодное хранение WB без складской себестоимости и транзита.",
+    },
+    {
+        "key": "penalties",
+        "label": "Штрафы",
+        "group": "Компоненты объединённых параметров Proxy 3",
+        "source_fields": ("penalties",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "penalties_adjustments_rate",
+        "sign_rule": "Канонический signed expense; сторно уменьшает расход",
+        "proxy_treatment": "Компонент penalties_adjustments_rate",
+        "note": "Только штрафы; корректировки расходов показаны следующей отдельной строкой.",
+    },
+    {
+        "key": "corrections",
+        "label": "Корректировки (расходы)",
+        "group": "Компоненты объединённых параметров Proxy 3",
+        "source_fields": ("corrections",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "penalties_adjustments_rate",
+        "sign_rule": "Standalone отрицательная additionalPayment нормализуется как положительный расход",
+        "proxy_treatment": "Компонент penalties_adjustments_rate",
+        "note": "Расходные корректировки не смешиваются со штрафами и не теряются в total_wb_expenses.",
+    },
+    {
+        "key": "subscriptions",
+        "label": "Подписки",
+        "group": "Компоненты параметра «Другие расходы»",
+        "source_fields": ("subscriptions",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "other_expense_rate",
+        "sign_rule": "Канонический signed deduction; сторно уменьшает расход",
+        "proxy_treatment": "Компонент other_expense_rate",
+        "note": "Подписки/Jamm из канонического классификатора Finance.",
+    },
+    {
+        "key": "paid_services",
+        "label": "Платные сервисы",
+        "group": "Компоненты параметра «Другие расходы»",
+        "source_fields": ("paid_services",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "other_expense_rate",
+        "sign_rule": "Канонический signed deduction; сторно уменьшает расход",
+        "proxy_treatment": "Компонент other_expense_rate",
+        "note": "Платные сервисы WB, классифицированные отдельно от подписок.",
+    },
+    {
+        "key": "review_points",
+        "label": "Баллы за отзывы",
+        "group": "Компоненты параметра «Другие расходы»",
+        "source_fields": ("review_points",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "other_expense_rate",
+        "sign_rule": "Канонический signed deduction; сторно уменьшает расход",
+        "proxy_treatment": "Компонент other_expense_rate",
+        "note": "Только операции «Баллы за отзывы»/«Списание за отзыв».",
+    },
+    {
+        "key": "other_deductions",
+        "label": "Прочие удержания",
+        "group": "Компоненты параметра «Другие расходы»",
+        "source_fields": ("other_deductions",),
+        "source_mode": "direct",
+        "proxy_parameter_key": "other_expense_rate",
+        "sign_rule": "Канонический signed deduction; сторно уменьшает расход",
+        "proxy_treatment": "Компонент other_expense_rate",
+        "note": "Только остаток канонического классификатора, не балансирующая разница.",
+    },
+    {
+        "key": "marketing",
+        "label": "Маркетинг и продвижение",
+        "group": "Справочные строки с отдельным учётом",
+        "source_fields": ("marketing",),
+        "source_mode": "direct",
+        "sign_rule": "Канонический signed deduction; сторно уменьшает расход",
+        "proxy_treatment": "Справочно; Proxy 3 вычитает canonical ads_sum отдельно, не добавляет процент повторно",
+        "note": "Finance marketing не копируется в versioned rate и не смешивается с другими удержаниями.",
+    },
+    {
+        "key": "acceptance",
+        "label": "Платная приёмка — начислено",
+        "group": "Справочные строки с отдельным учётом",
+        "source_fields": ("acceptance",),
+        "source_mode": "direct",
+        "sign_rule": "Канонический signed expense; отрицательная сумма не капитализируется",
+        "proxy_treatment": "Справочно; доказанная часть капитализируется, недоказанный остаток остаётся расходом периода",
+        "note": "Полное начисление до canonical Finance↔supply cost-layer addback.",
+    },
+    {
+        "key": "capitalized_acceptance",
+        "label": "Платная приёмка — капитализировано",
+        "group": "Справочные строки с отдельным учётом",
+        "source_fields": ("capitalized_acceptance",),
+        "source_mode": "direct",
+        "sign_rule": "Положительная доказанная часть; вычитается из расходов периода",
+        "proxy_treatment": "Не входит в процент повторно: уже находится в canonical WB cost",
+        "note": "Только exact matched-and-capped cost-layer lineage; разница с начислением не исчезает.",
+    },
+    {
+        "key": "transit_logistics",
+        "label": "Транзитная логистика — начислено",
+        "group": "Справочные строки с отдельным учётом",
+        "source_fields": ("transit_logistics",),
+        "source_mode": "direct",
+        "sign_rule": "Канонический signed deduction; отрицательная сумма не капитализируется",
+        "proxy_treatment": "Справочно; доказанная часть капитализируется, недоказанный остаток остаётся расходом периода",
+        "note": "Полное начисление транзита до canonical Finance↔supply cost-layer addback.",
+    },
+    {
+        "key": "capitalized_transit_logistics",
+        "label": "Транзитная логистика — капитализировано",
+        "group": "Справочные строки с отдельным учётом",
+        "source_fields": ("capitalized_transit_logistics",),
+        "source_mode": "direct",
+        "sign_rule": "Положительная доказанная часть; вычитается из расходов периода",
+        "proxy_treatment": "Не входит в процент повторно: уже находится в canonical WB cost",
+        "note": "Только exact matched-and-capped cost-layer lineage; разница с начислением не исчезает.",
+    },
+    {
+        "key": "positive_adjustments",
+        "label": "Корректировки и дополнительные выплаты (+)",
+        "group": "Контроль корректировок",
+        "source_fields": ("positive_adjustments",),
+        "source_mode": "direct",
+        "sign_rule": "Standalone положительная additionalPayment увеличивает финансовый результат",
+        "proxy_treatment": "Не является расходной ставкой Proxy 3",
+        "note": "Положительная корректировка раскрывается отдельно и не вычитается как расход.",
+    },
+    {
+        "key": "wb_remuneration_adjustment",
+        "label": "Корректировка вознаграждения WB — контроль",
+        "group": "Контроль корректировок",
+        "source_fields": ("wb_remuneration_adjustment",),
+        "source_mode": "direct",
+        "sign_rule": "Официальный signed control field",
+        "proxy_treatment": "Только контроль; не складывается повторно с agent_remuneration/positive_adjustments/corrections",
+        "note": "Sale/return уже отражены через forPay; standalone строки попадают ровно в одну экономическую категорию.",
+    },
+)
 
 
 class _StreamingJsonArrayDigest:

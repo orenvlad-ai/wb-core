@@ -115,6 +115,9 @@
     .calculation-total { font-size: 22px; font-weight: 900; }
     .formula-preview { margin-top: 14px; padding: 12px; border: 1px solid rgba(52,211,153,.32); border-radius: 8px; color: var(--success); background: rgba(52,211,153,.06); }
     .calculation-table { min-width: 980px; }
+    .calculation-reference-group th { position: static; background: rgba(167, 139, 250, .1); color: var(--text); text-transform: none; font-size: 13px; }
+    .calculation-reference-meta { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+    .calculation-reference-week-status { display: block; margin-top: 3px; color: var(--warning); font-size: 10px; text-transform: none; }
     .calculation-diff { margin: 12px 0 0; white-space: pre-wrap; color: var(--warning); }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
@@ -464,6 +467,7 @@
           <button id="saveCalculationParametersButton" class="primary" type="button" disabled>Сохранить новую версию</button>
         </div>
         <h2 style="margin-top: 22px;">Справочная информация по WB — три закрытые недели</h2>
+        <p id="calculationReferenceStatus" class="message">Проверяем полный календарный набор недель...</p>
         <div class="table-wrap"><table class="calculation-table"><thead id="calculationReferenceHead"></thead><tbody id="calculationReferenceRows"><tr><td>Данные загружаются...</td></tr></tbody></table></div>
         <h2 style="margin-top: 22px;">История версий</h2>
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
@@ -694,6 +698,7 @@
       const calculationDiff = document.getElementById("calculationParametersDiff");
       const calculationReferenceHead = document.getElementById("calculationReferenceHead");
       const calculationReferenceRows = document.getElementById("calculationReferenceRows");
+      const calculationReferenceStatus = document.getElementById("calculationReferenceStatus");
       const calculationHistoryRows = document.getElementById("calculationHistoryRows");
       const reloadCalculationButton = document.getElementById("reloadCalculationParametersButton");
       const previewCalculationButton = document.getElementById("previewCalculationParametersButton");
@@ -2491,15 +2496,41 @@
 
       function renderCalculationReference(reference) {
         const weeks = Array.isArray(reference && reference.weeks) ? reference.weeks : [];
+        const referenceStatus = String(reference && reference.status || "unavailable");
+        const missingWeeks = Array.isArray(reference && reference.missing_weeks) ? reference.missing_weeks : [];
+        calculationReferenceStatus.textContent = String(reference && reference.status_message || "Статус справочной выборки неизвестен.") +
+          (missingWeeks.length ? " Обязательные периоды без полного набора: " + missingWeeks.map((week) => week.week_start + " — " + week.week_end).join("; ") + "." : "");
+        calculationReferenceStatus.className = "message " + (referenceStatus === "ready" ? "success" : referenceStatus === "unavailable" ? "error" : "warning");
         calculationReferenceHead.innerHTML = "<tr><th>Статья</th>" + weeks.map((week) => (
-          "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) + "</th>"
-        )).join("") + "<th>Weighted average</th></tr>";
+          "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) +
+          (String(week.status || "") !== "ready" ? "<span class=\"calculation-reference-week-status\">" + escapeHtml(({missing:"нет данных", partial:"неполный набор", stale:"устаревшая семантика"})[week.status] || String(week.status || "нет данных")) + "</span>" : "") + "</th>"
+        )).join("") + "<th>Итог 3 недели<br><span class=\"calculation-reference-meta\">SUM / SUM</span></th></tr>";
         const rows = Array.isArray(reference && reference.rows) ? reference.rows : [];
-        calculationReferenceRows.innerHTML = rows.length ? rows.map((row) => (
-          "<tr><td>" + escapeHtml(row.label) + (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
-          (row.weekly_rate_pct || []).map((value) => "<td>" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
-          "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
-        )).join("") : "<tr><td colspan=\"5\">Нет трёх полностью закрытых недель.</td></tr>";
+        if (!rows.length) {
+          calculationReferenceRows.innerHTML = "<tr><td colspan=\"" + String(weeks.length + 2) + "\">Нет канонических данных для обязательных трёх недель.</td></tr>";
+          return;
+        }
+        let currentGroup = "";
+        const rendered = [];
+        rows.forEach((row) => {
+          const group = String(row.group || "Другие строки");
+          if (group !== currentGroup) {
+            rendered.push("<tr class=\"calculation-reference-group\"><th colspan=\"" + String(weeks.length + 2) + "\">" + escapeHtml(group) + "</th></tr>");
+            currentGroup = group;
+          }
+          const sourceFields = Array.isArray(row.source_fields) ? row.source_fields.join(row.source_mode === "first_available" ? " / alias " : " + ") : "—";
+          const audit = "Источник: " + sourceFields + " · знак: " + String(row.sign_rule || "—") + " · база: " + String(row.denominator || "net_revenue") + " · 3 недели: " + String(row.aggregation_rule || "SUM(amount) / SUM(net_revenue)");
+          const treatment = String(row.proxy_treatment || "");
+          rendered.push(
+            "<tr data-calculation-reference-key=\"" + escapeHtml(String(row.key || "")) + "\"><td>" + escapeHtml(row.label) +
+            "<div class=\"calculation-reference-meta\">" + escapeHtml(audit) + "</div>" +
+            (treatment ? "<div class=\"calculation-reference-meta\">Учёт: " + escapeHtml(treatment) + "</div>" : "") +
+            (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
+            (row.weekly_rate_pct || []).map((value, index) => "<td title=\"" + escapeHtml((row.weekly_amount_rub || [])[index] == null ? "Нет полного канонического значения" : "Сумма: " + String((row.weekly_amount_rub || [])[index]) + " ₽") + "\">" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
+            "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
+          );
+        });
+        calculationReferenceRows.innerHTML = rendered.join("");
       }
 
       function formatCalculationReferencePct(value) {

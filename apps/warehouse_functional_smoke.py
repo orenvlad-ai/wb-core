@@ -98,7 +98,12 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
-from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
+from packages.business_time import current_business_date_iso  # noqa: E402
+from packages.application.wb_finance_weekly import (  # noqa: E402
+    CALCULATION_REFERENCE_ROWS,
+    CLASSIFIER_VERSION as WB_FINANCE_CLASSIFIER_VERSION,
+    _functional_wb_cost_state,
+)
 from apps.warehouse_functional_runner import (  # noqa: E402
     _run,
     _recalculate_downstream_finance_cost,
@@ -2548,6 +2553,7 @@ def _test_versioned_parameters_and_reference() -> None:
         _assert(len(saved["history"]) == 2, "settings save appends a version")
         _assert(block.parameters_for_date("2026-07-14").buyout_rate == Decimal("0.91"), "effective date keeps earlier version")
         _assert(block.parameters_for_date("2026-07-15").buyout_rate == Decimal("0.8"), "effective version activates on date")
+        week_payloads: list[tuple[str, str, dict[str, str]]] = []
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """CREATE TABLE wb_finance_weekly_aggregates(
@@ -2556,45 +2562,202 @@ def _test_versioned_parameters_and_reference() -> None:
                        unknown_reasons_json TEXT,calculated_at TEXT,
                        PRIMARY KEY(seller_id,week_start,week_end))"""
             )
-            today = datetime.now(timezone.utc).date()
+            today = date.fromisoformat(current_business_date_iso())
             last_closed = today - timedelta(days=today.weekday() + 1)
-            for week_index in range(3):
+            bases = (Decimal("100"), Decimal("200"), Decimal("700"))
+            for week_index, revenue in enumerate(bases):
                 week_end = last_closed - timedelta(days=7 * (2 - week_index))
                 week_start = week_end - timedelta(days=6)
-                for seller_id, revenue, commission, acquiring in (
-                    ("seller-a", Decimal("100"), Decimal("30"), Decimal("5")),
-                    ("seller-b", Decimal("50"), Decimal("10"), Decimal("2")),
-                ):
-                    metrics = {
-                        "net_revenue": str(revenue),
-                        "commission": str(commission),
-                        "acquiring": str(acquiring),
-                        "logistics": "3",
-                        "storage": "2",
-                        "acceptance": "1",
-                        "penalties": "0",
-                    }
-                    conn.execute(
-                        "INSERT INTO wb_finance_weekly_aggregates VALUES(?,?,?,?,?,?,?,?,?)",
-                        (
-                            seller_id,
-                            week_start.isoformat(),
-                            week_end.isoformat(),
-                            "v1",
-                            json.dumps(metrics),
-                            "[]",
-                            "[]",
-                            "[]",
-                            NOW,
-                        ),
+                metrics = {
+                    "net_revenue": str(revenue),
+                    "commission": str(revenue * Decimal("0.3396")),
+                    "acquiring": str(revenue * Decimal("0.03")),
+                    "logistics": str((Decimal("1"), Decimal("6"), Decimal("14"))[week_index]),
+                    "storage": str(revenue * Decimal("0.01")),
+                    "acceptance": str(revenue * Decimal("0.04")),
+                    "capitalized_acceptance": str(revenue * Decimal("0.01")),
+                    "marketing": str(revenue * Decimal("0.10")),
+                    "transit_logistics": str(revenue * Decimal("0.03")),
+                    "capitalized_transit_logistics": str(revenue * Decimal("0.005")),
+                    "penalties": str(revenue * Decimal("0.005")),
+                    "corrections": str(revenue * Decimal("0.004")),
+                    "subscriptions": str(revenue * Decimal("0.003")),
+                    "paid_services": str(revenue * Decimal("0.002")),
+                    "review_points": str(revenue * Decimal("0.001")),
+                    "other_deductions": str(revenue * Decimal("0.0005")),
+                    "positive_adjustments": str(revenue * Decimal("0.02")),
+                    "wb_remuneration_adjustment": str(revenue * Decimal("0.07")),
+                }
+                if week_index > 0:
+                    metrics["agent_remuneration"] = str(
+                        revenue * Decimal("0.3396")
                     )
+                    metrics["commission"] = (
+                        "999999" if week_index == 1 else metrics["agent_remuneration"]
+                    )
+                week_payloads.append(
+                    (week_start.isoformat(), week_end.isoformat(), metrics)
+                )
+                conn.execute(
+                    "INSERT INTO wb_finance_weekly_aggregates VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        "seller-a",
+                        week_start.isoformat(),
+                        week_end.isoformat(),
+                        WB_FINANCE_CLASSIFIER_VERSION,
+                        json.dumps(metrics),
+                        "[]",
+                        "[]",
+                        "[]",
+                        NOW,
+                    ),
+                )
             conn.commit()
         reference = block.get_payload()["reference"]
         _assert(reference["status"] == "ready" and len(reference["weeks"]) == 3, "three closed weeks")
+        _assert(
+            [(item["week_start"], item["week_end"]) for item in reference["weeks"]]
+            == [(start, end) for start, end, _metrics in week_payloads],
+            "reference uses the exact last three closed calendar slots",
+        )
+        _assert(
+            reference["aggregation_rule"] == "SUM(amount) / SUM(net_revenue)"
+            and reference["gross_buyout_revenue_field"] == "net_revenue",
+            "reference pins one canonical denominator and SUM/SUM aggregation",
+        )
         by_key = {row["key"]: row for row in reference["rows"]}
-        _assert(by_key["wb_agent_and_other"]["weighted_average_pct"] == "22", "weighted reference uses sums and excludes acquiring duplication")
-        _assert(by_key["acquiring"]["weighted_average_pct"] == "4.666666666666666666666666667", "acquiring reference is separately classified")
-        _assert(by_key["acceptance"]["included_in_proxy_by_default"] is False, "paid acceptance is reference-only")
+        _assert(
+            list(by_key) == [str(spec["key"]) for spec in CALCULATION_REFERENCE_ROWS],
+            "every canonical calculation-reference row is present once and in audited order",
+        )
+        _assert(
+            [
+                Decimal(value)
+                for value in by_key["agent_remuneration"]["weekly_rate_pct"]
+            ]
+            == [Decimal("33.96")] * 3
+            and Decimal(
+                by_key["agent_remuneration"]["weighted_average_pct"]
+            )
+            == Decimal("33.96"),
+            "canonical agent remuneration uses agent_remuneration/commission once without subtracting acquiring",
+        )
+        _assert(
+            by_key["agent_remuneration"]["source_fields"]
+            == ["agent_remuneration", "commission"]
+            and by_key["agent_remuneration"]["source_mode"]
+            == "first_available",
+            "agent canonical field wins while commission remains only a compatible alias",
+        )
+        _assert(
+            Decimal(by_key["acquiring"]["weighted_average_pct"])
+            == Decimal("3"),
+            "acquiring reference is separately classified",
+        )
+        _assert(
+            [Decimal(value) for value in by_key["logistics"]["weekly_rate_pct"]]
+            == [Decimal("1"), Decimal("3"), Decimal("2")]
+            and Decimal(by_key["logistics"]["weighted_average_pct"])
+            == Decimal("2.1"),
+            "weighted reference is SUM(amount)/SUM(net_revenue), not mean weekly percentage",
+        )
+        required_atomic_rows = {
+            "penalties",
+            "corrections",
+            "subscriptions",
+            "paid_services",
+            "review_points",
+            "other_deductions",
+            "marketing",
+            "acceptance",
+            "capitalized_acceptance",
+            "transit_logistics",
+            "capitalized_transit_logistics",
+            "positive_adjustments",
+            "wb_remuneration_adjustment",
+        }
+        _assert(
+            required_atomic_rows <= set(by_key)
+            and by_key["penalties"]["label"] == "Штрафы"
+            and by_key["corrections"]["label"] == "Корректировки (расходы)",
+            "penalties, corrections and every other canonical component stay explicit",
+        )
+        for key, row in by_key.items():
+            _assert(
+                row["denominator"] == "net_revenue"
+                and row["aggregation_rule"]
+                == "SUM(amount) / SUM(net_revenue)"
+                and row["sign_rule"]
+                and row["proxy_treatment"]
+                and row["status"] == "ready",
+                f"reference row audit is complete for {key}",
+            )
+        _assert(
+            "капитализ" in by_key["acceptance"]["proxy_treatment"].casefold()
+            and "не входит" in by_key["capitalized_acceptance"]["proxy_treatment"].casefold()
+            and "остаток" in by_key["transit_logistics"]["proxy_treatment"].casefold(),
+            "acceptance/transit disclose gross, proven capitalized share and retained residual",
+        )
+
+        latest_start, latest_end, latest_metrics = week_payloads[-1]
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "DELETE FROM wb_finance_weekly_aggregates WHERE week_start=? AND week_end=?",
+                (latest_start, latest_end),
+            )
+            older_end = date.fromisoformat(week_payloads[0][1]) - timedelta(days=7)
+            older_start = older_end - timedelta(days=6)
+            conn.execute(
+                "INSERT INTO wb_finance_weekly_aggregates VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "seller-a",
+                    older_start.isoformat(),
+                    older_end.isoformat(),
+                    WB_FINANCE_CLASSIFIER_VERSION,
+                    json.dumps({**week_payloads[0][2], "net_revenue": "999999999"}),
+                    "[]",
+                    "[]",
+                    "[]",
+                    NOW,
+                ),
+            )
+            conn.commit()
+        stale = block.get_payload()["reference"]
+        _assert(
+            stale["status"] == "stale"
+            and stale["weeks"][-1]["status"] == "missing"
+            and stale["rows"][0]["weighted_average_pct"] is None
+            and [(item["week_start"], item["week_end"]) for item in stale["weeks"]]
+            == [(start, end) for start, end, _metrics in week_payloads],
+            "missing latest mandatory week is stale and never replaced by an arbitrary older week",
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "INSERT INTO wb_finance_weekly_aggregates VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "seller-a",
+                    latest_start,
+                    latest_end,
+                    WB_FINANCE_CLASSIFIER_VERSION,
+                    json.dumps(latest_metrics),
+                    "[]",
+                    "[]",
+                    "[]",
+                    NOW,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM wb_finance_weekly_aggregates WHERE week_start=? AND week_end=?",
+                (week_payloads[1][0], week_payloads[1][1]),
+            )
+            conn.commit()
+        partial = block.get_payload()["reference"]
+        _assert(
+            partial["status"] == "partial"
+            and partial["weeks"][1]["status"] == "missing"
+            and partial["rows"][0]["weekly_rate_pct"][1] is None,
+            "missing middle calendar week is an honest partial set",
+        )
 
 
 def _test_initial_settings_preserve_outer_transaction() -> None:

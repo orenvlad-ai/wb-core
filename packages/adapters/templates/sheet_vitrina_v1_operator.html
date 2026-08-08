@@ -836,6 +836,7 @@
       border-spacing: 0;
       min-width: max(100%, 1240px);
       font-size: 12px;
+      isolation: isolate;
     }
 
     .wb-finance-table th,
@@ -847,6 +848,7 @@
       text-align: right;
       white-space: nowrap;
       background: var(--control-bg);
+      background-clip: padding-box;
     }
 
     .wb-finance-table thead th {
@@ -862,18 +864,35 @@
     .wb-finance-table td:first-child {
       position: sticky;
       left: 0;
-      z-index: 3;
+      z-index: 5;
+      width: 285px;
       min-width: 285px;
-      max-width: 340px;
+      max-width: 285px;
       text-align: left;
       white-space: normal;
       background: var(--control-bg);
+      background-clip: padding-box;
       box-shadow: var(--sticky-shadow);
+      overflow-wrap: anywhere;
     }
 
     .wb-finance-table thead th:first-child {
-      z-index: 4;
+      z-index: 7;
       background: var(--panel-subtle);
+    }
+
+    .wb-finance-table tbody td:not(:first-child) {
+      position: relative;
+      z-index: 1;
+    }
+
+    .wb-finance-table tbody tr:not(.wb-finance-group-row):not(.wb-finance-internal-divider):hover td {
+      background: var(--control-bg-hover);
+    }
+
+    .wb-finance-table tbody tr:not(.wb-finance-group-row):not(.wb-finance-internal-divider):hover td:first-child {
+      z-index: 6;
+      background: var(--control-bg-hover);
     }
 
     .wb-finance-table .wb-finance-group-row td {
@@ -883,13 +902,25 @@
       text-align: left;
     }
 
+    .wb-finance-table .wb-finance-group-row td:first-child,
+    .wb-finance-table .wb-finance-group-row:hover td:first-child {
+      z-index: 6;
+      background: var(--panel-subtle);
+    }
+
     .wb-finance-table .wb-finance-internal-divider td {
       border-top: 4px solid var(--accent-hover);
-      background: var(--accent-soft);
+      background: var(--panel-elevated);
       color: var(--muted-strong);
       font-weight: 800;
       text-align: left;
       white-space: normal;
+    }
+
+    .wb-finance-table .wb-finance-internal-divider td:first-child,
+    .wb-finance-table .wb-finance-internal-divider:hover td:first-child {
+      z-index: 6;
+      background: var(--panel-elevated);
     }
 
     .wb-finance-negative { color: var(--error-text); font-weight: 700; }
@@ -899,9 +930,10 @@
     .wb-finance-expense-main { min-width: 0; }
     .wb-finance-expense-share { display: inline-flex; align-items: center; gap: 4px; padding-left: 8px; border-left: 1px solid var(--border); font-size: 10px; font-weight: 800; }
     .wb-finance-relative-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
-    .wb-finance-trend-up { color: #d56a7d; }
-    .wb-finance-trend-down { color: #4d9a78; }
+    .wb-finance-trend-improved { color: #4d9a78; }
+    .wb-finance-trend-deteriorated { color: #d56a7d; }
     .wb-finance-trend-flat { color: #b48b2b; }
+    .wb-finance-trend-neutral { color: var(--muted-strong); }
 
     [data-report-section-panel="partner"] .block { min-width: 0; overflow: hidden; }
     .partner-report-settings { display: grid; grid-template-columns: repeat(3,minmax(180px,1fr)); gap: 12px; margin-top: 14px; min-width: 0; }
@@ -13872,6 +13904,7 @@
           {key:"subscriptions", label:"Подписки", type:"money", expense:true}, {key:"paid_services", label:"Платные сервисы", type:"money", expense:true},
           {key:"review_points", label:"Баллы за отзывы", type:"money", expense:true},
           {key:"other_deductions", label:"Прочие удержания", type:"money", expense:true},
+          {key:"corrections", label:"Корректировки (расходы)", type:"money", expense:true},
           {key:"wb_remuneration_adjustment", label:"Корректировка Вознаграждения WB · внутри агентского контроля", type:"money"},
           {key:"positive_adjustments", label:"Корректировки и дополнительные выплаты", type:"money"},
           {key:"total_wb_expenses", label:"Расходы WB с маркетингом", type:"money", expense:true},
@@ -13891,10 +13924,10 @@
         }).join("") + "</tr></thead>";
         const body = definitions.map((definition) => {
           if (definition.group) {
-            return "<tr class=\"wb-finance-group-row\"><td>" + escapeHtml(definition.group) + "</td><td colspan=\"" + weeks.length + "\"></td></tr>";
+            return "<tr class=\"wb-finance-group-row\"><td>" + escapeHtml(definition.group) + "</td>" + weeks.map(function () { return "<td></td>"; }).join("") + "</tr>";
           }
           if (definition.internal) {
-            return "<tr class=\"wb-finance-internal-divider\"><td>" + escapeHtml(definition.label) + "</td><td colspan=\"" + weeks.length + "\"></td></tr>";
+            return "<tr class=\"wb-finance-internal-divider\"><td>" + escapeHtml(definition.label) + "</td>" + weeks.map(function () { return "<td></td>"; }).join("") + "</tr>";
           }
           return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week, weekIndex) => {
             const value = week.metrics ? week.metrics[definition.key] : null;
@@ -13905,13 +13938,17 @@
               const previousWeek = weekIndex > 0 ? weeks[weekIndex - 1] : null;
               const previousShare = previousWeek ? financeExpenseShare(previousWeek.metrics && previousWeek.metrics[definition.key], previousWeek.metrics && previousWeek.metrics.net_revenue) : null;
               const trend = financeTrend(share, previousShare);
-              return "<td" + className + "><span class=\"wb-finance-expense-cell\"><span class=\"wb-finance-expense-main\">" + escapeHtml(formatFinanceMetric(value, definition.type)) + "</span><span class=\"wb-finance-expense-share " + trend.className + "\">" + escapeHtml(formatFinanceMetric(share, "percent")) + (trend.arrow ? " " + trend.arrow : "") + "</span></span></td>";
+              const shareText = formatFinanceMetric(share, "percent");
+              const accessibleTrend = financeTrendDescription(trend.state, "Доля расхода " + shareText);
+              return "<td" + className + "><span class=\"wb-finance-expense-cell\"><span class=\"wb-finance-expense-main\">" + escapeHtml(formatFinanceMetric(value, definition.type)) + "</span><span class=\"wb-finance-expense-share " + trend.className + "\" data-trend-state=\"" + escapeHtml(trend.state) + "\" aria-label=\"" + escapeHtml(accessibleTrend) + "\" title=\"" + escapeHtml(accessibleTrend) + "\">" + escapeHtml(shareText) + "</span></span></td>";
             }
             if (definition.relative) {
               const previousWeek = weekIndex > 0 ? weeks[weekIndex - 1] : null;
               const previousValue = previousWeek && previousWeek.metrics ? previousWeek.metrics[definition.key] : null;
-              const trend = financeTrend(numeric, previousValue === null || previousValue === undefined ? null : Number(previousValue));
-              return "<td" + className + "><span class=\"wb-finance-relative-cell " + trend.className + "\">" + escapeHtml(formatFinanceMetric(value, definition.type)) + (trend.arrow ? " " + trend.arrow : "") + "</span></td>";
+              const trend = financeTrend(numeric, previousValue === null || previousValue === undefined ? null : Number(previousValue), false);
+              const relativeText = formatFinanceMetric(value, definition.type);
+              const accessibleTrend = financeTrendDescription(trend.state, relativeText);
+              return "<td" + className + "><span class=\"wb-finance-relative-cell " + trend.className + "\" data-trend-state=\"" + escapeHtml(trend.state) + "\" aria-label=\"" + escapeHtml(accessibleTrend) + "\" title=\"" + escapeHtml(accessibleTrend) + "\">" + escapeHtml(relativeText) + "</span></td>";
             }
             return "<td" + className + ">" + escapeHtml(formatFinanceMetric(value, definition.type)) + "</td>";
           }).join("") + "</tr>";
@@ -14013,12 +14050,25 @@
         return amount / base * 100;
       }
 
-      function financeTrend(value, previousValue) {
-        if (value === null || value === undefined || !Number.isFinite(Number(value))) return {arrow:"", className:"wb-finance-trend-flat"};
-        if (previousValue === null || previousValue === undefined || !Number.isFinite(Number(previousValue))) return {arrow:"", className:"wb-finance-trend-flat"};
+      function financeTrend(value, previousValue, lowerIsBetter = true) {
+        if (value === null || value === undefined || !Number.isFinite(Number(value))) return {state:"neutral", className:"wb-finance-trend-neutral"};
+        if (previousValue === null || previousValue === undefined || !Number.isFinite(Number(previousValue))) return {state:"neutral", className:"wb-finance-trend-neutral"};
         const delta = Number(value) - Number(previousValue);
-        if (Math.abs(delta) < 0.01) return {arrow:"→", className:"wb-finance-trend-flat"};
-        return delta > 0 ? {arrow:"↓", className:"wb-finance-trend-up"} : {arrow:"↑", className:"wb-finance-trend-down"};
+        if (Math.abs(delta) < 0.01) return {state:"flat", className:"wb-finance-trend-flat"};
+        const improved = lowerIsBetter ? delta < 0 : delta > 0;
+        return improved
+          ? {state:"improved", className:"wb-finance-trend-improved"}
+          : {state:"deteriorated", className:"wb-finance-trend-deteriorated"};
+      }
+
+      function financeTrendDescription(state, valueLabel) {
+        const suffix = ({
+          improved: "Улучшение: доля расхода снизилась относительно предыдущей недели.",
+          deteriorated: "Ухудшение: доля расхода выросла относительно предыдущей недели.",
+          flat: "Без существенных изменений относительно предыдущей недели.",
+          neutral: "Нет сопоставимой предыдущей недели."
+        })[state] || "Нет сопоставимой предыдущей недели.";
+        return valueLabel + ". " + suffix;
       }
 
       function financeStatusLabel(status, incomplete) {

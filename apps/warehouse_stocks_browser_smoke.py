@@ -628,14 +628,26 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                             },
                             "history": [],
                             "reference": {
+                                "status": "ready",
+                                "status_message": "Показаны ровно три последние полностью закрытые календарные недели.",
+                                "missing_weeks": [],
                                 "weeks": [
-                                    {"week_start": "2026-06-22", "week_end": "2026-06-28"},
-                                    {"week_start": "2026-06-29", "week_end": "2026-07-05"},
-                                    {"week_start": "2026-07-06", "week_end": "2026-07-12"},
+                                    {"week_start": "2026-06-22", "week_end": "2026-06-28", "status": "ready"},
+                                    {"week_start": "2026-06-29", "week_end": "2026-07-05", "status": "ready"},
+                                    {"week_start": "2026-07-06", "week_end": "2026-07-12", "status": "ready"},
                                 ],
                                 "rows": [
                                     {
+                                        "key": "agent_remuneration",
                                         "label": "Агентское вознаграждение",
+                                        "group": "Ориентиры для процентных параметров Proxy 3",
+                                        "source_fields": ["agent_remuneration", "commission"],
+                                        "source_mode": "first_available",
+                                        "sign_rule": "Продажа +, возврат −; эквайринг не входит",
+                                        "denominator": "net_revenue",
+                                        "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
+                                        "proxy_treatment": "Ориентир для wb_agent_and_other_rate",
+                                        "weekly_amount_rub": ["3296588.49", "0", None],
                                         "weekly_rate_pct": ["33.959072199101011", "0", None],
                                         "weighted_average_pct": "2.766203712870102",
                                         "note": "",
@@ -654,13 +666,20 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             surface.locator('html[data-settings-ready="true"]').wait_for()
             surface.locator('[data-settings-group-button="user-directory"]').click()
             rendered_values = surface.locator(
-                "#calculationReferenceRows tr:first-child td:not(:first-child)"
+                '#calculationReferenceRows tr[data-calculation-reference-key="agent_remuneration"] td:not(:first-child)'
             )
             rendered_values.first.wait_for()
             _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
             _assert(
                 rendered_values.all_inner_texts() == ["33,96%", "0%", "—", "2,77%"],
                 "settings reference percentages are rounded for display",
+            )
+            _assert(
+                "ровно три последние" in surface.locator("#calculationReferenceStatus").inner_text()
+                and "success" in str(surface.locator("#calculationReferenceStatus").get_attribute("class") or "")
+                and "SUM(amount) / SUM(net_revenue)" in surface.locator("#calculationReferenceRows").inner_text()
+                and surface.locator(".calculation-reference-group").count() == 1,
+                "settings reference exposes ready calendar status and per-row source/sign/SUM-SUM audit",
             )
             group_labels = surface.locator("[data-settings-group-button]").all_inner_texts()
             _assert(
