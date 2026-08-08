@@ -338,6 +338,14 @@ LOOP PR использует тот же единственный deploy command
 
 Production failure после merge ставит global `release:halted` и блокирует выбор следующего release. SSH exit `255` не считается доказанным deploy failure: это `transport-indeterminate`, после которого bounded reconciler читает exact metadata/runtime SHA, canonical EnvironmentFile key-presence без вывода values, systemd state/MainPID и mandatory status/operator probes. Healthy exact SHA продолжает transition; wrong/mixed SHA, invalid auth env, inactive systemd и failed probes сохраняют halted. Разрешены только safe retries `daemon-reload/restart/probes/readback`; rsync, metadata и dependencies не повторяются. Repo-owned `resume-halted` снимает label только по exact PR/head/merge/canonical-target evidence. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets остаются вне Git/logs.
 
+После успешной команды restart deploy runner boundedly повторяет только read-only
+`status_command` до трёх минут. Это покрывает асинхронный systemd restart, когда
+короткий внешний SQLite writer заставил первый процесс завершиться, а
+`Restart=always` запускает тот же exact-SHA runtime повторно. SSH exit `255`
+немедленно передаётся exact-SHA reconciler без локального retry; исчерпание
+bound, неверный SHA, failed probes или любой другой deploy-stage по-прежнему
+fail closed до `deployment_complete=true`.
+
 Read-only commands may inspect rollback-only target metadata (`print-plan`, `deploy --dry-run`, `apply-nginx-routes --dry-run`, bounded probes when explicitly needed), but routine writes must not target selleros.
 
 ## Canonical Target Definition
