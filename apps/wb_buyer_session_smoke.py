@@ -141,6 +141,21 @@ def _run_profile_adapter_smoke() -> None:
                 "exact buyer capability preflight must use one atomic persistent-price operation: "
                 f"{capability_calls}"
             )
+        stable_call_count = len(calls)
+        stable = WbBuyerSessionBlock(adapter=adapter).fetch_stable_authenticated_buyer_price(NM_ID)
+        if (
+            stable.get("status") != "ok"
+            or stable.get("stable") is not True
+            or stable.get("stable_read_count") != 2
+            or stable.get("proof") != "2_identical_authenticated_reads_one_persistent_context"
+        ):
+            raise AssertionError(f"stable buyer proof contract mismatch: {stable}")
+        stable_calls = calls[stable_call_count:]
+        if len(stable_calls) != 1 or stable_calls[0][1] != NM_ID:
+            raise AssertionError(
+                "stable buyer proof must keep all price reads in one persistent operation: "
+                f"{stable_calls}"
+            )
 
         if not calls or any(path != config.persistent_profile_dir for path, _nm_id, _headless in calls):
             raise AssertionError(f"all session/price operations must use one user_data_dir: {calls}")

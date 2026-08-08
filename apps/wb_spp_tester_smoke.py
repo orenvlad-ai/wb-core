@@ -292,8 +292,10 @@ def _run_validation_and_exact_order() -> None:
         ]
         if len(measurement_writes) != 10:
             raise AssertionError("only the explicitly requested 1 + 6 + 3 measurement writes are allowed")
-        if buyer.capability_calls != 13:
-            raise AssertionError("Start and every one of ten seller writes require a fresh capability preflight")
+        if buyer.capability_calls != 10:
+            raise AssertionError(
+                "each Start preflight must cover price one, with fresh preflights before every later seller write"
+            )
 
 
 def _run_logged_out_zero_writes() -> None:
@@ -349,7 +351,7 @@ def _run_progressive_result() -> None:
 def _run_mid_run_loss_and_restore() -> None:
     with TemporaryDirectory(prefix="spp-manual-loss-") as raw:
         source = FakePricesSource()
-        buyer = FakeBuyerSource(source, fail_capability_calls={3})
+        buyer = FakeBuyerSource(source, fail_capability_calls={2})
         block, _, _ = build_block(Path(raw), source, buyer)
         job = block.start(_payload([810, 800, 790]), actor="smoke")["job"]
         statuses = [row["status"] for row in job["measurements"]]
