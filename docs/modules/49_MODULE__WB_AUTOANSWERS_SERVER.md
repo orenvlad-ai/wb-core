@@ -575,7 +575,11 @@ the complete zero-write queue while the worker remains disabled/inactive. Its
 query-only plan and readback prove the exact deployed SHA, v4→v5 epoch change,
 before/after route/reply counts, zero stale unstarted artifacts, zero WB POSTs/
 provider calls and unchanged started-write, attempt, feedback, setting, cost,
-reservation and uncertainty digests. Only then may `autoanswers-lifecycle
+reservation and uncertainty digests. The settings compare-and-swap remains an
+exact v4→v5 gate, while every zero-write processing job is rebound from the
+exact per-row source `policy_epoch` and `policy_version` included in the
+fingerprint-bound projection; mixed legacy job identities inside a v4 store do
+not weaken the settings gate. Only then may `autoanswers-lifecycle
 reconcile` restore the persisted worker intent. The hosted
 `autoanswers-backlog-recovery capture` command captures or reuses an exact
 `wb_autoanswers_t0_manifest_v1` from a full paginated official unanswered list
