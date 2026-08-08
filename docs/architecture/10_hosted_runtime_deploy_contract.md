@@ -561,6 +561,18 @@ Archived MCP compatibility publication gate:
   and verifies the retained legacy table set, copies the current isolated
   queues/settings/audit back in one transaction, proves every table digest and
   preserves all non-Autoanswers registry tables;
+- Autoanswers owner-policy v5 activation uses only hosted
+  `autoanswers-policy-v5-reconciliation dry-run|apply|readback`, pinned to the
+  exact complete deployed SHA. The command refuses to run unless the worker
+  timer is disabled/inactive and its service is inactive; GET-only sync may
+  remain active. Dry-run/readback are SQLite `mode=ro` plus
+  `PRAGMA query_only=ON`. Apply requires the external reviewed fingerprint and
+  atomically evaluates every zero-write publication, rebinds or rekeys it under
+  v5, advances the policy epoch once and appends hash-only audit. A possible
+  prior WB write/readback is protected by a full non-target digest and is never
+  modified. Zero provider calls and zero WB POSTs are mandatory; lifecycle
+  resume is forbidden until readback is `reconciled` with exact counts and
+  unchanged invariants;
 - human-gated Autoanswers zero-backlog recovery uses only hosted
   `autoanswers-backlog-recovery capture|dry-run|apply|readback`. Every action
   is pinned to exact complete `.wb-core-runtime-sha` and deploy metadata;

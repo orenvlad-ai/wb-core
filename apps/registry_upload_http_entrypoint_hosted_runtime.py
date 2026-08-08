@@ -2640,6 +2640,216 @@ def run_autoanswers_backlog_recovery_command(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") != "pending" else 2
 
 
+def _run_remote_autoanswers_policy_v5_reconciliation(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    expected_deployed_sha: str,
+    reviewed_plan_path: Path | None = None,
+    fingerprint: str = "",
+    actor: str = "release-train",
+) -> dict[str, Any]:
+    """Run the v5 owner-policy gate while the publication worker is held."""
+
+    _ensure_active_hosted_runtime_target(
+        target,
+        action=f"autoanswers-policy-v5-reconciliation-{action}",
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Autoanswers policy v5 action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="autoanswers-policy-v5-reconciliation-apply",
+            dry_run=False,
+        )
+    deployed_sha = str(expected_deployed_sha).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
+        raise ValueError(
+            "Autoanswers policy v5 reconciliation requires --expected-deployed-sha"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "Autoanswers policy v5 reconciliation requires the canonical runtime dir"
+        )
+
+    lifecycle = _run_remote_autoanswers_lifecycle(target, action="status")
+    worker = dict(
+        ((lifecycle.get("lifecycle") or {}).get("components") or {}).get("worker")
+        or {}
+    )
+    worker_timer = dict(worker.get("timer") or {})
+    worker_service = dict(worker.get("service") or {})
+    worker_hold = {
+        "timer_enabled": str(worker_timer.get("is_enabled") or ""),
+        "timer_active": str(worker_timer.get("is_active") or ""),
+        "service_active": str(worker_service.get("is_active") or ""),
+    }
+    if (
+        worker_hold["timer_enabled"] == "enabled"
+        or worker_hold["timer_active"] in {"active", "activating", "reloading"}
+        or worker_hold["service_active"] in {"active", "activating", "reloading"}
+    ):
+        raise RuntimeError(
+            "Autoanswers policy v5 reconciliation requires the worker timer/service hold"
+        )
+
+    reviewed_plan_json: str | None = None
+    runner_args = [
+        "python3",
+        "apps/wb_autoanswers_policy_v5_reconciliation.py",
+        action,
+        "--runtime-dir",
+        runtime_dir,
+        "--expected-deployed-sha",
+        deployed_sha,
+    ]
+    if action in {"apply", "readback"}:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None:
+            raise ValueError(
+                f"Autoanswers policy v5 {action} requires --fingerprint"
+            )
+        if reviewed_plan_path is None or not reviewed_plan_path.is_file():
+            raise ValueError(
+                f"Autoanswers policy v5 {action} requires --reviewed-plan-file"
+            )
+        reviewed_payload = json.loads(reviewed_plan_path.read_text(encoding="utf-8"))
+        reviewed_plan = (
+            reviewed_payload.get("result")
+            if isinstance(reviewed_payload, Mapping)
+            and isinstance(reviewed_payload.get("result"), Mapping)
+            else reviewed_payload
+        )
+        if (
+            not isinstance(reviewed_plan, Mapping)
+            or reviewed_plan.get("coverage_confirmed") is not True
+            or str(reviewed_plan.get("plan_fingerprint") or "") != fingerprint
+            or str(
+                (reviewed_plan.get("deployed_runtime") or {}).get("runtime_sha")
+                if isinstance(reviewed_plan.get("deployed_runtime"), Mapping)
+                else ""
+            )
+            != deployed_sha
+        ):
+            raise ValueError(
+                "reviewed Autoanswers policy v5 plan does not match the exact release"
+            )
+        reviewed_plan_json = json.dumps(
+            reviewed_plan,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        runner_args.extend(
+            [
+                "--expected-fingerprint",
+                fingerprint,
+                "--reviewed-plan-stdin",
+            ]
+        )
+    if action == "apply":
+        runner_args.extend(
+            [
+                "--worker-hold-confirmed",
+                "--actor",
+                str(actor).strip() or "release-train",
+            ]
+        )
+    hold_script = (
+        "if /usr/bin/systemctl is-enabled --quiet wb-core-autoanswers-worker.timer; "
+        "then exit 41; fi; "
+        "if /usr/bin/systemctl is-active --quiet wb-core-autoanswers-worker.timer; "
+        "then exit 42; fi; "
+        "if /usr/bin/systemctl is-active --quiet wb-core-autoanswers-worker.service; "
+        "then exit 43; fi; "
+    )
+    shell = (
+        hold_script
+        + f"cd {shlex.quote(target.target_dir)} && "
+        + " ".join(shlex.quote(item) for item in runner_args)
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json,
+        cwd=ROOT,
+        timeout=600,
+        check=False,
+    )
+    allowed_returncodes = {0, 2} if action == "readback" else {0}
+    if result.returncode not in allowed_returncodes:
+        raise RuntimeError(
+            f"Autoanswers policy v5 reconciliation {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Autoanswers policy v5 reconciliation returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Autoanswers policy v5 reconciliation returned a non-object payload"
+        )
+    payload["worker_hold"] = worker_hold
+    if action == "dry-run" and payload.get("coverage_confirmed") is not True:
+        raise RuntimeError(
+            "Autoanswers policy v5 reconciliation dry-run is not apply-ready"
+        )
+    return payload
+
+
+def run_autoanswers_policy_v5_reconciliation_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.action)
+    reviewed_plan_path = (
+        _external_json_path(
+            str(args.reviewed_plan_file),
+            label="Autoanswers policy v5 reviewed plan",
+        )
+        if str(args.reviewed_plan_file or "").strip()
+        else None
+    )
+    payload = _run_remote_autoanswers_policy_v5_reconciliation(
+        target,
+        action=action,
+        expected_deployed_sha=str(args.expected_deployed_sha),
+        reviewed_plan_path=reviewed_plan_path,
+        fingerprint=str(args.fingerprint or ""),
+        actor=str(args.actor or "release-train"),
+    )
+    if str(args.output or "").strip():
+        output_path = _external_json_path(
+            str(args.output),
+            label="Autoanswers policy v5 reconciliation evidence",
+        )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"autoanswers-policy-v5-reconciliation-{action}",
+            "result": payload,
+        }
+    )
+    return 0 if payload.get("status") != "blocked" else 2
+
+
 def _load_autoanswers_answered_inventory_manifest(path: Path) -> dict[str, Any]:
     from apps.wb_autoanswers_answered_inventory_recovery import validate_manifest
 
@@ -8933,6 +9143,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     autoanswers_backlog_recovery.add_argument("--output", default="")
     autoanswers_backlog_recovery.set_defaults(
         handler=run_autoanswers_backlog_recovery_command
+    )
+
+    autoanswers_policy_v5_reconciliation = subparsers.add_parser(
+        "autoanswers-policy-v5-reconciliation",
+        help=(
+            "Plan, atomically apply or query-only read back owner-policy v5 "
+            "for every zero-write publication while the worker is held."
+        ),
+    )
+    autoanswers_policy_v5_reconciliation.add_argument(
+        "action",
+        choices=("dry-run", "apply", "readback"),
+    )
+    autoanswers_policy_v5_reconciliation.add_argument(
+        "--expected-deployed-sha",
+        required=True,
+    )
+    autoanswers_policy_v5_reconciliation.add_argument(
+        "--reviewed-plan-file",
+        default="",
+    )
+    autoanswers_policy_v5_reconciliation.add_argument("--fingerprint", default="")
+    autoanswers_policy_v5_reconciliation.add_argument(
+        "--actor",
+        default="release-train",
+    )
+    autoanswers_policy_v5_reconciliation.add_argument("--output", default="")
+    autoanswers_policy_v5_reconciliation.set_defaults(
+        handler=run_autoanswers_policy_v5_reconciliation_command
     )
 
     autoanswers_answered_inventory_recovery = subparsers.add_parser(
