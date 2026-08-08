@@ -47,6 +47,7 @@ NM_ID = 210183919
 def main() -> None:
     _run_architecture_guard()
     _run_profile_adapter_smoke()
+    _run_security_challenge_classification_smoke()
     _run_price_extraction_smoke()
     _run_recovery_persistent_e2e()
     _run_single_flight_start_smoke()
@@ -121,6 +122,7 @@ def _run_profile_adapter_smoke() -> None:
         if mismatch.get("status") != "wrong_account":
             raise AssertionError(f"a real stable account-id mismatch must be blocked: {mismatch}")
         session_result["identity_material"] = {"user_id": "stable-account-id"}
+        capability_call_count = len(calls)
         capability = WbBuyerSessionBlock(adapter=adapter).check_spp_capability()
         if (
             capability.get("status") != "valid"
@@ -132,6 +134,12 @@ def _run_profile_adapter_smoke() -> None:
             raise AssertionError(
                 "buyer health must validate the exact authenticated-price capability: "
                 + json.dumps(capability, ensure_ascii=False, sort_keys=True)
+            )
+        capability_calls = calls[capability_call_count:]
+        if len(capability_calls) != 1 or capability_calls[0][1] != NM_ID:
+            raise AssertionError(
+                "exact buyer capability preflight must use one atomic persistent-price operation: "
+                f"{capability_calls}"
             )
 
         if not calls or any(path != config.persistent_profile_dir for path, _nm_id, _headless in calls):
@@ -190,6 +198,38 @@ def _run_profile_adapter_smoke() -> None:
             [dict(row["authenticated"]) for row in no_fingerprint_reads]
         ) != 386.0:
             raise AssertionError("stable authenticated browser proof must replace missing fingerprint heuristics")
+
+
+def _run_security_challenge_classification_smoke() -> None:
+    class Body:
+        def inner_text(self, **_kwargs: Any) -> str:
+            return "Что-то не так... Подозрительная активность. captcha-support@rwb.ru"
+
+    class Response:
+        status = 498
+
+    class Page:
+        url = "https://www.wildberries.ru/lk"
+
+        def on(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def goto(self, *_args: Any, **_kwargs: Any) -> Response:
+            return Response()
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def locator(self, _selector: str) -> Body:
+            return Body()
+
+    page = Page()
+    session = WbBuyerSessionAdapter()._probe_session_in_context(page)
+    surface = _inspect_login_surface(page)
+    if session.get("status") != "security_challenge" or session.get("reason") != "buyer_security_challenge":
+        raise AssertionError(f"WB 498 must remain a truthful session challenge: {session}")
+    if surface != {"state": "human", "reason": "buyer_security_challenge"}:
+        raise AssertionError(f"central recovery must keep the challenge window alive: {surface}")
 
 
 def _run_price_extraction_smoke() -> None:
