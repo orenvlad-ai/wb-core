@@ -69,7 +69,70 @@ class _ShortReadResponse:
         return chunk
 
 
+def _assert_deploy_status_readback_retry() -> None:
+    attempts: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def recover_on_third_attempt(command: list[str]) -> None:
+        attempts.append(command)
+        if len(attempts) < 3:
+            raise subprocess.CalledProcessError(3, command)
+
+    hosted_runtime._run_deploy_status_readback(
+        ["ssh", "target", "systemctl status runtime.service"],
+        attempts=3,
+        retry_seconds=0.25,
+        runner=recover_on_third_attempt,
+        sleep=sleeps.append,
+    )
+    if len(attempts) != 3 or sleeps != [0.25, 0.25]:
+        raise AssertionError("deploy status readback must retry only within the exact bound")
+
+    transport_attempts: list[list[str]] = []
+
+    def transport_failure(command: list[str]) -> None:
+        transport_attempts.append(command)
+        raise subprocess.CalledProcessError(255, command)
+
+    try:
+        hosted_runtime._run_deploy_status_readback(
+            ["ssh", "target", "systemctl status runtime.service"],
+            attempts=3,
+            retry_seconds=0,
+            runner=transport_failure,
+            sleep=lambda _: (_ for _ in ()).throw(
+                AssertionError("transport failure must not enter local status retry")
+            ),
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 255 or len(transport_attempts) != 1:
+            raise AssertionError("SSH 255 must reach exact-SHA reconciliation immediately") from exc
+    else:
+        raise AssertionError("SSH 255 must remain transport-indeterminate")
+
+    terminal_attempts: list[list[str]] = []
+
+    def persistent_failure(command: list[str]) -> None:
+        terminal_attempts.append(command)
+        raise subprocess.CalledProcessError(3, command)
+
+    try:
+        hosted_runtime._run_deploy_status_readback(
+            ["ssh", "target", "systemctl status runtime.service"],
+            attempts=2,
+            retry_seconds=0,
+            runner=persistent_failure,
+            sleep=lambda _: None,
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 3 or len(terminal_attempts) != 2:
+            raise AssertionError("persistent service failure must halt after the exact bound") from exc
+    else:
+        raise AssertionError("persistent service failure must remain fail-closed")
+
+
 def main() -> None:
+    _assert_deploy_status_readback_retry()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"
     ) as bindings_temp_dir:
