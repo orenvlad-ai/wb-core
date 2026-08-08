@@ -77,8 +77,14 @@ only activation path.
   the started-publication digest.
 - `readback` is query-only and requires all unstarted artifacts to carry v5 and
   the new epoch with coherent exact reply hashes, the audited fingerprint,
-  exact before/after counts and unchanged settings (except policy), feedback,
-  started-write, attempt, reservation, cost and uncertainty digests.
+  exact before/after counts and unchanged settings (except policy),
+  started-write, attempt, outside-scope job, reservation, cost and uncertainty
+  digests. Feedback truth/version/media are a separate GET-only evidence group:
+  with the canonical readonly timer still enabled/active, non-decreasing counts
+  and changed digests are reported as a bounded observed delta. A count
+  regression, immutable execution drift, WB-attempt delta or provider-boundary
+  delta blocks. Existing flat v1 reviewed plans/audits are split compatibly and
+  retain their exact applied fingerprint.
 
 Only after a reconciled readback may feature-owned lifecycle reconciliation
 restore the previously persisted `auto_all` worker intent. Replaying an applied
