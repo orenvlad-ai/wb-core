@@ -50,6 +50,11 @@ CONTRACT = "wb_autoanswers_policy_v5_reconciliation_v1"
 APPLIED_EVENT = "owner_policy_v5_reconciliation_applied"
 ROW_EVENT = "owner_policy_v5_publication_rebound"
 STARTED_STATES = frozenset({"publishing", "publish_pending_readback", "published"})
+GET_ONLY_FEEDBACK_SURFACES = (
+    "feedback_truth",
+    "feedback_versions",
+    "feedback_media",
+)
 
 
 def _canonical(value: Any) -> str:
@@ -102,7 +107,7 @@ def _settings_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in row.keys() if key not in excluded}
 
 
-def _non_target_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
+def _immutable_execution_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
     settings = conn.execute(
         "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
     ).fetchone()
@@ -147,22 +152,6 @@ def _non_target_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
             ORDER BY j.processing_key
             """,
         ),
-        "feedback_truth": _query_digest(
-            conn,
-            """
-            SELECT feedback_id,content_version,content_version_hash,content_json,
-                   content_classification,rating,answer_text,wb_observation_hash
-            FROM sheet_vitrina_v1_wb_feedbacks ORDER BY feedback_id
-            """,
-        ),
-        "feedback_versions": _query_digest(
-            conn,
-            "SELECT * FROM sheet_vitrina_v1_wb_feedback_versions ORDER BY feedback_id,content_version",
-        ),
-        "feedback_media": _query_digest(
-            conn,
-            "SELECT * FROM sheet_vitrina_v1_wb_feedback_media ORDER BY feedback_id,content_version,kind,ordinal",
-        ),
         "cost_events": _query_digest(
             conn,
             "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_cost_events ORDER BY event_id",
@@ -180,6 +169,131 @@ def _non_target_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
             "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts ORDER BY processing_key,attempt_number",
         ),
     }
+
+
+def _mutable_get_only_surfaces(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "feedback_truth": _query_digest(
+            conn,
+            """
+            SELECT feedback_id,content_version,content_version_hash,content_json,
+                   content_classification,rating,answer_text,wb_observation_hash
+            FROM sheet_vitrina_v1_wb_feedbacks ORDER BY feedback_id
+            """,
+        ),
+        "feedback_versions": _query_digest(
+            conn,
+            "SELECT * FROM sheet_vitrina_v1_wb_feedback_versions ORDER BY feedback_id,content_version",
+        ),
+        "feedback_media": _query_digest(
+            conn,
+            "SELECT * FROM sheet_vitrina_v1_wb_feedback_media ORDER BY feedback_id,content_version,kind,ordinal",
+        ),
+    }
+
+
+def _external_call_counters(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        "wb_post_attempts": int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_attempts"
+            ).fetchone()[0]
+        ),
+        "provider_call_boundaries": int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                WHERE provider_call_started_at IS NOT NULL
+                """
+            ).fetchone()[0]
+        ),
+    }
+
+
+def _non_target_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Legacy flat projection retained for v1 plan/audit readback compatibility."""
+
+    return {
+        **_immutable_execution_invariants(conn),
+        **_mutable_get_only_surfaces(conn),
+    }
+
+
+def _reviewed_invariant_groups(
+    evidence: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, int]]:
+    immutable = evidence.get("immutable_execution_invariants")
+    get_only = evidence.get("mutable_get_only_surfaces")
+    counters = evidence.get("external_call_counters")
+    if isinstance(immutable, Mapping) and isinstance(get_only, Mapping):
+        return (
+            dict(immutable),
+            dict(get_only),
+            {str(key): int(value) for key, value in dict(counters or {}).items()},
+        )
+
+    legacy = evidence.get("non_target_invariants")
+    if not isinstance(legacy, Mapping):
+        return {}, {}, {}
+    legacy = dict(legacy)
+    legacy_get_only = {
+        key: legacy.pop(key)
+        for key in GET_ONLY_FEEDBACK_SURFACES
+        if key in legacy
+    }
+    publication_attempts = legacy.get("publication_attempts")
+    legacy_counters: dict[str, int] = {}
+    if isinstance(publication_attempts, Mapping):
+        legacy_counters["wb_post_attempts"] = int(
+            publication_attempts.get("count") or 0
+        )
+    return legacy, legacy_get_only, legacy_counters
+
+
+def _get_only_observed_delta(
+    reviewed: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    surfaces: dict[str, Any] = {}
+    blockers: list[str] = []
+    changed: list[str] = []
+    for key in GET_ONLY_FEEDBACK_SURFACES:
+        before = reviewed.get(key)
+        after = current.get(key)
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            blockers.append(f"get_only_feedback_evidence_missing:{key}")
+            continue
+        before_count = int(before.get("count") or 0)
+        after_count = int(after.get("count") or 0)
+        before_sha = str(before.get("sha256") or "")
+        after_sha = str(after.get("sha256") or "")
+        digest_changed = before_sha != after_sha
+        if digest_changed:
+            changed.append(key)
+        if after_count < before_count:
+            blockers.append(f"get_only_feedback_count_regressed:{key}")
+        surfaces[key] = {
+            "before_count": before_count,
+            "after_count": after_count,
+            "count_delta": after_count - before_count,
+            "before_sha256": before_sha,
+            "after_sha256": after_sha,
+            "digest_changed": digest_changed,
+        }
+    return (
+        {
+            "contract": "wb_autoanswers_get_only_feedback_delta_v1",
+            "classification": (
+                "bounded_observed_delta" if not blockers else "invalid_observed_delta"
+            ),
+            "bounded": not blockers,
+            "changed": bool(changed),
+            "changed_surfaces": changed,
+            "surfaces": surfaces,
+        },
+        blockers,
+    )
 
 
 def _mutation_safety(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -373,7 +487,9 @@ def build_plan(
     }
     safety = _mutation_safety(conn)
     backup = _verified_backup(runtime_dir)
-    non_target = _non_target_invariants(conn)
+    immutable_execution = _immutable_execution_invariants(conn)
+    mutable_get_only = _mutable_get_only_surfaces(conn)
+    external_calls = _external_call_counters(conn)
     identity = {
         "contract": CONTRACT,
         "owner_policy_contract": OWNER_POLICY_CONTRACT,
@@ -388,7 +504,9 @@ def build_plan(
         "counts": counts,
         "target_projection": action_projection,
         "target_projection_sha256": _fingerprint(action_projection),
-        "non_target_invariants": non_target,
+        "immutable_execution_invariants": immutable_execution,
+        "mutable_get_only_surfaces": mutable_get_only,
+        "external_call_counters": external_calls,
         "mutation_safety": safety,
     }
     plan_fingerprint = _fingerprint(identity)
@@ -398,7 +516,9 @@ def build_plan(
         "pre_change_digest": _fingerprint(
             {
                 "target_projection": action_projection,
-                "non_target_invariants": non_target,
+                "immutable_execution_invariants": immutable_execution,
+                "mutable_get_only_surfaces": mutable_get_only,
+                "external_call_counters": external_calls,
             }
         ),
         "coverage_confirmed": bool(
@@ -453,6 +573,16 @@ def apply_plan(
     with closing(_open(runtime_dir, read_only=False)) as conn:
         existing = _applied_evidence(conn, expected_fingerprint)
         if existing is not None:
+            expected_immutable, expected_get_only, expected_calls = (
+                _reviewed_invariant_groups(existing)
+            )
+            current_immutable = _immutable_execution_invariants(conn)
+            current_get_only = _mutable_get_only_surfaces(conn)
+            current_calls = _external_call_counters(conn)
+            get_only_delta, get_only_blockers = _get_only_observed_delta(
+                expected_get_only,
+                current_get_only,
+            )
             settings = conn.execute(
                 "SELECT policy_epoch,policy_version FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
             ).fetchone()
@@ -461,8 +591,12 @@ def apply_plan(
                 or str(settings["policy_version"]) != OWNER_POLICY_VERSION
                 or int(settings["policy_epoch"])
                 != int(existing.get("target_policy_epoch") or -1)
-                or _non_target_invariants(conn)
-                != existing.get("non_target_invariants")
+                or current_immutable != expected_immutable
+                or bool(get_only_blockers)
+                or any(
+                    int(current_calls.get(key, -1)) != int(value)
+                    for key, value in expected_calls.items()
+                )
             ):
                 raise RuntimeError(
                     "applied policy fingerprint no longer matches its protected invariants"
@@ -473,6 +607,11 @@ def apply_plan(
                 "idempotent": True,
                 "plan_fingerprint": expected_fingerprint,
                 "counts": existing.get("counts") or {},
+                "immutable_execution_invariants": current_immutable,
+                "mutable_get_only_surfaces": current_get_only,
+                "get_only_observed_delta": get_only_delta,
+                "wb_post_count": 0,
+                "provider_call_count": 0,
             }
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -636,7 +775,13 @@ def apply_plan(
                             "source_policy_epoch": plan["source_policy_epoch"],
                             "target_policy_epoch": next_epoch,
                             "counts": plan["counts"],
-                            "non_target_invariants": plan["non_target_invariants"],
+                            "immutable_execution_invariants": plan[
+                                "immutable_execution_invariants"
+                            ],
+                            "mutable_get_only_surfaces": plan[
+                                "mutable_get_only_surfaces"
+                            ],
+                            "external_call_counters": plan["external_call_counters"],
                             "deployed_runtime": dict(deployed_runtime),
                             "worker_hold_confirmed": True,
                             "wb_posts": 0,
@@ -648,8 +793,19 @@ def apply_plan(
                     iso_utc(now),
                 ),
             )
-            if _non_target_invariants(conn) != plan["non_target_invariants"]:
-                raise RuntimeError("policy reconciliation changed a non-target invariant")
+            if (
+                _immutable_execution_invariants(conn)
+                != plan["immutable_execution_invariants"]
+            ):
+                raise RuntimeError(
+                    "policy reconciliation changed an immutable execution invariant"
+                )
+            if _mutable_get_only_surfaces(conn) != plan["mutable_get_only_surfaces"]:
+                raise RuntimeError(
+                    "policy reconciliation changed a GET-only feedback surface"
+                )
+            if _external_call_counters(conn) != plan["external_call_counters"]:
+                raise RuntimeError("policy reconciliation changed an external-call counter")
             foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
             if foreign_keys:
                 raise RuntimeError("policy reconciliation violated SQLite foreign keys")
@@ -665,7 +821,9 @@ def apply_plan(
         "policy_version": OWNER_POLICY_VERSION,
         "policy_epoch": next_epoch,
         "counts": plan["counts"],
-        "non_target_invariants": plan["non_target_invariants"],
+        "immutable_execution_invariants": plan["immutable_execution_invariants"],
+        "mutable_get_only_surfaces": plan["mutable_get_only_surfaces"],
+        "external_call_counters": plan["external_call_counters"],
         "wb_post_count": 0,
         "provider_call_count": 0,
     }
@@ -686,14 +844,46 @@ def readback(
     rows = _publication_rows(conn)
     unstarted = [row for row in rows if not _is_started(row)]
     blockers: list[str] = []
+    reviewed_immutable, reviewed_get_only, reviewed_calls = _reviewed_invariant_groups(
+        reviewed_plan
+    )
+    current_immutable = _immutable_execution_invariants(conn)
+    current_get_only = _mutable_get_only_surfaces(conn)
+    current_calls = _external_call_counters(conn)
+    immutable_drift = sorted(
+        key
+        for key in set(reviewed_immutable) | set(current_immutable)
+        if reviewed_immutable.get(key) != current_immutable.get(key)
+    )
+    get_only_delta, get_only_blockers = _get_only_observed_delta(
+        reviewed_get_only,
+        current_get_only,
+    )
     if str(settings["policy_version"]) != OWNER_POLICY_VERSION:
         blockers.append("settings_policy_version_not_v5")
     if int(settings["policy_epoch"]) != int(reviewed_plan.get("target_policy_epoch") or -1):
         blockers.append("settings_policy_epoch_mismatch")
     if evidence is None:
         blockers.append("activation_audit_missing")
-    if _non_target_invariants(conn) != reviewed_plan.get("non_target_invariants"):
-        blockers.append("non_target_invariants_changed")
+    if immutable_drift:
+        blockers.append("immutable_execution_invariants_changed")
+    blockers.extend(get_only_blockers)
+    wb_post_count = int(current_calls["wb_post_attempts"]) - int(
+        reviewed_calls.get(
+            "wb_post_attempts",
+            ((reviewed_immutable.get("publication_attempts") or {}).get("count") or 0),
+        )
+    )
+    expected_provider_calls = reviewed_calls.get("provider_call_boundaries")
+    provider_call_count = (
+        int(current_calls["provider_call_boundaries"]) - int(expected_provider_calls)
+        if expected_provider_calls is not None
+        else 0
+    )
+    if wb_post_count != 0:
+        blockers.append("wb_post_count_changed")
+    if provider_call_count != 0:
+        blockers.append("provider_call_count_changed")
     stale = 0
     incoherent = 0
     metadata_stale = 0
@@ -753,11 +943,15 @@ def readback(
         "policy_epoch": int(settings["policy_epoch"]),
         "expected_counts": expected_counts,
         "actual_counts": actual_counts,
-        "non_target_invariants": _non_target_invariants(conn),
+        "immutable_execution_invariants": current_immutable,
+        "immutable_execution_drift": immutable_drift,
+        "mutable_get_only_surfaces": current_get_only,
+        "get_only_observed_delta": get_only_delta,
+        "external_call_counters": current_calls,
         "activation_audit_confirmed": evidence is not None,
         "blockers": blockers,
-        "wb_post_count": 0,
-        "provider_call_count": 0,
+        "wb_post_count": wb_post_count,
+        "provider_call_count": provider_call_count,
     }
 
 

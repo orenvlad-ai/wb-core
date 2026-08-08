@@ -577,10 +577,18 @@ Archived MCP compatibility publication gate:
   `PRAGMA query_only=ON`. Apply requires the external reviewed fingerprint and
   atomically evaluates every zero-write publication, rebinds or rekeys it under
   v5, advances the policy epoch once and appends hash-only audit. A possible
-  prior WB write/readback is protected by a full non-target digest and is never
-  modified. Zero provider calls and zero WB POSTs are mandatory; lifecycle
-  resume is forbidden until readback is `reconciled` with exact counts and
-  unchanged invariants;
+  prior WB write/readback and every execution-owned job, attempt, cost,
+  reservation and uncertainty row are protected by byte-stable immutable
+  digests and are never modified. Feedback truth/version/media evidence is a
+  separate GET-only group: while the canonical readonly-sync timer remains
+  enabled/active it may advance between apply and readback, and the runner
+  reports its before/after counts, count deltas and digests as a bounded
+  observed delta. A count regression, any immutable execution drift, a WB POST
+  attempt or provider-call boundary still blocks. Legacy flat v1 reviewed
+  plans/audits are split on read without changing their applied fingerprint.
+  Lifecycle resume is forbidden until readback is `reconciled` with exact
+  scope/counts, zero stale/metadata-stale/incoherent rows and zero WB/provider
+  deltas;
 - human-gated Autoanswers zero-backlog recovery uses only hosted
   `autoanswers-backlog-recovery capture|dry-run|apply|readback`. Every action
   is pinned to exact complete `.wb-core-runtime-sha` and deploy metadata;
