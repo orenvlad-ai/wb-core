@@ -103,26 +103,41 @@ class WbBuyerSessionBlock:
         return _public_session_payload(self.adapter.check_session())
 
     def check_spp_capability(self) -> dict[str, Any]:
-        """Check both authenticated identity and the exact buyer-price route."""
+        """Check authenticated identity and price in one persistent operation."""
 
-        session = self.check_session()
-        if not bool(session.get("valid")):
-            return {
-                **session,
-                "capability": "authenticated_buyer_price",
-                "capability_status": "blocked_by_auth",
-                "capability_valid": False,
-                "price": {},
-            }
         nm_id = int(self.adapter.config.validation_nm_id)
         price = _public_price_payload(
             self.adapter.fetch_authenticated_buyer_price(nm_id)
         )
+        price_status = str(price.get("status") or "probe_error")
+        session_status = str(price.get("session_status") or "").strip()
+        if not session_status and price_status.startswith("session_"):
+            session_status = price_status.removeprefix("session_")
+        if not session_status:
+            session_status = "valid" if price.get("authenticated_session_proof") else "probe_error"
+        session_valid = session_status == "valid"
+        session = {
+            "contract_name": "wb_buyer_session_status_v1",
+            "status": session_status,
+            "status_label": BUYER_STATUS_LABELS.get(session_status, "Неизвестно"),
+            "status_tone": "success"
+            if session_valid
+            else ("warning" if session_status in {"recovery_running", "security_challenge"} else "danger"),
+            "valid": session_valid,
+            "reason": _safe_reason(price.get("session_reason") or price.get("reason")),
+            "checked_at": str(price.get("session_checked_at") or price.get("measured_at") or ""),
+            "session_fingerprint": _safe_fingerprint(price.get("session_fingerprint")),
+            "account_confirmed": bool(price.get("account_fingerprint_available")),
+            "authenticated_session_proof": bool(price.get("authenticated_session_proof")),
+            "persistent_profile": bool(price.get("persistent_profile")),
+            "recovery_run_id": str(price.get("recovery_run_id") or "")[:160],
+            "action": "" if session_valid else "Установить сессию",
+        }
         return {
             **session,
             "capability": "authenticated_buyer_price",
-            "capability_status": "available" if price.get("status") == "ok" else str(price.get("status") or "unavailable"),
-            "capability_valid": price.get("status") == "ok",
+            "capability_status": "available" if price_status == "ok" else price_status,
+            "capability_valid": price_status == "ok" and session_valid,
             "validation_nm_id": nm_id,
             "price": price,
         }
@@ -271,6 +286,9 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "measured_at": str(raw.get("measured_at") or ""),
         "source_method": str(raw.get("source_method") or "")[:240],
         "source_endpoint": str(raw.get("source_endpoint") or "")[:500],
+        "session_status": str(raw.get("session_status") or "")[:80],
+        "session_reason": _safe_reason(raw.get("session_reason")),
+        "session_checked_at": str(raw.get("session_checked_at") or "")[:100],
         "session_fingerprint": _safe_fingerprint(raw.get("session_fingerprint")),
         "account_fingerprint_available": bool(raw.get("account_fingerprint_available")),
         "authenticated_session_proof": bool(raw.get("authenticated_session_proof")),

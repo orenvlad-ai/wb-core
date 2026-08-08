@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from playwright.sync_api import sync_playwright
 
 from packages.adapters.wb_buyer_session import (  # noqa: E402
+    CHALLENGE_MARKERS,
     WbBuyerSessionAdapter,
     WbBuyerSessionConfig,
     WbBuyerSessionLockTimeout,
@@ -540,6 +541,8 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
     if isinstance(injected, Mapping):
         return dict(injected)
     body = _safe_body_text(page).lower()
+    if any(marker in body for marker in CHALLENGE_MARKERS):
+        return {"state": "human", "reason": "buyer_security_challenge"}
     if any(marker in body for marker in ("код из смс", "введите код", "код подтверждения", "отправили код", "sms code", "verification code", "otp")):
         return {"state": "human", "reason": "buyer_sms_required"}
     if any(marker in body for marker in ("введите номер телефона", "номер телефона", "получить код", "phone number")):

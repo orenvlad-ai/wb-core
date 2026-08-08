@@ -32,6 +32,8 @@ CHALLENGE_MARKERS = (
     "data-site-key",
     "подтвердите, что вы не робот",
     "почти готово",
+    "подозрительная активность",
+    "captcha-support@rwb.ru",
 )
 RECOVERY_PROBE_BLOCKING_STATUSES = {
     "starting",
@@ -235,6 +237,9 @@ class WbBuyerSessionAdapter:
             "measured_at": str(raw.get("measured_at") or self._now_text()),
             "source_method": str(raw.get("source_method") or "authenticated_browser_network_json"),
             "source_endpoint": _safe_endpoint(raw.get("source_endpoint")),
+            "session_status": str(session.get("status") or "valid"),
+            "session_reason": str(session.get("reason") or "buyer_session_valid"),
+            "session_checked_at": str(session.get("checked_at") or self._now_text()),
             "session_fingerprint": str(session.get("session_fingerprint") or ""),
             "account_fingerprint_available": bool(session.get("account_confirmed")),
             "authenticated_session_proof": True,
@@ -659,6 +664,9 @@ class WbBuyerSessionAdapter:
             "measured_at": self._now_text(),
             "source_method": "authenticated_browser_network_json",
             "source_endpoint": "",
+            "session_status": str((session or {}).get("status") or ""),
+            "session_reason": str((session or {}).get("reason") or ""),
+            "session_checked_at": str((session or {}).get("checked_at") or ""),
             "session_fingerprint": str((session or {}).get("session_fingerprint") or ""),
             "account_fingerprint_available": bool((session or {}).get("account_confirmed")),
             "authenticated_session_proof": False,

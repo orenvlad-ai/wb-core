@@ -62,7 +62,7 @@ update_note: "Контракт заменён на короткий ручной
 7. компактную server-owned историю newest-first;
 8. внизу последние десять полезных sanitized технических событий.
 
-Login, recovery, launcher и noVNC не дублируются: ими владеет `Настройки → Источники и сессии`.
+Login, recovery, launcher и noVNC не дублируются: ими владеет `Настройки → Источники и сессии`. Exact capability preflight получает authenticated buyer price и session proof одной atomic persistent-profile операцией: отдельный предварительный browser launch только для `/lk` запрещён, потому что он не добавляет proof и повышает риск WB anti-bot challenge. HTTP 498/экран `Подозрительная активность` классифицируется как `security_challenge`; централизованный headed recovery удерживает этот экран до автоматического разрешения или действия оператора, а не превращает его в generic `probe_error`.
 
 # 3. API
 
