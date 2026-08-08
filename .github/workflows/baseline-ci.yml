@@ -70,6 +70,9 @@ jobs:
       - name: Install Chromium for projection UI smoke
         run: python3 -m playwright install chromium
 
+      - name: Validate maintenance write-barrier browser state
+        run: python3 apps/business_data_write_barrier_browser_smoke.py
+
       - name: Validate automatic projection table reread
         run: python3 apps/warehouse_business_projection_browser_smoke.py
 
