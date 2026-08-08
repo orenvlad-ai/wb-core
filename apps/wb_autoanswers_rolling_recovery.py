@@ -89,8 +89,10 @@ def _verified_backup(runtime_dir: Path) -> dict[str, Any]:
     databases = sorted(backup_dir.glob("*.sqlite3"))
     if databases:
         path = databases[-1]
-        with sqlite3.connect(
-            f"file:{path.resolve()}?mode=ro", uri=True, timeout=30
+        with closing(
+            sqlite3.connect(
+                f"file:{path.resolve()}?mode=ro", uri=True, timeout=30
+            )
         ) as conn:
             conn.execute("PRAGMA query_only=ON")
             integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
