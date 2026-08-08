@@ -478,6 +478,83 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertEqual(json.loads(str(captured[0][1]["input"])), plan)
         self.assertNotIn("feedbacks/answer", command)
 
+    def test_policy_v5_readback_binds_get_only_delta_to_readonly_sync(self) -> None:
+        target = hosted.load_hosted_runtime_target(TARGET)
+        deployed_sha = "a" * 40
+        fingerprint = "sha256:" + "b" * 64
+        plan = {
+            "contract": "wb_autoanswers_policy_v5_reconciliation_v1",
+            "coverage_confirmed": True,
+            "plan_fingerprint": fingerprint,
+            "deployed_runtime": {"runtime_sha": deployed_sha},
+        }
+        lifecycle = {
+            "lifecycle": {
+                "components": {
+                    "worker": {
+                        "timer": {"is_enabled": "disabled", "is_active": "inactive"},
+                        "service": {"is_active": "inactive"},
+                    },
+                    "readonly_sync": {
+                        "actual": True,
+                        "timer": {"is_enabled": "enabled", "is_active": "active"},
+                    },
+                }
+            }
+        }
+        response = {
+            "contract": "wb_autoanswers_policy_v5_reconciliation_v1",
+            "status": "reconciled",
+            "plan_fingerprint": fingerprint,
+            "blockers": [],
+            "get_only_observed_delta": {
+                "changed": True,
+                "bounded": True,
+                "changed_surfaces": ["feedback_truth"],
+            },
+        }
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+
+        with TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with patch.object(
+                hosted,
+                "_run_remote_autoanswers_lifecycle",
+                return_value=lifecycle,
+            ), patch.object(hosted.subprocess, "run", side_effect=fake_run):
+                reconciled = hosted._run_remote_autoanswers_policy_v5_reconciliation(
+                    target,
+                    action="readback",
+                    expected_deployed_sha=deployed_sha,
+                    reviewed_plan_path=plan_path,
+                    fingerprint=fingerprint,
+                )
+                lifecycle["lifecycle"]["components"]["readonly_sync"]["actual"] = False
+                blocked = hosted._run_remote_autoanswers_policy_v5_reconciliation(
+                    target,
+                    action="readback",
+                    expected_deployed_sha=deployed_sha,
+                    reviewed_plan_path=plan_path,
+                    fingerprint=fingerprint,
+                )
+        self.assertEqual(reconciled["status"], "reconciled")
+        self.assertTrue(reconciled["get_only_feedback_sync"]["confirmed"])
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertIn(
+            "get_only_feedback_delta_without_active_readonly_sync",
+            blocked["blockers"],
+        )
+
     def test_answered_inventory_wrapper_requires_external_exact_scope_and_human_gate(self) -> None:
         from apps.wb_autoanswers_answered_inventory_recovery import _fingerprint
 

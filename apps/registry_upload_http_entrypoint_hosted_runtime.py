@@ -2731,10 +2731,9 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
         )
 
     lifecycle = _run_remote_autoanswers_lifecycle(target, action="status")
-    worker = dict(
-        ((lifecycle.get("lifecycle") or {}).get("components") or {}).get("worker")
-        or {}
-    )
+    components = dict((lifecycle.get("lifecycle") or {}).get("components") or {})
+    worker = dict(components.get("worker") or {})
+    readonly_sync = dict(components.get("readonly_sync") or {})
     worker_timer = dict(worker.get("timer") or {})
     worker_service = dict(worker.get("service") or {})
     worker_hold = {
@@ -2742,6 +2741,17 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
         "timer_active": str(worker_timer.get("is_active") or ""),
         "service_active": str(worker_service.get("is_active") or ""),
     }
+    readonly_timer = dict(readonly_sync.get("timer") or {})
+    get_only_feedback_sync = {
+        "actual": bool(readonly_sync.get("actual")),
+        "timer_enabled": str(readonly_timer.get("is_enabled") or ""),
+        "timer_active": str(readonly_timer.get("is_active") or ""),
+    }
+    get_only_feedback_sync["confirmed"] = bool(
+        get_only_feedback_sync["actual"]
+        and get_only_feedback_sync["timer_enabled"] == "enabled"
+        and get_only_feedback_sync["timer_active"] == "active"
+    )
     if (
         worker_hold["timer_enabled"] == "enabled"
         or worker_hold["timer_active"] in {"active", "activating", "reloading"}
@@ -2855,6 +2865,18 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
             "Autoanswers policy v5 reconciliation returned a non-object payload"
         )
     payload["worker_hold"] = worker_hold
+    payload["get_only_feedback_sync"] = get_only_feedback_sync
+    get_only_delta = payload.get("get_only_observed_delta")
+    if (
+        action == "readback"
+        and isinstance(get_only_delta, Mapping)
+        and get_only_delta.get("changed") is True
+        and get_only_feedback_sync["confirmed"] is not True
+    ):
+        payload["status"] = "blocked"
+        payload["blockers"] = list(payload.get("blockers") or []) + [
+            "get_only_feedback_delta_without_active_readonly_sync"
+        ]
     if action == "dry-run" and payload.get("coverage_confirmed") is not True:
         raise RuntimeError(
             "Autoanswers policy v5 reconciliation dry-run is not apply-ready"
