@@ -35,6 +35,7 @@ SAFE_BUYER_REASONS = {
     "account_fingerprint_source_missing",
     "authenticated_network_price_missing",
     "authenticated_price_probe_failed",
+    "authenticated_price_unstable",
     "authenticated_price_unavailable",
     "authenticated_primary_price_missing",
     "buyer_account_context_missing",
@@ -188,6 +189,11 @@ class WbBuyerSessionBlock:
     def fetch_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
         return _public_price_payload(self.adapter.fetch_authenticated_buyer_price(int(nm_id)))
 
+    def fetch_stable_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
+        return _public_price_payload(
+            self.adapter.fetch_stable_authenticated_buyer_price(int(nm_id))
+        )
+
 
 class WbBuyerSessionRecoveryController:
     """Thin wrapper around the repo-owned buyer recovery/noVNC tool."""
@@ -294,6 +300,9 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "authenticated_session_proof": bool(raw.get("authenticated_session_proof")),
         "persistent_profile": bool(raw.get("persistent_profile")),
         "recovery_run_id": str(raw.get("recovery_run_id") or "")[:160],
+        "stable": bool(raw.get("stable")),
+        "stable_read_count": _int_or_none(raw.get("stable_read_count")),
+        "proof": str(raw.get("proof") or "")[:120],
         "freshness": dict(raw.get("freshness") or {}) if isinstance(raw.get("freshness"), Mapping) else {},
         "diagnostics": dict(raw.get("diagnostics") or {}) if isinstance(raw.get("diagnostics"), Mapping) else {},
     }

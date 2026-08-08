@@ -215,6 +215,120 @@ class WbBuyerSessionAdapter:
         except Exception:
             return self._price_error(normalized_nm_id, "probe_error", "authenticated_price_probe_failed")
 
+        return self._build_price_result(
+            normalized_nm_id,
+            raw=raw,
+            session=session,
+            stability="single_read",
+        )
+
+    def fetch_stable_authenticated_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        max_reads: int = 3,
+    ) -> dict[str, Any]:
+        """Prove two identical authenticated prices in one persistent context."""
+
+        normalized_nm_id = int(nm_id)
+        normalized_max_reads = max(2, min(3, int(max_reads)))
+        if normalized_nm_id <= 0:
+            return self._price_error(normalized_nm_id, "probe_error", "invalid_nm_id")
+        self._ensure_runtime_permissions()
+        joined = self._active_recovery()
+        if joined:
+            return self._price_error(
+                normalized_nm_id,
+                "session_recovery_running",
+                "buyer_recovery_in_progress",
+                joined_run_id=str(joined.get("run_id") or ""),
+            )
+        try:
+            with self.session_lock(
+                blocking=False,
+                owner_run_id=f"buyer-price-stable-{secrets.token_hex(6)}",
+                owner_operation="authenticated_price_stable_read",
+            ):
+                joined = self._active_recovery()
+                if joined:
+                    return self._price_error(
+                        normalized_nm_id,
+                        "session_recovery_running",
+                        "buyer_recovery_in_progress",
+                        joined_run_id=str(joined.get("run_id") or ""),
+                    )
+                operation = self._run_persistent_price_series_operation(
+                    nm_id=normalized_nm_id,
+                    headless=True,
+                    max_reads=normalized_max_reads,
+                )
+                session = self._validate_authenticated_session(
+                    operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+                    persist_fingerprint=True,
+                )
+                if session.get("status") != "valid":
+                    return self._price_error(
+                        normalized_nm_id,
+                        f"session_{session.get('status') or 'invalid'}",
+                        str(session.get("reason") or "buyer_session_invalid"),
+                        session=session,
+                    )
+                raw_prices = [
+                    dict(item)
+                    for item in operation.get("prices", [])
+                    if isinstance(item, Mapping)
+                ]
+        except BlockingIOError:
+            joined = self._active_recovery() or self._lock_owner()
+            return self._price_error(
+                normalized_nm_id,
+                "session_recovery_running",
+                "buyer_session_automation_busy",
+                joined_run_id=str(joined.get("run_id") or ""),
+            )
+        except Exception:
+            return self._price_error(normalized_nm_id, "probe_error", "authenticated_price_probe_failed")
+
+        results = [
+            self._build_price_result(
+                normalized_nm_id,
+                raw=raw,
+                session=session,
+                stability="same_persistent_context_series",
+            )
+            for raw in raw_prices
+        ]
+        first_error = next((result for result in results if result.get("status") != "ok"), None)
+        if first_error is not None:
+            return first_error
+        for index in range(1, len(results)):
+            current = _money_or_none(results[index].get("authenticated_buyer_price"))
+            previous = _money_or_none(results[index - 1].get("authenticated_buyer_price"))
+            if current is not None and current == previous:
+                result = dict(results[index])
+                result["stable"] = True
+                result["stable_read_count"] = index + 1
+                result["proof"] = "2_identical_authenticated_reads_one_persistent_context"
+                result["freshness"] = {
+                    **dict(result.get("freshness") or {}),
+                    "stability": "2_identical_authenticated_reads_one_persistent_context",
+                }
+                return result
+        return self._price_error(
+            normalized_nm_id,
+            "authenticated_unstable",
+            "authenticated_price_unstable",
+            session=session,
+        )
+
+    def _build_price_result(
+        self,
+        normalized_nm_id: int,
+        *,
+        raw: Mapping[str, Any],
+        session: Mapping[str, Any],
+        stability: str,
+    ) -> dict[str, Any]:
         status = str(raw.get("status") or "probe_error")
         if status != "ok":
             return self._price_error(
@@ -247,7 +361,7 @@ class WbBuyerSessionAdapter:
             "freshness": {
                 "live_read": True,
                 "http_status": _int_or_none(raw.get("http_status")),
-                "stability": "single_read",
+                "stability": stability,
             },
             "diagnostics": _safe_diagnostics(raw.get("diagnostics")),
         }
@@ -397,6 +511,54 @@ class WbBuyerSessionAdapter:
             try:
                 self.migrate_legacy_storage_state(context)
                 return self.probe_persistent_context(context, nm_id=nm_id)
+            finally:
+                context.close()
+                os.chmod(profile_dir, 0o700)
+
+    def _run_persistent_price_series_operation(
+        self,
+        *,
+        nm_id: int,
+        headless: bool,
+        max_reads: int,
+    ) -> dict[str, Any]:
+        profile_dir = self.config.persistent_profile_dir
+        if self.operation_probe is not None:
+            operation = dict(self.operation_probe(profile_dir, nm_id, headless))
+            price = operation.get("price") if isinstance(operation.get("price"), Mapping) else {}
+            return {
+                "session": operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+                "prices": [dict(price), dict(price)],
+            }
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                locale="ru-RU",
+                viewport={"width": 1500, "height": 820},
+            )
+            try:
+                self.migrate_legacy_storage_state(context)
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_default_timeout(self.config.navigation_timeout_ms)
+                page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
+                session = self._probe_session_in_context(page)
+                prices: list[dict[str, Any]] = []
+                if str(session.get("status") or "") == "valid":
+                    for _attempt in range(max_reads):
+                        price = self._probe_price_in_context(page, nm_id)
+                        prices.append(dict(price))
+                        if (
+                            len(prices) >= 2
+                            and prices[-1].get("status") == "ok"
+                            and prices[-2].get("status") == "ok"
+                            and _money_or_none(prices[-1].get("authenticated_buyer_price"))
+                            == _money_or_none(prices[-2].get("authenticated_buyer_price"))
+                        ):
+                            break
+                return {"session": session, "prices": prices}
             finally:
                 context.close()
                 os.chmod(profile_dir, 0o700)

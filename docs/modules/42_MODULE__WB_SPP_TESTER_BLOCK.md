@@ -87,7 +87,7 @@ Login, recovery, launcher и noVNC не дублируются: ими влад�
 - каждое значение обязательно, конечно, больше нуля и имеет не более двух знаков после запятой;
 - значения не исправляются и не округляются молча;
 - `confirm_live_price_change=true` и `restore_baseline=true` обязательны;
-- browser и backend выполняют свежий buyer capability preflight непосредственно на Start; backend preflight авторитетен;
+- browser и backend выполняют свежий buyer capability preflight непосредственно на Start; backend preflight авторитетен и покрывает первую measurement до любой seller write, поэтому первый worker не открывает третий дублирующий Chromium context;
 - capability failure возвращает короткую ошибку до baseline capture и до любого seller write.
 
 Response содержит compact job и `log_events`; raw upstream payloads, headers, paths, fingerprints и внутренний timeline не публикуются.
@@ -129,13 +129,13 @@ Start fail-closed при `editableSizePrice=true`, quarantine, неполной 
 
 Для каждой введённой цены:
 
-1. повторить buyer capability preflight;
+1. для первой цены использовать только что полученный authoritative backend Start-preflight, а перед каждой следующей ценой повторить fresh buyer capability preflight;
 2. сохранить текущий seller discount и вычислить необходимый integer seller `price`;
 3. выполнить guarded WB upload;
 4. дождаться финального upload status;
 5. прочитать фактический seller `discountedPrice`;
 6. проверить quarantine;
-7. получить stable authenticated buyer price;
+7. получить stable authenticated buyer price: два одинаковых fresh read выполняются в одном persistent Chromium context, а не отдельными browser launches;
 8. рассчитать СПП по фактическому seller readback:
 
 `spp = (seller_discounted_price - authenticated_buyer_price) / seller_discounted_price`.
