@@ -71,7 +71,10 @@ def main() -> None:
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page = browser.new_page(
+                viewport={"width": 960, "height": 900},
+                color_scheme="dark",
+            )
             page.on(
                 "console",
                 lambda message: (
@@ -95,6 +98,13 @@ def main() -> None:
             page.locator('[data-report-section-button="wb-finance"]').click()
             table = page.locator("#wbFinanceReportTableWrap table")
             table.wait_for(state="visible")
+            wrap = page.locator("#wbFinanceReportTableWrap")
+            wrap.evaluate("element => { element.scrollLeft = element.scrollWidth; }")
+            subscriptions_row = table.locator("tbody tr", has_text="Подписки").first
+            subscriptions_metric = subscriptions_row.locator("td").first
+            subscriptions_before_hover = subscriptions_metric.bounding_box()
+            subscriptions_metric.hover()
+            subscriptions_after_hover = subscriptions_metric.bounding_box()
             facts = page.evaluate(
                 r"""
                 () => {
@@ -107,6 +117,8 @@ def main() -> None:
                   const acquiringRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Эквайринг');
                   const withMarketingRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Расходы WB с маркетингом');
                   const noMarketingRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Расходы WB без маркетинга');
+                  const subscriptionsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Подписки');
+                  const correctionsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Корректировки (расходы)');
                   const cogsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Себестоимость продаж');
                   const profitRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Прибыль после себестоимости');
                   const marginRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Итоговая рентабельность, %');
@@ -115,23 +127,62 @@ def main() -> None:
                   wrap.scrollLeft = 0;
                   const before = wrap.scrollLeft;
                   wrap.scrollLeft = wrap.scrollWidth;
+                  const ownsStickyPixels = (row) => {
+                    const cell = row && row.cells && row.cells[0];
+                    if (!cell) return false;
+                    row.scrollIntoView({block: 'center'});
+                    wrap.scrollLeft = wrap.scrollWidth;
+                    const rect = cell.getBoundingClientRect();
+                    const points = [
+                      [rect.left + 6, rect.top + rect.height / 2],
+                      [rect.right - 6, rect.top + rect.height / 2]
+                    ];
+                    return points.every(([x, y]) => {
+                      const hit = document.elementFromPoint(x, y);
+                      return Boolean(hit && (hit === cell || cell.contains(hit)));
+                    });
+                  };
+                  const opaqueBackground = (cell) => {
+                    const value = getComputedStyle(cell).backgroundColor;
+                    const rgba = value.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)$/);
+                    return value !== 'transparent' && (!rgba || Number(rgba[1]) === 1);
+                  };
+                  const groupRow = table.querySelector('tbody tr.wb-finance-group-row');
+                  const internalRow = table.querySelector('tbody tr.wb-finance-internal-divider');
                   return {
                     weekCount: headerTitles.length,
                     headerTitles,
                     qualityLabels,
                     weekStatusLabels,
-                    commission: [...commissionRow.cells].slice(1).map((cell) => ({text: normalize(cell.innerText), className: cell.querySelector('.wb-finance-expense-share').className})),
+                    commission: [...commissionRow.cells].slice(1).map((cell) => {
+                      const share = cell.querySelector('.wb-finance-expense-share');
+                      return {text: normalize(cell.innerText), className: share.className, state: share.dataset.trendState, aria: share.getAttribute('aria-label'), title: share.title};
+                    }),
                     acquiring: [...acquiringRow.cells].slice(1).map((cell) => normalize(cell.innerText)),
-                    withMarketing: [...withMarketingRow.cells].slice(1).map((cell) => ({text: normalize(cell.innerText), className: cell.querySelector('.wb-finance-expense-share').className})),
+                    withMarketing: [...withMarketingRow.cells].slice(1).map((cell) => {
+                      const share = cell.querySelector('.wb-finance-expense-share');
+                      return {text: normalize(cell.innerText), className: share.className, state: share.dataset.trendState, aria: share.getAttribute('aria-label'), title: share.title};
+                    }),
                     duplicatePercentRow: [...table.querySelectorAll('tbody tr')].some((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Расходы WB, % от чистой выручки'),
                     technicalExpenseRow: [...table.querySelectorAll('tbody tr')].some((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Расходы периода, учитываемые в прибыли'),
                     lastExpenseMetric: noMarketingRow.previousElementSibling && noMarketingRow.nextElementSibling ? noMarketingRow.nextElementSibling.cells[0].innerText.trim() : '',
                     noMarketing: [...noMarketingRow.cells].slice(1).map((cell) => normalize(cell.innerText)),
                     containsPointDelta: table.innerText.includes('п.п.'),
+                    containsVisibleTrendGlyph: /[↑↓→]/.test(table.innerText),
+                    containsAccessibleTrendGlyph: [...table.querySelectorAll('[aria-label],[title]')].some((node) => /[↑↓→]/.test((node.getAttribute('aria-label') || '') + (node.getAttribute('title') || ''))),
+                    correctionsRowPresent: Boolean(correctionsRow),
                     cogs: [...cogsRow.cells].slice(1).map((cell) => normalize(cell.innerText)),
                     profit: [...profitRow.cells].slice(1).map((cell) => normalize(cell.innerText)),
                     margin: [...marginRow.cells].slice(1).map((cell) => normalize(cell.innerText)),
                     sticky: getComputedStyle(metricCell).position,
+                    subscriptionsMetricText: subscriptionsRow.cells[0].innerText.trim(),
+                    subscriptionsOpaque: opaqueBackground(subscriptionsRow.cells[0]),
+                    subscriptionsOwnsStickyPixels: ownsStickyPixels(subscriptionsRow),
+                    groupOpaque: opaqueBackground(groupRow.cells[0]),
+                    groupOwnsStickyPixels: ownsStickyPixels(groupRow),
+                    internalOpaque: opaqueBackground(internalRow.cells[0]),
+                    internalOwnsStickyPixels: ownsStickyPixels(internalRow),
+                    firstColumnWidth: subscriptionsRow.cells[0].getBoundingClientRect().width,
                     horizontalOverflow: wrap.scrollWidth > wrap.clientWidth,
                     horizontalScrollWorks: wrap.scrollLeft !== before,
                     note: document.getElementById('wbFinanceReportNotes').innerText,
@@ -140,6 +191,20 @@ def main() -> None:
                   };
                 }
                 """
+            )
+            facts["subscriptionsGeometryStable"] = bool(
+                subscriptions_before_hover
+                and subscriptions_after_hover
+                and abs(
+                    subscriptions_before_hover["x"]
+                    - subscriptions_after_hover["x"]
+                )
+                < 0.5
+                and abs(
+                    subscriptions_before_hover["width"]
+                    - subscriptions_after_hover["width"]
+                )
+                < 0.5
             )
             screenshot_path = str(
                 os.environ.get("WB_FINANCE_BROWSER_SMOKE_SCREENSHOT") or ""
@@ -167,26 +232,40 @@ def main() -> None:
                 f"incomplete post-cutover profit must stay blank: {facts}"
             )
         if (
-            "↓" not in facts["commission"][1]["text"]
-            or "wb-finance-trend-up" not in facts["commission"][1]["className"]
-            or "↑" not in facts["commission"][2]["text"]
-            or "wb-finance-trend-down" not in facts["commission"][2]["className"]
-            or "→" not in facts["withMarketing"][2]["text"]
+            facts["commission"][0]["state"] != "neutral"
+            or "wb-finance-trend-neutral" not in facts["commission"][0]["className"]
+            or facts["commission"][1]["state"] != "deteriorated"
+            or "wb-finance-trend-deteriorated" not in facts["commission"][1]["className"]
+            or facts["commission"][2]["state"] != "improved"
+            or "wb-finance-trend-improved" not in facts["commission"][2]["className"]
+            or facts["withMarketing"][2]["state"] != "flat"
             or "wb-finance-trend-flat" not in facts["withMarketing"][2]["className"]
-            or "↑" in facts["commission"][0]["text"]
-            or "↓" in facts["commission"][0]["text"]
-            or "→" in facts["commission"][0]["text"]
+            or "Нет сопоставимой предыдущей недели" not in facts["commission"][0]["aria"]
+            or "Ухудшение" not in facts["commission"][1]["title"]
+            or "Улучшение" not in facts["commission"][2]["aria"]
+            or facts["containsVisibleTrendGlyph"]
+            or facts["containsAccessibleTrendGlyph"]
             or facts["containsPointDelta"]
             or facts["duplicatePercentRow"]
             or facts["technicalExpenseRow"]
+            or not facts["correctionsRowPresent"]
         ):
-            raise AssertionError(f"expense percent/arrow quality contract mismatch: {facts}")
+            raise AssertionError(f"expense percent/color quality contract mismatch: {facts}")
         if facts["lastExpenseMetric"] != "Результат финансового отчёта WB":
             raise AssertionError(f"no-marketing metric is not last in expense block: {facts}")
         if (
             facts["sticky"] != "sticky"
             or not facts["horizontalOverflow"]
             or not facts["horizontalScrollWorks"]
+            or facts["subscriptionsMetricText"] != "Подписки"
+            or not facts["subscriptionsOpaque"]
+            or not facts["subscriptionsOwnsStickyPixels"]
+            or not facts["groupOpaque"]
+            or not facts["groupOwnsStickyPixels"]
+            or not facts["internalOpaque"]
+            or not facts["internalOwnsStickyPixels"]
+            or not facts["subscriptionsGeometryStable"]
+            or abs(float(facts["firstColumnWidth"]) - 285.0) > 1.0
         ):
             raise AssertionError(
                 f"weekly table scroll/sticky contract mismatch: {facts}"
@@ -215,7 +294,7 @@ def main() -> None:
                 f"local Finance UI emitted errors: console={console_errors}, network={failed_responses}"
             )
         print(
-            "wb_finance_weekly_browser: ok -> clean headers, mixed-source tooltip, expense shares/arrows, null blockers, sticky scroll"
+            "wb_finance_weekly_browser: ok -> clean headers, mixed-source tooltip, expense color states without glyphs, null blockers, opaque sticky hover/scroll"
         )
         preview_seconds = float(
             os.environ.get("WB_FINANCE_BROWSER_SMOKE_PREVIEW_SECONDS") or 0
@@ -272,7 +351,10 @@ def _finance_payload() -> dict[str, object]:
                 "penalties": "0.0000",
                 "subscriptions": "0.0000",
                 "paid_services": "0.0000",
+                "review_points": "0.0000",
                 "other_deductions": "0.0000",
+                "corrections": "0.0000",
+                "wb_remuneration_adjustment": "0.0000",
                 "positive_adjustments": "0.0000",
                 "total_wb_expenses": "360.0000",
                 "wb_expenses_without_marketing": "310.0000",

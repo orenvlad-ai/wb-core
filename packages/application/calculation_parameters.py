@@ -16,6 +16,11 @@ from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.wb_finance_weekly import (
+    CALCULATION_REFERENCE_CONTRACT_VERSION,
+    CALCULATION_REFERENCE_ROWS,
+    CLASSIFIER_VERSION as WB_FINANCE_CLASSIFIER_VERSION,
+)
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.warehouse_recovery_policy import (
     RecoveryState,
@@ -848,78 +853,263 @@ class CalculationParametersBlock:
     def _three_closed_week_reference(self) -> dict[str, Any]:
         today = date.fromisoformat(current_business_date_iso())
         last_closed_sunday = today - timedelta(days=today.weekday() + 1)
+        week_keys = [
+            (
+                (last_closed_sunday - timedelta(days=(2 - index) * 7 + 6)).isoformat(),
+                (last_closed_sunday - timedelta(days=(2 - index) * 7)).isoformat(),
+            )
+            for index in range(3)
+        ]
         with _connect(self.runtime.db_path) as conn:
             if not _table_exists(conn, "wb_finance_weekly_aggregates"):
-                return {"status": "unavailable", "weeks": [], "rows": []}
-            closed_weeks = conn.execute(
-                """
-                SELECT DISTINCT week_start,week_end FROM wb_finance_weekly_aggregates
-                WHERE week_end<=? ORDER BY week_end DESC LIMIT 3
-                """,
-                (last_closed_sunday.isoformat(),),
-            ).fetchall()
-            week_keys = [(str(row["week_start"]), str(row["week_end"])) for row in reversed(closed_weeks)]
-            source_rows = []
-            for week_start, week_end in week_keys:
-                source_rows.extend(
-                    conn.execute(
-                        """SELECT week_start,week_end,metrics_json FROM wb_finance_weekly_aggregates
-                           WHERE week_start=? AND week_end=? ORDER BY seller_id""",
-                        (week_start, week_end),
-                    ).fetchall()
+                return _unavailable_calculation_reference(
+                    week_keys,
+                    status="unavailable",
+                    status_message="Канонические недельные агрегаты Finance ещё не созданы.",
                 )
-        metric_keys = (
-            "net_revenue",
-            "commission",
-            "acquiring",
-            "logistics",
-            "storage",
-            "acceptance",
-            "penalties",
-        )
-        metrics_by_week: dict[tuple[str, str], dict[str, Decimal]] = {
-            key: {metric: Decimal("0") for metric in metric_keys} for key in week_keys
+            source_rows = conn.execute(
+                """SELECT seller_id,week_start,week_end,classifier_version,metrics_json
+                   FROM wb_finance_weekly_aggregates
+                   WHERE (week_start=? AND week_end=?)
+                      OR (week_start=? AND week_end=?)
+                      OR (week_start=? AND week_end=?)
+                   ORDER BY week_end,seller_id""",
+                tuple(value for key in week_keys for value in key),
+            ).fetchall()
+            any_aggregate_row = conn.execute(
+                "SELECT 1 FROM wb_finance_weekly_aggregates LIMIT 1"
+            ).fetchone()
+            all_sellers = [
+                str(row["seller_id"])
+                for row in conn.execute(
+                    "SELECT DISTINCT seller_id FROM wb_finance_weekly_aggregates ORDER BY seller_id"
+                ).fetchall()
+            ]
+
+        if not any_aggregate_row:
+            return _unavailable_calculation_reference(
+                week_keys,
+                status="unavailable",
+                status_message="Канонические недельные агрегаты Finance пока пусты.",
+            )
+
+        rows_by_week: dict[tuple[str, str], list[sqlite3.Row]] = {
+            key: [] for key in week_keys
         }
         for row in source_rows:
-            target = metrics_by_week[(str(row["week_start"]), str(row["week_end"]))]
-            source = _json_loads(row["metrics_json"])
-            for metric in metric_keys:
-                target[metric] += _decimal(source.get(metric))
-        weeks = [{"week_start": start, "week_end": end} for start, end in week_keys]
-        metrics = [metrics_by_week[key] for key in week_keys]
-        base_key = "net_revenue"
-        specs = (
-            ("wb_agent_and_other", "Агентское вознаграждение", lambda item: _decimal(item.get("commission")) - _decimal(item.get("acquiring"))),
-            ("acquiring", "Эквайринг", lambda item: _decimal(item.get("acquiring"))),
-            ("logistics", "Логистика WB", lambda item: _decimal(item.get("logistics"))),
-            ("storage", "Хранение WB", lambda item: _decimal(item.get("storage"))),
-            ("acceptance", "Платная приёмка", lambda item: _decimal(item.get("acceptance"))),
-            ("penalties", "Штрафы/корректировки", lambda item: _decimal(item.get("penalties"))),
+            rows_by_week[(str(row["week_start"]), str(row["week_end"]))].append(row)
+        expected_sellers = sorted(
+            {str(row["seller_id"]) for row in source_rows} or set(all_sellers)
         )
-        result_rows = []
-        total_base = sum((_decimal(item.get(base_key)) for item in metrics), Decimal("0"))
-        for key, label, expense_fn in specs:
-            expenses = [expense_fn(item) for item in metrics]
-            weekly = [
-                None if _decimal(item.get(base_key)) == 0 else expense / _decimal(item.get(base_key))
-                for item, expense in zip(metrics, expenses)
+        weeks: list[dict[str, Any]] = []
+        metrics_by_week: list[list[dict[str, Any]] | None] = []
+        for week_start, week_end in week_keys:
+            week_rows = rows_by_week[(week_start, week_end)]
+            actual_sellers = sorted({str(row["seller_id"]) for row in week_rows})
+            missing_sellers = [
+                seller for seller in expected_sellers if seller not in actual_sellers
             ]
-            result_rows.append(
+            classifier_versions = sorted(
+                {str(row["classifier_version"] or "") for row in week_rows}
+            )
+            if not week_rows:
+                week_status = "missing"
+            elif missing_sellers:
+                week_status = "partial"
+            elif classifier_versions != [WB_FINANCE_CLASSIFIER_VERSION]:
+                week_status = "stale"
+            else:
+                week_status = "ready"
+            weeks.append(
                 {
-                    "key": key,
-                    "label": label,
-                    "weekly_rate_pct": [None if value is None else _text(value * Decimal("100")) for value in weekly],
-                    "weighted_average_pct": None if total_base == 0 else _text(sum(expenses, Decimal("0")) / total_base * Decimal("100")),
-                    "included_in_proxy_by_default": key == "wb_agent_and_other",
-                    "note": "excluded_from_proxy_cost_already_capitalized" if key == "acceptance" else ("shown_separately_from_commission" if key == "acquiring" else ""),
+                    "week_start": week_start,
+                    "week_end": week_end,
+                    "status": week_status,
+                    "seller_ids": actual_sellers,
+                    "missing_seller_ids": missing_sellers,
+                    "classifier_versions": classifier_versions,
                 }
             )
+            metrics_by_week.append(
+                [_json_loads(row["metrics_json"]) for row in week_rows]
+                if week_status == "ready"
+                else None
+            )
+
+        week_statuses = [str(week["status"]) for week in weeks]
+        if all(status == "ready" for status in week_statuses):
+            reference_status = "ready"
+        elif (
+            week_statuses[-1] != "ready"
+            or "stale" in week_statuses
+        ):
+            reference_status = "stale"
+        else:
+            reference_status = "partial"
+
+        bases: list[Decimal | None] = []
+        for sources in metrics_by_week:
+            base_values = (
+                [_reference_direct_amount(source, "net_revenue") for source in sources]
+                if sources is not None
+                else []
+            )
+            bases.append(
+                sum((value for value in base_values if value is not None), Decimal("0"))
+                if base_values and all(value is not None for value in base_values)
+                else None
+            )
+
+        result_rows: list[dict[str, Any]] = []
+        for spec in CALCULATION_REFERENCE_ROWS:
+            amounts: list[Decimal | None] = []
+            for sources in metrics_by_week:
+                source_amounts = (
+                    [_reference_amount(source, spec) for source in sources]
+                    if sources is not None
+                    else []
+                )
+                amounts.append(
+                    sum(
+                        (value for value in source_amounts if value is not None),
+                        Decimal("0"),
+                    )
+                    if source_amounts
+                    and all(value is not None for value in source_amounts)
+                    else None
+                )
+            weekly_rates = [
+                None
+                if amount is None or base is None or base <= 0
+                else amount / base
+                for amount, base in zip(amounts, bases)
+            ]
+            complete = (
+                reference_status == "ready"
+                and all(amount is not None for amount in amounts)
+                and all(base is not None and base > 0 for base in bases)
+            )
+            total_base = (
+                sum((base for base in bases if base is not None), Decimal("0"))
+                if complete
+                else None
+            )
+            weighted = (
+                sum((amount for amount in amounts if amount is not None), Decimal("0"))
+                / total_base
+                if complete and total_base is not None and total_base > 0
+                else None
+            )
+            result_rows.append(
+                {
+                    "key": str(spec["key"]),
+                    "label": str(spec["label"]),
+                    "group": str(spec["group"]),
+                    "source_fields": list(spec["source_fields"]),
+                    "source_mode": str(spec["source_mode"]),
+                    "sign_rule": str(spec["sign_rule"]),
+                    "denominator": "net_revenue",
+                    "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
+                    "proxy_parameter_key": spec.get("proxy_parameter_key"),
+                    "proxy_treatment": str(spec["proxy_treatment"]),
+                    "weekly_amount_rub": [
+                        None if amount is None else _text(amount) for amount in amounts
+                    ],
+                    "weekly_rate_pct": [
+                        None if value is None else _text(value * Decimal("100"))
+                        for value in weekly_rates
+                    ],
+                    "weighted_average_pct": (
+                        None if weighted is None else _text(weighted * Decimal("100"))
+                    ),
+                    "status": "ready" if complete else "partial",
+                    "included_in_proxy_by_default": spec["key"] == "agent_remuneration",
+                    "note": str(spec["note"]),
+                }
+            )
+
+        if reference_status == "ready" and any(
+            row["status"] != "ready" for row in result_rows
+        ):
+            reference_status = "partial"
+        missing_weeks = [
+            {"week_start": week["week_start"], "week_end": week["week_end"]}
+            for week in weeks
+            if week["status"] != "ready"
+        ]
+        status_message = {
+            "ready": "Показаны ровно три последние полностью закрытые календарные недели.",
+            "partial": "Набор неполный: отсутствующая неделя или компонент не заменены более старым периодом.",
+            "stale": "Последняя обязательная закрытая неделя отсутствует или использует устаревший classifier; старые недели не подставлены.",
+        }[reference_status]
         return {
-            "status": "ready" if len(weeks) == 3 else "partial",
-            "gross_buyout_revenue_field": base_key,
+            "contract_version": CALCULATION_REFERENCE_CONTRACT_VERSION,
+            "status": reference_status,
+            "status_message": status_message,
+            "gross_buyout_revenue_field": "net_revenue",
+            "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
+            "expected_seller_ids": expected_sellers,
+            "latest_closed_week_end": last_closed_sunday.isoformat(),
+            "missing_weeks": missing_weeks,
             "weeks": weeks,
             "rows": result_rows,
         }
+
+
+def _unavailable_calculation_reference(
+    week_keys: list[tuple[str, str]],
+    *,
+    status: str,
+    status_message: str,
+) -> dict[str, Any]:
+    return {
+        "contract_version": CALCULATION_REFERENCE_CONTRACT_VERSION,
+        "status": status,
+        "status_message": status_message,
+        "gross_buyout_revenue_field": "net_revenue",
+        "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
+        "expected_seller_ids": [],
+        "latest_closed_week_end": week_keys[-1][1] if week_keys else None,
+        "missing_weeks": [
+            {"week_start": week_start, "week_end": week_end}
+            for week_start, week_end in week_keys
+        ],
+        "weeks": [
+            {
+                "week_start": week_start,
+                "week_end": week_end,
+                "status": "missing",
+                "seller_ids": [],
+                "missing_seller_ids": [],
+                "classifier_versions": [],
+            }
+            for week_start, week_end in week_keys
+        ],
+        "rows": [],
+    }
+
+
+def _reference_direct_amount(source: Mapping[str, Any], field: str) -> Decimal | None:
+    if field not in source or source.get(field) in {None, ""}:
+        return None
+    return _optional_decimal(source.get(field))
+
+
+def _reference_amount(
+    source: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> Decimal | None:
+    fields = [str(field) for field in spec.get("source_fields") or ()]
+    if str(spec.get("source_mode") or "") == "first_available":
+        for field in fields:
+            value = _reference_direct_amount(source, field)
+            if value is not None:
+                return value
+        return None
+    values = [_reference_direct_amount(source, field) for field in fields]
+    if not values or any(value is None for value in values):
+        return None
+    return sum((value for value in values if value is not None), Decimal("0"))
 
 
 def ensure_calculation_parameters_schema(conn: sqlite3.Connection) -> None:

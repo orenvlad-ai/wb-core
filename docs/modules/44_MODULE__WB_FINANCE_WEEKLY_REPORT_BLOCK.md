@@ -76,7 +76,7 @@ agent_remuneration          = combined_commission_control − acquiring
 
 Official `additionalPayment` / XLSX `Корректировка Вознаграждения Вайлдберриз (ВВ)` is retained as an explicit disclosure. On sale/return it is already reflected by `forPay` and is not added a second time. A standalone positive/negative correction row is classified once as positive adjustment or period correction. Tests include a non-zero correction.
 
-Deduction money preserves the signed official value. A negative deduction is an expense reversal/refund and therefore reduces its bucket; it is never converted into a second positive expense with `abs()`. Exact production names containing `Баллы за отзывы` or `Списание за отзыв` use the separate `review_points` bucket and Finance UI row. The existing Finance `marketing` bucket remains separate and continues to participate in both expense-with-marketing and expense-without-marketing disclosures. Negative acceptance or transit cannot become a positive capitalization candidate.
+Deduction money preserves the signed official value. A negative deduction is an expense reversal/refund and therefore reduces its bucket; it is never converted into a second positive expense with `abs()`. Exact production names containing `Баллы за отзывы` or `Списание за отзыв` use the separate `review_points` bucket and Finance UI row. `corrections` has its own `Корректировки (расходы)` row and is never hidden under a penalties-only label. The existing Finance `marketing` bucket remains separate and continues to participate in both expense-with-marketing and expense-without-marketing disclosures. Negative acceptance or transit cannot become a positive capitalization candidate.
 
 ## Expense and profit semantics
 
@@ -96,7 +96,7 @@ profit_after_cogs = net_revenue − profit_period_expenses
                     + positive_adjustments − COGS
 ```
 
-Every expense money cell shows amount plus only `%`, arrow and color. An increased expense share is deterioration: red/pink `↓`. A decreased share is improvement: green `↑`. Effectively unchanged is neutral/yellow `→`; the first/missing-base week has no arrow. Numeric deltas and `п.п.` are forbidden.
+Every expense money cell shows amount plus `%` and a semantic color, without visible or accessible arrow glyphs. An increased expense share is deterioration and uses red/pink; a decreased share is improvement and uses green; effectively unchanged uses neutral/yellow. The first week or a missing comparison base uses a muted neutral state and must not imply improvement or deterioration. `aria-label` and `title` state the share and meaning in words without `↑`, `↓` or `→`. Numeric deltas and `п.п.` are forbidden.
 
 ## Ads compatibility
 
@@ -236,7 +236,7 @@ Production apply is not implied by merge/deploy and remains forbidden until the 
 
 ## UI and verification
 
-The operator table has clean calculated headers, separate agent/acquiring/review-points rows, compact expense microcells, sticky metric column and table-local horizontal scroll. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store. It also reads the bounded post-cutover backup health: selected restore-set identity/count/bytes, age and RPO/RTO, next atomic-replacement capacity, last success/failure, 30/90-day retained-growth projection and blockers.
+The operator table has clean calculated headers, separate agent/acquiring/review-points/corrections rows, compact expense microcells, sticky metric column and table-local horizontal scroll. The first column keeps a fixed geometry, opaque theme-aware background and higher stacking layer during real horizontal scroll and hover; metric text, including `Подписки`, group headings and internal dividers, cannot reveal or receive hits through neighbouring week cells in light or dark themes. Real coverage errors appear once at report level with SKU reasons. Its storage card shows exact generation/schema ids, cursors, lag, mismatches, actionable dead letters, free capacity and rollback/cutover readiness without creating schema or switching a store. It also reads the bounded post-cutover backup health: selected restore-set identity/count/bytes, age and RPO/RTO, next atomic-replacement capacity, last success/failure, 30/90-day retained-growth projection and blockers.
 
 After split cutover, Finance and Partner attach the manifest-selected raw
 generation read-only and expose only the connection-local current-row

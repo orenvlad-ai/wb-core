@@ -58,7 +58,31 @@ Accepted WB supply добавляет доказанный inbound capital, но
 
 Validation требует каждый процент в `0..100%` и total expenses `<100%`. Save создаёт новую version и targeted Proxy recalculation от effective date; physical warehouses не пересчитываются.
 
-Reference table использует три последние полностью закрытые недели WB finance reports. Каждая expense category делится на ту же canonical gross buyout revenue base (`net_revenue`) и three-week value считается как `SUM(expense) / SUM(gross buyout revenue)`, а не arithmetic mean weekly percentages. Paid acceptance показана только как reference: она не входит в Proxy expense rate, потому что капитализируется в WB cost. `ads_sum` вычитается отдельно; FF → WB transit уже находится в cost.
+Reference table переиспользует canonical `wb_finance_weekly_aggregates`, их classifier и signed-компоненты; отдельного классификатора справочника нет. Она запрашивает ровно три последние полностью закрытые календарные недели. Пропущенная неделя не заменяется более старой: неполное seller coverage даёт `partial`, отсутствие обязательного слота — `stale`, а трёхнедельный итог остаётся пустым до полного exact набора. Каждая строка делится на единый denominator `net_revenue`; итог считается только как `SUM(amount) / SUM(net_revenue)`, а не как arithmetic mean weekly percentages.
+
+Построчный audited contract справочника:
+
+| Строка | Canonical source | Знак и учёт в Proxy 3 |
+|---|---|---|
+| Агентское вознаграждение WB | `agent_remuneration`, совместимый fallback `commission` | Signed expense; acquiring уже исключён classifier-ом и второй раз не вычитается |
+| Эквайринг | `acquiring` | Signed expense; отдельная ставка |
+| Логистика | `logistics` | Signed expense; отдельная ставка |
+| Хранение | `storage` | Signed expense; отдельная ставка |
+| Штрафы | `penalties` | Signed deduction; компонент penalties/adjustments |
+| Корректировки (расходы) | `corrections` | Signed period correction; компонент penalties/adjustments |
+| Подписки | `subscriptions` | Signed deduction; компонент other expense |
+| Платные сервисы | `paid_services` | Signed deduction; компонент other expense |
+| Баллы за отзывы | `review_points` | Signed deduction; компонент other expense |
+| Прочие удержания | `other_deductions` | Signed deduction; компонент other expense |
+| Маркетинг | `marketing` | Справочно: Proxy 3 вычитает canonical `ads_sum` отдельно |
+| Платная приёмка — начислено | `acceptance` | Справочно: proven capitalized share исключается, неподтверждённый остаток остаётся расходом периода |
+| Платная приёмка — капитализировано | `capitalized_acceptance` | Положительная proven capped часть; уже в canonical WB cost и повторно в ставку не входит |
+| Транзитная логистика — начислено | `transit_logistics` | Справочно: proven capitalized share исключается, неподтверждённый остаток остаётся расходом периода |
+| Транзитная логистика — капитализировано | `capitalized_transit_logistics` | Положительная proven capped часть; уже в canonical WB cost и повторно в ставку не входит |
+| Корректировки и дополнительные выплаты (+) | `positive_adjustments` | Signed income adjustment, не расходная ставка |
+| Контроль корректировки вознаграждения WB | `wb_remuneration_adjustment` | Контрольная disclosure; не складывается повторно с агентским вознаграждением или корректировками |
+
+Все expense reversal/refund сохраняют канонический signed знак и уменьшают соответствующую строку; `abs()` запрещён. Reference UI публикует для каждой строки source fields, sign rule, denominator, aggregation rule и inclusion/capitalization note. Это только исправление справочного отображения: формула и сохранённые versioned settings Proxy 3 не меняются.
 
 # 3. Proxy 3 formula
 
