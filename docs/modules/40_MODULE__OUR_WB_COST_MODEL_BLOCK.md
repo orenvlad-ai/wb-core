@@ -60,6 +60,8 @@ Validation требует каждый процент в `0..100%` и total expe
 
 Reference table переиспользует canonical `wb_finance_weekly_aggregates`, их classifier и signed-компоненты; отдельного классификатора справочника нет. Она запрашивает ровно три последние полностью закрытые календарные недели. Пропущенная неделя не заменяется более старой: неполное seller coverage даёт `partial`, отсутствие обязательного слота — `stale`, а трёхнедельный итог остаётся пустым до полного exact набора. Каждая строка делится на единый denominator `net_revenue`; итог считается только как `SUM(amount) / SUM(net_revenue)`, а не как arithmetic mean weekly percentages.
 
+Тот же справочный UI отдельно показывает информационную строку `Процент выкупа за 3 закрытые недели`. Она не использует Finance denominator: backend читает доступные exact-date `sales_funnel_history` snapshots за последние три полностью закрытые Monday-Sunday недели в canonical `Asia/Yekaterinburg`, объединяет только SKU-day пары с валидным normalized `buyoutPercent` и положительным `orderCount` и считает `SUM(buyoutPercent * orderCount) / SUM(orderCount)`. Missing/invalid `buyoutPercent`, missing/zero `orderCount` пропускаются; `buyoutCount` не является весом, current open week исключена. Строка read-only и не меняет `buyout_rate`, version history, targeted recalculation или формулу Proxy.
+
 Построчный audited contract справочника:
 
 | Строка | Canonical source | Знак и учёт в Proxy 3 |

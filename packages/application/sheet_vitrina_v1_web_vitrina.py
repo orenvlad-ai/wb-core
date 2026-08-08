@@ -16,6 +16,11 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_PUBLIC_METRIC_KEYS,
     active_refresh_summary as _active_refresh_summary,
 )
+from packages.application.sheet_vitrina_v1_buyout_percent import (
+    BUYOUT_PERCENT_METRIC_KEY,
+    extend_metrics_with_buyout_percent,
+    load_buyout_percent_snapshot_values,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
@@ -195,6 +200,11 @@ class SheetVitrinaV1WebVitrinaBlock:
             source_status_snapshot_as_of_date = _last_materialized_snapshot_as_of_date(period_date_bindings)
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
             read_model = WEB_VITRINA_PERIOD_READ_MODEL
+            buyout_source_dates = [
+                binding.column_date
+                for binding in period_date_bindings
+                if not binding.missing
+            ]
         else:
             if as_of_date:
                 snapshot = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
@@ -210,6 +220,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             period_refresh_summary = _active_refresh_summary(refresh_status)
             source_status_snapshot_as_of_date = snapshot.as_of_date
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
+            buyout_source_dates = list(snapshot.date_columns)
         snapshot = apply_warehouse_business_projection_overlay(
             self.runtime,
             snapshot=snapshot,
@@ -226,11 +237,13 @@ class SheetVitrinaV1WebVitrinaBlock:
             int(item.nm_id): item
             for item in current_state.config_v2
         }
-        effective_metrics = extend_metrics_with_sku_action_metrics(
-            extend_metrics_with_incident_stock_metrics(
-                extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_our_wb_cost_metrics(
-                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_buyout_percent(
+            extend_metrics_with_sku_action_metrics(
+                extend_metrics_with_incident_stock_metrics(
+                    extend_metrics_with_own_product_capital_metrics(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        )
                     )
                 )
             )
@@ -256,6 +269,14 @@ class SheetVitrinaV1WebVitrinaBlock:
                 fallback_updated_at=refreshed_at,
             ),
             server_cell_presentation=server_cell_presentation,
+        )
+        rows = _include_buyout_percent_rows(
+            rows,
+            runtime=self.runtime,
+            date_columns=snapshot.date_columns,
+            source_snapshot_dates=buyout_source_dates,
+            enabled_config=[item for item in current_state.config_v2 if item.enabled],
+            metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
@@ -1167,6 +1188,97 @@ def _normalize_rows(
             )
         )
     return normalized
+
+
+def _include_buyout_percent_rows(
+    rows: list[WebVitrinaContractRow],
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_columns: list[str],
+    source_snapshot_dates: list[str],
+    enabled_config: list[ConfigV2Item],
+    metric: MetricV2Item,
+) -> list[WebVitrinaContractRow]:
+    """Complete old ready snapshots from the accepted exact-date source seam."""
+
+    result = list(rows)
+    rows_by_id = {row.row_id: row for row in result}
+    values_by_nm_id = load_buyout_percent_snapshot_values(
+        runtime=runtime,
+        snapshot_dates=source_snapshot_dates,
+        nm_ids=[item.nm_id for item in enabled_config],
+    )
+    for config in sorted(enabled_config, key=lambda item: item.display_order):
+        row_id = f"SKU:{config.nm_id}|{BUYOUT_PERCENT_METRIC_KEY}"
+        existing = rows_by_id.get(row_id)
+        values_by_date = (
+            dict(existing.values_by_date)
+            if existing is not None
+            else {column_date: "" for column_date in date_columns}
+        )
+        captured_at_values: list[str] = []
+        source_values = values_by_nm_id.get(int(config.nm_id), {})
+        for column_date in date_columns:
+            snapshot_value = source_values.get(column_date)
+            if snapshot_value is None:
+                continue
+            captured_at_values.append(snapshot_value.captured_at)
+            if values_by_date.get(column_date) in {None, ""}:
+                values_by_date[column_date] = snapshot_value.value
+
+        if existing is not None:
+            replacement = replace(
+                existing,
+                values_by_date=values_by_date,
+                row_last_updated_at=(
+                    max(
+                        [
+                            value
+                            for value in [
+                                existing.row_last_updated_at,
+                                *captured_at_values,
+                            ]
+                            if value
+                        ],
+                        default="",
+                    )
+                ),
+            )
+            result[result.index(existing)] = replacement
+            rows_by_id[row_id] = replacement
+            continue
+        if not any(value not in {None, ""} for value in values_by_date.values()):
+            continue
+
+        added = WebVitrinaContractRow(
+            row_id=row_id,
+            row_order=len(result) + 1,
+            scope_kind="SKU",
+            scope_key=f"SKU:{config.nm_id}",
+            scope_label=config.display_name,
+            metric_key=BUYOUT_PERCENT_METRIC_KEY,
+            metric_label=metric.label_ru,
+            row_last_updated_at=max(
+                (value for value in captured_at_values if value),
+                default="",
+            ),
+            section=metric.section,
+            group=config.group,
+            nm_id=config.nm_id,
+            format=metric.format,
+            values_by_date=values_by_date,
+        )
+        scope_row_indexes = [
+            index
+            for index, row in enumerate(result)
+            if row.scope_key == added.scope_key
+        ]
+        if scope_row_indexes:
+            result.insert(scope_row_indexes[-1] + 1, added)
+        else:
+            result.append(added)
+        rows_by_id[row_id] = added
+    return result
 
 
 def _apply_funnel_operator_presentation(

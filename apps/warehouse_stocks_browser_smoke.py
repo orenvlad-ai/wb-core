@@ -653,6 +653,15 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                                         "note": "",
                                     }
                                 ],
+                                "buyout_percent": {
+                                    "label": "Процент выкупа за 3 закрытые недели",
+                                    "weighted_average_pct": "83",
+                                    "date_from": "2026-06-22",
+                                    "date_to": "2026-07-12",
+                                    "business_timezone": "Asia/Yekaterinburg",
+                                    "aggregation_rule": "SUM(buyoutPercent * orderCount) / SUM(orderCount)",
+                                    "status_message": "Рассчитано по доступным SKU-day значениям.",
+                                },
                             },
                         },
                         ensure_ascii=False,
@@ -680,6 +689,18 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 and "SUM(amount) / SUM(net_revenue)" in surface.locator("#calculationReferenceRows").inner_text()
                 and surface.locator(".calculation-reference-group").count() == 1,
                 "settings reference exposes ready calendar status and per-row source/sign/SUM-SUM audit",
+            )
+            _assert(
+                surface.locator("#calculationBuyoutReferenceLabel").inner_text()
+                == "Процент выкупа за 3 закрытые недели"
+                and surface.locator("#calculationBuyoutReferenceValue").inner_text() == "83%"
+                and "2026-06-22 — 2026-07-12"
+                in surface.locator("#calculationBuyoutReferenceMeta").inner_text()
+                and "Asia/Yekaterinburg"
+                in surface.locator("#calculationBuyoutReferenceMeta").inner_text()
+                and "SUM(buyoutPercent * orderCount) / SUM(orderCount)"
+                in surface.locator("#calculationBuyoutReferenceMeta").inner_text(),
+                "settings buyout reference exposes the weighted three-closed-week value and audit",
             )
             group_labels = surface.locator("[data-settings-group-button]").all_inner_texts()
             _assert(

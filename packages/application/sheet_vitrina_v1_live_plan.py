@@ -51,6 +51,9 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_PUBLIC_METRIC_KEYS,
     filter_archived_public_metrics,
 )
+from packages.application.sheet_vitrina_v1_buyout_percent import (
+    extend_metrics_with_buyout_percent,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -1050,11 +1053,13 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
-        effective_metrics = extend_metrics_with_sku_action_metrics(
-            extend_metrics_with_incident_stock_metrics(
-                extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_our_wb_cost_metrics(
-                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_buyout_percent(
+            extend_metrics_with_sku_action_metrics(
+                extend_metrics_with_incident_stock_metrics(
+                    extend_metrics_with_own_product_capital_metrics(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        )
                     )
                 )
             )
