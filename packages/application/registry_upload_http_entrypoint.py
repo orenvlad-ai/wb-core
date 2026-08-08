@@ -834,7 +834,6 @@ class _EntrypointMaintenanceSchedules:
             "feedback_complaints": (
                 self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_request()
             ),
-            "spp": self.entrypoint.handle_sheet_prices_spp_test_schedule_request(),
             "spp_status": self.entrypoint.handle_sheet_prices_spp_test_status_request(),
         }
 
@@ -885,11 +884,6 @@ class _EntrypointMaintenanceSchedules:
                     if isinstance(item, Mapping)
                 ]
             }
-        )
-        spp = dict(baseline.get("spp") or {})
-        self.entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
-            {"schedule": dict(spp.get("schedule") or {})},
-            actor="auto_updates_policy_v1_migration",
         )
         return self.read_all()
 
@@ -2141,12 +2135,6 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_prices_quarantine_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.prices_block.get_quarantine_goods(params or {})
 
-    def handle_sheet_prices_spp_test_baseline_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        return self.spp_tester_block.build_baseline(params or {})
-
-    def handle_sheet_prices_spp_test_plan_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.spp_tester_block.build_plan(payload)
-
     def handle_sheet_prices_spp_test_start_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         return self.spp_tester_block.start(payload, actor=actor)
 
@@ -2158,20 +2146,6 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_prices_spp_test_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.spp_tester_block.history(params or {})
-
-    def handle_sheet_prices_spp_test_history_detail_request(self, job_id: str) -> dict[str, Any]:
-        return self.spp_tester_block.history_detail(job_id)
-
-    def handle_sheet_prices_spp_test_schedule_request(self) -> dict[str, Any]:
-        return self.spp_tester_block.get_schedule()
-
-    def handle_sheet_prices_spp_test_schedule_save_request(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        return self.spp_tester_block.save_schedule(payload, actor=actor)
 
     def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
         payload = self.buyer_session_block.check_spp_capability()

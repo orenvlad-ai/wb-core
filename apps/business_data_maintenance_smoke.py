@@ -91,7 +91,6 @@ class FakeSchedules:
                 "schedules": [{"id": "daily", "enabled": True}],
                 "recent_runs": [],
             },
-            "spp": {"schedule": {"id": "daily_spp", "enabled": True}},
             "spp_status": {"status": "ready", "job": None},
         }
         self.disable_calls = 0
@@ -336,7 +335,7 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
         assert result["runtime_schedules"]["web_vitrina"]["schedule_policy"]["mode"] == "interval"
         assert result["runtime_schedules"]["web_vitrina"]["enabled_ids"]
         assert result["runtime_schedules"]["feedback_complaints"]["enabled_ids"]
-        assert result["runtime_schedules"]["spp"]["enabled"] is True
+        assert result["runtime_schedules"]["spp"]["active_job"] is None
         state_path = runtime_dir / maintenance.STATE_FILENAME
         audit_path = runtime_dir / maintenance.AUDIT_FILENAME
         assert state_path.stat().st_mode & 0o777 == 0o600
@@ -920,7 +919,6 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
         _warehouse_baseline(runtime_dir)
         systemd = FakeSystemd()
         schedules = FakeSchedules()
-        schedules.payloads["spp"]["schedule"]["enabled"] = False
         old = _with_quiet_local_boundaries()
         try:
             maintenance.maintenance_hold(
@@ -954,8 +952,6 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
                 for item in restored["auto_updates"]["processes"]
             }
             assert rows["warehouse_functional"]["actual"] is True
-            assert rows["spp_test"]["desired"] is False
-            assert rows["spp_test"]["actual"] is False
             assert rows["autoanswers"]["actual"] is False
             assert rows["autoanswers"]["component_states"]["readonly_sync"]["actual"] is True
             persisted_policy = json.loads(
@@ -1080,7 +1076,6 @@ def _assert_policy_v1_hold_restores_exact_feature_schedules_once() -> None:
                 row["enabled"] = False
             for row in schedules.payloads["feedback_complaints"]["schedules"]:
                 row["enabled"] = False
-            schedules.payloads["spp"]["schedule"]["enabled"] = False
 
             def restore_warehouse(_: Path) -> dict[str, Any]:
                 systemd.enable_now("wb-core-warehouse-functional-sync.timer")
@@ -1129,7 +1124,6 @@ def _assert_unsupported_enable_and_noop_are_preflighted() -> None:
             revision = int(policy["revision"])
             for process_key, desired, expected_text in (
                 ("autoanswers", True, "monitoring-only"),
-                ("spp_test", False, "monitoring-only"),
                 ("warehouse_functional", True, "no-op desired state"),
             ):
                 try:

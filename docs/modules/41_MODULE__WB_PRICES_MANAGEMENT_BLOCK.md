@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-41-WB-PRICES-MANAGEMENT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический reference по operator-разделу `Цены` для чтения, guarded изменения цен/скидок и bounded `Проверка СПП` через WB Prices and Discounts API."
-scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics; bounded server-owned SPP tester for one nmID with safe-slow plan/start/status/restore, stale lifecycle reconciliation, existing-job history, one persistent daily `Автопроверка` schedule and a shared manual/scheduled runtime lock. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
+scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; current goods price/discount table and guarded edits; server-owned manual SPP tester for one nmID and exact ordered list of 1–6 prices with authenticated buyer readback, progressive compact results, history/log, execution lock and mandatory seller-tuple restore. Adaptive range/plan/refinement/threshold and scheduled SPP runs are removed."
 source_basis:
   - "packages/contracts/wb_prices_management.py"
   - "packages/contracts/wb_spp_tester.py"
@@ -32,15 +32,10 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}"
   - "GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}/goods"
   - "GET /v1/sheet-vitrina-v1/prices/quarantine"
-  - "GET /v1/sheet-vitrina-v1/prices/spp-test/baseline?nmID=..."
-  - "POST /v1/sheet-vitrina-v1/prices/spp-test/plan"
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/start"
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/status"
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/restore"
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/history"
-  - "GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}"
-  - "GET /v1/sheet-vitrina-v1/prices/spp-test/schedule"
-  - "POST /v1/sheet-vitrina-v1/prices/spp-test/schedule"
 related_runners:
   - "apps/wb_prices_management_smoke.py"
   - "apps/wb_prices_management_browser_smoke.py"
@@ -54,7 +49,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now automatically checks/recovers the dedicated buyer session, resumes an existing recovery after reload, auto-clicks one saved WB account, opens noVNC only for real human steps, and applies the same no-write preflight to manual and scheduled starts."
+update_note: "Prices table semantics are unchanged. `Цены → Проверка СПП` is now a manual exact-price flow; recovery remains centralized and the former plan/schedule product is removed."
 ---
 
 # 1. Идентификатор и статус
@@ -70,7 +65,7 @@ update_note: "Prices table semantics are unchanged. `Цены -> Проверк�
 
 Раздел имеет два подтаба:
 - `Текущие цены` — текущая таблица цен/скидок и ручной guarded upload-task workflow.
-- `Проверка СПП` — bounded live tool for one SKU/nmID that first proves or automatically recovers the dedicated buyer session, temporarily changes seller discounted price across an operator-specified range, measures authenticated buyer price plus anonymous control, detects suspicious adjacent thresholds and restores baseline through staged proof.
+- `Проверка СПП` — manual live tool for one SKU/nmID and an exact ordered list of 1–6 operator-entered prices. It proves the authenticated-buyer-price capability, measures only those prices and restores the exact seller tuple.
 
 Top-level UI shows one row per active `nmID` where possible:
 - photo/name/our SKU/vendorCode/nmID;
@@ -85,7 +80,7 @@ Top-level UI shows one row per active `nmID` where possible:
 
 Browser state is only transient editing/modal state plus presentation-only column visibility in localStorage. Current price truth is read from WB via backend routes; SPP/promo values are read from current server-owned runtime/read-side sources; preview and upload status are server-owned readback surfaces.
 
-For `Проверка СПП`, browser state is only form draft and presentation. Baseline, plan, current/last job, measurements, thresholds, expandable history, schedule, audit and restore proof are server-owned runtime state under `sheet_vitrina_v1_prices/spp_tests/`. Existing `jobs/*.json` remain the history source; no second DB/journal is introduced.
+For `Проверка СПП`, browser state is only the SKU, price-count and price-field draft. Current/last job, results, compact history, audit-derived ten-event log and restore proof are server-owned under `sheet_vitrina_v1_prices/spp_tests/`. Existing `jobs/*.json` remain compatible history truth.
 
 # 3. WB Prices API Boundary
 
@@ -158,24 +153,25 @@ Commit route:
 
 SPP tester route:
 - accepts only one `nmID` per job;
+- accepts one ordered `prices` list of length `1..6` and never generates, sorts or deduplicates points;
 - rejects `editableSizePrice=true` and existing quarantine at baseline;
 - requires `WB_SPP_TEST_ENABLED=true`, `WB_PRICES_WRITE_ENABLED=true`, explicit live-change confirmation and `restore_baseline=true`;
+- performs exact buyer-capability preflight on Start before any seller write and repeats it before every measurement write;
 - changes only integer seller `price` while preserving current discount during measurements;
 - uses WB readback `discountedPrice` as actual seller price truth;
-- polls public anonymous buyer price slowly and excludes low-confidence/stale/429 points from threshold detection;
-- writes upload/readback/public/quarantine events to JSONL audit;
+- uses only stable authenticated buyer price for SPP and has no anonymous fallback;
+- stops remaining prices on the first error and proceeds to restore;
+- writes sanitized upload/readback/buyer/quarantine events to JSONL audit;
 - allows only one active/unrestored SPP test job at a time through runtime `current_job.json` pointer/heartbeat and removes that pointer after fresh exact seller baseline proof;
-- shares one OS-level execution lock across manual jobs, scheduled jobs and emergency restore;
-- reconciles an orphan only through fresh exact WB seller tuple + quarantine evidence; authenticated/anonymous buyer evidence is diagnostic only and TTL expiry alone never unlocks it;
-- persists `trigger_source=manual|schedule` for new jobs while legacy source stays unknown;
-- uses the same baseline/write/readback/restore path for daily scheduled jobs and never starts one merely because the schedule was saved.
+- shares one OS-level execution lock across manual jobs and emergency restore;
+- reconciles an orphan only through fresh exact WB seller tuple + quarantine evidence; buyer evidence is not part of restore and TTL expiry alone never unlocks it.
 
 Restore:
 - is always required at the end of an MVP run;
 - uses direct restore only for small moves;
 - splits large downward discounted restore moves through bridge steps;
 - requires upload success, WB readback and quarantine absence for bridge/final steps;
-- final proof requires only WB price/discount/discountedPrice equal baseline and quarantine absent; authenticated/public buyer price and SPP capture is non-blocking diagnostic evidence;
+- final proof requires WB price/discount/discountedPrice equal baseline and quarantine absent; buyer availability cannot block seller restore;
 - failed restore or quarantine yields `manual_restore_required` and keeps emergency restore visible.
 
 # 6. Status Readback
@@ -216,13 +212,12 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 
 `Проверка СПП` renders a minimal monitoring/testing surface:
 - an exact authenticated buyer-price capability check; invalid auth/capability points to centralized `Настройки → Источники и сессии` and never starts recovery or exposes noVNC/launcher controls locally;
-- `Автопроверка` above manual inputs with one daily schedule, explicit future-live-change consent, `Asia/Yekaterinburg — Оренбург`, next run and last automatic status;
 - SKU/nmID selector sourced from current price rows / active registry;
-- baseline card with seller price, discount, discounted price, public buyer price, current `SPP-прокси`, quarantine and `editableSizePrice`;
-- inputs for discounted price min/max, threshold precision, max measurements, safe-slow mode, live-change confirmation and restore confirmation;
-- plan preview with route, estimated duration, request budget, restore route and live warning;
-- current job status, compact timeline, measurements table and threshold table.
-- `История проверок` below the current/last job with bounded cursor loading and lazy safe detail expansion.
+- dropdown `Сколько цен проверить` with values 1–6 and exactly that many numbered money inputs;
+- one `Старт проверки` button;
+- progressive five-column results: target, actual seller discounted, buyer, SPP, status;
+- compact newest-first history without raw detail expansion;
+- exactly the latest ten sanitized technical events at the bottom.
 
 # 9. Verification
 
@@ -245,7 +240,7 @@ Public/live verification may open the page, read goods, run preview and inspect 
 # 10. Out Of Scope
 
 - Excel import/export of prices.
-- Multiple SPP schedules or non-daily cadence.
+- Automatic or scheduled SPP checks.
 - WB Club discount writes.
 - B2B wholesale discount writes.
 - Size-level price editing through `/api/v2/upload/task/size`.

@@ -1,25 +1,19 @@
-"""Contracts and constants for the WB SPP tester operator block."""
+"""Contracts and constants for the manual WB SPP tester."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Literal
 
 
 SPP_TEST_CONTRACT_PREFIX = "sheet_vitrina_v1_prices_spp_test"
-SPP_TEST_MODE_SAFE_SLOW = "safe_slow"
-SPP_TEST_MAX_MEASUREMENTS_MIN = 3
-SPP_TEST_MAX_MEASUREMENTS_MAX = 30
-SPP_TEST_DEFAULT_PRECISION_RUB = 2
-SPP_TEST_DEFAULT_MAX_MEASUREMENTS = 8
-SPP_TEST_SCHEDULE_TIMEZONE = "Asia/Yekaterinburg"
-SPP_TEST_SCHEDULE_TIMEZONE_LABEL = "Оренбург"
-SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES = 15
+SPP_TEST_PRICE_COUNT_MIN = 1
+SPP_TEST_PRICE_COUNT_MAX = 6
 SPP_TEST_HISTORY_DEFAULT_LIMIT = 20
 SPP_TEST_HISTORY_MAX_LIMIT = 50
+SPP_TEST_LOG_LIMIT = 10
 
 SPP_TEST_ACTIVE_STATUSES = {
-    "planning",
+    "preflight",
     "measuring",
     "cooldown",
     "restoring",
@@ -28,73 +22,24 @@ SPP_TEST_ACTIVE_STATUSES = {
 SPP_TEST_FINAL_STATUSES = {
     "complete",
     "interrupted_restored",
-    "skipped",
-    "threshold_detected",
-    "threshold_not_detected",
     "inconclusive",
     "manual_restore_required",
     "failed",
 }
 
 SppTestJobStatus = Literal[
-    "planning",
+    "preflight",
     "measuring",
     "cooldown",
     "restoring",
     "complete",
     "interrupted_restored",
-    "skipped",
     "manual_restore_required",
     "failed",
 ]
 
 SppTestResultStatus = Literal[
-    "threshold_detected",
-    "threshold_not_detected",
+    "success",
     "inconclusive",
     "manual_restore_required",
 ]
-
-
-@dataclass(frozen=True)
-class SppTestPointPlan:
-    target_discounted_price: float
-    kind: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "target_discounted_price": self.target_discounted_price,
-            "kind": self.kind,
-        }
-
-
-@dataclass(frozen=True)
-class SppTestPlan:
-    nm_id: int
-    range_min_discounted: float
-    range_max_discounted: float
-    precision_rub: float
-    max_measurements: int
-    mode: str
-    initial_points: list[SppTestPointPlan]
-    refinement_budget: int
-    estimated_duration_seconds: int
-    request_budget: Mapping[str, int]
-    restore_route: list[Mapping[str, Any]]
-    warnings: list[str]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "nmID": self.nm_id,
-            "range_min_discounted": self.range_min_discounted,
-            "range_max_discounted": self.range_max_discounted,
-            "precision_rub": self.precision_rub,
-            "max_measurements": self.max_measurements,
-            "mode": self.mode,
-            "initial_points": [point.to_dict() for point in self.initial_points],
-            "refinement_budget": self.refinement_budget,
-            "estimated_duration_seconds": self.estimated_duration_seconds,
-            "request_budget": dict(self.request_budget),
-            "restore_route": [dict(item) for item in self.restore_route],
-            "warnings": list(self.warnings),
-        }

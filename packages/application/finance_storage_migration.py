@@ -80,8 +80,6 @@ _SYSTEMD_UNITS = (
     "wb-core-sheet-vitrina-closure-retry.timer",
     "wb-core-feedbacks-auto-complaints-tick.service",
     "wb-core-feedbacks-auto-complaints-tick.timer",
-    "wb-core-spp-tester-schedule-tick.service",
-    "wb-core-spp-tester-schedule-tick.timer",
     "wb-core-autoanswers-readonly-sync.service",
     "wb-core-autoanswers-readonly-sync.timer",
     "wb-core-autoanswers-worker.service",

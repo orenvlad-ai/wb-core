@@ -37,7 +37,7 @@ from packages.adapters.wb_buyer_session import (  # noqa: E402
     WbBuyerSessionConfig,
     extract_authenticated_price_from_network_payload,
 )
-from packages.application.wb_spp_tester import _stable_buyer_pair  # noqa: E402
+from packages.application.wb_spp_tester import _stable_authenticated_price  # noqa: E402
 from packages.application.wb_buyer_session import WbBuyerSessionBlock  # noqa: E402
 
 
@@ -186,7 +186,9 @@ def _run_profile_adapter_smoke() -> None:
                 "anonymous": {"public_buyer_price": 394.0, "destination_context": _destination()},
             },
         ]
-        if _stable_buyer_pair(no_fingerprint_reads) != (386.0, 394.0):
+        if _stable_authenticated_price(
+            [dict(row["authenticated"]) for row in no_fingerprint_reads]
+        ) != 386.0:
             raise AssertionError("stable authenticated browser proof must replace missing fingerprint heuristics")
 
 

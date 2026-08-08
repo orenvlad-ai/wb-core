@@ -52,6 +52,7 @@ ACTIVE_RUNTIME_STATES = frozenset(
     {
         "queued",
         "starting",
+        "preflight",
         "planning",
         "measuring",
         "cooldown",
@@ -65,7 +66,6 @@ CORE_TIMER_UNITS = (
     "wb-core-sheet-vitrina-refresh.timer",
     "wb-core-sheet-vitrina-closure-retry.timer",
     "wb-core-feedbacks-auto-complaints-tick.timer",
-    "wb-core-spp-tester-schedule-tick.timer",
     "wb-core-wb-finance-weekly.timer",
     "wb-core-finance-backup-rotation.timer",
 )
@@ -121,7 +121,6 @@ WRITER_PROCESS_MARKERS = (
     "sheet_vitrina_v1_closure_retry.py",
     "sheet_vitrina_v1_temporal_closure_retry_live.py",
     "sheet_vitrina_v1_feedbacks_auto_complaints_tick.py",
-    "wb_spp_tester_schedule_tick.py",
     "wb_finance_weekly.py",
     "finance_storage_backup_rotation.py",
     "warehouse_functional_runner.py",
@@ -131,7 +130,6 @@ WRITER_PROCESS_MARKERS = (
 
 WEB_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 FEEDBACK_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/schedules"
-SPP_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/schedule"
 SPP_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/status"
 
 PROCESS_SPECS: tuple[dict[str, Any], ...] = (
@@ -181,16 +179,6 @@ PROCESS_SPECS: tuple[dict[str, Any], ...] = (
         "control_location": "Отзывы → Авто-жалобы",
         "control_capability": "monitor",
         "desired_source": "feedback_complaints_schedule",
-    },
-    {
-        "key": "spp_test",
-        "display_name": "Автоматический тест СПП",
-        "timer": "wb-core-spp-tester-schedule-tick.timer",
-        "schedule": "spp",
-        "control_owner": "feature",
-        "control_location": "Цены → Тест СПП",
-        "control_capability": "monitor",
-        "desired_source": "spp_test_schedule",
     },
     {
         "key": "autoanswers",
@@ -319,7 +307,6 @@ class RuntimeScheduleClient:
         return {
             "web_vitrina": self._request(WEB_SCHEDULE_PATH),
             "feedback_complaints": self._request(FEEDBACK_SCHEDULE_PATH),
-            "spp": self._request(SPP_SCHEDULE_PATH),
             "spp_status": self._request(SPP_STATUS_PATH),
         }
 
@@ -370,23 +357,16 @@ class RuntimeScheduleClient:
                 ]
             },
         )
-        spp = dict(baseline.get("spp") or {})
-        self._request(
-            SPP_SCHEDULE_PATH,
-            {"schedule": dict(spp.get("schedule") or {})},
-        )
         return self.read_all()
 
 
 def _runtime_summary(payloads: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     web = payloads.get("web_vitrina") or {}
     feedback = payloads.get("feedback_complaints") or {}
-    spp = payloads.get("spp") or {}
     spp_status = payloads.get("spp_status") or {}
 
     web_schedules = [item for item in web.get("schedules", []) if isinstance(item, Mapping)]
     feedback_schedules = [item for item in feedback.get("schedules", []) if isinstance(item, Mapping)]
-    spp_schedule = spp.get("schedule") if isinstance(spp.get("schedule"), Mapping) else {}
     feedback_active = [
         {"run_id": str(item.get("run_id") or ""), "status": str(item.get("status") or "")}
         for item in feedback.get("recent_runs", [])
@@ -419,8 +399,6 @@ def _runtime_summary(payloads: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
             "active_runs": feedback_active,
         },
         "spp": {
-            "enabled": bool(spp_schedule.get("enabled")),
-            "schedule_id": str(spp_schedule.get("id") or ""),
             "active_job": spp_active,
         },
     }
@@ -600,8 +578,6 @@ def _initial_owner_policy(runtime_dir: Path) -> dict[str, Any]:
                     if isinstance(item, Mapping) and bool(item.get("enabled"))
                 ]
             )
-        elif schedule_key == "spp" and schedule_evidence:
-            desired = bool((schedule_evidence.get("schedule") or {}).get("enabled"))
         evidence = {
             "source": evidence_source,
             "timer": timer_evidence,
@@ -1822,7 +1798,6 @@ def maintenance_control_signature(
     runtime = dict(status.get("runtime_schedules") or {})
     web = dict(runtime.get("web_vitrina") or {})
     feedback = dict(runtime.get("feedback_complaints") or {})
-    spp = dict(runtime.get("spp") or {})
     process_desired = {
         str(item.get("process_key") or ""): item.get("desired")
         for item in process_rows
@@ -1867,10 +1842,6 @@ def maintenance_control_signature(
                 "enabled_ids": sorted(
                     str(value) for value in feedback.get("enabled_ids", [])
                 ),
-            },
-            "spp": {
-                "enabled": bool(spp.get("enabled")),
-                "schedule_id": str(spp.get("schedule_id") or ""),
             },
         },
         "unknown_wb_core_timers": sorted(
@@ -2516,10 +2487,6 @@ def maintenance_restore(
             bool(item.get("enabled"))
             for item in feedback_baseline.get("schedules", [])
             if isinstance(item, Mapping)
-        )
-        spp_baseline = dict(schedule_baseline.get("spp") or {})
-        desired["spp_test"] = bool(
-            (spp_baseline.get("schedule") or {}).get("enabled")
         )
     unknown = sorted(key for key, value in desired.items() if value is None)
     if unknown:
