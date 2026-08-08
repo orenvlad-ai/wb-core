@@ -408,7 +408,6 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
         ("warehouse_functional", "Склады и себестоимость", True, "manage", "Настройки → Автообновления"),
         ("wb_finance_weekly", "Финансовый отчёт WB", True, "manage", "Настройки → Автообновления"),
         ("feedback_complaints", "Авто-жалобы", True, "monitor", "Отзывы → Авто-жалобы"),
-        ("spp_test", "Автоматический тест СПП", False, "monitor", "Цены → Тест СПП"),
         ("autoanswers", "Autoanswers", True, "monitor", "Отзывы → Отзывы"),
     ]
     auto_payload = {
@@ -670,6 +669,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                     "Справочники",
                     "Расчётные параметры",
                     "Автообновления",
+                    "Источники и сессии",
                     "Пользователи",
                 ],
                 f"settings top-level navigation changed: {group_labels}",
@@ -690,8 +690,8 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 "[data-vitrina-schedule-editor] thead th"
             ).nth(6).wait_for()
             _assert(
-                surface.locator("[data-auto-update-process]").count() == 7,
-                "auto-updates page must show only seven logical real processes",
+                surface.locator("[data-auto-update-process]").count() == 6,
+                "auto-updates page must show only six logical real processes after SPP schedule removal",
             )
             _assert(
                 surface.locator("[data-vitrina-schedule-editor]").count() == 1
@@ -728,9 +728,6 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 ).count() == 0
                 and surface.locator(
                     '[data-auto-update-toggle="feedback_complaints"]'
-                ).count() == 0
-                and surface.locator(
-                    '[data-auto-update-toggle="spp_test"]'
                 ).count() == 0,
                 "feature-owned processes must have no Settings mutation controls",
             )

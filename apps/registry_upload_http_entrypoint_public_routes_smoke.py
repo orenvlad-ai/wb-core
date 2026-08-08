@@ -479,12 +479,12 @@ def main() -> None:
         for item in eu_print_plan["deploy_plan"]["managed_systemd_units"]
         if isinstance(item, dict)
     }
-    required_spp_units = {
+    removed_spp_units = {
         "wb-core-spp-tester-schedule-tick.service",
         "wb-core-spp-tester-schedule-tick.timer",
     }
-    if not required_spp_units.issubset(eu_managed_units):
-        raise AssertionError(f"EU target missing repo-owned SPP scheduler units: {required_spp_units - eu_managed_units}")
+    if removed_spp_units & eu_managed_units:
+        raise AssertionError(f"EU target still deploys removed SPP scheduler units: {removed_spp_units & eu_managed_units}")
     finance_backup_timer = next(
         (
             item

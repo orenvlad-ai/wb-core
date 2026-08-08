@@ -329,6 +329,7 @@ class HostedRuntimeTarget:
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
     managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
+    retired_systemd_units: tuple[str, ...] = field(default_factory=tuple)
     nginx_public_routes: NginxPublicRoutesConfig | None = None
     target_role: str = ""
     target_lifecycle: str = ""
@@ -392,6 +393,12 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
                 restart=bool(raw_unit.get("restart", False)),
             )
         )
+    raw_retired_systemd_units = payload.get("retired_systemd_units") or []
+    if not isinstance(raw_retired_systemd_units, list):
+        raise ValueError("retired_systemd_units must be a JSON array")
+    retired_systemd_units = tuple(
+        str(unit_name or "").strip() for unit_name in raw_retired_systemd_units
+    )
     raw_nginx_public_routes = payload.get("nginx_public_routes")
     nginx_public_routes: NginxPublicRoutesConfig | None = None
     if raw_nginx_public_routes is not None:
@@ -435,6 +442,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
         managed_systemd_units=tuple(managed_systemd_units),
+        retired_systemd_units=retired_systemd_units,
         nginx_public_routes=nginx_public_routes,
         target_role=str(payload.get("target_role", "")).strip(),
         target_lifecycle=str(payload.get("target_lifecycle", "")).strip(),
@@ -478,7 +486,15 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     missing = _missing_for_deploy(target)
     target_blockers = _target_action_blockers(target)
     mutation_guard = _describe_target_mutation_guard(target)
-    deploy_sequence = [
+    deploy_sequence: list[str] = []
+    if target.retired_systemd_units:
+        deploy_sequence.extend(
+            [
+                "disable, stop and remove explicitly retired systemd units before runtime sync",
+                "daemon-reload systemd after retired unit removal",
+            ]
+        )
+    deploy_sequence.extend([
         "sync current checked-out worktree to target_dir via rsync",
         "install required host OS packages for seller-portal recovery and browser launch",
         "install required host OS packages for seller-portal owner capture runtime",
@@ -489,14 +505,11 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "ensure Playwright Chromium can launch from both hosted runtime python contexts",
         "install locked frozen Node boundary dependencies and verify Node.js >=20 plus ffmpeg",
         "prepare additive autoanswers schema with a verified backup while effective OFF",
-    ]
+    ])
     if target.has_managed_systemd_units:
-        deploy_sequence.extend(
-            [
-                "install repo-owned systemd units into systemd_unit_directory",
-                "daemon-reload systemd and apply managed unit changes",
-            ]
-        )
+        deploy_sequence.append("install repo-owned systemd units into systemd_unit_directory")
+    if target.has_managed_systemd_units:
+        deploy_sequence.append("daemon-reload systemd and apply managed unit changes")
     if target.has_nginx_public_routes:
         deploy_sequence.append(
             "render repo-owned nginx public route allowlist, backup server config, validate nginx config and reload nginx"
@@ -528,6 +541,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "systemd_unit_directory": target.systemd_unit_directory or None,
         "systemd_units_source_dir": target.systemd_units_source_dir or None,
         "managed_systemd_units": _describe_managed_systemd_units(target),
+        "retired_systemd_units": list(target.retired_systemd_units),
         "nginx_public_routes": _describe_nginx_public_routes(target),
         "route_paths": target.route_paths,
         "runtime_env_contract": RUNTIME_ENV_CONTRACT,
@@ -1012,6 +1026,7 @@ def deploy_current_checkout(
             "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "systemd_install": systemd_commands["install"],
+            "systemd_retire": systemd_commands["retire"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
             "restart": restart_command,
             "systemd_enable": systemd_commands["enable"],
@@ -1072,6 +1087,12 @@ def deploy_current_checkout(
 
     # Never let a deploy/restart proceed against a missing hosted auth contour.
     run_stage("auth-preflight", auth_env_preflight_command)
+    # Retire obsolete schedulers before sync/dependency work.  This closes the
+    # window in which a legacy timer could start a removed writer flow during
+    # a long deployment.
+    if systemd_commands["retire"]:
+        run_stage("systemd-retire", systemd_commands["retire"])
+        run_stage("daemon-reload", systemd_commands["daemon_reload"])
     run_stage("mkdir", mkdir_command)
     run_stage("sync", rsync_plan)
     run_stage("chown", chown_target_dir_command)
@@ -1092,6 +1113,7 @@ def deploy_current_checkout(
     )
     if systemd_commands["install"]:
         run_stage("systemd-install", systemd_commands["install"])
+    if systemd_commands["install"]:
         run_stage("daemon-reload", systemd_commands["daemon_reload"])
     if nginx_public_routes_command:
         run_stage("nginx", nginx_public_routes_command)
@@ -12346,38 +12368,61 @@ def _describe_managed_systemd_units(target: HostedRuntimeTarget) -> list[dict[st
 
 
 def _validate_managed_systemd_units(target: HostedRuntimeTarget) -> None:
-    if not target.has_managed_systemd_units:
-        return
-    source_dir = _resolve_repo_relative_dir(target.systemd_units_source_dir)
-    if not source_dir.exists():
-        raise FileNotFoundError(f"managed systemd unit source dir not found: {source_dir}")
-    for unit in target.managed_systemd_units:
-        unit_path = source_dir / unit.name
-        if not unit_path.exists():
-            raise FileNotFoundError(f"managed systemd unit file not found: {unit_path}")
+    managed_names = {unit.name for unit in target.managed_systemd_units}
+    retired_names = set(target.retired_systemd_units)
+    if managed_names & retired_names:
+        raise ValueError(
+            "systemd units cannot be both managed and retired: "
+            + ",".join(sorted(managed_names & retired_names))
+        )
+    unit_name_pattern = re.compile(r"^[A-Za-z0-9_.@-]+\.(?:service|timer)$")
+    for unit_name in sorted(managed_names | retired_names):
+        if not unit_name_pattern.fullmatch(unit_name):
+            raise ValueError(f"invalid systemd unit name: {unit_name!r}")
+    if target.has_managed_systemd_units:
+        source_dir = _resolve_repo_relative_dir(target.systemd_units_source_dir)
+        if not source_dir.exists():
+            raise FileNotFoundError(f"managed systemd unit source dir not found: {source_dir}")
+        for unit in target.managed_systemd_units:
+            unit_path = source_dir / unit.name
+            if not unit_path.exists():
+                raise FileNotFoundError(f"managed systemd unit file not found: {unit_path}")
 
 
 def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, list[str] | None]:
-    if not target.has_managed_systemd_units:
+    if not target.has_managed_systemd_units and not target.retired_systemd_units:
         return {
             "install": None,
+            "retire": None,
             "daemon_reload": None,
             "enable": None,
             "restart": None,
         }
 
-    install_steps = [f"install -d {shlex.quote(target.systemd_unit_directory)}"]
-    for unit in target.managed_systemd_units:
-        install_steps.append(
-            "install -m 0644 "
-            f"{shlex.quote(_remote_systemd_unit_source_path(target, unit.name))} "
-            f"{shlex.quote(_remote_systemd_unit_destination_path(target, unit.name))}"
+    install_steps: list[str] = []
+    if target.has_managed_systemd_units:
+        install_steps.append(f"install -d {shlex.quote(target.systemd_unit_directory)}")
+        for unit in target.managed_systemd_units:
+            install_steps.append(
+                "install -m 0644 "
+                f"{shlex.quote(_remote_systemd_unit_source_path(target, unit.name))} "
+                f"{shlex.quote(_remote_systemd_unit_destination_path(target, unit.name))}"
+            )
+
+    retire_steps: list[str] = ["set -eu"]
+    for unit_name in target.retired_systemd_units:
+        quoted_name = shlex.quote(unit_name)
+        quoted_path = shlex.quote(_remote_systemd_unit_destination_path(target, unit_name))
+        retire_steps.append(
+            f"if systemctl cat {quoted_name} >/dev/null 2>&1; then "
+            f"systemctl disable --now {quoted_name}; fi; rm -f {quoted_path}"
         )
 
     enable_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.enable]
     restart_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.restart]
     return {
-        "install": _remote_shell_command(target, " && ".join(install_steps)),
+        "install": _remote_shell_command(target, " && ".join(install_steps)) if install_steps else None,
+        "retire": _remote_shell_command(target, "; ".join(retire_steps)) if target.retired_systemd_units else None,
         "daemon_reload": _remote_shell_command(target, "systemctl daemon-reload"),
         "enable": (
             _remote_shell_command(target, f"systemctl enable {' '.join(enable_names)}")
@@ -12408,8 +12453,9 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
         "service_name": target.service_name,
         "restart_command": target.restart_command,
     }
-    if target.has_managed_systemd_units:
+    if target.has_managed_systemd_units or target.retired_systemd_units:
         required["systemd_unit_directory"] = target.systemd_unit_directory
+    if target.has_managed_systemd_units:
         required["systemd_units_source_dir"] = target.systemd_units_source_dir
     for key, value in required.items():
         if _is_placeholder(value):
@@ -12418,6 +12464,9 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
         for unit in target.managed_systemd_units:
             if _is_placeholder(unit.name):
                 missing.append("managed_systemd_units[].name")
+    for unit_name in target.retired_systemd_units:
+        if _is_placeholder(unit_name):
+            missing.append("retired_systemd_units[]")
     if target.nginx_public_routes:
         nginx_required = {
             "nginx_public_routes.server_config_path": target.nginx_public_routes.server_config_path,

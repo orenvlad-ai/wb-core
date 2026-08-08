@@ -77,16 +77,6 @@
       "restart": false
     },
     {
-      "name": "wb-core-spp-tester-schedule-tick.service",
-      "enable": false,
-      "restart": false
-    },
-    {
-      "name": "wb-core-spp-tester-schedule-tick.timer",
-      "enable": false,
-      "restart": false
-    },
-    {
       "name": "wb-core-wb-finance-weekly.service",
       "enable": false,
       "restart": false
@@ -151,6 +141,10 @@
       "enable": false,
       "restart": false
     }
+  ],
+  "retired_systemd_units": [
+    "wb-core-spp-tester-schedule-tick.timer",
+    "wb-core-spp-tester-schedule-tick.service"
   ],
   "runtime_env": {
     "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",

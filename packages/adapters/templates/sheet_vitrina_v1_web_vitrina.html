@@ -4292,12 +4292,6 @@
       min-width: 0;
     }
 
-    .spp-test-summary-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-    }
-
     .spp-test-card {
       min-width: 0;
       border: 1px solid var(--border);
@@ -4340,6 +4334,12 @@
     .spp-test-input-row {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .spp-test-price-fields {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
 
@@ -4399,7 +4399,7 @@
 
     .spp-test-table {
       width: 100%;
-      min-width: 980px;
+      min-width: 680px;
       border-collapse: collapse;
       table-layout: fixed;
       font-size: 12px;
@@ -4416,16 +4416,6 @@
       text-overflow: ellipsis;
     }
 
-    .spp-test-schedule {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    .spp-test-schedule-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
-    }
-
     .spp-test-history-list {
       display: grid;
     }
@@ -4439,33 +4429,26 @@
       border-bottom: 0;
     }
 
-    .spp-test-history-row summary {
-      cursor: pointer;
+    .spp-test-history-row {
       display: grid;
-      grid-template-columns: minmax(170px, 1fr) minmax(180px, 1.5fr) minmax(110px, .7fr) minmax(120px, .8fr) minmax(90px, .6fr);
+      grid-template-columns: minmax(150px, .8fr) minmax(110px, .5fr) minmax(120px, .6fr) minmax(260px, 2fr);
       gap: 10px;
       align-items: center;
-      padding: 10px 0;
+      padding: 10px 12px;
       font-size: 12px;
-      list-style-position: inside;
     }
 
-    .spp-test-history-detail {
-      padding: 0 0 12px;
+    .spp-test-log-list {
       display: grid;
-      gap: 10px;
     }
 
-    .spp-test-history-json {
-      margin: 0;
-      max-height: 360px;
-      overflow: auto;
-      border-radius: 6px;
-      background: var(--panel-subtle);
-      padding: 10px;
-      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-      white-space: pre-wrap;
-      word-break: break-word;
+    .spp-test-log-row {
+      display: grid;
+      grid-template-columns: minmax(150px, .8fr) minmax(120px, .6fr) minmax(280px, 2fr);
+      gap: 10px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
     }
 
     .ads-workspace {
@@ -4989,11 +4972,11 @@
         width: 100%;
       }
 
-      .spp-test-summary-grid,
       .spp-test-field-grid,
       .spp-test-input-row,
-      .spp-test-schedule-grid,
-      .spp-test-history-row summary {
+      .spp-test-price-fields,
+      .spp-test-history-row,
+      .spp-test-log-row {
         grid-template-columns: minmax(0, 1fr);
       }
 
@@ -6109,174 +6092,61 @@
           </div>
         </section>
         <section class="prices-subpanel" data-prices-subpanel="spp-test" hidden>
-          <p class="spp-test-warning">Тест временно меняет live цену на WB. План, запуск, restore и результат сохраняются на сервере.</p>
+          <p class="spp-test-warning">Проверка последовательно применит только указанные цены, прочитает цену покупателя и обязательно восстановит исходную цену.</p>
           <section class="spp-test-card" data-wb-buyer-session-panel>
             <div class="spp-test-main-head" style="padding:0 0 10px">
-              <h3>Покупательская сессия</h3>
-              <span class="prices-badge" data-wb-buyer-session-state>не проверена</span>
+              <h3>Бот покупателя</h3>
+              <span class="prices-badge" data-wb-buyer-session-state>Проверяем</span>
             </div>
             <div class="spp-test-field-grid" data-wb-buyer-session-meta>
-              <span class="spp-test-field">Статус<strong>Не проверена</strong></span>
+              <span class="spp-test-field">Готовность<strong>Проверяем…</strong></span>
               <span class="spp-test-field">Последняя проверка<strong>—</strong></span>
             </div>
             <div class="spp-test-actions">
-              <button class="button secondary" type="button" data-wb-buyer-session-check>Проверить</button>
+              <button class="button secondary" type="button" data-wb-buyer-session-check>Повторить проверку</button>
               <span class="research-result-note" data-wb-buyer-session-note></span>
             </div>
             <p class="research-error" data-wb-buyer-session-error></p>
           </section>
-          <section class="spp-test-card spp-test-schedule">
-            <div class="spp-test-main-head" style="padding:0 0 10px">
-              <h3>Автопроверка</h3>
-              <div class="spp-test-actions">
-                <span class="prices-badge" data-spp-schedule-state>расписание выключено</span>
-                <span class="prices-badge" data-spp-runtime-state>Состояние не подтверждено</span>
-              </div>
-            </div>
-            <label class="spp-test-checkbox"><input type="checkbox" data-spp-schedule-enabled>Включена</label>
-            <div class="spp-test-schedule-grid">
+          <section class="spp-test-card">
+            <h3>Ручная проверка цен</h3>
+            <div class="spp-test-input-row">
               <label class="spp-test-field">Товар / SKU / nmID
-                <select class="input" data-spp-schedule-nm><option value="">Выберите SKU</option></select>
+                <select class="input" data-spp-test-nm><option value="">Выберите товар</option></select>
               </label>
-              <label class="spp-test-field">Мин. цена со скидкой
-                <input class="input" type="number" min="1" step="1" data-spp-schedule-input="range_min_discounted">
-              </label>
-              <label class="spp-test-field">Макс. цена со скидкой
-                <input class="input" type="number" min="1" step="1" data-spp-schedule-input="range_max_discounted">
-              </label>
-              <label class="spp-test-field">Точность
-                <input class="input" type="number" min="1" step="1" value="2" data-spp-schedule-input="precision_rub">
-              </label>
-              <label class="spp-test-field">Макс. измерений
-                <input class="input" type="number" min="3" max="30" step="1" value="8" data-spp-schedule-input="max_measurements">
-              </label>
-              <span class="spp-test-field">Периодичность<strong>Ежедневно</strong></span>
-              <label class="spp-test-field">Время запуска
-                <input class="input" type="time" value="12:00" data-spp-schedule-time>
-              </label>
-              <span class="spp-test-field">Часовой пояс<strong>Asia/Yekaterinburg — Оренбург</strong></span>
-            </div>
-            <label class="spp-test-checkbox"><input type="checkbox" data-spp-schedule-consent>Согласен на будущие временные live-изменения цены по этому расписанию</label>
-            <div class="spp-test-field-grid" data-spp-schedule-meta>
-              <span class="spp-test-field">Следующий запуск<strong>—</strong></span>
-              <span class="spp-test-field">Последний автоматический запуск<strong>—</strong></span>
-              <span class="spp-test-field">Последний статус<strong>—</strong></span>
-            </div>
-            <div class="spp-test-field-grid" data-spp-runtime-meta></div>
-            <div class="spp-test-actions">
-              <button class="button primary" type="button" data-spp-schedule-save>Сохранить расписание</button>
-              <span class="research-result-note" data-spp-schedule-note></span>
-            </div>
-            <p class="research-error" data-spp-schedule-error></p>
-          </section>
-          <div class="spp-test-summary-grid">
-            <section class="spp-test-card">
-              <h3>SKU / nmID</h3>
-              <label class="spp-test-field">Товар
-                <select class="input" data-spp-test-nm>
-                  <option value="">Выберите SKU</option>
+              <label class="spp-test-field">Сколько цен проверить
+                <select class="input" data-spp-test-price-count>
+                  <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+                  <option value="4">4</option><option value="5">5</option><option value="6">6</option>
                 </select>
               </label>
-              <div class="spp-test-field-grid" data-spp-test-product>
-                <span class="spp-test-field">Название<strong>—</strong></span>
-                <span class="spp-test-field">Наш SKU<strong>—</strong></span>
-                <span class="spp-test-field">nmID<strong>—</strong></span>
-                <span class="spp-test-field">vendorCode<strong>—</strong></span>
-              </div>
-            </section>
-            <section class="spp-test-card">
-              <h3>Baseline</h3>
-              <div class="spp-test-field-grid" data-spp-test-baseline>
-                <span class="spp-test-field">Цена<strong>—</strong></span>
-                <span class="spp-test-field">Скидка<strong>—</strong></span>
-                <span class="spp-test-field">Со скидкой<strong>—</strong></span>
-                <span class="spp-test-field">Цена авторизованного покупателя<strong>—</strong></span>
-                <span class="spp-test-field">Анонимная цена<strong>—</strong></span>
-                <span class="spp-test-field">Доп. скидка аккаунта<strong>—</strong></span>
-                <span class="spp-test-field">SPP-прокси авторизованный<strong>—</strong></span>
-                <span class="spp-test-field">SPP-прокси анонимный<strong>—</strong></span>
-                <span class="spp-test-field">Payment context<strong>—</strong></span>
-                <span class="spp-test-field">Карантин<strong>—</strong></span>
-                <span class="spp-test-field">Тип цены<strong>—</strong></span>
-              </div>
-            </section>
-            <section class="spp-test-card">
-              <h3>Тест</h3>
-              <div class="spp-test-input-row">
-                <label class="spp-test-field">Мин. цена со скидкой
-                  <input class="input" type="number" min="1" step="1" data-spp-test-input="range_min_discounted">
-                </label>
-                <label class="spp-test-field">Макс. цена со скидкой
-                  <input class="input" type="number" min="1" step="1" data-spp-test-input="range_max_discounted">
-                </label>
-              </div>
-              <div class="spp-test-input-row">
-                <label class="spp-test-field">Точность порога
-                  <input class="input" type="number" min="1" step="1" value="2" data-spp-test-input="precision_rub">
-                </label>
-                <label class="spp-test-field">Макс. измерений
-                  <input class="input" type="number" min="3" max="30" step="1" value="8" data-spp-test-input="max_measurements">
-                </label>
-              </div>
-              <span class="prices-badge">Безопасный медленный</span>
-              <label class="spp-test-checkbox"><input type="checkbox" data-spp-test-confirm-live>Понимаю, что тест временно меняет live цену на WB</label>
-              <label class="spp-test-checkbox"><input type="checkbox" checked data-spp-test-restore-baseline>После теста восстановить baseline</label>
-              <div class="spp-test-actions">
-                <button class="button secondary" type="button" data-spp-test-plan>Построить план</button>
-                <button class="button primary" type="button" data-spp-test-start disabled>Запустить</button>
-                <button class="button danger" type="button" data-spp-test-restore hidden>Восстановить baseline</button>
-              </div>
-              <p class="research-result-note" data-spp-test-start-reason>сначала построить план</p>
-              <p class="research-error" data-spp-test-error></p>
-            </section>
-          </div>
+            </div>
+            <div class="spp-test-price-fields" data-spp-test-price-fields></div>
+            <div class="spp-test-actions">
+              <button class="button primary" type="button" data-spp-test-start disabled>Старт проверки</button>
+              <button class="button danger" type="button" data-spp-test-restore hidden>Аварийно восстановить цену</button>
+              <span class="research-result-note" data-spp-test-start-reason></span>
+            </div>
+            <p class="research-error" data-spp-test-error></p>
+          </section>
           <div class="spp-test-main">
             <div class="spp-test-main-head">
-              <h3 data-spp-test-status-title>План и измерения</h3>
-              <span class="prices-badge" data-spp-test-state>нет активного job</span>
-            </div>
-            <div class="spp-test-card" data-spp-test-plan-preview>
-              План ещё не построен.
+              <h3>Текущий результат</h3>
+              <span class="prices-badge" data-spp-test-state>нет запуска</span>
             </div>
             <div class="prices-table-scroll">
               <table class="spp-test-table">
                 <thead>
                   <tr>
-                    <th style="width:110px">Цель</th>
-                    <th style="width:130px">Продавец со скидкой</th>
-                    <th style="width:130px">Авториз. покупатель</th>
-                    <th style="width:130px">Анонимная</th>
-                    <th style="width:130px">Доп. скидка</th>
-                    <th style="width:110px">SPP авториз.</th>
-                    <th style="width:110px">SPP аноним.</th>
-                    <th style="width:160px">Payment</th>
-                    <th style="width:110px">Delta</th>
-                    <th style="width:110px">Уверенность</th>
-                    <th style="width:120px">uploadID</th>
-                    <th style="width:130px">Статус</th>
-                    <th style="width:180px">Примечание</th>
+                    <th>Заданная цена</th>
+                    <th>Фактическая цена продавца</th>
+                    <th>Цена покупателя</th>
+                    <th>СПП</th>
+                    <th>Статус</th>
                   </tr>
                 </thead>
                 <tbody data-spp-test-measurements>
-                  <tr><td colspan="13">Измерений пока нет.</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="prices-table-scroll">
-              <table class="spp-test-table">
-                <thead>
-                  <tr>
-                    <th style="width:160px">Нижняя цена</th>
-                    <th style="width:160px">Верхняя цена</th>
-                    <th style="width:120px">SPP left</th>
-                    <th style="width:120px">SPP right</th>
-                    <th style="width:110px">Delta</th>
-                    <th style="width:130px">Ширина</th>
-                    <th style="width:130px">Уверенность</th>
-                  </tr>
-                </thead>
-                <tbody data-spp-test-thresholds>
-                  <tr><td colspan="7">Порогов пока нет.</td></tr>
+                  <tr><td colspan="5">Результатов пока нет.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -6290,6 +6160,10 @@
               <p class="research-result-note" style="padding:12px">История загружается…</p>
             </div>
             <p class="research-error" style="padding:0 12px" data-spp-history-error></p>
+          </div>
+          <div class="spp-test-main">
+            <div class="spp-test-main-head"><h3>Технический лог · последние 10 событий</h3></div>
+            <div class="spp-test-log-list" data-spp-test-log><p class="research-result-note" style="padding:12px">Лог пока пуст.</p></div>
           </div>
         </section>
       </section>
@@ -6922,37 +6796,20 @@
     const pricesSubtabButtons = Array.from(document.querySelectorAll("[data-prices-subtab]"));
     const pricesSubpanels = Array.from(document.querySelectorAll("[data-prices-subpanel]"));
     const sppTestNmSelect = document.querySelector("[data-spp-test-nm]");
-    const sppTestProductNode = document.querySelector("[data-spp-test-product]");
-    const sppTestBaselineNode = document.querySelector("[data-spp-test-baseline]");
-    const sppTestPlanButton = document.querySelector("[data-spp-test-plan]");
+    const sppTestPriceCountNode = document.querySelector("[data-spp-test-price-count]");
+    const sppTestPriceFieldsNode = document.querySelector("[data-spp-test-price-fields]");
     const sppTestStartButton = document.querySelector("[data-spp-test-start]");
     const sppTestRestoreButton = document.querySelector("[data-spp-test-restore]");
-    const sppTestConfirmLiveNode = document.querySelector("[data-spp-test-confirm-live]");
-    const sppTestRestoreBaselineNode = document.querySelector("[data-spp-test-restore-baseline]");
     const sppTestStartReasonNode = document.querySelector("[data-spp-test-start-reason]");
     const sppTestErrorNode = document.querySelector("[data-spp-test-error]");
-    const sppTestPlanPreviewNode = document.querySelector("[data-spp-test-plan-preview]");
     const sppTestMeasurementsNode = document.querySelector("[data-spp-test-measurements]");
-    const sppTestThresholdsNode = document.querySelector("[data-spp-test-thresholds]");
     const sppTestStateNode = document.querySelector("[data-spp-test-state]");
-    const sppTestStatusTitleNode = document.querySelector("[data-spp-test-status-title]");
+    const sppTestLogNode = document.querySelector("[data-spp-test-log]");
     const wbBuyerSessionStateNode = document.querySelector("[data-wb-buyer-session-state]");
     const wbBuyerSessionMetaNode = document.querySelector("[data-wb-buyer-session-meta]");
     const wbBuyerSessionCheckButton = document.querySelector("[data-wb-buyer-session-check]");
-    const wbBuyerSessionInstallButton = document.querySelector("[data-wb-buyer-session-install]");
     const wbBuyerSessionNoteNode = document.querySelector("[data-wb-buyer-session-note]");
     const wbBuyerSessionErrorNode = document.querySelector("[data-wb-buyer-session-error]");
-    const sppScheduleEnabledNode = document.querySelector("[data-spp-schedule-enabled]");
-    const sppScheduleNmSelect = document.querySelector("[data-spp-schedule-nm]");
-    const sppScheduleTimeNode = document.querySelector("[data-spp-schedule-time]");
-    const sppScheduleConsentNode = document.querySelector("[data-spp-schedule-consent]");
-    const sppScheduleSaveButton = document.querySelector("[data-spp-schedule-save]");
-    const sppScheduleStateNode = document.querySelector("[data-spp-schedule-state]");
-    const sppRuntimeStateNode = document.querySelector("[data-spp-runtime-state]");
-    const sppRuntimeMetaNode = document.querySelector("[data-spp-runtime-meta]");
-    const sppScheduleMetaNode = document.querySelector("[data-spp-schedule-meta]");
-    const sppScheduleNoteNode = document.querySelector("[data-spp-schedule-note]");
-    const sppScheduleErrorNode = document.querySelector("[data-spp-schedule-error]");
     const sppHistoryListNode = document.querySelector("[data-spp-history-list]");
     const sppHistoryMoreButton = document.querySelector("[data-spp-history-more]");
     const sppHistoryErrorNode = document.querySelector("[data-spp-history-error]");
@@ -7545,10 +7402,8 @@
         statusPollSequence: 0,
         sppTest: {
           selectedNmId: "",
-          baselineLoading: false,
-          baseline: null,
-          planLoading: false,
-          plan: null,
+          priceCount: 1,
+          prices: [""],
           startLoading: false,
           restoring: false,
           statusLoading: false,
@@ -7557,24 +7412,15 @@
           buyerSessionLoading: false,
           buyerSessionLoaded: false,
           buyerSession: null,
-          buyerRecoveryStarting: false,
-          buyerRecovery: null,
-          buyerRecoveryPollSequence: 0,
-          buyerRecoveryLauncherDownloaded: false,
           buyerSessionNote: "",
           buyerSessionError: "",
           pollSequence: 0,
-          scheduleLoading: false,
-          scheduleSaving: false,
-          scheduleLoaded: false,
-          schedule: null,
-          scheduleNote: "",
+          logEvents: [],
           historyLoading: false,
           historyLoaded: false,
           historyItems: [],
           historyNextCursor: "",
           historyHasMore: false,
-          historyDetails: {},
           error: ""
         }
       },
@@ -14604,7 +14450,6 @@
       } finally {
         monitoring.loading = false;
         renderFeedbacksAutomationPanel();
-        renderSppSchedule();
       }
     }
 
@@ -20699,10 +20544,6 @@
         activatePricesSubtab(subtab.getAttribute("data-prices-subtab") || "current");
         return;
       }
-      if (event.target.closest("[data-spp-test-plan]")) {
-        buildSppTestPlan();
-        return;
-      }
       if (event.target.closest("[data-wb-buyer-session-check]")) {
         loadWbBuyerSession({force: true});
         return;
@@ -20715,21 +20556,9 @@
         restoreSppTestBaseline();
         return;
       }
-      if (event.target.closest("[data-spp-schedule-save]")) {
-        saveSppSchedule();
-        return;
-      }
       if (event.target.closest("[data-spp-history-more]")) {
         loadSppHistory({reset: false});
         return;
-      }
-      const historyRow = event.target.closest("[data-spp-history-job]");
-      if (historyRow) {
-        window.setTimeout(function() {
-          if (historyRow.open) {
-            loadSppHistoryDetail(historyRow.getAttribute("data-spp-history-job") || "");
-          }
-        }, 0);
       }
     }
 
@@ -20755,82 +20584,39 @@
 
     function ensureSppTestReady(options) {
       renderSppTestSelector();
+      renderSppTestPriceFields();
       renderSppTest();
-      loadProcessMonitoring({silent: true});
       if ((!state.prices.sppTest.buyerSessionLoaded || (options && options.refreshBuyerSession))
           && !state.prices.sppTest.buyerSessionLoading) {
-        loadWbBuyerSession({force: !!(options && options.refreshBuyerSession)});
+        loadWbBuyerSession();
       }
       loadSppTestStatus({silent: true});
-      if (!state.prices.sppTest.scheduleLoaded) {
-        loadSppSchedule();
-      }
-      if (!state.prices.sppTest.historyLoaded) {
-        loadSppHistory({reset: true});
-      }
+      if (!state.prices.sppTest.historyLoaded) loadSppHistory({reset: true});
     }
 
-    async function resumeWbBuyerSessionLifecycle() {
-      if (state.prices.sppTest.buyerRecoveryStarting || state.prices.sppTest.buyerSessionLoading) {
-        return;
-      }
-      if (!WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path) {
-        return loadWbBuyerSession({force: false, autoRecover: true});
-      }
-      state.prices.sppTest.buyerRecoveryStarting = true;
-      state.prices.sppTest.buyerSessionNote = "Восстанавливаем lifecycle текущей сессии…";
-      renderWbBuyerSession();
-      try {
-        const url = new URL(WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path, window.location.origin);
-        url.searchParams.set("probe", "false");
-        const response = await fetch(url.toString(), {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from buyer recovery status route");
-        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "buyer recovery status returned " + response.status);
-        state.prices.sppTest.buyerRecovery = payload || null;
-        state.prices.sppTest.buyerRecoveryLauncherDownloaded = false;
-        if (payload && payload.running) {
-          state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
-          if (payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
-          pollWbBuyerRecovery(false);
-          return;
-        }
-        if (payload && payload.status === "completed") {
-          state.prices.sppTest.buyerSession = payload.session || null;
-        }
-      } catch (error) {
-        state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.buyerRecoveryStarting = false;
-        renderWbBuyerSession();
-      }
-      return loadWbBuyerSession({force: true, autoRecover: true});
-    }
-
-    async function loadWbBuyerSession(options) {
+    async function loadWbBuyerSession() {
       if (!WEB_VITRINA_CONFIG.wb_buyer_session_check_path || state.prices.sppTest.buyerSessionLoading) {
-        return;
+        return state.prices.sppTest.buyerSession;
       }
       state.prices.sppTest.buyerSessionLoading = true;
       state.prices.sppTest.buyerSessionError = "";
+      state.prices.sppTest.buyerSessionNote = "";
       renderWbBuyerSession();
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.wb_buyer_session_check_path, {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from buyer session route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "buyer session route returned " + response.status);
-        }
+        const payload = await readJsonResponse(response, "non-json response from buyer capability check");
+        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "проверка бота вернула " + response.status);
         state.prices.sppTest.buyerSession = payload || null;
         state.prices.sppTest.buyerSessionLoaded = true;
         state.prices.sppTest.buyerSessionNote = payload && payload.capability_valid
-          ? "Buyer-сессия и маршрут авторизованной цены подтверждены."
-          : "Проверка не пройдена. Восстановите сессию в Настройки → Источники и сессии.";
-        if (payload && payload.capability_valid && state.prices.sppTest.selectedNmId) {
-          loadSppBaseline(state.prices.sppTest.selectedNmId);
-        }
+          ? "Авторизованная цена покупателя доступна."
+          : "Проверка не пройдена. Восстановите бота в Настройки → Источники и сессии.";
+        return payload;
       } catch (error) {
-        state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, status_label: "Ошибка проверки"};
+        state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, capability_valid: false, status_label: "Ошибка"};
         state.prices.sppTest.buyerSessionLoaded = true;
         state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
+        return state.prices.sppTest.buyerSession;
       } finally {
         state.prices.sppTest.buyerSessionLoading = false;
         renderWbBuyerSession();
@@ -20838,510 +20624,142 @@
       }
     }
 
-    async function startWbBuyerRecovery(options) {
-      if (!WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path || state.prices.sppTest.buyerRecoveryStarting) {
-        return;
-      }
-      state.prices.sppTest.buyerRecoveryStarting = true;
-      state.prices.sppTest.buyerRecoveryLauncherDownloaded = false;
-      state.prices.sppTest.buyerSessionError = "";
-      state.prices.sppTest.buyerSessionNote = "Запускаем автоматическое восстановление…";
-      renderWbBuyerSession();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({replace: !!(options && options.replace)})
-        });
-        const payload = await readJsonResponse(response, "non-json response from buyer recovery start route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "buyer recovery start returned " + response.status);
-        }
-        state.prices.sppTest.buyerRecovery = payload || null;
-        state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload || {});
-        if (payload && payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
-        pollWbBuyerRecovery(true);
-      } catch (error) {
-        state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.buyerRecoveryStarting = false;
-        renderWbBuyerSession();
-      }
-    }
-
-    function pollWbBuyerRecovery(force) {
-      const recovery = state.prices.sppTest.buyerRecovery || {};
-      if (!force && (!recovery.running || recovery.run_is_final)) {
-        return;
-      }
-      const sequence = ++state.prices.sppTest.buyerRecoveryPollSequence;
-      window.setTimeout(async function() {
-        if (sequence !== state.prices.sppTest.buyerRecoveryPollSequence || !WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path) {
-          return;
-        }
-        try {
-          const url = new URL(WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path, window.location.origin);
-          if (recovery.run_id) url.searchParams.set("run_id", recovery.run_id);
-          url.searchParams.set("probe", "false");
-          const response = await fetch(url.toString(), {credentials: "same-origin"});
-          const payload = await readJsonResponse(response, "non-json response from buyer recovery status route");
-          if (!response.ok) throw new Error(payload && payload.error ? payload.error : "buyer recovery status returned " + response.status);
-          state.prices.sppTest.buyerRecovery = payload || null;
-          if (payload && payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
-          if (payload && payload.status === "completed") {
-            state.prices.sppTest.buyerSession = payload.session || null;
-            state.prices.sppTest.buyerSessionLoaded = true;
-            state.prices.sppTest.buyerSessionNote = "Покупательская сессия установлена.";
-            loadWbBuyerSession({force: true});
-          } else if (payload && payload.running) {
-            state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
-            pollWbBuyerRecovery(false);
-          } else if (payload && payload.run_is_final) {
-            state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
-          }
-        } catch (error) {
-          state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
-        } finally {
-          renderWbBuyerSession();
-          renderSppTest();
-        }
-      }, force ? 1200 : 2500);
-    }
-
-    function wbBuyerRecoveryMessage(payload) {
-      const status = String((payload && (payload.stage || payload.status)) || "");
-      if (status === "checking_session" || status === "starting") return "Проверяем покупательскую сессию…";
-      if (status === "automatic_login") return "Выполняем автоматический вход через сохранённый аккаунт…";
-      if (status === "validating_session") return "Проверяем авторизацию и цену после перезапуска Chromium…";
-      if (status === "awaiting_human") return String(payload.human_action || "Завершите вход в защищённом окне Wildberries.");
-      if (status === "completed") return "Покупательская сессия действует.";
-      if (status === "timeout") return "Автовосстановление завершилось по timeout. Можно безопасно повторить.";
-      if (status === "error") return "Автовосстановление завершилось контролируемой ошибкой.";
-      return "Проверяем состояние восстановления…";
-    }
-
-    function downloadWbBuyerRecoveryLauncher() {
-      const recovery = state.prices.sppTest.buyerRecovery || {};
-      const path = recovery.launcher_download_path || WEB_VITRINA_CONFIG.wb_buyer_recovery_launcher_path || "";
-      if (state.prices.sppTest.buyerRecoveryLauncherDownloaded) {
-        return;
-      }
-      if (!path || !recovery.launcher_ready) {
-        state.prices.sppTest.buyerSessionError = "Launcher ещё не готов.";
-        renderWbBuyerSession();
-        return;
-      }
-      const link = document.createElement("a");
-      link.href = path;
-      link.download = "";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      state.prices.sppTest.buyerRecoveryLauncherDownloaded = true;
-      state.prices.sppTest.buyerSessionNote = String(recovery.human_action || "Откройте скачанный защищённый launcher и завершите вход в Wildberries.");
-      renderWbBuyerSession();
+    function sppBuyerSessionValid() {
+      const session = state.prices.sppTest.buyerSession || {};
+      return session.valid === true && session.capability_valid === true;
     }
 
     function renderWbBuyerSession() {
       const session = state.prices.sppTest.buyerSession || {};
-      const recovery = state.prices.sppTest.buyerRecovery || {};
-      const status = String(session.status || "");
-      const recoveryStatus = String(recovery.stage || recovery.status || "");
-      const recoveryActive = !!recovery.running || recoveryStatus === "validating_session";
-      const capabilityValid = session.capability_valid === true;
-      const label = state.prices.sppTest.buyerSessionLoading
-        ? "Проверяем маршрут"
-        : (capabilityValid ? "Маршрут доступен" : (session.status_label || (status === "valid" ? "Сессия есть, маршрут не подтверждён" : "Не проверена")));
+      const ready = sppBuyerSessionValid();
+      let label = "Не проверен";
+      if (state.prices.sppTest.buyerSessionLoading) label = "Проверяем";
+      else if (ready) label = "Готов";
+      else if (["missing", "invalid", "expired", "logged_out"].indexOf(String(session.status || "")) !== -1) label = "Разлогинен";
+      else if (state.prices.sppTest.buyerSessionLoaded) label = "Ошибка";
       if (wbBuyerSessionStateNode) {
         wbBuyerSessionStateNode.textContent = label;
-        wbBuyerSessionStateNode.className = "prices-badge " + (capabilityValid ? "success" : "error");
+        wbBuyerSessionStateNode.className = "prices-badge " + (ready ? "success" : (state.prices.sppTest.buyerSessionLoading ? "warning" : "error"));
       }
       if (wbBuyerSessionMetaNode) {
         wbBuyerSessionMetaNode.innerHTML = [
-          sppTestFact("Авторизация", session.valid === true ? "Подтверждена" : (session.status_label || session.status || "—")),
-          sppTestFact("Capability", String(session.capability_status || "не проверена")),
-          sppTestFact("Проверочный nmID", session.validation_nm_id || "—"),
-          sppTestFact("Последняя проверка", formatTimestampDisplay(session.capability_checked_at || session.checked_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
+          sppTestFact("Готовность", label),
+          sppTestFact("Последняя проверка", formatTimestampDisplay(
+            session.capability_checked_at || session.checked_at,
+            {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}
+          ) || "—")
         ].join("");
       }
-      if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading;
+      if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading || state.prices.sppTest.startLoading;
       if (wbBuyerSessionNoteNode) wbBuyerSessionNoteNode.textContent = state.prices.sppTest.buyerSessionNote || "";
       if (wbBuyerSessionErrorNode) wbBuyerSessionErrorNode.textContent = state.prices.sppTest.buyerSessionError || "";
     }
 
-    function wbBuyerRecoveryStatusLabel(payload) {
-      const status = String((payload && (payload.stage || payload.status)) || "");
-      if (status === "checking_session" || status === "starting") return "Проверяем сессию";
-      if (status === "automatic_login") return "Выполняем автоматический вход";
-      if (status === "validating_session") return "Проверяем профиль после перезапуска";
-      if (status === "awaiting_human") {
-        return String(payload.reason || "") === "buyer_account_fingerprint_mismatch" ? "Другой аккаунт" : "Ждём SMS/действие";
-      }
-      if (status === "completed") return "Действует";
-      if (status === "timeout") return "Recovery timeout";
-      if (status === "error") return "Ошибка recovery";
-      return String(payload.status_label || "Восстановление");
-    }
-
     function renderSppTestSelector() {
-      if (!sppTestNmSelect) {
-        return;
-      }
+      if (!sppTestNmSelect) return;
       const selected = String(state.prices.sppTest.selectedNmId || "");
-      const options = ['<option value="">Выберите SKU</option>'].concat((state.prices.rows || []).map(function(row) {
+      const options = ['<option value="">Выберите товар</option>'].concat((state.prices.rows || []).map(function(row) {
         const nmId = String(row.nmID || "");
         const title = row.title || row.displayName || row.vendorCode || ("nmID " + nmId);
         const sku = row.ourSku ? " · " + row.ourSku : "";
         return '<option value="' + escapeHtml(nmId) + '"' + (nmId === selected ? " selected" : "") + ">" + escapeHtml(title + " · " + nmId + sku) + "</option>";
       }));
       sppTestNmSelect.innerHTML = options.join("");
-      if (sppScheduleNmSelect) {
-        const schedule = state.prices.sppTest.schedule || {};
-        const scheduleSelected = String(schedule.nmID || sppScheduleNmSelect.value || "");
-        sppScheduleNmSelect.innerHTML = options.map(function(option) {
-          return option.replace(/ selected/g, "");
-        }).join("");
-        sppScheduleNmSelect.value = scheduleSelected;
-      }
     }
 
-    function selectedSppTestRow() {
-      const selected = String(state.prices.sppTest.selectedNmId || "");
-      if (!selected) {
-        return null;
-      }
-      return (state.prices.rows || []).find(function(row) {
-        return String(row.nmID || "") === selected;
-      }) || null;
+    function renderSppTestPriceFields() {
+      if (!sppTestPriceFieldsNode) return;
+      const count = Math.max(1, Math.min(6, Number(state.prices.sppTest.priceCount || 1)));
+      if (sppTestPriceCountNode) sppTestPriceCountNode.value = String(count);
+      sppTestPriceFieldsNode.innerHTML = Array.from({length: count}, function(_, index) {
+        const value = String(state.prices.sppTest.prices[index] || "");
+        return '<label class="spp-test-field">Цена ' + String(index + 1)
+          + '<input class="input" type="number" min="0.01" step="0.01" inputmode="decimal" required data-spp-test-price-index="'
+          + String(index) + '" value="' + escapeHtml(value) + '"></label>';
+      }).join("");
     }
 
-    async function loadSppBaseline(nmId) {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_baseline_path || !nmId) {
-        return;
+    function collectSppTestPrices() {
+      const count = Math.max(1, Math.min(6, Number(state.prices.sppTest.priceCount || 1)));
+      const values = state.prices.sppTest.prices.slice(0, count).map(function(value) { return String(value || "").trim(); });
+      if (values.length !== count || values.some(function(value) { return !/^(?:\d+)(?:[.,]\d{1,2})?$/.test(value); })) {
+        return {valid: false, reason: "Заполните все цены положительными денежными значениями (не более двух знаков после запятой).", prices: []};
       }
-      state.prices.sppTest.baselineLoading = true;
-      state.prices.sppTest.error = "";
-      state.prices.sppTest.baseline = null;
-      state.prices.sppTest.plan = null;
-      renderSppTest();
-      try {
-        const url = new URL(WEB_VITRINA_CONFIG.prices_spp_test_baseline_path, window.location.origin);
-        url.searchParams.set("nmID", String(nmId));
-        const response = await fetch(url.toString(), {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP baseline route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP baseline route returned " + response.status);
-        }
-        if (!payload || payload.contract_name !== "sheet_vitrina_v1_prices_spp_test_baseline") {
-          throw new Error("unexpected SPP baseline payload");
-        }
-        const baseline = payload.baseline || null;
-        if (baseline) {
-          baseline._writeEnabled = !!payload.write_enabled;
-          baseline._sppTestEnabled = !!payload.spp_test_enabled;
-          if (baseline.buyerSession && !state.prices.sppTest.buyerSessionLoaded) {
-            state.prices.sppTest.buyerSession = baseline.buyerSession;
-            state.prices.sppTest.buyerSessionLoaded = true;
-          }
-        }
-        state.prices.sppTest.baseline = baseline;
-      } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.baselineLoading = false;
-        renderSppTest();
+      const numbers = values.map(function(value) { return Number(value.replace(",", ".")); });
+      if (numbers.some(function(value) { return !Number.isFinite(value) || value <= 0; })) {
+        return {valid: false, reason: "Каждая цена должна быть больше нуля.", prices: []};
       }
+      return {valid: true, reason: "", prices: numbers};
     }
 
     async function loadSppTestStatus(options) {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_status_path || state.prices.sppTest.statusLoading) {
-        return;
-      }
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_status_path || state.prices.sppTest.statusLoading) return;
       state.prices.sppTest.statusLoading = true;
-      if (!options || !options.silent) {
-        renderSppTest();
-      }
       try {
-        const previousJob = state.prices.sppTest.job || {};
+        const previous = state.prices.sppTest.job || {};
         const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path, {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP status route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP status route returned " + response.status);
-        }
+        const payload = await readJsonResponse(response, "non-json response from SPP status");
+        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "статус проверки вернул " + response.status);
         state.prices.sppTest.activeJob = payload.active_job || null;
         state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
-        const currentJob = state.prices.sppTest.job || {};
-        const terminalStatuses = ["complete", "interrupted_restored", "manual_restore_required", "failed", "skipped"];
-        if (
-          state.prices.sppTest.historyLoaded
-          && currentJob.job_id
-          && (currentJob.job_id !== previousJob.job_id || currentJob.status !== previousJob.status)
-          && terminalStatuses.indexOf(String(currentJob.status || "")) !== -1
-        ) {
+        state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
+        const current = state.prices.sppTest.job || {};
+        if (current.job_id && (current.job_id !== previous.job_id || current.status !== previous.status)
+            && ["complete", "interrupted_restored", "manual_restore_required", "failed"].indexOf(String(current.status || "")) !== -1) {
           loadSppHistory({reset: true});
-          loadSppSchedule();
         }
         pollSppTestIfActive();
       } catch (error) {
-        if (!options || !options.silent) {
-          state.prices.sppTest.error = String(error && error.message ? error.message : error);
-        }
+        if (!options || !options.silent) state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
         state.prices.sppTest.statusLoading = false;
         renderSppTest();
       }
     }
 
-    async function loadSppSchedule() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_schedule_path || state.prices.sppTest.scheduleLoading) {
-        return;
-      }
-      state.prices.sppTest.scheduleLoading = true;
-      state.prices.sppTest.error = "";
-      renderSppSchedule();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_schedule_path, {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP schedule route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP schedule route returned " + response.status);
-        }
-        state.prices.sppTest.schedule = payload.schedule || null;
-        state.prices.sppTest.scheduleLoaded = true;
-        applySppScheduleToForm();
-      } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.scheduleLoading = false;
-        renderSppSchedule();
-      }
-    }
-
-    function applySppScheduleToForm() {
-      const schedule = state.prices.sppTest.schedule || {};
-      if (sppScheduleEnabledNode) sppScheduleEnabledNode.checked = !!schedule.enabled;
-      if (sppScheduleNmSelect) sppScheduleNmSelect.value = String(schedule.nmID || "");
-      if (sppScheduleTimeNode) sppScheduleTimeNode.value = String(schedule.local_time_hhmm || "12:00");
-      if (sppScheduleConsentNode) sppScheduleConsentNode.checked = !!schedule.future_live_price_changes_confirmed;
-      document.querySelectorAll("[data-spp-schedule-input]").forEach(function(input) {
-        const key = input.getAttribute("data-spp-schedule-input") || "";
-        const value = schedule[key];
-        input.value = value === null || value === undefined ? "" : String(value);
-      });
-      renderSppTestSelector();
-    }
-
-    function collectSppSchedulePayload() {
-      const payload = {
-        enabled: !!(sppScheduleEnabledNode && sppScheduleEnabledNode.checked),
-        nmID: Number(sppScheduleNmSelect && sppScheduleNmSelect.value ? sppScheduleNmSelect.value : 0),
-        cadence: "daily",
-        local_time_hhmm: String(sppScheduleTimeNode && sppScheduleTimeNode.value ? sppScheduleTimeNode.value : "12:00"),
-        timezone: "Asia/Yekaterinburg",
-        future_live_price_changes_confirmed: !!(sppScheduleConsentNode && sppScheduleConsentNode.checked)
-      };
-      document.querySelectorAll("[data-spp-schedule-input]").forEach(function(input) {
-        payload[input.getAttribute("data-spp-schedule-input")] = String(input.value || "").trim();
-      });
-      return payload;
-    }
-
-    async function saveSppSchedule() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_schedule_path || state.prices.sppTest.scheduleSaving) {
-        return;
-      }
-      state.prices.sppTest.scheduleSaving = true;
-      state.prices.sppTest.scheduleNote = "";
-      state.prices.sppTest.error = "";
-      renderSppSchedule();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_schedule_path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({schedule: collectSppSchedulePayload()})
-        });
-        const payload = await readJsonResponse(response, "non-json response from SPP schedule save route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP schedule save returned " + response.status);
-        }
-        state.prices.sppTest.schedule = payload.schedule || null;
-        state.prices.sppTest.scheduleLoaded = true;
-        state.prices.sppTest.scheduleNote = payload.schedule && payload.schedule.enabled
-          ? "Расписание сохранено. Проверка ждёт назначенного времени."
-          : "Расписание сохранено и выключено.";
-        applySppScheduleToForm();
-        loadProcessMonitoring({silent: true});
-      } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.scheduleSaving = false;
-        renderSppSchedule();
-      }
-    }
-
-    function renderSppSchedule() {
-      const schedule = state.prices.sppTest.schedule || {};
-      if (sppScheduleStateNode) {
-        sppScheduleStateNode.textContent = schedule.enabled ? "расписание включено" : "расписание выключено";
-        sppScheduleStateNode.className = "prices-badge " + (schedule.enabled ? "success" : "");
-      }
-      const runtimeProcess = processMonitoringItem("spp_test");
-      const runtimePresentation = processOperationalPresentation(runtimeProcess);
-      if (sppRuntimeStateNode) {
-        sppRuntimeStateNode.textContent = runtimePresentation.label;
-        sppRuntimeStateNode.className = "prices-badge " + runtimePresentation.tone;
-      }
-      if (sppRuntimeMetaNode) {
-        const runtime = runtimeProcess || {};
-        sppRuntimeMetaNode.innerHTML = [
-          sppTestFact("Источник управления", runtime.control_location || "Цены → Тест СПП"),
-          sppTestFact("Desired", runtime.desired === true ? "Включено" : runtime.desired === false ? "Выключено" : "Не подтверждено"),
-          sppTestFact("Actual timer", runtime.actual === true ? "Работает" : runtime.actual === false ? "Не работает" : "Не подтверждено"),
-          sppTestFact("Последний запуск", formatTimestampDisplay(runtime.last_run || "") || "—"),
-          sppTestFact("Последний успех", formatTimestampDisplay(runtime.last_success || "") || "—"),
-          sppTestFact("Следующий запуск", formatTimestampDisplay(runtime.next_run || "") || "—"),
-          sppTestFact("Drift", runtime.drift_status || "unknown"),
-          sppTestFact("Последняя ошибка", runtime.last_error || state.processMonitoring.error || "—")
-        ].join("");
-      }
-      if (sppScheduleSaveButton) {
-        const enablingSchedule = !!(sppScheduleEnabledNode && sppScheduleEnabledNode.checked);
-        sppScheduleSaveButton.disabled = state.prices.sppTest.scheduleSaving || (enablingSchedule && !sppBuyerSessionValid());
-        sppScheduleSaveButton.textContent = state.prices.sppTest.scheduleSaving ? "Сохранение…" : "Сохранить расписание";
-        sppScheduleSaveButton.title = enablingSchedule && !sppBuyerSessionValid()
-          ? "Восстановите Buyer-сессию в Настройки → Источники и сессии"
-          : "";
-      }
-      if (sppScheduleMetaNode) {
-        const next = formatTimestampDisplay(schedule.next_run_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
-        const last = formatTimestampDisplay(schedule.last_automatic_run_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
-        sppScheduleMetaNode.innerHTML = [
-          sppTestFact("Следующий запуск", next),
-          sppTestFact("Последний автоматический запуск", last),
-          sppTestFact("Последний статус", schedule.last_automatic_status || "—")
-        ].join("");
-      }
-      if (sppScheduleNoteNode) sppScheduleNoteNode.textContent = state.prices.sppTest.scheduleNote || "";
-      if (sppScheduleErrorNode) sppScheduleErrorNode.textContent = state.prices.sppTest.error || "";
-    }
-
     async function loadSppHistory(options) {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_history_path || state.prices.sppTest.historyLoading) {
-        return;
-      }
-      const reset = !!(options && options.reset);
-      if (reset) {
-        state.prices.sppTest.historyItems = [];
-        state.prices.sppTest.historyNextCursor = "";
-        state.prices.sppTest.historyHasMore = false;
-        state.prices.sppTest.historyDetails = {};
-      }
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_history_path || state.prices.sppTest.historyLoading) return;
+      const reset = !options || options.reset !== false;
       state.prices.sppTest.historyLoading = true;
-      renderSppHistory();
+      if (reset) state.prices.sppTest.historyNextCursor = "";
       try {
         const url = new URL(WEB_VITRINA_CONFIG.prices_spp_test_history_path, window.location.origin);
-        url.searchParams.set("limit", "20");
-        if (!reset && state.prices.sppTest.historyNextCursor) {
-          url.searchParams.set("cursor", state.prices.sppTest.historyNextCursor);
-        }
+        url.searchParams.set("limit", "10");
+        if (!reset && state.prices.sppTest.historyNextCursor) url.searchParams.set("cursor", state.prices.sppTest.historyNextCursor);
         const response = await fetch(url.toString(), {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP history route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP history route returned " + response.status);
-        }
-        const incoming = Array.isArray(payload.items) ? payload.items : [];
-        const known = new Set(state.prices.sppTest.historyItems.map(function(item) { return String(item.job_id || ""); }));
-        incoming.forEach(function(item) {
-          if (!known.has(String(item.job_id || ""))) state.prices.sppTest.historyItems.push(item);
-        });
+        const payload = await readJsonResponse(response, "non-json response from SPP history");
+        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "история вернула " + response.status);
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        state.prices.sppTest.historyItems = reset ? items : state.prices.sppTest.historyItems.concat(items);
         state.prices.sppTest.historyNextCursor = String(payload.next_cursor || "");
         state.prices.sppTest.historyHasMore = !!payload.has_more;
         state.prices.sppTest.historyLoaded = true;
-        if (sppHistoryErrorNode) sppHistoryErrorNode.textContent = "";
       } catch (error) {
-        if (sppHistoryErrorNode) sppHistoryErrorNode.textContent = String(error && error.message ? error.message : error);
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
         state.prices.sppTest.historyLoading = false;
         renderSppHistory();
       }
     }
 
-    async function loadSppHistoryDetail(jobId) {
-      const normalized = String(jobId || "");
-      if (!normalized || state.prices.sppTest.historyDetails[normalized]) {
-        return;
-      }
-      state.prices.sppTest.historyDetails[normalized] = {loading: true};
-      renderSppHistory();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_history_path + "/" + encodeURIComponent(normalized), {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP history detail route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP history detail returned " + response.status);
-        }
-        state.prices.sppTest.historyDetails[normalized] = {job: payload.job || {}};
-      } catch (error) {
-        state.prices.sppTest.historyDetails[normalized] = {error: String(error && error.message ? error.message : error)};
-      } finally {
-        renderSppHistory();
-      }
-    }
-
     function renderSppHistory() {
       if (!sppHistoryListNode) return;
-      const rows = state.prices.sppTest.historyItems || [];
-      if (!rows.length) {
-        sppHistoryListNode.innerHTML = '<p class="research-result-note" style="padding:12px">' + (state.prices.sppTest.historyLoading ? "История загружается…" : "Проверок пока нет.") + "</p>";
+      const items = state.prices.sppTest.historyItems || [];
+      if (!items.length) {
+        sppHistoryListNode.innerHTML = '<p class="research-result-note" style="padding:12px">' + (state.prices.sppTest.historyLoading ? "Загрузка…" : "История пока пуста.") + "</p>";
       } else {
-        sppHistoryListNode.innerHTML = rows.map(function(row) {
-          const jobId = String(row.job_id || "");
-          const detail = state.prices.sppTest.historyDetails[jobId] || null;
-          const source = row.trigger_source === "manual" ? "ручной" : (row.trigger_source === "schedule" ? "автоматический" : "источник неизвестен");
-          const product = row.title || row.ourSku || row.vendorCode || ("nmID " + valueOrDash(row.nmID));
-          const when = formatTimestampDisplay(row.created_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
-          const duration = formatDurationSeconds(row.duration_seconds || 0);
-          let detailHtml = '<p class="research-result-note">Раскройте строку для загрузки деталей.</p>';
-          if (detail && detail.loading) detailHtml = '<p class="research-result-note">Загрузка деталей…</p>';
-          if (detail && detail.error) detailHtml = '<p class="research-error">' + escapeHtml(detail.error) + "</p>";
-          if (detail && detail.job) {
-            const job = detail.job;
-            const baseline = job.baseline || {};
-            const input = job.input || {};
-            const restore = job.restore || {};
-            const proof = restore.proof || {};
-            detailHtml = [
-              '<div class="spp-test-field-grid">',
-              sppTestFact("Диапазон", pricesMoney(input.range_min_discounted, "RUB") + " … " + pricesMoney(input.range_max_discounted, "RUB")),
-              sppTestFact("Точность / измерения", valueOrDash(input.precision_rub) + " / " + valueOrDash(input.max_measurements)),
-              sppTestFact("Baseline", pricesMoney(baseline.price, "RUB") + " · " + pricesDiscount(baseline.discount) + " · " + pricesMoney(baseline.discountedPrice, "RUB")),
-              sppTestFact("Авторизованный покупатель", pricesMoney(baseline.authenticatedBuyerPrice, "RUB")),
-              sppTestFact("Анонимная цена", pricesMoney(baseline.anonymousBuyerPrice, "RUB")),
-              sppTestFact("Доп. скидка аккаунта", pricesMoney(baseline.additionalAccountDiscountRub, "RUB") + " · " + formatRatioPercent(baseline.additionalAccountDiscountPct)),
-              sppTestFact("SPP авториз. / аноним.", formatRatioPercent(baseline.authenticatedSppProxy) + " / " + formatRatioPercent(baseline.anonymousSppProxy)),
-              sppTestFact("Payment context", baseline.paymentContext || "unknown/mixed"),
-              sppTestFact("Покупательская сессия", (baseline.buyerSession || {}).status_label || (baseline.buyerSession || {}).status || "—"),
-              sppTestFact("Измерений / порогов", String((job.measurements || []).length) + " / " + String((job.thresholds || []).length)),
-              sppTestFact("Restore proof", restore.restored ? "подтверждён" : "не подтверждён"),
-              sppTestFact("Exact tuple", [proof.price_matches, proof.discount_matches, proof.discountedPrice_matches].every(Boolean) ? "совпадает" : "не подтверждён"),
-              sppTestFact("Quarantine", proof.quarantine_absent === true ? "нет" : "не подтверждено"),
-              sppTestFact("Lifecycle", (job.lifecycle_diagnostics || {}).classification || "—"),
-              "</div>",
-              '<pre class="spp-test-history-json">' + escapeHtml(JSON.stringify(job, null, 2)) + "</pre>"
-            ].join("");
-          }
-          return [
-            '<details class="spp-test-history-row" data-spp-history-job="' + escapeHtml(jobId) + '"' + (detail ? " open" : "") + ">",
-            "<summary>",
-            "<span>" + escapeHtml(when) + "</span>",
-            "<span>" + escapeHtml(product + " · " + valueOrDash(row.nmID)) + "</span>",
-            "<span>" + escapeHtml(source) + "</span>",
-            '<span class="prices-badge ' + sppStatusTone(row.status) + '">' + escapeHtml(sppStatusLabel(row.status)) + "</span>",
-            "<span>" + escapeHtml(duration) + "</span>",
-            "</summary>",
-            '<div class="spp-test-history-detail">' + detailHtml + "</div>",
-            "</details>"
-          ].join("");
+        sppHistoryListNode.innerHTML = items.map(function(item) {
+          const results = (item.results || []).map(function(row) {
+            const target = pricesMoney(row.target_price, "RUB");
+            const buyer = row.buyer_price === null || row.buyer_price === undefined ? "—" : pricesMoney(row.buyer_price, "RUB");
+            const spp = row.spp === null || row.spp === undefined ? "—" : formatNumber(Number(row.spp) * 100, 2, true) + "%";
+            return target + " → " + buyer + " · СПП " + spp + " · " + sppPointStatusLabel(row.status);
+          }).join("; ");
+          return '<div class="spp-test-history-row"><span>'
+            + escapeHtml(formatTimestampDisplay(item.finished_at || item.created_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
+            + '</span><span>nmID ' + escapeHtml(valueOrDash(item.nmID)) + '</span><span class="prices-badge '
+            + sppStatusTone(item.status) + '">' + escapeHtml(sppStatusLabel(item.status)) + '</span><span>'
+            + escapeHtml(results || "без результатов") + "</span></div>";
         }).join("");
       }
       if (sppHistoryMoreButton) {
@@ -21349,116 +20767,46 @@
         sppHistoryMoreButton.disabled = state.prices.sppTest.historyLoading;
         sppHistoryMoreButton.textContent = state.prices.sppTest.historyLoading ? "Загрузка…" : "Показать ещё";
       }
-    }
-
-    function collectSppTestPayload() {
-      const payload = {
-        nmID: Number(state.prices.sppTest.selectedNmId || 0),
-        mode: "safe_slow",
-        confirm_live_price_change: !!(sppTestConfirmLiveNode && sppTestConfirmLiveNode.checked),
-        restore_baseline: !!(sppTestRestoreBaselineNode && sppTestRestoreBaselineNode.checked)
-      };
-      document.querySelectorAll("[data-spp-test-input]").forEach(function(input) {
-        payload[input.getAttribute("data-spp-test-input")] = String(input.value || "").trim();
-      });
-      return payload;
-    }
-
-    function sppTestInputValue(name) {
-      const input = document.querySelector('[data-spp-test-input="' + name + '"]');
-      return input ? String(input.value || "").trim() : "";
-    }
-
-    function sppTestNumericInput(name) {
-      const raw = sppTestInputValue(name);
-      if (!raw) {
-        return NaN;
-      }
-      return Number(raw.replace(",", "."));
-    }
-
-    function sppTestInputsAreValid() {
-      const rangeMin = sppTestNumericInput("range_min_discounted");
-      const rangeMax = sppTestNumericInput("range_max_discounted");
-      const precision = sppTestNumericInput("precision_rub");
-      const maxMeasurements = sppTestNumericInput("max_measurements");
-      return Number.isFinite(rangeMin)
-        && Number.isFinite(rangeMax)
-        && Number.isFinite(precision)
-        && Number.isInteger(maxMeasurements)
-        && rangeMin > 0
-        && rangeMax > 0
-        && rangeMin < rangeMax
-        && precision > 0
-        && maxMeasurements >= 3
-        && maxMeasurements <= 30;
-    }
-
-    function sppTestPlanMatchesInputs(plan) {
-      if (!plan) {
-        return false;
-      }
-      const selectedNmId = Number(state.prices.sppTest.selectedNmId || 0);
-      const sameNmId = Number(plan.nmID || 0) === selectedNmId;
-      const sameMin = Number(plan.range_min_discounted) === sppTestNumericInput("range_min_discounted");
-      const sameMax = Number(plan.range_max_discounted) === sppTestNumericInput("range_max_discounted");
-      const samePrecision = Number(plan.precision_rub) === sppTestNumericInput("precision_rub");
-      const sameMaxMeasurements = Number(plan.max_measurements) === sppTestNumericInput("max_measurements");
-      return sameNmId && sameMin && sameMax && samePrecision && sameMaxMeasurements;
-    }
-
-    async function buildSppTestPlan() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_plan_path || state.prices.sppTest.planLoading) {
-        return;
-      }
-      state.prices.sppTest.planLoading = true;
-      state.prices.sppTest.error = "";
-      renderSppTest();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_plan_path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(collectSppTestPayload())
-        });
-        const payload = await readJsonResponse(response, "non-json response from SPP plan route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP plan route returned " + response.status);
-        }
-        state.prices.sppTest.plan = payload.plan || null;
-        state.prices.sppTest.activeJob = payload.active_job || null;
-        if (payload.buyer_session && !state.prices.sppTest.buyerSessionLoaded) {
-          state.prices.sppTest.buyerSession = payload.buyer_session;
-          state.prices.sppTest.buyerSessionLoaded = true;
-        }
-      } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.planLoading = false;
-        renderSppTest();
-      }
+      if (sppHistoryErrorNode) sppHistoryErrorNode.textContent = "";
     }
 
     async function startSppTest() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_start_path || state.prices.sppTest.startLoading || !sppTestCanStart()) {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_start_path || state.prices.sppTest.startLoading) return;
+      const parsed = collectSppTestPrices();
+      if (!state.prices.sppTest.selectedNmId || !parsed.valid) {
+        state.prices.sppTest.error = !state.prices.sppTest.selectedNmId ? "Выберите товар." : parsed.reason;
+        renderSppTest();
         return;
       }
       state.prices.sppTest.startLoading = true;
       state.prices.sppTest.error = "";
+      state.prices.sppTest.buyerSessionNote = "Свежая проверка бота перед стартом…";
       renderSppTest();
+      const session = await loadWbBuyerSession();
+      if (!(session && session.valid === true && session.capability_valid === true)) {
+        state.prices.sppTest.buyerSessionNote = "Бот не готов; сервер подтверждает zero-write отказ…";
+        renderSppTest();
+      }
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_start_path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(collectSppTestPayload())
+          method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            nmID: Number(state.prices.sppTest.selectedNmId),
+            price_count: parsed.prices.length,
+            prices: parsed.prices,
+            confirm_live_price_change: true,
+            restore_baseline: true
+          })
         });
-        const payload = await readJsonResponse(response, "non-json response from SPP start route");
+        const payload = await readJsonResponse(response, "non-json response from SPP start");
         if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP start route returned " + response.status);
+          state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
+          throw new Error(payload && payload.error ? payload.error : "старт проверки вернул " + response.status);
         }
         state.prices.sppTest.job = payload.job || null;
-        pollSppTestIfActive(true);
+        state.prices.sppTest.activeJob = payload.job || null;
+        state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
+        pollSppTestIfActive();
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
@@ -21468,27 +20816,22 @@
     }
 
     async function restoreSppTestBaseline() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_restore_path || state.prices.sppTest.restoring) {
-        return;
-      }
-      const job = state.prices.sppTest.activeJob || state.prices.sppTest.job || {};
+      const job = state.prices.sppTest.job || {};
+      if (!job.job_id || state.prices.sppTest.restoring || !WEB_VITRINA_CONFIG.prices_spp_test_restore_path) return;
       state.prices.sppTest.restoring = true;
       state.prices.sppTest.error = "";
       renderSppTest();
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_restore_path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({job_id: job.job_id || "", confirm_restore: true})
+          method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: job.job_id, confirm_restore: true})
         });
-        const payload = await readJsonResponse(response, "non-json response from SPP restore route");
-        if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "SPP restore route returned " + response.status);
-        }
-        state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
+        const payload = await readJsonResponse(response, "non-json response from SPP restore");
+        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "restore вернул " + response.status);
+        state.prices.sppTest.job = payload.job || job;
         state.prices.sppTest.activeJob = payload.active_job || null;
-        await loadSppTestStatus({silent: true});
+        state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
+        loadSppHistory({reset: true});
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
@@ -21497,346 +20840,105 @@
       }
     }
 
-    function pollSppTestIfActive(force) {
-      const job = state.prices.sppTest.job || {};
-      const status = String(job.status || "");
-      const active = ["planning", "measuring", "cooldown", "restoring", "running"].indexOf(status) !== -1;
-      if (!active && !force) {
-        return;
-      }
-      const pollId = ++state.prices.sppTest.pollSequence;
-      window.setTimeout(async function() {
-        if (pollId !== state.prices.sppTest.pollSequence) {
-          return;
-        }
-        await loadSppTestStatus({silent: true});
-      }, force ? 1200 : 6000);
-    }
-
-    function sppTestStartEligibility() {
-      const baseline = state.prices.sppTest.baseline || {};
-      const activeJob = state.prices.sppTest.activeJob || {};
-      const job = state.prices.sppTest.job || {};
-      const activeStatus = String(activeJob.status || "");
-      const localStatus = String(job.status || "");
-      const blockingStatuses = ["planning", "measuring", "cooldown", "restoring", "running", "manual_restore_required"];
-      const blockingStatus = blockingStatuses.indexOf(activeStatus) !== -1 || blockingStatuses.indexOf(localStatus) !== -1;
-      if (!state.prices.sppTest.selectedNmId) {
-        return {canStart: false, reason: "выберите SKU/nmID"};
-      }
-      if (!sppBuyerSessionValid()) {
-        return {canStart: false, reason: "Восстановите Buyer-сессию в Настройки → Источники и сессии"};
-      }
-      if (!sppTestInputsAreValid()) {
-        return {canStart: false, reason: "диапазон невалиден"};
-      }
-      if (!state.prices.sppTest.plan || !sppTestPlanMatchesInputs(state.prices.sppTest.plan)) {
-        return {canStart: false, reason: "сначала построить план"};
-      }
-      if (blockingStatus) {
-        return {canStart: false, reason: "есть active job"};
-      }
-      if (baseline.can_start === false) {
-        return {canStart: false, reason: "baseline недоступен"};
-      }
-      if (!baseline._sppTestEnabled) {
-        return {canStart: false, reason: "включите WB_SPP_TEST_ENABLED"};
-      }
-      if (!baseline._writeEnabled) {
-        return {canStart: false, reason: "включите WB_PRICES_WRITE_ENABLED"};
-      }
-      if (!sppTestConfirmLiveNode || !sppTestConfirmLiveNode.checked) {
-        return {canStart: false, reason: "подтвердите live изменение цены"};
-      }
-      if (!sppTestRestoreBaselineNode || !sppTestRestoreBaselineNode.checked) {
-        return {canStart: false, reason: "подтвердите restore baseline"};
-      }
-      return {canStart: true, reason: ""};
-    }
-
-    function sppTestCanStart() {
-      return sppTestStartEligibility().canStart;
-    }
-
-    function sppBuyerSessionValid() {
-      const session = state.prices.sppTest.buyerSession || {};
-      return session.status === "valid" && session.valid === true && session.capability_valid === true;
-    }
-
-    function renderSppTest() {
-      syncPricesSubtabs();
-      renderSppTestSelector();
-      renderWbBuyerSession();
-      const selectedRow = selectedSppTestRow();
-      if (sppTestProductNode) {
-        sppTestProductNode.innerHTML = [
-          sppTestFact("Название", selectedRow ? (selectedRow.title || selectedRow.displayName || "—") : "—"),
-          sppTestFact("Наш SKU", selectedRow ? (selectedRow.ourSku || "—") : "—"),
-          sppTestFact("nmID", selectedRow ? (selectedRow.nmID || "—") : "—"),
-          sppTestFact("vendorCode", selectedRow ? (selectedRow.vendorCode || "—") : "—")
-        ].join("");
-      }
-      const baseline = state.prices.sppTest.baseline || null;
-      if (sppTestBaselineNode) {
-        if (state.prices.sppTest.baselineLoading) {
-          sppTestBaselineNode.innerHTML = '<span class="spp-test-field">Baseline<strong>Загрузка…</strong></span>';
-        } else if (!baseline) {
-          sppTestBaselineNode.innerHTML = '<span class="spp-test-field">Baseline<strong>—</strong></span>';
-        } else {
-          sppTestBaselineNode.innerHTML = [
-            sppTestFact("Цена", pricesMoney(baseline.price, baseline.currencyIsoCode4217 || "RUB")),
-            sppTestFact("Скидка", pricesDiscount(baseline.discount)),
-            sppTestFact("Со скидкой", pricesMoney(baseline.discountedPrice, baseline.currencyIsoCode4217 || "RUB")),
-            sppTestFact("Цена авторизованного покупателя", pricesMoney(baseline.authenticatedBuyerPrice, "RUB")),
-            sppTestFact("Анонимная цена", pricesMoney(baseline.anonymousBuyerPrice, "RUB")),
-            sppTestFact("Доп. скидка аккаунта", pricesMoney(baseline.additionalAccountDiscountRub, "RUB") + " · " + formatRatioPercent(baseline.additionalAccountDiscountPct)),
-            sppTestFact("SPP-прокси авторизованный", formatRatioPercent(baseline.authenticatedSppProxy)),
-            sppTestFact("SPP-прокси анонимный", formatRatioPercent(baseline.anonymousSppProxy)),
-            sppTestFact("Payment context", baseline.paymentContext || "unknown/mixed"),
-            sppTestFact("Wallet / card / club", [pricesMoney(baseline.walletPrice, "RUB"), pricesMoney(baseline.cardPrice, "RUB"), pricesMoney(baseline.clubPrice, "RUB")].join(" / ")),
-            sppTestFact("Покупательская сессия", (baseline.buyerSession || {}).status_label || (baseline.buyerSession || {}).status || "—"),
-            sppTestFact("Карантин", baseline.quarantine && baseline.quarantine.is_quarantined ? "есть" : "нет"),
-            sppTestFact("Тип цены", baseline.editableSizePriceLabel || "—"),
-            sppTestFact("WB writes", baseline._writeEnabled ? "вкл" : "выкл"),
-            sppTestFact("SPP guard", baseline._sppTestEnabled ? "вкл" : "выкл")
-          ].join("");
-        }
-      }
-      if (sppTestErrorNode) {
-        sppTestErrorNode.textContent = state.prices.sppTest.error || "";
-      }
-      if (sppTestPlanButton) {
-        sppTestPlanButton.disabled = state.prices.sppTest.planLoading || !state.prices.sppTest.selectedNmId || !sppBuyerSessionValid();
-        sppTestPlanButton.textContent = state.prices.sppTest.planLoading ? "План…" : "Построить план";
-        sppTestPlanButton.title = !sppBuyerSessionValid() ? "Восстановите Buyer-сессию в Настройки → Источники и сессии" : "";
-      }
-      if (sppTestStartButton) {
-        const eligibility = sppTestStartEligibility();
-        sppTestStartButton.disabled = state.prices.sppTest.startLoading || !eligibility.canStart;
-        sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Запуск…" : "Запустить";
-        sppTestStartButton.title = eligibility.reason || "";
-        if (sppTestStartReasonNode) {
-          sppTestStartReasonNode.textContent = eligibility.canStart ? "" : eligibility.reason;
-          sppTestStartReasonNode.hidden = eligibility.canStart;
-        }
-      }
-      renderSppRestoreButton();
-      renderSppPlanPreview();
-      renderSppJobTables();
-      renderSppSchedule();
-      renderSppHistory();
-    }
-
-    function renderSppRestoreButton() {
-      if (!sppTestRestoreButton) {
-        return;
-      }
+    function pollSppTestIfActive() {
       const job = state.prices.sppTest.activeJob || state.prices.sppTest.job || {};
-      const status = String(job.status || "");
-      const restore = job.restore || {};
-      const visible = ["planning", "measuring", "cooldown", "restoring", "manual_restore_required"].indexOf(status) !== -1
-        || (status === "failed" && restore.restored !== true);
-      sppTestRestoreButton.hidden = !visible;
-      sppTestRestoreButton.disabled = state.prices.sppTest.restoring || !visible;
-      sppTestRestoreButton.textContent = state.prices.sppTest.restoring ? "Restore…" : "Восстановить baseline";
+      if (["preflight", "measuring", "cooldown", "restoring", "running"].indexOf(String(job.status || "")) === -1) return;
+      const sequence = ++state.prices.sppTest.pollSequence;
+      window.setTimeout(function() {
+        if (sequence === state.prices.sppTest.pollSequence) loadSppTestStatus({silent: true});
+      }, 800);
     }
 
-    function renderSppPlanPreview() {
-      if (!sppTestPlanPreviewNode) {
-        return;
-      }
-      const plan = state.prices.sppTest.plan;
-      const job = state.prices.sppTest.job;
-      if (!plan && !job) {
-        sppTestPlanPreviewNode.innerHTML = "План ещё не построен.";
-        return;
-      }
-      const currentPlan = plan || (job && job.plan) || {};
-      const route = (currentPlan.initial_points || []).map(function(point) {
-        return pricesMoney(point.target_discounted_price, "RUB") + " · " + valueOrDash(point.kind);
-      }).join(" → ");
-      const requestBudget = currentPlan.request_budget || {};
-      const warnings = (currentPlan.warnings || []).join(", ");
-      const jobLine = job ? ('<div class="research-result-note">job ' + escapeHtml(job.job_id || "—") + ' · ' + escapeHtml(sppStatusLabel(job.status)) + ' · ' + escapeHtml(job.result_status || "—") + "</div>") : "";
-      sppTestPlanPreviewNode.innerHTML = [
-        '<div class="spp-test-field-grid">',
-        sppTestFact("Маршрут", route || "—"),
-        sppTestFact("Оценка", formatDurationSeconds(currentPlan.estimated_duration_seconds || 0)),
-        sppTestFact("WB uploads", requestBudget.wb_uploads || "—"),
-        sppTestFact("Public reads", requestBudget.public_reads || "—"),
-        sppTestFact("Restore", "staged baseline proof"),
-        sppTestFact("Runtime lock", sppRuntimeLockLabel(job, state.prices.sppTest.activeJob)),
-        sppTestFact("Риск", warnings || "live test"),
-        "</div>",
-        jobLine,
-        renderSppTimeline(job)
-      ].join("");
-    }
-
-    function renderSppTimeline(job) {
-      if (!job || !Array.isArray(job.timeline) || !job.timeline.length) {
-        return "";
-      }
-      return '<div class="research-result-note">' + job.timeline.slice(-5).map(function(item) {
-        return escapeHtml(sppStatusLabel(item.status) + ": " + (item.note || ""));
-      }).join(" · ") + "</div>";
-    }
-
-    function renderSppJobTables() {
+    function renderSppTest(options) {
+      renderSppTestSelector();
+      if (!(options && options.preservePriceFields)) renderSppTestPriceFields();
+      renderWbBuyerSession();
+      renderSppHistory();
       const job = state.prices.sppTest.job || {};
+      const parsed = collectSppTestPrices();
+      const activeJob = state.prices.sppTest.activeJob || {};
+      const active = !!activeJob.job_id || ["preflight", "measuring", "cooldown", "restoring", "running"].indexOf(String(job.status || "")) !== -1;
+      const canStart = !!state.prices.sppTest.selectedNmId && parsed.valid && sppBuyerSessionValid()
+        && !!state.prices.writeEnabled && !active && !state.prices.sppTest.startLoading;
+      if (sppTestStartButton) {
+        sppTestStartButton.disabled = !canStart;
+        sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Проверяем бота…" : "Старт проверки";
+      }
+      if (sppTestStartReasonNode) {
+        sppTestStartReasonNode.textContent = active ? "Дождитесь восстановления исходной цены."
+          : !state.prices.writeEnabled ? "Изменение цен выключено на сервере."
+          : !sppBuyerSessionValid() ? "Бот покупателя должен быть готов."
+          : !state.prices.sppTest.selectedNmId ? "Выберите товар."
+          : !parsed.valid ? parsed.reason : "Будут проверены только эти цены, строго по порядку.";
+      }
       if (sppTestStateNode) {
-        sppTestStateNode.textContent = sppStatusLabel(job.status || (state.prices.sppTest.activeJob && state.prices.sppTest.activeJob.status) || "no_job");
-        sppTestStateNode.className = "prices-badge " + sppStatusTone(job.status || "");
+        sppTestStateNode.textContent = job.job_id ? sppStatusLabel(job.status) : "нет запуска";
+        sppTestStateNode.className = "prices-badge " + sppStatusTone(job.status);
       }
-      if (sppTestStatusTitleNode) {
-        sppTestStatusTitleNode.textContent = job.result_status ? ("Результат: " + sppResultLabel(job.result_status)) : "План и измерения";
-      }
+      const rows = Array.isArray(job.measurements) ? job.measurements : [];
       if (sppTestMeasurementsNode) {
-        const rows = Array.isArray(job.measurements) ? job.measurements : [];
-        if (!rows.length) {
-          sppTestMeasurementsNode.innerHTML = '<tr><td colspan="13">Измерений пока нет.</td></tr>';
-        } else {
-          sppTestMeasurementsNode.innerHTML = rows.map(function(row) {
-            return [
-              "<tr>",
-              "<td>" + escapeHtml(pricesMoney(row.target_discounted_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.actual_wb_discounted_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.authenticated_buyer_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.anonymous_buyer_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.additional_account_discount_rub, "RUB") + " · " + formatRatioPercent(row.additional_account_discount_pct)) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.authenticated_spp_proxy)) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.anonymous_spp_proxy)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.payment_context)) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.delta_vs_previous_high_confidence)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.confidence)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.uploadID)) + "</td>",
-              '<td><span class="prices-badge ' + sppPointTone(row.status) + '">' + escapeHtml(sppPointStatusLabel(row.status)) + "</span></td>",
-              '<td title="' + escapeHtml(row.note || "") + '">' + escapeHtml(valueOrDash(row.note)) + "</td>",
-              "</tr>"
-            ].join("");
-          }).join("");
-        }
+        sppTestMeasurementsNode.innerHTML = rows.length ? rows.map(function(row) {
+          return "<tr><td>" + escapeHtml(pricesMoney(row.target_price, "RUB")) + "</td><td>"
+            + escapeHtml(row.seller_discounted_price === null || row.seller_discounted_price === undefined ? "—" : pricesMoney(row.seller_discounted_price, "RUB"))
+            + "</td><td>" + escapeHtml(row.buyer_price === null || row.buyer_price === undefined ? "—" : pricesMoney(row.buyer_price, "RUB"))
+            + "</td><td>" + escapeHtml(row.spp === null || row.spp === undefined ? "—" : formatNumber(Number(row.spp) * 100, 2, true) + "%")
+            + '</td><td><span class="prices-badge ' + sppPointTone(row.status) + '">' + escapeHtml(sppPointStatusLabel(row.status)) + "</span></td></tr>";
+        }).join("") : '<tr><td colspan="5">Результатов пока нет.</td></tr>';
       }
-      if (sppTestThresholdsNode) {
-        const thresholds = Array.isArray(job.thresholds) ? job.thresholds : [];
-        if (!thresholds.length) {
-          sppTestThresholdsNode.innerHTML = '<tr><td colspan="7">Порогов пока нет.</td></tr>';
-        } else {
-          sppTestThresholdsNode.innerHTML = thresholds.map(function(row) {
-            return [
-              "<tr>",
-              "<td>" + escapeHtml(pricesMoney(row.lower_actual_discounted_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.upper_actual_discounted_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.spp_left)) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.spp_right)) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.delta)) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.bracket_width, "RUB")) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.confidence)) + "</td>",
-              "</tr>"
-            ].join("");
-          }).join("");
-        }
+      if (sppTestRestoreButton) {
+        sppTestRestoreButton.hidden = !job.manual_restore_required;
+        sppTestRestoreButton.disabled = state.prices.sppTest.restoring;
       }
+      if (sppTestLogNode) {
+        const events = (state.prices.sppTest.logEvents || []).slice(-10);
+        sppTestLogNode.innerHTML = events.length ? events.map(function(event) {
+          return '<div class="spp-test-log-row"><span>'
+            + escapeHtml(formatTimestampDisplay(event.time, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
+            + "</span><span>" + escapeHtml(event.stage || "—") + "</span><span>" + escapeHtml(event.message || "—") + "</span></div>";
+        }).join("") : '<p class="research-result-note" style="padding:12px">Лог пока пуст.</p>';
+      }
+      if (sppTestErrorNode) sppTestErrorNode.textContent = state.prices.sppTest.error || "";
     }
 
     function sppTestFact(label, value) {
-      return '<span class="spp-test-field">' + escapeHtml(label) + '<strong title="' + escapeHtml(valueOrDash(value)) + '">' + escapeHtml(valueOrDash(value)) + "</strong></span>";
-    }
-
-    function formatRatioPercent(value) {
-      if (value === null || value === undefined || value === "") {
-        return "—";
-      }
-      const numberValue = Number(value);
-      if (!Number.isFinite(numberValue)) {
-        return "—";
-      }
-      return formatNumber(numberValue * 100, Math.abs(numberValue) < 0.1 ? 2 : 1, true) + "%";
-    }
-
-    function formatDurationSeconds(value) {
-      const seconds = Number(value || 0);
-      if (!Number.isFinite(seconds) || seconds <= 0) {
-        return "—";
-      }
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 90) {
-        return String(minutes) + " мин";
-      }
-      return String(Math.round(minutes / 60 * 10) / 10) + " ч";
+      return '<span class="spp-test-field">' + escapeHtml(label) + "<strong>" + escapeHtml(valueOrDash(value)) + "</strong></span>";
     }
 
     function sppStatusLabel(value) {
       const normalized = String(value || "");
-      if (normalized === "planning") return "планирование";
-      if (normalized === "measuring") return "измерение";
-      if (normalized === "cooldown") return "пауза";
-      if (normalized === "restoring") return "restore";
+      if (normalized === "preflight") return "проверяем";
+      if (normalized === "measuring" || normalized === "running") return "выполняется";
+      if (normalized === "cooldown") return "ожидание";
+      if (normalized === "restoring") return "восстанавливаем";
       if (normalized === "complete") return "готово";
-      if (normalized === "interrupted_restored") return "прерван, baseline восстановлен";
-      if (normalized === "skipped") return "пропущено";
-      if (normalized === "manual_restore_required") return "нужен restore";
-      if (normalized === "failed") return "ошибка";
-      if (normalized === "no_job") return "нет active job";
-      return normalized || "—";
-    }
-
-    function sppRuntimeLockLabel(job, activeJob) {
-      const current = activeJob || {};
-      const lifecycle = (job && job.lifecycle_diagnostics) || {};
-      const classification = String(lifecycle.classification || "");
-      if (current.job_id) {
-        if (classification === "stale_orphan_unrestored") return "stale; нужен restore";
-        return "active";
-      }
-      if (classification === "stale_orphan_restored_confirmed" || classification === "terminal_restored_reconciled") {
-        return "stale reconciled; lock cleared";
-      }
-      if (job && job.restore && job.restore.restored === true) {
-        return "cleared after seller baseline proof";
-      }
-      return "нет active lock";
-    }
-
-    function sppResultLabel(value) {
-      const normalized = String(value || "");
-      if (normalized === "threshold_detected") return "порог найден";
-      if (normalized === "threshold_not_detected") return "порог не найден";
-      if (normalized === "inconclusive") return "неубедительно";
-      if (normalized === "manual_restore_required") return "нужен restore";
+      if (normalized === "interrupted_restored") return "остановлено, цена восстановлена";
+      if (normalized === "manual_restore_required") return "нужно восстановление";
+      if (normalized === "failed") return "ошибка, цена восстановлена";
       return normalized || "—";
     }
 
     function sppStatusTone(value) {
       const normalized = String(value || "");
-      if (normalized === "manual_restore_required" || normalized === "failed") return "error";
-      if (normalized === "cooldown" || normalized === "restoring" || normalized === "skipped") return "warning";
+      if (normalized === "manual_restore_required") return "error";
+      if (normalized === "failed" || normalized === "cooldown" || normalized === "restoring") return "warning";
       if (normalized === "complete" || normalized === "interrupted_restored") return "success";
       return "";
     }
 
     function sppPointStatusLabel(value) {
       const normalized = String(value || "");
-      if (normalized === "ok") return "ok";
-      if (normalized === "stale_public_price") return "stale";
-      if (normalized === "public_429") return "429";
-      if (normalized === "buyer_session_invalid") return "нет buyer session";
-      if (normalized === "buyer_session_lost") return "buyer session потеряна";
-      if (normalized === "authenticated_unstable") return "auth цена unstable";
-      if (normalized === "buyer_destination_mismatch") return "region mismatch";
-      if (normalized === "rate_limited_stop") return "429 stop";
+      if (normalized === "ok") return "готово";
+      if (normalized === "buyer_session_invalid" || normalized === "buyer_session_lost") return "бот не готов";
+      if (normalized === "authenticated_unstable") return "цена покупателя не подтверждена";
+      if (normalized === "buyer_destination_mismatch") return "регион покупателя не совпал";
       if (normalized === "quarantine_detected") return "карантин";
-      if (normalized === "readback_mismatch") return "readback";
-      if (normalized === "upload_not_success") return "upload";
-      return normalized || "—";
+      if (normalized === "readback_mismatch") return "цена продавца не подтверждена";
+      if (normalized === "upload_not_success") return "WB отклонил цену";
+      return normalized || "ошибка";
     }
 
     function sppPointTone(value) {
-      const normalized = String(value || "");
-      if (normalized === "ok") return "success";
-      if (normalized === "stale_public_price" || normalized === "public_429" || normalized === "rate_limited_stop" || normalized === "quarantine_detected" || normalized === "buyer_session_lost" || normalized === "buyer_destination_mismatch") return "warning";
-      if (normalized && normalized !== "started") return "error";
-      return "";
+      return String(value || "") === "ok" ? "success" : "error";
     }
 
     function pricesColumnById(columnId) {
@@ -22169,27 +21271,26 @@
         return;
       }
       if (target === sppTestNmSelect) {
-        const nmId = String(target.value || "");
-        state.prices.sppTest.selectedNmId = nmId;
-        state.prices.sppTest.plan = null;
+        state.prices.sppTest.selectedNmId = String(target.value || "");
         state.prices.sppTest.error = "";
         renderSppTest();
-        if (nmId) {
-          loadSppBaseline(nmId);
-        }
         return;
       }
-      if (target.getAttribute("data-spp-test-input")) {
-        state.prices.sppTest.plan = null;
+      if (target === sppTestPriceCountNode) {
+        const count = Math.max(1, Math.min(6, Number(target.value || 1)));
+        state.prices.sppTest.priceCount = count;
+        state.prices.sppTest.prices = Array.from({length: count}, function(_, index) {
+          return String(state.prices.sppTest.prices[index] || "");
+        });
         renderSppTest();
         return;
       }
-      if (target === sppTestConfirmLiveNode || target === sppTestRestoreBaselineNode) {
-        renderSppTest();
-        return;
-      }
-      if (target === sppScheduleEnabledNode) {
-        renderSppSchedule();
+      const priceIndexAttribute = target.getAttribute("data-spp-test-price-index");
+      const priceIndex = Number(priceIndexAttribute);
+      if (priceIndexAttribute !== null && Number.isInteger(priceIndex) && priceIndex >= 0) {
+        state.prices.sppTest.prices[priceIndex] = String(target.value || "");
+        state.prices.sppTest.error = "";
+        renderSppTest({preservePriceFields: true});
         return;
       }
       if (target === pricesSearchNode) {

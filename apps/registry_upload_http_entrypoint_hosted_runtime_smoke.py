@@ -3639,6 +3639,10 @@ def main() -> None:
                     "restart": True,
                 },
             ],
+            "retired_systemd_units": [
+                "wb-core-spp-tester-schedule-tick.timer",
+                "wb-core-spp-tester-schedule-tick.service",
+            ],
             "runtime_env": {
                 "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
                 "REGISTRY_UPLOAD_HTTP_PORT": str(port),
@@ -3734,6 +3738,19 @@ def main() -> None:
                 raise AssertionError("print-plan must expose seller recovery SSH destination contract")
             if len(print_plan["deploy_plan"]["managed_systemd_units"]) != 2:
                 raise AssertionError("print-plan must expose managed systemd units when configured")
+            if print_plan["deploy_plan"]["retired_systemd_units"] != [
+                "wb-core-spp-tester-schedule-tick.timer",
+                "wb-core-spp-tester-schedule-tick.service",
+            ]:
+                raise AssertionError("print-plan must expose retired SPP schedule units in order")
+            deploy_sequence = print_plan["deploy_plan"]["deploy_sequence"]
+            if not (
+                deploy_sequence.index(
+                    "disable, stop and remove explicitly retired systemd units before runtime sync"
+                )
+                < deploy_sequence.index("sync current checked-out worktree to target_dir via rsync")
+            ):
+                raise AssertionError("retired SPP schedule units must be stopped before runtime sync")
             nginx_routes = print_plan["deploy_plan"].get("nginx_public_routes") or {}
             if nginx_routes.get("route_count", 0) < 20:
                 raise AssertionError("print-plan must expose nginx public route allowlist")
@@ -3848,6 +3865,20 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose wb-web-bot venv browser install")
             if "install" not in " ".join(deploy_dry_run["commands"]["systemd_install"]):
                 raise AssertionError("deploy --dry-run must expose systemd install command")
+            retirement_command = " ".join(deploy_dry_run["commands"]["systemd_retire"])
+            if (
+                "systemctl disable --now wb-core-spp-tester-schedule-tick.timer"
+                not in retirement_command
+                or "systemctl disable --now wb-core-spp-tester-schedule-tick.service"
+                not in retirement_command
+                or "rm -f /etc/systemd/system/wb-core-spp-tester-schedule-tick.timer"
+                not in retirement_command
+                or "rm -f /etc/systemd/system/wb-core-spp-tester-schedule-tick.service"
+                not in retirement_command
+            ):
+                raise AssertionError(
+                    "deploy --dry-run must disable, stop and remove both retired SPP schedule units"
+                )
             if "daemon-reload" not in " ".join(deploy_dry_run["commands"]["systemd_daemon_reload"]):
                 raise AssertionError("deploy --dry-run must expose daemon-reload command")
             if "enable" not in " ".join(deploy_dry_run["commands"]["systemd_enable"]):
@@ -3889,26 +3920,18 @@ def main() -> None:
                 )
             if "OnCalendar=*-*-* *:17:00 Europe/Moscow" not in functional_timer:
                 raise AssertionError("functional scheduler must run hourly in the explicit business timezone")
-            spp_service = (
-                ROOT
-                / "artifacts"
-                / "registry_upload_http_entrypoint"
-                / "systemd"
-                / "wb-core-spp-tester-schedule-tick.service"
-            ).read_text(encoding="utf-8")
-            spp_timer = (
-                ROOT
-                / "artifacts"
-                / "registry_upload_http_entrypoint"
-                / "systemd"
-                / "wb-core-spp-tester-schedule-tick.timer"
-            ).read_text(encoding="utf-8")
-            if "apps/wb_spp_tester_schedule_tick.py" not in spp_service or "--runtime-dir /opt/wb-core-runtime/state" not in spp_service:
-                raise AssertionError("SPP schedule service must use the repo-owned due runner and production state dir")
-            if "TimeoutStartSec=3h" not in spp_service:
-                raise AssertionError("SPP schedule service must outlive a complete safe-slow probe and guarded restore")
-            if "OnUnitActiveSec=1min" not in spp_timer or "Persistent=true" in spp_timer:
-                raise AssertionError("SPP schedule timer must be a non-persistent one-minute due ticker")
+            for removed_spp_unit in (
+                "wb-core-spp-tester-schedule-tick.service",
+                "wb-core-spp-tester-schedule-tick.timer",
+            ):
+                if (
+                    ROOT
+                    / "artifacts"
+                    / "registry_upload_http_entrypoint"
+                    / "systemd"
+                    / removed_spp_unit
+                ).exists():
+                    raise AssertionError(f"removed SPP scheduler artifact still exists: {removed_spp_unit}")
             if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
                 raise AssertionError("deploy --dry-run must expose nginx public route update command")
 

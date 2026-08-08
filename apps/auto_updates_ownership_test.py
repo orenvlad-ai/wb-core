@@ -63,7 +63,6 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
             },
             {
                 "feedback_complaints": "Отзывы → Авто-жалобы",
-                "spp_test": "Цены → Тест СПП",
                 "autoanswers": "Отзывы → Отзывы",
             },
         )
@@ -83,7 +82,7 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
                 encoding="utf-8",
             )
             policy = load_or_initialize_owner_policy(runtime_dir)
-            for key in ("feedback_complaints", "spp_test", "autoanswers"):
+            for key in ("feedback_complaints", "autoanswers"):
                 with self.subTest(process_key=key), self.assertRaisesRegex(
                     RuntimeError, "monitoring-only"
                 ):
@@ -122,7 +121,7 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
         self.assertIn('"auto_updates_path":', web_html)
         self.assertIn(DEFAULT_AUTO_UPDATES_MONITORING_PATH, web_html)
         self.assertIn("data-feedbacks-auto-schedules-body", web_html)
-        self.assertIn("data-spp-schedule-enabled", web_html)
+        self.assertNotIn("data-spp-schedule-enabled", web_html)
         self.assertIn("data-autoanswers-mode", web_html)
 
     def test_monitoring_cards_render_without_individual_toggle_branch(self) -> None:
@@ -182,7 +181,6 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
             "wb-core-sheet-vitrina-refresh.timer",
             "wb-core-sheet-vitrina-closure-retry.timer",
             "wb-core-feedbacks-auto-complaints-tick.timer",
-            "wb-core-spp-tester-schedule-tick.timer",
             "wb-core-wb-finance-weekly.timer",
             "wb-core-warehouse-functional-sync.timer",
             "wb-core-autoanswers-readonly-sync.timer",
