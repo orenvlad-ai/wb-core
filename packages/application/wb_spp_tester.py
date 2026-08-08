@@ -459,8 +459,17 @@ class WbSppTesterBlock:
             _parse_money(value, f"target_prices[{index}]")
             for index, value in enumerate(job["input"].get("target_prices", []))
         ]
+        start_buyer_session = (
+            dict(job.get("buyer_session") or {})
+            if isinstance(job.get("buyer_session"), Mapping)
+            else {}
+        )
         for index, target in enumerate(route):
-            point = self._measure_point(job, target)
+            point = self._measure_point(
+                job,
+                target,
+                buyer_session_preflight=start_buyer_session if index == 0 else None,
+            )
             job["measurements"].append(point)
             self._save_job(job)
             if point.get("status") != "ok":
@@ -479,7 +488,13 @@ class WbSppTesterBlock:
             job["result_status"] = "success"
         self._save_job(job)
 
-    def _measure_point(self, job: dict[str, Any], target_discounted: Decimal) -> dict[str, Any]:
+    def _measure_point(
+        self,
+        job: dict[str, Any],
+        target_discounted: Decimal,
+        *,
+        buyer_session_preflight: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         nm_id = int(job["nmID"])
         baseline = job["baseline"]
         discount = int(baseline["discount"])
@@ -499,7 +514,11 @@ class WbSppTesterBlock:
             "evidence": {},
         }
         self._append_audit(str(job["job_id"]), "measurement_started", measurement)
-        session = self._safe_buyer_session_preflight()
+        session = (
+            {**dict(buyer_session_preflight), "reused_start_preflight": True}
+            if isinstance(buyer_session_preflight, Mapping)
+            else self._safe_buyer_session_preflight()
+        )
         measurement["evidence"]["buyer_session_preflight"] = session
         if session.get("status") != "valid" or session.get("capability_valid") is not True:
             measurement["status"] = "buyer_session_invalid"
@@ -611,6 +630,45 @@ class WbSppTesterBlock:
 
     def _poll_authenticated_buyer_stable(self, job: Mapping[str, Any]) -> dict[str, Any]:
         nm_id = int(job["nmID"])
+        stable_reader = getattr(
+            self.buyer_source,
+            "fetch_stable_authenticated_buyer_price",
+            None,
+        )
+        if callable(stable_reader):
+            authenticated = dict(stable_reader(nm_id))
+            self._append_audit(
+                str(job["job_id"]),
+                "authenticated_buyer_price_read",
+                authenticated,
+            )
+            status = str(authenticated.get("status") or "")
+            if (
+                status == "ok"
+                and authenticated.get("stable") is True
+                and _number_or_none(authenticated.get("authenticated_buyer_price")) is not None
+            ):
+                return {
+                    "status": "ok",
+                    "stable": True,
+                    "authenticated_buyer_price": _number_or_none(
+                        authenticated.get("authenticated_buyer_price")
+                    ),
+                    "proof": str(authenticated.get("proof") or "2_identical_authenticated_reads"),
+                }
+            lost = status.startswith("session_") or status in {
+                "login_redirect",
+                "security_challenge",
+                "wrong_account",
+            }
+            return {
+                "status": "buyer_session_lost" if lost else "authenticated_unstable",
+                "stable": False,
+                "authenticated_buyer_price": None,
+                "reason": str(
+                    authenticated.get("reason") or "authenticated_price_read_failed"
+                ),
+            }
         reads: list[dict[str, Any]] = []
         self._sleep_with_heartbeat(
             job,
