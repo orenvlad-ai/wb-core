@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -141,6 +142,12 @@ def _assert_progressive_run(page, server: "_LocalSppUiServer") -> None:
     history_text = page.locator("[data-spp-history-list]").inner_text()
     if str(PRIMARY_NM) not in history_text or "810" not in history_text or "800" not in history_text:
         raise AssertionError(f"compact history is incomplete: {history_text}")
+    if "ещё: 4" not in history_text:
+        raise AssertionError(f"legacy history was not compacted to three visible results: {history_text}")
+    if not page.locator("[data-spp-history-more]").is_hidden():
+        raise AssertionError("history pagination button must remain hidden when there is no next page")
+    if not page.locator("[data-spp-test-restore]").is_hidden():
+        raise AssertionError("emergency restore must be hidden after exact restore proof")
     final = server.spp_block.status({})["job"]
     proof = final["restore"]
     if not (
@@ -223,6 +230,35 @@ class _LocalSppUiServer:
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
         runtime_dir = Path(self.tmp.name) / "runtime"
         runtime = _seed_runtime(runtime_dir)
+        legacy_job_dir = runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests" / "jobs"
+        legacy_job_dir.mkdir(parents=True, exist_ok=True)
+        legacy_job_id = "11111111111111111111111111111111"
+        legacy_job = {
+            "job_id": legacy_job_id,
+            "created_at": "2026-08-01T08:00:00Z",
+            "updated_at": "2026-08-01T08:03:00Z",
+            "finished_at": "2026-08-01T08:03:00Z",
+            "status": "complete",
+            "result_status": "success",
+            "nmID": PRIMARY_NM,
+            "baseline": {"title": "legacy compact history fixture"},
+            "measurements": [
+                {
+                    "target_discounted_price": 700 + index,
+                    "actual_wb_discounted_price": 700 + index,
+                    "authenticated_buyer_price": 650 + index,
+                    "spp_proxy": 0.0714,
+                    "status": "ok",
+                }
+                for index in range(1, 8)
+            ],
+            "restore": {"restored": True},
+            "manual_restore_required": False,
+        }
+        (legacy_job_dir / f"{legacy_job_id}.json").write_text(
+            json.dumps(legacy_job, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
         current_prices_source = CurrentPricesSource()
         clock = MutableClock()
         self.spp_block = WbSppTesterBlock(
