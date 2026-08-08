@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -15,6 +15,10 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_buyout_percent import (
+    build_three_closed_week_buyout_reference,
+    three_closed_week_keys,
+)
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.wb_finance_weekly import (
     CALCULATION_REFERENCE_CONTRACT_VERSION,
@@ -852,20 +856,18 @@ class CalculationParametersBlock:
 
     def _three_closed_week_reference(self) -> dict[str, Any]:
         today = date.fromisoformat(current_business_date_iso())
-        last_closed_sunday = today - timedelta(days=today.weekday() + 1)
-        week_keys = [
-            (
-                (last_closed_sunday - timedelta(days=(2 - index) * 7 + 6)).isoformat(),
-                (last_closed_sunday - timedelta(days=(2 - index) * 7)).isoformat(),
-            )
-            for index in range(3)
-        ]
+        week_keys = three_closed_week_keys(today)
+        buyout_percent = build_three_closed_week_buyout_reference(
+            runtime=self.runtime,
+            today=today,
+        )
         with _connect(self.runtime.db_path) as conn:
             if not _table_exists(conn, "wb_finance_weekly_aggregates"):
                 return _unavailable_calculation_reference(
                     week_keys,
                     status="unavailable",
                     status_message="Канонические недельные агрегаты Finance ещё не созданы.",
+                    buyout_percent=buyout_percent,
                 )
             source_rows = conn.execute(
                 """SELECT seller_id,week_start,week_end,classifier_version,metrics_json
@@ -891,6 +893,7 @@ class CalculationParametersBlock:
                 week_keys,
                 status="unavailable",
                 status_message="Канонические недельные агрегаты Finance пока пусты.",
+                buyout_percent=buyout_percent,
             )
 
         rows_by_week: dict[tuple[str, str], list[sqlite3.Row]] = {
@@ -1049,10 +1052,11 @@ class CalculationParametersBlock:
             "gross_buyout_revenue_field": "net_revenue",
             "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
             "expected_seller_ids": expected_sellers,
-            "latest_closed_week_end": last_closed_sunday.isoformat(),
+            "latest_closed_week_end": week_keys[-1][1],
             "missing_weeks": missing_weeks,
             "weeks": weeks,
             "rows": result_rows,
+            "buyout_percent": buyout_percent,
         }
 
 
@@ -1061,6 +1065,7 @@ def _unavailable_calculation_reference(
     *,
     status: str,
     status_message: str,
+    buyout_percent: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "contract_version": CALCULATION_REFERENCE_CONTRACT_VERSION,
@@ -1086,6 +1091,7 @@ def _unavailable_calculation_reference(
             for week_start, week_end in week_keys
         ],
         "rows": [],
+        "buyout_percent": dict(buyout_percent),
     }
 
 

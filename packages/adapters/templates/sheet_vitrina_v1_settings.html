@@ -118,6 +118,8 @@
     .calculation-reference-group th { position: static; background: rgba(167, 139, 250, .1); color: var(--text); text-transform: none; font-size: 13px; }
     .calculation-reference-meta { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
     .calculation-reference-week-status { display: block; margin-top: 3px; color: var(--warning); font-size: 10px; text-transform: none; }
+    .calculation-buyout-reference { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin: 12px 0; padding: 14px; border: 1px solid rgba(52, 211, 153, .32); border-radius: 8px; background: rgba(52, 211, 153, .06); }
+    .calculation-buyout-reference .calculation-total { color: var(--success); white-space: nowrap; }
     .calculation-diff { margin: 12px 0 0; white-space: pre-wrap; color: var(--warning); }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
@@ -468,6 +470,13 @@
         </div>
         <h2 style="margin-top: 22px;">Справочная информация по WB — три закрытые недели</h2>
         <p id="calculationReferenceStatus" class="message">Проверяем полный календарный набор недель...</p>
+        <div id="calculationBuyoutReference" class="calculation-buyout-reference" role="status">
+          <div>
+            <strong id="calculationBuyoutReferenceLabel">Процент выкупа за 3 закрытые недели</strong>
+            <div id="calculationBuyoutReferenceMeta" class="calculation-reference-meta">Читаем доступные SKU-day значения sales_funnel_history...</div>
+          </div>
+          <div id="calculationBuyoutReferenceValue" class="calculation-total">—</div>
+        </div>
         <div class="table-wrap"><table class="calculation-table"><thead id="calculationReferenceHead"></thead><tbody id="calculationReferenceRows"><tr><td>Данные загружаются...</td></tr></tbody></table></div>
         <h2 style="margin-top: 22px;">История версий</h2>
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
@@ -699,6 +708,9 @@
       const calculationReferenceHead = document.getElementById("calculationReferenceHead");
       const calculationReferenceRows = document.getElementById("calculationReferenceRows");
       const calculationReferenceStatus = document.getElementById("calculationReferenceStatus");
+      const calculationBuyoutReferenceLabel = document.getElementById("calculationBuyoutReferenceLabel");
+      const calculationBuyoutReferenceMeta = document.getElementById("calculationBuyoutReferenceMeta");
+      const calculationBuyoutReferenceValue = document.getElementById("calculationBuyoutReferenceValue");
       const calculationHistoryRows = document.getElementById("calculationHistoryRows");
       const reloadCalculationButton = document.getElementById("reloadCalculationParametersButton");
       const previewCalculationButton = document.getElementById("previewCalculationParametersButton");
@@ -2498,6 +2510,13 @@
         const weeks = Array.isArray(reference && reference.weeks) ? reference.weeks : [];
         const referenceStatus = String(reference && reference.status || "unavailable");
         const missingWeeks = Array.isArray(reference && reference.missing_weeks) ? reference.missing_weeks : [];
+        const buyoutReference = reference && reference.buyout_percent && typeof reference.buyout_percent === "object" ? reference.buyout_percent : {};
+        calculationBuyoutReferenceLabel.textContent = String(buyoutReference.label || "Процент выкупа за 3 закрытые недели");
+        calculationBuyoutReferenceValue.textContent = formatCalculationReferencePct(buyoutReference.weighted_average_pct);
+        calculationBuyoutReferenceMeta.textContent = String(buyoutReference.status_message || "Нет данных для расчёта.") +
+          " Период: " + String(buyoutReference.date_from || "—") + " — " + String(buyoutReference.date_to || "—") +
+          " · " + String(buyoutReference.business_timezone || "Asia/Yekaterinburg") +
+          " · " + String(buyoutReference.aggregation_rule || "SUM(buyoutPercent * orderCount) / SUM(orderCount)");
         calculationReferenceStatus.textContent = String(reference && reference.status_message || "Статус справочной выборки неизвестен.") +
           (missingWeeks.length ? " Обязательные периоды без полного набора: " + missingWeeks.map((week) => week.week_start + " — " + week.week_end).join("; ") + "." : "");
         calculationReferenceStatus.className = "message " + (referenceStatus === "ready" ? "success" : referenceStatus === "unavailable" ? "error" : "warning");
