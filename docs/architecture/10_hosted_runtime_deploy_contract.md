@@ -338,6 +338,14 @@ LOOP PR использует тот же единственный deploy command
 
 Production failure после merge ставит global `release:halted` и блокирует выбор следующего release. SSH exit `255` не считается доказанным deploy failure: это `transport-indeterminate`, после которого bounded reconciler читает exact metadata/runtime SHA, canonical EnvironmentFile key-presence без вывода values, systemd state/MainPID и mandatory status/operator probes. Healthy exact SHA продолжает transition; wrong/mixed SHA, invalid auth env, inactive systemd и failed probes сохраняют halted. Разрешены только safe retries `daemon-reload/restart/probes/readback`; rsync, metadata и dependencies не повторяются. Repo-owned `resume-halted` снимает label только по exact PR/head/merge/canonical-target evidence. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets остаются вне Git/logs.
 
+После успешной команды restart deploy runner boundedly повторяет только read-only
+`status_command` до трёх минут. Это покрывает асинхронный systemd restart, когда
+короткий внешний SQLite writer заставил первый процесс завершиться, а
+`Restart=always` запускает тот же exact-SHA runtime повторно. SSH exit `255`
+немедленно передаётся exact-SHA reconciler без локального retry; исчерпание
+bound, неверный SHA, failed probes или любой другой deploy-stage по-прежнему
+fail closed до `deployment_complete=true`.
+
 Read-only commands may inspect rollback-only target metadata (`print-plan`, `deploy --dry-run`, `apply-nginx-routes --dry-run`, bounded probes when explicitly needed), but routine writes must not target selleros.
 
 ## Canonical Target Definition
@@ -569,10 +577,18 @@ Archived MCP compatibility publication gate:
   `PRAGMA query_only=ON`. Apply requires the external reviewed fingerprint and
   atomically evaluates every zero-write publication, rebinds or rekeys it under
   v5, advances the policy epoch once and appends hash-only audit. A possible
-  prior WB write/readback is protected by a full non-target digest and is never
-  modified. Zero provider calls and zero WB POSTs are mandatory; lifecycle
-  resume is forbidden until readback is `reconciled` with exact counts and
-  unchanged invariants;
+  prior WB write/readback and every execution-owned job, attempt, cost,
+  reservation and uncertainty row are protected by byte-stable immutable
+  digests and are never modified. Feedback truth/version/media evidence is a
+  separate GET-only group: while the canonical readonly-sync timer remains
+  enabled/active it may advance between apply and readback, and the runner
+  reports its before/after counts, count deltas and digests as a bounded
+  observed delta. A count regression, any immutable execution drift, a WB POST
+  attempt or provider-call boundary still blocks. Legacy flat v1 reviewed
+  plans/audits are split on read without changing their applied fingerprint.
+  Lifecycle resume is forbidden until readback is `reconciled` with exact
+  scope/counts, zero stale/metadata-stale/incoherent rows and zero WB/provider
+  deltas;
 - human-gated Autoanswers zero-backlog recovery uses only hosted
   `autoanswers-backlog-recovery capture|dry-run|apply|readback`. Every action
   is pinned to exact complete `.wb-core-runtime-sha` and deploy metadata;

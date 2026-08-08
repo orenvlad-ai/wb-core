@@ -221,6 +221,36 @@ class PolicyV5ReconciliationTest(unittest.TestCase):
             with closing(sqlite3.connect(backup_dir / "verified.sqlite3")) as target:
                 source.backup(target)
 
+    def _apply_single(self, feedback_id: str) -> tuple[dict, dict, str]:
+        publication_key = self._approved(
+            feedback_id,
+            "Через неделю защитное стекло крошится",
+        )
+        self._backup()
+        deployed = {
+            "runtime_sha": "d" * 40,
+            "deploy_metadata_sha": "d" * 40,
+            "deployment_complete": True,
+            "deployed_at": "2026-08-08T12:00:00Z",
+        }
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            plan = public_plan(
+                build_plan(conn, runtime_dir=self.runtime_dir, deployed_runtime=deployed)
+            )
+        applied = apply_plan(
+            self.runtime_dir,
+            expected_fingerprint=plan["plan_fingerprint"],
+            deployed_runtime=deployed,
+            actor="test",
+            worker_hold_confirmed=True,
+        )
+        self.assertEqual(applied["status"], "applied")
+        self.assertFalse(applied["idempotent"])
+        publication_key = self.repo.get_feedback(feedback_id)["publications"][0][
+            "publication_key"
+        ]
+        return plan, deployed, publication_key
+
     def test_all_unstarted_are_evaluated_and_started_write_is_untouched(self) -> None:
         self._approved("post-use", "Через неделю стекло крошится")
         self._approved("danger", "Скол на четверть экрана")
@@ -449,6 +479,229 @@ class PolicyV5ReconciliationTest(unittest.TestCase):
         self.assertEqual(evidence["actual_counts"]["metadata_stale_unstarted"], 0)
         self.assertEqual(evidence["wb_post_count"], 0)
         self.assertEqual(evidence["provider_call_count"], 0)
+
+    def test_get_only_feedback_advances_are_a_bounded_reconciled_delta(self) -> None:
+        plan, _, _ = self._apply_single("get-only-stable")
+        legacy_reviewed = dict(plan)
+        legacy_reviewed["non_target_invariants"] = {
+            **legacy_reviewed.pop("immutable_execution_invariants"),
+            **legacy_reviewed.pop("mutable_get_only_surfaces"),
+        }
+        legacy_reviewed.pop("external_call_counters")
+
+        refreshed = feedback(
+            "get-only-stable",
+            text="Через неделю защитное стекло крошится",
+            photo_query="readonly-rotated",
+        )
+        refreshed["pros"] = ""
+        self.repo.upsert_feedback(
+            refreshed,
+            source_stream="detail",
+            run_kind="reconciliation",
+        )
+        discovered = feedback(
+            "get-only-new",
+            text="Новый отзыв readonly sync",
+            photo_query="readonly-new",
+        )
+        discovered["pros"] = ""
+        self.repo.upsert_feedback(
+            discovered,
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            evidence = readback(
+                conn,
+                reviewed_plan=legacy_reviewed,
+                expected_fingerprint=plan["plan_fingerprint"],
+            )
+        self.assertEqual(evidence["status"], "reconciled")
+        self.assertFalse(evidence["blockers"])
+        self.assertFalse(evidence["immutable_execution_drift"])
+        delta = evidence["get_only_observed_delta"]
+        self.assertTrue(delta["bounded"])
+        self.assertEqual(
+            set(delta["changed_surfaces"]),
+            {"feedback_truth", "feedback_versions", "feedback_media"},
+        )
+        self.assertEqual(delta["surfaces"]["feedback_truth"]["count_delta"], 1)
+        self.assertEqual(delta["surfaces"]["feedback_versions"]["count_delta"], 1)
+        self.assertEqual(delta["surfaces"]["feedback_media"]["count_delta"], 1)
+        self.assertEqual(evidence["actual_counts"]["stale_unstarted"], 0)
+        self.assertEqual(evidence["actual_counts"]["metadata_stale_unstarted"], 0)
+        self.assertEqual(evidence["actual_counts"]["incoherent_unstarted"], 0)
+        self.assertEqual(evidence["wb_post_count"], 0)
+        self.assertEqual(evidence["provider_call_count"], 0)
+
+    def test_started_and_outside_scope_execution_drift_blocks_readback(self) -> None:
+        started_key = self._approved("immutable-started", "Скол на четверть экрана")
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_publication_jobs
+                SET state='publishing',write_started_at=?,updated_at=?
+                WHERE publication_key=?
+                """,
+                (iso_utc(), iso_utc(), started_key),
+            )
+        self._backup()
+        deployed = {
+            "runtime_sha": "e" * 40,
+            "deploy_metadata_sha": "e" * 40,
+            "deployment_complete": True,
+            "deployed_at": "2026-08-08T12:00:00Z",
+        }
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            plan = public_plan(
+                build_plan(conn, runtime_dir=self.runtime_dir, deployed_runtime=deployed)
+            )
+        apply_plan(
+            self.runtime_dir,
+            expected_fingerprint=plan["plan_fingerprint"],
+            deployed_runtime=deployed,
+            actor="test",
+            worker_hold_confirmed=True,
+        )
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_publication_jobs
+                SET last_error_code='immutable-drift'
+                WHERE publication_key=?
+                """,
+                (started_key,),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET last_error_code='immutable-drift'
+                WHERE processing_key=(
+                    SELECT processing_key FROM sheet_vitrina_v1_wb_publication_jobs
+                    WHERE publication_key=?
+                )
+                """,
+                (started_key,),
+            )
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            evidence = readback(
+                conn,
+                reviewed_plan=plan,
+                expected_fingerprint=plan["plan_fingerprint"],
+            )
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertIn("immutable_execution_invariants_changed", evidence["blockers"])
+        self.assertIn("started_publications", evidence["immutable_execution_drift"])
+        self.assertIn(
+            "jobs_outside_zero_write_scope",
+            evidence["immutable_execution_drift"],
+        )
+
+    def test_wb_and_provider_call_count_changes_block_readback(self) -> None:
+        plan, _, publication_key = self._apply_single("external-call-drift")
+        with self.repo.transaction() as conn:
+            processing_key = str(
+                conn.execute(
+                    "SELECT processing_key FROM sheet_vitrina_v1_wb_publication_jobs WHERE publication_key=?",
+                    (publication_key,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_publication_attempts(
+                    attempt_id,publication_key,attempt_number,request_reply_sha256,
+                    transport_outcome,http_status,write_started_at,details_json
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "unexpected-wb-post",
+                    publication_key,
+                    1,
+                    final_reply_hash("unexpected"),
+                    "started",
+                    None,
+                    iso_utc(),
+                    canonical_json({"unexpected": True}),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                SET provider_call_started_at=?,updated_at=?
+                WHERE processing_key=?
+                """,
+                (iso_utc(), iso_utc(), processing_key),
+            )
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            evidence = readback(
+                conn,
+                reviewed_plan=plan,
+                expected_fingerprint=plan["plan_fingerprint"],
+            )
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertEqual(evidence["wb_post_count"], 1)
+        self.assertEqual(evidence["provider_call_count"], 1)
+        self.assertIn("wb_post_count_changed", evidence["blockers"])
+        self.assertIn("provider_call_count_changed", evidence["blockers"])
+
+    def test_cost_reservation_and_uncertainty_drift_blocks_readback(self) -> None:
+        plan, _, publication_key = self._apply_single("financial-drift")
+        with self.repo.transaction() as conn:
+            processing_key = str(
+                conn.execute(
+                    "SELECT processing_key FROM sheet_vitrina_v1_wb_publication_jobs WHERE publication_key=?",
+                    (publication_key,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswers_cost_events(
+                    event_id,processing_key,media_processing_version,actual_cost_usd,incurred_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                ("unexpected-cost", processing_key, 99, "0.0001", iso_utc()),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                SET updated_at=? WHERE processing_key=?
+                """,
+                ("2026-08-08T12:00:01Z", processing_key),
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+                    uncertainty_id,processing_key,attempt_number,transition_run_id,
+                    upper_bound_usd,effective_at,error_code,evidence_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "unexpected-uncertainty",
+                    processing_key,
+                    99,
+                    None,
+                    "0.01",
+                    iso_utc(),
+                    "unexpected",
+                    canonical_json({"unexpected": True}),
+                    iso_utc(),
+                ),
+            )
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            evidence = readback(
+                conn,
+                reviewed_plan=plan,
+                expected_fingerprint=plan["plan_fingerprint"],
+            )
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertIn("immutable_execution_invariants_changed", evidence["blockers"])
+        self.assertTrue(
+            {"cost_events", "reservations", "uncertainty"}.issubset(
+                set(evidence["immutable_execution_drift"])
+            )
+        )
 
 
 if __name__ == "__main__":

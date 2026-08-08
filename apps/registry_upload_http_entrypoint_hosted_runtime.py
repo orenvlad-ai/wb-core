@@ -18,7 +18,7 @@ import ssl
 import subprocess
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -56,6 +56,8 @@ ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
 FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
+DEPLOY_STATUS_READBACK_ATTEMPTS = 37
+DEPLOY_STATUS_READBACK_RETRY_SECONDS = 5.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -1039,6 +1041,47 @@ def deploy_current_checkout(
     if dry_run:
         return summary
 
+    def reconcile_transport_failure(
+        stage: str,
+        exc: subprocess.CalledProcessError,
+        *,
+        allow_transport_reconciliation: bool = True,
+    ) -> None:
+        if not allow_transport_reconciliation:
+            raise RuntimeError(
+                f"transport-indeterminate during {stage}; mutation preflight must be rerun idempotently"
+            ) from exc
+        release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
+        release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
+        release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+        if not release_pr.isdigit() or not release_head:
+            raise RuntimeError(
+                f"transport-indeterminate during {stage}; release identity is unavailable"
+            ) from exc
+        from apps.hosted_runtime_transport_reconcile import reconcile
+
+        reconciliation = reconcile(
+            target_file=target_file or resolve_target_file(),
+            expected_sha=release_merge,
+            pr=int(release_pr),
+            head=release_head,
+            merge=release_merge,
+            failed_stage=(
+                "readback"
+                if stage == "metadata-complete"
+                else stage
+                if stage in {"daemon-reload", "restart", "probes", "readback"}
+                else "sync"
+            ),
+            require_deployment_complete=stage == "metadata-complete",
+            allow_repairs=stage != "metadata-complete",
+        )
+        summary["transport_reconciliation"] = reconciliation
+        if not bool(reconciliation.get("healthy")):
+            raise RuntimeError(
+                f"transport-indeterminate during {stage}; exact-SHA reconciliation halted"
+            ) from exc
+
     def run_stage(
         stage: str,
         command: list[str],
@@ -1050,40 +1093,11 @@ def deploy_current_checkout(
         except subprocess.CalledProcessError as exc:
             if exc.returncode != 255:
                 raise
-            if not allow_transport_reconciliation:
-                raise RuntimeError(
-                    f"transport-indeterminate during {stage}; mutation preflight must be rerun idempotently"
-                ) from exc
-            release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
-            release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
-            release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
-            if not release_pr.isdigit() or not release_head:
-                raise RuntimeError(
-                    f"transport-indeterminate during {stage}; release identity is unavailable"
-                ) from exc
-            from apps.hosted_runtime_transport_reconcile import reconcile
-
-            reconciliation = reconcile(
-                target_file=target_file or resolve_target_file(),
-                expected_sha=release_merge,
-                pr=int(release_pr),
-                head=release_head,
-                merge=release_merge,
-                failed_stage=(
-                    "readback"
-                    if stage == "metadata-complete"
-                    else stage
-                    if stage in {"daemon-reload", "restart", "probes", "readback"}
-                    else "sync"
-                ),
-                require_deployment_complete=stage == "metadata-complete",
-                allow_repairs=stage != "metadata-complete",
+            reconcile_transport_failure(
+                stage,
+                exc,
+                allow_transport_reconciliation=allow_transport_reconciliation,
             )
-            summary["transport_reconciliation"] = reconciliation
-            if not bool(reconciliation.get("healthy")):
-                raise RuntimeError(
-                    f"transport-indeterminate during {stage}; exact-SHA reconciliation halted"
-                ) from exc
 
     # Never let a deploy/restart proceed against a missing hosted auth contour.
     run_stage("auth-preflight", auth_env_preflight_command)
@@ -1123,7 +1137,12 @@ def deploy_current_checkout(
     if systemd_commands["restart"]:
         run_stage("restart", systemd_commands["restart"])
     if status_command:
-        run_stage("readback", status_command)
+        try:
+            _run_deploy_status_readback(status_command)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 255:
+                raise
+            reconcile_transport_failure("readback", exc)
     # Read back the same contract after all managed-unit operations.
     run_stage("readback", auth_env_preflight_command)
     # The exact SHA markers are written before dependency/schema work so an
@@ -1136,6 +1155,41 @@ def deploy_current_checkout(
         deploy_completion_metadata_command,
     )
     return summary
+
+
+def _run_deploy_status_readback(
+    command: list[str],
+    *,
+    attempts: int = DEPLOY_STATUS_READBACK_ATTEMPTS,
+    retry_seconds: float = DEPLOY_STATUS_READBACK_RETRY_SECONDS,
+    runner: Callable[[list[str]], Any] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Wait boundedly for an asynchronously restarting systemd service.
+
+    ``systemctl restart`` can succeed before the new process finishes startup.
+    A short-lived SQLite writer may then make the process fail and systemd may
+    recover it through ``Restart=always``. Only the read-only status command is
+    repeated here; transport-indeterminate SSH exits remain owned by the exact
+    SHA reconciler and every other deploy stage stays single-attempt.
+    """
+
+    if attempts <= 0:
+        raise ValueError("deploy status readback attempts must be positive")
+    execute = runner or _run_command
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            execute(command)
+            return
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 255:
+                raise
+            last_error = exc
+        if attempt < attempts:
+            sleep(retry_seconds)
+    if last_error is not None:
+        raise last_error
 
 
 def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
@@ -2677,10 +2731,9 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
         )
 
     lifecycle = _run_remote_autoanswers_lifecycle(target, action="status")
-    worker = dict(
-        ((lifecycle.get("lifecycle") or {}).get("components") or {}).get("worker")
-        or {}
-    )
+    components = dict((lifecycle.get("lifecycle") or {}).get("components") or {})
+    worker = dict(components.get("worker") or {})
+    readonly_sync = dict(components.get("readonly_sync") or {})
     worker_timer = dict(worker.get("timer") or {})
     worker_service = dict(worker.get("service") or {})
     worker_hold = {
@@ -2688,6 +2741,17 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
         "timer_active": str(worker_timer.get("is_active") or ""),
         "service_active": str(worker_service.get("is_active") or ""),
     }
+    readonly_timer = dict(readonly_sync.get("timer") or {})
+    get_only_feedback_sync = {
+        "actual": bool(readonly_sync.get("actual")),
+        "timer_enabled": str(readonly_timer.get("is_enabled") or ""),
+        "timer_active": str(readonly_timer.get("is_active") or ""),
+    }
+    get_only_feedback_sync["confirmed"] = bool(
+        get_only_feedback_sync["actual"]
+        and get_only_feedback_sync["timer_enabled"] == "enabled"
+        and get_only_feedback_sync["timer_active"] == "active"
+    )
     if (
         worker_hold["timer_enabled"] == "enabled"
         or worker_hold["timer_active"] in {"active", "activating", "reloading"}
@@ -2801,6 +2865,18 @@ def _run_remote_autoanswers_policy_v5_reconciliation(
             "Autoanswers policy v5 reconciliation returned a non-object payload"
         )
     payload["worker_hold"] = worker_hold
+    payload["get_only_feedback_sync"] = get_only_feedback_sync
+    get_only_delta = payload.get("get_only_observed_delta")
+    if (
+        action == "readback"
+        and isinstance(get_only_delta, Mapping)
+        and get_only_delta.get("changed") is True
+        and get_only_feedback_sync["confirmed"] is not True
+    ):
+        payload["status"] = "blocked"
+        payload["blockers"] = list(payload.get("blockers") or []) + [
+            "get_only_feedback_delta_without_active_readonly_sync"
+        ]
     if action == "dry-run" and payload.get("coverage_confirmed") is not True:
         raise RuntimeError(
             "Autoanswers policy v5 reconciliation dry-run is not apply-ready"

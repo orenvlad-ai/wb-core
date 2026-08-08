@@ -447,12 +447,23 @@ event and is idempotent. It does not clear `reservation_missing`,
 Policy v5 activation additionally evaluates every zero-write publication while
 the worker timer/service is held. The fingerprint binds the complete target
 projection, deployed SHA, current backup, exact before/after counts and
-non-target digests. One transaction advances the policy epoch, rebinds every
+split evidence groups. Immutable execution evidence covers settings outside
+the policy CAS, started publications, attempts, jobs outside the zero-write
+scope, costs, reservations and provider uncertainty; any drift remains a
+blocking byte mismatch. Feedback truth, immutable-version inventory and media
+are separately classified as GET-only surfaces. When the canonical readonly
+timer remains enabled/active, their non-decreasing counts and before/after
+digests are reported as a bounded observed delta instead of execution drift.
+The existing flat v1 reviewed plan and apply audit remain valid inputs and are
+split during readback, so a completed apply is never rerun for this contract
+correction. One transaction advances the policy epoch, rebinds every
 unchanged artifact and atomically rewrites/rekeys only an affected unstarted
 reply. Any write-started/readback/published aggregate and its linked job/attempt
 projection are protected by a digest and remain byte-for-byte unchanged. The
-runner performs zero WB POSTs and zero provider calls; query-only readback must
-report `reconciled` before lifecycle resume.
+runner performs zero WB POSTs and zero provider calls; explicit attempt and
+provider-boundary counter deltas block. Query-only readback must report
+`reconciled`, exact scope/counts and zero stale, metadata-stale and incoherent
+unstarted rows before lifecycle resume.
 
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. The main Autoanswers card has a visible `Настроить лимиты` action which opens one opaque dark modal for all seven global limits. The former technical disclosure links to that same modal instead of duplicating controls. An hourly/daily/monthly budget pause adds `Увеличить лимит`, opens the same modal, focuses the corresponding field and shows `used + reserved / current / new`. The modal displays the active transition-run cap separately as read-only with an explanation that an ordinary global-settings save cannot enlarge it. It also shows immutable initial membership, admitted-since-start totals by content class and rating, current exact total, last admission refresh/batch, current literal priority bucket and pause/error reason. Queue progress uses the full current admitted set and is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`. Ordinary budget/rate/backoff pauses render as the yellow `Работает · штатная пауза`, even if the one-shot service's last exit presentation is error; genuine lifecycle drift and fatal reasons remain red.
 
@@ -574,8 +585,11 @@ transition run/cap. After deploy the hosted
 the complete zero-write queue while the worker remains disabled/inactive. Its
 query-only plan and readback prove the exact deployed SHA, v4→v5 epoch change,
 before/after route/reply counts, zero stale unstarted artifacts, zero WB POSTs/
-provider calls and unchanged started-write, attempt, feedback, setting, cost,
-reservation and uncertainty digests. The settings compare-and-swap remains an
+provider calls and unchanged started-write, attempt, setting, cost, reservation
+and uncertainty digests. Concurrent readonly GET sync may advance feedback
+truth/version/media evidence only as a separately reported bounded observed
+delta with an enabled/active readonly timer; it is not an execution invariant.
+The settings compare-and-swap remains an
 exact v4→v5 gate, while every zero-write processing job is rebound from the
 exact per-row source `policy_epoch` and `policy_version` included in the
 fingerprint-bound projection; mixed legacy job identities inside a v4 store do
