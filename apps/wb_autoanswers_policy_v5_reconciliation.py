@@ -272,6 +272,7 @@ def _planned_action(row: Mapping[str, Any], *, next_policy_epoch: int) -> dict[s
         "feedback_id": str(row["feedback_id"]),
         "content_version": int(row["content_version"]),
         "source_policy_epoch": int(row.get("policy_epoch") or 0),
+        "source_job_policy_epoch": int(row.get("job_policy_epoch") or 0),
         "source_policy_version": str(row.get("job_policy_version") or ""),
         "next_policy_epoch": int(next_policy_epoch),
         "source_route": str(row.get("final_route") or ""),
@@ -299,6 +300,7 @@ def _projection(action: Mapping[str, Any]) -> dict[str, Any]:
             "feedback_id",
             "content_version",
             "source_policy_epoch",
+            "source_job_policy_epoch",
             "source_policy_version",
             "next_policy_epoch",
             "source_route",
@@ -503,7 +505,7 @@ def apply_plan(
                     UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
                     SET policy_epoch=?,policy_version=?,final_route=?,case_code=?,
                         final_reply=?,final_reply_sha256=?,result_json=?,fallback_used=?,updated_at=?
-                    WHERE processing_key=? AND policy_version=?
+                    WHERE processing_key=? AND policy_epoch=? AND policy_version=?
                     """,
                     (
                         next_epoch,
@@ -516,7 +518,8 @@ def apply_plan(
                         action["next_fallback_used"],
                         iso_utc(now),
                         action["processing_key"],
-                        PREVIOUS_POLICY_VERSION,
+                        action["source_job_policy_epoch"],
+                        action["source_policy_version"],
                     ),
                 )
                 if int(job_cursor.rowcount or 0) != 1:

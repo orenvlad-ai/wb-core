@@ -338,6 +338,40 @@ class PolicyV5ReconciliationTest(unittest.TestCase):
                 worker_hold_confirmed=False,
             )
 
+    def test_apply_rebinds_a_zero_write_job_from_its_exact_legacy_identity(self) -> None:
+        self._approved("legacy-job", "Через неделю стекло посыпалось")
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET policy_epoch=12,policy_version='owner-policy-2026-07-21-v2'
+                WHERE feedback_id='legacy-job'
+                """
+            )
+        self._backup()
+        deployed = {
+            "runtime_sha": "c" * 40,
+            "deploy_metadata_sha": "c" * 40,
+            "deployment_complete": True,
+            "deployed_at": "2026-08-08T12:00:00Z",
+        }
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            plan = public_plan(
+                build_plan(conn, runtime_dir=self.runtime_dir, deployed_runtime=deployed)
+            )
+        self.assertEqual(plan["counts"]["unstarted_evaluated"], 1)
+        applied = apply_plan(
+            self.runtime_dir,
+            expected_fingerprint=plan["plan_fingerprint"],
+            deployed_runtime=deployed,
+            actor="test",
+            worker_hold_confirmed=True,
+        )
+        self.assertEqual(applied["status"], "applied")
+        job = self.repo.get_feedback("legacy-job")["ai_jobs"][0]
+        self.assertEqual(job["policy_version"], OWNER_POLICY_VERSION)
+        self.assertEqual(job["policy_epoch"], plan["target_policy_epoch"])
+
 
 if __name__ == "__main__":
     unittest.main()
