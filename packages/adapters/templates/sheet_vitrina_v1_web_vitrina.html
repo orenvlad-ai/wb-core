@@ -1130,6 +1130,10 @@
       transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
     }
 
+    .button[hidden] {
+      display: none !important;
+    }
+
     .button.primary {
       border-color: var(--accent-border);
       background: var(--control-bg);
@@ -20749,17 +20753,21 @@
         sppHistoryListNode.innerHTML = '<p class="research-result-note" style="padding:12px">' + (state.prices.sppTest.historyLoading ? "Загрузка…" : "История пока пуста.") + "</p>";
       } else {
         sppHistoryListNode.innerHTML = items.map(function(item) {
-          const results = (item.results || []).map(function(row) {
+          const allResults = Array.isArray(item.results) ? item.results : [];
+          const results = allResults.slice(0, 3).map(function(row) {
             const target = pricesMoney(row.target_price, "RUB");
             const buyer = row.buyer_price === null || row.buyer_price === undefined ? "—" : pricesMoney(row.buyer_price, "RUB");
             const spp = row.spp === null || row.spp === undefined ? "—" : formatNumber(Number(row.spp) * 100, 2, true) + "%";
             return target + " → " + buyer + " · СПП " + spp + " · " + sppPointStatusLabel(row.status);
-          }).join("; ");
+          });
+          if (allResults.length > results.length) {
+            results.push("ещё: " + String(allResults.length - results.length));
+          }
           return '<div class="spp-test-history-row"><span>'
             + escapeHtml(formatTimestampDisplay(item.finished_at || item.created_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
             + '</span><span>nmID ' + escapeHtml(valueOrDash(item.nmID)) + '</span><span class="prices-badge '
             + sppStatusTone(item.status) + '">' + escapeHtml(sppStatusLabel(item.status)) + '</span><span>'
-            + escapeHtml(results || "без результатов") + "</span></div>";
+            + escapeHtml(results.join("; ") || "без результатов") + "</span></div>";
         }).join("");
       }
       if (sppHistoryMoreButton) {

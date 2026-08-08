@@ -174,7 +174,7 @@ Server-owned state:
 
 # 8. History и technical log
 
-History сохраняет canonical jobs, но UI/API summary не показывает evidence, lifecycle diagnostics, raw JSON, request budgets или upstream payloads.
+History сохраняет canonical jobs, но UI/API summary не показывает evidence, lifecycle diagnostics, raw JSON, request budgets или upstream payloads. UI показывает не более трёх кратких результатов одной history-записи и отдельный счётчик оставшихся цен, поэтому совместимые legacy jobs с длинными measurement-массивами не растягивают основной экран. Кнопка аварийного restore видима только для фактического `manual_restore_required=true`; обычный terminal job с доказанным restore не оставляет ложного recovery-action.
 
 Technical log строится из allowlisted audit events и всегда ограничен последними десятью полезными событиями. Каждая строка имеет только `time`, короткий `stage` и короткий `message`. Sanitizer исключает secrets, cookies, authorization headers, token-like keys, внутренние paths и raw payload presentation.
 
