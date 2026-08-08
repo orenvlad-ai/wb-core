@@ -338,6 +338,118 @@ class PolicyV5ReconciliationTest(unittest.TestCase):
                 worker_hold_confirmed=False,
             )
 
+    def test_apply_rebinds_a_zero_write_job_from_its_exact_legacy_identity(self) -> None:
+        legacy_key = self._approved("legacy-job", "Скол на четверть экрана")
+        started_key = self._approved("started-legacy", "Скол на четверть экрана")
+        with self.repo.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                SET policy_epoch=12,policy_version='owner-policy-2026-07-21-v2'
+                WHERE feedback_id='legacy-job'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_publication_jobs
+                SET state='publishing',attempts=1,write_started_at=?,updated_at=?
+                WHERE publication_key=?
+                """,
+                (iso_utc(), iso_utc(), started_key),
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_publication_attempts(
+                    attempt_id,publication_key,attempt_number,request_reply_sha256,
+                    transport_outcome,http_status,write_started_at,details_json
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "started-legacy-attempt",
+                    started_key,
+                    1,
+                    final_reply_hash("Исходный ответ started-legacy"),
+                    "started",
+                    None,
+                    iso_utc(),
+                    canonical_json({"test": True}),
+                ),
+            )
+        legacy_before = self.repo.get_feedback("legacy-job")
+        route_before = legacy_before["ai_jobs"][0]["final_route"]
+        reply_before = legacy_before["ai_jobs"][0]["final_reply"]
+        with closing(self.repo._connect()) as conn:
+            non_target_before = _non_target_invariants(conn)
+        self._backup()
+        deployed = {
+            "runtime_sha": "c" * 40,
+            "deploy_metadata_sha": "c" * 40,
+            "deployment_complete": True,
+            "deployed_at": "2026-08-08T12:00:00Z",
+        }
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            internal_plan = build_plan(
+                conn,
+                runtime_dir=self.runtime_dir,
+                deployed_runtime=deployed,
+            )
+        projection = internal_plan["target_projection"]
+        self.assertEqual(len(projection), 1)
+        self.assertEqual(projection[0]["source_job_policy_epoch"], 12)
+        self.assertEqual(
+            projection[0]["source_job_policy_version"],
+            "owner-policy-2026-07-21-v2",
+        )
+        plan = public_plan(internal_plan)
+        self.assertEqual(plan["counts"]["unstarted_evaluated"], 1)
+        self.assertEqual(plan["counts"]["started_preserved"], 1)
+        self.assertEqual(plan["counts"]["route_changed"], 0)
+        self.assertEqual(plan["counts"]["reply_changed"], 0)
+        self.assertEqual(plan["counts"]["metadata_only_rebound"], 1)
+
+        applied = apply_plan(
+            self.runtime_dir,
+            expected_fingerprint=plan["plan_fingerprint"],
+            deployed_runtime=deployed,
+            actor="test",
+            worker_hold_confirmed=True,
+        )
+        self.assertEqual(applied["status"], "applied")
+        self.assertFalse(applied["idempotent"])
+        self.assertEqual(applied["wb_post_count"], 0)
+        self.assertEqual(applied["provider_call_count"], 0)
+        job = self.repo.get_feedback("legacy-job")["ai_jobs"][0]
+        self.assertEqual(job["policy_version"], OWNER_POLICY_VERSION)
+        self.assertEqual(job["policy_epoch"], plan["target_policy_epoch"])
+        self.assertEqual(job["final_route"], route_before)
+        self.assertEqual(job["final_reply"], reply_before)
+        self.assertEqual(
+            self.repo.get_feedback("legacy-job")["publications"][0]["publication_key"],
+            legacy_key,
+        )
+        with closing(self.repo._connect()) as conn:
+            self.assertEqual(_non_target_invariants(conn), non_target_before)
+
+        replay = apply_plan(
+            self.runtime_dir,
+            expected_fingerprint=plan["plan_fingerprint"],
+            deployed_runtime=deployed,
+            actor="test",
+            worker_hold_confirmed=True,
+        )
+        self.assertTrue(replay["idempotent"])
+        with closing(_open(self.runtime_dir, read_only=True)) as conn:
+            evidence = readback(
+                conn,
+                reviewed_plan=plan,
+                expected_fingerprint=plan["plan_fingerprint"],
+            )
+        self.assertEqual(evidence["status"], "reconciled")
+        self.assertEqual(evidence["actual_counts"]["stale_unstarted"], 0)
+        self.assertEqual(evidence["actual_counts"]["metadata_stale_unstarted"], 0)
+        self.assertEqual(evidence["wb_post_count"], 0)
+        self.assertEqual(evidence["provider_call_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
