@@ -201,6 +201,19 @@ class ReleaseSafetyTest(unittest.TestCase):
             hosted.run_autoanswers_backlog_recovery_command,
         )
         self.assertEqual(backlog_args.action, "dry-run")
+        policy_args = hosted.build_arg_parser().parse_args(
+            [
+                "autoanswers-policy-v5-reconciliation",
+                "dry-run",
+                "--expected-deployed-sha",
+                "a" * 40,
+            ]
+        )
+        self.assertIs(
+            policy_args.handler,
+            hosted.run_autoanswers_policy_v5_reconciliation_command,
+        )
+        self.assertEqual(policy_args.action, "dry-run")
         answered_inventory_args = hosted.build_arg_parser().parse_args(
             [
                 "autoanswers-answered-inventory-recovery",
@@ -399,6 +412,70 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("--expected-deployed-sha " + deployed_sha, command)
         self.assertIn("--approval-reference github-pr-gate-comment-123", command)
         self.assertEqual(json.loads(str(captured[0][1]["input"])), manifest)
+        self.assertNotIn("feedbacks/answer", command)
+
+    def test_policy_v5_wrapper_requires_worker_hold_and_streams_reviewed_plan(self) -> None:
+        target = hosted.load_hosted_runtime_target(TARGET)
+        deployed_sha = "a" * 40
+        fingerprint = "sha256:" + "b" * 64
+        plan = {
+            "contract": "wb_autoanswers_policy_v5_reconciliation_v1",
+            "coverage_confirmed": True,
+            "plan_fingerprint": fingerprint,
+            "deployed_runtime": {"runtime_sha": deployed_sha},
+        }
+        lifecycle = {
+            "lifecycle": {
+                "components": {
+                    "worker": {
+                        "timer": {"is_enabled": "disabled", "is_active": "inactive"},
+                        "service": {"is_active": "inactive"},
+                    }
+                }
+            }
+        }
+        response = {
+            "contract": "wb_autoanswers_policy_v5_reconciliation_v1",
+            "status": "applied",
+            "plan_fingerprint": fingerprint,
+        }
+        captured: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured.append((command, kwargs))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+
+        with TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with patch.object(
+                hosted,
+                "_run_remote_autoanswers_lifecycle",
+                return_value=lifecycle,
+            ), patch.object(hosted.subprocess, "run", side_effect=fake_run):
+                result = hosted._run_remote_autoanswers_policy_v5_reconciliation(
+                    target,
+                    action="apply",
+                    expected_deployed_sha=deployed_sha,
+                    reviewed_plan_path=plan_path,
+                    fingerprint=fingerprint,
+                    actor="release-train",
+                )
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["worker_hold"]["timer_active"], "inactive")
+        command = " ".join(captured[0][0])
+        self.assertIn("systemctl is-enabled --quiet wb-core-autoanswers-worker.timer", command)
+        self.assertIn("systemctl is-active --quiet wb-core-autoanswers-worker.service", command)
+        self.assertIn("wb_autoanswers_policy_v5_reconciliation.py apply", command)
+        self.assertIn("--worker-hold-confirmed", command)
+        self.assertEqual(json.loads(str(captured[0][1]["input"])), plan)
         self.assertNotIn("feedbacks/answer", command)
 
     def test_answered_inventory_wrapper_requires_external_exact_scope_and_human_gate(self) -> None:

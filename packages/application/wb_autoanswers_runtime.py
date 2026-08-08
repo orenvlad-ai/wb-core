@@ -64,6 +64,10 @@ from packages.contracts.wb_autoanswers import (
     validate_mode,
 )
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.wb_autoanswers_owner_policy import (
+    OWNER_POLICY_VERSION,
+    apply_owner_policy,
+)
 
 
 SCHEMA_VERSION = 10
@@ -93,9 +97,10 @@ MAX_OPERATOR_MATERIALIZED_PROCESSING_JOBS = 100
 # path plus two rewrite/validator cycles.  Settlement releases the difference.
 DEFAULT_JOB_RESERVATION_USD = Decimal("0.10")
 DEFAULT_ESTIMATED_REVIEW_COST_USD = Decimal("0.03")
-DEFAULT_POLICY_VERSION = "owner-policy-2026-08-01-v4"
-PREVIOUS_POLICY_VERSION = "owner-policy-2026-07-21-v3"
+DEFAULT_POLICY_VERSION = OWNER_POLICY_VERSION
+PREVIOUS_POLICY_VERSION = "owner-policy-2026-08-01-v4"
 RATING_ONLY_TEMPLATE_POLICY_VERSION = "owner-policy-2026-07-21-v2"
+SAFE_PUBLIC_TEMPLATE_POLICY_VERSION = "owner-policy-2026-08-01-v4"
 DEFAULT_LEASE_SECONDS = 300
 RECONCILIATION_STALL_THRESHOLD_SECONDS = 15 * 60
 RECONCILIATION_ACTION_OUTCOMES = frozenset(
@@ -701,7 +706,7 @@ def rating_only_template(feedback_id: str, rating: int) -> dict[str, Any]:
 def _safe_public_policy() -> dict[str, Any]:
     policy = json.loads(SAFE_PUBLIC_POLICY_PATH.read_text(encoding="utf-8"))
     if (
-        policy.get("policy_version") != DEFAULT_POLICY_VERSION
+        policy.get("policy_version") != SAFE_PUBLIC_TEMPLATE_POLICY_VERSION
         or policy.get("contract") != "wb_autoanswers_safe_public_policy_v1"
         or policy.get("route") != "public_only"
         or policy.get("openai_calls") != 0
@@ -744,6 +749,7 @@ def safe_public_template(feedback_id: str, rating: int) -> dict[str, Any]:
         "template_id": f"safe_public_{template_group}_v{index + 1}",
         "reply": reply,
         "policy_version": DEFAULT_POLICY_VERSION,
+        "template_policy_version": SAFE_PUBLIC_TEMPLATE_POLICY_VERSION,
         "openai_calls": 0,
     }
 
@@ -7021,6 +7027,14 @@ class AutoanswersRepository:
                     "route": route,
                     "source_route": "seller_chat",
                 }
+            result = apply_owner_policy(
+                feedback_id=str(job["feedback_id"]),
+                rating=int(feedback["rating"] or 0),
+                content_json=feedback["content_json"],
+                result=result,
+            )
+            route = str(result["final_route"])
+            reply = str(result["final_reply"])
             reply_sha = final_reply_hash(reply)
             next_state = STATE_GENERATED
             review_reasons: list[str] = []
@@ -7360,6 +7374,39 @@ class AutoanswersRepository:
                         "source_reply_sha256": source_reply_sha,
                         "template_id": selected["template_id"],
                         "operator_handoff": False,
+                    },
+                    at=now,
+                )
+            if settings.policy_version == DEFAULT_POLICY_VERSION and feedback is not None:
+                before_policy_route = route
+                before_policy_reply_sha = final_reply_hash(reply)
+                stored_result = apply_owner_policy(
+                    feedback_id=str(job["feedback_id"]),
+                    rating=int(feedback["rating"] or 0),
+                    content_json=feedback["content_json"],
+                    result=stored_result,
+                )
+                route = str(stored_result["final_route"])
+                reply = str(stored_result["final_reply"])
+                fallback_used = bool(stored_result.get("fallback_used"))
+                owner_evidence = dict(stored_result.get("server_owner_policy") or {})
+                self._audit(
+                    conn,
+                    aggregate_type="processing_job",
+                    aggregate_id=processing_key_value,
+                    event_type="owner_policy_v5_evaluated",
+                    actor_type="policy",
+                    actor_id=settings.policy_version,
+                    details={
+                        "source_route": before_policy_route,
+                        "source_reply_sha256": before_policy_reply_sha,
+                        "publication_route": route,
+                        "reply_changed": before_policy_reply_sha != final_reply_hash(reply),
+                        "reason": owner_evidence.get("reason"),
+                        "hard_return_reasons": owner_evidence.get("hard_return_reasons") or [],
+                        "template_id": owner_evidence.get("template_id"),
+                        "unfortunately_action": owner_evidence.get("unfortunately_action"),
+                        "model_calls": 0,
                     },
                     at=now,
                 )

@@ -7,7 +7,7 @@ purpose: "Server-native synchronization, frozen AI drafting and readback-confirm
 scope: "SellerOS / wb-core feedbacks section"
 source_basis: "Owner decisions plus frozen AI bundle v1.4.2"
 source_of_truth_level: "implementation contract"
-update_note: "Schema v10 adds a fingerprint-bound backlog recovery ledger; policy v4 removes automatic seller-chat/operator tails, safely rebinds unstarted publications, recovers durable terminal evidence and distinguishes WB processed-without-answer observations from actionable unanswered work without changing the frozen v1.4.2 bundle."
+update_note: "Policy v5 adds a semantic hard-return guard, variable post-use-breakage replies, deterministic natural use of «к сожалению» and fingerprint-bound reconciliation of every zero-write publication before worker resume, without changing the frozen v1.4.2 bundle or schema v10."
 ---
 
 # WB Autoanswers Server v1
@@ -59,6 +59,8 @@ Frozen identity:
 | Bounded coordinator tick | `packages/application/wb_autoanswers_coordinator.py` |
 | GET-only sync and manual media canary | `apps/wb_autoanswers_readonly.py` |
 | Feature-owned systemd reconciliation/readback | `packages/application/wb_autoanswers_lifecycle.py`, `apps/wb_autoanswers_lifecycle.py` |
+| Versioned owner return/reply policy | `packages/application/wb_autoanswers_owner_policy.py`, `packages/contracts/wb_autoanswers_owner_policy_v1.json` |
+| Zero-write v5 queue reconciliation | `apps/wb_autoanswers_policy_v5_reconciliation.py` |
 | Current-schema backup gate | `apps/wb_autoanswers_activation.py` |
 | Incident evidence and bounded recovery | `apps/wb_autoanswers_incident_evidence.py`, `apps/wb_autoanswers_budget_reconciliation.py`, `apps/wb_autoanswers_prefilter_skip_recovery.py`, `apps/wb_autoanswers_rolling_recovery.py`, `apps/wb_autoanswers_reconciliation_recovery.py`, `apps/wb_autoanswers_backlog_recovery.py` |
 | Authenticated production UI Flow | `apps/wb_autoanswers_production_ui_flow.py` |
@@ -141,7 +143,7 @@ It never inserts a duplicate immutable row and reports the additive
 `content_version_reused` evidence; truly new content still appends the next
 version.
 
-Processing idempotency is `feedback_id | content_version | 1.4.2`. Publication idempotency is `feedback_id | content_version | normalized-final-reply-sha256 | create-answer-v1`. One feedback version can have at most one publication aggregate.
+Processing idempotency is `feedback_id | content_version | 1.4.2`. Publication idempotency is `feedback_id | content_version | normalized-final-reply-sha256 | create-answer-v1`. One feedback version can have at most one publication aggregate. Policy v5 may atomically rekey that aggregate only before any WB write/attempt exists; append-only audit retains the prior key, reply hash, route and semantic reason. After write start the identity is immutable and readback-only.
 
 ## Sync and modes
 
@@ -173,7 +175,7 @@ The persisted default remains OFF and `WB_AUTOANSWERS_FORCE_OFF=true` always has
 - `off`: readonly sync/UI/readback continue; worker timer, new AI claims and new WB writes stop;
 - `manual`: readonly sync and worker run, but only explicit generate/regenerate/review/publish jobs are serviced;
 - `draft_only`: eligible scoped reviews receive reusable drafts, never publication;
-- `auto_safe`: `public_only`, `wb_return`, `wb_support`, the exact owner-approved `rating_only_template`, and a seller-chat result transformed by the zero-cost policy-v4 safe-public contract may auto-publish;
+- `auto_safe`: `public_only`, a v5 hard-grounded `wb_return`, `wb_support`, the exact owner-approved `rating_only_template`, and a seller-chat result transformed by the zero-cost safe-public contract may auto-publish;
 - `auto_all`: every route that passes all hard gates may publish; `seller_chat` never waits for an operator and is deterministically replaced with a `public_only` acknowledgement before enqueue. Fallback, unsafe, stale, external-answer and media-uncertain artifacts still fail closed.
 
 The frozen v1.4.2 bundle and its routing evidence remain unchanged. Policy v4
@@ -182,6 +184,16 @@ an immutable job revision, then publishes only a server-owned deterministic
 acknowledgement from `wb_autoanswers_safe_public_policy_v1`. That text contains
 no chat handoff or case code and promises no money, replacement, compensation,
 return approval or WB decision. The transform performs zero OpenAI calls.
+
+Policy v5 then applies the separate `wb_autoanswers_owner_policy_v1` semantic
+guard to every frozen result. An ordinary post-use crack, break, crumble,
+shedding or chip is `public_only`; only the independent hard grounds enumerated
+in `WB_AUTOANSWERS_POLICY_ADDENDUM_v5.md` preserve `wb_return`. The decision
+uses co-occurring normalized signal groups over all review surfaces, not a
+small keyword regex and not a quota. Post-use replies are deterministic but
+variable, do not invent an impact or intact screen, and mention force/angle/
+contact point only for a positively described impact. The same policy limits
+`к сожалению` to one natural occurrence and prevents double empathy.
 
 The dedicated lifecycle maps those modes to two components. Readonly sync is
 enabled for every mode except a global master pause; the worker is enabled for
@@ -416,7 +428,7 @@ the immutable target execution projection plus sweep identity/caps. The apply
 transaction separately proves its non-target snapshot unchanged; later normal
 queue progress does not invalidate readback. Replay is a confirmed no-op.
 
-Policy reconciliation never sends an immutable publication aggregate back
+Policy reconciliation never sends a write-started publication aggregate back
 through regeneration. Under policy v4 an exact unstarted publication whose
 reply hash still matches the valid processing artifact is rebound in place to
 the current policy epoch and `approved`, with zero provider calls and zero WB
@@ -431,6 +443,16 @@ zero remaining stale publication-bound candidates, zero active reservations
 and zero unresolved provider-cost boundaries. The release appends one audit
 event and is idempotent. It does not clear `reservation_missing`,
 `budget_state_unknown`, quota or other provider/safety latches.
+
+Policy v5 activation additionally evaluates every zero-write publication while
+the worker timer/service is held. The fingerprint binds the complete target
+projection, deployed SHA, current backup, exact before/after counts and
+non-target digests. One transaction advances the policy epoch, rebinds every
+unchanged artifact and atomically rewrites/rekeys only an affected unstarted
+reply. Any write-started/readback/published aggregate and its linked job/attempt
+projection are protected by a digest and remain byte-for-byte unchanged. The
+runner performs zero WB POSTs and zero provider calls; query-only readback must
+report `reconciled` before lifecycle resume.
 
 The UI shows hourly/daily/monthly actual spend, active reserved spend, remaining caps, current run spend, last update and the official billing link. The main Autoanswers card has a visible `Настроить лимиты` action which opens one opaque dark modal for all seven global limits. The former technical disclosure links to that same modal instead of duplicating controls. An hourly/daily/monthly budget pause adds `Увеличить лимит`, opens the same modal, focuses the corresponding field and shows `used + reserved / current / new`. The modal displays the active transition-run cap separately as read-only with an explanation that an ordinary global-settings save cannot enlarge it. It also shows immutable initial membership, admitted-since-start totals by content class and rating, current exact total, last admission refresh/batch, current literal priority bucket and pause/error reason. Queue progress uses the full current admitted set and is split into visually separate `Все отзывы` and `Отзывы с содержанием` cards. Each contains preparation and readback-confirmed publication stages with exact percent, `X из Y`, remaining, status and pause reason; the content card additionally shows `needs_review`, current operation, throughput and ETA. A zero denominator is `Нет отзывов в этой категории`, never a false 100%. Manual mode retains the durable counters and displays `Приостановлено вручную`. Ordinary budget/rate/backoff pauses render as the yellow `Работает · штатная пауза`, even if the one-shot service's last exit presentation is error; genuine lifecycle drift and fatal reasons remain red.
 
@@ -540,13 +562,21 @@ PYTHONPATH=. python3 -m unittest \
   apps.wb_autoanswers_reconciliation_recovery_test \
   apps.wb_autoanswers_ui_browser_test \
   apps.wb_autoanswers_rolling_recovery_test \
-  apps.wb_autoanswers_backlog_recovery_test
+  apps.wb_autoanswers_backlog_recovery_test \
+  apps.wb_autoanswers_policy_v5_reconciliation_test
 PYTHONPATH=. python3 apps/business_data_maintenance_status_smoke.py
 python3 -m compileall -q apps packages
 ```
 
 Production acceptance preserves the already confirmed feature intent and exact
 transition run/cap. After deploy the hosted
+`autoanswers-policy-v5-reconciliation dry-run|apply|readback` first evaluates
+the complete zero-write queue while the worker remains disabled/inactive. Its
+query-only plan and readback prove the exact deployed SHA, v4→v5 epoch change,
+before/after route/reply counts, zero stale unstarted artifacts, zero WB POSTs/
+provider calls and unchanged started-write, attempt, feedback, setting, cost,
+reservation and uncertainty digests. Only then may `autoanswers-lifecycle
+reconcile` restore the persisted worker intent. The hosted
 `autoanswers-backlog-recovery capture` command captures or reuses an exact
 `wb_autoanswers_t0_manifest_v1` from a full paginated official unanswered list
 plus one detail GET per feedback. `wb_autoanswers_backlog_recovery_v1` dry-run
