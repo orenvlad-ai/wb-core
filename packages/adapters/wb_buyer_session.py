@@ -13,6 +13,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import signal
+import subprocess
 import time
 from typing import Any, Callable, Iterator, Mapping
 from urllib import parse as urllib_parse
@@ -42,6 +45,82 @@ RECOVERY_PROBE_BLOCKING_STATUSES = {
     "awaiting_human",
     "validating_session",
 }
+HEADFUL_PROBE_DISPLAY_NUMBERS = tuple(range(90, 98))
+
+
+@contextmanager
+def _ephemeral_headful_display(*, headless: bool) -> Iterator[None]:
+    """Provide a private Xvfb display for WB probes that must look headed."""
+
+    if headless or str(os.environ.get("DISPLAY") or "").strip():
+        yield
+        return
+    executable = shutil.which("Xvfb")
+    if executable is None:
+        raise RuntimeError("buyer headed probe requires Xvfb")
+    process: subprocess.Popen[Any] | None = None
+    display = ""
+    for number in HEADFUL_PROBE_DISPLAY_NUMBERS:
+        socket_path = Path(f"/tmp/.X11-unix/X{number}")
+        if socket_path.exists():
+            continue
+        candidate = f":{number}"
+        launched = subprocess.Popen(
+            [
+                executable,
+                candidate,
+                "-screen",
+                "0",
+                "1500x820x24",
+                "-nolisten",
+                "tcp",
+                "-noreset",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if socket_path.exists():
+                process = launched
+                display = candidate
+                break
+            if launched.poll() is not None:
+                break
+            time.sleep(0.05)
+        if process is not None:
+            break
+        _terminate_display_process(launched)
+    if process is None or not display:
+        raise RuntimeError("buyer headed probe could not start an isolated Xvfb display")
+    previous = os.environ.get("DISPLAY")
+    os.environ["DISPLAY"] = display
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = previous
+        _terminate_display_process(process)
+
+
+def _terminate_display_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 class WbBuyerSessionLockTimeout(TimeoutError):
@@ -191,7 +270,7 @@ class WbBuyerSessionAdapter:
                         "buyer_recovery_in_progress",
                         joined_run_id=str(joined.get("run_id") or ""),
                     )
-                operation = self._run_persistent_operation(nm_id=normalized_nm_id, headless=True)
+                operation = self._run_persistent_operation(nm_id=normalized_nm_id, headless=False)
                 session = self._validate_authenticated_session(
                     operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
                     persist_fingerprint=True,
@@ -259,7 +338,7 @@ class WbBuyerSessionAdapter:
                     )
                 operation = self._run_persistent_price_series_operation(
                     nm_id=normalized_nm_id,
-                    headless=True,
+                    headless=False,
                     max_reads=normalized_max_reads,
                 )
                 session = self._validate_authenticated_session(
@@ -501,19 +580,20 @@ class WbBuyerSessionAdapter:
             return dict(self.operation_probe(profile_dir, nm_id, headless))
         from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=headless,
-                locale="ru-RU",
-                viewport={"width": 1500, "height": 820},
-            )
-            try:
-                self.migrate_legacy_storage_state(context)
-                return self.probe_persistent_context(context, nm_id=nm_id)
-            finally:
-                context.close()
-                os.chmod(profile_dir, 0o700)
+        with _ephemeral_headful_display(headless=headless):
+            with sync_playwright() as playwright:
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=headless,
+                    locale="ru-RU",
+                    viewport={"width": 1500, "height": 820},
+                )
+                try:
+                    self.migrate_legacy_storage_state(context)
+                    return self.probe_persistent_context(context, nm_id=nm_id)
+                finally:
+                    context.close()
+                    os.chmod(profile_dir, 0o700)
 
     def _run_persistent_price_series_operation(
         self,
@@ -532,36 +612,37 @@ class WbBuyerSessionAdapter:
             }
         from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=headless,
-                locale="ru-RU",
-                viewport={"width": 1500, "height": 820},
-            )
-            try:
-                self.migrate_legacy_storage_state(context)
-                page = context.pages[0] if context.pages else context.new_page()
-                page.set_default_timeout(self.config.navigation_timeout_ms)
-                page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
-                session = self._probe_session_in_context(page)
-                prices: list[dict[str, Any]] = []
-                if str(session.get("status") or "") == "valid":
-                    for _attempt in range(max_reads):
-                        price = self._probe_price_in_context(page, nm_id)
-                        prices.append(dict(price))
-                        if (
-                            len(prices) >= 2
-                            and prices[-1].get("status") == "ok"
-                            and prices[-2].get("status") == "ok"
-                            and _money_or_none(prices[-1].get("authenticated_buyer_price"))
-                            == _money_or_none(prices[-2].get("authenticated_buyer_price"))
-                        ):
-                            break
-                return {"session": session, "prices": prices}
-            finally:
-                context.close()
-                os.chmod(profile_dir, 0o700)
+        with _ephemeral_headful_display(headless=headless):
+            with sync_playwright() as playwright:
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=headless,
+                    locale="ru-RU",
+                    viewport={"width": 1500, "height": 820},
+                )
+                try:
+                    self.migrate_legacy_storage_state(context)
+                    page = context.pages[0] if context.pages else context.new_page()
+                    page.set_default_timeout(self.config.navigation_timeout_ms)
+                    page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
+                    session = self._probe_session_in_context(page)
+                    prices: list[dict[str, Any]] = []
+                    if str(session.get("status") or "") == "valid":
+                        for _attempt in range(max_reads):
+                            price = self._probe_price_in_context(page, nm_id)
+                            prices.append(dict(price))
+                            if (
+                                len(prices) >= 2
+                                and prices[-1].get("status") == "ok"
+                                and prices[-2].get("status") == "ok"
+                                and _money_or_none(prices[-1].get("authenticated_buyer_price"))
+                                == _money_or_none(prices[-2].get("authenticated_buyer_price"))
+                            ):
+                                break
+                    return {"session": session, "prices": prices}
+                finally:
+                    context.close()
+                    os.chmod(profile_dir, 0o700)
 
     def migrate_legacy_storage_state(self, context: Any) -> dict[str, Any]:
         """Best-effort one-time import; the legacy JSON never becomes canonical again."""
