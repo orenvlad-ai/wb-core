@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import shlex
 import sys
 from typing import Any, Iterable
@@ -3016,6 +3017,68 @@ def _assert_workflow_contract() -> None:
     ).read_text(encoding="utf-8")
 
 
+def _assert_visible_codex_task_lifecycle_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    execution = (
+        ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
+    archived_workspace = (
+        ROOT / "docs" / "architecture" / "13_codex_curator_workspace.md"
+    ).read_text(encoding="utf-8")
+    execution_folded = re.sub(r"\s+", " ", execution.casefold())
+
+    assert "## Видимый Жизненный Цикл Codex-Задач" in execution
+    assert "единственный authoritative WBC contract" in execution
+    for source in (agents, execution):
+        folded = source.casefold()
+        for required in (
+            "WBC · <короткая тема> · К<n>",
+            "WBC · <та же короткая тема> · И<n>",
+            "без напоминания",
+            "закреп",
+            "ровно одного прямого",
+            "задача принята",
+            "вручную открепляет",
+        ):
+            assert required.casefold() in folded
+
+    for required in (
+        "n = 1 + max",
+        "К1+",
+        "И1+",
+        "не синтезируют",
+        "не закрепляет повторно",
+        "не меняет task class",
+        "не дублируют naming/pinning/unpinning/acceptance правила",
+        "не создают Gateway, Agent Orchestrator, reviewer, arbiter, watcher",
+    ):
+        assert required.casefold() in execution_folded
+
+    title_pattern = re.compile(
+        r"^WBC · (?P<topic>[^·\n]+?) · (?P<role>[КИ])(?P<index>[1-9][0-9]*)$"
+    )
+    curator = title_pattern.fullmatch("WBC · Единые имена задач · К1")
+    executor = title_pattern.fullmatch("WBC · Единые имена задач · И1")
+    successor = title_pattern.fullmatch("WBC · Единые имена задач · И2")
+    assert curator and executor and successor
+    assert curator["topic"] == executor["topic"] == successor["topic"]
+    assert (curator["role"], curator["index"]) == ("К", "1")
+    assert (executor["role"], executor["index"]) == ("И", "1")
+    assert int(successor["index"]) == int(executor["index"]) + 1
+    for invalid in (
+        "DCP · Единые имена задач · К1",
+        "WBC · Единые имена задач · К01",
+        "WBC · Единые имена задач · И1+",
+        "WBC · Другая тема · executor",
+    ):
+        assert title_pattern.fullmatch(invalid) is None
+
+    assert "находится только" in archived_workspace
+    assert "07_codex_execution_protocol.md#видимый-жизненный-цикл-codex-задач" in (
+        archived_workspace
+    )
+
+
 def _monitor_query_matches(query: str, item: dict[str, Any]) -> bool:
     """Evaluate the bounded qualifiers used by the canonical monitor regression."""
 
@@ -4173,6 +4236,7 @@ def main() -> int:
     _assert_goal_shepherd_regressions()
     _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
+    _assert_visible_codex_task_lifecycle_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()
     _assert_two_parallel_loop_roots()

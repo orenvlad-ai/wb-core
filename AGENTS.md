@@ -7,15 +7,26 @@
 Этот раздел имеет приоритет над историческими orchestration-пассажами ниже.
 Обычная задача использует простой автономный flow:
 
-1. пользователь обсуждает цель с куратором;
-2. куратор создаёт отдельную исполняемую Codex-задачу;
-3. исполнитель работает в отдельной branch/worktree, запускает targeted checks
+1. новый куратор без напоминания задаёт себе короткое полностью видимое имя
+   `WBC · <короткая тема> · К<n>` и закрепляет задачу;
+2. пользователь обсуждает цель с куратором;
+3. после согласования куратор создаёт ровно одного прямого исполнителя, задаёт
+   ему связанное имя `WBC · <та же короткая тема> · И<n>` и закрепляет задачу;
+4. исполнитель работает в отдельной branch/worktree, запускает targeted checks
    и создаёт open non-draft PR с `task:standard` и ровно одной `scope:*` label;
-4. после successful `baseline` PR получает `release:ready`;
-5. существующий GitHub Release Train повторно проверяет current head/checks,
+5. после successful `baseline` PR получает `release:ready`;
+6. существующий GitHub Release Train повторно проверяет current head/checks,
    сериализует sync/merge и выполняет применимый deploy/verify;
-6. исполнитель передаёт короткий технический отчёт, а владелец принимает
-   результат вручную.
+7. исполнитель передаёт короткий технический отчёт куратору, куратор делает
+   owner handoff; только владелец пишет `Задача принята` и вручную открепляет
+   задачи.
+
+Единственный подробный contract интерфейсных имён, нумерации, pin/unpin и
+owner acceptance находится в разделе [«Видимый Жизненный Цикл
+Codex-Задач»](docs/architecture/07_codex_execution_protocol.md#видимый-жизненный-цикл-codex-задач).
+Project/bootstrap instructions только направляют к этому `AGENTS.md` и current
+execution protocol, но не копируют шаблон как второй source of truth.
+Агенты не синтезируют owner acceptance и не открепляют задачи автоматически.
 
 `WB_CORE_ORCHESTRATION_REQUIRED=false`. Global Watcher, external orchestration
 registry, Task Passport, acceptance envelope, curator workspace automation,
