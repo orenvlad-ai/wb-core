@@ -72,6 +72,8 @@ def _run_architecture_guard() -> None:
         raise AssertionError(f"snapshot/import buyer-session architecture returned: {present}")
     if combined.count("launch_persistent_context(") < 2:
         raise AssertionError("all buyer browser paths must be persistent-profile launches")
+    if "_ephemeral_headful_display" not in source:
+        raise AssertionError("authenticated buyer-price probes must have an isolated headed display")
 
 
 def _run_profile_adapter_smoke() -> None:
@@ -136,9 +138,9 @@ def _run_profile_adapter_smoke() -> None:
                 + json.dumps(capability, ensure_ascii=False, sort_keys=True)
             )
         capability_calls = calls[capability_call_count:]
-        if len(capability_calls) != 1 or capability_calls[0][1] != NM_ID:
+        if len(capability_calls) != 1 or capability_calls[0][1] != NM_ID or capability_calls[0][2] is not False:
             raise AssertionError(
-                "exact buyer capability preflight must use one atomic persistent-price operation: "
+                "exact buyer capability preflight must use one headed atomic persistent-price operation: "
                 f"{capability_calls}"
             )
         stable_call_count = len(calls)
@@ -151,9 +153,9 @@ def _run_profile_adapter_smoke() -> None:
         ):
             raise AssertionError(f"stable buyer proof contract mismatch: {stable}")
         stable_calls = calls[stable_call_count:]
-        if len(stable_calls) != 1 or stable_calls[0][1] != NM_ID:
+        if len(stable_calls) != 1 or stable_calls[0][1] != NM_ID or stable_calls[0][2] is not False:
             raise AssertionError(
-                "stable buyer proof must keep all price reads in one persistent operation: "
+                "stable buyer proof must keep all price reads in one headed persistent operation: "
                 f"{stable_calls}"
             )
 
