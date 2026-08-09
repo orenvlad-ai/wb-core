@@ -654,13 +654,19 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                                     }
                                 ],
                                 "buyout_percent": {
-                                    "label": "Процент выкупа за 3 закрытые недели",
+                                    "label": "Расчётный выкуп (подтверждённый)",
                                     "weighted_average_pct": "83",
                                     "date_from": "2026-06-22",
                                     "date_to": "2026-07-12",
+                                    "trusted_cutoff": "2026-07-13",
                                     "business_timezone": "Asia/Yekaterinburg",
                                     "aggregation_rule": "SUM(buyoutPercent * orderCount) / SUM(orderCount)",
-                                    "status_message": "Рассчитано по доступным SKU-day значениям.",
+                                    "status_message": "Три последние закрытые недели подтверждены; используются только данные возрастом не менее 6 дней.",
+                                    "weeks": [
+                                        {"week_start": "2026-06-22", "week_end": "2026-06-28", "status": "ready", "weighted_average_pct": "80"},
+                                        {"week_start": "2026-06-29", "week_end": "2026-07-05", "status": "ready", "weighted_average_pct": "83"},
+                                        {"week_start": "2026-07-06", "week_end": "2026-07-12", "status": "ready", "weighted_average_pct": "86"},
+                                    ],
                                 },
                             },
                         },
@@ -677,6 +683,9 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             rendered_values = surface.locator(
                 '#calculationReferenceRows tr[data-calculation-reference-key="agent_remuneration"] td:not(:first-child)'
             )
+            buyout_values = surface.locator(
+                '#calculationReferenceRows tr[data-calculation-reference-key="buyout_percent_confirmed"] td:not(:first-child)'
+            )
             rendered_values.first.wait_for()
             _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
             _assert(
@@ -687,14 +696,17 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 "ровно три последние" in surface.locator("#calculationReferenceStatus").inner_text()
                 and "success" in str(surface.locator("#calculationReferenceStatus").get_attribute("class") or "")
                 and "SUM(amount) / SUM(net_revenue)" in surface.locator("#calculationReferenceRows").inner_text()
-                and surface.locator(".calculation-reference-group").count() == 1,
+                and surface.locator(".calculation-reference-group").count() == 2,
                 "settings reference exposes ready calendar status and per-row source/sign/SUM-SUM audit",
             )
             _assert(
                 surface.locator("#calculationBuyoutReferenceLabel").inner_text()
-                == "Процент выкупа за 3 закрытые недели"
+                == "Расчётный выкуп (подтверждённый)"
                 and surface.locator("#calculationBuyoutReferenceValue").inner_text() == "83%"
+                and buyout_values.all_inner_texts() == ["80%", "83%", "86%", "83%"]
                 and "2026-06-22 — 2026-07-12"
+                in surface.locator("#calculationBuyoutReferenceMeta").inner_text()
+                and "trusted cutoff: 2026-07-13"
                 in surface.locator("#calculationBuyoutReferenceMeta").inner_text()
                 and "Asia/Yekaterinburg"
                 in surface.locator("#calculationBuyoutReferenceMeta").inner_text()

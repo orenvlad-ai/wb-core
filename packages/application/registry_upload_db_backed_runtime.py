@@ -2199,6 +2199,72 @@ class RegistryUploadDbBackedRuntime:
             )
             conn.commit()
 
+    def replace_temporal_source_snapshot_window(
+        self,
+        *,
+        source_key: str,
+        date_from: str,
+        date_to: str,
+        captured_at: str,
+        exact_date_payloads: Mapping[str, Any],
+    ) -> dict[str, int]:
+        """Atomically replace one bounded source/date window."""
+
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        _validate_timestamp(captured_at, field_name="captured_at")
+        if date_to < date_from:
+            raise ValueError("date_to must be >= date_from")
+        payloads = {
+            str(snapshot_date): payload
+            for snapshot_date, payload in exact_date_payloads.items()
+        }
+        if any(
+            snapshot_date < date_from or snapshot_date > date_to
+            for snapshot_date in payloads
+        ):
+            raise ValueError("exact_date_payloads contains a date outside the bounded window")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                deleted = conn.execute(
+                    """
+                    DELETE FROM temporal_source_snapshots
+                    WHERE source_key = ?
+                      AND snapshot_date >= ?
+                      AND snapshot_date <= ?
+                    """,
+                    (source_key, date_from, date_to),
+                ).rowcount
+                for snapshot_date, payload in sorted(payloads.items()):
+                    conn.execute(
+                        """
+                        INSERT INTO temporal_source_snapshots(
+                            source_key,
+                            snapshot_date,
+                            captured_at,
+                            payload_json
+                        )
+                        VALUES(?, ?, ?, ?)
+                        """,
+                        (
+                            source_key,
+                            snapshot_date,
+                            captured_at,
+                            _serialize_temporal_source_payload(payload),
+                        ),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "deleted_snapshot_count": int(deleted or 0),
+            "saved_snapshot_count": len(payloads),
+        }
+
     def load_temporal_source_snapshot(
         self,
         *,

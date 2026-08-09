@@ -45,6 +45,7 @@ ACTIVATED_AT = "2026-04-13T12:00:03Z"
 REFRESHED_AT = "2026-04-13T12:05:00Z"
 AS_OF_DATE = "2026-04-12"
 TODAY_CURRENT_DATE = "2026-04-13"
+MATURE_BUYOUT_BOUNDARY_DATE = "2026-04-07"
 SERVER_NOW = datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc)
 CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
 ACCEPTED_CURRENT_CAPTURED_AT = "2026-04-12T15:05:00Z"
@@ -462,7 +463,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
     expected_by_source = {
         "web_source_snapshot": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "seller_funnel_snapshot": [AS_OF_DATE, TODAY_CURRENT_DATE],
-        "sales_funnel_history": [AS_OF_DATE, TODAY_CURRENT_DATE],
+        "sales_funnel_history": [MATURE_BUYOUT_BOUNDARY_DATE, AS_OF_DATE, TODAY_CURRENT_DATE],
         "prices_snapshot": [TODAY_CURRENT_DATE],
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [TODAY_CURRENT_DATE],
@@ -481,6 +482,8 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
 
 
 def _expected_request_dates(source_key: str) -> list[str]:
+    if source_key == "sales_funnel_history":
+        return [MATURE_BUYOUT_BOUNDARY_DATE, AS_OF_DATE, TODAY_CURRENT_DATE]
     if source_key in CURRENT_ONLY_SOURCE_KEYS or source_key == "spp":
         return [TODAY_CURRENT_DATE]
     if source_key == "stocks":

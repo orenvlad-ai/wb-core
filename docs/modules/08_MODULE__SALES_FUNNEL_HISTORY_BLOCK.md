@@ -26,6 +26,8 @@ related_runners:
   - "apps/sales_funnel_history_block_batching_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
+  - "apps/sheet_vitrina_v1_buyout_mature_backfill.py"
+  - "apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py"
 related_docs:
   - "00_INDEX__MODULES.md"
   - "migration/45_sales_funnel_history_block_contract.md"
@@ -72,8 +74,11 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 - Success payload также пригоден для server-owned exact-date persistence:
   - current factory-order helper split-ит `success.items[]` по `item.date`;
   - дальше каждый exact-date slice может truthfully сохраняться в `temporal_source_snapshots[source_key=sales_funnel_history]` без изменения business contract самого official-api блока.
-- Active read consumers expose normalized `buyoutPercent` without a second WB integration: Web Vitrina completes the SKU row from the same exact-date snapshots when an older ready snapshot predates the enabled metric and derives the matching daily `TOTAL|buyoutPercent` as `SUM(buyoutPercent * orderCount) / SUM(orderCount)` across enabled SKU for that date. Missing/invalid percentages and missing/zero weights are skipped, no denominator means blank, `buyoutCount` is never a weight, and legacy arithmetic `avg_buyoutPercent` stays disabled/nonpublic. Settings independently calculates the three-closed-week reference only from available `(date, nmId)` pairs that contain valid `buyoutPercent` plus positive `orderCount`.
-- The Settings reference uses `SUM(buyoutPercent * orderCount) / SUM(orderCount)` across the last three complete Monday-Sunday weeks in `Asia/Yekaterinburg`; it skips missing/invalid percentages and missing/zero orders, never weights by `buyoutCount`, never includes the current open week and does not feed a Proxy formula or a saved calculation parameter.
+- Canonical `buyoutPercent` maturity is fixed in `Asia/Yekaterinburg`: `snapshot_date <= current_business_date - 6 calendar days`, inclusive. D0..D-5 is never public. Web Vitrina overwrites every persisted SKU/TOTAL value in that immature band with blank/`—`, including old zero and non-zero values. Mature SKU projection accepts only an exact-date official snapshot whose persisted `captured_at` proves capture on/after that date's D-6 boundary and whose payload covers every enabled SKU; polluted ready rows are not a fallback. Daily `TOTAL|buyoutPercent` remains `SUM(buyoutPercent * orderCount) / SUM(orderCount)` over enabled SKU with positive orders; no valid denominator is blank, `buyoutCount` is never a weight and legacy arithmetic `avg_buyoutPercent` remains disabled/nonpublic.
+- The fixed threshold is grounded in the `2026-08-09` diagnostic: mature `2026-07-01..2026-07-21` weighted `96.22%` on `63,804` orders; live age-5 refetch `2026-08-04` weighted `96.50%` with zero anomalous SKU; age 4 weighted `92.51%` with seven anomalous SKU representing `14.5%` of order weight. The observed stabilization boundary is D-5, and the public D-6 rule deliberately retains one calendar day of safety margin instead of adding a dynamic stability estimator.
+- Each business day the ordinary refresh owns one cheap mature reconcile: inspect only D-7..D-6, request D-6 when mature proof is absent and use D-7 only as bounded catch-up. Persisted exact-date payload + capture business date + enabled-SKU coverage is the idempotency proof, so repeated same-day manual refreshes do not repeat mature upstream load. An old D-6 candidate captured while immature is replaced by the fresh official payload; after successful mature capture it is not requested again. This seam does not introduce a scheduler, watcher or orchestration state machine.
+- Settings row `Расчётный выкуп (подтверждённый)` uses the same `SUM(buyoutPercent * orderCount) / SUM(orderCount)` formula for each of exactly the latest three closed Monday-Sunday weeks and for their combined range. A week is published only when all seven dates are within the trusted cutoff and every enabled SKU-day has valid mature coverage; a required immature/missing/invalid day blanks that weekly cell, and any blank week blanks the combined cell. The current open week is always excluded and an unavailable latest week is never replaced by an older week. This reference never changes a Proxy formula, `buyout_rate` or saved calculation parameter.
+- The one-time historical official reconcile is bounded to `2026-07-22..2026-08-03` in `apps/sheet_vitrina_v1_buyout_mature_backfill.py`. Dry-run is the default and writes a private machine-readable reviewed manifest outside Git; explicit apply requires its SHA-256, exact deployed-runtime SHA marker, human approval reference, exact current targets/pre-change digest, coherent verified SQLite backup, atomic allowlisted replacement, non-target digest equality, idempotent desired-content proof and post-apply reconciliation evidence. If the official API cannot return complete coverage for an older exact date, the manifest is blocked and no persisted polluted value is treated as authoritative. Production read preflight on `2026-08-09` confirmed this current limitation: exact `2026-08-03` returns `buyoutPercent`/`orderCount`, while exact `2026-07-22` is rejected by the authoritative endpoint as exceeding its historical-day limit. Therefore the old polluted window remains publicly blank until a complete official manifest becomes possible; partial or invented restoration is forbidden.
 - This batching only removes per-request span pressure; it does **not** bypass the current live authoritative depth boundary of the upstream source.
 - If a bounded historical window is migrated from live `DATA_VITRINA`, that sheet acts only as one-time migration input for exact-date replacement/reconcile; ongoing source of truth remains official API payload + server-owned runtime snapshots.
 - If the upstream source rejects older start days relative to current business date, the server-owned consumer must surface that boundary truthfully instead of inventing backfill or approximate history.
@@ -103,12 +108,14 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 - batching/rate-limit smoke: `apps/sales_funnel_history_block_batching_smoke.py`
 - runtime/reconcile smoke: `apps/factory_order_sales_history_smoke.py`
 - bounded reconcile runner: `apps/factory_order_sales_history_reconcile.py`
+- guarded mature-buyout reconcile runner: `apps/sheet_vitrina_v1_buyout_mature_backfill.py`
 
 # 6. Какой smoke подтверждён
 
 - Artifact-backed smoke подтверждён через `apps/sales_funnel_history_block_smoke.py`.
 - Authoritative server-side smoke подтверждён через `apps/sales_funnel_history_block_http_smoke.py`.
 - Exact-date runtime split/reconcile smoke подтверждён через `apps/factory_order_sales_history_smoke.py`.
+- D-6 maturity, overwrite/idempotency/catch-up, immutable read masking, three-week fail-closed aggregation and guarded historical apply are checked by `apps/sheet_vitrina_v1_buyout_percent_smoke.py` and `apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py`.
 
 # 7. Что уже доказано по модулю
 

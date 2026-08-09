@@ -46,6 +46,7 @@ jobs:
           python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
+          python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
 
       - name: Validate warehouse recovery policy

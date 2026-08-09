@@ -472,8 +472,8 @@
         <p id="calculationReferenceStatus" class="message">Проверяем полный календарный набор недель...</p>
         <div id="calculationBuyoutReference" class="calculation-buyout-reference" role="status">
           <div>
-            <strong id="calculationBuyoutReferenceLabel">Процент выкупа за 3 закрытые недели</strong>
-            <div id="calculationBuyoutReferenceMeta" class="calculation-reference-meta">Читаем доступные SKU-day значения sales_funnel_history...</div>
+            <strong id="calculationBuyoutReferenceLabel">Расчётный выкуп (подтверждённый)</strong>
+            <div id="calculationBuyoutReferenceMeta" class="calculation-reference-meta">Только подтверждённые данные возрастом не менее 6 дней.</div>
           </div>
           <div id="calculationBuyoutReferenceValue" class="calculation-total">—</div>
         </div>
@@ -2511,10 +2511,11 @@
         const referenceStatus = String(reference && reference.status || "unavailable");
         const missingWeeks = Array.isArray(reference && reference.missing_weeks) ? reference.missing_weeks : [];
         const buyoutReference = reference && reference.buyout_percent && typeof reference.buyout_percent === "object" ? reference.buyout_percent : {};
-        calculationBuyoutReferenceLabel.textContent = String(buyoutReference.label || "Процент выкупа за 3 закрытые недели");
+        calculationBuyoutReferenceLabel.textContent = String(buyoutReference.label || "Расчётный выкуп (подтверждённый)");
         calculationBuyoutReferenceValue.textContent = formatCalculationReferencePct(buyoutReference.weighted_average_pct);
         calculationBuyoutReferenceMeta.textContent = String(buyoutReference.status_message || "Нет данных для расчёта.") +
           " Период: " + String(buyoutReference.date_from || "—") + " — " + String(buyoutReference.date_to || "—") +
+          " · trusted cutoff: " + String(buyoutReference.trusted_cutoff || "—") +
           " · " + String(buyoutReference.business_timezone || "Asia/Yekaterinburg") +
           " · " + String(buyoutReference.aggregation_rule || "SUM(buyoutPercent * orderCount) / SUM(orderCount)");
         calculationReferenceStatus.textContent = String(reference && reference.status_message || "Статус справочной выборки неизвестен.") +
@@ -2524,7 +2525,37 @@
           "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) +
           (String(week.status || "") !== "ready" ? "<span class=\"calculation-reference-week-status\">" + escapeHtml(({missing:"нет данных", partial:"неполный набор", stale:"устаревшая семантика"})[week.status] || String(week.status || "нет данных")) + "</span>" : "") + "</th>"
         )).join("") + "<th>Итог 3 недели<br><span class=\"calculation-reference-meta\">SUM / SUM</span></th></tr>";
-        const rows = Array.isArray(reference && reference.rows) ? reference.rows : [];
+        const buyoutWeeks = Array.isArray(buyoutReference.weeks) ? buyoutReference.weeks : [];
+        const buyoutWeekByRange = new Map(buyoutWeeks.map((week) => (
+          [String(week.week_start || "") + "|" + String(week.week_end || ""), week]
+        )));
+        const alignedBuyoutWeeks = weeks.map((week) => (
+          buyoutWeekByRange.get(String(week.week_start || "") + "|" + String(week.week_end || "")) || {}
+        ));
+        const buyoutWeekStatus = buyoutWeeks.map((week) => (
+          String(week.week_start || "") + " — " + String(week.week_end || "") + ": " +
+          (({ready:"подтверждена", immature:"ещё не достигла D-6", missing:"нет snapshot", partial:"неполное покрытие"})[String(week.status || "")] || String(week.status || "нет данных"))
+        )).join("; ");
+        const buyoutRow = {
+          key: "buyout_percent_confirmed",
+          group: "Справочные показатели",
+          label: String(buyoutReference.label || "Расчётный выкуп (подтверждённый)"),
+          source_fields: ["buyoutPercent", "orderCount"],
+          source_mode: "weighted",
+          sign_rule: "positive orderCount",
+          denominator: "SUM(orderCount)",
+          aggregation_rule: String(buyoutReference.aggregation_rule || "SUM(buyoutPercent * orderCount) / SUM(orderCount)"),
+          weekly_rate_pct: alignedBuyoutWeeks.map((week) => week.weighted_average_pct),
+          weekly_cell_titles: alignedBuyoutWeeks.map((week) => (
+            String(week.status || "") === "ready"
+              ? "Подтверждённая неделя: " + String(week.week_start || "—") + " — " + String(week.week_end || "—")
+              : "Неделя не опубликована: " + String(week.status || "нет полного подтверждения")
+          )),
+          weighted_average_pct: buyoutReference.weighted_average_pct,
+          note: "Только подтверждённые данные возрастом не менее 6 дней. " + buyoutWeekStatus
+        };
+        const financeRows = Array.isArray(reference && reference.rows) ? reference.rows : [];
+        const rows = [buyoutRow, ...financeRows];
         if (!rows.length) {
           calculationReferenceRows.innerHTML = "<tr><td colspan=\"" + String(weeks.length + 2) + "\">Нет канонических данных для обязательных трёх недель.</td></tr>";
           return;
@@ -2545,7 +2576,7 @@
             "<div class=\"calculation-reference-meta\">" + escapeHtml(audit) + "</div>" +
             (treatment ? "<div class=\"calculation-reference-meta\">Учёт: " + escapeHtml(treatment) + "</div>" : "") +
             (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
-            (row.weekly_rate_pct || []).map((value, index) => "<td title=\"" + escapeHtml((row.weekly_amount_rub || [])[index] == null ? "Нет полного канонического значения" : "Сумма: " + String((row.weekly_amount_rub || [])[index]) + " ₽") + "\">" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
+            (row.weekly_rate_pct || []).map((value, index) => "<td title=\"" + escapeHtml((row.weekly_cell_titles || [])[index] || ((row.weekly_amount_rub || [])[index] == null ? "Нет полного канонического значения" : "Сумма: " + String((row.weekly_amount_rub || [])[index]) + " ₽")) + "\">" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
             "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
           );
         });

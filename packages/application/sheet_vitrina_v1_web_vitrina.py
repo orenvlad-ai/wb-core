@@ -20,6 +20,7 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (
     BUYOUT_PERCENT_METRIC_KEY,
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
     aggregate_buyout_percent,
+    buyout_snapshot_is_mature,
     extend_metrics_with_buyout_percent,
     load_buyout_percent_snapshot_metrics,
 )
@@ -279,6 +280,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             source_snapshot_dates=buyout_source_dates,
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
             metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
+            current_business_date=date.fromisoformat(current_business_date_iso(now)),
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
@@ -1200,6 +1202,7 @@ def _include_buyout_percent_rows(
     source_snapshot_dates: list[str],
     enabled_config: list[ConfigV2Item],
     metric: MetricV2Item,
+    current_business_date: date,
 ) -> list[WebVitrinaContractRow]:
     """Complete SKU rows and derive the paired daily TOTAL from exact-date source truth."""
 
@@ -1211,13 +1214,27 @@ def _include_buyout_percent_rows(
     rows_by_id = {row.row_id: row for row in result}
     metrics_by_nm_id = load_buyout_percent_snapshot_metrics(
         runtime=runtime,
-        snapshot_dates=source_snapshot_dates,
+        snapshot_dates=[
+            snapshot_date
+            for snapshot_date in source_snapshot_dates
+            if buyout_snapshot_is_mature(
+                snapshot_date=snapshot_date,
+                today=current_business_date,
+            )
+        ],
         nm_ids=[item.nm_id for item in enabled_config],
+        require_mature_capture=True,
     )
 
     total_values_by_date: dict[str, Any] = {}
     total_captured_at_values: list[str] = []
     for column_date in date_columns:
+        if not buyout_snapshot_is_mature(
+            snapshot_date=column_date,
+            today=current_business_date,
+        ):
+            total_values_by_date[column_date] = ""
+            continue
         date_metrics = [
             metrics_by_nm_id.get(int(config.nm_id), {}).get(column_date)
             for config in enabled_config
@@ -1291,12 +1308,20 @@ def _include_buyout_percent_rows(
         captured_at_values: list[str] = []
         source_values = metrics_by_nm_id.get(int(config.nm_id), {})
         for column_date in date_columns:
+            # Persisted ready rows are never trusted for this metric. Immature
+            # dates and mature dates without exact authoritative evidence are
+            # blanked even when an old snapshot contains 0 or a non-zero value.
+            values_by_date[column_date] = ""
+            if not buyout_snapshot_is_mature(
+                snapshot_date=column_date,
+                today=current_business_date,
+            ):
+                continue
             snapshot_metrics = source_values.get(column_date)
             if snapshot_metrics is None or snapshot_metrics.buyout_percent is None:
                 continue
             captured_at_values.append(snapshot_metrics.captured_at)
-            if values_by_date.get(column_date) in {None, ""}:
-                values_by_date[column_date] = float(snapshot_metrics.buyout_percent)
+            values_by_date[column_date] = float(snapshot_metrics.buyout_percent)
 
         if existing is not None:
             replacement = replace(
@@ -1319,9 +1344,6 @@ def _include_buyout_percent_rows(
             result[result.index(existing)] = replacement
             rows_by_id[row_id] = replacement
             continue
-        if not any(value not in {None, ""} for value in values_by_date.values()):
-            continue
-
         added = WebVitrinaContractRow(
             row_id=row_id,
             row_order=len(result) + 1,
