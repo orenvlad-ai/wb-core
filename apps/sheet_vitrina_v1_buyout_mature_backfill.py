@@ -1,4 +1,4 @@
-"""Guarded official-API reconcile for the polluted mature buyout window."""
+"""Guarded official-API reconcile for the unproven mature buyout window."""
 
 from __future__ import annotations
 
@@ -47,8 +47,8 @@ from packages.contracts.sales_funnel_history_block import (  # noqa: E402
 
 
 SCHEMA_VERSION = "sheet_vitrina_v1_buyout_mature_backfill_v2"
-BACKFILL_DATE_FROM = "2026-07-22"
-BACKFILL_DATE_TO = "2026-08-03"
+BACKFILL_DATE_FROM = "2026-07-13"
+BACKFILL_DATE_TO = "2026-07-21"
 MAX_WINDOW_DAYS = 31
 
 
