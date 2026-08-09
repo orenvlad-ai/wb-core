@@ -41,6 +41,10 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
     LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
 )
+from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
+    BUYOUT_PERCENT_METRIC_KEY,
+    LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_incident_stocks import INCIDENT_STOCK_FACT_METRIC_KEYS  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
 from packages.application.web_vitrina_gravity_table_adapter import build_web_vitrina_gravity_table_adapter  # noqa: E402
@@ -48,6 +52,9 @@ from packages.application.web_vitrina_page_composition import build_web_vitrina_
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model  # noqa: E402
 
 STORAGE_KEY = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
+BUYOUT_LOGICAL_METRIC_ID = (
+    f"pair::{BUYOUT_PERCENT_METRIC_KEY}::{BUYOUT_PERCENT_METRIC_KEY}"
+)
 TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
     "[data-metric-display-select]"
@@ -65,6 +72,8 @@ def main() -> None:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 try:
+                    _run_buyout_pair_checks(browser, server)
+                    server.reset_user_config()
                     _run_checks(browser, server)
                 finally:
                     browser.close()
@@ -73,6 +82,9 @@ def main() -> None:
             "status": "ok",
             "checks": [
                 "v3_v4_sanitizer",
+                "buyout_total_sku_logical_pair",
+                "buyout_saved_preset_compatibility",
+                "buyout_shared_display_control",
                 "local_migration_total_basis",
                 "local_migration_scope_only_preserved",
                 "local_migration_related_preferences_preserved",
@@ -204,6 +216,122 @@ def _check_server_config_sanitizer() -> None:
         or not unified.get("migrations", {}).get("unified_presentation_v1")
     ):
         raise AssertionError(f"server sanitizer must preserve bounded v4 unified config, got {unified}")
+
+
+def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
+    server.user_config = {
+        "status": "ok",
+        "revision": 1,
+        "updated_at": "2026-06-01T10:00:00Z",
+        "config": {
+            "version": 4,
+            "presentation": {
+                "order": [BUYOUT_LOGICAL_METRIC_ID],
+                "display": {BUYOUT_LOGICAL_METRIC_ID: "shown"},
+                "manual": True,
+            },
+            "expanded_anchors": [],
+            "sku_presets": [
+                {
+                    "preset_id": "buyout",
+                    "name": "Выкуп",
+                    "metric_keys": [BUYOUT_PERCENT_METRIC_KEY],
+                }
+            ],
+            "sku_highlight_metric_keys": [],
+            "sku_metric_selection": {
+                "mode": "preset",
+                "preset_id": "buyout",
+                "all": False,
+                "metric_keys": [],
+            },
+            "migrations": {
+                "incident_effective_shown_v1": True,
+                "sku_presets_seeded_v1": True,
+                "unified_presentation_v1": True,
+            },
+        },
+    }
+    server.save_count = 0
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+
+    total_selector = (
+        f'tr[data-row-kind="total"] td[data-col-id="metric_label"]'
+        f'[data-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"]'
+    )
+    sku_selector = (
+        f'tr[data-row-kind="sku"] td[data-col-id="metric_label"]'
+        f'[data-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"]'
+    )
+    if page.locator(total_selector).count() != 1 or page.locator(sku_selector).count() < 2:
+        raise AssertionError("buyoutPercent must render one TOTAL row and current SKU rows")
+    if page.locator(f'[data-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
+        raise AssertionError("legacy avg_buyoutPercent must not render")
+    if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Выкуп":
+        raise AssertionError("saved buyout preset must survive unified pair reconciliation")
+
+    _open_sku_metric_picker(page)
+    if page.locator(f'[data-sku-metric-option="{BUYOUT_PERCENT_METRIC_KEY}"]').count() != 1:
+        raise AssertionError("SKU picker must contain exactly one logical buyoutPercent option")
+    if page.locator(f'[data-sku-metric-option="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
+        raise AssertionError("legacy TOTAL average must not duplicate the SKU picker item")
+
+    _open_metrics(page)
+    pair_row = page.locator(
+        f'[data-metric-config-row="{BUYOUT_LOGICAL_METRIC_ID}"]'
+        f'[data-total-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"]'
+        f'[data-sku-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"]'
+    )
+    if (
+        pair_row.count() != 1
+        or pair_row.get_attribute("data-metric-availability") != "common"
+        or pair_row.locator(".metrics-config-label").inner_text().strip() != "Процент выкупа"
+        or pair_row.locator(".metrics-config-scope-badge").count()
+    ):
+        raise AssertionError("TOTAL/SKU buyoutPercent must be one common logical row without scope badge")
+    if page.locator(
+        f'[data-total-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"],'
+        f'[data-sku-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]'
+    ).count():
+        raise AssertionError("legacy avg_buyoutPercent must not enter the metrics modal")
+
+    display_select = pair_row.locator("[data-metric-display-select]")
+    save_before = server.save_count
+    display_select.select_option("hidden")
+    _wait_for_server_save_count(server, save_before + 1)
+    page.wait_for_function(
+        """({totalSelector, skuSelector}) => (
+          document.querySelectorAll(totalSelector).length === 0
+          && document.querySelectorAll(skuSelector).length === 0
+        )""",
+        arg={"totalSelector": total_selector, "skuSelector": sku_selector},
+        timeout=5000,
+    )
+    saved = server.user_config["config"]
+    if (
+        saved.get("presentation", {}).get("order", []).count(BUYOUT_LOGICAL_METRIC_ID) != 1
+        or saved.get("presentation", {}).get("display", {}).get(BUYOUT_LOGICAL_METRIC_ID)
+        != "hidden"
+        or saved.get("sku_presets", [{}])[0].get("metric_keys")
+        != [BUYOUT_PERCENT_METRIC_KEY]
+    ):
+        raise AssertionError(f"paired display and preset membership must persist together, got {saved}")
+
+    save_before = server.save_count
+    display_select.select_option("shown")
+    _wait_for_server_save_count(server, save_before + 1)
+    page.wait_for_function(
+        """({totalSelector, skuSelector}) => (
+          document.querySelectorAll(totalSelector).length === 1
+          && document.querySelectorAll(skuSelector).length >= 2
+        )""",
+        arg={"totalSelector": total_selector, "skuSelector": sku_selector},
+        timeout=5000,
+    )
+    context.close()
 
 
 def _run_checks(browser, server: "FixtureServer") -> None:
@@ -740,6 +868,43 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
     start_date = NOW.date() - timedelta(days=6)
     for offset in range(7):
         snapshot_date = (start_date + timedelta(days=offset)).isoformat()
+        runtime.save_temporal_source_snapshot(
+            source_key="sales_funnel_history",
+            snapshot_date=snapshot_date,
+            captured_at=f"{snapshot_date}T12:00:00Z",
+            payload={
+                "kind": "success",
+                "date_from": snapshot_date,
+                "date_to": snapshot_date,
+                "count": 4,
+                "items": [
+                    {
+                        "date": snapshot_date,
+                        "nm_id": enabled[0].nm_id,
+                        "metric": BUYOUT_PERCENT_METRIC_KEY,
+                        "value": 0.5,
+                    },
+                    {
+                        "date": snapshot_date,
+                        "nm_id": enabled[0].nm_id,
+                        "metric": "orderCount",
+                        "value": 10,
+                    },
+                    {
+                        "date": snapshot_date,
+                        "nm_id": enabled[1].nm_id,
+                        "metric": BUYOUT_PERCENT_METRIC_KEY,
+                        "value": 0.9,
+                    },
+                    {
+                        "date": snapshot_date,
+                        "nm_id": enabled[1].nm_id,
+                        "metric": "orderCount",
+                        "value": 30,
+                    },
+                ],
+            },
+        )
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=f"{snapshot_date}T12:05:00Z",
@@ -785,6 +950,15 @@ class FixtureServer:
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
+
+    def reset_user_config(self) -> None:
+        self.user_config = {
+            "status": "missing",
+            "revision": 0,
+            "updated_at": "",
+            "config": None,
+        }
+        self.save_count = 0
 
     def __enter__(self) -> "FixtureServer":
         port = _reserve_free_port()

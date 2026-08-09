@@ -16,6 +16,7 @@ from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
 
 SALES_FUNNEL_HISTORY_SOURCE_KEY = "sales_funnel_history"
 BUYOUT_PERCENT_METRIC_KEY = "buyoutPercent"
+LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY = "avg_buyoutPercent"
 ORDER_COUNT_METRIC_KEY = "orderCount"
 BUYOUT_PERCENT_LABEL_RU = "Процент выкупа"
 THREE_CLOSED_WEEKS_BUYOUT_LABEL_RU = "Процент выкупа за 3 закрытые недели"
@@ -30,6 +31,20 @@ class BuyoutPercentSnapshotValue:
     captured_at: str
 
 
+@dataclass(frozen=True)
+class BuyoutPercentSnapshotMetrics:
+    buyout_percent: Decimal | None
+    order_count: Decimal | None
+    captured_at: str
+
+
+@dataclass(frozen=True)
+class BuyoutPercentAggregation:
+    value: Decimal | None
+    order_count_weight: Decimal
+    included_pair_count: int
+
+
 def extend_metrics_with_buyout_percent(
     metrics: Iterable[MetricV2Item],
 ) -> list[MetricV2Item]:
@@ -39,6 +54,15 @@ def extend_metrics_with_buyout_percent(
     result: list[MetricV2Item] = []
     found = False
     for metric in existing:
+        if metric.metric_key == LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY:
+            result.append(
+                replace(
+                    metric,
+                    enabled=False,
+                    show_in_data=False,
+                )
+            )
+            continue
         if metric.metric_key != BUYOUT_PERCENT_METRIC_KEY:
             result.append(metric)
             continue
@@ -78,35 +102,78 @@ def load_buyout_percent_snapshot_values(
 ) -> dict[int, dict[str, BuyoutPercentSnapshotValue]]:
     """Read official normalized buyoutPercent values from exact-date snapshots."""
 
+    metrics_by_nm_id = load_buyout_percent_snapshot_metrics(
+        runtime=runtime,
+        snapshot_dates=snapshot_dates,
+        nm_ids=nm_ids,
+    )
+    return {
+        nm_id: {
+            snapshot_date: BuyoutPercentSnapshotValue(
+                value=float(metrics.buyout_percent),
+                captured_at=metrics.captured_at,
+            )
+            for snapshot_date, metrics in values_by_date.items()
+            if metrics.buyout_percent is not None
+        }
+        for nm_id, values_by_date in metrics_by_nm_id.items()
+        if any(metrics.buyout_percent is not None for metrics in values_by_date.values())
+    }
+
+
+def load_buyout_percent_snapshot_metrics(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_dates: Sequence[str],
+    nm_ids: Iterable[int] | None = None,
+) -> dict[int, dict[str, BuyoutPercentSnapshotMetrics]]:
+    """Read valid buyoutPercent/orderCount pairs from exact-date snapshots."""
+
     requested_nm_ids = (
         {int(nm_id) for nm_id in nm_ids}
         if nm_ids is not None
         else None
     )
-    values: dict[int, dict[str, BuyoutPercentSnapshotValue]] = {}
+    values: dict[int, dict[str, BuyoutPercentSnapshotMetrics]] = {}
     for snapshot_date in dict.fromkeys(str(item) for item in snapshot_dates):
         payload, captured_at = runtime.load_temporal_source_snapshot(
             source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
             snapshot_date=snapshot_date,
         )
-        for item in _successful_snapshot_items(payload):
-            if _item_text(item, "date") != snapshot_date:
-                continue
-            if _item_text(item, "metric") != BUYOUT_PERCENT_METRIC_KEY:
-                continue
-            nm_id = _item_int(item, "nm_id")
-            value = _fraction(_item_value(item, "value"))
-            if (
-                nm_id is None
-                or value is None
-                or (requested_nm_ids is not None and nm_id not in requested_nm_ids)
-            ):
-                continue
-            values.setdefault(nm_id, {})[snapshot_date] = BuyoutPercentSnapshotValue(
-                value=float(value),
+        for nm_id, metrics in _snapshot_metrics_by_nm_id(
+            _successful_snapshot_items(payload),
+            snapshot_date=snapshot_date,
+            requested_nm_ids=requested_nm_ids,
+        ).items():
+            values.setdefault(nm_id, {})[snapshot_date] = BuyoutPercentSnapshotMetrics(
+                buyout_percent=metrics.get(BUYOUT_PERCENT_METRIC_KEY),
+                order_count=metrics.get(ORDER_COUNT_METRIC_KEY),
                 captured_at=str(captured_at or ""),
             )
     return values
+
+
+def aggregate_buyout_percent(
+    pairs: Iterable[tuple[Any, Any]],
+) -> BuyoutPercentAggregation:
+    """Return the orderCount-weighted normalized fraction for valid pairs only."""
+
+    weighted_sum = Decimal("0")
+    order_count_sum = Decimal("0")
+    included_pair_count = 0
+    for raw_buyout_percent, raw_order_count in pairs:
+        buyout_percent = _fraction(raw_buyout_percent)
+        order_count = _positive_decimal(raw_order_count)
+        if buyout_percent is None or order_count is None:
+            continue
+        weighted_sum += buyout_percent * order_count
+        order_count_sum += order_count
+        included_pair_count += 1
+    return BuyoutPercentAggregation(
+        value=(weighted_sum / order_count_sum if order_count_sum > 0 else None),
+        order_count_weight=order_count_sum,
+        included_pair_count=included_pair_count,
+    )
 
 
 def three_closed_week_keys(today: date) -> list[tuple[str, str]]:
@@ -131,9 +198,7 @@ def build_three_closed_week_buyout_reference(
 
     week_keys = three_closed_week_keys(today)
     requested_dates = list(_iter_iso_dates(week_keys[0][0], week_keys[-1][1]))
-    weighted_sum = Decimal("0")
-    order_count_sum = Decimal("0")
-    included_sku_day_count = 0
+    pairs: list[tuple[Decimal | None, Decimal | None]] = []
     available_snapshot_dates: list[str] = []
 
     for snapshot_date in requested_dates:
@@ -145,38 +210,21 @@ def build_three_closed_week_buyout_reference(
         if not items:
             continue
         available_snapshot_dates.append(snapshot_date)
-        by_nm_id: dict[int, dict[str, Decimal]] = {}
-        for item in items:
-            if _item_text(item, "date") != snapshot_date:
-                continue
-            nm_id = _item_int(item, "nm_id")
-            metric = _item_text(item, "metric")
-            if nm_id is None or metric not in {
-                BUYOUT_PERCENT_METRIC_KEY,
-                ORDER_COUNT_METRIC_KEY,
-            }:
-                continue
-            if metric == BUYOUT_PERCENT_METRIC_KEY:
-                value = _fraction(_item_value(item, "value"))
-            else:
-                value = _positive_decimal(_item_value(item, "value"))
-            if value is not None:
-                by_nm_id.setdefault(nm_id, {})[metric] = value
+        pairs.extend(
+            (
+                metrics.get(BUYOUT_PERCENT_METRIC_KEY),
+                metrics.get(ORDER_COUNT_METRIC_KEY),
+            )
+            for metrics in _snapshot_metrics_by_nm_id(
+                items,
+                snapshot_date=snapshot_date,
+            ).values()
+        )
 
-        for metrics in by_nm_id.values():
-            buyout_percent = metrics.get(BUYOUT_PERCENT_METRIC_KEY)
-            order_count = metrics.get(ORDER_COUNT_METRIC_KEY)
-            if buyout_percent is None or order_count is None:
-                continue
-            weighted_sum += buyout_percent * order_count
-            order_count_sum += order_count
-            included_sku_day_count += 1
-
-    weighted_average = (
-        weighted_sum / order_count_sum
-        if order_count_sum > 0
-        else None
-    )
+    aggregation = aggregate_buyout_percent(pairs)
+    weighted_average = aggregation.value
+    included_sku_day_count = aggregation.included_pair_count
+    order_count_sum = aggregation.order_count_weight
     return {
         "key": "buyout_percent_three_closed_weeks",
         "label": THREE_CLOSED_WEEKS_BUYOUT_LABEL_RU,
@@ -219,6 +267,34 @@ def _successful_snapshot_items(payload: Any) -> list[Any]:
         return []
     items = _item_value(candidate, "items")
     return list(items) if isinstance(items, (list, tuple)) else []
+
+
+def _snapshot_metrics_by_nm_id(
+    items: Iterable[Any],
+    *,
+    snapshot_date: str,
+    requested_nm_ids: set[int] | None = None,
+) -> dict[int, dict[str, Decimal]]:
+    by_nm_id: dict[int, dict[str, Decimal]] = {}
+    for item in items:
+        if _item_text(item, "date") != snapshot_date:
+            continue
+        nm_id = _item_int(item, "nm_id")
+        metric = _item_text(item, "metric")
+        if (
+            nm_id is None
+            or (requested_nm_ids is not None and nm_id not in requested_nm_ids)
+            or metric not in {BUYOUT_PERCENT_METRIC_KEY, ORDER_COUNT_METRIC_KEY}
+        ):
+            continue
+        value = (
+            _fraction(_item_value(item, "value"))
+            if metric == BUYOUT_PERCENT_METRIC_KEY
+            else _positive_decimal(_item_value(item, "value"))
+        )
+        if value is not None:
+            by_nm_id.setdefault(nm_id, {})[metric] = value
+    return by_nm_id
 
 
 def _item_value(item: Any, field: str) -> Any:
