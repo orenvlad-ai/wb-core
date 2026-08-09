@@ -173,6 +173,15 @@ WRITERS = [
         "lifecycle": "minimal verified compressed evidence",
     },
     {
+        "owner": "buyout_mature_backfill",
+        "source": "apps/sheet_vitrina_v1_buyout_mature_backfill.py",
+        "cadence": "human_gated_one_shot",
+        "artifact": "coherent pre-mutation SQLite copy",
+        "full_monolith": True,
+        "guard": "reviewed manifest + exact deployed SHA + approval reference",
+        "lifecycle": "private evidence retained through reconciliation",
+    },
+    {
         "owner": "promo_metric_eligibility_recompute",
         "source": "apps/promo_metric_eligibility_recompute.py",
         "cadence": "human_gated_one_shot",

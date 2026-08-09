@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
-from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME
+from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
+from packages.business_time import (
+    CANONICAL_BUSINESS_TIMEZONE_NAME,
+    business_date_from_timestamp,
+    current_business_date_iso,
+)
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
+from packages.contracts.sales_funnel_history_block import (
+    SalesFunnelHistoryItem,
+    SalesFunnelHistoryRequest,
+    SalesFunnelHistorySuccess,
+)
 
 
 SALES_FUNNEL_HISTORY_SOURCE_KEY = "sales_funnel_history"
@@ -19,10 +29,12 @@ BUYOUT_PERCENT_METRIC_KEY = "buyoutPercent"
 LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY = "avg_buyoutPercent"
 ORDER_COUNT_METRIC_KEY = "orderCount"
 BUYOUT_PERCENT_LABEL_RU = "Процент выкупа"
-THREE_CLOSED_WEEKS_BUYOUT_LABEL_RU = "Процент выкупа за 3 закрытые недели"
+CONFIRMED_BUYOUT_LABEL_RU = "Расчётный выкуп (подтверждённый)"
 BUYOUT_PERCENT_AGGREGATION_RULE = (
     "SUM(buyoutPercent * orderCount) / SUM(orderCount)"
 )
+BUYOUT_PERCENT_MATURITY_DAYS = 6
+BUYOUT_PERCENT_UPSTREAM_DEPTH_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,195 @@ class BuyoutPercentAggregation:
     value: Decimal | None
     order_count_weight: Decimal
     included_pair_count: int
+
+
+@dataclass(frozen=True)
+class MatureBuyoutCaptureResult:
+    status: str
+    business_date: str
+    trusted_cutoff: str
+    inspected_dates: tuple[str, ...]
+    requested_dates: tuple[str, ...]
+    saved_dates: tuple[str, ...]
+    failed_dates: tuple[str, ...]
+    proof_dates: tuple[str, ...]
+    requested_nm_id_count: int
+    detail: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "business_date": self.business_date,
+            "trusted_cutoff": self.trusted_cutoff,
+            "maturity_days": BUYOUT_PERCENT_MATURITY_DAYS,
+            "upstream_depth_days": BUYOUT_PERCENT_UPSTREAM_DEPTH_DAYS,
+            "inspected_dates": list(self.inspected_dates),
+            "requested_dates": list(self.requested_dates),
+            "saved_dates": list(self.saved_dates),
+            "failed_dates": list(self.failed_dates),
+            "proof_dates": list(self.proof_dates),
+            "requested_nm_id_count": self.requested_nm_id_count,
+            "detail": self.detail,
+        }
+
+
+def trusted_buyout_cutoff(today: date) -> date:
+    """Return the inclusive D-6 business-date maturity boundary."""
+
+    return today - timedelta(days=BUYOUT_PERCENT_MATURITY_DAYS)
+
+
+def buyout_snapshot_is_mature(*, snapshot_date: str, today: date) -> bool:
+    return date.fromisoformat(snapshot_date) <= trusted_buyout_cutoff(today)
+
+
+def capture_mature_buyout_percent_snapshots(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    sales_funnel_history_block: SalesFunnelHistoryBlock,
+    enabled_nm_ids: Iterable[int],
+    now: datetime,
+    captured_at_factory: Callable[[], str] | None = None,
+) -> MatureBuyoutCaptureResult:
+    """Capture only the newly mature D-6 boundary plus bounded D-7 catch-up.
+
+    A persisted snapshot proves completion only when its capture business date
+    is at least six calendar days after the snapshot date and the exact payload
+    covers every enabled SKU. This makes same-day manual refreshes idempotent
+    without introducing another scheduler or orchestration state machine.
+    """
+
+    business_date = date.fromisoformat(current_business_date_iso(now))
+    trusted_cutoff = trusted_buyout_cutoff(business_date)
+    requested_nm_ids = sorted({int(nm_id) for nm_id in enabled_nm_ids})
+    if not requested_nm_ids:
+        return MatureBuyoutCaptureResult(
+            status="skipped",
+            business_date=business_date.isoformat(),
+            trusted_cutoff=trusted_cutoff.isoformat(),
+            inspected_dates=(),
+            requested_dates=(),
+            saved_dates=(),
+            failed_dates=(),
+            proof_dates=(),
+            requested_nm_id_count=0,
+            detail="No enabled SKU targets.",
+        )
+
+    earliest_fetchable = business_date - timedelta(
+        days=BUYOUT_PERCENT_UPSTREAM_DEPTH_DAYS
+    )
+    inspected_dates = tuple(
+        _iter_iso_dates(earliest_fetchable.isoformat(), trusted_cutoff.isoformat())
+    )
+    proof_dates: list[str] = []
+    requested_dates: list[str] = []
+    for snapshot_date in inspected_dates:
+        payload, captured_at = runtime.load_temporal_source_snapshot(
+            source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+            snapshot_date=snapshot_date,
+        )
+        if mature_buyout_capture_proof(
+            payload=payload,
+            captured_at=captured_at,
+            snapshot_date=snapshot_date,
+            enabled_nm_ids=requested_nm_ids,
+        ):
+            proof_dates.append(snapshot_date)
+        else:
+            requested_dates.append(snapshot_date)
+
+    if not requested_dates:
+        return MatureBuyoutCaptureResult(
+            status="already_captured",
+            business_date=business_date.isoformat(),
+            trusted_cutoff=trusted_cutoff.isoformat(),
+            inspected_dates=inspected_dates,
+            requested_dates=(),
+            saved_dates=(),
+            failed_dates=(),
+            proof_dates=tuple(proof_dates),
+            requested_nm_id_count=len(requested_nm_ids),
+            detail="Persisted mature capture proof already covers the bounded window.",
+        )
+
+    result = sales_funnel_history_block.execute(
+        SalesFunnelHistoryRequest(
+            snapshot_type=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+            date_from=requested_dates[0],
+            date_to=requested_dates[-1],
+            nm_ids=requested_nm_ids,
+        )
+    ).result
+    exact_payloads = split_sales_funnel_success_payload_by_date(result)
+    captured_at = (
+        captured_at_factory()
+        if captured_at_factory is not None
+        else now.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    saved_dates: list[str] = []
+    failed_dates: list[str] = []
+    for snapshot_date in requested_dates:
+        exact_payload = exact_payloads.get(snapshot_date)
+        if exact_payload is None or not buyout_snapshot_has_enabled_sku_coverage(
+            exact_payload,
+            snapshot_date=snapshot_date,
+            enabled_nm_ids=set(requested_nm_ids),
+        ):
+            failed_dates.append(snapshot_date)
+            continue
+        runtime.save_temporal_source_snapshot(
+            source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+            snapshot_date=snapshot_date,
+            captured_at=captured_at,
+            payload=exact_payload,
+        )
+        saved_dates.append(snapshot_date)
+
+    return MatureBuyoutCaptureResult(
+        status="captured" if not failed_dates else "partial",
+        business_date=business_date.isoformat(),
+        trusted_cutoff=trusted_cutoff.isoformat(),
+        inspected_dates=inspected_dates,
+        requested_dates=tuple(requested_dates),
+        saved_dates=tuple(saved_dates),
+        failed_dates=tuple(failed_dates),
+        proof_dates=tuple(proof_dates),
+        requested_nm_id_count=len(requested_nm_ids),
+        detail=(
+            "Authoritative mature exact-date payload persisted."
+            if not failed_dates
+            else "Official payload did not fully cover every enabled SKU for all requested dates."
+        ),
+    )
+
+
+def mature_buyout_capture_proof(
+    *,
+    payload: Any,
+    captured_at: str | None,
+    snapshot_date: str,
+    enabled_nm_ids: Iterable[int],
+) -> bool:
+    """Prove that an exact snapshot was captured no earlier than its D-6 boundary."""
+
+    if payload is None or not captured_at:
+        return False
+    try:
+        capture_business_date = date.fromisoformat(
+            business_date_from_timestamp(str(captured_at))
+        )
+    except (TypeError, ValueError):
+        return False
+    if capture_business_date < date.fromisoformat(snapshot_date) + timedelta(
+        days=BUYOUT_PERCENT_MATURITY_DAYS
+    ):
+        return False
+    return buyout_snapshot_has_enabled_sku_coverage(
+        payload,
+        snapshot_date=snapshot_date,
+        enabled_nm_ids={int(nm_id) for nm_id in enabled_nm_ids},
+    )
 
 
 def extend_metrics_with_buyout_percent(
@@ -126,6 +327,7 @@ def load_buyout_percent_snapshot_metrics(
     runtime: RegistryUploadDbBackedRuntime,
     snapshot_dates: Sequence[str],
     nm_ids: Iterable[int] | None = None,
+    require_mature_capture: bool = False,
 ) -> dict[int, dict[str, BuyoutPercentSnapshotMetrics]]:
     """Read valid buyoutPercent/orderCount pairs from exact-date snapshots."""
 
@@ -140,6 +342,13 @@ def load_buyout_percent_snapshot_metrics(
             source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
             snapshot_date=snapshot_date,
         )
+        if require_mature_capture and not mature_buyout_capture_proof(
+            payload=payload,
+            captured_at=captured_at,
+            snapshot_date=snapshot_date,
+            enabled_nm_ids=requested_nm_ids or (),
+        ):
+            continue
         for nm_id, metrics in _snapshot_metrics_by_nm_id(
             _successful_snapshot_items(payload),
             snapshot_date=snapshot_date,
@@ -194,41 +403,117 @@ def build_three_closed_week_buyout_reference(
     runtime: RegistryUploadDbBackedRuntime,
     today: date,
 ) -> dict[str, Any]:
-    """Weight all available valid SKU-day buyout values by orderCount."""
+    """Build fail-closed weekly and combined confirmed-buyout references."""
 
     week_keys = three_closed_week_keys(today)
-    requested_dates = list(_iter_iso_dates(week_keys[0][0], week_keys[-1][1]))
-    pairs: list[tuple[Decimal | None, Decimal | None]] = []
+    trusted_cutoff = trusted_buyout_cutoff(today)
+    try:
+        current_state = runtime.load_current_state()
+    except ValueError:
+        current_state = None
+    enabled_nm_ids = {
+        int(item.nm_id)
+        for item in (current_state.config_v2 if current_state is not None else ())
+        if item.enabled
+    }
+    combined_pairs: list[tuple[Decimal | None, Decimal | None]] = []
     available_snapshot_dates: list[str] = []
-
-    for snapshot_date in requested_dates:
-        payload, _captured_at = runtime.load_temporal_source_snapshot(
-            source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
-            snapshot_date=snapshot_date,
-        )
-        items = _successful_snapshot_items(payload)
-        if not items:
-            continue
-        available_snapshot_dates.append(snapshot_date)
-        pairs.extend(
-            (
-                metrics.get(BUYOUT_PERCENT_METRIC_KEY),
-                metrics.get(ORDER_COUNT_METRIC_KEY),
+    week_results: list[dict[str, Any]] = []
+    all_weeks_ready = True
+    for week_start, week_end in week_keys:
+        week_dates = list(_iter_iso_dates(week_start, week_end))
+        week_pairs: list[tuple[Decimal | None, Decimal | None]] = []
+        missing_dates: list[str] = []
+        invalid_dates: list[str] = []
+        immature = date.fromisoformat(week_end) > trusted_cutoff
+        if immature:
+            all_weeks_ready = False
+            week_results.append(
+                _buyout_week_result(
+                    week_start=week_start,
+                    week_end=week_end,
+                    status="immature",
+                    aggregation=aggregate_buyout_percent(()),
+                    covered_day_count=0,
+                    missing_dates=[],
+                    invalid_dates=[],
+                )
             )
-            for metrics in _snapshot_metrics_by_nm_id(
-                items,
+            continue
+
+        for snapshot_date in week_dates:
+            payload, captured_at = runtime.load_temporal_source_snapshot(
+                source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
                 snapshot_date=snapshot_date,
-            ).values()
+            )
+            if payload is None:
+                missing_dates.append(snapshot_date)
+                continue
+            if not mature_buyout_capture_proof(
+                payload=payload,
+                captured_at=captured_at,
+                snapshot_date=snapshot_date,
+                enabled_nm_ids=enabled_nm_ids,
+            ):
+                invalid_dates.append(snapshot_date)
+                continue
+            available_snapshot_dates.append(snapshot_date)
+            metrics_by_nm_id = _snapshot_metrics_by_nm_id(
+                _successful_snapshot_items(payload),
+                snapshot_date=snapshot_date,
+                requested_nm_ids=enabled_nm_ids,
+            )
+            week_pairs.extend(
+                (
+                    metrics.buyout_percent,
+                    metrics.order_count,
+                )
+                for metrics in (
+                    BuyoutPercentSnapshotMetrics(
+                        buyout_percent=values.get(BUYOUT_PERCENT_METRIC_KEY),
+                        order_count=values.get(ORDER_COUNT_METRIC_KEY),
+                        captured_at=str(captured_at or ""),
+                    )
+                    for values in metrics_by_nm_id.values()
+                )
+            )
+
+        aggregation = aggregate_buyout_percent(week_pairs)
+        if missing_dates:
+            status = "missing"
+        elif invalid_dates or aggregation.value is None:
+            status = "partial"
+        else:
+            status = "ready"
+            combined_pairs.extend(week_pairs)
+        if status != "ready":
+            all_weeks_ready = False
+        week_results.append(
+            _buyout_week_result(
+                week_start=week_start,
+                week_end=week_end,
+                status=status,
+                aggregation=aggregation if status == "ready" else aggregate_buyout_percent(()),
+                covered_day_count=(
+                    len(week_dates) - len(missing_dates) - len(invalid_dates)
+                ),
+                missing_dates=missing_dates,
+                invalid_dates=invalid_dates,
+            )
         )
 
-    aggregation = aggregate_buyout_percent(pairs)
+    aggregation = (
+        aggregate_buyout_percent(combined_pairs)
+        if all_weeks_ready
+        else aggregate_buyout_percent(())
+    )
     weighted_average = aggregation.value
     included_sku_day_count = aggregation.included_pair_count
     order_count_sum = aggregation.order_count_weight
     return {
         "key": "buyout_percent_three_closed_weeks",
-        "label": THREE_CLOSED_WEEKS_BUYOUT_LABEL_RU,
-        "status": "ready" if weighted_average is not None else "unavailable",
+        "label": CONFIRMED_BUYOUT_LABEL_RU,
+        "status": "ready" if all_weeks_ready and weighted_average is not None else "unavailable",
         "weighted_average_pct": (
             _decimal_text(weighted_average * Decimal("100"))
             if weighted_average is not None
@@ -236,11 +521,10 @@ def build_three_closed_week_buyout_reference(
         ),
         "date_from": week_keys[0][0],
         "date_to": week_keys[-1][1],
-        "weeks": [
-            {"week_start": week_start, "week_end": week_end}
-            for week_start, week_end in week_keys
-        ],
+        "weeks": week_results,
         "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "maturity_days": BUYOUT_PERCENT_MATURITY_DAYS,
+        "trusted_cutoff": trusted_cutoff.isoformat(),
         "source_key": SALES_FUNNEL_HISTORY_SOURCE_KEY,
         "source_store": "temporal_source_snapshots",
         "value_metric": BUYOUT_PERCENT_METRIC_KEY,
@@ -251,10 +535,40 @@ def build_three_closed_week_buyout_reference(
         "available_snapshot_day_count": len(available_snapshot_dates),
         "available_snapshot_dates": available_snapshot_dates,
         "status_message": (
-            f"Рассчитано по {included_sku_day_count} доступным SKU-day значениям."
-            if weighted_average is not None
-            else "Нет SKU-day строк с валидными buyoutPercent и положительным orderCount."
+            "Три последние закрытые недели подтверждены; используются только данные "
+            f"возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
+            if all_weeks_ready and weighted_average is not None
+            else "Итог не опубликован: каждая из трёх последних закрытых недель должна "
+            f"быть полностью подтверждена данными возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
         ),
+    }
+
+
+def _buyout_week_result(
+    *,
+    week_start: str,
+    week_end: str,
+    status: str,
+    aggregation: BuyoutPercentAggregation,
+    covered_day_count: int,
+    missing_dates: list[str],
+    invalid_dates: list[str],
+) -> dict[str, Any]:
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "status": status,
+        "weighted_average_pct": (
+            _decimal_text(aggregation.value * Decimal("100"))
+            if aggregation.value is not None
+            else None
+        ),
+        "included_sku_day_count": aggregation.included_pair_count,
+        "order_count_weight": _decimal_text(aggregation.order_count_weight),
+        "covered_day_count": covered_day_count,
+        "required_day_count": 7,
+        "missing_dates": list(missing_dates),
+        "invalid_dates": list(invalid_dates),
     }
 
 
@@ -290,11 +604,68 @@ def _snapshot_metrics_by_nm_id(
         value = (
             _fraction(_item_value(item, "value"))
             if metric == BUYOUT_PERCENT_METRIC_KEY
-            else _positive_decimal(_item_value(item, "value"))
+            else _nonnegative_decimal(_item_value(item, "value"))
         )
         if value is not None:
             by_nm_id.setdefault(nm_id, {})[metric] = value
     return by_nm_id
+
+
+def buyout_snapshot_has_enabled_sku_coverage(
+    payload: Any,
+    *,
+    snapshot_date: str,
+    enabled_nm_ids: set[int],
+) -> bool:
+    if not enabled_nm_ids:
+        return False
+    metrics_by_nm_id = _snapshot_metrics_by_nm_id(
+        _successful_snapshot_items(payload),
+        snapshot_date=snapshot_date,
+        requested_nm_ids=enabled_nm_ids,
+    )
+    if set(metrics_by_nm_id) != enabled_nm_ids:
+        return False
+    for metrics in metrics_by_nm_id.values():
+        order_count = metrics.get(ORDER_COUNT_METRIC_KEY)
+        if order_count is None:
+            return False
+        if order_count > 0 and metrics.get(BUYOUT_PERCENT_METRIC_KEY) is None:
+            return False
+    return True
+
+
+def split_sales_funnel_success_payload_by_date(
+    payload: Any,
+) -> dict[str, SalesFunnelHistorySuccess]:
+    if _item_text(payload, "kind") != "success":
+        return {}
+    items_by_date: dict[str, list[SalesFunnelHistoryItem]] = {}
+    for item in _successful_snapshot_items(payload):
+        snapshot_date = _item_text(item, "date")
+        nm_id = _item_int(item, "nm_id")
+        metric = _item_text(item, "metric")
+        value = _finite_decimal(_item_value(item, "value"))
+        if not snapshot_date or nm_id is None or not metric or value is None:
+            continue
+        items_by_date.setdefault(snapshot_date, []).append(
+            SalesFunnelHistoryItem(
+                date=snapshot_date,
+                nm_id=nm_id,
+                metric=metric,
+                value=float(value),
+            )
+        )
+    return {
+        snapshot_date: SalesFunnelHistorySuccess(
+            kind="success",
+            date_from=snapshot_date,
+            date_to=snapshot_date,
+            count=len(items),
+            items=sorted(items, key=lambda item: (item.nm_id, item.metric)),
+        )
+        for snapshot_date, items in sorted(items_by_date.items())
+    }
 
 
 def _item_value(item: Any, field: str) -> Any:
@@ -335,6 +706,11 @@ def _fraction(value: Any) -> Decimal | None:
 def _positive_decimal(value: Any) -> Decimal | None:
     parsed = _finite_decimal(value)
     return parsed if parsed is not None and parsed > 0 else None
+
+
+def _nonnegative_decimal(value: Any) -> Decimal | None:
+    parsed = _finite_decimal(value)
+    return parsed if parsed is not None and parsed >= 0 else None
 
 
 def _iter_iso_dates(date_from: str, date_to: str) -> Iterable[str]:

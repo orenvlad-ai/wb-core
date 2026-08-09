@@ -268,6 +268,13 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
     )
     if page.locator(total_selector).count() != 1 or page.locator(sku_selector).count() < 2:
         raise AssertionError("buyoutPercent must render one TOTAL row and current SKU rows")
+    immature_cells = page.locator(
+        f'td[data-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"][data-cell-date]:not([data-cell-date=""])'
+    ).all_inner_texts()
+    if not immature_cells or any(value.strip() != "—" for value in immature_cells):
+        raise AssertionError(
+            f"immature buyoutPercent SKU/TOTAL browser cells must render dashes, got {immature_cells}"
+        )
     if page.locator(f'[data-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
         raise AssertionError("legacy avg_buyoutPercent must not render")
     if page.locator("[data-sku-metric-summary]").inner_text().strip() != "SKU-метрики: Выкуп":
@@ -737,7 +744,10 @@ def _check_sku_metric_highlights(page, server: "FixtureServer") -> None:
             .map((node) => node.getAttribute('data-sku-metric-option') || '')
             .filter(Boolean));
           return Array.from(new Set(Array.from(document.querySelectorAll(
-            '[data-table-body] tr[data-row-kind="sku"] td[data-metric-key]'
+            '[data-table-body] tr[data-row-kind="sku"] td[data-metric-key][data-cell-date]:not([data-cell-date=""])'
+          )).filter((node) => (
+            (node.textContent || '').trim() !== '—'
+            && (node.getAttribute('data-presentation-state') || '') !== 'unavailable'
           )).map((node) => node.getAttribute('data-metric-key') || '').filter((key) => optionKeys.has(key)))).slice(0, 2);
         }"""
     )

@@ -52,6 +52,7 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
     filter_archived_public_metrics,
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (
+    capture_mature_buyout_percent_snapshots,
     extend_metrics_with_buyout_percent,
 )
 from packages.application.sheet_vitrina_v1_onec_stocks import (
@@ -1052,6 +1053,60 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
+
+        mature_buyout_started = _start_refresh_phase(
+            diagnostics,
+            "mature_buyout_capture",
+            started_at=self._diagnostic_timestamp(),
+        )
+        if not selected_source_keys or "sales_funnel_history" in selected_source_keys:
+            try:
+                mature_buyout_capture = capture_mature_buyout_percent_snapshots(
+                    runtime=self.runtime,
+                    sales_funnel_history_block=self.sales_funnel_history_block,
+                    enabled_nm_ids=[item.nm_id for item in enabled_config],
+                    now=self.now_factory(),
+                    captured_at_factory=self._diagnostic_timestamp,
+                ).public()
+            except Exception as exc:  # noqa: BLE001 - ordinary refresh stays truthful and retryable.
+                mature_buyout_capture = {
+                    "status": "error",
+                    "business_date": current_date,
+                    "trusted_cutoff": (
+                        date.fromisoformat(current_date) - timedelta(days=6)
+                    ).isoformat(),
+                    "requested_nm_id_count": len(enabled_config),
+                    "detail": str(exc),
+                }
+            diagnostics["mature_buyout_capture"] = mature_buyout_capture
+            _finish_refresh_phase(
+                diagnostics,
+                mature_buyout_started,
+                finished_at=self._diagnostic_timestamp(),
+                status=(
+                    "error"
+                    if mature_buyout_capture.get("status") in {"error", "partial"}
+                    else "success"
+                ),
+            )
+            emit(
+                _format_log_event(
+                    "mature_buyout_capture",
+                    **mature_buyout_capture,
+                )
+            )
+        else:
+            diagnostics["mature_buyout_capture"] = {
+                "status": "skipped",
+                "detail": "sales_funnel_history source group is excluded",
+            }
+            _finish_refresh_phase(
+                diagnostics,
+                mature_buyout_started,
+                finished_at=self._diagnostic_timestamp(),
+                status="skipped",
+                note_kind="source_scope_excluded",
+            )
 
         effective_metrics = extend_metrics_with_buyout_percent(
             extend_metrics_with_sku_action_metrics(
