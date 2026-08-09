@@ -7,6 +7,7 @@ purpose: "Зафиксировать канонический reference по ope
 scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; current goods price/discount table and guarded edits; server-owned manual SPP tester for one nmID and exact ordered list of 1–6 prices with authenticated buyer readback, progressive compact results, history/log, execution lock and mandatory seller-tuple restore. Adaptive range/plan/refinement/threshold and scheduled SPP runs are removed."
 source_basis:
   - "packages/contracts/wb_prices_management.py"
+  - "packages/contracts/wb_price_quarantine.py"
   - "packages/contracts/wb_spp_tester.py"
   - "packages/adapters/wb_prices_management.py"
   - "packages/application/wb_prices_management.py"
@@ -15,6 +16,7 @@ source_basis:
   - "packages/adapters/registry_upload_http_entrypoint.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
   - "Official WB API docs: Prices and Discounts"
+  - "Official WB Seller instruction `Карантин цен`, updated 2026-05-18: https://seller.wildberries.ru/instructions/ru/tj/material/price-quarantine?recommended=true"
 related_modules:
   - "packages/contracts/wb_prices_management.py"
   - "packages/adapters/wb_prices_management.py"
@@ -49,7 +51,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table semantics are unchanged. `Цены → Проверка СПП` is now a manual exact-price flow; recovery remains centralized and the former plan/schedule product is removed."
+update_note: "Manual SPP and ordinary prices preview share the conservative 1.5x/33.3% inclusive seller-discounted-price quarantine contract. Selected SKU current discounted price is visible before input; risky sequences are blocked before upload and rechecked immediately before each measurement write."
 ---
 
 # 1. Идентификатор и статус
@@ -139,7 +141,7 @@ Preview route:
 - rejects empty payload, duplicate `nmID` and rows where both `price` and `discount` are absent;
 - pulls current prices from WB read endpoint;
 - calculates old/new seller price, seller discount and discounted price;
-- flags quarantine risk when new discounted price is at least 3x lower than old discounted price;
+- evaluates the shared conservative quarantine rule on exact kopecks: `new_discounted * 1.5 <= previous_discounted` (33.3% decrease or more, inclusive), and flags the concrete transition/drop percentage without changing ordinary upload semantics;
 - blocks ordinary product price edits for rows with `editableSizePrice=true`;
 - stores only a short-lived preview token under runtime state.
 
@@ -157,7 +159,11 @@ SPP tester route:
 - rejects `editableSizePrice=true` and existing quarantine at baseline;
 - requires `WB_SPP_TEST_ENABLED=true`, `WB_PRICES_WRITE_ENABLED=true`, explicit live-change confirmation and `restore_baseline=true`;
 - performs exact buyer-capability preflight on Start before any seller write and repeats it before every measurement write;
+- retries only a generic transient `probe_error`/`session_probe_error` once after a short bounded pause; explicit logout/expiry, wrong account, login redirect, security challenge, recovery/automation lock and other blocking states are never retried; only an allowlisted navigation/HTTP/Chromium diagnostic category is exposed;
+- validates fresh baseline discounted price → first requested point and every requested point → the next point using the shared 1.5x inclusive contract before creating a runnable job; risk returns controlled `422` with zero seller uploads;
 - changes only integer seller `price` while preserving current discount during measurements;
+- derives the integer seller `price` first, calculates the kopeck-exact expected `discountedPrice` after that rounding, and uses that expected value for quarantine comparisons;
+- immediately before each measurement upload reads the fresh seller tuple and quarantine again, requires the expected previous tuple, and blocks on drift, unavailable proof, current quarantine or a newly risky transition;
 - uses WB readback `discountedPrice` as actual seller price truth;
 - uses only stable authenticated buyer price for SPP and has no anonymous fallback;
 - stops remaining prices on the first error and proceeds to restore;
@@ -170,6 +176,7 @@ Restore:
 - is always required at the end of an MVP run;
 - uses direct restore only for small moves;
 - splits large downward discounted restore moves through bridge steps;
+- evaluates every planned and fresh restore bridge against the same conservative rule; bounded bridge decreases remain strictly below the 1.5x threshold;
 - requires upload success, WB readback and quarantine absence for bridge/final steps;
 - final proof requires WB price/discount/discountedPrice equal baseline and quarantine absent; buyer availability cannot block seller restore;
 - failed restore or quarantine yields `manual_restore_required` and keeps emergency restore visible.
@@ -213,7 +220,9 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 `Проверка СПП` renders a minimal monitoring/testing surface:
 - an exact authenticated buyer-price capability check; invalid auth/capability points to centralized `Настройки → Источники и сессии` and never starts recovery or exposes noVNC/launcher controls locally;
 - SKU/nmID selector sourced from current price rows / active registry;
+- the selected SKU's already-loaded current seller `discountedPrice`, with supporting original seller price and discount when available; selecting a SKU creates no additional upstream request;
 - dropdown `Сколько цен проверить` with values 1–6 and exactly that many numbered money inputs;
+- a concrete quarantine warning naming the risky transition and drop percentage; Start stays disabled for baseline→first, within-list and exact inclusive-boundary risks;
 - one `Старт проверки` button;
 - progressive five-column results: target, actual seller discounted, buyer, SPP, status;
 - compact newest-first history without raw detail expansion;
@@ -227,6 +236,8 @@ Targeted local smokes:
 - `python3 apps/wb_spp_tester_smoke.py`
 - `python3 apps/wb_spp_tester_browser_smoke.py`
 
+The targeted smokes prove selected-SKU current-price rendering, safe-sequence availability, baseline→first and within-list warnings, the exact inclusive 1.5x boundary, controlled `422` with zero upload, fresh per-write drift rejection, one transient buyer retry, explicit no-retry blockers, sanitized diagnostics and conservative restore bridges.
+
 Regression smokes:
 - `python3 apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
 - `python3 apps/sheet_vitrina_v1_ads_smoke.py`
@@ -235,7 +246,7 @@ Regression smokes:
 
 All prices management and SPP tester smokes use fake upstreams and must not call live `POST /api/v2/upload/task`.
 
-Public/live verification may open the page, read goods, run preview and inspect commit enabled/disabled state, but must not click live commit.
+Ordinary prices public verification may open the page, read goods, run preview and inspect commit enabled/disabled state, but must not click ordinary live commit. Post-deploy SPP acceptance may perform only the separately authorized single bounded safe run defined by module 42, with exact baseline capture, mandatory restore and fresh seller tuple/quarantine/lock proof.
 
 # 10. Out Of Scope
 

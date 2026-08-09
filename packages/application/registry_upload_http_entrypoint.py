@@ -2175,6 +2175,9 @@ class RegistryUploadHttpEntrypoint:
                 "reason": str((payload.get("price") or {}).get("reason") or payload.get("reason") or "")
                 if isinstance(payload.get("price"), Mapping)
                 else str(payload.get("reason") or ""),
+                "diagnostic_category": str(payload.get("diagnostic_category") or "")[:80],
+                "probe_attempts": int(payload.get("probe_attempts") or 1),
+                "probe_retry_attempted": bool(payload.get("probe_retry_attempted")),
                 "validation_nm_id": payload.get("validation_nm_id"),
                 "account_confirmed": bool(payload.get("account_confirmed")),
             },

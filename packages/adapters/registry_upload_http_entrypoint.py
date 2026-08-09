@@ -3027,6 +3027,9 @@ def _build_handler(
                             "status_tone": "danger",
                             "valid": False,
                             "reason": "buyer_session_probe_failed",
+                            "diagnostic_category": "application_failure",
+                            "probe_attempts": 1,
+                            "probe_retry_attempted": False,
                             "action": "Установить сессию",
                         },
                     )

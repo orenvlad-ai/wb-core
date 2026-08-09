@@ -21,6 +21,7 @@ from packages.application.wb_spp_tester import (  # noqa: E402
     WbSppTesterError,
     WbSppTesterSafetyConfig,
 )
+from packages.contracts.wb_price_quarantine import evaluate_wb_price_quarantine_transition  # noqa: E402
 
 PRIMARY_NM = 210183919
 BASELINE = {"price": 1000, "discount": 10, "discountedPrice": 900.0}
@@ -58,10 +59,13 @@ class FakePricesSource:
         editable_size_price: bool = False,
         quarantine: bool = False,
         refuse_restore: bool = False,
+        drift_on_goods_read: int | None = None,
     ) -> None:
         self.editable_size_price = editable_size_price
         self.quarantine = quarantine
         self.refuse_restore = refuse_restore
+        self.drift_on_goods_read = drift_on_goods_read
+        self.goods_reads = 0
         self.good = {
             "nmID": PRIMARY_NM,
             "vendorCode": "VC-PRIMARY",
@@ -91,6 +95,11 @@ class FakePricesSource:
         return {"data": {"listGoods": rows[offset : offset + limit]}, "error": False, "errorText": ""}
 
     def fetch_goods_by_nm_ids(self, nm_ids: Sequence[int]) -> Mapping[str, Any]:
+        self.goods_reads += 1
+        if self.drift_on_goods_read == self.goods_reads:
+            self.good["sizes"][0]["price"] = 1200
+            self.good["sizes"][0]["discountedPrice"] = 1080.0
+            self.good["sizes"][0]["clubDiscountedPrice"] = 1080.0
         rows = [self.good] if PRIMARY_NM in {int(value) for value in nm_ids} else []
         return {"data": {"listGoods": rows}, "error": False, "errorText": ""}
 
@@ -422,6 +431,77 @@ def _run_baseline_safety_guards() -> None:
                 raise AssertionError("unsafe baseline must perform zero seller writes")
 
 
+def _run_quarantine_sequence_guards() -> None:
+    if not evaluate_wb_price_quarantine_transition(900, 600).risky:
+        raise AssertionError("exact 1.5x boundary must be quarantined inclusively")
+    if evaluate_wb_price_quarantine_transition(900, 600.01).risky:
+        raise AssertionError("a transition below the conservative boundary must remain available")
+    for targets, expected_from, expected_to in (
+        ([599.4], "baseline", "price_1"),
+        ([810, 540], "price_1", "price_2"),
+    ):
+        with TemporaryDirectory(prefix="spp-quarantine-plan-") as raw:
+            block, source, _buyer = build_block(Path(raw))
+            try:
+                block.start(_payload(targets), actor="smoke")
+            except WbSppTesterError as exc:
+                risks = exc.payload.get("risky_transitions") or []
+                if (
+                    exc.http_status != 422
+                    or exc.payload.get("reason") != "price_quarantine_risk"
+                    or not risks
+                    or risks[0].get("from") != expected_from
+                    or risks[0].get("to") != expected_to
+                    or (risks[0].get("quarantine_transition") or {}).get("risky") is not True
+                ):
+                    raise AssertionError(f"wrong controlled quarantine error: {exc.payload}") from exc
+            else:
+                raise AssertionError(f"risky sequence must be rejected before a job starts: {targets}")
+            if source.upload_payloads:
+                raise AssertionError("controlled 422 quarantine rejection must perform zero upload_task calls")
+
+    with TemporaryDirectory(prefix="spp-quarantine-rounded-safe-") as raw:
+        block, source, _buyer = build_block(Path(raw))
+        job = block.start(_payload([600]), actor="smoke")["job"]
+        if job["status"] != "complete" or job["measurements"][0]["seller_discounted_price"] != 600.3:
+            raise AssertionError(f"integer seller-price rounding must keep the safe target available: {job}")
+        assert_restored(job, source)
+
+
+def _run_fresh_prewrite_drift_guard() -> None:
+    with TemporaryDirectory(prefix="spp-prewrite-drift-") as raw:
+        source = FakePricesSource(drift_on_goods_read=2)
+        block, _, _buyer = build_block(Path(raw), source)
+        job = block.start(_payload([810]), actor="smoke")["job"]
+        if [row["status"] for row in job["measurements"]] != ["seller_state_drift"]:
+            raise AssertionError(f"fresh seller tuple drift must block the measurement write: {job}")
+        measurement_uploads = [
+            upload for upload in source.upload_payloads
+            if upload and upload[0].get("discount") is None
+        ]
+        if measurement_uploads:
+            raise AssertionError("fresh per-write drift guard must fail before a measurement upload_task")
+        if job["status"] != "failed" or job["result_status"] != "inconclusive":
+            raise AssertionError(f"drift-blocked job must fail closed after restore: {job}")
+        assert_restored(job, source)
+
+
+def _run_restore_bridge_threshold_guard() -> None:
+    with TemporaryDirectory(prefix="spp-restore-bridge-threshold-") as raw:
+        block, source, _buyer = build_block(Path(raw))
+        public_job = block.start(_payload([1800]), actor="smoke")["job"]
+        stored_job = block._load_job(str(public_job["job_id"])) or {}  # noqa: SLF001
+        steps = (stored_job.get("restore") or {}).get("steps") or []
+        bridge_steps = [step for step in steps if step.get("kind") == "bridge"]
+        if not bridge_steps:
+            raise AssertionError(f"large downward restore must use bounded bridge steps: {steps}")
+        if any((step.get("quarantine_transition") or {}).get("risky") for step in steps):
+            raise AssertionError(f"every restore bridge must stay below the 1.5x threshold: {steps}")
+        if any((step.get("prewrite_guard") or {}).get("quarantine_transition", {}).get("risky") for step in steps):
+            raise AssertionError(f"fresh restore prewrite guards must remain conservative: {steps}")
+        assert_restored(public_job, source)
+
+
 def _run_removed_contract_guard() -> None:
     adapter = (ROOT / "packages" / "adapters" / "registry_upload_http_entrypoint.py").read_text(encoding="utf-8")
     application = (ROOT / "packages" / "application" / "registry_upload_http_entrypoint.py").read_text(encoding="utf-8")
@@ -445,6 +525,9 @@ def main() -> None:
     _run_manual_restore_required_only_when_unproved()
     _run_history_and_log_contract()
     _run_baseline_safety_guards()
+    _run_quarantine_sequence_guards()
+    _run_fresh_prewrite_drift_guard()
+    _run_restore_bridge_threshold_guard()
     _run_removed_contract_guard()
     print("wb_spp_tester_smoke: OK")
 

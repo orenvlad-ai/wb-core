@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from typing import Any, Callable, Mapping
+from urllib import parse as urllib_parse
 
 from packages.adapters.wb_buyer_session import WbBuyerSessionAdapter
 
@@ -93,12 +95,41 @@ SAFE_BUYER_REASONS = {
     "product_payload_missing",
 }
 
+TRANSIENT_CAPABILITY_STATUSES = {"probe_error", "session_probe_error"}
+TRANSIENT_CAPABILITY_REASONS = {
+    "",
+    "authenticated_price_probe_failed",
+    "buyer_session_probe_failed",
+}
+SAFE_PROBE_DIAGNOSTIC_CATEGORIES = {
+    "navigation_no_response",
+    "http_status",
+    "chromium_failure",
+    "navigation_failure",
+    "runtime_failure",
+    "application_failure",
+    "unclassified_probe_failure",
+}
+
 
 class WbBuyerSessionBlock:
     """Safe public/application surface used by HTTP and the SPP tester."""
 
-    def __init__(self, *, adapter: WbBuyerSessionAdapter | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        adapter: WbBuyerSessionAdapter | None = None,
+        sleep: Callable[[float], None] | None = None,
+        capability_retry_delay_seconds: float | None = None,
+    ) -> None:
         self.adapter = adapter or WbBuyerSessionAdapter()
+        self.sleep = sleep or time.sleep
+        configured_delay = (
+            capability_retry_delay_seconds
+            if capability_retry_delay_seconds is not None
+            else _bounded_float(os.environ.get("WB_BUYER_CAPABILITY_RETRY_DELAY_SECONDS"), default=1.0)
+        )
+        self.capability_retry_delay_seconds = max(0.1, min(5.0, float(configured_delay)))
 
     def check_session(self) -> dict[str, Any]:
         return _public_session_payload(self.adapter.check_session())
@@ -107,9 +138,12 @@ class WbBuyerSessionBlock:
         """Check authenticated identity and price in one persistent operation."""
 
         nm_id = int(self.adapter.config.validation_nm_id)
-        price = _public_price_payload(
-            self.adapter.fetch_authenticated_buyer_price(nm_id)
-        )
+        price = _public_price_payload(self.adapter.fetch_authenticated_buyer_price(nm_id))
+        first_diagnostic_category = _probe_diagnostic_category(price)
+        retry_attempted = _is_transient_capability_probe(price)
+        if retry_attempted:
+            self.sleep(self.capability_retry_delay_seconds)
+            price = _public_price_payload(self.adapter.fetch_authenticated_buyer_price(nm_id))
         price_status = str(price.get("status") or "probe_error")
         session_status = str(price.get("session_status") or "").strip()
         if not session_status and price_status.startswith("session_"):
@@ -134,6 +168,9 @@ class WbBuyerSessionBlock:
             "recovery_run_id": str(price.get("recovery_run_id") or "")[:160],
             "action": "" if session_valid else "Установить сессию",
         }
+        diagnostic_category = _probe_diagnostic_category(price)
+        if not diagnostic_category and retry_attempted and price_status == "ok":
+            diagnostic_category = first_diagnostic_category
         return {
             **session,
             "capability": "authenticated_buyer_price",
@@ -141,6 +178,9 @@ class WbBuyerSessionBlock:
             "capability_valid": price_status == "ok" and session_valid,
             "validation_nm_id": nm_id,
             "price": price,
+            "probe_attempts": 2 if retry_attempted else 1,
+            "probe_retry_attempted": retry_attempted,
+            "diagnostic_category": diagnostic_category,
         }
 
     def ensure_session(
@@ -290,8 +330,8 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "payment_context": str(raw.get("payment_context") or "unknown/mixed")[:120],
         "destination_context": dict(raw.get("destination_context") or {}) if isinstance(raw.get("destination_context"), Mapping) else {},
         "measured_at": str(raw.get("measured_at") or ""),
-        "source_method": str(raw.get("source_method") or "")[:240],
-        "source_endpoint": str(raw.get("source_endpoint") or "")[:500],
+        "source_method": _safe_source_method(raw.get("source_method")),
+        "source_endpoint": _safe_public_wb_endpoint(raw.get("source_endpoint")),
         "session_status": str(raw.get("session_status") or "")[:80],
         "session_reason": _safe_reason(raw.get("session_reason")),
         "session_checked_at": str(raw.get("session_checked_at") or "")[:100],
@@ -304,7 +344,7 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "stable_read_count": _int_or_none(raw.get("stable_read_count")),
         "proof": str(raw.get("proof") or "")[:120],
         "freshness": dict(raw.get("freshness") or {}) if isinstance(raw.get("freshness"), Mapping) else {},
-        "diagnostics": dict(raw.get("diagnostics") or {}) if isinstance(raw.get("diagnostics"), Mapping) else {},
+        "diagnostics": _public_probe_diagnostics(raw.get("diagnostics")),
     }
 
 
@@ -362,6 +402,90 @@ def _safe_reason(value: Any) -> str:
 def _safe_fingerprint(value: Any) -> str:
     text = str(value or "").lower()
     return text if len(text) == 64 and all(char in "0123456789abcdef" for char in text) else ""
+
+
+def _is_transient_capability_probe(price: Mapping[str, Any]) -> bool:
+    status = str(price.get("status") or "probe_error").strip().lower()
+    session_status = str(price.get("session_status") or "").strip().lower()
+    reason = str(price.get("reason") or "").strip().lower()
+    if status not in TRANSIENT_CAPABILITY_STATUSES:
+        return False
+    return (
+        session_status in {"", "probe_error", "session_probe_error"}
+        and reason in TRANSIENT_CAPABILITY_REASONS
+    )
+
+
+def _probe_diagnostic_category(price: Mapping[str, Any]) -> str:
+    diagnostics = price.get("diagnostics") if isinstance(price.get("diagnostics"), Mapping) else {}
+    value = str(diagnostics.get("failure_category") or "").strip().lower()
+    if value in SAFE_PROBE_DIAGNOSTIC_CATEGORIES:
+        return value
+    status = str(price.get("status") or "").strip().lower()
+    return "unclassified_probe_failure" if status in TRANSIENT_CAPABILITY_STATUSES else ""
+
+
+def _public_probe_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    category = str(value.get("failure_category") or "").strip().lower()
+    if category in SAFE_PROBE_DIAGNOSTIC_CATEGORIES:
+        result["failure_category"] = category
+    try:
+        http_status = int(value.get("http_status"))
+    except (TypeError, ValueError):
+        http_status = 0
+    if 100 <= http_status <= 599:
+        result["http_status"] = http_status
+    for key in (
+        "normal_field",
+        "wallet_field",
+        "card_field",
+        "club_field",
+        "network_primary",
+        "region_mismatch",
+        "currency_mismatch",
+    ):
+        item = value.get(key)
+        if isinstance(item, (str, int, float, bool, type(None))):
+            result[key] = item
+    return result
+
+
+def _safe_source_method(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > 240:
+        return ""
+    if not all(char.isalnum() or char in "._:-[]" for char in text):
+        return ""
+    if any(marker in text.lower() for marker in ("cookie", "token", "secret", "password")):
+        return ""
+    return text
+
+
+def _safe_public_wb_endpoint(value: Any) -> str:
+    try:
+        parsed = urllib_parse.urlparse(str(value or ""))
+    except Exception:
+        return ""
+    scheme = str(parsed.scheme or "").lower()
+    hostname = str(parsed.hostname or "").lower().rstrip(".")
+    if scheme not in {"http", "https"} or not (
+        hostname in {"wb.ru", "wildberries.ru"}
+        or hostname.endswith(".wb.ru")
+        or hostname.endswith(".wildberries.ru")
+    ):
+        return ""
+    return urllib_parse.urlunparse((scheme, hostname, parsed.path, "", "", ""))[:500]
+
+
+def _bounded_float(value: Any, *, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric if numeric >= 0 else default
 
 
 def _number_or_none(value: Any) -> float | None:

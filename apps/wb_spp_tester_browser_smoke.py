@@ -109,6 +109,50 @@ def _assert_dynamic_fields_and_validation(page) -> None:
         raise AssertionError("invalid-price explanation must be short and explicit")
 
 
+def _assert_current_price_and_quarantine_guard(page, server: "_LocalSppUiServer") -> None:
+    current_text = page.locator("[data-spp-test-current-price]").inner_text()
+    for expected in ("Текущая цена со скидкой", "900", "Исходная цена", "1 000", "Скидка продавца", "10%"):
+        if expected not in current_text.replace(" ", " "):
+            raise AssertionError(f"selected SKU current seller tuple is incomplete: {current_text}")
+
+    count = page.locator("[data-spp-test-price-count]")
+    count.select_option("1")
+    page.locator('[data-spp-test-price-index="0"]').fill("599.4")
+    warning = page.locator("[data-spp-test-quarantine-warning]")
+    if warning.is_hidden() or not page.locator("[data-spp-test-start]").is_disabled():
+        raise AssertionError("baseline-to-first quarantine risk must be visible and disable Start")
+    warning_text = warning.inner_text()
+    for expected in ("Текущая цена → Цена 1", "33,40%", "33,3%"):
+        if expected not in warning_text:
+            raise AssertionError(f"baseline transition warning is not concrete: {warning_text}")
+
+    upload_count = len(server.spp_prices_source.upload_payloads)
+    response = page.request.post(
+        server.base_url + "/v1/sheet-vitrina-v1/prices/spp-test/start",
+        data={
+            "nmID": PRIMARY_NM,
+            "price_count": 1,
+            "prices": [599.4],
+            "confirm_live_price_change": True,
+            "restore_baseline": True,
+        },
+    )
+    payload = response.json()
+    if response.status != 422 or payload.get("reason") != "price_quarantine_risk":
+        raise AssertionError(f"direct risky POST must return controlled 422: {response.status} {payload}")
+    if len(server.spp_prices_source.upload_payloads) != upload_count:
+        raise AssertionError("direct risky POST must call no upload_task")
+
+    count.select_option("2")
+    page.locator('[data-spp-test-price-index="0"]').fill("810")
+    page.locator('[data-spp-test-price-index="1"]').fill("540")
+    warning_text = warning.inner_text()
+    if warning.is_hidden() or "Цена 1 → Цена 2" not in warning_text or "33,33%" not in warning_text:
+        raise AssertionError(f"within-list exact boundary must be blocked explicitly: {warning_text}")
+    if not page.locator("[data-spp-test-start]").is_disabled():
+        raise AssertionError("within-list quarantine risk must disable Start")
+
+
 def _assert_progressive_run(page, server: "_LocalSppUiServer") -> None:
     page.locator("[data-spp-test-price-count]").select_option("2")
     page.locator('[data-spp-test-price-index="0"]').fill("810")
@@ -204,6 +248,7 @@ def main() -> None:
                 _open_manual_panel(page, server.base_url)
                 _assert_minimal_surface(page)
                 _assert_dynamic_fields_and_validation(page)
+                _assert_current_price_and_quarantine_guard(page, server)
                 _assert_progressive_run(page, server)
                 if "Текущие цены" not in page.locator("[data-prices-panel]").inner_text():
                     raise AssertionError("the neighboring current-prices subtab regressed")
