@@ -18,8 +18,10 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (
     BUYOUT_PERCENT_METRIC_KEY,
+    LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
+    aggregate_buyout_percent,
     extend_metrics_with_buyout_percent,
-    load_buyout_percent_snapshot_values,
+    load_buyout_percent_snapshot_metrics,
 )
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_incident_stocks import (
@@ -1199,15 +1201,85 @@ def _include_buyout_percent_rows(
     enabled_config: list[ConfigV2Item],
     metric: MetricV2Item,
 ) -> list[WebVitrinaContractRow]:
-    """Complete old ready snapshots from the accepted exact-date source seam."""
+    """Complete SKU rows and derive the paired daily TOTAL from exact-date source truth."""
 
-    result = list(rows)
+    result = [
+        row
+        for row in rows
+        if row.metric_key != LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY
+    ]
     rows_by_id = {row.row_id: row for row in result}
-    values_by_nm_id = load_buyout_percent_snapshot_values(
+    metrics_by_nm_id = load_buyout_percent_snapshot_metrics(
         runtime=runtime,
         snapshot_dates=source_snapshot_dates,
         nm_ids=[item.nm_id for item in enabled_config],
     )
+
+    total_values_by_date: dict[str, Any] = {}
+    total_captured_at_values: list[str] = []
+    for column_date in date_columns:
+        date_metrics = [
+            metrics_by_nm_id.get(int(config.nm_id), {}).get(column_date)
+            for config in enabled_config
+        ]
+        aggregation = aggregate_buyout_percent(
+            (
+                (snapshot_metrics.buyout_percent, snapshot_metrics.order_count)
+                if snapshot_metrics is not None
+                else (None, None)
+            )
+            for snapshot_metrics in date_metrics
+        )
+        total_values_by_date[column_date] = (
+            float(aggregation.value)
+            if aggregation.value is not None
+            else ""
+        )
+        if aggregation.value is not None:
+            total_captured_at_values.extend(
+                snapshot_metrics.captured_at
+                for snapshot_metrics in date_metrics
+                if snapshot_metrics is not None and snapshot_metrics.captured_at
+            )
+
+    total_row_id = f"TOTAL|{BUYOUT_PERCENT_METRIC_KEY}"
+    existing_total = rows_by_id.get(total_row_id)
+    total_row = WebVitrinaContractRow(
+        row_id=total_row_id,
+        row_order=(existing_total.row_order if existing_total is not None else len(result) + 1),
+        scope_kind="TOTAL",
+        scope_key="TOTAL",
+        scope_label="ИТОГО",
+        metric_key=BUYOUT_PERCENT_METRIC_KEY,
+        metric_label=metric.label_ru,
+        row_last_updated_at=max(
+            [
+                value
+                for value in [
+                    existing_total.row_last_updated_at if existing_total is not None else "",
+                    *total_captured_at_values,
+                ]
+                if value
+            ],
+            default="",
+        ),
+        section=metric.section,
+        group=None,
+        nm_id=None,
+        format=metric.format,
+        values_by_date=total_values_by_date,
+    )
+    if existing_total is not None:
+        result[result.index(existing_total)] = total_row
+    else:
+        total_indexes = [
+            index
+            for index, row in enumerate(result)
+            if row.scope_kind == "TOTAL"
+        ]
+        result.insert(total_indexes[-1] + 1 if total_indexes else 0, total_row)
+    rows_by_id[total_row_id] = total_row
+
     for config in sorted(enabled_config, key=lambda item: item.display_order):
         row_id = f"SKU:{config.nm_id}|{BUYOUT_PERCENT_METRIC_KEY}"
         existing = rows_by_id.get(row_id)
@@ -1217,14 +1289,14 @@ def _include_buyout_percent_rows(
             else {column_date: "" for column_date in date_columns}
         )
         captured_at_values: list[str] = []
-        source_values = values_by_nm_id.get(int(config.nm_id), {})
+        source_values = metrics_by_nm_id.get(int(config.nm_id), {})
         for column_date in date_columns:
-            snapshot_value = source_values.get(column_date)
-            if snapshot_value is None:
+            snapshot_metrics = source_values.get(column_date)
+            if snapshot_metrics is None or snapshot_metrics.buyout_percent is None:
                 continue
-            captured_at_values.append(snapshot_value.captured_at)
+            captured_at_values.append(snapshot_metrics.captured_at)
             if values_by_date.get(column_date) in {None, ""}:
-                values_by_date[column_date] = snapshot_value.value
+                values_by_date[column_date] = float(snapshot_metrics.buyout_percent)
 
         if existing is not None:
             replacement = replace(

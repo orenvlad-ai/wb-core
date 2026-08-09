@@ -25,6 +25,8 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_AGGREGATION_RULE,
     BUYOUT_PERCENT_METRIC_KEY,
+    LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
+    aggregate_buyout_percent,
     build_three_closed_week_buyout_reference,
     extend_metrics_with_buyout_percent,
     three_closed_week_keys,
@@ -69,9 +71,10 @@ def main() -> None:
         )
         if source_metric.enabled:
             raise AssertionError("fixture must retain the historical disabled registry flag")
+        effective_metrics = extend_metrics_with_buyout_percent(current_state.metrics_v2)
         effective_metric = next(
             item
-            for item in extend_metrics_with_buyout_percent(current_state.metrics_v2)
+            for item in effective_metrics
             if item.metric_key == BUYOUT_PERCENT_METRIC_KEY
         )
         if (
@@ -81,6 +84,15 @@ def main() -> None:
             or effective_metric.format != "percent"
         ):
             raise AssertionError(f"buyoutPercent must be effective-visible, got {effective_metric}")
+        legacy_average = next(
+            item
+            for item in effective_metrics
+            if item.metric_key == LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY
+        )
+        if legacy_average.enabled or legacy_average.show_in_data:
+            raise AssertionError(
+                f"legacy arithmetic average must remain nonpublic, got {legacy_average}"
+            )
 
         enabled_skus = [item for item in current_state.config_v2 if item.enabled]
         first_nm_id = enabled_skus[0].nm_id
@@ -90,7 +102,10 @@ def main() -> None:
             "2026-08-04",
             [
                 _item("2026-08-04", first_nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.55),
+                _item("2026-08-04", first_nm_id, "orderCount", 10),
+                _item("2026-08-04", first_nm_id, "buyoutCount", 999999),
                 _item("2026-08-04", second_nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.7),
+                _item("2026-08-04", second_nm_id, "orderCount", 30),
             ],
         )
         _save_snapshot(
@@ -98,6 +113,7 @@ def main() -> None:
             "2026-08-05",
             [
                 _item("2026-08-05", first_nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.65),
+                _item("2026-08-05", first_nm_id, "orderCount", 0),
                 _item("2026-08-05", second_nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.75),
             ],
         )
@@ -114,8 +130,21 @@ def main() -> None:
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
         )
         rows_by_id = {row.row_id: row for row in contract.rows}
+        total_row = rows_by_id[f"TOTAL|{BUYOUT_PERCENT_METRIC_KEY}"]
         first_row = rows_by_id[f"SKU:{first_nm_id}|{BUYOUT_PERCENT_METRIC_KEY}"]
         second_row = rows_by_id[f"SKU:{second_nm_id}|{BUYOUT_PERCENT_METRIC_KEY}"]
+        if total_row.values_by_date != {"2026-08-04": 0.6625, "2026-08-05": ""}:
+            raise AssertionError(
+                "daily TOTAL must be orderCount-weighted and blank without a denominator, "
+                f"got {total_row.values_by_date}"
+            )
+        if (
+            total_row.scope_kind != "TOTAL"
+            or total_row.metric_key != BUYOUT_PERCENT_METRIC_KEY
+            or total_row.metric_label != "Процент выкупа"
+            or total_row.format != "percent"
+        ):
+            raise AssertionError(f"paired TOTAL presentation mismatch: {total_row}")
         if first_row.values_by_date != {"2026-08-04": 0.55, "2026-08-05": 0.65}:
             raise AssertionError(f"first SKU buyout values mismatch: {first_row}")
         if second_row.values_by_date != {"2026-08-04": 0.7, "2026-08-05": 0.75}:
@@ -126,6 +155,28 @@ def main() -> None:
             or first_row.format != "percent"
         ):
             raise AssertionError(f"buyoutPercent presentation mismatch: {first_row}")
+        if any(
+            row.metric_key == LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY
+            for row in contract.rows
+        ):
+            raise AssertionError("legacy avg_buyoutPercent must not enter the public read contract")
+
+        empty_aggregation = aggregate_buyout_percent(
+            [
+                (1.2, 100),
+                (0.5, 0),
+                (0.8, None),
+                (None, 20),
+            ]
+        )
+        if (
+            empty_aggregation.value is not None
+            or empty_aggregation.order_count_weight != 0
+            or empty_aggregation.included_pair_count != 0
+        ):
+            raise AssertionError(
+                f"invalid/missing/zero-weight pairs must yield blank aggregation, got {empty_aggregation}"
+            )
 
         _seed_three_closed_week_reference(
             runtime,
@@ -196,6 +247,8 @@ def main() -> None:
             raise AssertionError("Proxy formula changed while adding the buyout display")
 
         print("buyout_percent_metric_effective: ok -> SKU percent")
+        print("buyout_percent_daily_total: ok ->", total_row.values_by_date)
+        print("buyout_percent_legacy_average_nonpublic: ok")
         print("buyout_percent_vitrina_snapshot_projection: ok ->", first_row.values_by_date)
         print("buyout_percent_three_closed_weeks: ok ->", reference["weighted_average_pct"])
         print("buyout_percent_current_week_excluded: ok ->", reference["date_to"])

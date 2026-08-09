@@ -107,7 +107,7 @@ def main() -> None:
         if payload.page_route != "/sheet-vitrina-v1/vitrina" or payload.read_route != "/v1/sheet-vitrina-v1/web-vitrina":
             raise AssertionError(f"route fixation mismatch, got {payload}")
 
-        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 13:
+        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 14:
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")

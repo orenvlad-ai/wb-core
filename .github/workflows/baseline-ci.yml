@@ -71,6 +71,9 @@ jobs:
       - name: Install Chromium for projection UI smoke
         run: python3 -m playwright install chromium
 
+      - name: Validate paired buyout metric presentation
+        run: python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+
       - name: Validate maintenance write-barrier browser state
         run: python3 apps/business_data_write_barrier_browser_smoke.py
 

@@ -370,6 +370,7 @@ def main() -> None:
         expected_row_ids = [
             "TOTAL|total_view_count",
             "TOTAL|total_orderSum",
+            "TOTAL|buyoutPercent",
             f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted",
             f"SKU:{enabled[0].nm_id}|avg_addToCartConversion",
             f"SKU:{enabled[1].nm_id}|avg_price_seller_discounted",
