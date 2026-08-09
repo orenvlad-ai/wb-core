@@ -24,6 +24,7 @@ from apps.sheet_vitrina_v1_buyout_mature_backfill import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     DB_FILENAME,
     RegistryUploadDbBackedRuntime,
+    _SCHEMA_READY_KEYS,
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_METRIC_KEY,
@@ -160,6 +161,10 @@ def main() -> None:
         else:
             raise AssertionError("wrong manifest hash unexpectedly applied")
 
+        # Production apply runs in a new process.  Force the same first-call
+        # schema path so the smoke catches an implicit schema transaction
+        # colliding with the explicit bounded BEGIN IMMEDIATE.
+        _SCHEMA_READY_KEYS.clear()
         applied = run_backfill(
             runtime_dir=runtime_dir,
             evidence_dir=evidence_dir,
