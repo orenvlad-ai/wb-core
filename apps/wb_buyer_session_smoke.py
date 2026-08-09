@@ -11,6 +11,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 from typing import Any, Mapping
 import zipfile
 
@@ -47,6 +48,7 @@ NM_ID = 210183919
 def main() -> None:
     _run_architecture_guard()
     _run_profile_adapter_smoke()
+    _run_capability_retry_smoke()
     _run_security_challenge_classification_smoke()
     _run_price_extraction_smoke()
     _run_recovery_persistent_e2e()
@@ -247,6 +249,124 @@ def _run_security_challenge_classification_smoke() -> None:
         raise AssertionError(f"WB 498 must remain a truthful session challenge: {session}")
     if surface != {"state": "human", "reason": "buyer_security_challenge"}:
         raise AssertionError(f"central recovery must keep the challenge window alive: {surface}")
+
+
+def _run_capability_retry_smoke() -> None:
+    class SequenceAdapter:
+        def __init__(self, results: list[Mapping[str, Any]]) -> None:
+            self.config = SimpleNamespace(validation_nm_id=NM_ID)
+            self.results = [dict(item) for item in results]
+            self.calls = 0
+
+        def fetch_authenticated_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+            if int(nm_id) != NM_ID:
+                raise AssertionError("capability retry used an unexpected validation nmID")
+            index = min(self.calls, len(self.results) - 1)
+            self.calls += 1
+            return dict(self.results[index])
+
+    transient = {
+        "status": "probe_error",
+        "reason": "authenticated_price_probe_failed",
+        "session_status": "probe_error",
+        "diagnostics": {
+            "failure_category": "navigation_no_response",
+            "raw_payload": "must-not-leak",
+            "cookie": "must-not-leak",
+            "internal_path": "/opt/private/profile",
+        },
+        "source_endpoint": "file:///opt/private/profile",
+    }
+    success = {
+        **_ok_price(NM_ID),
+        "session_status": "valid",
+        "session_reason": "buyer_session_valid",
+        "session_fingerprint": "a" * 64,
+        "account_fingerprint_available": True,
+        "authenticated_session_proof": True,
+        "persistent_profile": True,
+    }
+    recovered_adapter = SequenceAdapter([transient, success])
+    delays: list[float] = []
+    recovered = WbBuyerSessionBlock(
+        adapter=recovered_adapter,  # type: ignore[arg-type]
+        sleep=lambda seconds: delays.append(float(seconds)),
+        capability_retry_delay_seconds=0.25,
+    ).check_spp_capability()
+    if (
+        recovered_adapter.calls != 2
+        or delays != [0.25]
+        or recovered.get("capability_valid") is not True
+        or recovered.get("probe_retry_attempted") is not True
+        or recovered.get("probe_attempts") != 2
+        or recovered.get("diagnostic_category") != "navigation_no_response"
+    ):
+        raise AssertionError(f"one bounded transient retry must recover capability: {recovered}")
+    recovered_json = json.dumps(recovered, ensure_ascii=False)
+    for forbidden in ("must-not-leak", "/opt/private", "raw_payload", "cookie"):
+        if forbidden in recovered_json:
+            raise AssertionError(f"capability retry payload leaked {forbidden!r}: {recovered_json}")
+
+    repeated_adapter = SequenceAdapter([
+        transient,
+        {**transient, "diagnostics": {"failure_category": "chromium_failure", "secret": "must-not-leak"}},
+    ])
+    repeated = WbBuyerSessionBlock(
+        adapter=repeated_adapter,  # type: ignore[arg-type]
+        sleep=lambda _seconds: None,
+        capability_retry_delay_seconds=0,
+    ).check_spp_capability()
+    if (
+        repeated_adapter.calls != 2
+        or repeated.get("capability_valid") is not False
+        or repeated.get("probe_attempts") != 2
+        or repeated.get("diagnostic_category") != "chromium_failure"
+    ):
+        raise AssertionError(f"repeated generic failure must stop after one retry: {repeated}")
+
+    explicit_states = (
+        ("expired", "expired", "buyer_session_expired"),
+        ("logged_out", "logged_out", "buyer_login_required"),
+        ("session_expired", "expired", "buyer_login_required"),
+        ("wrong_account", "wrong_account", "buyer_account_fingerprint_mismatch"),
+        ("login_redirect", "login_redirect", "buyer_login_redirect"),
+        ("security_challenge", "security_challenge", "buyer_security_challenge"),
+        ("session_recovery_running", "recovery_running", "buyer_recovery_in_progress"),
+        ("probe_error", "recovery_running", "buyer_session_automation_busy"),
+        ("probe_error", "", "buyer_session_automation_busy"),
+    )
+    for status, session_status, reason in explicit_states:
+        adapter = SequenceAdapter([{
+            "status": status,
+            "session_status": session_status,
+            "reason": reason,
+            "diagnostics": {"failure_category": "runtime_failure"},
+        }])
+        result = WbBuyerSessionBlock(
+            adapter=adapter,  # type: ignore[arg-type]
+            sleep=lambda _seconds: (_ for _ in ()).throw(AssertionError("explicit blocker was retried")),
+            capability_retry_delay_seconds=0,
+        ).check_spp_capability()
+        if adapter.calls != 1 or result.get("probe_retry_attempted") is not False:
+            raise AssertionError(f"explicit capability blocker must not be retried: {status} {result}")
+
+    sanitized_adapter = SequenceAdapter([{
+        **transient,
+        "source_method": "/Users/private/browser-profile",
+        "source_endpoint": "https://user:password@www.wildberries.ru/catalog/1/detail.aspx?token=secret",
+        "diagnostics": {},
+    }])
+    sanitized = WbBuyerSessionBlock(
+        adapter=sanitized_adapter,  # type: ignore[arg-type]
+        sleep=lambda _seconds: None,
+        capability_retry_delay_seconds=0,
+    ).check_spp_capability()
+    sanitized_json = json.dumps(sanitized, ensure_ascii=False)
+    if sanitized.get("diagnostic_category") != "unclassified_probe_failure":
+        raise AssertionError(f"generic failure must keep a bounded diagnostic category: {sanitized}")
+    for forbidden in ("/Users/private", "user:password", "token=secret"):
+        if forbidden in sanitized_json:
+            raise AssertionError(f"sanitized capability payload leaked {forbidden!r}: {sanitized_json}")
 
 
 def _run_price_extraction_smoke() -> None:

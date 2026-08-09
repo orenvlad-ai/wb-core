@@ -291,8 +291,13 @@ class WbBuyerSessionAdapter:
                 "buyer_session_automation_busy",
                 joined_run_id=str(joined.get("run_id") or ""),
             )
-        except Exception:
-            return self._price_error(normalized_nm_id, "probe_error", "authenticated_price_probe_failed")
+        except Exception as exc:
+            return self._price_error(
+                normalized_nm_id,
+                "probe_error",
+                "authenticated_price_probe_failed",
+                diagnostics=_probe_failure_diagnostics(exc),
+            )
 
         return self._build_price_result(
             normalized_nm_id,
@@ -365,8 +370,13 @@ class WbBuyerSessionAdapter:
                 "buyer_session_automation_busy",
                 joined_run_id=str(joined.get("run_id") or ""),
             )
-        except Exception:
-            return self._price_error(normalized_nm_id, "probe_error", "authenticated_price_probe_failed")
+        except Exception as exc:
+            return self._price_error(
+                normalized_nm_id,
+                "probe_error",
+                "authenticated_price_probe_failed",
+                diagnostics=_probe_failure_diagnostics(exc),
+            )
 
         results = [
             self._build_price_result(
@@ -543,7 +553,11 @@ class WbBuyerSessionAdapter:
     ) -> dict[str, Any]:
         status = str(raw.get("status") or "probe_error")
         if status != "valid":
-            return self._session_result(status, reason=str(raw.get("reason") or f"buyer_session_{status}"))
+            return self._session_result(
+                status,
+                reason=str(raw.get("reason") or f"buyer_session_{status}"),
+                diagnostics=raw.get("diagnostics") if isinstance(raw.get("diagnostics"), Mapping) else {},
+            )
         identity_material = _canonical_account_identity(raw.get("identity_material"))
         if not identity_material:
             return self._session_result(
@@ -761,8 +775,22 @@ class WbBuyerSessionAdapter:
         normalized_path = parsed.path.rstrip("/").lower()
         if not _is_wb_host(parsed.hostname) or not (normalized_path == "/lk" or normalized_path.startswith("/lk/")):
             return {"status": "login_redirect", "reason": "buyer_login_redirect"}
-        if response is None or int(getattr(response, "status", 0) or 0) >= 400:
-            return {"status": "probe_error", "reason": "buyer_session_probe_failed"}
+        if response is None:
+            return {
+                "status": "probe_error",
+                "reason": "buyer_session_probe_failed",
+                "diagnostics": {"failure_category": "navigation_no_response"},
+            }
+        response_status = int(getattr(response, "status", 0) or 0)
+        if response_status >= 400:
+            return {
+                "status": "probe_error",
+                "reason": "buyer_session_probe_failed",
+                "diagnostics": {
+                    "failure_category": "http_status",
+                    "http_status": response_status,
+                },
+            }
         return {
             "status": "valid",
             "reason": "buyer_session_valid",
@@ -789,7 +817,10 @@ class WbBuyerSessionAdapter:
                 return
 
         page.on("response", capture)
-        page.goto(self.config.product_url_template.format(nm_id=nm_id), wait_until="domcontentloaded")
+        navigation_response = page.goto(
+            self.config.product_url_template.format(nm_id=nm_id),
+            wait_until="domcontentloaded",
+        )
         page.wait_for_timeout(self.config.settle_timeout_ms)
         url = str(page.url or "")
         body = _safe_page_text(page)
@@ -803,6 +834,22 @@ class WbBuyerSessionAdapter:
             result.pop("source_score", None)
             result["measured_at"] = self._now_text()
             return result
+        if navigation_response is None:
+            return {
+                "status": "probe_error",
+                "reason": "authenticated_price_probe_failed",
+                "diagnostics": {"failure_category": "navigation_no_response"},
+            }
+        response_status = int(getattr(navigation_response, "status", 0) or 0)
+        if response_status >= 400:
+            return {
+                "status": "probe_error",
+                "reason": "authenticated_price_probe_failed",
+                "diagnostics": {
+                    "failure_category": "http_status",
+                    "http_status": response_status,
+                },
+            }
         return {"status": "price_missing", "reason": "authenticated_network_price_missing"}
 
     def _fingerprint(self, identity_material: Any) -> str:
@@ -869,6 +916,7 @@ class WbBuyerSessionAdapter:
         session_fingerprint: str = "",
         account_confirmed: bool = False,
         recovery_run_id: str = "",
+        diagnostics: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "contract_name": "wb_buyer_session_status_v1",
@@ -881,6 +929,7 @@ class WbBuyerSessionAdapter:
             "authenticated_session_proof": status == "valid",
             "persistent_profile": True,
             "recovery_run_id": recovery_run_id,
+            "diagnostics": _safe_diagnostics(diagnostics or {}),
         }
 
     def _price_error(
@@ -916,7 +965,14 @@ class WbBuyerSessionAdapter:
             "persistent_profile": True,
             "recovery_run_id": joined_run_id,
             "freshness": {"live_read": False, "stability": "unavailable"},
-            "diagnostics": _safe_diagnostics(diagnostics or {}),
+            "diagnostics": _safe_diagnostics({
+                **(
+                    dict((session or {}).get("diagnostics") or {})
+                    if isinstance((session or {}).get("diagnostics"), Mapping)
+                    else {}
+                ),
+                **dict(diagnostics or {}),
+            }),
         }
 
     def _now_text(self) -> str:
@@ -1198,8 +1254,23 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
         "network_primary",
         "region_mismatch",
         "currency_mismatch",
+        "failure_category",
+        "http_status",
     }
     return {str(key): item for key, item in value.items() if str(key) in allowed and isinstance(item, (str, int, float, bool, type(None)))}
+
+
+def _probe_failure_diagnostics(exc: Exception) -> dict[str, str]:
+    name = type(exc).__name__.lower()
+    module = type(exc).__module__.lower()
+    message = str(exc).lower()
+    if "playwright" in module or any(marker in name or marker in message for marker in ("chromium", "browser", "targetclosed")):
+        category = "chromium_failure"
+    elif "timeout" in name or "navigation" in message or "net::err" in message:
+        category = "navigation_failure"
+    else:
+        category = "runtime_failure"
+    return {"failure_category": category}
 
 
 def _first_query(query: Mapping[str, list[str]], *keys: str) -> str:

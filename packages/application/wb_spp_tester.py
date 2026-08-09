@@ -31,6 +31,10 @@ from packages.application.wb_prices_management import (
 )
 from packages.application.wb_buyer_session import WbBuyerSessionBlock
 from packages.contracts.wb_buyer_session import WbAuthenticatedBuyerPriceSource
+from packages.contracts.wb_price_quarantine import (
+    WB_QUARANTINE_RATIO,
+    evaluate_wb_price_quarantine_transition,
+)
 from packages.contracts.wb_spp_tester import (
     SPP_TEST_ACTIVE_STATUSES,
     SPP_TEST_CONTRACT_PREFIX,
@@ -49,9 +53,11 @@ TECH_LOG_LABELS = {
     "start_preflight": "Проверка бота",
     "start_preflight_failed": "Проверка бота",
     "baseline_failed": "Baseline",
+    "sequence_quarantine_blocked": "Карантин",
     "job_start": "Baseline",
     "measurement_started": "Цена",
     "measurement_buyer_session_blocked": "Проверка бота",
+    "measurement_prewrite_guard_blocked": "Карантин",
     "wb_upload_task": "Запись цены",
     "wb_upload_task_error": "Запись цены",
     "wb_prices_readback": "WB readback",
@@ -231,6 +237,30 @@ class WbSppTesterBlock:
                 )
                 exc.payload["log_events"] = self._load_log_events(job_id=job_id)
                 raise
+            measurement_plan = self._build_measurement_plan(
+                baseline=baseline,
+                target_prices=target_prices,
+            )
+            risky_transitions = [
+                dict(item)
+                for item in measurement_plan
+                if bool((item.get("quarantine_transition") or {}).get("risky"))
+            ]
+            if risky_transitions:
+                self._append_audit(
+                    job_id,
+                    "sequence_quarantine_blocked",
+                    {"risky_transitions": risky_transitions},
+                )
+                raise WbSppTesterError(
+                    "Последовательность цен может попасть в карантин WB. Ни одна цена не изменена.",
+                    http_status=422,
+                    payload={
+                        "reason": "price_quarantine_risk",
+                        "risky_transitions": risky_transitions,
+                        "log_events": self._load_log_events(job_id=job_id),
+                    },
+                )
             now_text = self.timestamp_factory()
             job = {
                 "job_id": job_id,
@@ -247,6 +277,7 @@ class WbSppTesterBlock:
                     "target_prices": [_decimal_to_float(value) for value in target_prices],
                     "price_count": len(target_prices),
                     "restore_baseline": True,
+                    "measurement_plan": measurement_plan,
                 },
                 "baseline": baseline,
                 "buyer_session": buyer_session,
@@ -525,6 +556,24 @@ class WbSppTesterBlock:
             measurement["note"] = "authenticated buyer-price capability is not ready; no seller price write was attempted"
             self._append_audit(str(job["job_id"]), "measurement_buyer_session_blocked", measurement)
             return measurement
+        try:
+            write_guard = self._fresh_measurement_write_guard(
+                job,
+                upload_price=upload_price,
+                expected_discounted=expected_discounted,
+            )
+        except Exception:
+            write_guard = {
+                "status": "seller_guard_unavailable",
+                "safe": False,
+                "reason": "fresh_seller_readback_or_quarantine_unavailable",
+            }
+        measurement["evidence"]["prewrite_guard"] = write_guard
+        if write_guard.get("safe") is not True:
+            measurement["status"] = str(write_guard.get("status") or "seller_guard_unavailable")
+            measurement["note"] = "fresh seller/quarantine guard blocked the measurement; no seller price write was attempted"
+            self._append_audit(str(job["job_id"]), "measurement_prewrite_guard_blocked", measurement)
+            return measurement
         upload = self._upload_price_with_backoff(job, [{"nmID": nm_id, "price": upload_price}])
         if upload.get("status") == "rate_limited_stop":
             measurement["status"] = "rate_limited_stop"
@@ -762,6 +811,101 @@ class WbSppTesterBlock:
         self._append_audit(str(job["job_id"]), "wb_quarantine_check", result)
         return result
 
+    def _build_measurement_plan(
+        self,
+        *,
+        baseline: Mapping[str, Any],
+        target_prices: Sequence[Decimal],
+    ) -> list[dict[str, Any]]:
+        discount = int(baseline["discount"])
+        previous = _parse_money(baseline["discountedPrice"], "baseline_discountedPrice")
+        previous_label = "baseline"
+        plan: list[dict[str, Any]] = []
+        for index, target in enumerate(target_prices):
+            upload_price, expected = _price_for_discounted(target, discount)
+            transition = evaluate_wb_price_quarantine_transition(previous, expected).to_dict()
+            item = {
+                "index": index + 1,
+                "from": previous_label,
+                "to": f"price_{index + 1}",
+                "target_discounted_price": _decimal_to_float(target),
+                "upload_price": upload_price,
+                "expected_discounted_price": _decimal_to_float(expected),
+                "quarantine_transition": transition,
+            }
+            plan.append(item)
+            previous = expected
+            previous_label = f"price_{index + 1}"
+        return plan
+
+    def _fresh_measurement_write_guard(
+        self,
+        job: Mapping[str, Any],
+        *,
+        upload_price: int,
+        expected_discounted: Decimal,
+    ) -> dict[str, Any]:
+        nm_id = int(job["nmID"])
+        current = self._fetch_current_good(
+            nm_id,
+            job_id=str(job["job_id"]),
+            audit_event="wb_measurement_prewrite_readback",
+        )
+        quarantine = self._check_quarantine(job)
+        expected_current = self._expected_prewrite_tuple(job)
+        tuple_matches = bool(
+            _optional_int(current.get("price")) == _optional_int(expected_current.get("price"))
+            and _optional_int(current.get("discount")) == _optional_int(expected_current.get("discount"))
+            and _money_exact(current.get("discountedPrice"), expected_current.get("discountedPrice"))
+        )
+        current_discounted = _parse_money(current.get("discountedPrice"), "current_discountedPrice")
+        transition = evaluate_wb_price_quarantine_transition(
+            current_discounted,
+            expected_discounted,
+        ).to_dict()
+        status = "safe"
+        if quarantine.get("is_quarantined"):
+            status = "quarantine_detected"
+        elif not tuple_matches:
+            status = "seller_state_drift"
+        elif transition.get("risky"):
+            status = "prewrite_quarantine_risk"
+        return {
+            "status": status,
+            "safe": status == "safe",
+            "checked_at": self.timestamp_factory(),
+            "tuple_matches_expected_current": tuple_matches,
+            "current": {
+                "price": _optional_int(current.get("price")),
+                "discount": _optional_int(current.get("discount")),
+                "discountedPrice": _number_or_none(current.get("discountedPrice")),
+            },
+            "expected_current": {
+                "price": _optional_int(expected_current.get("price")),
+                "discount": _optional_int(expected_current.get("discount")),
+                "discountedPrice": _number_or_none(expected_current.get("discountedPrice")),
+            },
+            "next": {
+                "price": int(upload_price),
+                "discount": int(job["baseline"]["discount"]),
+                "discountedPrice": _decimal_to_float(expected_discounted),
+            },
+            "quarantine_absent": not quarantine.get("is_quarantined"),
+            "quarantine_transition": transition,
+        }
+
+    def _expected_prewrite_tuple(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
+        rows = job.get("measurements") if isinstance(job.get("measurements"), list) else []
+        for row in reversed(rows):
+            if not isinstance(row, Mapping) or row.get("status") != "ok":
+                continue
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), Mapping) else {}
+            readback = evidence.get("readback") if isinstance(evidence.get("readback"), Mapping) else {}
+            if readback:
+                return readback
+        baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+        return baseline
+
     def _restore_baseline(self, job: dict[str, Any], *, reason: str) -> bool:
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else None
         if not baseline:
@@ -803,10 +947,44 @@ class WbSppTesterBlock:
             self._save_job(job)
             return False
 
-        steps = self._build_restore_steps(job)
+        current_discounted = _parse_money(
+            (preflight_proof.get("seller_tuple") or {}).get("discountedPrice"),
+            "restore_current_discountedPrice",
+        )
+        steps = self._build_restore_steps(job, current_discounted=current_discounted)
         for step in steps:
             price = int(step["price"])
             discount = int(step["discount"])
+            try:
+                fresh_current = self._fetch_current_good(
+                    nm_id,
+                    job_id=str(job["job_id"]),
+                    audit_event="wb_restore_prewrite_readback",
+                )
+                fresh_quarantine = self._check_quarantine(job)
+                fresh_transition = evaluate_wb_price_quarantine_transition(
+                    fresh_current.get("discountedPrice"),
+                    step["expected_discounted_price"],
+                ).to_dict()
+            except Exception as exc:
+                step["status"] = "prewrite_guard_unavailable"
+                step["prewrite_error"] = _safe_text(exc, 160)
+                restore_state.setdefault("steps", []).append(step)
+                job["manual_restore_required"] = True
+                job["result_status"] = "manual_restore_required"
+                self._save_job(job)
+                return False
+            step["prewrite_guard"] = {
+                "quarantine_absent": not fresh_quarantine.get("is_quarantined"),
+                "quarantine_transition": fresh_transition,
+            }
+            if fresh_quarantine.get("is_quarantined") or fresh_transition.get("risky"):
+                step["status"] = "prewrite_guard_blocked"
+                restore_state.setdefault("steps", []).append(step)
+                job["manual_restore_required"] = True
+                job["result_status"] = "manual_restore_required"
+                self._save_job(job)
+                return False
             upload = self._upload_price_with_backoff(job, [{"nmID": nm_id, "price": price, "discount": discount}])
             step["upload"] = upload
             if upload.get("status") == "rate_limited_stop" or upload.get("uploadID") is None:
@@ -876,31 +1054,51 @@ class WbSppTesterBlock:
         proof["proof_status"] = "confirmed" if _restore_proof_ok(proof) else "not_confirmed"
         return proof
 
-    def _build_restore_steps(self, job: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _build_restore_steps(
+        self,
+        job: Mapping[str, Any],
+        *,
+        current_discounted: Decimal | None = None,
+    ) -> list[dict[str, Any]]:
         baseline = job["baseline"]
         baseline_discounted = _parse_money(baseline["discountedPrice"], "baseline_discountedPrice")
         baseline_discount = int(baseline["discount"])
         baseline_price = int(baseline["price"])
-        current_discounted = self._last_known_discounted(job)
+        current_discounted = current_discounted if current_discounted is not None else self._last_known_discounted(job)
         steps: list[dict[str, Any]] = []
         if current_discounted is not None and current_discounted > baseline_discounted * Decimal("1.25"):
             cursor = current_discounted
-            while cursor > baseline_discounted * Decimal("1.25"):
-                cursor = max(baseline_discounted, (cursor * Decimal("0.80")).quantize(MONEY, rounding=ROUND_HALF_UP))
-                if cursor <= baseline_discounted:
+            for _attempt in range(32):
+                if cursor <= baseline_discounted * Decimal("1.25"):
                     break
-                price, expected = _price_for_discounted(cursor, baseline_discount)
+                previous = cursor
+                target = max(baseline_discounted, (previous * Decimal("0.80")).quantize(MONEY, rounding=ROUND_HALF_UP))
+                if target <= baseline_discounted:
+                    break
+                price, expected = _price_for_discounted(target, baseline_discount)
                 if price == baseline_price:
                     break
+                if expected >= previous:
+                    raise RuntimeError("restore bridge cannot make safe rounded progress")
                 steps.append(
                     {
                         "kind": "bridge",
-                        "target_discounted_price": _decimal_to_float(cursor),
+                        "target_discounted_price": _decimal_to_float(target),
                         "price": price,
                         "discount": baseline_discount,
                         "expected_discounted_price": _decimal_to_float(expected),
+                        "quarantine_transition": evaluate_wb_price_quarantine_transition(previous, expected).to_dict(),
                     }
                 )
+                cursor = expected
+                if cursor <= baseline_discounted * Decimal("1.25"):
+                    break
+            else:
+                raise RuntimeError("restore bridge exceeded bounded step count")
+        final_previous = current_discounted if not steps else _parse_money(
+            steps[-1]["expected_discounted_price"],
+            "restore_bridge_discountedPrice",
+        )
         steps.append(
             {
                 "kind": "baseline",
@@ -908,8 +1106,16 @@ class WbSppTesterBlock:
                 "price": baseline_price,
                 "discount": baseline_discount,
                 "expected_discounted_price": _decimal_to_float(baseline_discounted),
+                "quarantine_transition": evaluate_wb_price_quarantine_transition(
+                    final_previous or baseline_discounted,
+                    baseline_discounted,
+                ).to_dict(),
             }
         )
+        if any(bool((step.get("quarantine_transition") or {}).get("risky")) for step in steps):
+            raise RuntimeError(
+                f"restore bridge violates conservative {WB_QUARANTINE_RATIO} quarantine threshold"
+            )
         return steps
 
     def _last_known_discounted(self, job: Mapping[str, Any]) -> Decimal | None:
@@ -981,6 +1187,9 @@ class WbSppTesterBlock:
                 "capability_status": "probe_error",
                 "capability_valid": False,
                 "reason": "buyer_session_probe_failed",
+                "diagnostic_category": "application_failure",
+                "probe_attempts": 1,
+                "probe_retry_attempted": False,
                 "checked_at": self.timestamp_factory(),
             }
         payload.setdefault("status", "probe_error")
@@ -1618,12 +1827,20 @@ def _technical_log_message(event_type: str, payload: Mapping[str, Any]) -> str:
         return _safe_text(payload.get("reason"), 160) or "Бот покупателя не готов"
     if event_type == "baseline_failed":
         return _safe_text(payload.get("reason"), 160) or "Исходная seller tuple не подтверждена"
+    if event_type == "sequence_quarantine_blocked":
+        risks = payload.get("risky_transitions") if isinstance(payload.get("risky_transitions"), list) else []
+        transition = risks[0] if risks and isinstance(risks[0], Mapping) else {}
+        risk = transition.get("quarantine_transition") if isinstance(transition.get("quarantine_transition"), Mapping) else {}
+        return f"Старт заблокирован: снижение {_number_or_none(risk.get('drop_percent')) or '≥33,3'}%"
     if event_type == "job_start":
         return "Исходная seller tuple зафиксирована"
     if event_type == "measurement_started":
         return f"Цель: {_number_or_none(payload.get('target_discounted_price')) or '—'} ₽"
     if event_type == "measurement_buyer_session_blocked":
         return "Запись отменена: capability не готова"
+    if event_type == "measurement_prewrite_guard_blocked":
+        guard = (payload.get("evidence") or {}).get("prewrite_guard") if isinstance(payload.get("evidence"), Mapping) else {}
+        return f"Запись отменена: {_safe_text((guard or {}).get('status'), 80) or 'fresh guard blocked'}"
     if event_type == "wb_upload_task":
         return "Задача изменения цены создана"
     if event_type == "wb_upload_task_error":

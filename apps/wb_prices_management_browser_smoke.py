@@ -75,7 +75,7 @@ def main() -> None:
             page.locator("[data-prices-preview]").click()
             page.locator("[data-prices-modal]").wait_for(state="visible", timeout=7000)
             modal_text = page.locator("[data-prices-modal]").inner_text()
-            if "Live write выключен" not in modal_text or "quarantine_risk" not in modal_text:
+            if "Live write выключен" not in modal_text or "33,3% или больше" not in modal_text:
                 raise AssertionError(f"disabled preview modal mismatch: {modal_text}")
             if not page.locator("[data-prices-commit]").is_disabled():
                 raise AssertionError("commit button must be disabled when WB_PRICES_WRITE_ENABLED is off")

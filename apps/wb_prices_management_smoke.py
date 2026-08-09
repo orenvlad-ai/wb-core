@@ -39,6 +39,10 @@ from packages.application.wb_prices_management import (  # noqa: E402
     normalize_upload_good,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+from packages.contracts.wb_price_quarantine import (  # noqa: E402
+    WB_QUARANTINE_WARNING_CODE,
+    evaluate_wb_price_quarantine_transition,
+)
 from packages.contracts.promo_live_source import (  # noqa: E402
     PromoLiveSourceEnvelope,
     PromoLiveSourceItem,
@@ -207,10 +211,22 @@ def _run_unit_checks() -> None:
         stale_row = {int(row["nmID"]): row for row in stale_block.build_goods_table()["rows"]}[PRIMARY_NM]
         if stale_row["promoLabel"] != "н/д" or "no current promo denominator" not in stale_row["promoReason"]:
             raise AssertionError(f"stale promo payload must explain denominator refresh need, got: {stale_row}")
-        preview = block.preview_changes({"changes": [{"nmID": PRIMARY_NM, "price": 200, "discount": 10}]})
+        exact_boundary = evaluate_wb_price_quarantine_transition(150, 100)
+        just_below_boundary = evaluate_wb_price_quarantine_transition(150, 100.01)
+        if not exact_boundary.risky or just_below_boundary.risky:
+            raise AssertionError("conservative quarantine threshold must be inclusive at exact 1.5x")
+        preview = block.preview_changes({"changes": [{"nmID": PRIMARY_NM, "price": 600, "discount": 0}]})
         row = preview["preview"]["rows"][0]
-        if row["new"]["discountedPrice"] != 180 or "quarantine_risk" not in ",".join(row["warnings"]):
+        if (
+            row["new"]["discountedPrice"] != 600
+            or WB_QUARANTINE_WARNING_CODE not in row["warnings"]
+            or row.get("quarantine_transition", {}).get("risky") is not True
+        ):
             raise AssertionError(f"preview quarantine risk mismatch: {row}")
+        rounded_safe = block.preview_changes({"changes": [{"nmID": PRIMARY_NM, "price": 667, "discount": 10}]})
+        rounded_safe_row = rounded_safe["preview"]["rows"][0]
+        if rounded_safe_row["new"]["discountedPrice"] != 600.3 or rounded_safe_row["warnings"]:
+            raise AssertionError(f"kopeck-exact safe transition must remain available: {rounded_safe_row}")
         size_preview = block.preview_changes({"changes": [{"nmID": SIZE_PRICE_NM, "price": 1000}]})
         if size_preview["preview"]["summary"]["valid"] != 0 or "size-based" not in size_preview["preview"]["rows"][0]["errors"][0]:
             raise AssertionError(f"editable size price must block ordinary price edit: {size_preview}")

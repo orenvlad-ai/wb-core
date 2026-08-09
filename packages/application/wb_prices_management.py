@@ -13,6 +13,10 @@ from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from packages.adapters.wb_prices_management import HttpBackedWbPricesManagementSource, WbPricesManagementSource
+from packages.contracts.wb_price_quarantine import (
+    WB_QUARANTINE_WARNING_CODE,
+    evaluate_wb_price_quarantine_transition,
+)
 from packages.contracts.wb_prices_management import (
     MAX_PRICE_CHANGES_PER_UPLOAD,
     PRICE_UPLOAD_FINAL_STATUSES,
@@ -154,8 +158,14 @@ class WbPricesManagementBlock:
             new_price = Decimal(change.price) if change.price is not None else old_price
             new_discount = Decimal(change.discount) if change.discount is not None else old_discount
             new_discounted = _discounted_price(new_price, new_discount)
-            if old_discounted > 0 and new_discounted * Decimal("3") <= old_discounted:
-                warnings.append("quarantine_risk_new_discounted_price_at_least_3x_lower")
+            quarantine_transition = None
+            if old_discounted > 0 and new_discounted > 0:
+                quarantine_transition = evaluate_wb_price_quarantine_transition(
+                    old_discounted,
+                    new_discounted,
+                )
+                if quarantine_transition.risky:
+                    warnings.append(WB_QUARANTINE_WARNING_CODE)
             valid = not errors
             row = {
                 "nmID": good.nm_id,
@@ -165,6 +175,7 @@ class WbPricesManagementBlock:
                 "valid": valid,
                 "errors": errors,
                 "warnings": warnings,
+                "quarantine_transition": quarantine_transition.to_dict() if quarantine_transition else None,
                 "requested": change.to_upload_dict(),
                 "current": {
                     "price": _decimal_to_json(old_price),

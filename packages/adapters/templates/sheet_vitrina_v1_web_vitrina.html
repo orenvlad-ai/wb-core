@@ -6125,7 +6125,11 @@
                 </select>
               </label>
             </div>
+            <div class="spp-test-field-grid" data-spp-test-current-price>
+              <span class="spp-test-field">Текущая цена со скидкой<strong>Выберите товар</strong></span>
+            </div>
             <div class="spp-test-price-fields" data-spp-test-price-fields></div>
+            <p class="spp-test-warning" data-spp-test-quarantine-warning hidden></p>
             <div class="spp-test-actions">
               <button class="button primary" type="button" data-spp-test-start disabled>Старт проверки</button>
               <button class="button danger" type="button" data-spp-test-restore hidden>Аварийно восстановить цену</button>
@@ -6802,6 +6806,8 @@
     const sppTestNmSelect = document.querySelector("[data-spp-test-nm]");
     const sppTestPriceCountNode = document.querySelector("[data-spp-test-price-count]");
     const sppTestPriceFieldsNode = document.querySelector("[data-spp-test-price-fields]");
+    const sppTestCurrentPriceNode = document.querySelector("[data-spp-test-current-price]");
+    const sppTestQuarantineWarningNode = document.querySelector("[data-spp-test-quarantine-warning]");
     const sppTestStartButton = document.querySelector("[data-spp-test-start]");
     const sppTestRestoreButton = document.querySelector("[data-spp-test-restore]");
     const sppTestStartReasonNode = document.querySelector("[data-spp-test-start-reason]");
@@ -20612,9 +20618,11 @@
         if (!response.ok) throw new Error(payload && payload.error ? payload.error : "проверка бота вернула " + response.status);
         state.prices.sppTest.buyerSession = payload || null;
         state.prices.sppTest.buyerSessionLoaded = true;
+        const diagnostic = sppBuyerDiagnosticLabel(payload && payload.diagnostic_category);
         state.prices.sppTest.buyerSessionNote = payload && payload.capability_valid
-          ? "Авторизованная цена покупателя доступна."
-          : "Проверка не пройдена. Восстановите бота в Настройки → Источники и сессии.";
+          ? "Авторизованная цена покупателя доступна." + (payload.probe_retry_attempted ? " Успешно после одного свежего повтора." : "")
+          : "Проверка не пройдена. Восстановите бота в Настройки → Источники и сессии."
+            + (diagnostic ? " Диагностика: " + diagnostic + "." : "");
         return payload;
       } catch (error) {
         state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, capability_valid: false, status_label: "Ошибка"};
@@ -20631,6 +20639,19 @@
     function sppBuyerSessionValid() {
       const session = state.prices.sppTest.buyerSession || {};
       return session.valid === true && session.capability_valid === true;
+    }
+
+    function sppBuyerDiagnosticLabel(value) {
+      const labels = {
+        navigation_no_response: "navigation no response",
+        http_status: "HTTP status",
+        chromium_failure: "Chromium failure",
+        navigation_failure: "navigation failure",
+        runtime_failure: "runtime failure",
+        application_failure: "application failure",
+        unclassified_probe_failure: "probe failure"
+      };
+      return labels[String(value || "")] || "";
     }
 
     function renderWbBuyerSession() {
@@ -20651,7 +20672,8 @@
           sppTestFact("Последняя проверка", formatTimestampDisplay(
             session.capability_checked_at || session.checked_at,
             {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}
-          ) || "—")
+          ) || "—"),
+          sppBuyerDiagnosticLabel(session.diagnostic_category) ? sppTestFact("Диагностика", sppBuyerDiagnosticLabel(session.diagnostic_category)) : ""
         ].join("");
       }
       if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading || state.prices.sppTest.startLoading;
@@ -20694,6 +20716,82 @@
         return {valid: false, reason: "Каждая цена должна быть больше нуля.", prices: []};
       }
       return {valid: true, reason: "", prices: numbers};
+    }
+
+    function selectedSppPriceRow() {
+      const selected = String(state.prices.sppTest.selectedNmId || "");
+      return (state.prices.rows || []).find(function(row) {
+        return String(row.nmID || "") === selected;
+      }) || null;
+    }
+
+    function parseSppMoneyKopecks(value) {
+      const normalized = String(value == null ? "" : value).trim().replace(",", ".");
+      const match = normalized.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+      if (!match) return null;
+      const whole = Number(match[1]);
+      const fraction = Number(String(match[2] || "").padEnd(2, "0"));
+      if (!Number.isSafeInteger(whole) || whole < 0 || !Number.isSafeInteger(fraction)) return null;
+      const kopecks = whole * 100 + fraction;
+      return Number.isSafeInteger(kopecks) && kopecks > 0 ? kopecks : null;
+    }
+
+    function sppExpectedDiscountedKopecks(targetKopecks, discount) {
+      const factor = 100 - Number(discount);
+      if (!Number.isSafeInteger(targetKopecks) || targetKopecks <= 0 || !Number.isInteger(factor) || factor <= 0 || factor > 100) {
+        return null;
+      }
+      const uploadPrice = Math.floor((2 * targetKopecks + factor) / (2 * factor));
+      const expectedKopecks = uploadPrice * factor;
+      if (!Number.isSafeInteger(uploadPrice) || uploadPrice <= 0 || !Number.isSafeInteger(expectedKopecks)) return null;
+      return {uploadPrice: uploadPrice, expectedKopecks: expectedKopecks};
+    }
+
+    function sppQuarantinePlan() {
+      const row = selectedSppPriceRow();
+      if (!row) return {valid: false, reason: "Выберите товар.", risks: []};
+      const currentKopecks = parseSppMoneyKopecks(row.discountedPrice);
+      const discount = Number(row.discount);
+      if (currentKopecks === null || !Number.isInteger(discount) || discount < 0 || discount > 99) {
+        return {valid: false, reason: "Текущая seller discounted price или скидка не подтверждена.", risks: []};
+      }
+      const count = Math.max(1, Math.min(6, Number(state.prices.sppTest.priceCount || 1)));
+      const rawPrices = state.prices.sppTest.prices.slice(0, count);
+      let previousKopecks = currentKopecks;
+      let previousLabel = "Текущая цена";
+      const transitions = [];
+      for (let index = 0; index < rawPrices.length; index += 1) {
+        const targetKopecks = parseSppMoneyKopecks(rawPrices[index]);
+        if (targetKopecks === null) return {valid: false, reason: "Заполните все цены.", risks: []};
+        const converted = sppExpectedDiscountedKopecks(targetKopecks, discount);
+        if (!converted) return {valid: false, reason: "Не удалось безопасно преобразовать цену продавца.", risks: []};
+        const risky = converted.expectedKopecks * 15 <= previousKopecks * 10;
+        const dropPercent = ((previousKopecks - converted.expectedKopecks) * 100) / previousKopecks;
+        transitions.push({
+          from: previousLabel,
+          to: "Цена " + String(index + 1),
+          previousKopecks: previousKopecks,
+          nextKopecks: converted.expectedKopecks,
+          uploadPrice: converted.uploadPrice,
+          dropPercent: dropPercent,
+          risky: risky
+        });
+        previousKopecks = converted.expectedKopecks;
+        previousLabel = "Цена " + String(index + 1);
+      }
+      return {valid: true, reason: "", transitions: transitions, risks: transitions.filter(function(item) { return item.risky; })};
+    }
+
+    function formatSppKopecks(value) {
+      return (Number(value || 0) / 100).toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " ₽";
+    }
+
+    function sppQuarantineWarning(risk) {
+      if (!risk) return "";
+      return "Риск карантина WB: " + risk.from + " → " + risk.to + ": "
+        + formatSppKopecks(risk.previousKopecks) + " → " + formatSppKopecks(risk.nextKopecks)
+        + ", снижение " + Number(risk.dropPercent).toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 2})
+        + "% (порог от 33,3%, включительно).";
     }
 
     async function loadSppTestStatus(options) {
@@ -20781,8 +20879,12 @@
     async function startSppTest() {
       if (!WEB_VITRINA_CONFIG.prices_spp_test_start_path || state.prices.sppTest.startLoading) return;
       const parsed = collectSppTestPrices();
-      if (!state.prices.sppTest.selectedNmId || !parsed.valid) {
-        state.prices.sppTest.error = !state.prices.sppTest.selectedNmId ? "Выберите товар." : parsed.reason;
+      const quarantinePlan = sppQuarantinePlan();
+      if (!state.prices.sppTest.selectedNmId || !parsed.valid || !quarantinePlan.valid || quarantinePlan.risks.length) {
+        state.prices.sppTest.error = !state.prices.sppTest.selectedNmId ? "Выберите товар."
+          : !parsed.valid ? parsed.reason
+          : !quarantinePlan.valid ? quarantinePlan.reason
+          : sppQuarantineWarning(quarantinePlan.risks[0]);
         renderSppTest();
         return;
       }
@@ -20864,10 +20966,24 @@
       renderSppHistory();
       const job = state.prices.sppTest.job || {};
       const parsed = collectSppTestPrices();
+      const selectedPriceRow = selectedSppPriceRow();
+      const quarantinePlan = sppQuarantinePlan();
+      const quarantineRisk = quarantinePlan.risks && quarantinePlan.risks.length ? quarantinePlan.risks[0] : null;
       const activeJob = state.prices.sppTest.activeJob || {};
       const active = !!activeJob.job_id || ["preflight", "measuring", "cooldown", "restoring", "running"].indexOf(String(job.status || "")) !== -1;
-      const canStart = !!state.prices.sppTest.selectedNmId && parsed.valid && sppBuyerSessionValid()
+      const canStart = !!state.prices.sppTest.selectedNmId && parsed.valid && quarantinePlan.valid && !quarantineRisk && sppBuyerSessionValid()
         && !!state.prices.writeEnabled && !active && !state.prices.sppTest.startLoading;
+      if (sppTestCurrentPriceNode) {
+        sppTestCurrentPriceNode.innerHTML = selectedPriceRow ? [
+          sppTestFact("Текущая цена со скидкой", pricesMoney(selectedPriceRow.discountedPrice, selectedPriceRow.currencyIsoCode4217 || "RUB")),
+          selectedPriceRow.price === null || selectedPriceRow.price === undefined ? "" : sppTestFact("Исходная цена", pricesMoney(selectedPriceRow.price, selectedPriceRow.currencyIsoCode4217 || "RUB")),
+          selectedPriceRow.discount === null || selectedPriceRow.discount === undefined ? "" : sppTestFact("Скидка продавца", pricesDiscount(selectedPriceRow.discount))
+        ].join("") : sppTestFact("Текущая цена со скидкой", "Выберите товар");
+      }
+      if (sppTestQuarantineWarningNode) {
+        sppTestQuarantineWarningNode.hidden = !quarantineRisk;
+        sppTestQuarantineWarningNode.textContent = quarantineRisk ? sppQuarantineWarning(quarantineRisk) : "";
+      }
       if (sppTestStartButton) {
         sppTestStartButton.disabled = !canStart;
         sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Проверяем бота…" : "Старт проверки";
@@ -20877,7 +20993,10 @@
           : !state.prices.writeEnabled ? "Изменение цен выключено на сервере."
           : !sppBuyerSessionValid() ? "Бот покупателя должен быть готов."
           : !state.prices.sppTest.selectedNmId ? "Выберите товар."
-          : !parsed.valid ? parsed.reason : "Будут проверены только эти цены, строго по порядку.";
+          : !parsed.valid ? parsed.reason
+          : !quarantinePlan.valid ? quarantinePlan.reason
+          : quarantineRisk ? sppQuarantineWarning(quarantineRisk)
+          : "Будут проверены только эти цены, строго по порядку.";
       }
       if (sppTestStateNode) {
         sppTestStateNode.textContent = job.job_id ? sppStatusLabel(job.status) : "нет запуска";
@@ -20940,6 +21059,9 @@
       if (normalized === "authenticated_unstable") return "цена покупателя не подтверждена";
       if (normalized === "buyer_destination_mismatch") return "регион покупателя не совпал";
       if (normalized === "quarantine_detected") return "карантин";
+      if (normalized === "prewrite_quarantine_risk") return "риск карантина";
+      if (normalized === "seller_state_drift") return "seller state изменился";
+      if (normalized === "seller_guard_unavailable") return "fresh guard недоступен";
       if (normalized === "readback_mismatch") return "цена продавца не подтверждена";
       if (normalized === "upload_not_success") return "WB отклонил цену";
       return normalized || "ошибка";
@@ -21432,7 +21554,7 @@
           '<td>' + escapeHtml(pricesDiscount(row.new && row.new.discount)) + '</td>',
           '<td>' + escapeHtml(pricesMoney(row.current && row.current.discountedPrice, "")) + '</td>',
           '<td>' + escapeHtml(pricesMoney(row.new && row.new.discountedPrice, "")) + '</td>',
-          '<td><span class="prices-badge ' + tone + '">' + escapeHtml(errors[0] || warnings[0] || "ok") + '</span></td>',
+          '<td><span class="prices-badge ' + tone + '">' + escapeHtml(errors[0] || pricesWarningLabel(warnings[0]) || "ok") + '</span></td>',
           '</tr>'
         ].join("");
       }).join("");
@@ -21453,6 +21575,13 @@
         pricesCommitButton.disabled = !canCommit || !!state.prices.commitLoading;
         pricesCommitButton.textContent = state.prices.commitLoading ? "Отправка…" : (state.prices.writeEnabled ? "Отправить в WB" : "Live write выключен");
       }
+    }
+
+    function pricesWarningLabel(value) {
+      const labels = {
+        quarantine_risk_discounted_price_drop_at_least_33_3_percent: "Цена со скидкой снижается на 33,3% или больше: риск карантина WB."
+      };
+      return labels[String(value || "")] || String(value || "");
     }
 
     async function commitPriceChanges() {
@@ -22436,7 +22565,7 @@
       }
     }
 
-    function skuManagementWarningLabel(value){const labels={quarantine_risk_new_discounted_price_at_least_3x_lower:"Новая цена продавца минимум в 3 раза ниже текущей: WB может поместить товар в карантин.",promo_evidence_unavailable_or_stale:"Данные об акциях для этого SKU отсутствуют или устарели.",active_promo_participation:"SKU участвует в действующей акции; изменение цены может повлиять на условия акции.",public_buyer_price_missing_or_stale:"Свежая публичная цена покупателя не подтверждена и не будет подменена расчётом.",min_bid_unavailable:"Текущий минимум ставки WB не подтверждён."};return labels[String(value||"")]||String(value||"");}
+    function skuManagementWarningLabel(value){const labels={quarantine_risk_discounted_price_drop_at_least_33_3_percent:"Цена со скидкой снижается на 33,3% или больше: риск карантина WB.",promo_evidence_unavailable_or_stale:"Данные об акциях для этого SKU отсутствуют или устарели.",active_promo_participation:"SKU участвует в действующей акции; изменение цены может повлиять на условия акции.",public_buyer_price_missing_or_stale:"Свежая публичная цена покупателя не подтверждена и не будет подменена расчётом.",min_bid_unavailable:"Текущий минимум ставки WB не подтверждён."};return labels[String(value||"")]||String(value||"");}
 
     function skuManagementPreviewFactsHtml(p){
       if(!p)return "";
