@@ -14,16 +14,21 @@ source_basis:
 related_modules:
   - "packages/contracts/sales_funnel_history_block.py"
   - "packages/adapters/sales_funnel_history_block.py"
+  - "packages/adapters/seller_analytics_csv_report.py"
   - "packages/application/sales_funnel_history_block.py"
   - "packages/application/factory_order_sales_history.py"
 related_tables:
   - "temporal_source_snapshots"
 related_endpoints:
   - "POST /api/analytics/v3/sales-funnel/products/history"
+  - "POST /api/v2/nm-report/downloads [reportType=DETAIL_HISTORY_REPORT]"
+  - "GET /api/v2/nm-report/downloads"
+  - "GET /api/v2/nm-report/downloads/file/{downloadId}"
 related_runners:
   - "apps/sales_funnel_history_block_smoke.py"
   - "apps/sales_funnel_history_block_http_smoke.py"
   - "apps/sales_funnel_history_block_batching_smoke.py"
+  - "apps/sales_funnel_history_detail_csv_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/sheet_vitrina_v1_buyout_mature_backfill.py"
@@ -36,7 +41,7 @@ related_docs:
   - "migration/48_sales_funnel_history_block_legacy_sample_source.md"
   - "artifacts/sales_funnel_history_block/evidence/initial__sales-funnel-history__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current exact-date runtime seam для factory-order: merged official-api checkpoint блока `sales_funnel_history_block` теперь по-прежнему отвечает за truthful historical payload и bounded batching по `nmIds` / date windows, а server-owned consumers могут split-ить success payload на exact-date snapshots и persist-ить их в `temporal_source_snapshots`; live `DATA_VITRINA` допускается только как one-time bounded migration input для historical window reconcile, но не как постоянный source of truth."
+update_note: "Обновлён под официальный Seller Analytics CSV `DETAIL_HISTORY_REPORT`: недельный endpoint остаётся дешёвым daily D-6 source, а bounded historical reconcile использует общую create/list/download transport-цепочку и строгий full enabled-SKU/date parser без fallback."
 ---
 
 # 1. Идентификатор и статус
@@ -50,7 +55,7 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 
 # 2. Legacy-source и legacy semantics
 
-- Legacy-source фиксируется как `POST /api/analytics/v3/sales-funnel/products/history` + current RAW/APPLY semantics.
+- Legacy-source фиксируется как `POST /api/analytics/v3/sales-funnel/products/history` + current RAW/APPLY semantics. Current historical official source для периода старше недельной глубины — Seller Analytics CSV `DETAIL_HISTORY_REPORT` через общую create/list/download chain.
 - Результат задаётся на уровне `date + nmId + metric`.
 - Ключевая semantics:
   - apply берёт latest `fetched_at` per `(date,nmId,metric)`
@@ -70,7 +75,9 @@ update_note: "Обновлён под current exact-date runtime seam для fac
   - `items = []`
   - `count = 0`
 - Целевой смысл блока: bounded historical sales funnel snapshot без переноса старой orchestration-логики.
-- Current HTTP adapter keeps the same external request/response contract and still splits wide periods into bounded date windows before calling official API.
+- Current weekly HTTP adapter keeps the same external request/response contract and splits its supported periods into bounded date/SKU batches. Он не используется для старого reconcile за пределами недельной глубины.
+- `DetailHistoryCsvBackedSalesFunnelHistorySource` создаёт один bounded `DETAIL_HISTORY_REPORT` с `nmIDs`, `startDate/endDate`, `timezone=Asia/Yekaterinburg`, `aggregationLevel=day`; общий transport `seller_analytics_csv_report.py` владеет POST create, GET list/poll, GET ZIP/download, CSV decode и `429` retry для stocks и funnel consumers.
+- CSV parser требует документированные `nmID`, `dt`, `ordersCount`, `buyoutPercent`, ровно одну строку на каждую requested enabled-SKU/date пару, отвергает duplicate/out-of-scope/non-finite/invalid values и не синтезирует отсутствующие нули. `ordersCount` нормализуется в target metric `orderCount`, `buyoutPercent` — из процентов в fraction через существующий application transform.
 - Success payload также пригоден для server-owned exact-date persistence:
   - current factory-order helper split-ит `success.items[]` по `item.date`;
   - дальше каждый exact-date slice может truthfully сохраняться в `temporal_source_snapshots[source_key=sales_funnel_history]` без изменения business contract самого official-api блока.
@@ -78,8 +85,8 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 - The fixed threshold is grounded in the `2026-08-09` diagnostic: mature `2026-07-01..2026-07-21` weighted `96.22%` on `63,804` orders; live age-5 refetch `2026-08-04` weighted `96.50%` with zero anomalous SKU; age 4 weighted `92.51%` with seven anomalous SKU representing `14.5%` of order weight. The observed stabilization boundary is D-5, and the public D-6 rule deliberately retains one calendar day of safety margin instead of adding a dynamic stability estimator.
 - Each business day the ordinary refresh owns one cheap mature reconcile: inspect only D-7..D-6, request D-6 when mature proof is absent and use D-7 only as bounded catch-up. Persisted exact-date payload + capture business date + enabled-SKU coverage is the idempotency proof, so repeated same-day manual refreshes do not repeat mature upstream load. An old D-6 candidate captured while immature is replaced by the fresh official payload; after successful mature capture it is not requested again. This seam does not introduce a scheduler, watcher or orchestration state machine.
 - Settings row `Расчётный выкуп (подтверждённый)` uses the same `SUM(buyoutPercent * orderCount) / SUM(orderCount)` formula for each of exactly the latest three closed Monday-Sunday weeks and for their combined range. A week is published only when all seven dates are within the trusted cutoff and every enabled SKU-day has valid mature coverage; a required immature/missing/invalid day blanks that weekly cell, and any blank week blanks the combined cell. The current open week is always excluded and an unavailable latest week is never replaced by an older week. This reference never changes a Proxy formula, `buyout_rate` or saved calculation parameter.
-- The one-time historical official reconcile is bounded to `2026-07-22..2026-08-03` in `apps/sheet_vitrina_v1_buyout_mature_backfill.py`. Dry-run is the default and writes a private machine-readable reviewed manifest outside Git; explicit apply requires its SHA-256, exact deployed-runtime SHA marker, human approval reference, exact current targets/pre-change digest, coherent verified SQLite backup, atomic allowlisted replacement, non-target digest equality, idempotent desired-content proof and post-apply reconciliation evidence. If the official API cannot return complete coverage for an older exact date, the manifest is blocked and no persisted polluted value is treated as authoritative. Production read preflight on `2026-08-09` confirmed this current limitation: exact `2026-08-03` returns `buyoutPercent`/`orderCount`, while exact `2026-07-22` is rejected by the authoritative endpoint as exceeding its historical-day limit. Therefore the old polluted window remains publicly blank until a complete official manifest becomes possible; partial or invented restoration is forbidden.
-- This batching only removes per-request span pressure; it does **not** bypass the current live authoritative depth boundary of the upstream source.
+- The one-time historical official reconcile is bounded to `2026-07-22..2026-08-03` in `apps/sheet_vitrina_v1_buyout_mature_backfill.py`. Dry-run is the default and writes a private machine-readable reviewed manifest outside Git; explicit apply requires its SHA-256, exact deployed-runtime SHA marker, human approval reference, exact current targets/pre-change digest, coherent verified SQLite backup, atomic allowlisted replacement, non-target digest equality, idempotent desired-content proof and post-apply reconciliation evidence. Manifest v2 records the official CSV endpoint chain, report type, download/report provenance, CSV digest and exact coverage counts separately from the desired business-content digest. If any enabled-SKU/date pair is absent, the manifest is blocked and no persisted polluted value is treated as authoritative.
+- Bounded production capability proof on `2026-08-09` confirmed entitlement and exact full coverage for `2026-07-22..2026-08-03`: one `DETAIL_HISTORY_REPORT` returned `429/429` requested pairs for `33` enabled SKU across `13` dates, with zero missing/out-of-scope rows. This closes the former weekly-endpoint depth blocker without using legacy sheet data or invented values.
 - If a bounded historical window is migrated from live `DATA_VITRINA`, that sheet acts only as one-time migration input for exact-date replacement/reconcile; ongoing source of truth remains official API payload + server-owned runtime snapshots.
 - If the upstream source rejects older start days relative to current business date, the server-owned consumer must surface that boundary truthfully instead of inventing backfill or approximate history.
 
@@ -101,11 +108,13 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 
 - contracts: `packages/contracts/sales_funnel_history_block.py`
 - adapters: `packages/adapters/sales_funnel_history_block.py`
+- shared Seller Analytics CSV transport: `packages/adapters/seller_analytics_csv_report.py`
 - application: `packages/application/sales_funnel_history_block.py`
 - runtime-backed consumer helper: `packages/application/factory_order_sales_history.py`
 - artifact-backed smoke: `apps/sales_funnel_history_block_smoke.py`
 - authoritative server-side smoke: `apps/sales_funnel_history_block_http_smoke.py`
 - batching/rate-limit smoke: `apps/sales_funnel_history_block_batching_smoke.py`
+- DETAIL_HISTORY_REPORT transport/normalization/coverage smoke: `apps/sales_funnel_history_detail_csv_smoke.py`
 - runtime/reconcile smoke: `apps/factory_order_sales_history_smoke.py`
 - bounded reconcile runner: `apps/factory_order_sales_history_reconcile.py`
 - guarded mature-buyout reconcile runner: `apps/sheet_vitrina_v1_buyout_mature_backfill.py`
@@ -114,6 +123,7 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 
 - Artifact-backed smoke подтверждён через `apps/sales_funnel_history_block_smoke.py`.
 - Authoritative server-side smoke подтверждён через `apps/sales_funnel_history_block_http_smoke.py`.
+- Official `DETAIL_HISTORY_REPORT` request schema, percent/order normalization and strict incomplete-coverage failure подтверждены через `apps/sales_funnel_history_detail_csv_smoke.py`.
 - Exact-date runtime split/reconcile smoke подтверждён через `apps/factory_order_sales_history_smoke.py`.
 - D-6 maturity, overwrite/idempotency/catch-up, immutable read masking, three-week fail-closed aggregation and guarded historical apply are checked by `apps/sheet_vitrina_v1_buyout_percent_smoke.py` and `apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py`.
 
@@ -122,7 +132,7 @@ update_note: "Обновлён под current exact-date runtime seam для fac
 - Parity подтверждена для `normal-case` и `empty-case`.
 - Server-side checkpoint подтверждён как реально рабочий: `normal -> success`, `normal: count -> 140`.
 - Percent-normalization и latest-`fetched_at` semantics сохранены внутри bounded target contract.
-- HTTP adapter не только режет запрос по `nmIds`, но и bounded-chunk'ит длинный date range на несколько day windows с последующим merge без изменения target shape.
+- Weekly HTTP adapter режет запрос по `nmIds` и bounded day windows без изменения target shape; historical CSV adapter сохраняет тот же target shape для документированной глубины до года.
 - Тот же target shape достаточно строг, чтобы server-owned consumers могли:
   - materialize-ить exact-date snapshots в runtime;
   - делать truthful window replacement/reconcile без merge с polluted rows;

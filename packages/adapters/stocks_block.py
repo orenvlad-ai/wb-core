@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
 import math
 from dataclasses import dataclass, field
@@ -14,10 +12,11 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 from urllib import error, request as urllib_request
-import uuid
-import zipfile
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
+from packages.adapters.seller_analytics_csv_report import (
+    SellerAnalyticsCsvReportTransport,
+)
 from packages.business_time import business_date_iso
 from packages.contracts.stocks_block import StocksRequest
 
@@ -93,14 +92,6 @@ class _HistoricalStocksBatchResult:
     row_count: int
     unique_nm_ids: set[int]
     notes_by_date: dict[str, str]
-
-
-class _HistoricalStocksHttpStatusError(RuntimeError):
-    def __init__(self, status_code: int, body: str, headers: Mapping[str, Any] | None = None) -> None:
-        self.status_code = status_code
-        self.body = body
-        self.headers = headers or {}
-        super().__init__(f"historical stocks http {status_code}")
 
 
 class HttpBackedStocksSource:
@@ -661,15 +652,17 @@ class HistoricalCsvBackedStocksSource:
         self._token_env_var = token_env_var
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = timeout_seconds
-        self._poll_interval_seconds = max(0.1, poll_interval_seconds)
-        self._max_poll_attempts = max(1, max_poll_attempts)
         self._max_days_per_report = max(1, max_days_per_report)
-        self._max_retries_on_429 = max(0, max_retries_on_429)
-        self._opener = opener or urllib_request.urlopen
-        self._sleep = sleep_fn or time.sleep
-        self._time = time_fn or time.time
-        self._uuid_factory = uuid_factory or (lambda: str(uuid.uuid4()))
         self._now_factory = now_factory or _utc_now
+        self._csv_transport = SellerAnalyticsCsvReportTransport(
+            poll_interval_seconds=poll_interval_seconds,
+            max_poll_attempts=max_poll_attempts,
+            max_retries_on_429=max_retries_on_429,
+            opener=opener,
+            sleep_fn=sleep_fn,
+            time_fn=time_fn,
+            uuid_factory=uuid_factory,
+        )
         self._warehouse_region_resolver = warehouse_region_resolver
         self._current_inventory_source = current_inventory_source or HttpBackedStocksSource(
             base_url=base_url,
@@ -760,182 +753,28 @@ class HistoricalCsvBackedStocksSource:
         requested_nm_ids: list[int],
         warehouse_region_map: Mapping[str, str],
     ) -> _HistoricalStocksBatchResult:
-        download_id = self._uuid_factory()
-        report_name = f"wb-core stocks history {date_from}..{date_to} [{download_id[:8]}]"
-        self._create_report(
+        report = self._csv_transport.fetch(
             base_url=base_url,
             token=token,
             timeout_seconds=timeout_seconds,
-            download_id=download_id,
-            report_name=report_name,
-            date_from=date_from,
-            date_to=date_to,
-            requested_nm_ids=requested_nm_ids,
-        )
-        report_meta = self._poll_report_ready(
-            base_url=base_url,
-            token=token,
-            timeout_seconds=timeout_seconds,
-            download_id=download_id,
-        )
-        csv_rows = self._download_report_rows(
-            base_url=base_url,
-            token=token,
-            timeout_seconds=timeout_seconds,
-            download_id=download_id,
+            report_type="STOCK_HISTORY_DAILY_CSV",
+            report_name=f"wb-core stocks history {date_from}..{date_to}",
+            params={
+                "nmIds": requested_nm_ids,
+                "currentPeriod": {"start": date_from, "end": date_to},
+                "stockType": "wb",
+                "skipDeletedNm": False,
+            },
         )
         return self._build_batch_payloads(
-            csv_rows=csv_rows,
+            csv_rows=report.rows,
             requested_nm_ids=requested_nm_ids,
             warehouse_region_map=warehouse_region_map,
             date_from=date_from,
             date_to=date_to,
-            download_id=download_id,
-            report_name=str(report_meta.get("name") or report_name),
-            snapshot_ts=str(report_meta.get("createdAt") or _format_csv_snapshot_ts(self._now_factory())),
-        )
-
-    def _create_report(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        timeout_seconds: float,
-        download_id: str,
-        report_name: str,
-        date_from: str,
-        date_to: str,
-        requested_nm_ids: list[int],
-    ) -> None:
-        req = urllib_request.Request(
-            url=f"{base_url}/api/v2/nm-report/downloads",
-            data=json.dumps(
-                {
-                    "id": download_id,
-                    "reportType": "STOCK_HISTORY_DAILY_CSV",
-                    "userReportName": report_name,
-                    "params": {
-                        "nmIds": requested_nm_ids,
-                        "currentPeriod": {"start": date_from, "end": date_to},
-                        "stockType": "wb",
-                        "skipDeletedNm": False,
-                    },
-                }
-            ).encode("utf-8"),
-            method="POST",
-            headers={"Authorization": token, "Content-Type": "application/json"},
-        )
-        body = self._open_report_request_with_429_retry(
-            req,
-            timeout_seconds=timeout_seconds,
-            action_label="create-report",
-        ).decode("utf-8")
-        if not body:
-            return
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            return
-        if isinstance(payload, Mapping) and str(payload.get("error", "")).strip():
-            raise RuntimeError(f"historical stocks create-report failed: {payload}")
-
-    def _poll_report_ready(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        timeout_seconds: float,
-        download_id: str,
-        ) -> Mapping[str, Any]:
-        for attempt in range(self._max_poll_attempts):
-            req = urllib_request.Request(
-                url=f"{base_url}/api/v2/nm-report/downloads",
-                method="GET",
-                headers={"Authorization": token},
-            )
-            payload = json.loads(
-                self._open_report_request_with_429_retry(
-                    req,
-                    timeout_seconds=timeout_seconds,
-                    action_label="poll",
-                ).decode("utf-8")
-            )
-            report = _find_download_report(payload, download_id)
-            if report is None:
-                if attempt + 1 >= self._max_poll_attempts:
-                    raise RuntimeError(f"historical stocks report {download_id} was not listed")
-                self._sleep(self._poll_interval_seconds)
-                continue
-            status = str(report.get("status") or "").upper()
-            if status == "SUCCESS":
-                return report
-            if status in {"FAILED", "ERROR", "CANCELLED", "CANCELED"}:
-                raise RuntimeError(
-                    f"historical stocks report {download_id} failed with status {status}: {report}"
-                )
-            if attempt + 1 >= self._max_poll_attempts:
-                raise RuntimeError(
-                    f"historical stocks report {download_id} did not finish within bounded polling window"
-                )
-            self._sleep(self._poll_interval_seconds)
-        raise RuntimeError(f"historical stocks report {download_id} polling exhausted")
-
-    def _download_report_rows(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        timeout_seconds: float,
-        download_id: str,
-    ) -> list[dict[str, str]]:
-        req = urllib_request.Request(
-            url=f"{base_url}/api/v2/nm-report/downloads/file/{download_id}",
-            method="GET",
-            headers={"Authorization": token},
-        )
-        payload = self._open_report_request_with_429_retry(
-            req,
-            timeout_seconds=timeout_seconds,
-            action_label="download",
-        )
-        csv_bytes = _extract_csv_bytes(payload)
-        csv_text = _decode_csv_bytes(csv_bytes)
-        return _iter_csv_dict_rows(csv_text)
-
-    def _open_report_request_with_429_retry(
-        self,
-        req: urllib_request.Request,
-        *,
-        timeout_seconds: float,
-        action_label: str,
-    ) -> bytes:
-        attempt = 0
-        while True:
-            try:
-                with self._opener(req, timeout=timeout_seconds) as response:
-                    return response.read()
-            except error.HTTPError as exc:
-                body = exc.read().decode("utf-8")
-                wrapped = _HistoricalStocksHttpStatusError(exc.code, body, headers=exc.headers or {})
-                if wrapped.status_code == 429 and attempt < self._max_retries_on_429:
-                    attempt += 1
-                    self._sleep(self._resolve_retry_wait_seconds(wrapped.headers))
-                    continue
-                raise wrapped from exc
-            except error.URLError as exc:
-                raise RuntimeError(
-                    f"historical stocks {action_label} transport failed: {exc}"
-                ) from exc
-
-    def _resolve_retry_wait_seconds(self, headers: Mapping[str, Any]) -> float:
-        retry_seconds = _parse_positive_float(headers.get("X-Ratelimit-Retry"))
-        reset_seconds = _parse_reset_header_seconds(headers.get("X-Ratelimit-Reset"), now_epoch=self._time())
-        fallback_seconds = _parse_positive_float(headers.get("Retry-After"))
-        return max(
-            self._poll_interval_seconds,
-            retry_seconds,
-            reset_seconds,
-            fallback_seconds,
+            download_id=report.download_id,
+            report_name=report.report_name,
+            snapshot_ts=report.created_at or _format_csv_snapshot_ts(self._now_factory()),
         )
 
     def _build_batch_payloads(
@@ -1046,65 +885,6 @@ def _parse_reset_header_seconds(raw_value: Any, *, now_epoch: float) -> float:
     if parsed > now_epoch + 1:
         return max(0.0, parsed - now_epoch)
     return parsed
-
-
-def _find_download_report(payload: Any, download_id: str) -> Mapping[str, Any] | None:
-    candidates: list[Any]
-    if isinstance(payload, list):
-        candidates = payload
-    elif isinstance(payload, Mapping):
-        data = payload.get("data")
-        if isinstance(data, list):
-            candidates = data
-        elif isinstance(data, Mapping):
-            nested = data.get("reports") or data.get("items") or data.get("data")
-            candidates = nested if isinstance(nested, list) else []
-        else:
-            candidates = []
-    else:
-        candidates = []
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        if str(candidate.get("id") or "") == download_id:
-            return candidate
-    return None
-
-
-def _extract_csv_bytes(payload: bytes) -> bytes:
-    buffer = io.BytesIO(payload)
-    if not zipfile.is_zipfile(buffer):
-        return payload
-    with zipfile.ZipFile(buffer, "r") as archive:
-        candidate_names = [name for name in archive.namelist() if not name.endswith("/")]
-        if not candidate_names:
-            raise RuntimeError("historical stocks report archive is empty")
-        preferred_name = next(
-            (name for name in candidate_names if name.lower().endswith(".csv")),
-            candidate_names[0],
-        )
-        return archive.read(preferred_name)
-
-
-def _decode_csv_bytes(payload: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
-        try:
-            return payload.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise RuntimeError("historical stocks csv bytes could not be decoded")
-
-
-def _iter_csv_dict_rows(csv_text: str) -> list[dict[str, str]]:
-    lines = csv_text.splitlines()
-    if not lines:
-        return []
-    delimiter = ";" if lines[0].count(";") > lines[0].count(",") else ","
-    reader = csv.DictReader(io.StringIO(csv_text), delimiter=delimiter)
-    return [
-        {str(key or "").strip(): str(value or "").strip() for key, value in row.items()}
-        for row in reader
-    ]
 
 
 def _parse_csv_nm_id(raw_value: Any) -> int | None:
