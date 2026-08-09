@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import quote
 
 
@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.sales_funnel_history_block import (  # noqa: E402
-    HttpBackedSalesFunnelHistorySource,
+    DetailHistoryCsvBackedSalesFunnelHistorySource,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     DB_FILENAME,
@@ -46,7 +46,7 @@ from packages.contracts.sales_funnel_history_block import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = "sheet_vitrina_v1_buyout_mature_backfill_v1"
+SCHEMA_VERSION = "sheet_vitrina_v1_buyout_mature_backfill_v2"
 BACKFILL_DATE_FROM = "2026-07-22"
 BACKFILL_DATE_TO = "2026-08-03"
 MAX_WINDOW_DAYS = 31
@@ -89,6 +89,11 @@ def run_backfill(
         )
 
     if not apply:
+        source_evidence_getter: Callable[[], Mapping[str, Any]] | None = None
+        if history_block is None:
+            detail_history_source = DetailHistoryCsvBackedSalesFunnelHistorySource()
+            history_block = SalesFunnelHistoryBlock(detail_history_source)
+            source_evidence_getter = lambda: detail_history_source.last_fetch_evidence
         return _build_manifest(
             runtime=runtime,
             evidence_dir=evidence_dir,
@@ -96,8 +101,8 @@ def run_backfill(
             date_to=date_to,
             business_date=business_date.isoformat(),
             trusted_cutoff_date=cutoff.isoformat(),
-            history_block=history_block
-            or SalesFunnelHistoryBlock(HttpBackedSalesFunnelHistorySource()),
+            history_block=history_block,
+            source_evidence_getter=source_evidence_getter,
             created_at=_timestamp(effective_now),
         )
     if (
@@ -141,6 +146,7 @@ def _build_manifest(
     business_date: str,
     trusted_cutoff_date: str,
     history_block: SalesFunnelHistoryBlock,
+    source_evidence_getter: Callable[[], Mapping[str, Any]] | None,
     created_at: str,
 ) -> dict[str, Any]:
     enabled_nm_ids = _enabled_nm_ids(runtime)
@@ -157,6 +163,7 @@ def _build_manifest(
         date_to=date_to,
     )
     source_errors: list[dict[str, str]] = []
+    source_evidence: dict[str, Any] = {}
     try:
         result = history_block.execute(
             SalesFunnelHistoryRequest(
@@ -167,6 +174,8 @@ def _build_manifest(
             )
         ).result
         exact_payloads = split_sales_funnel_success_payload_by_date(result)
+        if source_evidence_getter is not None:
+            source_evidence = dict(source_evidence_getter())
     except Exception as exc:  # noqa: BLE001 - dry-run records the upstream blocker.
         exact_payloads = {}
         source_errors.append(
@@ -217,7 +226,15 @@ def _build_manifest(
             "non_target_digest": non_target_digest,
         },
         "authoritative": {
-            "source": "POST /api/analytics/v3/sales-funnel/products/history",
+            "source": {
+                "endpoint_chain": [
+                    "POST /api/v2/nm-report/downloads",
+                    "GET /api/v2/nm-report/downloads",
+                    "GET /api/v2/nm-report/downloads/file/{downloadId}",
+                ],
+                "report_type": "DETAIL_HISTORY_REPORT",
+                "acquisition_evidence": source_evidence,
+            },
             "snapshot_count": len(authoritative),
             "item_count": sum(
                 len((payload or {}).get("items") or [])
@@ -293,7 +310,7 @@ def _apply_manifest(
         raise BuyoutMatureBackfillError("reviewed manifest SHA-256 mismatch")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("status") != "ready":
-        raise BuyoutMatureBackfillError("reviewed manifest is not a ready v1 manifest")
+        raise BuyoutMatureBackfillError("reviewed manifest is not a ready v2 manifest")
     if not approval_reference or len(approval_reference) > 500:
         raise BuyoutMatureBackfillError("human approval reference is missing or invalid")
     scope = dict(manifest.get("scope") or {})

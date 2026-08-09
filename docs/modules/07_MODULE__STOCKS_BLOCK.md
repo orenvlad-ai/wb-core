@@ -14,6 +14,7 @@ source_basis:
 related_modules:
   - "packages/contracts/stocks_block.py"
   - "packages/adapters/stocks_block.py"
+  - "packages/adapters/seller_analytics_csv_report.py"
   - "packages/application/stocks_block.py"
   - "packages/application/warehouse_stocks.py"
   - "packages/application/wb_incident_policy.py"
@@ -40,7 +41,7 @@ related_docs:
   - "migration/44_stocks_block_legacy_sample_source.md"
   - "artifacts/stocks_block/evidence/initial__stocks__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под final temporal classifier: current `wb-warehouses` path сохраняется для supply-контуров и metadata bridge, а `sheet_vitrina_v1` закрепляет `stocks` на Seller Analytics CSV path `STOCK_HISTORY_DAILY_CSV` как exact-date closed-day source with `yesterday_closed_only` reporting semantics: required slot = `yesterday_closed`, `today_current` stays truthful `not_available`/blank and no longer degrades semantic green by itself."
+update_note: "Обновлён под общий Seller Analytics CSV transport: stocks сохраняет `STOCK_HISTORY_DAILY_CSV` exact-date closed-day semantics, а create/list/download/ZIP/CSV/429 contract переиспользуется с historical funnel `DETAIL_HISTORY_REPORT` без изменения stocks payload."
 ---
 
 # 1. Идентификатор и статус
@@ -59,6 +60,7 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - `POST /api/analytics/v1/stocks-report/wb-warehouses` c batched `nmIds`, `limit/offset` pagination и analytics-capable token;
   - Seller Analytics CSV chain `POST /api/v2/nm-report/downloads` + `GET /api/v2/nm-report/downloads` + `GET /api/v2/nm-report/downloads/file/{downloadId}` with `reportType=STOCK_HISTORY_DAILY_CSV`.
 - Current canonical runtime secret path для official stocks adapter: `WB_API_TOKEN`.
+- Общая transport-граница `packages/adapters/seller_analytics_csv_report.py` владеет create/list/poll/download/ZIP/CSV decode и bounded `429` retry; `stocks_block.py` передаёт в неё только `STOCK_HISTORY_DAILY_CSV` params и сохраняет прежнюю stocks-specific нормализацию.
 - Current `wb-warehouses` endpoint остаётся live inventory source для factory/WB supply flows и bounded metadata bridge `OfficeName -> regionName` при historical CSV normalization.
 - The same current adapter is the only `Склад WB` opening-snapshot source. Its raw payload now includes exact UTC `data.fetched_at`; the warehouse cutover stores that timestamp, requested/covered nmID counts, payload digest and per-warehouse raw rows. This reuse does not switch `sheet_vitrina_v1` back from the historical closed-day semantics described below.
 - В bounded `sheet_vitrina_v1` contour `stocks` теперь классифицируется как WB API date/period-capable source:
@@ -125,6 +127,7 @@ Policy revisions carry `active`, warehouse IDs and identities, reason, `effectiv
 
 - contracts: `packages/contracts/stocks_block.py`
 - adapters: `packages/adapters/stocks_block.py`
+- shared Seller Analytics CSV transport: `packages/adapters/seller_analytics_csv_report.py`
 - application: `packages/application/stocks_block.py`
 - official token boundary: `packages/adapters/official_api_runtime.py` with canonical env key `WB_API_TOKEN`
 - artifact-backed smoke: `apps/stocks_block_smoke.py`
