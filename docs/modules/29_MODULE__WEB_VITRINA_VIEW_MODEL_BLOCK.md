@@ -10,6 +10,7 @@ source_basis:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "packages/contracts/web_vitrina_contract.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
+  - "packages/application/sheet_vitrina_v1_proxy_v4.py"
 related_modules:
   - "packages/contracts/web_vitrina_contract.py"
   - "packages/contracts/web_vitrina_view_model.py"
@@ -23,11 +24,12 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Phase 2 web-vitrina materialize-ит отдельный library-agnostic `view_model` слой поверх stable `web_vitrina_contract` v1: mapper не меняет server truth, а phase 3 теперь уже подключает отдельный Gravity-specific adapter поверх этого seam, не меняя сам `view_model`."
+update_note: "View model сохраняет server-owned immutable Proxy V4 SKU/TOTAL truth: fixed pre-boundary blanks, ratio-of-aggregates TOTAL и по одному logical picker item на profit/margin pair."
 ---
 
 # 1. Идентификатор и статус
@@ -108,6 +110,12 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
   - `web_vitrina_page_composition`
 - still-later layer:
   - `export_layer`
+
+## 3.3 Proxy V4 presentation truth
+
+Server read model расширяет активный runtime catalog двумя public families: `Proxy прибыль 4` and `Прокси маржинальность 4`. Каждая family содержит SKU key и deterministic TOTAL key, но unified metric presentation объединяет pair в один logical picker/filter item; отдельный duplicated TOTAL option и scope badge не создаются. Это presentation pairing, а не пересчёт данных.
+
+V4 cells до fixed product boundary `2026-08-01` остаются `null` и форматируются как `—`. После boundary SKU profit/margin приходят только из effective immutable V4 parameter version and complete operands. TOTAL profit is the sum of eligible SKU profits; TOTAL margin is summed eligible profit divided by summed eligible expected buyout revenue. View-model/formatter layers never average SKU margins, substitute V3, invent zero or forward-fill a missing parameter version. Existing Proxy 3 rows, formatting and saved presentation state remain unchanged; old saved configurations gain the new active pairs only through the existing catalog-intersection/append migration.
 
 # 4. Артефакты и wiring по модулю
 

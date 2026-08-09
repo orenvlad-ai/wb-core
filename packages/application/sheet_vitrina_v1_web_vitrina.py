@@ -29,6 +29,7 @@ from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
+from packages.application.sheet_vitrina_v1_proxy_v4 import extend_metrics_with_proxy_v4
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_METRIC_KEYS,
     OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS,
@@ -244,8 +245,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             extend_metrics_with_sku_action_metrics(
                 extend_metrics_with_incident_stock_metrics(
                     extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        extend_metrics_with_proxy_v4(
+                            extend_metrics_with_our_wb_cost_metrics(
+                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                            )
                         )
                     )
                 )

@@ -114,6 +114,20 @@ negative-deduction uplift. Its exact semantic-category totals cover every
 retained operation group even when detailed output is truncated. It is
 evidence only: it cannot rebuild Finance or mutate Partner/ads state.
 
+## Proxy V4 automatic-rate consumer
+
+Proxy V4 consumes the existing immutable `wb_finance_weekly_aggregates` and `wb_finance_weekly_sync` read model; it does not fetch or reclassify Finance rows and does not add a second scheduler. A candidate version requires exactly the same three fully closed Monday-Sunday weeks as its mature Buyout window, complete seller coverage, `completed` sync provenance and current `wb_finance_weekly_classifier_v3_signed_review_points`. Historical as-of initialization additionally requires each week's `first_loaded_at` business date to be no later than the candidate effective date.
+
+Every automatic rate is a direct three-week `SUM(signed amount) / SUM(net_revenue)`, never an arithmetic mean of weekly percentages. Composition is exact:
+
+- agent remuneration uses canonical `agent_remuneration`, with `commission` only as compatibility alias; acquiring remains separate;
+- ordinary customer logistics, storage and acquiring remain separate rates;
+- penalties rate combines `penalties + corrections` with their signed semantics;
+- other expense combines `subscriptions + paid_services + review_points + other_deductions` plus only the uncapitalized remainders `acceptance − capitalized_acceptance` and `transit_logistics − capitalized_transit_logistics`;
+- marketing is excluded because V4 subtracts canonical `ads_sum` separately; capitalized acceptance/transit, positive adjustments and `wb_remuneration_adjustment` are excluded to prevent double count.
+
+The aligned range, current classifier, source amounts, seller coverage and Finance source digests participate in the immutable V4 source-window fingerprint. Incomplete/stale data blocks a new revision and leaves the last confirmed V4 version effective. A correction to an already frozen window requires the separate guarded historical reconciliation contract; the normal refresh never mutates prior V4 history.
+
 ## Production-safe all-history runner
 
 Local application runner:

@@ -382,6 +382,8 @@ DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
+DEFAULT_PROXY_V4_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4"
+DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_PROXY_V4_PARAMETERS_PATH}/preview"
 DEFAULT_AUTO_UPDATES_PATH = "/v1/sheet-vitrina-v1/settings/auto-updates"
 DEFAULT_SOURCES_SESSIONS_PATH = "/v1/sheet-vitrina-v1/settings/sources-sessions"
 DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH = f"{DEFAULT_SOURCES_SESSIONS_PATH}/spp-proxy/check"
@@ -725,6 +727,8 @@ def _build_handler(
             if parsed.path in {
                 DEFAULT_CALCULATION_PARAMETERS_PATH,
                 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
+                DEFAULT_PROXY_V4_PARAMETERS_PATH,
+                DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH,
             }:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -732,6 +736,13 @@ def _build_handler(
                     body = _load_request_payload(self)
                     if parsed.path == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH:
                         payload = entrypoint.handle_calculation_parameters_preview_request(body)
+                    elif parsed.path == DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH:
+                        payload = entrypoint.handle_proxy_v4_parameters_preview_request(body)
+                    elif parsed.path == DEFAULT_PROXY_V4_PARAMETERS_PATH:
+                        payload = entrypoint.handle_proxy_v4_parameters_save_request(
+                            body,
+                            actor=_current_web_user_config_key(self),
+                        )
                     else:
                         payload = entrypoint.handle_calculation_parameters_save_request(
                             body,
@@ -2790,6 +2801,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"calculation parameters failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_PROXY_V4_PARAMETERS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_proxy_v4_parameters_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Proxy V4 parameters failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -8721,6 +8747,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
+        "proxy_v4_parameters_path": DEFAULT_PROXY_V4_PARAMETERS_PATH,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
         "sources_sessions_path": DEFAULT_SOURCES_SESSIONS_PATH,
         "spp_proxy_source_check_path": DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH,
@@ -8740,6 +8767,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "auto_schedules_run_now_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
         "job_path": DEFAULT_SHEET_JOB_PATH,
         "calculation_parameters_preview_path": DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
+        "proxy_v4_parameters_preview_path": DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "embedded": bool(embedded),

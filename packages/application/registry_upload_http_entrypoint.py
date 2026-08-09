@@ -126,6 +126,7 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
 )
+from packages.application.sheet_vitrina_v1_proxy_v4 import extend_metrics_with_proxy_v4
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_METRIC_KEYS,
     OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
@@ -175,6 +176,7 @@ from packages.application.wb_transit_cost_replay import (
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
 from packages.application.warehouse_update_journal import WarehouseUpdateJournal
 from packages.application.calculation_parameters import CalculationParametersBlock
+from packages.application.calculation_parameters_v4 import ProxyV4ParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -1158,6 +1160,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.calculation_parameters_block = CalculationParametersBlock(runtime=self.runtime)
+        self.proxy_v4_parameters_block = ProxyV4ParametersBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+        )
         self.our_wb_cost_block = OurWbCostBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
@@ -1473,9 +1479,11 @@ class RegistryUploadHttpEntrypoint:
         metric_labels_by_source = _build_activity_metric_labels_by_source(
             extend_metrics_with_sku_action_metrics(
                 extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_our_wb_cost_metrics(
-                        extend_metrics_with_onec_stock_metrics(
-                            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                    extend_metrics_with_proxy_v4(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(
+                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                            )
                         )
                     )
                 )
@@ -5581,6 +5589,23 @@ class RegistryUploadHttpEntrypoint:
         self, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
         return self.calculation_parameters_block.create_version(
+            payload,
+            preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
+            created_by=actor,
+        )
+
+    def handle_proxy_v4_parameters_request(self) -> dict[str, Any]:
+        return self.proxy_v4_parameters_block.get_payload()
+
+    def handle_proxy_v4_parameters_preview_request(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self.proxy_v4_parameters_block.preview_tax_version(payload)
+
+    def handle_proxy_v4_parameters_save_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.proxy_v4_parameters_block.create_tax_version(
             payload,
             preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
             created_by=actor,

@@ -31,6 +31,10 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.sales_funnel_history_block import (  # noqa: E402
     SalesFunnelHistoryBlock,
 )
+from packages.application.warehouse_sync_lock import (  # noqa: E402
+    WarehouseSyncBusyError,
+    warehouse_sync_lock,
+)
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_MATURITY_DAYS,
     SALES_FUNNEL_HISTORY_SOURCE_KEY,
@@ -46,9 +50,9 @@ from packages.contracts.sales_funnel_history_block import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = "sheet_vitrina_v1_buyout_mature_backfill_v2"
-BACKFILL_DATE_FROM = "2026-07-13"
-BACKFILL_DATE_TO = "2026-07-21"
+SCHEMA_VERSION = "sheet_vitrina_v1_buyout_mature_backfill_v3"
+BACKFILL_DATE_FROM = "2026-07-06"
+BACKFILL_DATE_TO = "2026-07-12"
 MAX_WINDOW_DAYS = 31
 
 
@@ -123,18 +127,24 @@ def run_backfill(
         expected_deployed_sha=expected_deployed_sha,
         deployed_sha_file=sha_file,
     )
-    return _apply_manifest(
-        runtime=runtime,
-        evidence_dir=evidence_dir,
-        manifest_path=manifest_path.expanduser().resolve(),
-        expected_manifest_sha256=expected_manifest_sha256,
-        deployed_sha=deployed_sha,
-        deployed_sha_file=sha_file,
-        approval_reference=str(approval_reference).strip(),
-        business_date=business_date.isoformat(),
-        trusted_cutoff_date=cutoff.isoformat(),
-        applied_at=_timestamp(effective_now),
-    )
+    try:
+        with warehouse_sync_lock(runtime.runtime_dir, blocking=False):
+            return _apply_manifest(
+                runtime=runtime,
+                evidence_dir=evidence_dir,
+                manifest_path=manifest_path.expanduser().resolve(),
+                expected_manifest_sha256=expected_manifest_sha256,
+                deployed_sha=deployed_sha,
+                deployed_sha_file=sha_file,
+                approval_reference=str(approval_reference).strip(),
+                business_date=business_date.isoformat(),
+                trusted_cutoff_date=cutoff.isoformat(),
+                applied_at=_timestamp(effective_now),
+            )
+    except WarehouseSyncBusyError as exc:
+        raise BuyoutMatureBackfillError(
+            "canonical warehouse writer is busy; no historical buyout mutation was attempted"
+        ) from exc
 
 
 def _build_manifest(
@@ -310,7 +320,7 @@ def _apply_manifest(
         raise BuyoutMatureBackfillError("reviewed manifest SHA-256 mismatch")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("status") != "ready":
-        raise BuyoutMatureBackfillError("reviewed manifest is not a ready v2 manifest")
+        raise BuyoutMatureBackfillError("reviewed manifest is not a ready v3 manifest")
     if not approval_reference or len(approval_reference) > 500:
         raise BuyoutMatureBackfillError("human approval reference is missing or invalid")
     scope = dict(manifest.get("scope") or {})
