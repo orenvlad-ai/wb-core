@@ -2227,6 +2227,10 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            # The first schema check in a fresh process can run idempotent DML
+            # backfills and therefore leave an implicit transaction open.
+            # Close that schema transaction before opening the bounded write.
+            conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             try:
                 deleted = conn.execute(
