@@ -447,7 +447,7 @@
           <p>Версионные параметры формул. Изменение не затрагивает физические склады.</p>
           <button id="reloadCalculationParametersButton" type="button">Обновить</button>
         </div>
-        <h2 style="margin-top: 18px;">Proxy прибыль и маржинальность</h2>
+        <h2 style="margin-top: 18px;">Proxy прибыль и маржинальность · V3</h2>
         <div id="calculationParametersForm" class="calculation-grid">
           <label class="field"><span>Коэффициент выкупа, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="buyout_rate"></label>
           <label class="field"><span>Налог, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="tax_rate"></label>
@@ -478,8 +478,33 @@
           <div id="calculationBuyoutReferenceValue" class="calculation-total">—</div>
         </div>
         <div class="table-wrap"><table class="calculation-table"><thead id="calculationReferenceHead"></thead><tbody id="calculationReferenceRows"><tr><td>Данные загружаются...</td></tr></tbody></table></div>
-        <h2 style="margin-top: 22px;">История версий</h2>
+        <h2 style="margin-top: 22px;">История версий V3</h2>
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
+
+        <h2 style="margin-top: 30px;">Proxy прибыль и маржинальность · V4</h2>
+        <p class="calculation-reference-meta">Фиксированная граница публикации: 2026-08-01. Автоматические ставки заморожены в immutable version по точному общему пересечению READY COMPLETE недель Buyout + Finance среди трёх календарных слотов; достаточно 1–3 недель, вручную меняется только налог.</p>
+        <div id="proxyV4ParametersForm" class="calculation-grid">
+          <label class="field"><span>Расчётный выкуп (подтверждённый), %</span><input type="number" readonly data-proxy-v4-rate="buyout_rate"></label>
+          <label class="field"><span>Налог, %</span><input id="proxyV4TaxRate" type="number" min="0" max="100" step="0.01"></label>
+          <label class="field"><span>Агентское вознаграждение WB, %</span><input type="number" readonly data-proxy-v4-rate="agent_remuneration_rate"></label>
+          <label class="field"><span>Эквайринг, %</span><input type="number" readonly data-proxy-v4-rate="acquiring_rate"></label>
+          <label class="field"><span>Логистика WB до покупателя, %</span><input type="number" readonly data-proxy-v4-rate="wb_logistics_rate"></label>
+          <label class="field"><span>Хранение WB, %</span><input type="number" readonly data-proxy-v4-rate="wb_storage_rate"></label>
+          <label class="field"><span>Штрафы и корректировки расходов, %</span><input type="number" readonly data-proxy-v4-rate="penalties_adjustments_rate"></label>
+          <label class="field"><span>Другие расходы, %</span><input type="number" readonly data-proxy-v4-rate="other_expense_rate"></label>
+          <div class="calculation-card"><span class="muted">Всего включённых расходов</span><div id="proxyV4ExpenseTotal" class="calculation-total">—</div></div>
+          <div class="calculation-card"><span class="muted">Остаётся</span><div id="proxyV4RetainedShare" class="calculation-total">—</div></div>
+        </div>
+        <div id="proxyV4FormulaPreview" class="formula-preview">expected_buyout_revenue × (1 − included_expense_rate) − expected_buyout_qty × canonical_WB_WAC − ads_sum</div>
+        <p id="proxyV4SourceMeta" class="calculation-reference-meta">Source period и version metadata загружаются...</p>
+        <p id="proxyV4ParametersMessage" class="message">Читаем V4 параметры...</p>
+        <pre id="proxyV4ParametersDiff" class="calculation-diff"></pre>
+        <div class="toolbar" style="margin-top: 10px;">
+          <button id="previewProxyV4TaxButton" type="button" disabled>Показать diff налога</button>
+          <button id="saveProxyV4TaxButton" class="primary" type="button" disabled>Сохранить новую V4 version</button>
+        </div>
+        <h2 style="margin-top: 22px;">История версий V4</h2>
+        <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective from</th><th>Source weeks</th><th>Выкуп</th><th>Налог</th><th>Расходы</th><th>Статус</th><th>Создано</th></tr></thead><tbody id="proxyV4HistoryRows"><tr><td colspan="8">История загружается...</td></tr></tbody></table></div>
       </section>
 
       <section id="autoUpdatesGroupPanel" class="block settings-group-panel" data-settings-group-panel="auto-updates" aria-labelledby="autoUpdatesTitle" hidden>
@@ -621,6 +646,8 @@
       const usersPath = config.settings_users_path;
       const calculationParametersPath = config.calculation_parameters_path;
       const calculationParametersPreviewPath = config.calculation_parameters_preview_path;
+      const proxyV4ParametersPath = config.proxy_v4_parameters_path;
+      const proxyV4ParametersPreviewPath = config.proxy_v4_parameters_preview_path;
       const autoUpdatesPath = config.auto_updates_path;
       const sourcesSessionsPath = config.sources_sessions_path;
       const sourceRoutes = {
@@ -715,6 +742,16 @@
       const reloadCalculationButton = document.getElementById("reloadCalculationParametersButton");
       const previewCalculationButton = document.getElementById("previewCalculationParametersButton");
       const saveCalculationButton = document.getElementById("saveCalculationParametersButton");
+      const proxyV4RateInputs = Array.from(document.querySelectorAll("[data-proxy-v4-rate]"));
+      const proxyV4TaxRate = document.getElementById("proxyV4TaxRate");
+      const proxyV4ExpenseTotal = document.getElementById("proxyV4ExpenseTotal");
+      const proxyV4RetainedShare = document.getElementById("proxyV4RetainedShare");
+      const proxyV4SourceMeta = document.getElementById("proxyV4SourceMeta");
+      const proxyV4Message = document.getElementById("proxyV4ParametersMessage");
+      const proxyV4Diff = document.getElementById("proxyV4ParametersDiff");
+      const proxyV4HistoryRows = document.getElementById("proxyV4HistoryRows");
+      const previewProxyV4TaxButton = document.getElementById("previewProxyV4TaxButton");
+      const saveProxyV4TaxButton = document.getElementById("saveProxyV4TaxButton");
       const autoUpdatesRows = document.getElementById("autoUpdatesRows");
       const autoUpdatesMessage = document.getElementById("autoUpdatesMessage");
       const autoUpdatesOverallStatus = document.getElementById("autoUpdatesOverallStatus");
@@ -755,6 +792,7 @@
       let editingContractId = "";
       let users = [];
       let calculationPreviewFingerprint = "";
+      let proxyV4PreviewFingerprint = "";
       let autoUpdatesState = null;
       let sourcesSessionsState = null;
       const sourceCheckPromises = new Map();
@@ -877,6 +915,7 @@
         }
         if (requested === "user-directory") {
           loadCalculationParameters();
+          loadProxyV4Parameters();
         }
         if (requested === "auto-updates") {
           loadAutoUpdates();
@@ -2524,7 +2563,7 @@
         calculationReferenceHead.innerHTML = "<tr><th>Статья</th>" + weeks.map((week) => (
           "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) +
           (String(week.status || "") !== "ready" ? "<span class=\"calculation-reference-week-status\">" + escapeHtml(({missing:"нет данных", partial:"неполный набор", stale:"устаревшая семантика"})[week.status] || String(week.status || "нет данных")) + "</span>" : "") + "</th>"
-        )).join("") + "<th>Итог 3 недели<br><span class=\"calculation-reference-meta\">SUM / SUM</span></th></tr>";
+        )).join("") + "<th>Итог подтверждённых недель<br><span class=\"calculation-reference-meta\">1–3 недели · SUM / SUM</span></th></tr>";
         const buyoutWeeks = Array.isArray(buyoutReference.weeks) ? buyoutReference.weeks : [];
         const buyoutWeekByRange = new Map(buyoutWeeks.map((week) => (
           [String(week.week_start || "") + "|" + String(week.week_end || ""), week]
@@ -2552,7 +2591,7 @@
               : "Неделя не опубликована: " + String(week.status || "нет полного подтверждения")
           )),
           weighted_average_pct: buyoutReference.weighted_average_pct,
-          note: "Только подтверждённые данные возрастом не менее 6 дней. " + buyoutWeekStatus
+          note: String(buyoutReference.status_message || "") + " " + buyoutWeekStatus
         };
         const financeRows = Array.isArray(reference && reference.rows) ? reference.rows : [];
         const rows = [buyoutRow, ...financeRows];
@@ -2575,6 +2614,10 @@
             "<tr data-calculation-reference-key=\"" + escapeHtml(String(row.key || "")) + "\"><td>" + escapeHtml(row.label) +
             "<div class=\"calculation-reference-meta\">" + escapeHtml(audit) + "</div>" +
             (treatment ? "<div class=\"calculation-reference-meta\">Учёт: " + escapeHtml(treatment) + "</div>" : "") +
+            (row.coverage_text ? "<div class=\"user-source-note\">" + escapeHtml(row.coverage_text) +
+              (Array.isArray(row.contributing_week_ranges) && row.contributing_week_ranges.length
+                ? ": " + escapeHtml(row.contributing_week_ranges.map((range) => range.join(" — ")).join("; "))
+                : "") + "</div>" : "") +
             (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
             (row.weekly_rate_pct || []).map((value, index) => "<td title=\"" + escapeHtml((row.weekly_cell_titles || [])[index] || ((row.weekly_amount_rub || [])[index] == null ? "Нет полного канонического значения" : "Сумма: " + String((row.weekly_amount_rub || [])[index]) + " ₽")) + "\">" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
             "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
@@ -3127,6 +3170,129 @@
         }
       }
 
+      function proxyV4TaxPayload() {
+        const value = Number(proxyV4TaxRate.value);
+        if (!Number.isFinite(value) || value < 0 || value > 100) {
+          throw new Error("Налог V4 должен быть от 0 до 100%.");
+        }
+        return {tax_rate: String(value / 100)};
+      }
+
+      function refreshProxyV4TaxDraft() {
+        proxyV4PreviewFingerprint = "";
+        saveProxyV4TaxButton.disabled = true;
+        proxyV4Diff.textContent = "";
+        try {
+          proxyV4TaxPayload();
+          previewProxyV4TaxButton.disabled = false;
+          proxyV4Message.textContent = "Изменение налога получит текущую business date автоматически; сначала проверьте diff.";
+          proxyV4Message.className = "message warning";
+        } catch (error) {
+          previewProxyV4TaxButton.disabled = true;
+          proxyV4Message.textContent = error.message;
+          proxyV4Message.className = "message error";
+        }
+      }
+
+      function renderProxyV4(payload) {
+        const current = payload && payload.current && typeof payload.current === "object" ? payload.current : null;
+        const parameters = current && current.parameters && typeof current.parameters === "object" ? current.parameters : {};
+        proxyV4RateInputs.forEach((input) => {
+          const raw = parameters[input.dataset.proxyV4Rate];
+          input.value = raw == null || raw === "" ? "" : String(Number(raw) * 100);
+        });
+        proxyV4TaxRate.value = parameters.tax_rate == null || parameters.tax_rate === "" ? "" : String(Number(parameters.tax_rate) * 100);
+        proxyV4TaxRate.disabled = !current;
+        previewProxyV4TaxButton.disabled = !current;
+        proxyV4ExpenseTotal.textContent = formatCalculationReferencePct(parameters.included_expense_rate_pct);
+        proxyV4RetainedShare.textContent = formatCalculationReferencePct(parameters.retained_share_pct);
+        const aligned = payload && payload.aligned_window && typeof payload.aligned_window === "object" ? payload.aligned_window : {};
+        const rangesText = (ranges) => Array.isArray(ranges) && ranges.length
+          ? ranges.map((range) => Array.isArray(range) ? range.join(" — ") : String(range)).join("; ")
+          : "—";
+        proxyV4SourceMeta.textContent = current
+          ? "Version: " + String(current.version_id || "—") +
+            " · effective from: " + String(current.effective_date || "—") +
+            " · frozen coverage: " + String(parameters.coverage_text || "—") +
+            " · frozen weeks: " + rangesText(parameters.source_week_ranges) +
+            " · denominators: Buyout orderCount " + String(parameters.buyout_order_count_weight || "—") +
+            ", Finance net_revenue " + String(parameters.finance_net_revenue_weight || "—") +
+            " · latest candidate: " + String(aligned.coverage_text || "—") +
+            " · candidate weeks: " + rangesText(aligned.source_week_ranges) +
+            (Array.isArray(aligned.blockers) && aligned.blockers.length ? " · pending: " + aligned.blockers.join(" ") : "") +
+            " · Finance: SUM(signed amount) / SUM(net_revenue) · Buyout: SUM(buyoutPercent × orderCount) / SUM(orderCount)"
+          : "V4 не публикуется до guarded historical initialization с фиксированной границей 2026-08-01.";
+        proxyV4Message.textContent = String(payload && payload.status_message || "Статус V4 неизвестен.");
+        proxyV4Message.className = "message " + (
+          payload && payload.status === "ready" ? "success" :
+          payload && payload.status === "initialization_required" ? "error" : "warning"
+        );
+        const history = Array.isArray(payload && payload.history) ? payload.history : [];
+        proxyV4HistoryRows.innerHTML = history.length ? history.map((item) => {
+          const values = item.parameters || {};
+          return "<tr><td>" + escapeHtml(item.version_id || "—") + "</td><td>" + escapeHtml(item.effective_date || "—") +
+            "</td><td>" + escapeHtml(rangesText(values.source_week_ranges) + " · " + String(values.coverage_text || "—")) +
+            "</td><td>" + escapeHtml(formatCalculationReferencePct(values.buyout_rate_pct)) +
+            "</td><td>" + escapeHtml(formatCalculationReferencePct(values.tax_rate_pct)) +
+            "</td><td>" + escapeHtml(formatCalculationReferencePct(values.included_expense_rate_pct)) +
+            "</td><td>" + escapeHtml(item.version_kind || "—") +
+            "</td><td>" + escapeHtml(item.created_at || "—") + "</td></tr>";
+        }).join("") : "<tr><td colspan=\"8\">Guarded historical initialization ещё не выполнена.</td></tr>";
+        proxyV4PreviewFingerprint = "";
+        proxyV4Diff.textContent = "";
+        saveProxyV4TaxButton.disabled = true;
+      }
+
+      async function loadProxyV4Parameters() {
+        if (!proxyV4ParametersPath) return;
+        try {
+          const payload = await fetchJson(proxyV4ParametersPath, {headers: {Accept: "application/json"}});
+          renderProxyV4(payload);
+        } catch (error) {
+          proxyV4Message.textContent = error.message;
+          proxyV4Message.className = "message error";
+        }
+      }
+
+      async function previewProxyV4Tax() {
+        try {
+          const result = await fetchJson(proxyV4ParametersPreviewPath, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
+            body: JSON.stringify(proxyV4TaxPayload())
+          });
+          proxyV4PreviewFingerprint = String(result.preview_fingerprint || "");
+          proxyV4Diff.textContent = result.changed
+            ? "Налог: " + String(result.before_tax_rate_pct || "—") + "% → " + String(result.after_tax_rate_pct || "—") + "%\nEffective business date: " + String(result.effective_date || "—")
+            : "Налог V4 не изменился.";
+          saveProxyV4TaxButton.disabled = !result.changed || !proxyV4PreviewFingerprint;
+          proxyV4Message.textContent = result.changed ? "Diff V4 готов; effective date назначена автоматически." : "Изменений нет.";
+          proxyV4Message.className = "message warning";
+        } catch (error) {
+          proxyV4Message.textContent = error.message;
+          proxyV4Message.className = "message error";
+        }
+      }
+
+      async function saveProxyV4Tax() {
+        if (!proxyV4PreviewFingerprint) return;
+        try {
+          const body = proxyV4TaxPayload();
+          body.preview_fingerprint = proxyV4PreviewFingerprint;
+          const payload = await fetchJson(proxyV4ParametersPath, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
+            body: JSON.stringify(body)
+          });
+          renderProxyV4(payload);
+          proxyV4Message.textContent = "Новая V4 tax version сохранена; свежая Витрина применит её только с назначенной business date.";
+          proxyV4Message.className = "message success";
+        } catch (error) {
+          proxyV4Message.textContent = error.message;
+          proxyV4Message.className = "message error";
+        }
+      }
+
       addItemButton.addEventListener("click", () => {
         const draft = {
           item_id: "",
@@ -3194,9 +3360,15 @@
       createUserButton.addEventListener("click", createUser);
       calculationInputs.forEach((input) => input.addEventListener("input", refreshCalculationPreview));
       calculationEffectiveDate.addEventListener("change", refreshCalculationPreview);
-      reloadCalculationButton.addEventListener("click", loadCalculationParameters);
+      reloadCalculationButton.addEventListener("click", () => {
+        loadCalculationParameters();
+        loadProxyV4Parameters();
+      });
       previewCalculationButton.addEventListener("click", previewCalculationParameters);
       saveCalculationButton.addEventListener("click", saveCalculationParameters);
+      proxyV4TaxRate.addEventListener("input", refreshProxyV4TaxDraft);
+      previewProxyV4TaxButton.addEventListener("click", previewProxyV4Tax);
+      saveProxyV4TaxButton.addEventListener("click", saveProxyV4Tax);
       reloadAutoUpdatesButton.addEventListener("click", () => {
         loadAutoUpdates();
         loadVitrinaSchedules();

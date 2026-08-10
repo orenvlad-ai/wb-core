@@ -33,6 +33,11 @@ from packages.application.calculation_parameters import (
     ProxyParameters,
     calculate_proxy_3,
 )
+from packages.application.calculation_parameters_v4 import (
+    ProxyV4Parameters,
+    ProxyV4ParametersBlock,
+    calculate_proxy_4,
+)
 from packages.application.fin_report_daily_block import FinReportDailyBlock
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -96,6 +101,13 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
+)
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
+    extend_metrics_with_proxy_v4,
 )
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_AVG_COST_RUB_METRIC_KEY,
@@ -977,6 +989,10 @@ class SheetVitrinaV1LivePlanBlock:
     ) -> None:
         self.runtime = runtime
         self.calculation_parameters_block = CalculationParametersBlock(runtime=runtime)
+        self.proxy_v4_parameters_block = ProxyV4ParametersBlock(
+            runtime=runtime,
+            now_factory=now_factory or _default_now_factory,
+        )
         self.web_source_block = web_source_block or WebSourceSnapshotBlock(HttpBackedWebSourceSnapshotSource())
         self.seller_funnel_block = seller_funnel_block or SellerFunnelSnapshotBlock(HttpBackedSellerFunnelSnapshotSource())
         self.sales_funnel_history_block = sales_funnel_history_block or SalesFunnelHistoryBlock(HttpBackedSalesFunnelHistorySource())
@@ -1108,12 +1124,36 @@ class SheetVitrinaV1LivePlanBlock:
                 note_kind="source_scope_excluded",
             )
 
+        proxy_v4_rollover = (
+            self.proxy_v4_parameters_block.materialize_latest_confirmed_window(
+                business_date=current_date,
+            )
+            if not selected_source_keys and not selected_metric_keys
+            else {
+                "status": "skipped_partial_refresh",
+                "created": False,
+                "effective_date": current_date,
+                "detail": "Proxy V4 rollover is owned by the complete Vitrina refresh.",
+            }
+        )
+        diagnostics["proxy_v4_rollover"] = proxy_v4_rollover
+        emit(
+            _format_log_event(
+                "proxy_v4_rollover",
+                status=str(proxy_v4_rollover.get("status") or "unknown"),
+                created=bool(proxy_v4_rollover.get("created")),
+                version_id=str(proxy_v4_rollover.get("version_id") or ""),
+            )
+        )
+
         effective_metrics = extend_metrics_with_buyout_percent(
             extend_metrics_with_sku_action_metrics(
                 extend_metrics_with_incident_stock_metrics(
                     extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        extend_metrics_with_proxy_v4(
+                            extend_metrics_with_our_wb_cost_metrics(
+                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                            )
                         )
                     )
                 )
@@ -1210,6 +1250,7 @@ class SheetVitrinaV1LivePlanBlock:
             formulas_by_id=formulas_by_id,
             live_sources=live_sources,
             proxy_parameters_resolver=self.calculation_parameters_block.parameters_for_date,
+            proxy_v4_parameters_resolver=self.proxy_v4_parameters_block.parameters_for_date,
         )
 
         materialize_data_started = _start_refresh_phase(
@@ -2828,12 +2869,14 @@ class _MetricEvaluator:
         formulas_by_id: Mapping[str, FormulaV2Item],
         live_sources: TemporalLiveSources,
         proxy_parameters_resolver: Callable[[str], ProxyParameters] | None = None,
+        proxy_v4_parameters_resolver: Callable[[str], ProxyV4Parameters | None] | None = None,
     ) -> None:
         self.enabled_config = enabled_config
         self.metrics_by_key = metrics_by_key
         self.formulas_by_id = formulas_by_id
         self.live_sources = live_sources
         self.proxy_parameters_resolver = proxy_parameters_resolver or (lambda _date: DEFAULT_PROXY_PARAMETERS)
+        self.proxy_v4_parameters_resolver = proxy_v4_parameters_resolver or (lambda _date: None)
         self.grouped_config = _group_config(enabled_config)
         self.config_by_nm_id = {item.nm_id: item for item in enabled_config}
         self.sku_cache: dict[tuple[str, int, str], float | None] = {}
@@ -2913,6 +2956,19 @@ class _MetricEvaluator:
                         temporal_slot,
                     ),
                     expected_revenue,
+                )
+            elif metric.metric_key in {
+                PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
+                PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+            }:
+                aggregate = self._aggregate_proxy_v4(
+                    self.enabled_config,
+                    temporal_slot,
+                )
+                value = (
+                    aggregate["proxy_profit_4"]
+                    if metric.metric_key == PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY
+                    else aggregate["proxy_margin_4"]
                 )
             elif metric.metric_key == TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY:
                 value = self._aggregate_our_wb_unit_cost(temporal_slot)
@@ -3144,6 +3200,45 @@ class _MetricEvaluator:
         if not values or any(value is None for value in values):
             return None
         return float(sum(value for value in values if value is not None))
+
+    def _aggregate_proxy_v4(
+        self,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> dict[str, float | None]:
+        parameters = self._proxy_v4_parameters(temporal_slot)
+        if parameters is None:
+            return {
+                "proxy_profit_4": None,
+                "expected_buyout_revenue": None,
+                "proxy_margin_4": None,
+            }
+        eligible: list[tuple[float, float]] = []
+        for item in config_items:
+            profit = self.resolve_sku(
+                PROXY_V4_PROFIT_RUB_METRIC_KEY,
+                item.nm_id,
+                temporal_slot,
+            )
+            order_sum = self.resolve_sku("orderSum", item.nm_id, temporal_slot)
+            if profit is None or order_sum is None:
+                continue
+            eligible.append(
+                (float(profit), float(order_sum) * float(parameters.buyout_rate))
+            )
+        if not eligible:
+            return {
+                "proxy_profit_4": None,
+                "expected_buyout_revenue": None,
+                "proxy_margin_4": None,
+            }
+        profit = sum(item[0] for item in eligible)
+        revenue = sum(item[1] for item in eligible)
+        return {
+            "proxy_profit_4": profit,
+            "expected_buyout_revenue": revenue,
+            "proxy_margin_4": None if revenue == 0 else profit / revenue,
+        }
 
     def _aggregate_avg(
         self,
@@ -3380,6 +3475,34 @@ class _MetricEvaluator:
                 self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
                 expected_revenue,
             )
+        if metric_key == PROXY_V4_PROFIT_RUB_METRIC_KEY:
+            column_date = self._slot_lookups(temporal_slot).column_date
+            calculated = calculate_proxy_4(
+                order_sum=self.resolve_sku("orderSum", nm_id, temporal_slot),
+                order_count=self.resolve_sku("orderCount", nm_id, temporal_slot),
+                canonical_wb_wac=self.resolve_sku(
+                    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+                    nm_id,
+                    temporal_slot,
+                ),
+                ads_sum=self.resolve_sku("ads_sum", nm_id, temporal_slot),
+                parameters=self._proxy_v4_parameters(temporal_slot),
+                business_date=column_date,
+            )
+            value = calculated["proxy_profit_4"]
+            return None if value is None else float(value)
+        if metric_key == PROXY_V4_MARGIN_PCT_METRIC_KEY:
+            parameters = self._proxy_v4_parameters(temporal_slot)
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            expected_revenue = (
+                None
+                if parameters is None or order_sum is None
+                else float(order_sum) * float(parameters.buyout_rate)
+            )
+            return _divide_or_none(
+                self.resolve_sku(PROXY_V4_PROFIT_RUB_METRIC_KEY, nm_id, temporal_slot),
+                expected_revenue,
+            )
         if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
             return _divide_or_zero(
                 self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot),
@@ -3499,6 +3622,10 @@ class _MetricEvaluator:
         # version.  This is Proxy 3 on both sides of the boundary.
         effective_date = max(column_date, OUR_WB_COST_OPENING_DATE)
         return self.proxy_parameters_resolver(effective_date)
+
+    def _proxy_v4_parameters(self, temporal_slot: str) -> ProxyV4Parameters | None:
+        column_date = self._slot_lookups(temporal_slot).column_date
+        return self.proxy_v4_parameters_resolver(column_date)
 
 
 BLOCKED_SOURCE_METRIC_KEYS: set[str] = set()

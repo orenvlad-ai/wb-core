@@ -314,10 +314,14 @@ def main() -> None:
             immature_latest_week["date_to"] != "2026-08-02"
             or immature_latest_week["weeks"][2]["status"] != "immature"
             or immature_latest_week["weeks"][2]["weighted_average_pct"] is not None
-            or immature_latest_week["weighted_average_pct"] is not None
+            or immature_latest_week["weighted_average_pct"] != "70"
+            or immature_latest_week["ready_week_count"] != 2
+            or immature_latest_week["contributing_week_ranges"]
+            != [["2026-07-13", "2026-07-19"], ["2026-07-20", "2026-07-26"]]
         ):
             raise AssertionError(
-                "latest closed but not-yet-D-6 week must stay in place and blank the combined value"
+                "latest immature cell must stay blank while combined uses the two READY weeks: "
+                + repr(immature_latest_week)
             )
 
         runtime.delete_temporal_source_snapshots(
@@ -330,12 +334,14 @@ def main() -> None:
             today=TODAY,
         )
         if (
-            incomplete_reference["weighted_average_pct"] is not None
+            incomplete_reference["weighted_average_pct"] != "80"
             or incomplete_reference["weeks"][1]["status"] != "missing"
             or incomplete_reference["weeks"][1]["weighted_average_pct"] is not None
+            or incomplete_reference["ready_week_count"] != 2
         ):
             raise AssertionError(
-                "one missing mature date must blank its week and the combined result"
+                "one missing mature date must blank only its week and exclude it from combined: "
+                + repr(incomplete_reference)
             )
         _save_week_day(
             runtime,
@@ -468,7 +474,7 @@ def main() -> None:
         print("buyout_percent_vitrina_snapshot_projection: ok ->", first_row.values_by_date)
         print("buyout_percent_three_closed_weeks: ok ->", reference["weighted_average_pct"])
         print("buyout_percent_weekly_cells: ok ->", [week["weighted_average_pct"] for week in reference["weeks"]])
-        print("buyout_percent_fail_closed: ok -> missing mature day blanks week and combined")
+        print("buyout_percent_partial_exclusion: ok -> missing mature day blanks only its week")
         print("buyout_percent_mature_capture: ok -> overwrite + idempotency + D-7 catch-up")
         print("buyout_percent_current_week_excluded: ok ->", reference["date_to"])
         print("buyout_percent_settings_line: ok -> informational only")

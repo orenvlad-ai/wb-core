@@ -939,16 +939,16 @@ class CalculationParametersBlock:
                 else None
             )
 
-        week_statuses = [str(week["status"]) for week in weeks]
-        if all(status == "ready" for status in week_statuses):
-            reference_status = "ready"
-        elif (
-            week_statuses[-1] != "ready"
-            or "stale" in week_statuses
-        ):
-            reference_status = "stale"
-        else:
-            reference_status = "partial"
+        ready_week_indexes = [
+            index for index, week in enumerate(weeks) if week["status"] == "ready"
+        ]
+        reference_status = (
+            "ready"
+            if len(ready_week_indexes) == len(week_keys)
+            else "partial"
+            if ready_week_indexes
+            else "unavailable"
+        )
 
         bases: list[Decimal | None] = []
         for sources in metrics_by_week:
@@ -987,21 +987,31 @@ class CalculationParametersBlock:
                 else amount / base
                 for amount, base in zip(amounts, bases)
             ]
-            complete = (
-                reference_status == "ready"
-                and all(amount is not None for amount in amounts)
-                and all(base is not None and base > 0 for base in bases)
-            )
+            contributing_indexes = [
+                index
+                for index in ready_week_indexes
+                if amounts[index] is not None
+                and bases[index] is not None
+                and bases[index] > 0
+            ]
             total_base = (
-                sum((base for base in bases if base is not None), Decimal("0"))
-                if complete
+                sum((bases[index] for index in contributing_indexes), Decimal("0"))
+                if contributing_indexes
                 else None
             )
             weighted = (
-                sum((amount for amount in amounts if amount is not None), Decimal("0"))
+                sum((amounts[index] for index in contributing_indexes), Decimal("0"))
                 / total_base
-                if complete and total_base is not None and total_base > 0
+                if total_base is not None and total_base > 0
                 else None
+            )
+            contributing_ranges = [list(week_keys[index]) for index in contributing_indexes]
+            row_status = (
+                "ready"
+                if len(contributing_indexes) == len(week_keys)
+                else "partial"
+                if contributing_indexes
+                else "unavailable"
             )
             result_rows.append(
                 {
@@ -1025,26 +1035,49 @@ class CalculationParametersBlock:
                     "weighted_average_pct": (
                         None if weighted is None else _text(weighted * Decimal("100"))
                     ),
-                    "status": "ready" if complete else "partial",
+                    "status": row_status,
+                    "ready_week_count": len(contributing_indexes),
+                    "required_week_count": len(week_keys),
+                    "contributing_week_ranges": contributing_ranges,
+                    "net_revenue_weight": (
+                        None if total_base is None else _text(total_base)
+                    ),
+                    "coverage_text": (
+                        f"расчёт по {len(contributing_indexes)} из {len(week_keys)} подтверждённых недель"
+                        if contributing_indexes
+                        else "нет подтверждённых недель для расчёта"
+                    ),
                     "included_in_proxy_by_default": spec["key"] == "agent_remuneration",
                     "note": str(spec["note"]),
                 }
             )
 
-        if reference_status == "ready" and any(
-            row["status"] != "ready" for row in result_rows
-        ):
+        if reference_status == "ready" and any(row["status"] != "ready" for row in result_rows):
             reference_status = "partial"
         missing_weeks = [
             {"week_start": week["week_start"], "week_end": week["week_end"]}
             for week in weeks
             if week["status"] != "ready"
         ]
-        status_message = {
-            "ready": "Показаны ровно три последние полностью закрытые календарные недели.",
-            "partial": "Набор неполный: отсутствующая неделя или компонент не заменены более старым периодом.",
-            "stale": "Последняя обязательная закрытая неделя отсутствует или использует устаревший classifier; старые недели не подставлены.",
-        }[reference_status]
+        contributing_week_ranges = [list(week_keys[index]) for index in ready_week_indexes]
+        contributing_text = "; ".join(
+            f"{week_start} — {week_end}"
+            for week_start, week_end in contributing_week_ranges
+        )
+        status_message = (
+            f"Расчёт по {len(ready_week_indexes)} из {len(week_keys)} подтверждённых недель"
+            + (f": {contributing_text}." if contributing_text else ".")
+            + (
+                " Недоступные или неполные недели остаются «—» и не заменяются более старым периодом."
+                if len(ready_week_indexes) != len(week_keys)
+                else ""
+            )
+            if ready_week_indexes
+            else (
+                "Среди трёх последних закрытых недель нет ни одной полной READY Finance-недели; "
+                "combined остаётся «—»."
+            )
+        )
         return {
             "contract_version": CALCULATION_REFERENCE_CONTRACT_VERSION,
             "status": reference_status,
@@ -1053,6 +1086,9 @@ class CalculationParametersBlock:
             "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
             "expected_seller_ids": expected_sellers,
             "latest_closed_week_end": week_keys[-1][1],
+            "ready_week_count": len(ready_week_indexes),
+            "required_week_count": len(week_keys),
+            "contributing_week_ranges": contributing_week_ranges,
             "missing_weeks": missing_weeks,
             "weeks": weeks,
             "rows": result_rows,
@@ -1075,6 +1111,9 @@ def _unavailable_calculation_reference(
         "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
         "expected_seller_ids": [],
         "latest_closed_week_end": week_keys[-1][1] if week_keys else None,
+        "ready_week_count": 0,
+        "required_week_count": len(week_keys),
+        "contributing_week_ranges": [],
         "missing_weeks": [
             {"week_start": week_start, "week_end": week_end}
             for week_start, week_end in week_keys

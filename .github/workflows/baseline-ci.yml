@@ -48,6 +48,8 @@ jobs:
           python3 apps/sales_funnel_history_detail_csv_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
+          python3 apps/sheet_vitrina_v1_proxy_v4_smoke.py
+          python3 apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
 
       - name: Validate warehouse recovery policy
@@ -74,7 +76,9 @@ jobs:
         run: python3 -m playwright install chromium
 
       - name: Validate paired buyout metric presentation
-        run: python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+        run: |
+          python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py
 
       - name: Validate maintenance write-barrier browser state
         run: python3 apps/business_data_write_barrier_browser_smoke.py

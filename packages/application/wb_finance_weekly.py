@@ -39,7 +39,7 @@ from packages.business_time import business_date_from_timestamp
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v3_signed_review_points"
 SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v4"
-CALCULATION_REFERENCE_CONTRACT_VERSION = "wb_finance_calculation_reference_v2"
+CALCULATION_REFERENCE_CONTRACT_VERSION = "wb_finance_calculation_reference_v3"
 MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.0001")

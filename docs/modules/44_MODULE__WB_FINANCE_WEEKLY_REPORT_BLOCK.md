@@ -114,6 +114,20 @@ negative-deduction uplift. Its exact semantic-category totals cover every
 retained operation group even when detailed output is truncated. It is
 evidence only: it cannot rebuild Finance or mutate Partner/ads state.
 
+## Proxy V4 automatic-rate consumer
+
+Proxy V4 consumes the existing immutable `wb_finance_weekly_aggregates` and `wb_finance_weekly_sync` read model; it does not fetch or reclassify Finance rows and does not add a second scheduler. For each of the latest three fully closed Monday-Sunday slots, Finance READY requires complete seller coverage, `completed` sync provenance, every required metric and current `wb_finance_weekly_classifier_v3_signed_review_points`. A candidate version uses only the exact intersection of READY COMPLETE Finance weeks and mature READY Buyout weeks inside those same slots, with at least one common range. The version persists every contributing range and both denominators, so unrelated Buyout/Finance periods cannot be silently mixed. Historical as-of initialization is stricter: both initial versions require exact 3-of-3 common proof, and each Finance week's `first_loaded_at` business date must be no later than the candidate effective date.
+
+Every automatic rate is a direct one-to-three-week `SUM(signed amount) / SUM(net_revenue)` over that common intersection, never an arithmetic mean of weekly percentages. Missing/partial weeks contribute neither amount nor denominator; proven signed zero remains zero. Composition is exact:
+
+- agent remuneration uses canonical `agent_remuneration`, with `commission` only as compatibility alias; acquiring remains separate;
+- ordinary customer logistics, storage and acquiring remain separate rates;
+- penalties rate combines `penalties + corrections` with their signed semantics;
+- other expense combines `subscriptions + paid_services + review_points + other_deductions` plus only the uncapitalized remainders `acceptance − capitalized_acceptance` and `transit_logistics − capitalized_transit_logistics`;
+- marketing is excluded because V4 subtracts canonical `ads_sum` separately; capitalized acceptance/transit, positive adjustments and `wb_remuneration_adjustment` are excluded to prevent double count.
+
+The exact contributing ranges, current classifier, source amounts, Buyout `orderCount` weight, Finance `net_revenue` denominator, seller coverage and source digests participate in the immutable V4 source-window fingerprint. Zero common READY weeks, coverage loss inside the same slot window or stale source leaves the last confirmed V4 version effective; with no prior version the formula remains fail-closed. A newly READY week changes the fingerprint and creates at most one version from its actual materialization business date; repetition is idempotent. A payload correction for already frozen contributing ranges requires the separate guarded historical reconciliation contract; the normal refresh never mutates prior V4 history.
+
 ## Production-safe all-history runner
 
 Local application runner:

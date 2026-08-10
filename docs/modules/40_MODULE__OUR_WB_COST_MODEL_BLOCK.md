@@ -3,8 +3,8 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать direct projection `Себестоимость WB наша` и versioned Proxy 3 поверх canonical functional warehouse/cost engine."
-scope: "Public metric keys, daily WB WAC, Proxy profit/margin 3, calculation parameters and legacy audit boundary."
+purpose: "Зафиксировать direct projection `Себестоимость WB наша`, неизменный Proxy 3 и immutable automatic Proxy 4 поверх canonical functional warehouse/cost engine."
+scope: "Public metric keys, daily WB WAC, Proxy profit/margin 3 and 4, calculation parameters and legacy audit boundary."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
@@ -13,8 +13,11 @@ source_basis:
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/calculation_parameters.py"
+  - "packages/application/calculation_parameters_v4.py"
   - "packages/application/our_wb_costs.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
+  - "packages/application/sheet_vitrina_v1_proxy_v4.py"
+  - "packages/application/proxy_v4_historical_projection.py"
   - "packages/application/warehouse_functional_economics_backfill.py"
   - "packages/application/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
 related_tables:
@@ -22,13 +25,16 @@ related_tables:
   - "sheet_vitrina_v1_warehouse_wb_daily_cost"
   - "sheet_vitrina_v1_warehouse_archival_estimate_versions/rows/active"
   - "sheet_vitrina_v1_calculation_parameter_versions"
+  - "sheet_vitrina_v1_proxy_v4_parameter_versions"
   - "sheet_vitrina_v1_wb_cost_daily_state (legacy audit/fallback before functional apply only)"
 related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
+  - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4"
+  - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "Один temporal resolver обслуживает Vitrina, Finance, Partner и Proxy 3; legacy group COST_PRICE / Proxy 1 остаются audit-only и исключены из public catalog/read/UI."
+update_note: "Добавлен отдельный immutable Proxy V4 с fixed boundary 2026-08-01 и aligned three-week Buyout/Finance versions; V3 formula/history и canonical WB WAC не меняются."
 ---
 
 # 1. Canonical WB WAC
@@ -47,7 +53,7 @@ Accepted WB supply добавляет доказанный inbound capital, но
 
 # 2. Versioned calculation parameters
 
-`Настройки → Расчётные параметры` хранит immutable versions с effective date, revision, author/time, exact fingerprint и diff preview. Верхняя навигация уже является заголовком раздела, поэтому страница не повторяет внутренний heading `Расчётные параметры`. Initial version effective `2026-07-01`:
+`Настройки → Расчётные параметры → Proxy прибыль и маржинальность · V3` хранит прежние immutable versions с effective date, revision, author/time, exact fingerprint и diff preview. Переименование блока не меняет его поля, формулу, историю или save/recalculation semantics. Верхняя навигация уже является заголовком раздела, поэтому страница не повторяет внутренний heading `Расчётные параметры`. Initial V3 version effective `2026-07-01`:
 
 - buyout rate — `91%`;
 - tax — `6%`;
@@ -56,11 +62,11 @@ Accepted WB supply добавляет доказанный inbound capital, но
 - total included expenses — `44%`;
 - retained share — `56%`.
 
-Validation требует каждый процент в `0..100%` и total expenses `<100%`. Save создаёт новую version и targeted Proxy recalculation от effective date; physical warehouses не пересчитываются.
+Validation требует каждый процент в `0..100%` и total expenses `<100%`. V3 save создаёт новую version и targeted Proxy 3 recalculation от явно выбранной effective date; physical warehouses не пересчитываются.
 
-Reference table переиспользует canonical `wb_finance_weekly_aggregates`, их classifier и signed-компоненты; отдельного классификатора справочника нет. Она запрашивает ровно три последние полностью закрытые календарные недели. Пропущенная неделя не заменяется более старой: неполное seller coverage даёт `partial`, отсутствие обязательного слота — `stale`, а трёхнедельный итог остаётся пустым до полного exact набора. Каждая строка делится на единый denominator `net_revenue`; итог считается только как `SUM(amount) / SUM(net_revenue)`, а не как arithmetic mean weekly percentages.
+Reference table переиспользует canonical `wb_finance_weekly_aggregates`, их classifier и signed-компоненты; отдельного классификатора справочника нет. Она всегда показывает ровно три последние полностью закрытые календарные slot-недели. Пропущенная/partial/stale неделя остаётся `—` и не заменяется более старой; combined каждой строки использует все READY COMPLETE недели внутри этих трёх слотов, от одной до трёх. Никакая частичная строка или день не входит в числитель/знаменатель, missing не становится zero, а canonical zero остаётся валидным. Каждая строка делится на единый denominator `net_revenue`; combined считается только как direct `SUM(amount) / SUM(net_revenue)`, а не arithmetic mean weekly percentages, и показывает coverage `N из 3` плюс contributing ranges. При нуле READY недель combined остаётся пустым.
 
-В тех же трёх недельных колонках справочного UI и в объединённой колонке находится информационная строка `Расчётный выкуп (подтверждённый)`. Она не использует Finance denominator: backend берёт ровно три последние закрытые Monday-Sunday недели в canonical `Asia/Yekaterinburg`, публикует каждую неделю только когда все семь дат не новее D-6 trusted cutoff и имеют полное valid mature coverage по enabled SKU, а затем считает `SUM(buyoutPercent * orderCount) / SUM(orderCount)` только по positive-`orderCount` SKU-day. Missing/immature/invalid дата делает недельную ячейку `—`; свежая или неполная последняя неделя не заменяется старшей, не считается частично и блокирует объединённый итог. Combined также является прямым SUM/SUM по всем SKU-day трёх недель, не arithmetic mean трёх процентов. `buyoutCount` не является весом, current open week исключена. Canonical historical восстановление использует только official Seller Analytics CSV `DETAIL_HISTORY_REPORT`: polluted mature окно `2026-07-22..2026-08-03` прошло полный `33 × 13` coverage proof и guarded exact-date replacement, а production readback bounded-ил отдельный `2026-07-13..2026-07-21` official refetch для `33 × 9` старых same-day-provenance rows. Timestamp-only rewrite, legacy finance/sheet rows и частичные данные не являются fallback. Строка read-only и не меняет `buyout_rate`, version history, targeted recalculation или формулу Proxy Profit 3.
+В тех же трёх недельных колонках справочного UI и в объединённой колонке находится информационная строка `Расчётный выкуп (подтверждённый)`. Она не использует Finance denominator: backend берёт ровно три последние закрытые Monday-Sunday slot-недели в canonical `Asia/Yekaterinburg`, публикует каждую неделю только когда все семь дат не новее D-6 trusted cutoff и имеют полное valid mature coverage по enabled SKU, а затем считает `SUM(buyoutPercent * orderCount) / SUM(orderCount)` только по positive-`orderCount` SKU-day. Missing/immature/invalid дата делает недельную ячейку `—`; такая неделя не заменяется старшей, не считается частично и полностью исключается из combined. Combined публикуется по всем READY неделям в трёх слотах (одна–три) прямым SKU-day SUM/SUM, не arithmetic mean процентов; при нуле READY недель это `—`. UI показывает `N из 3`, contributing и pending ranges. `buyoutCount` не является весом, current open week исключена. Canonical historical восстановление использует только official Seller Analytics CSV `DETAIL_HISTORY_REPORT`: polluted mature окно `2026-07-22..2026-08-03` прошло полный `33 × 13` coverage proof и guarded exact-date replacement, а production readback bounded-ил отдельный `2026-07-13..2026-07-21` official refetch для `33 × 9` старых same-day-provenance rows. Timestamp-only rewrite, legacy finance/sheet rows и частичные данные не являются fallback. Строка read-only и не меняет `buyout_rate`, version history, targeted recalculation или формулу Proxy Profit 3.
 
 Построчный audited contract справочника:
 
@@ -86,6 +92,22 @@ Reference table переиспользует canonical `wb_finance_weekly_aggreg
 
 Все expense reversal/refund сохраняют канонический signed знак и уменьшают соответствующую строку; `abs()` запрещён. Reference UI публикует для каждой строки source fields, sign rule, denominator, aggregation rule и inclusion/capitalization note. Это только исправление справочного отображения: формула и сохранённые versioned settings Proxy 3 не меняются.
 
+## 2.1 Immutable automatic Proxy V4 parameters
+
+Отдельный блок `Proxy прибыль и маржинальность · V4` не переиспользует mutable V3 settings. Его product boundary фиксирован кодом как `2026-08-01`; до неё V4 resolver всегда возвращает NULL. В UI нет ручной даты начала. Только `tax_rate` остаётся ручным: preview и save автоматически привязывают новую immutable revision к текущей business date в `Asia/Yekaterinburg`; прошлые V4 даты не пересчитываются. Все остальные ставки, total included expenses, retained share, source range, status/version/effective-from metadata read-only.
+
+Automatic revision создаётся только когда Buyout и Finance имеют один и тот же exact набор трёх полностью закрытых Monday-Sunday недель. Buyout — прямой `SUM(buyoutPercent × orderCount) / SUM(orderCount)` по mature-proven D-6 enabled SKU-day с positive orders. Finance — прямой `SUM(signed amount) / SUM(net_revenue)` по тем же трём неделям и полному seller/classifier coverage. Source-window fingerprint включает диапазон и digests обоих source payloads; повторный refresh того же окна idempotent. Неполное/immature/stale окно не создаёт revision и не затирает последнюю подтверждённую версию. Изменение данных уже frozen range возвращает `historical_repair_required`; обычный rollover не является скрытым backfill. Занятый общий warehouse writer возвращает pending status, а не ломает Витрину.
+
+V4 expense composition фиксирована так:
+
+- `agent_remuneration_rate = SUM(agent_remuneration|commission) / SUM(net_revenue)`, acquiring исключён;
+- acquiring, ordinary customer logistics и storage — отдельные signed rates;
+- `penalties_adjustments_rate = SUM(penalties + corrections) / SUM(net_revenue)`;
+- `other_expense_rate = SUM(subscriptions + paid_services + review_points + other_deductions + acceptance − capitalized_acceptance + transit_logistics − capitalized_transit_logistics) / SUM(net_revenue)`;
+- marketing исключён, потому что `ads_sum` вычитается отдельно; positive adjustments и `wb_remuneration_adjustment` исключены; капитализированные acceptance/transit уже входят в canonical WB WAC и второй раз не вычитаются.
+
+Initial historical materialization — отдельная production-mutation. После official repair `2026-07-06..2026-07-12` она создаёт as-of revisions effective `2026-08-01` (source window `2026-07-06..2026-07-26`) и `2026-08-08` (source window `2026-07-13..2026-08-02`), затем пересчитывает только V4 rows существующих ready snapshots начиная с boundary. Она использует dry-run manifest, exact deployed SHA/human gate, pre-change digests, verified backup, V3/non-target invariants, atomic CAS apply, idempotency and post-apply reconciliation; future-known coefficients не проецируются назад.
+
 # 3. Proxy 3 formula
 
 Public Proxy 3 contract применяется ко всей активной истории. Для даты до `2026-07-01` canonical cost и versioned calculation parameters, effective на `2026-07-01`, проецируются назад; order/ads operands остаются значениями фактической исторической даты. На/после границы используются exact-date cost и effective settings. Legacy Proxy 2 definitions сохраняются только как technical audit и никогда не подменяют Proxy 3. Для SKU/date:
@@ -109,7 +131,22 @@ Advertising is not multiplied by buyout rate. Missing required operand remains N
 
 Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and their existing TOTAL keys. `our_wb_cost_confirmed_share_pct`, Proxy 2 and old inventory-return metrics are archived at both catalog/read-contract boundaries; persisted legacy rows may remain only as technical evidence and are removed by the guarded economics cutover.
 
-## 3.1 Legacy group COST_PRICE / Proxy 1 boundary
+## 3.1 Proxy 4 formula
+
+Для SKU/date on/after `2026-08-01` используется только effective immutable V4 revision:
+
+```text
+expected_buyout_revenue = orderSum × V4 buyout_rate
+expected_buyout_qty     = orderCount × V4 buyout_rate
+proxy_profit_4          = expected_buyout_revenue × (1 − included_expense_rate)
+                          − expected_buyout_qty × canonical_WB_WAC
+                          − ads_sum
+proxy_margin_4          = proxy_profit_4 / expected_buyout_revenue
+```
+
+Любой missing operand оставляет SKU V4 blank; zero expected revenue даёт blank margin. TOTAL profit — сумма только eligible SKU profits, TOTAL expected revenue — сумма соответствующих SKU expected revenues, TOTAL margin — их ratio, никогда не среднее SKU margins. Public pairs `proxy_profit_4_rub`/`total_proxy_profit_4_rub` и `proxy_margin_4_pct`/`proxy_margin_4_pct_total` представлены как два общих picker item без отдельного duplicated TOTAL item. Proxy 3 keys/formula/history остаются полностью прежними.
+
+## 3.2 Legacy group COST_PRICE / Proxy 1 boundary
 
 `cost_price_rub` is not a warehouse WAC. Its source is the separately uploaded group-level `COST_PRICE` dataset resolved by `group + max(effective_from <= slot_date)`; `avg_cost_price_rub` aggregates those group-resolved SKU values. Proxy 1 directly consumes that value through the fixed historical coefficients `0.5096/0.91`, then feeds `proxy_margin_pct` and their TOTAL rows.
 
@@ -117,7 +154,7 @@ The complete dependency closure — `cost_price_rub`, `avg_cost_price_rub`, `pro
 
 # 4. Quality and consumers
 
-Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All active direct consumers, including товарный капитал, его рентабельность, web-vitrina, Finance, Partner, Proxy 3 and `Управление SKU`, call the same temporal functional projection; independent retro maps and hidden fallback to 1C/legacy cost are prohibited.
+Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All active direct consumers, including товарный капитал, его рентабельность, web-vitrina, Finance, Partner, Proxy 3, Proxy 4 and `Управление SKU`, call the same temporal functional projection; independent retro maps and hidden fallback to 1C/legacy cost are prohibited.
 
 Late transit, FF services, storage, paid WB acceptance, supplier financial rows and bank commissions bind to the originating shipment/supply cost layer. Transit/services/storage allocate over the full corrected sent composition; paid acceptance allocates over accepted quantity. Their business date is source provenance, not upload time. A late component queues one coalesced affected-SKU revision and rebuilds dependent WAC/capital/COGS/Finance/Proxy history without another physical movement. Confirmed zero is distinct from missing/not-requested/updating/not-found/source-error/session-expired; every unknown state stays `null`, never `0 ₽`.
 

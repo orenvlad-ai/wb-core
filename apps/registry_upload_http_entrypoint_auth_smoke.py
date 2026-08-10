@@ -28,6 +28,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SETTINGS_USERS_PATH,
+    DEFAULT_PROXY_V4_PARAMETERS_PATH,
     DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
     DEFAULT_PARTNER_REPORT_PREVIEW_PATH,
@@ -193,6 +194,16 @@ def main() -> None:
                 users_code, users_payload = _get_json(f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if users_code != 401 or users_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated users API must return 401 JSON: {users_code} {users_payload}")
+                proxy_v4_code, proxy_v4_payload = _get_json(
+                    f"{base_url}{DEFAULT_PROXY_V4_PARAMETERS_PATH}"
+                )
+                if (
+                    proxy_v4_code != 401
+                    or proxy_v4_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError(
+                        f"unauthenticated Proxy V4 settings must return 401 JSON: {proxy_v4_code} {proxy_v4_payload}"
+                    )
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
@@ -281,6 +292,22 @@ def main() -> None:
                         or ">Договоры и инвойсы<" in body
                     ):
                         raise AssertionError("authenticated operator settings page must render settings tabs and registry sections")
+                proxy_v4_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_PROXY_V4_PARAMETERS_PATH}",
+                    headers={"Accept": "application/json"},
+                    method="GET",
+                )
+                with opener.open(proxy_v4_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if (
+                        response.status != 200
+                        or payload.get("contract_name")
+                        != "sheet_vitrina_v1_proxy_v4_parameters"
+                        or payload.get("fixed_boundary") != "2026-08-01"
+                    ):
+                        raise AssertionError(
+                            f"authenticated operator must read Proxy V4 settings: {response.status} {payload}"
+                        )
                 user_config_get = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
                     headers={"Accept": "application/json"},

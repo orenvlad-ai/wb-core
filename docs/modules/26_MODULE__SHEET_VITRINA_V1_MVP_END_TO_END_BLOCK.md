@@ -27,6 +27,9 @@ related_modules:
   - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_research.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
+  - "packages/application/calculation_parameters_v4.py"
+  - "packages/application/sheet_vitrina_v1_proxy_v4.py"
+  - "packages/application/proxy_v4_historical_projection.py"
   - "packages/application/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
@@ -47,6 +50,7 @@ related_tables:
   - "FORMULAS"
   - "DATA_VITRINA"
   - "STATUS"
+  - "sheet_vitrina_v1_proxy_v4_parameter_versions"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
   - "POST /v1/cost-price/upload"
@@ -64,6 +68,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/plan"
   - "GET /v1/sheet-vitrina-v1/status"
   - "GET /v1/sheet-vitrina-v1/job"
+  - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4"
+  - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/status"
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
   - "GET /sheet-vitrina-v1/operator"
@@ -126,6 +132,10 @@ related_runners:
   - "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"
   - "apps/sheet_vitrina_v1_buyout_mature_backfill.py"
   - "apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py"
+  - "apps/sheet_vitrina_v1_proxy_v4_initialize.py"
+  - "apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py"
+  - "apps/sheet_vitrina_v1_proxy_v4_smoke.py"
+  - "apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
@@ -149,7 +159,7 @@ related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под Google Sheets decommission and current plan-report operator flow: active contour is website/operator/public web-vitrina; plan-report has per-block coverage, controlled server-side monthly baseline XLSX routes and contract-period strategic guardrails for the annual buyout plan, 2026 USN upper limit and contractual minimum DRR; former Apps Script load/upload/write path is archived/do-not-use."
+update_note: "Добавлен immutable Proxy V4 с fixed 2026-08-01 boundary, automatic aligned three-week Buyout/Finance versions, public SKU/TOTAL metrics и guarded as-of initialization; V3 остаётся без изменений."
 ---
 
 # 1. Идентификатор и статус
@@ -512,6 +522,7 @@ Legacy `COST_PRICE` хранится как server-owned group/effective-date au
 | `proxy_profit_rub`, `profit_proxy_rub`, `total_proxy_profit_rub` | `orderSum × 0.5096 − orderCount × 0.91 × cost_price_rub − ads_sum`; TOTAL sum | legacy Proxy 1 profit/margin and old saved views | retired atomically with its cost dependency |
 | `proxy_margin_pct`, `proxy_margin_pct_total` | Proxy 1 profit divided by order revenue; TOTAL ratio of aggregates | legacy operator rows | retired atomically with Proxy 1 |
 | `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and TOTAL keys | canonical daily WB WAC plus versioned calculation parameters | Web Vitrina, Finance, Partner, SKU Management | remains canonical active/public |
+| `proxy_profit_4_rub`, `proxy_margin_4_pct` and TOTAL keys | immutable aligned three-week Buyout/Finance V4 parameters plus canonical daily WB WAC | Web Vitrina | active/public only from fixed `2026-08-01`; earlier dates blank |
 | `own_capital_*`, `own_total_*` canonical stage/product-capital rows | functional warehouse quantity/capital/WAC projection | Web Vitrina and capital consumers | remains canonical active/public |
 
 Saved metric-presentation state is compatible by intersection with the current server catalog: unknown retired keys are dropped from order/display/expanded anchors, active keys are appended in canonical order, and the cleaned state is persisted on migration or the next explicit user change. No dead metric row or zero-count picker option is created.
@@ -526,9 +537,12 @@ Saved metric-presentation state is compatible by intersection with the current s
   - `our_wb_cost_confirmed_share_pct` / `total_our_wb_cost_confirmed_share_pct` = `Доля подтверждённой себестоимости, %`; SKU value is bucket-based `confirmed_qty / stock_qty` and may be partial, blank is allowed only when stock is zero/missing, and TOTAL is quantity-weighted `SUM(confirmed_qty) / SUM(stock_qty)` rather than an average of SKU percentages;
   - `proxy_profit_3_rub` / `total_proxy_profit_3_rub` = true `proxy прибыль 3` on every active date: before `2026-07-01` exact same-`nmId` cost and effective settings from 01.07 are projected backwards while historical order/ads operands remain date-specific; on/after the boundary exact-date cost/effective settings are used. Formula is `orderSum × buyout_rate × retained_share − orderCount × buyout_rate × canonical_WB_WAC − ads_sum`; TOTAL is the sum of complete SKU rows.
   - `proxy_margin_3_pct` / `proxy_margin_3_pct_total` = `Прокси маржинальность 3, %` / `Прокси маржинальность 3 всего, %`; SKU denominator is expected buyout revenue `orderSum × buyout_rate`, TOTAL is `SUM(SKU profit) / SUM(SKU expected buyout revenue)`. Proxy 2 is never substituted and SKU margins are never averaged.
+  - `proxy_profit_4_rub` / `total_proxy_profit_4_rub` and `proxy_margin_4_pct` / `proxy_margin_4_pct_total` use the separate effective immutable V4 version only on/after `2026-08-01`. Formula is `orderSum × V4 buyout_rate × (1 − V4 included_expense_rate) − orderCount × V4 buyout_rate × canonical_WB_WAC − ads_sum`; missing operand is blank. TOTAL sums eligible SKU profits and divides by summed eligible expected buyout revenue, never averages SKU margins.
+  - each V4 SKU/TOTAL pair is one logical metric-presentation item, so picker/filter does not create a duplicated TOTAL option; V3 public keys and values remain unchanged.
 - Preliminary WB supply cost layers may exist for status `4/6` or planned quantity, but physical daily rolling admits only final `acceptedQuantity` / `accepted_quantity` on status `5` and groups it by normalized local `accepted_date` derived from the fact date. Planned `supply_date`, status `4/6`, and `quantity/qty` do not move physical buckets. Final accepted NULL-cost quantity enters explicit estimated/unknown, `confirmed + estimated + fallback` closes to stock, and zero-stock inbound carry remains internal to recalculation while persisted buckets stay capped to stock.
 - Web-vitrina read contract uses the same runtime-extended metric catalog as the DATA snapshot builder, so SKU/TOTAL our-WB rows must expose Russian labels and format metadata; confirmed share rows use `format=percent`, not raw number rendering.
-- The runtime-extended catalog makes the existing SKU `buyoutPercent` metric effective-visible without mutating the persisted legacy registry bundle, but its public value is fail-closed behind the fixed `Asia/Yekaterinburg` D-6 maturity boundary. Read projection discards every persisted D0..D-5 zero/non-zero value and renders blank/`—` for both all enabled SKU rows and the one `TOTAL|buyoutPercent`. Mature values come only from exact-date `sales_funnel_history` snapshots with capture provenance on/after their D-6 boundary and full enabled-SKU coverage; a polluted or same-day-captured ready row is never a fallback. The read contract derives mature TOTAL with positive-`orderCount` weighting and blank-without-denominator semantics. Because TOTAL and SKU share the one public key `buyoutPercent`, metric-presentation v4 treats them as one common pair for order/status/presets/user config; disabled legacy `avg_buyoutPercent` is not re-enabled or rendered. Ordinary refresh checks only D-7..D-6 for mature capture/catch-up and skips already proven dates. Historical official reconciliation uses separate guarded dry-run/explicit-apply captures backed by Seller Analytics CSV `DETAIL_HISTORY_REPORT`: the polluted `2026-07-22..2026-08-03` window required all `33 × 13 = 429` pairs, and production readback then bounded the remaining pre-provenance capture to `2026-07-13..2026-07-21` with all `33 × 9 = 297` pairs. Both scopes record official report/CSV provenance and apply only through reviewed manifest, exact deployment, human gate, backup and reconciliation. The resulting mature exact-date snapshots feed both Vitrina and the three closed-week Settings reference; no `DATA_VITRINA`, timestamp-only rewrite or arithmetic fallback is allowed.
+- The runtime-extended catalog makes the existing SKU `buyoutPercent` metric effective-visible without mutating the persisted legacy registry bundle, but its public value is fail-closed behind the fixed `Asia/Yekaterinburg` D-6 maturity boundary. Read projection discards every persisted D0..D-5 zero/non-zero value and renders blank/`—` for both all enabled SKU rows and the one `TOTAL|buyoutPercent`. Mature values come only from exact-date `sales_funnel_history` snapshots with capture provenance on/after their D-6 boundary and full enabled-SKU coverage; a polluted or same-day-captured ready row is never a fallback. The read contract derives mature TOTAL with positive-`orderCount` weighting and blank-without-denominator semantics. Because TOTAL and SKU share the one public key `buyoutPercent`, metric-presentation v4 treats them as one common pair for order/status/presets/user config; disabled legacy `avg_buyoutPercent` is not re-enabled or rendered. Ordinary refresh checks only D-7..D-6 for mature capture/catch-up and skips already proven dates. Historical official reconciliation uses separate guarded dry-run/explicit-apply captures backed by Seller Analytics CSV `DETAIL_HISTORY_REPORT`: current mature proof starts `2026-07-13`, and V4 requires one final exact `2026-07-06..2026-07-12` official repair with all `33 × 7 = 231` pairs. It records official report/CSV provenance and applies only through reviewed manifest, exact deployment, human gate, backup and reconciliation. The resulting mature exact-date snapshots feed Vitrina, the Settings reference and immutable V4 source windows; no `DATA_VITRINA`, timestamp-only rewrite or arithmetic fallback is allowed.
+- The ordinary Vitrina refresh uses its existing seam to inspect the latest three closed slots and compute the exact READY COMPLETE Buyout∩Finance intersection. One to three common weeks publish direct SUM/SUM automatic rates; zero common weeks keep the last immutable V4 version (or fail closed before initialization). It creates at most one new revision for a changed contributing-source fingerprint, including arrival of a previously missing newest week, carries the latest manual V4 tax, and reports ready/stale/pending/historical-repair-required without rewriting frozen dates or loading expensive history. Initial as-of V4 projection remains stricter and separate: after exact official proof it creates 3-of-3 versions effective `2026-08-01` (`2026-07-06..2026-07-26`) and `2026-08-08` (`2026-07-13..2026-08-02`), then updates only V4 rows of ready snapshots. Dates `2026-08-01..2026-08-07` resolve the first version and `2026-08-08..2026-08-09` the second; the not-yet-ready `2026-08-03..2026-08-09` slot cannot blank those historical metrics. Pre-boundary values remain blank; V3/non-target digests and repeated-apply readback stay invariant.
 - Ordinary manual/auto vitrina refresh reads the already materialized functional warehouse/cost state and never runs WB supply sync, stock fetch or Seller Portal automation. The separate bounded hourly/manual WB pipeline owns external refresh and atomic functional publication.
 - Frozen snapshots created before margin 3 entered the runtime catalog are completed only by the guarded margin-3 one-off runner described above. Ordinary historical refresh, replace-existing materialization and workbook/stock importers are prohibited for this repair because they can rewrite unrelated frozen cells.
 - Management proxy WB cost rows are not strict accounting FIFO. Proxy 2 remains technical archive only and cannot substitute Proxy 3; source/component statuses must stay explicit when values are estimates or pending components.
@@ -579,6 +593,7 @@ Saved metric-presentation state is compatible by intersection with the current s
   - 1C `proxy_profit_2_rub` uses the same coefficients and dependencies as `proxy_profit_rub`, replacing only `cost_price_rub` with `onec_WB_STOCK_unit_cost_rub`;
   - `proxy_profit_3_rub` always uses the effective versioned `buyout_rate`, included expense rates and shared canonical `our_wb_unit_cost_rub` projection; before `2026-07-01` the resolver projects same-`nmId` cost/settings from 01.07 and never reads Proxy 2;
   - `proxy_margin_3_pct` divides by `orderSum × buyout_rate`; TOTAL divides summed complete SKU profits by summed expected buyout revenue. Missing operands stay blank and a zero denominator returns blank; TOTAL is not an average of SKU percentages;
+  - `proxy_profit_4_rub` and `proxy_margin_4_pct` resolve only the V4 revision effective on the row's business date and are blank before `2026-08-01`; their TOTAL rows use eligible ratio-of-aggregates semantics;
   - 1C percent totals `proxy_margin_2_pct_total` and `inventory_capital_return_pct_total` are ratio-of-aggregates, not averages of SKU rows;
   - margin 3 SKU/TOTAL rows are Python runtime extensions placed immediately after profit 3 and assigned to the same web-vitrina source/group refresh set, so profit and margin update atomically in partial merges;
   - the initial effective version is `91%` buyout, `44%` included expenses and `56%` retained share; hardcoded `0.5096/0.91` are not active Proxy 3 formula inputs.
@@ -747,6 +762,8 @@ Bounded допущение:
   - что runtime-extended our-WB SKU/TOTAL rows in `GET /v1/sheet-vitrina-v1/web-vitrina` expose Russian labels and percent format metadata;
   - что `our_wb_unit_cost_rub` before `2026-07-01` uses the exact same-`nmId` 01.07 retrospective projection and `proxy_profit_3_rub` is true Proxy 3 rather than a Proxy 2 alias;
   - что `proxy_margin_3_pct` / `proxy_margin_3_pct_total` are percent-formatted rows immediately after profit 3, use expected-buyout-revenue denominator and ratio-of-aggregates for TOTAL, never average SKU margins or substitute margin 2, and refresh in the same source group as profit 3;
+  - что V3 formula/history remain byte-for-byte semantically unchanged while V4 adds its own fixed boundary, immutable aligned-window versions, automatic tax effective date, missing-operand blanks and eligible TOTAL ratio;
+  - что `Proxy прибыль 4` и `Прокси маржинальность 4` each appear once in the unified picker while rendering their SKU/TOTAL rows;
   - что planned/open status `4/6` never changes physical daily buckets, status `4 -> 5` enters once on final acceptance fact, accepted NULL-cost inbound closes into explicit estimated quantity, and unchanged rebuild is idempotent;
   - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;

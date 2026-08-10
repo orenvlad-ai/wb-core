@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -46,6 +47,12 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
 )
 from packages.application.sheet_vitrina_v1_incident_stocks import INCIDENT_STOCK_FACT_METRIC_KEYS  # noqa: E402
+from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
+    PROXY_V4_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
 from packages.application.web_vitrina_gravity_table_adapter import build_web_vitrina_gravity_table_adapter  # noqa: E402
 from packages.application.web_vitrina_page_composition import build_web_vitrina_page_composition  # noqa: E402
@@ -54,6 +61,10 @@ from packages.application.web_vitrina_view_model import build_web_vitrina_view_m
 STORAGE_KEY = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
 BUYOUT_LOGICAL_METRIC_ID = (
     f"pair::{BUYOUT_PERCENT_METRIC_KEY}::{BUYOUT_PERCENT_METRIC_KEY}"
+)
+PROXY_V4_LOGICAL_METRIC_IDS = (
+    f"pair::{PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY}::{PROXY_V4_PROFIT_RUB_METRIC_KEY}",
+    f"pair::{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}::{PROXY_V4_MARGIN_PCT_METRIC_KEY}",
 )
 TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
@@ -285,6 +296,9 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
         raise AssertionError("SKU picker must contain exactly one logical buyoutPercent option")
     if page.locator(f'[data-sku-metric-option="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
         raise AssertionError("legacy TOTAL average must not duplicate the SKU picker item")
+    for metric_key in (PROXY_V4_PROFIT_RUB_METRIC_KEY, PROXY_V4_MARGIN_PCT_METRIC_KEY):
+        if page.locator(f'[data-sku-metric-option="{metric_key}"]').count() != 1:
+            raise AssertionError(f"SKU picker must contain one V4 metric item: {metric_key}")
 
     _open_metrics(page)
     pair_row = page.locator(
@@ -304,6 +318,14 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
         f'[data-sku-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]'
     ).count():
         raise AssertionError("legacy avg_buyoutPercent must not enter the metrics modal")
+    for logical_id in PROXY_V4_LOGICAL_METRIC_IDS:
+        v4_pair = page.locator(f'[data-metric-config-row="{logical_id}"]')
+        if (
+            v4_pair.count() != 1
+            or v4_pair.get_attribute("data-metric-availability") != "common"
+            or v4_pair.locator(".metrics-config-scope-badge").count()
+        ):
+            raise AssertionError(f"V4 SKU/TOTAL metrics must be one common logical item: {logical_id}")
 
     display_select = pair_row.locator("[data-metric-display-select]")
     save_before = server.save_count
@@ -918,11 +940,14 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=f"{snapshot_date}T12:05:00Z",
-            plan=_build_plan(
-                as_of_date=snapshot_date,
-                first_nm_id=enabled[0].nm_id,
-                second_nm_id=enabled[1].nm_id,
-                first_group=first_group,
+            plan=_with_proxy_v4_rows(
+                _build_plan(
+                    as_of_date=snapshot_date,
+                    first_nm_id=enabled[0].nm_id,
+                    second_nm_id=enabled[1].nm_id,
+                    first_group=first_group,
+                ),
+                nm_ids=[enabled[0].nm_id, enabled[1].nm_id],
             ),
         )
     contract = SheetVitrinaV1WebVitrinaBlock(runtime=runtime, now_factory=lambda: NOW).build(
@@ -945,6 +970,29 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
         activity_surface=_build_activity_surface_fixture(),
         metric_catalog=_active_incident_metric_catalog(),
     )
+
+
+def _with_proxy_v4_rows(plan, *, nm_ids: list[int]):
+    sheets = []
+    for sheet in plan.sheets:
+        if sheet.sheet_name != "DATA_VITRINA":
+            sheets.append(sheet)
+            continue
+        blanks = [""] * len(plan.date_columns)
+        rows = [
+            *sheet.rows,
+            ["Proxy прибыль 4", f"TOTAL|{PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY}", *blanks],
+            ["Прокси маржинальность 4", f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}", *blanks],
+        ]
+        for nm_id in nm_ids:
+            rows.extend(
+                [
+                    ["SKU: Proxy прибыль 4", f"SKU:{nm_id}|{PROXY_V4_PROFIT_RUB_METRIC_KEY}", *blanks],
+                    ["SKU: Прокси маржинальность 4", f"SKU:{nm_id}|{PROXY_V4_MARGIN_PCT_METRIC_KEY}", *blanks],
+                ]
+            )
+        sheets.append(replace(sheet, rows=rows, row_count=len(rows)))
+    return replace(plan, sheets=sheets)
 
 
 class FixtureServer:
