@@ -15,7 +15,10 @@
 3. После согласования куратор создаёт ровно одного прямого user-owned
    исполнителя, задаёт ему связанное имя
    `WBC · <та же короткая тема> · И<n>` и закрепляет задачу. Куратор не
-   реализует change сам и не заменяет исполнителя subagent-ом.
+   реализует change сам и не заменяет исполнителя subagent-ом. Executor prompt
+   завершается обязательным указанием самостоятельно дойти до применимого
+   terminal state и вернуть в исходную кураторскую задачу один финальный
+   technical handoff после `COMPLETE` либо доказанного `BLOCKED`.
 4. Исполнитель работает в отдельной branch/worktree от актуального
    `origin/main`, обновляет только необходимые code/docs/tests и выполняет
    targeted checks и semantic self-review.
@@ -33,14 +36,37 @@
    `scope:live-runtime` — только на `release:production` после canonical
    deploy/verify. `scope:production-mutation` использует отдельный human-gated
    terminalization contract и автоматически не выпускается.
-9. Исполнитель передаёт куратору короткий технический отчёт с PR, final SHA и
-   проверками. Куратор делает owner handoff. Техническое завершение, merge и
-   release label не являются owner acceptance: только владелец пишет
-   `Задача принята` и вручную открепляет задачи.
+9. Исполнитель передаёт куратору один финальный technical handoff. Куратор без
+   повторной технической проверки тезисно пересказывает его владельцу.
+   Техническое завершение, merge и release label не являются owner acceptance:
+   только владелец пишет `Задача принята` и вручную открепляет задачи.
 
 Ветви, PR и release labels других задач не изменяй. Чужая активная release
 операция — штатное ожидание; она не разрешает снимать labels, обходить очередь
 или вмешиваться в live release.
+
+## Quiet curator после dispatch
+
+Каждый executor task prompt заканчивается обязательным указанием со следующей
+не сокращаемой семантикой:
+
+`Исполнитель самостоятельно доводит задачу до применимого terminal state. После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую задачу один финальный technical handoff: итоговый статус; что сделано; что не сделано или осталось вне scope; PR и final SHA; проверки; merge/release/deploy/production state; сложности, риски и blockers.`
+
+После успешного dispatch куратор немедленно завершает свой текущий turn.
+`Ждёт` означает quiet wait: отсутствие активных model/tool calls, а не
+`wait`/poll loop. До пробуждения куратор не инициирует wait/read/list/status
+опросы исполнителя, GitHub/CI/runtime/production audit его работы, follow-up
+prompts, промежуточные сводки, параллельную реализацию, независимую перепроверку
+handoff, heartbeat, automation или любой другой мониторинговый контур.
+
+Куратора пробуждает только один из трёх сигналов: финальный handoff исполнителя,
+доказанное strict human-only обращение исполнителя либо новое явное указание
+владельца. Обычный progress исполнителя не является сигналом. Вся техническая
+проверка, evidence и terminal closure до handoff принадлежат исполнителю. После
+финального handoff куратор только тезисно сообщает владельцу статус, сделанное,
+не сделанное или исключённое, выполненные проверки и достигнутый
+production/terminal state, а также сложности, риски или blocker; второй
+технический audit он не выполняет.
 
 ## Выключенная legacy-оркестрация
 
@@ -227,9 +253,11 @@ URL и redirects, отсутствие `5xx`, `DOMContentLoaded`, видимый
 Playwright context без пользовательского profile/cookies/credentials и без
 business mutations вне explicit scope.
 
-Отчёт другого агента не является доказательством. Перед handoff проверь GitHub
-state, final SHA, semantic diff, checks/reviews, unresolved threads, docs и,
-если применимо, canonical deploy/live/data evidence.
+Исполнитель не подменяет собственную technical verification отчётами других
+агентов. Перед финальным handoff он сам проверяет GitHub state, final SHA,
+semantic diff, checks/reviews, unresolved threads, docs и, если применимо,
+canonical deploy/live/data evidence. Эта обязанность не поручает куратору
+повторный audit после handoff.
 
 Пользователь нужен только для strict human-only действия: отсутствующий
 credential/permission/approval, interactive login/2FA/captcha, доказанный
