@@ -13,6 +13,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_PROXY_V4_PARAMETERS_PATH,
+    DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH,
+    WEB_AUTH_SECTION_SETTINGS,
+    _required_section_for_path,
+)
 
 
 SCRIPT = ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py"
@@ -102,6 +108,8 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/settings/users/",
         "/v1/sheet-vitrina-v1/settings/sources-sessions",
         "/v1/sheet-vitrina-v1/settings/sources-sessions/spp-proxy/check",
+        "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4",
+        "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview",
         "/sheet-vitrina-v1/supplier",
         "/sheet-vitrina-v1/settings",
         "/sheet-vitrina-v1/instructions",
@@ -117,6 +125,23 @@ def main() -> None:
     missing = sorted(required_paths - route_paths)
     if missing:
         raise AssertionError(f"public route allowlist missing required paths: {missing}")
+    proxy_v4_route = next(
+        route
+        for route in routes
+        if route["path"] == "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4"
+    )
+    if set(proxy_v4_route.get("methods") or []) != {"GET", "POST"}:
+        raise AssertionError(f"Proxy V4 parameters route must publish GET/POST, got {proxy_v4_route}")
+    proxy_v4_preview_route = next(
+        route
+        for route in routes
+        if route["path"] == "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
+    )
+    if set(proxy_v4_preview_route.get("methods") or []) != {"POST"}:
+        raise AssertionError(f"Proxy V4 preview route must publish POST only, got {proxy_v4_preview_route}")
+    for path in (DEFAULT_PROXY_V4_PARAMETERS_PATH, DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH):
+        if _required_section_for_path(path) != WEB_AUTH_SECTION_SETTINGS:
+            raise AssertionError(f"Proxy V4 route must require settings section access: {path}")
     fulfillment_upload_prefix = next(
         route
         for route in routes
@@ -246,6 +271,10 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include sources/sessions status exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/settings/sources-sessions/spp-proxy/check {") != 1:
         raise AssertionError("rendered nginx block must include SPP Proxy source check exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/calculation-parameters-v4 {") != 1:
+        raise AssertionError("rendered nginx block must include Proxy V4 parameters exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview {") != 1:
+        raise AssertionError("rendered nginx block must include Proxy V4 parameters preview exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/users/ {") != 1:
         raise AssertionError("rendered nginx block must include settings user item API exactly once")
     if rendered.count("location = /sheet-vitrina-v1/settings {") != 1:

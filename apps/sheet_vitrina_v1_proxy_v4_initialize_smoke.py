@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -17,6 +18,11 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_proxy_v4_initialize import (  # noqa: E402
     run_initialization,
+)
+from apps.sheet_vitrina_v1_proxy_v4_reconcile import (  # noqa: E402
+    ProxyV4ReconciliationError,
+    _validate_window,
+    run_reconciliation,
 )
 from apps.sheet_vitrina_v1_proxy_v4_smoke import (  # noqa: E402
     BUNDLE_FIXTURE,
@@ -41,10 +47,21 @@ from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
 
 
 NOW = datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc)
+REPAIR_NOW = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
 DEPLOYED_SHA = "1" * 40
 
 
 def main() -> None:
+    try:
+        _validate_window(
+            date_from="2026-08-01T00:00:00Z",
+            date_to="2026-08-09",
+            business_date="2026-08-10",
+        )
+    except ProxyV4ReconciliationError:
+        pass
+    else:
+        raise AssertionError("V4 reconciliation accepted a non-exact date scope")
     with TemporaryDirectory(prefix="proxy-v4-init-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime_dir = root / "runtime"
@@ -202,10 +219,75 @@ def main() -> None:
             ) > Decimal("0.0000005"):
                 raise AssertionError(f"historical V4 TOTAL margin is not a ratio of aggregates")
 
+        drifted = _drift_v4_total(
+            runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-08-09")
+        )
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-08-10T06:00:00Z",
+            plan=drifted,
+        )
+        repair_dry_run = run_reconciliation(
+            runtime_dir=runtime_dir,
+            evidence_dir=evidence_dir / "repair",
+            source_manifest_path=Path(dry_run["manifest_path"]),
+            expected_source_manifest_sha256=str(dry_run["manifest_sha256"]),
+            date_from="2026-08-01",
+            date_to="2026-08-09",
+            apply=False,
+            now=REPAIR_NOW,
+        )
+        if (
+            repair_dry_run["status"] != "ready"
+            or repair_dry_run["target_snapshot_count"] != 9
+            or repair_dry_run["affected_snapshot_count"] != 1
+        ):
+            raise AssertionError(f"V4 drift reconciliation dry-run failed: {repair_dry_run}")
+        repaired = run_reconciliation(
+            runtime_dir=runtime_dir,
+            evidence_dir=evidence_dir / "repair",
+            source_manifest_path=Path(dry_run["manifest_path"]),
+            expected_source_manifest_sha256=str(dry_run["manifest_sha256"]),
+            date_from="2026-08-01",
+            date_to="2026-08-09",
+            apply=True,
+            manifest_path=Path(repair_dry_run["manifest_path"]),
+            expected_manifest_sha256=str(repair_dry_run["manifest_sha256"]),
+            expected_deployed_sha=DEPLOYED_SHA,
+            deployed_sha_file=sha_file,
+            approval_reference="owner-repair-gate-test",
+            now=REPAIR_NOW,
+        )
+        if (
+            repaired["status"] != "reconciled"
+            or repaired["affected_snapshot_count"] != 1
+            or not repaired["non_target_preserved"]
+            or _v3_digest(runtime.db_path) != v3_before
+        ):
+            raise AssertionError(f"V4 drift reconciliation apply failed: {repaired}")
+        repair_repeated = run_reconciliation(
+            runtime_dir=runtime_dir,
+            evidence_dir=evidence_dir / "repair",
+            source_manifest_path=Path(dry_run["manifest_path"]),
+            expected_source_manifest_sha256=str(dry_run["manifest_sha256"]),
+            date_from="2026-08-01",
+            date_to="2026-08-09",
+            apply=True,
+            manifest_path=Path(repair_dry_run["manifest_path"]),
+            expected_manifest_sha256=str(repair_dry_run["manifest_sha256"]),
+            expected_deployed_sha=DEPLOYED_SHA,
+            deployed_sha_file=sha_file,
+            approval_reference="owner-repair-gate-test",
+            now=REPAIR_NOW,
+        )
+        if repair_repeated["status"] != "already_applied" or not repair_repeated["idempotent_noop"]:
+            raise AssertionError(f"V4 drift reconciliation repeat was not idempotent: {repair_repeated}")
+
     print("proxy_v4_initialization_dry_run_manifest: ok")
     print("proxy_v4_initialization_backup_apply_readback: ok")
     print("proxy_v4_initialization_idempotency_v3_invariant: ok")
     print("proxy_v4_aug_1_7_aug_8_9_as_of_versions_no_drift: ok")
+    print("proxy_v4_drift_reconciliation_manifest_backup_idempotency: ok")
 
 
 def _ready_plan(as_of_date: str, nm_ids: list[int]) -> SheetVitrinaV1Envelope:
@@ -270,6 +352,19 @@ def _v3_digest(db_path: Path) -> str:
                FROM sheet_vitrina_v1_calculation_parameter_versions ORDER BY revision"""
         ).fetchall()
     return json.dumps(rows, sort_keys=True)
+
+
+def _drift_v4_total(plan: SheetVitrinaV1Envelope) -> SheetVitrinaV1Envelope:
+    sheets = []
+    for sheet in plan.sheets:
+        if sheet.sheet_name != "DATA_VITRINA":
+            sheets.append(sheet)
+            continue
+        rows = [list(row) for row in sheet.rows]
+        target = next(row for row in rows if str(row[1]) == "TOTAL|total_proxy_profit_4_rub")
+        target[2] = float(target[2]) + 100
+        sheets.append(replace(sheet, rows=rows))
+    return replace(plan, sheets=sheets)
 
 
 if __name__ == "__main__":
