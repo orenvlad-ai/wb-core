@@ -33,7 +33,15 @@ from packages.application.warehouse_functional import (
 
 
 CONTRACT_NAME = "ff_inventory_reconciliation_v1"
-PLAN_VERSION = "v1"
+PLAN_VERSION = "v2_target_intent"
+CONFIRM_RETRY_LIMIT = 5
+CONFIRM_RETRYABLE_CODES = {
+    "relevant_ledger_changed",
+    "non_target_digest_changed",
+    "inventory_cost_basis_changed",
+    "wb_supply_return_proof_changed",
+    "wb_supply_return_lifecycle_changed",
+}
 ZERO = Decimal("0")
 REQUIRED_HEADERS = (
     "nmId",
@@ -201,9 +209,31 @@ class FfInventoryReconciliation:
             )
         if confirmation_fingerprint != str(row["plan_fingerprint"] or ""):
             raise FfInventoryReconciliationError(
-                "stale_or_invalid_fingerprint",
-                "Confirmation fingerprint does not match the stored preview",
+                "preview_confirmation_mismatch",
+                "Confirmation does not match the stored inventory target",
             )
+        stored_plan = dict(_loads(row["plan_json"], {}))
+        if str(stored_plan.get("fingerprint") or "") != str(
+            row["plan_fingerprint"] or ""
+        ):
+            raise FfInventoryReconciliationError(
+                "stored_preview_identity_invalid",
+                "Stored inventory preview identity is inconsistent",
+            )
+        if str(row["status"] or "") not in {"previewed", "confirmed"} or not bool(
+            stored_plan.get("apply_allowed")
+        ):
+            raise FfInventoryReconciliationError(
+                "preview_not_confirmable",
+                "Inventory preview did not pass validation",
+                details=stored_plan.get("blockers") or [],
+            )
+        confirmed_target_intent = _target_intent_from_stored_plan(
+            stored_plan,
+            source_sha256=str(row["source_sha256"] or ""),
+            business_date=str(row["business_date"] or ""),
+            return_supply_ids=_loads(row["return_supply_ids_json"], []),
+        )
         result = self.apply_plan(
             source_bytes=bytes(row["source_file_blob"]),
             source_filename=str(row["source_filename"]),
@@ -212,6 +242,7 @@ class FfInventoryReconciliation:
             confirmation_fingerprint=confirmation_fingerprint,
             approval_reference=f"ui-explicit-confirm:{preview_id}",
             created_by=created_by,
+            _confirmed_target_intent=confirmed_target_intent,
         )
         with _connect(self.runtime.db_path) as conn:
             conn.execute(
@@ -228,37 +259,51 @@ class FfInventoryReconciliation:
         source_filename: str,
         business_date: str,
         return_supply_ids: Iterable[str] = (),
+        _confirmed_target_intent: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         source_sha256 = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        normalized_return_supply_ids = sorted(
+            {str(item).strip() for item in return_supply_ids if str(item).strip()}
+        )
         parsed_rows = _parse_target_workbook(source_bytes, business_date=business_date)
         source_key = f"{source_sha256}:{business_date}"
         with _connect(self.runtime.db_path, query_only=True) as conn:
             _require_tables(conn)
-            active_catalog, _ = _complete_active_nomenclature(conn)
-            target_rows, identity_blockers = _resolve_target_rows(
-                parsed_rows,
-                active_catalog=active_catalog,
-            )
-            target_nm_ids = sorted(target_rows)
-            nomenclature, nomenclature_blockers = _exact_nomenclature(
-                conn, target_nm_ids
-            )
-            blockers: list[dict[str, Any]] = [
-                *identity_blockers,
-                *nomenclature_blockers,
-            ]
-            missing_nm_ids = sorted(set(active_catalog) - set(target_nm_ids))
-            if missing_nm_ids:
-                blockers.append(
-                    {
-                        "code": "active_nomenclature_rows_missing",
-                        "nm_ids": missing_nm_ids,
-                        "message": (
-                            "Manager workbook must contain every active FF nomenclature identity, "
-                            "including explicit zero targets"
-                        ),
-                    }
+            if _confirmed_target_intent is None:
+                active_catalog, _ = _complete_active_nomenclature(conn)
+                target_rows, identity_blockers = _resolve_target_rows(
+                    parsed_rows,
+                    active_catalog=active_catalog,
                 )
+                target_nm_ids = sorted(target_rows)
+                nomenclature, nomenclature_blockers = _exact_nomenclature(
+                    conn, target_nm_ids
+                )
+                blockers: list[dict[str, Any]] = [
+                    *identity_blockers,
+                    *nomenclature_blockers,
+                ]
+                missing_nm_ids = sorted(set(active_catalog) - set(target_nm_ids))
+                if missing_nm_ids:
+                    blockers.append(
+                        {
+                            "code": "active_nomenclature_rows_missing",
+                            "nm_ids": missing_nm_ids,
+                            "message": (
+                                "Manager workbook must contain every active FF nomenclature identity, "
+                                "including explicit zero targets"
+                            ),
+                        }
+                    )
+            else:
+                target_rows, nomenclature = _materialize_confirmed_target_intent(
+                    _confirmed_target_intent,
+                    source_sha256=source_sha256,
+                    business_date=business_date,
+                    return_supply_ids=normalized_return_supply_ids,
+                )
+                target_nm_ids = sorted(target_rows)
+                blockers = []
             existing = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_ff_inventory_reconciliations
@@ -282,7 +327,7 @@ class FfInventoryReconciliation:
                 return {
                     "contract_name": CONTRACT_NAME,
                     "plan_version": PLAN_VERSION,
-                    "status": "already_applied" if target_matches else "applied_target_drifted",
+                    "status": "already_applied",
                     "apply_allowed": False,
                     "idempotent": True,
                     "fingerprint": str(existing["plan_fingerprint"] or ""),
@@ -325,7 +370,7 @@ class FfInventoryReconciliation:
 
             returns: list[dict[str, Any]] = []
             return_by_nm: dict[int, Decimal] = {}
-            for supply_id in sorted({str(item).strip() for item in return_supply_ids if str(item).strip()}):
+            for supply_id in normalized_return_supply_ids:
                 try:
                     planned_return = _plan_supply_return(
                         conn,
@@ -351,25 +396,32 @@ class FfInventoryReconciliation:
                     )
 
             cost_snapshot: dict[int, dict[str, Any]] = {}
+            available_cost_bases: dict[int, dict[str, Any]] = {}
             adjustment_lines: list[dict[str, Any]] = []
             for nm_id in target_nm_ids:
                 baseline_after_returns = before.get(nm_id, ZERO) + return_by_nm.get(nm_id, ZERO)
                 delta = target_rows[nm_id]["target_quantity"] - baseline_after_returns
-                if delta == ZERO:
-                    continue
                 basis = _frozen_ff_cost_basis(
                     conn,
                     nm_id=nm_id,
                     business_date=business_date,
                 )
+                validate_without_delta = (
+                    _confirmed_target_intent is None
+                    or bool(_confirmed_target_intent.get("all_target_costs_validated"))
+                )
                 if basis is None:
-                    blockers.append(
-                        {
-                            "code": "inventory_cost_basis_missing",
-                            "nm_id": nm_id,
-                            "message": "No admissible same-SKU FF cost basis exists on or before the business date",
-                        }
-                    )
+                    if delta != ZERO or validate_without_delta:
+                        blockers.append(
+                            {
+                                "code": "inventory_cost_basis_missing",
+                                "nm_id": nm_id,
+                                "message": "No admissible same-SKU FF cost basis exists on or before the business date",
+                            }
+                        )
+                    continue
+                available_cost_bases[nm_id] = basis
+                if delta == ZERO:
                     continue
                 cost_snapshot[nm_id] = basis
                 identity = nomenclature.get(nm_id, {})
@@ -491,10 +543,11 @@ class FfInventoryReconciliation:
                     }
                 )
             source_revisions = {
-                "active_functional_version": _active_version_guard(conn),
+                "audit_active_functional_version": _active_version_guard(conn),
                 "nomenclature_digest": _digest(nomenclature),
                 "return_proofs": [item["proof"] for item in returns],
                 "cost_snapshot_digest": _digest(cost_snapshot),
+                "available_cost_bases_digest": _digest(available_cost_bases),
             }
             non_target_digest = _non_target_digest(conn, target_nm_ids)
             relevant_ledger_digest = _relevant_ledger_digest(conn, target_nm_ids)
@@ -542,6 +595,18 @@ class FfInventoryReconciliation:
         ]
         for item, operation_id in zip(documents, operation_ids, strict=True):
             item["operation_id"] = operation_id
+        target_intent = (
+            _normalize_target_intent(_confirmed_target_intent)
+            if _confirmed_target_intent is not None
+            else _build_target_intent(
+                source_sha256=source_sha256,
+                business_date=business_date,
+                return_supply_ids=normalized_return_supply_ids,
+                target_rows=target_rows,
+                nomenclature=nomenclature,
+                all_target_costs_validated=True,
+            )
+        )
         manifest = {
             "plan_version": PLAN_VERSION,
             "source": {
@@ -566,6 +631,7 @@ class FfInventoryReconciliation:
             )),
             "documents": documents,
             "per_sku": per_sku,
+            "target_intent": target_intent,
             "source_revisions": source_revisions,
             "relevant_ledger_digest": relevant_ledger_digest,
             "non_target_digest": non_target_digest,
@@ -596,7 +662,8 @@ class FfInventoryReconciliation:
                 "repeat_apply_t0_noop": True,
             },
         }
-        fingerprint = "sha256:" + _digest(manifest)
+        manifest["semantic_snapshot_fingerprint"] = "sha256:" + _digest(manifest)
+        fingerprint = _target_intent_fingerprint(target_intent)
         return {
             "contract_name": CONTRACT_NAME,
             "plan_version": PLAN_VERSION,
@@ -622,6 +689,57 @@ class FfInventoryReconciliation:
         confirmation_fingerprint: str,
         approval_reference: str,
         created_by: str,
+        _confirmed_target_intent: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply one confirmed absolute target with bounded optimistic retries.
+
+        The confirmation token authorizes the server-stored target.  Every
+        attempt rebuilds the actual before/delta/cost plan from canonical data;
+        source drift between that read and BEGIN IMMEDIATE is absorbed here and
+        never turned into a second owner confirmation.
+        """
+
+        normalized_return_supply_ids = tuple(
+            sorted({str(item).strip() for item in return_supply_ids if str(item).strip()})
+        )
+        last_retryable: Exception | None = None
+        for attempt in range(CONFIRM_RETRY_LIMIT):
+            try:
+                return self._apply_plan_once(
+                    source_bytes=source_bytes,
+                    source_filename=source_filename,
+                    business_date=business_date,
+                    return_supply_ids=normalized_return_supply_ids,
+                    confirmation_fingerprint=confirmation_fingerprint,
+                    approval_reference=approval_reference,
+                    created_by=created_by,
+                    confirmed_target_intent=_confirmed_target_intent,
+                )
+            except FfInventoryReconciliationError as exc:
+                if exc.code not in CONFIRM_RETRYABLE_CODES or attempt + 1 >= CONFIRM_RETRY_LIMIT:
+                    raise
+                last_retryable = exc
+            except sqlite3.OperationalError as exc:
+                lowered = str(exc).lower()
+                if not any(token in lowered for token in ("locked", "busy", "snapshot")):
+                    raise
+                if attempt + 1 >= CONFIRM_RETRY_LIMIT:
+                    raise
+                last_retryable = exc
+        assert last_retryable is not None
+        raise last_retryable
+
+    def _apply_plan_once(
+        self,
+        *,
+        source_bytes: bytes,
+        source_filename: str,
+        business_date: str,
+        return_supply_ids: Iterable[str],
+        confirmation_fingerprint: str,
+        approval_reference: str,
+        created_by: str,
+        confirmed_target_intent: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         if not approval_reference.strip():
             raise FfInventoryReconciliationError(
@@ -633,18 +751,15 @@ class FfInventoryReconciliation:
             source_filename=source_filename,
             business_date=business_date,
             return_supply_ids=return_supply_ids,
+            _confirmed_target_intent=confirmed_target_intent,
         )
         if plan.get("idempotent"):
-            if confirmation_fingerprint != str(plan.get("fingerprint") or ""):
+            if confirmed_target_intent is None and confirmation_fingerprint != str(
+                plan.get("fingerprint") or ""
+            ):
                 raise FfInventoryReconciliationError(
-                    "stale_or_invalid_fingerprint",
-                    "Confirmation fingerprint does not match the existing operation",
-                )
-            if str(plan.get("status") or "") != "already_applied":
-                raise FfInventoryReconciliationError(
-                    "applied_target_drifted",
-                    "The prior reconciliation exists but its exact FF target no longer holds",
-                    details=plan.get("readback") or {},
+                    "confirmation_target_mismatch",
+                    "Confirmation does not match the existing inventory target",
                 )
             replay = _ensure_existing_inventory_replay(
                 self.runtime,
@@ -660,10 +775,12 @@ class FfInventoryReconciliation:
                 "replay": replay,
                 "plan": plan,
             }
-        if confirmation_fingerprint != str(plan.get("fingerprint") or ""):
+        if confirmed_target_intent is None and confirmation_fingerprint != str(
+            plan.get("fingerprint") or ""
+        ):
             raise FfInventoryReconciliationError(
-                "stale_or_invalid_fingerprint",
-                "Confirmation fingerprint does not match the fresh dry-run",
+                "confirmation_target_mismatch",
+                "Confirmation does not match the inventory target",
             )
         if not plan.get("apply_allowed"):
             raise FfInventoryReconciliationError(
@@ -673,7 +790,10 @@ class FfInventoryReconciliation:
             )
         manifest = dict(plan["manifest"])
         source = dict(manifest["source"])
-        reconciliation_id = "ffir_" + confirmation_fingerprint.split(":", 1)[-1][:24]
+        intent_fingerprint = _target_intent_fingerprint(manifest["target_intent"])
+        manifest["confirmation_fingerprint"] = confirmation_fingerprint
+        manifest["intent_fingerprint"] = intent_fingerprint
+        reconciliation_id = "ffir_" + intent_fingerprint.split(":", 1)[-1][:24]
         now = _parse_timestamp(self.timestamp_factory())
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
@@ -695,12 +815,6 @@ class FfInventoryReconciliation:
                         per_sku=existing_manifest.get("per_sku") or [],
                         target_total=_decimal(existing_manifest.get("target_total")),
                     )
-                    if not repeated_readback["target_matches"]:
-                        raise FfInventoryReconciliationError(
-                            "applied_target_drifted",
-                            "The prior reconciliation exists but its exact FF target no longer holds",
-                            details=repeated_readback,
-                        )
                     conn.rollback()
                     return {
                         "status": "already_applied",
@@ -720,25 +834,10 @@ class FfInventoryReconciliation:
                         "non_target_digest_changed",
                         "Non-target production state changed after dry-run",
                     )
-                if _active_version_guard(conn) != manifest["source_revisions"]["active_functional_version"]:
-                    raise FfInventoryReconciliationError(
-                        "active_functional_version_changed",
-                        "The frozen cost source version changed after dry-run",
-                    )
-                locked_nomenclature, locked_nomenclature_blockers = _exact_nomenclature(
-                    conn,
-                    target_nm_ids,
-                )
-                if (
-                    locked_nomenclature_blockers
-                    or _digest(locked_nomenclature)
-                    != str(manifest["source_revisions"]["nomenclature_digest"])
-                ):
-                    raise FfInventoryReconciliationError(
-                        "nomenclature_changed",
-                        "Exact SKU/nmID/barcode identity changed after dry-run",
-                        details=locked_nomenclature_blockers,
-                    )
+                locked_nomenclature = {
+                    int(item["nm_id"]): dict(item["identity"])
+                    for item in manifest["target_intent"].get("targets") or []
+                }
                 locked_cost_snapshot: dict[int, dict[str, Any]] = {}
                 for document in manifest["documents"]:
                     if str(document.get("source_type") or "") != SOURCE_INVENTORY:
@@ -1367,6 +1466,240 @@ def _ensure_existing_inventory_replay(
         )
         conn.commit()
         return replay
+
+
+def _build_target_intent(
+    *,
+    source_sha256: str,
+    business_date: str,
+    return_supply_ids: Iterable[str],
+    target_rows: Mapping[int, Mapping[str, Any]],
+    nomenclature: Mapping[int, Mapping[str, Any]],
+    all_target_costs_validated: bool,
+) -> dict[str, Any]:
+    targets: list[dict[str, Any]] = []
+    for nm_id in sorted(target_rows):
+        row = dict(target_rows[nm_id])
+        identity = dict(nomenclature.get(nm_id) or {})
+        targets.append(
+            {
+                "nm_id": int(nm_id),
+                "target_quantity": _text(row.get("target_quantity")),
+                "source_nm_id": row.get("source_nm_id"),
+                "source_barcode": str(row.get("source_barcode") or ""),
+                "identity_source": str(row.get("identity_source") or ""),
+                "matched_barcode_role": str(row.get("matched_barcode_role") or ""),
+                "sku_comment": str(row.get("sku_comment") or ""),
+                "row_no": int(row.get("row_no") or 0),
+                "header_profile": str(row.get("header_profile") or ""),
+                "identity": {
+                    "item_id": str(identity.get("item_id") or ""),
+                    "nm_id": int(nm_id),
+                    "our_sku": str(identity.get("our_sku") or ""),
+                    "nomenclature_name": str(identity.get("nomenclature_name") or ""),
+                    "barcode": str(identity.get("barcode") or ""),
+                    "barcodes": sorted(
+                        {str(value) for value in identity.get("barcodes") or [] if str(value)}
+                    ),
+                    "group_name": str(identity.get("group_name") or ""),
+                },
+            }
+        )
+    return _normalize_target_intent(
+        {
+            "contract_name": "ff_inventory_target_intent_v1",
+            "source_sha256": source_sha256,
+            "business_date": business_date,
+            "return_supply_ids": sorted(
+                {str(item).strip() for item in return_supply_ids if str(item).strip()}
+            ),
+            "all_target_costs_validated": bool(all_target_costs_validated),
+            "targets": targets,
+        }
+    )
+
+
+def _normalize_target_intent(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    raw = dict(value or {})
+    normalized_targets: list[dict[str, Any]] = []
+    for raw_target in raw.get("targets") or []:
+        target = dict(raw_target or {})
+        nm_id = int(target.get("nm_id") or 0)
+        identity = dict(target.get("identity") or {})
+        normalized_targets.append(
+            {
+                "nm_id": nm_id,
+                "target_quantity": _text(target.get("target_quantity")),
+                "source_nm_id": target.get("source_nm_id"),
+                "source_barcode": str(target.get("source_barcode") or ""),
+                "identity_source": str(target.get("identity_source") or ""),
+                "matched_barcode_role": str(target.get("matched_barcode_role") or ""),
+                "sku_comment": str(target.get("sku_comment") or ""),
+                "row_no": int(target.get("row_no") or 0),
+                "header_profile": str(target.get("header_profile") or ""),
+                "identity": {
+                    "item_id": str(identity.get("item_id") or ""),
+                    "nm_id": nm_id,
+                    "our_sku": str(identity.get("our_sku") or ""),
+                    "nomenclature_name": str(identity.get("nomenclature_name") or ""),
+                    "barcode": str(identity.get("barcode") or ""),
+                    "barcodes": sorted(
+                        {str(item) for item in identity.get("barcodes") or [] if str(item)}
+                    ),
+                    "group_name": str(identity.get("group_name") or ""),
+                },
+            }
+        )
+    normalized_targets.sort(key=lambda item: int(item["nm_id"]))
+    return {
+        "contract_name": "ff_inventory_target_intent_v1",
+        "source_sha256": str(raw.get("source_sha256") or ""),
+        "business_date": str(raw.get("business_date") or ""),
+        "return_supply_ids": sorted(
+            {str(item).strip() for item in raw.get("return_supply_ids") or [] if str(item).strip()}
+        ),
+        "all_target_costs_validated": bool(raw.get("all_target_costs_validated")),
+        "targets": normalized_targets,
+    }
+
+
+def _target_intent_fingerprint(value: Mapping[str, Any]) -> str:
+    return "sha256:" + _digest(_normalize_target_intent(value))
+
+
+def _target_intent_from_stored_plan(
+    plan: Mapping[str, Any],
+    *,
+    source_sha256: str,
+    business_date: str,
+    return_supply_ids: Iterable[str],
+) -> dict[str, Any]:
+    manifest = dict(plan.get("manifest") or {})
+    current = manifest.get("target_intent")
+    if isinstance(current, Mapping) and current.get("targets"):
+        intent = _normalize_target_intent(current)
+        if _target_intent_fingerprint(intent) != str(plan.get("fingerprint") or ""):
+            raise FfInventoryReconciliationError(
+                "stored_preview_identity_invalid",
+                "Stored inventory target fingerprint is inconsistent",
+            )
+    else:
+        line_identity: dict[int, dict[str, Any]] = {}
+        for document in manifest.get("documents") or []:
+            for raw_line in dict(document or {}).get("lines") or []:
+                line = dict(raw_line or {})
+                nm_id = int(line.get("nm_id") or 0)
+                line_identity.setdefault(
+                    nm_id,
+                    {
+                        "nm_id": nm_id,
+                        "our_sku": str(line.get("sku") or ""),
+                        "nomenclature_name": str(line.get("nomenclature_name") or ""),
+                        "barcode": str(line.get("barcode") or ""),
+                        "barcodes": [str(line.get("barcode") or "")]
+                        if str(line.get("barcode") or "")
+                        else [],
+                        "group_name": str(line.get("group_name") or ""),
+                    },
+                )
+        targets = []
+        for raw_item in manifest.get("per_sku") or []:
+            item = dict(raw_item or {})
+            nm_id = int(item.get("nm_id") or 0)
+            identity = dict(line_identity.get(nm_id) or {})
+            if not identity:
+                identity = {
+                    "nm_id": nm_id,
+                    "our_sku": str(item.get("sku_comment") or nm_id),
+                    "nomenclature_name": str(item.get("sku_comment") or ""),
+                    "barcode": str(item.get("source_barcode") or ""),
+                    "barcodes": [str(item.get("source_barcode") or "")]
+                    if str(item.get("source_barcode") or "")
+                    else [],
+                    "group_name": "",
+                }
+            targets.append(
+                {
+                    "nm_id": nm_id,
+                    "target_quantity": item.get("target_quantity"),
+                    "source_nm_id": item.get("source_nm_id"),
+                    "source_barcode": item.get("source_barcode"),
+                    "identity_source": item.get("identity_source"),
+                    "sku_comment": item.get("sku_comment"),
+                    "row_no": item.get("source_row"),
+                    "header_profile": str(dict(manifest.get("source") or {}).get("header_profile") or ""),
+                    "identity": identity,
+                }
+            )
+        intent = _build_target_intent(
+            source_sha256=source_sha256,
+            business_date=business_date,
+            return_supply_ids=return_supply_ids,
+            target_rows={int(item["nm_id"]): item for item in targets},
+            nomenclature={int(item["nm_id"]): item["identity"] for item in targets},
+            all_target_costs_validated=False,
+        )
+    _materialize_confirmed_target_intent(
+        intent,
+        source_sha256=source_sha256,
+        business_date=business_date,
+        return_supply_ids=return_supply_ids,
+    )
+    return intent
+
+
+def _materialize_confirmed_target_intent(
+    value: Mapping[str, Any],
+    *,
+    source_sha256: str,
+    business_date: str,
+    return_supply_ids: Iterable[str],
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    intent = _normalize_target_intent(value)
+    expected_returns = sorted(
+        {str(item).strip() for item in return_supply_ids if str(item).strip()}
+    )
+    if (
+        intent["source_sha256"] != source_sha256
+        or intent["business_date"] != business_date
+        or intent["return_supply_ids"] != expected_returns
+        or not intent["targets"]
+    ):
+        raise FfInventoryReconciliationError(
+            "confirmed_target_intent_invalid",
+            "Stored inventory target does not match its source/date identity",
+        )
+    target_rows: dict[int, dict[str, Any]] = {}
+    nomenclature: dict[int, dict[str, Any]] = {}
+    for item in intent["targets"]:
+        nm_id = int(item["nm_id"])
+        target_quantity = _decimal(item["target_quantity"])
+        if (
+            nm_id <= 0
+            or nm_id in target_rows
+            or target_quantity < ZERO
+            or target_quantity != target_quantity.to_integral_value()
+        ):
+            raise FfInventoryReconciliationError(
+                "confirmed_target_intent_invalid",
+                "Stored inventory target contains an invalid SKU or quantity",
+                details={"nm_id": nm_id, "target_quantity": str(target_quantity)},
+            )
+        target_rows[nm_id] = {
+            "nm_id": nm_id,
+            "source_nm_id": item.get("source_nm_id"),
+            "source_barcode": str(item.get("source_barcode") or ""),
+            "matched_barcode_role": str(item.get("matched_barcode_role") or ""),
+            "identity_source": str(item.get("identity_source") or ""),
+            "sku_comment": str(item.get("sku_comment") or ""),
+            "target_quantity": target_quantity,
+            "row_no": int(item.get("row_no") or 0),
+            "header_profile": str(item.get("header_profile") or ""),
+        }
+        identity = dict(item.get("identity") or {})
+        identity["nm_id"] = nm_id
+        nomenclature[nm_id] = identity
+    return target_rows, nomenclature
 
 
 def _parse_target_workbook(

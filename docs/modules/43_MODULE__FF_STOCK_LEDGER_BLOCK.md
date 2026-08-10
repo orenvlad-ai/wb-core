@@ -118,7 +118,7 @@ Enabling `Показать технический архив` requests `show_tec
 На unified FF page рядом с остатками находятся два business-document action:
 
 - `Скачать шаблон` строит полный XLSX по всем active/non-hidden `nmId` на выбранную business date с отдельным текстовым `Штрихкод` из canonical primary barcode; ведущие нули и длинные identifiers сохраняются, а явная строка с нулём обязательна, поэтому отсутствие SKU не может означать ни «не считали», ни «считать нулём»;
-- `Загрузить инвентаризацию` сохраняет original bytes/SHA в preview, показывает blockers/deltas/cost basis и требует отдельный explicit confirm;
+- `Загрузить инвентаризацию` сохраняет original bytes/SHA и абсолютный физический target в preview, до состояния ready проверяет полное разрешение номенклатуры и наличие положительной same-SKU cost basis для каждой target-строки, затем предоставляет одну отдельную кнопку `Провести инвентаризацию`;
 - `Накладные расходы FF` принимает business date, положительную RUB-сумму и основание, показывает exact allocation preview и только после отдельного confirm создаёт immutable cost-only документ.
 
 Оба action используют server-owned `ff_document_workflow_v1`, а не локальное
@@ -130,13 +130,13 @@ repeat с новым request id создаёт только alias к тому ж
 preview и остаётся T0.
 
 Публичные стадии фиксированы: `данные приняты` → `проверка завершена` → `готово
-к подтверждению` → `документ проведён` → `распределение/пересчёт завершён`.
+к проведению` → `документ проведён` → `распределение/пересчёт завершён`.
 Preview/ready остаются жёлтыми и никогда не означают проведение. Большая зелёная
-отметка `Принято и проведено` допустима только после exact document readback, а
-финальная `Распределено и пересчитано` — только после durable functional и
-economics completion. Проведённый документ с queued/running replay показывается
-как partial, а replay error — отдельно красным без предложения повторить
-business document.
+отметка inventory `Инвентаризация проведена: <before> → <target>` и текст
+`Остатки обновлены` допустимы только после durable functional/economics
+completion и exact target readback. Между commit и replay UI показывает
+partial `Документ проведён; пересчёт выполняется`; повторять business document
+не требуется. Overhead сохраняет собственную финальную формулировку.
 
 Inventory делает bounded DB-free проверку XLSX до постановки plan job. Row-level
 `code/details` сохраняются структурированно; одинаковые date mismatch
@@ -262,26 +262,41 @@ preservation rule.
 `apps/ff_inventory_reconciliation.py` is the only runner for a manager XLSX
 physical target. Dry-run is default. It validates exact headers/business date,
 one resolved active/non-hidden nomenclature identity per row and полное покрытие каждой active/non-hidden identity (включая явные zero targets), current FF balances, confirmed
-supply-return proofs and a frozen same-SKU FF cost basis no later than the
-business date. The hierarchy is exact original debit, same-date FF WAC, last
+supply-return proofs and the existence of a positive same-SKU FF cost basis no later than the
+business date for every target SKU, including rows whose preview delta is zero. The hierarchy is exact original debit, same-date FF WAC, last
 earlier FF WAC, latest certified landed inbound cost, then only an explicit
 positive row in `sheet_vitrina_v1_ff_inventory_cost_bases` whose source type is
 `exact_original_source_debit` or `business_approved_estimate`; the latter also
 requires immutable approval and provenance fields. Proven returns are separate documents. Remaining positive and
 negative SKU deltas become one inventory receipt and one inventory writeoff,
 respectively; direct balance updates and synthetic zero cost are forbidden.
-The source bytes/SHA-256, per-SKU before/return/inventory/target/cost/capital,
-source revisions, target and non-target digests, approval reference and exact
-operation ids form the immutable manifest/fingerprint.
+The confirmation identity is the immutable target intent: source bytes/SHA-256,
+business date, complete resolved target quantities and pinned stable
+nomenclature identities. It deliberately excludes the volatile global active
+functional version identity. That version remains audit context in the plan
+and final manifest, but an unrelated publication cannot change the target
+confirmation token.
 
 Новый default header profile — `nmId / Штрихкод / Комментарий SKU / Остаток ФФ / Дата остатка`; прежний exact четырёхколоночный `nmId` profile остаётся совместимым. Строка может использовать unique `nmId`, text-only primary/additional barcode из `barcode + barcodes_json` или оба поля, если они разрешаются в одну позицию. Empty/unknown/ambiguous/conflicting identity, duplicate SKU после resolution, numeric/formula/scientific/fractional barcode representation и неполный active target fail closed до confirm.
 
-Apply requires that exact fresh fingerprint and human approval reference,
-rechecks all guards under `BEGIN IMMEDIATE`, stores the XLSX content-addressed
-evidence, appends documents and inserts the canonical targeted replay queue row
-atomically. HTTP confirm заканчивается после durable ledger+queue readback и не
-выполняет functional/economics replay синхронно. Exact repeat is T0. Readback proves
-every target SKU and total. Recovery tier T1 appends exact inverse-cost
+Confirm approves the target, not the preview delta. It rereads current canonical
+FF quantities, return proofs and positive same-SKU cost bases, recomputes the
+actual correcting delta to the approved target and rechecks target/non-target
+ledger invariants under `BEGIN IMMEDIATE`. A concurrent ledger writer,
+publication or SQLite snapshot/busy race triggers a bounded internal reread and
+retry; the browser does not own a stale/revalidate workflow. The successful
+attempt stores the XLSX content-addressed evidence and an immutable manifest
+with actual before/delta/target, chosen positive costs/bases, return proof,
+ledger digests and audit-only active functional version, then atomically appends
+the parent, at most one linked receipt and one linked writeoff, and exactly one
+canonical targeted queue row. HTTP confirm заканчивается после durable
+ledger+queue readback и не выполняет functional/economics replay синхронно.
+Idempotency is bound to the exact source/date/target intent: double click,
+response loss, reload or exact retry returns the same reconciliation and never
+applies the target twice. Stored ready previews from the earlier full-manifest
+fingerprint format derive this intent from their persisted target and confirm
+normally after upgrade without re-upload. Readback proves every target SKU and
+total. Recovery tier T1 appends exact inverse-cost
 compensating documents; it never deletes or rewrites the source/audit history.
 
 ### FF overhead allocation

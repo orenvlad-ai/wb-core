@@ -81,6 +81,7 @@ def main() -> None:
             activated_at_factory=lambda: ACTIVATED_AT,
             now_factory=lambda: NOW,
         )
+        _seed_inventory_cost_bases(runtime, active_nm_ids)
         def reject_synchronous_replay(*_args: object, **_kwargs: object) -> dict[str, object]:
             raise AssertionError("FF confirm must not execute functional/economics replay in HTTP")
 
@@ -250,6 +251,7 @@ def main() -> None:
                 fields={"business_date": "2026-04-18", "request_id": "ffi_http_inventory_mismatch"},
             )
             _assert(mismatch_code == 422, f"date mismatch must be a controlled 422: {mismatch_payload}")
+            _assert(mismatch_payload["confirm_allowed"] is False, "invalid inventory source must keep confirm disabled")
             _assert("Дата в файле: 17.04.2026; дата в форме: 18.04.2026" in mismatch_payload["validation"]["message_ru"], "date mismatch must be grouped and localized")
             _assert(mismatch_payload["validation"]["affected_count"] == len(active_nm_ids), "date mismatch affected row count changed")
             _assert(mismatch_payload["validation"]["examples"][0]["message_ru"], "row examples must be localized")
@@ -798,6 +800,26 @@ def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
             return response.status, response.read(), dict(response.headers.items())
     except error.HTTPError as exc:
         return exc.code, exc.read(), dict(exc.headers.items())
+
+
+def _seed_inventory_cost_bases(
+    runtime: RegistryUploadDbBackedRuntime,
+    nm_ids: list[int],
+) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_inventory_cost_bases(
+                basis_version_id,nm_id,effective_from,unit_cost_rub,basis_kind,
+                quality,source_reference,approval_reference,provenance_json,
+                status,created_at
+            ) VALUES(?,?,'2026-04-18','100','business_approved_estimate',
+                     'fixture_positive_same_sku','http-smoke','fixture-approval',
+                     '{"fixture":"ff_stock_ledger_http_smoke"}','active',?)
+            """,
+            [(f"http-inventory-basis-{nm_id}", nm_id, ACTIVATED_AT) for nm_id in nm_ids],
+        )
+        conn.commit()
 
 
 def _reserve_free_port() -> int:
