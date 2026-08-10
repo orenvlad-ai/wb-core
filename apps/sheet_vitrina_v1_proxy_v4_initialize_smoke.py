@@ -72,7 +72,8 @@ def main() -> None:
             _save_buyout_week(runtime, week_start, enabled_nm_ids, Decimal(buyout))
             _save_finance_week(runtime.db_path, week_start, first_loaded_at)
         current_state = runtime.load_current_state()
-        for as_of_date in ("2026-08-01", "2026-08-08"):
+        target_dates = tuple(f"2026-08-{day:02d}" for day in range(1, 10))
+        for as_of_date in target_dates:
             plan = _ready_plan(as_of_date, enabled_nm_ids[:2])
             runtime.save_sheet_vitrina_ready_snapshot(
                 current_state=current_state,
@@ -89,8 +90,20 @@ def main() -> None:
         )
         if dry_run["status"] != "ready" or dry_run["planned_version_count"] != 2:
             raise AssertionError(f"V4 initialization dry-run failed: {dry_run}")
-        if dry_run["target_snapshot_count"] != 2 or dry_run["insert_v4_row_count"] != 12:
+        if dry_run["target_snapshot_count"] != 9 or dry_run["insert_v4_row_count"] != 54:
             raise AssertionError(f"V4 snapshot scope drifted: {dry_run}")
+        manifest = json.loads(Path(dry_run["manifest_path"]).read_text(encoding="utf-8"))
+        version_parameters = [
+            json.loads(item["parameters_json"])
+            for item in manifest["desired"]["version_rows"]
+        ]
+        if (
+            [item["source_week_count"] for item in version_parameters] != [3, 3]
+            or [item["finance_net_revenue_weight"] for item in version_parameters]
+            != ["3000", "3000"]
+            or any(Decimal(item["buyout_order_count_weight"]) <= 0 for item in version_parameters)
+        ):
+            raise AssertionError(f"initial version coverage/denominators are not reviewable: {version_parameters}")
 
         ProxyV4ParametersBlock(runtime=runtime, now_factory=lambda: NOW)
         sha_file = root / "deployed.sha"
@@ -131,7 +144,7 @@ def main() -> None:
             "2026-08-01",
         ]:
             raise AssertionError("V4 historical versions were not read back in effective order")
-        for as_of_date in ("2026-08-01", "2026-08-08"):
+        for as_of_date in target_dates:
             snapshot = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
             rows_by_id = {
                 str(row[1]): row
@@ -147,7 +160,7 @@ def main() -> None:
             ):
                 if not any(row_id.endswith("|" + metric_key) for row_id in rows_by_id):
                     raise AssertionError(f"initialized snapshot misses {metric_key}")
-            buyout_rate = Decimal("0.8") if as_of_date == "2026-08-01" else Decimal("0.9")
+            buyout_rate = Decimal("0.8") if as_of_date <= "2026-08-07" else Decimal("0.9")
             retained = Decimal("0.754")
             eligible: list[tuple[Decimal, Decimal]] = []
             for index, nm_id in enumerate(enabled_nm_ids[:2], start=1):
@@ -192,6 +205,7 @@ def main() -> None:
     print("proxy_v4_initialization_dry_run_manifest: ok")
     print("proxy_v4_initialization_backup_apply_readback: ok")
     print("proxy_v4_initialization_idempotency_v3_invariant: ok")
+    print("proxy_v4_aug_1_7_aug_8_9_as_of_versions_no_drift: ok")
 
 
 def _ready_plan(as_of_date: str, nm_ids: list[int]) -> SheetVitrinaV1Envelope:

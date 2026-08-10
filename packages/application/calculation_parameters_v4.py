@@ -15,6 +15,7 @@ from packages.application.registry_upload_db_backed_runtime import (
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (
     BUYOUT_PERCENT_AGGREGATION_RULE,
+    aggregate_buyout_percent,
     build_three_closed_week_buyout_reference,
     three_closed_week_keys,
 )
@@ -35,7 +36,7 @@ from packages.business_time import (
 
 PROXY_V4_BLOCK_KEY = "proxy_profit_margin_v4"
 PROXY_V4_FIXED_BOUNDARY = "2026-08-01"
-PROXY_V4_CONTRACT_VERSION = "sheet_vitrina_v1_proxy_v4_parameters_v1"
+PROXY_V4_CONTRACT_VERSION = "sheet_vitrina_v1_proxy_v4_parameters_v2"
 PROXY_V4_FORMULA_VERSION = "proxy_profit_4_v1"
 PROXY_V4_INITIAL_EFFECTIVE_DATES = ("2026-08-01", "2026-08-08")
 
@@ -101,6 +102,11 @@ class ProxyV4Parameters:
     source_window_from: str
     source_window_to: str
     source_window_fingerprint: str
+    source_week_ranges: tuple[tuple[str, str], ...]
+    source_slot_from: str
+    source_slot_to: str
+    buyout_order_count_weight: Decimal
+    finance_net_revenue_weight: Decimal
     version_id: str = ""
     revision: int = 0
     version_kind: str = ""
@@ -143,6 +149,15 @@ class ProxyV4Parameters:
             "source_window_from": self.source_window_from,
             "source_window_to": self.source_window_to,
             "source_window_fingerprint": self.source_window_fingerprint,
+            "source_week_ranges": [list(item) for item in self.source_week_ranges],
+            "source_week_count": len(self.source_week_ranges),
+            "source_slot_from": self.source_slot_from,
+            "source_slot_to": self.source_slot_to,
+            "buyout_order_count_weight": _text(self.buyout_order_count_weight),
+            "finance_net_revenue_weight": _text(self.finance_net_revenue_weight),
+            "coverage_text": (
+                f"расчёт по {len(self.source_week_ranges)} из 3 подтверждённых недель"
+            ),
             "version_kind": self.version_kind,
             "created_at": self.created_at,
             "created_by": self.created_by,
@@ -221,7 +236,7 @@ def build_confirmed_aligned_window(
     today: date,
     finance_available_by: str | None = None,
 ) -> dict[str, Any]:
-    """Build one exact three-week Buyout+Finance source window or fail closed."""
+    """Build rates from the exact READY Buyout/Finance week intersection."""
 
     week_keys = three_closed_week_keys(today)
     buyout = build_three_closed_week_buyout_reference(runtime=runtime, today=today)
@@ -235,57 +250,125 @@ def build_confirmed_aligned_window(
         for item in buyout.get("weeks") or []
     ]
     aligned = buyout_ranges == week_keys and list(finance["week_keys"]) == week_keys
+    buyout_by_range = {
+        (str(item.get("week_start") or ""), str(item.get("week_end") or "")): item
+        for item in buyout.get("weeks") or []
+    }
+    finance_by_range = {
+        (str(item.get("week_start") or ""), str(item.get("week_end") or "")): item
+        for item in finance.get("weeks") or []
+    }
+    contributing_week_ranges = [
+        key
+        for key in week_keys
+        if aligned
+        and str(buyout_by_range.get(key, {}).get("status") or "") == "ready"
+        and str(finance_by_range.get(key, {}).get("status") or "") == "ready"
+    ]
+    buyout_combined = _combine_buyout_week_results(
+        buyout_by_range,
+        contributing_week_ranges,
+    )
+    finance_combined = _combine_finance_week_results(
+        finance_by_range,
+        contributing_week_ranges,
+    )
     ready = (
         aligned
-        and buyout.get("status") == "ready"
-        and finance.get("status") == "ready"
+        and bool(contributing_week_ranges)
+        and buyout_combined["value"] is not None
+        and finance_combined["status"] == "ready"
     )
     automatic_rates: dict[str, str] = {}
     blockers: list[str] = []
     if not aligned:
         blockers.append("Buyout and Finance week ranges are not aligned.")
-    if buyout.get("status") != "ready":
-        blockers.append(str(buyout.get("status_message") or "Buyout window is incomplete."))
-    if finance.get("status") != "ready":
-        blockers.append(str(finance.get("status_message") or "Finance window is incomplete."))
+    for key in week_keys:
+        buyout_status = str(buyout_by_range.get(key, {}).get("status") or "missing")
+        finance_week = finance_by_range.get(key, {})
+        finance_status = str(finance_week.get("status") or "missing")
+        if buyout_status != "ready" or finance_status != "ready":
+            reasons = [
+                f"Buyout={buyout_status}",
+                f"Finance={finance_status}",
+                *[str(item) for item in finance_week.get("reasons") or []],
+            ]
+            blockers.append(f"{key[0]}..{key[1]} excluded ({', '.join(reasons)}).")
     if ready:
-        buyout_rate = _decimal(buyout.get("weighted_average_pct")) / Decimal("100")
-        finance_rates = dict(finance["rates"])
+        buyout_rate = _decimal(buyout_combined["value"])
+        finance_rates = dict(finance_combined["rates"])
         automatic_rates = {
             "buyout_rate": _text(buyout_rate),
             **{field: _text(_decimal(finance_rates[field])) for field in AUTOMATIC_RATE_FIELDS if field != "buyout_rate"},
         }
     fingerprint_payload = {
         "contract": PROXY_V4_CONTRACT_VERSION,
-        "week_keys": week_keys,
+        "source_week_ranges": contributing_week_ranges,
         "buyout": {
-            "status": buyout.get("status"),
-            "weighted_average_pct": buyout.get("weighted_average_pct"),
-            "weeks": buyout.get("weeks"),
-            "available_snapshot_dates": buyout.get("available_snapshot_dates"),
-            "source_payload_digest": _buyout_source_payload_digest(
-                runtime,
-                date_from=week_keys[0][0],
-                date_to=week_keys[-1][1],
-            ),
+            "value": buyout_combined["value"],
+            "order_count_weight": buyout_combined["order_count_weight"],
+            "included_sku_day_count": buyout_combined["included_sku_day_count"],
+            "source_payload_digests": [
+                {
+                    "week_start": week_start,
+                    "week_end": week_end,
+                    "digest": _buyout_source_payload_digest(
+                        runtime,
+                        date_from=week_start,
+                        date_to=week_end,
+                    ),
+                }
+                for week_start, week_end in contributing_week_ranges
+            ],
         },
-        "finance": finance.get("fingerprint_payload"),
+        "finance": finance_combined["fingerprint_payload"],
         "automatic_rates": automatic_rates,
     }
+    coverage_text = (
+        f"расчёт по {len(contributing_week_ranges)} из {len(week_keys)} подтверждённых недель"
+    )
     return {
         "status": "ready" if ready else "unavailable",
         "status_message": (
-            "Buyout и Finance полностью подтверждены на одном окне из трёх закрытых недель."
+            "Buyout и Finance используют одно точное пересечение READY COMPLETE недель; "
+            + coverage_text
+            + "."
             if ready
-            else "Новая V4 version не создаётся: " + " ".join(blockers)
+            else "Новая V4 version не создаётся: нет общего READY COMPLETE периода. "
+            + " ".join(blockers)
         ),
         "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
         "business_date": today.isoformat(),
-        "source_window_from": week_keys[0][0],
-        "source_window_to": week_keys[-1][1],
+        "source_window_from": (
+            contributing_week_ranges[0][0] if contributing_week_ranges else ""
+        ),
+        "source_window_to": (
+            contributing_week_ranges[-1][1] if contributing_week_ranges else ""
+        ),
+        "source_slot_from": week_keys[0][0],
+        "source_slot_to": week_keys[-1][1],
         "week_keys": [list(item) for item in week_keys],
+        "source_week_ranges": [list(item) for item in contributing_week_ranges],
+        "ready_week_count": len(contributing_week_ranges),
+        "required_week_count": len(week_keys),
+        "coverage_text": coverage_text,
         "buyout": buyout,
+        "aligned_buyout": {
+            "value": buyout_combined["value"],
+            "weighted_average_pct": (
+                None
+                if buyout_combined["value"] is None
+                else _text(_decimal(buyout_combined["value"]) * Decimal("100"))
+            ),
+            "order_count_weight": buyout_combined["order_count_weight"],
+            "included_sku_day_count": buyout_combined["included_sku_day_count"],
+        },
         "finance": {key: value for key, value in finance.items() if key != "fingerprint_payload"},
+        "aligned_finance": {
+            key: value
+            for key, value in finance_combined.items()
+            if key != "fingerprint_payload"
+        },
         "automatic_rates": automatic_rates,
         "source_window_fingerprint": _digest(fingerprint_payload),
         "buyout_aggregation_rule": BUYOUT_PERCENT_AGGREGATION_RULE,
@@ -361,22 +444,17 @@ class ProxyV4ParametersBlock:
                 "detail": window["status_message"],
                 "window": window,
             }
-        candidate_range = (
-            str(window["source_window_from"]),
-            str(window["source_window_to"]),
-        )
-        current_range = (current.source_window_from, current.source_window_to)
         candidate_fingerprint = str(window["source_window_fingerprint"])
-        if candidate_range == current_range:
-            if candidate_fingerprint != current.source_window_fingerprint:
-                return {
-                    "status": "historical_repair_required",
-                    "created": False,
-                    "effective_date": effective_date,
-                    "current_version_id": current.version_id,
-                    "detail": "Тот же source range изменился; обычный rollover не переписывает frozen V4 history.",
-                    "window": window,
-                }
+        candidate_weeks = tuple(
+            (str(item[0]), str(item[1])) for item in window["source_week_ranges"]
+        )
+        current_weeks = current.source_week_ranges
+        candidate_slot = (
+            str(window["source_slot_from"]),
+            str(window["source_slot_to"]),
+        )
+        current_slot = (current.source_slot_from, current.source_slot_to)
+        if candidate_fingerprint == current.source_window_fingerprint:
             return {
                 "status": "already_materialized",
                 "created": False,
@@ -384,13 +462,31 @@ class ProxyV4ParametersBlock:
                 "current_version_id": current.version_id,
                 "window": window,
             }
-        if candidate_range[1] <= current_range[1]:
+        if candidate_slot == current_slot and candidate_weeks == current_weeks:
+            return {
+                "status": "historical_repair_required",
+                "created": False,
+                "effective_date": effective_date,
+                "current_version_id": current.version_id,
+                "detail": "Те же contributing weeks изменили payload; обычный rollover не переписывает frozen V4 history.",
+                "window": window,
+            }
+        if candidate_slot == current_slot and not set(candidate_weeks) > set(current_weeks):
             return {
                 "status": "stale",
                 "created": False,
                 "effective_date": effective_date,
                 "current_version_id": current.version_id,
-                "detail": "Latest aligned range does not advance the frozen V4 source window.",
+                "detail": "READY coverage сократился внутри того же окна; последняя immutable V4 version сохранена.",
+                "window": window,
+            }
+        if candidate_slot[1] < current_slot[1]:
+            return {
+                "status": "stale",
+                "created": False,
+                "effective_date": effective_date,
+                "current_version_id": current.version_id,
+                "detail": "Latest three-slot window does not advance the frozen V4 source window.",
                 "window": window,
             }
         try:
@@ -466,6 +562,11 @@ class ProxyV4ParametersBlock:
                 source_window_from=current.source_window_from,
                 source_window_to=current.source_window_to,
                 source_window_fingerprint=current.source_window_fingerprint,
+                source_week_ranges=current.source_week_ranges,
+                source_slot_from=current.source_slot_from,
+                source_slot_to=current.source_slot_to,
+                buyout_order_count_weight=current.buyout_order_count_weight,
+                finance_net_revenue_weight=current.finance_net_revenue_weight,
                 version_kind="operator_tax",
                 created_by=created_by,
             )
@@ -488,28 +589,35 @@ class ProxyV4ParametersBlock:
         message = "V4 ожидает guarded historical initialization с 2026-08-01."
         if current is not None:
             current_parameters = dict(current["parameters"])
-            current_range = (
-                str(current_parameters.get("source_window_from") or ""),
-                str(current_parameters.get("source_window_to") or ""),
-            )
-            candidate_range = (
-                str(window.get("source_window_from") or ""),
-                str(window.get("source_window_to") or ""),
-            )
             if window["status"] != "ready":
                 status = "stale"
-                message = "Используется последняя подтверждённая V4 version; новое aligned окно неполно."
-            elif candidate_range == current_range and str(
-                window.get("source_window_fingerprint") or ""
-            ) == str(current_parameters.get("source_window_fingerprint") or ""):
+                message = "Используется последняя подтверждённая V4 version; в трёх slot-неделях нет общего READY периода."
+            elif str(window.get("source_window_fingerprint") or "") == str(
+                current_parameters.get("source_window_fingerprint") or ""
+            ):
                 status = "ready"
-                message = "Действует последняя подтверждённая immutable V4 version."
-            elif candidate_range == current_range:
+                message = (
+                    "Действует последняя подтверждённая immutable V4 version; "
+                    + str(window.get("coverage_text") or "")
+                    + "."
+                )
+            elif (
+                window.get("source_week_ranges")
+                == current_parameters.get("source_week_ranges")
+                and window.get("source_slot_from")
+                == current_parameters.get("source_slot_from")
+                and window.get("source_slot_to")
+                == current_parameters.get("source_slot_to")
+            ):
                 status = "historical_repair_required"
-                message = "Source range изменился; требуется отдельный guarded historical reconciliation."
+                message = "Frozen contributing weeks изменили source payload; требуется guarded reconciliation."
             else:
                 status = "pending_new_window"
-                message = "Новое fully confirmed aligned окно ожидает ближайший штатный Vitrina refresh."
+                message = (
+                    "Новое общее READY-покрытие ожидает ближайший штатный Vitrina refresh; "
+                    + str(window.get("coverage_text") or "")
+                    + "."
+                )
         return {
             "contract_name": "sheet_vitrina_v1_proxy_v4_parameters",
             "contract_version": PROXY_V4_CONTRACT_VERSION,
@@ -573,6 +681,17 @@ class ProxyV4ParametersBlock:
             source_window_from=str(window["source_window_from"]),
             source_window_to=str(window["source_window_to"]),
             source_window_fingerprint=str(window["source_window_fingerprint"]),
+            source_week_ranges=tuple(
+                (str(item[0]), str(item[1])) for item in window["source_week_ranges"]
+            ),
+            source_slot_from=str(window["source_slot_from"]),
+            source_slot_to=str(window["source_slot_to"]),
+            buyout_order_count_weight=_decimal(
+                window["aligned_buyout"]["order_count_weight"]
+            ),
+            finance_net_revenue_weight=_decimal(
+                window["aligned_finance"]["net_revenue"]
+            ),
             version_kind=version_kind,
             created_by=created_by,
         )
@@ -593,6 +712,11 @@ class ProxyV4ParametersBlock:
         source_window_from: str,
         source_window_to: str,
         source_window_fingerprint: str,
+        source_week_ranges: tuple[tuple[str, str], ...],
+        source_slot_from: str,
+        source_slot_to: str,
+        buyout_order_count_weight: Decimal,
+        finance_net_revenue_weight: Decimal,
         version_kind: str,
         created_by: str,
     ) -> dict[str, Any]:
@@ -613,6 +737,11 @@ class ProxyV4ParametersBlock:
                 source_window_from=source_window_from,
                 source_window_to=source_window_to,
                 source_window_fingerprint=source_window_fingerprint,
+                source_week_ranges=source_week_ranges,
+                source_slot_from=source_slot_from,
+                source_slot_to=source_slot_to,
+                buyout_order_count_weight=buyout_order_count_weight,
+                finance_net_revenue_weight=finance_net_revenue_weight,
                 version_id=version_id,
                 revision=revision,
                 version_kind=version_kind,
@@ -664,9 +793,9 @@ def plan_initial_historical_versions(
             today=date.fromisoformat(normalized_date),
             finance_available_by=normalized_date,
         )
-        if window["status"] != "ready":
+        if window["status"] != "ready" or int(window["ready_week_count"]) != 3:
             raise ValueError(
-                f"Proxy V4 historical window {normalized_date} is not fully confirmed: {window['status_message']}"
+                f"Proxy V4 historical window {normalized_date} requires exact 3-of-3 as-of proof: {window['status_message']}"
             )
         if current_tax is None:
             current_tax = _bounded_rate(tax_rate_resolver(normalized_date), "tax_rate")
@@ -681,6 +810,18 @@ def plan_initial_historical_versions(
                 source_window_from=str(window["source_window_from"]),
                 source_window_to=str(window["source_window_to"]),
                 source_window_fingerprint=str(window["source_window_fingerprint"]),
+                source_week_ranges=tuple(
+                    (str(item[0]), str(item[1]))
+                    for item in window["source_week_ranges"]
+                ),
+                source_slot_from=str(window["source_slot_from"]),
+                source_slot_to=str(window["source_slot_to"]),
+                buyout_order_count_weight=_decimal(
+                    window["aligned_buyout"]["order_count_weight"]
+                ),
+                finance_net_revenue_weight=_decimal(
+                    window["aligned_finance"]["net_revenue"]
+                ),
                 version_id=f"proxy_v4_v{revision}_{normalized_date.replace('-', '')}",
                 revision=revision,
                 version_kind="historical_initialization",
@@ -777,8 +918,6 @@ def _build_finance_window(
         sync_by_week[(str(row["week_start"]), str(row["week_end"]))].append(row)
 
     week_results: list[dict[str, Any]] = []
-    sources: list[dict[str, Any]] = []
-    all_ready = bool(expected_sellers)
     for week_start, week_end in week_keys:
         aggregates = aggregates_by_week[(week_start, week_end)]
         sync = sync_by_week[(week_start, week_end)]
@@ -818,7 +957,19 @@ def _build_finance_window(
             and len(week_sources) == len(expected_sellers)
             else "unavailable"
         )
-        all_ready = all_ready and status == "ready"
+        net_revenue: Decimal | None = None
+        amounts: dict[str, Decimal] = {}
+        if status == "ready":
+            net_revenue = sum(
+                (_metric(source, "net_revenue") for source in week_sources),
+                Decimal("0"),
+            )
+            if net_revenue <= 0:
+                reasons.append("SUM(net_revenue) must be positive")
+                status = "unavailable"
+                net_revenue = None
+            else:
+                amounts = _finance_amounts(week_sources)
         week_results.append(
             {
                 "week_start": week_start,
@@ -831,28 +982,70 @@ def _build_finance_window(
                     (str(row["first_loaded_at"] or "") for row in sync),
                     default="",
                 ),
+                "net_revenue": None if net_revenue is None else _text(net_revenue),
+                "amounts": {key: _text(value) for key, value in amounts.items()},
+                "rates": (
+                    {
+                        key: _text(value / net_revenue)
+                        for key, value in amounts.items()
+                    }
+                    if net_revenue is not None
+                    else {}
+                ),
+                "source_metrics_digest": _digest(week_sources),
+                "source_sync_digest": _digest(
+                    [
+                        {
+                            "seller_id": str(row["seller_id"]),
+                            "status": str(row["status"] or ""),
+                            "first_loaded_at": str(row["first_loaded_at"] or ""),
+                            "content_hash": str(row["content_hash"] or ""),
+                        }
+                        for row in sync
+                    ]
+                ),
             }
         )
-        if status == "ready":
-            sources.extend(week_sources)
-    if not all_ready:
-        return {
-            **_unavailable_finance_window(
-                week_keys,
-                "Каждая из трёх Finance-недель должна иметь полный seller/classifier/source coverage.",
-            ),
-            "weeks": week_results,
-            "expected_seller_count": len(expected_sellers),
-        }
+    week_by_range = {
+        (str(item["week_start"]), str(item["week_end"])): item
+        for item in week_results
+    }
+    ready_week_ranges = [
+        key for key in week_keys if week_by_range[key]["status"] == "ready"
+    ]
+    combined = _combine_finance_week_results(week_by_range, ready_week_ranges)
+    status = (
+        "ready"
+        if len(ready_week_ranges) == len(week_keys) and combined["status"] == "ready"
+        else "partial"
+        if ready_week_ranges and combined["status"] == "ready"
+        else "unavailable"
+    )
+    return {
+        "status": status,
+        "status_message": (
+            f"Finance: расчёт по {len(ready_week_ranges)} из {len(week_keys)} READY COMPLETE недель прямым SUM/SUM."
+            if ready_week_ranges
+            else "Finance: среди трёх закрытых slot-недель нет READY COMPLETE недели."
+        ),
+        "week_keys": list(week_keys),
+        "weeks": week_results,
+        "ready_week_count": len(ready_week_ranges),
+        "required_week_count": len(week_keys),
+        "contributing_week_ranges": [list(item) for item in ready_week_ranges],
+        "expected_seller_count": len(expected_sellers),
+        "classifier_version": WB_FINANCE_CLASSIFIER_VERSION,
+        "aggregation_rule": "SUM(signed amount) / SUM(net_revenue)",
+        "net_revenue": combined["net_revenue"],
+        "amounts": combined["amounts"],
+        "rates": combined["rates"],
+        "composition": _finance_composition(),
+        "fingerprint_payload": combined["fingerprint_payload"],
+    }
 
-    net_revenue = sum((_metric(source, "net_revenue") for source in sources), Decimal("0"))
-    if net_revenue <= 0:
-        return {
-            **_unavailable_finance_window(week_keys, "SUM(net_revenue) must be positive."),
-            "weeks": week_results,
-            "expected_seller_count": len(expected_sellers),
-        }
-    amounts = {
+
+def _finance_amounts(sources: list[Mapping[str, Any]]) -> dict[str, Decimal]:
+    return {
         "agent_remuneration_rate": sum(
             (_metric_alias(source, "agent_remuneration", "commission") for source in sources),
             Decimal("0"),
@@ -879,44 +1072,102 @@ def _build_finance_window(
             Decimal("0"),
         ),
     }
-    rates = {key: _text(value / net_revenue) for key, value in amounts.items()}
+
+
+def _finance_composition() -> dict[str, Any]:
+    return {
+        "agent_remuneration": "agent_remuneration|commission; acquiring excluded",
+        "penalties_adjustments": "penalties + corrections",
+        "other_expense": (
+            "subscriptions + paid_services + review_points + other_deductions + "
+            "acceptance - capitalized_acceptance + transit_logistics - capitalized_transit_logistics"
+        ),
+        "excluded": [
+            "marketing",
+            "positive_adjustments",
+            "wb_remuneration_adjustment",
+            "capitalized_acceptance",
+            "capitalized_transit_logistics",
+        ],
+    }
+
+
+def _combine_finance_week_results(
+    week_by_range: Mapping[tuple[str, str], Mapping[str, Any]],
+    included_ranges: list[tuple[str, str]],
+) -> dict[str, Any]:
+    included = [week_by_range[key] for key in included_ranges]
+    if not included or any(str(item.get("status") or "") != "ready" for item in included):
+        return {
+            "status": "unavailable",
+            "net_revenue": None,
+            "amounts": {},
+            "rates": {},
+            "fingerprint_payload": {"status": "unavailable", "week_ranges": included_ranges},
+        }
+    net_revenue = sum((_decimal(item.get("net_revenue")) for item in included), Decimal("0"))
+    if net_revenue <= 0:
+        return {
+            "status": "unavailable",
+            "net_revenue": None,
+            "amounts": {},
+            "rates": {},
+            "fingerprint_payload": {"status": "unavailable", "week_ranges": included_ranges},
+        }
+    amounts = {
+        field: sum(
+            (_decimal(dict(item.get("amounts") or {}).get(field)) for item in included),
+            Decimal("0"),
+        )
+        for field in AUTOMATIC_RATE_FIELDS
+        if field != "buyout_rate"
+    }
+    rates = {field: _text(value / net_revenue) for field, value in amounts.items()}
     fingerprint_payload = {
         "classifier_version": WB_FINANCE_CLASSIFIER_VERSION,
-        "week_keys": week_keys,
-        "expected_seller_count": len(expected_sellers),
-        "weeks": week_results,
+        "week_ranges": included_ranges,
         "net_revenue": _text(net_revenue),
-        "amounts": {key: _text(value) for key, value in amounts.items()},
+        "amounts": {field: _text(value) for field, value in amounts.items()},
         "rates": rates,
-        "source_metrics_digest": _digest(sources),
-        "composition": {
-            "agent_remuneration": "agent_remuneration|commission; acquiring excluded",
-            "penalties_adjustments": "penalties + corrections",
-            "other_expense": (
-                "subscriptions + paid_services + review_points + other_deductions + "
-                "acceptance - capitalized_acceptance + transit_logistics - capitalized_transit_logistics"
-            ),
-            "excluded": [
-                "marketing",
-                "positive_adjustments",
-                "wb_remuneration_adjustment",
-                "capitalized_acceptance",
-                "capitalized_transit_logistics",
-            ],
-        },
+        "source_weeks": [
+            {
+                "week_start": str(item.get("week_start") or ""),
+                "week_end": str(item.get("week_end") or ""),
+                "source_metrics_digest": str(item.get("source_metrics_digest") or ""),
+                "source_sync_digest": str(item.get("source_sync_digest") or ""),
+            }
+            for item in included
+        ],
+        "composition": _finance_composition(),
     }
     return {
         "status": "ready",
-        "status_message": "Три Finance-недели подтверждены и рассчитаны прямым SUM/SUM.",
-        "week_keys": list(week_keys),
-        "weeks": week_results,
-        "expected_seller_count": len(expected_sellers),
-        "classifier_version": WB_FINANCE_CLASSIFIER_VERSION,
-        "aggregation_rule": "SUM(signed amount) / SUM(net_revenue)",
         "net_revenue": _text(net_revenue),
+        "amounts": {field: _text(value) for field, value in amounts.items()},
         "rates": rates,
-        "composition": fingerprint_payload["composition"],
         "fingerprint_payload": fingerprint_payload,
+    }
+
+
+def _combine_buyout_week_results(
+    week_by_range: Mapping[tuple[str, str], Mapping[str, Any]],
+    included_ranges: list[tuple[str, str]],
+) -> dict[str, Any]:
+    included = [week_by_range[key] for key in included_ranges]
+    aggregation = aggregate_buyout_percent(
+        (
+            _decimal(item.get("weighted_average_pct")) / Decimal("100"),
+            _decimal(item.get("order_count_weight")),
+        )
+        for item in included
+        if str(item.get("status") or "") == "ready"
+    )
+    return {
+        "value": None if aggregation.value is None else _text(aggregation.value),
+        "order_count_weight": _text(aggregation.order_count_weight),
+        "included_sku_day_count": sum(
+            int(item.get("included_sku_day_count") or 0) for item in included
+        ),
     }
 
 
@@ -971,6 +1222,11 @@ def _parameters_from_values(
     source_window_from: str,
     source_window_to: str,
     source_window_fingerprint: str,
+    source_week_ranges: tuple[tuple[str, str], ...],
+    source_slot_from: str,
+    source_slot_to: str,
+    buyout_order_count_weight: Decimal,
+    finance_net_revenue_weight: Decimal,
     version_id: str,
     revision: int,
     version_kind: str,
@@ -983,6 +1239,17 @@ def _parameters_from_values(
         source_window_from=date.fromisoformat(source_window_from).isoformat(),
         source_window_to=date.fromisoformat(source_window_to).isoformat(),
         source_window_fingerprint=str(source_window_fingerprint),
+        source_week_ranges=tuple(
+            (
+                date.fromisoformat(str(week_start)).isoformat(),
+                date.fromisoformat(str(week_end)).isoformat(),
+            )
+            for week_start, week_end in source_week_ranges
+        ),
+        source_slot_from=date.fromisoformat(source_slot_from).isoformat(),
+        source_slot_to=date.fromisoformat(source_slot_to).isoformat(),
+        buyout_order_count_weight=_decimal(buyout_order_count_weight),
+        finance_net_revenue_weight=_decimal(finance_net_revenue_weight),
         version_id=version_id,
         revision=revision,
         version_kind=version_kind,
@@ -999,6 +1266,12 @@ def _parameters_from_values(
 
 def _parameters_from_row(row: sqlite3.Row) -> ProxyV4Parameters:
     raw = json.loads(str(row["parameters_json"] or "{}"))
+    raw_ranges = raw.get("source_week_ranges")
+    source_week_ranges = (
+        tuple((str(item[0]), str(item[1])) for item in raw_ranges)
+        if isinstance(raw_ranges, list) and raw_ranges
+        else ((str(row["source_window_from"]), str(row["source_window_to"])),)
+    )
     return _parameters_from_values(
         effective_date=str(row["effective_date"]),
         tax_rate=_decimal(raw.get("tax_rate")),
@@ -1006,6 +1279,11 @@ def _parameters_from_row(row: sqlite3.Row) -> ProxyV4Parameters:
         source_window_from=str(row["source_window_from"]),
         source_window_to=str(row["source_window_to"]),
         source_window_fingerprint=str(row["source_window_fingerprint"]),
+        source_week_ranges=source_week_ranges,
+        source_slot_from=str(raw.get("source_slot_from") or row["source_window_from"]),
+        source_slot_to=str(raw.get("source_slot_to") or row["source_window_to"]),
+        buyout_order_count_weight=_decimal(raw.get("buyout_order_count_weight")),
+        finance_net_revenue_weight=_decimal(raw.get("finance_net_revenue_weight")),
         version_id=str(row["version_id"]),
         revision=int(row["revision"]),
         version_kind=str(row["version_kind"]),

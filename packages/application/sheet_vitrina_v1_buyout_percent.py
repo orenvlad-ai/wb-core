@@ -419,7 +419,7 @@ def build_three_closed_week_buyout_reference(
     combined_pairs: list[tuple[Decimal | None, Decimal | None]] = []
     available_snapshot_dates: list[str] = []
     week_results: list[dict[str, Any]] = []
-    all_weeks_ready = True
+    ready_week_ranges: list[tuple[str, str]] = []
     for week_start, week_end in week_keys:
         week_dates = list(_iter_iso_dates(week_start, week_end))
         week_pairs: list[tuple[Decimal | None, Decimal | None]] = []
@@ -427,7 +427,6 @@ def build_three_closed_week_buyout_reference(
         invalid_dates: list[str] = []
         immature = date.fromisoformat(week_end) > trusted_cutoff
         if immature:
-            all_weeks_ready = False
             week_results.append(
                 _buyout_week_result(
                     week_start=week_start,
@@ -486,8 +485,7 @@ def build_three_closed_week_buyout_reference(
         else:
             status = "ready"
             combined_pairs.extend(week_pairs)
-        if status != "ready":
-            all_weeks_ready = False
+            ready_week_ranges.append((week_start, week_end))
         week_results.append(
             _buyout_week_result(
                 week_start=week_start,
@@ -502,18 +500,33 @@ def build_three_closed_week_buyout_reference(
             )
         )
 
-    aggregation = (
-        aggregate_buyout_percent(combined_pairs)
-        if all_weeks_ready
-        else aggregate_buyout_percent(())
-    )
+    aggregation = aggregate_buyout_percent(combined_pairs)
     weighted_average = aggregation.value
     included_sku_day_count = aggregation.included_pair_count
     order_count_sum = aggregation.order_count_weight
+    ready_week_count = len(ready_week_ranges)
+    status = (
+        "ready"
+        if ready_week_count == len(week_keys) and weighted_average is not None
+        else "partial"
+        if ready_week_count > 0 and weighted_average is not None
+        else "unavailable"
+    )
+    pending_week_ranges = [
+        (str(item["week_start"]), str(item["week_end"]))
+        for item in week_results
+        if item["status"] != "ready"
+    ]
+    contributing_text = "; ".join(
+        f"{week_start} — {week_end}" for week_start, week_end in ready_week_ranges
+    )
+    pending_text = "; ".join(
+        f"{week_start} — {week_end}" for week_start, week_end in pending_week_ranges
+    )
     return {
         "key": "buyout_percent_three_closed_weeks",
         "label": CONFIRMED_BUYOUT_LABEL_RU,
-        "status": "ready" if all_weeks_ready and weighted_average is not None else "unavailable",
+        "status": status,
         "weighted_average_pct": (
             _decimal_text(weighted_average * Decimal("100"))
             if weighted_average is not None
@@ -522,6 +535,10 @@ def build_three_closed_week_buyout_reference(
         "date_from": week_keys[0][0],
         "date_to": week_keys[-1][1],
         "weeks": week_results,
+        "ready_week_count": ready_week_count,
+        "required_week_count": len(week_keys),
+        "contributing_week_ranges": [list(item) for item in ready_week_ranges],
+        "pending_week_ranges": [list(item) for item in pending_week_ranges],
         "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
         "maturity_days": BUYOUT_PERCENT_MATURITY_DAYS,
         "trusted_cutoff": trusted_cutoff.isoformat(),
@@ -535,11 +552,19 @@ def build_three_closed_week_buyout_reference(
         "available_snapshot_day_count": len(available_snapshot_dates),
         "available_snapshot_dates": available_snapshot_dates,
         "status_message": (
-            "Три последние закрытые недели подтверждены; используются только данные "
-            f"возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
-            if all_weeks_ready and weighted_average is not None
-            else "Итог не опубликован: каждая из трёх последних закрытых недель должна "
-            f"быть полностью подтверждена данными возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
+            f"Расчёт по {ready_week_count} из {len(week_keys)} подтверждённых недель"
+            + (f": {contributing_text}." if contributing_text else ".")
+            + (
+                f" Не включены: {pending_text}; их ячейки остаются «—»."
+                if pending_text
+                else ""
+            )
+            + f" Используются только данные возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
+            if weighted_average is not None
+            else (
+                "Итог не опубликован: среди трёх последних закрытых недель нет ни одной "
+                f"полностью подтверждённой данными возрастом не менее {BUYOUT_PERCENT_MATURITY_DAYS} дней."
+            )
         ),
     }
 

@@ -29,6 +29,7 @@ from apps.sheet_vitrina_v1_buyout_mature_backfill import (  # noqa: E402
 )
 from packages.application.calculation_parameters_v4 import (  # noqa: E402
     PROXY_V4_BLOCK_KEY,
+    PROXY_V4_CONTRACT_VERSION,
     PROXY_V4_FIXED_BOUNDARY,
     PROXY_V4_INITIAL_EFFECTIVE_DATES,
     ProxyV4Parameters,
@@ -49,7 +50,7 @@ from packages.application.warehouse_sync_lock import (  # noqa: E402
 from packages.business_time import current_business_date_iso  # noqa: E402
 
 
-SCHEMA_VERSION = "sheet_vitrina_v1_proxy_v4_initialization_v1"
+SCHEMA_VERSION = "sheet_vitrina_v1_proxy_v4_initialization_v2"
 TARGET_DATE_FROM = PROXY_V4_FIXED_BOUNDARY
 MAX_TARGET_DAYS = 31
 
@@ -490,7 +491,7 @@ def _planned_version_row(item: ProxyV4Parameters) -> dict[str, Any]:
     public = item.public()
     fingerprint = _digest(
         {
-            "contract": "sheet_vitrina_v1_proxy_v4_parameters_v1",
+            "contract": PROXY_V4_CONTRACT_VERSION,
             "effective_date": item.effective_date,
             "source_window_fingerprint": item.source_window_fingerprint,
             "rates": {

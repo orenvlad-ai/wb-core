@@ -101,6 +101,19 @@ def main() -> None:
         }
         if rates != expected:
             raise AssertionError(f"direct SUM/SUM or V4 expense composition drifted: {rates}")
+        expected_three_week_buyout_weight = Decimal(len(enabled_nm_ids) * 21 * 10)
+        if (
+            first_window["source_week_ranges"]
+            != [
+                ["2026-07-06", "2026-07-12"],
+                ["2026-07-13", "2026-07-19"],
+                ["2026-07-20", "2026-07-26"],
+            ]
+            or Decimal(first_window["aligned_buyout"]["order_count_weight"])
+            != expected_three_week_buyout_weight
+            or Decimal(first_window["aligned_finance"]["net_revenue"]) != Decimal("3000")
+        ):
+            raise AssertionError(f"aligned source ranges/denominators are not exact: {first_window}")
         if "marketing" not in first_window["finance"]["composition"]["excluded"]:
             raise AssertionError("marketing must stay outside included_expense_rate")
 
@@ -112,6 +125,21 @@ def main() -> None:
             raise AssertionError(f"historical effective dates drifted: {versions}")
         if [item.buyout_rate for item in versions] != [Decimal("0.8"), Decimal("0.9")]:
             raise AssertionError("future confirmed buyout leaked backwards")
+        if (
+            versions[0].source_week_ranges
+            != (
+                ("2026-07-06", "2026-07-12"),
+                ("2026-07-13", "2026-07-19"),
+                ("2026-07-20", "2026-07-26"),
+            )
+            or versions[1].source_week_ranges
+            != (
+                ("2026-07-13", "2026-07-19"),
+                ("2026-07-20", "2026-07-26"),
+                ("2026-07-27", "2026-08-02"),
+            )
+        ):
+            raise AssertionError("historical versions did not freeze their exact as-of weeks")
         _install_historical_versions(runtime.db_path, versions)
 
         block = ProxyV4ParametersBlock(runtime=runtime, now_factory=lambda: NOW)
@@ -203,11 +231,26 @@ def main() -> None:
                 f"V4 tax effective date must use Asia/Yekaterinburg boundary: {next_business_day}"
             )
 
-        for week_start, buyout, first_loaded_at in (
-            ("2026-08-03", Decimal("0.95"), "2026-08-10T07:00:00Z"),
+        two_ready = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            two_ready["status"] != "ready"
+            or two_ready["ready_week_count"] != 2
+            or two_ready["source_week_ranges"]
+            != [["2026-07-20", "2026-07-26"], ["2026-07-27", "2026-08-02"]]
+            or two_ready["automatic_rates"]["buyout_rate"] != "0.95"
+            or Decimal(two_ready["aligned_buyout"]["order_count_weight"])
+            != Decimal(len(enabled_nm_ids) * 14 * 10)
+            or two_ready["aligned_finance"]["net_revenue"] != "2000"
         ):
-            _save_buyout_week(runtime, week_start, enabled_nm_ids, buyout)
-            _save_finance_week(runtime.db_path, week_start, first_loaded_at)
+            raise AssertionError(f"missing latest week must yield exact 2-of-3 intersection: {two_ready}")
+        two_ready_rollover = block.materialize_latest_confirmed_window(business_date="2026-08-15")
+        if two_ready_rollover["status"] != "materialized" or not two_ready_rollover["created"]:
+            raise AssertionError(f"new 2-of-3 slot window must materialize once: {two_ready_rollover}")
+        if block.materialize_latest_confirmed_window(business_date="2026-08-15")["created"]:
+            raise AssertionError("same 2-of-3 source fingerprint was not idempotent")
+
+        _save_buyout_week(runtime, "2026-08-03", enabled_nm_ids, Decimal("0.95"))
+        _save_finance_week(runtime.db_path, "2026-08-03", "2026-08-10T07:00:00Z")
         original_lock = calculation_parameters_v4.warehouse_sync_lock
 
         @contextmanager
@@ -225,12 +268,95 @@ def main() -> None:
             raise AssertionError(f"busy rollover must retain the prior immutable version: {lock_busy}")
         advanced = block.materialize_latest_confirmed_window(business_date="2026-08-15")
         if advanced["status"] != "materialized" or not advanced["created"]:
-            raise AssertionError(f"next fully confirmed window must create one version: {advanced}")
+            raise AssertionError(f"arrival of third READY week must create one version: {advanced}")
         repeated = block.materialize_latest_confirmed_window(business_date="2026-08-15")
         if repeated["status"] != "already_materialized" or repeated["created"]:
             raise AssertionError("same-day next-window rollover was not idempotent")
         if block.parameters_for_date("2026-08-15").tax_rate != Decimal("0.07"):  # type: ignore[union-attr]
             raise AssertionError("automatic rollover must carry the latest manual tax")
+        if block.parameters_for_date("2026-08-09").buyout_rate != Decimal("0.9"):  # type: ignore[union-attr]
+            raise AssertionError("later 2/3 or 3/3 rollover rewrote Aug 8-9 history")
+
+        _delete_finance_week(runtime.db_path, "2026-08-03")
+        _delete_finance_week(runtime.db_path, "2026-07-27")
+        one_ready = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            one_ready["status"] != "ready"
+            or one_ready["ready_week_count"] != 1
+            or one_ready["source_week_ranges"] != [["2026-07-20", "2026-07-26"]]
+            or one_ready["automatic_rates"]["buyout_rate"] != "0.9"
+            or one_ready["aligned_finance"]["net_revenue"] != "1000"
+        ):
+            raise AssertionError(f"1-of-3 aligned direct SUM/SUM failed: {one_ready}")
+        retained_history_count = len(block.get_payload()["history"])
+        shrunk = block.materialize_latest_confirmed_window(business_date="2026-08-15")
+        if shrunk["status"] != "stale" or shrunk["created"]:
+            raise AssertionError(f"same-slot source loss must retain the last version: {shrunk}")
+
+        _delete_finance_week(runtime.db_path, "2026-07-20")
+        zero_ready = block.materialize_latest_confirmed_window(business_date="2026-08-15")
+        if zero_ready["status"] != "stale" or zero_ready["created"]:
+            raise AssertionError(f"zero READY weeks must retain the last version: {zero_ready}")
+        if len(block.get_payload()["history"]) != retained_history_count:
+            raise AssertionError("zero-ready fallback created a blank or zero V4 version")
+
+        _save_finance_week(
+            runtime.db_path,
+            "2026-07-20",
+            "2026-07-27T07:00:00Z",
+            metrics=_zero_finance_metrics(),
+        )
+        _save_buyout_week(runtime, "2026-07-20", enabled_nm_ids, Decimal("0"))
+        proven_zero = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            proven_zero["status"] != "ready"
+            or proven_zero["ready_week_count"] != 1
+            or proven_zero["automatic_rates"]["buyout_rate"] != "0"
+            or any(
+                Decimal(proven_zero["automatic_rates"][field]) != 0
+                for field in (
+                    "agent_remuneration_rate",
+                    "acquiring_rate",
+                    "wb_logistics_rate",
+                    "wb_storage_rate",
+                    "penalties_adjustments_rate",
+                    "other_expense_rate",
+                )
+            )
+        ):
+            raise AssertionError(f"proven canonical zero was confused with missing: {proven_zero}")
+
+        _save_buyout_week(runtime, "2026-07-20", enabled_nm_ids, Decimal("0.90"))
+        _save_finance_week(
+            runtime.db_path,
+            "2026-07-20",
+            "2026-07-27T07:00:00Z",
+            metrics=_scaled_finance_metrics(net_revenue=Decimal("1000"), acquiring=Decimal("10")),
+        )
+        _save_finance_week(
+            runtime.db_path,
+            "2026-07-27",
+            "2026-08-03T07:00:00Z",
+            metrics=_scaled_finance_metrics(net_revenue=Decimal("3000"), acquiring=Decimal("150")),
+        )
+        _delete_finance_week(runtime.db_path, "2026-08-03")
+        weighted_two = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            weighted_two["ready_week_count"] != 2
+            or weighted_two["automatic_rates"]["acquiring_rate"] != "0.04"
+            or weighted_two["aligned_finance"]["net_revenue"] != "4000"
+        ):
+            raise AssertionError(f"2-of-3 Finance rate is not direct SUM/SUM: {weighted_two}")
+        _delete_finance_week(runtime.db_path, "2026-07-27")
+        weighted_one = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            weighted_one["ready_week_count"] != 1
+            or weighted_one["automatic_rates"]["acquiring_rate"] != "0.01"
+            or weighted_one["aligned_finance"]["net_revenue"] != "1000"
+        ):
+            raise AssertionError(f"1-of-3 Finance rate is not direct SUM/SUM: {weighted_one}")
+        _save_finance_week(runtime.db_path, "2026-07-27", "2026-08-03T07:00:00Z")
+        _save_finance_week(runtime.db_path, "2026-08-03", "2026-08-10T07:00:00Z")
 
         metrics = extend_metrics_with_proxy_v4(runtime.load_current_state().metrics_v2)
         v4 = {item.metric_key: item for item in metrics if item.metric_key in {
@@ -259,14 +385,34 @@ def main() -> None:
         if v3["proxy_profit_3"] != Decimal("1000") * Decimal("0.91") * Decimal("0.56") - Decimal("10") * Decimal("0.91") * Decimal("20") - Decimal("30"):
             raise AssertionError("Proxy V3 formula changed while adding V4")
 
-        _delete_finance_week(runtime.db_path, "2026-08-03")
-        incomplete = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
-        if incomplete["status"] != "unavailable" or incomplete["automatic_rates"]:
-            raise AssertionError("partial aligned window must fail closed without new rates")
+        _save_partial_buyout_day(runtime, "2026-08-05", enabled_nm_ids)
+        partial = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
+        if (
+            partial["status"] != "ready"
+            or partial["buyout"]["weeks"][2]["status"] != "partial"
+            or partial["ready_week_count"] != 2
+            or ["2026-08-03", "2026-08-09"] in partial["source_week_ranges"]
+        ):
+            raise AssertionError(f"partial week was not excluded atomically: {partial}")
+        _delete_finance_week(runtime.db_path, "2026-07-20")
+        exact_intersection = build_confirmed_aligned_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if (
+            exact_intersection["ready_week_count"] != 1
+            or exact_intersection["source_week_ranges"]
+            != [["2026-07-27", "2026-08-02"]]
+        ):
+            raise AssertionError(
+                "V4 silently mixed unrelated Buyout/Finance week sets: "
+                + repr(exact_intersection)
+            )
 
     print("proxy_v4_formula_boundary_total: ok")
     print("proxy_v4_aligned_window_sum_sum_expense_exclusions: ok")
     print("proxy_v4_as_of_versions_tax_rollover_idempotency: ok")
+    print("proxy_v4_one_two_three_week_intersection_zero_fallback: ok")
     print("proxy_v4_public_metric_pairs_v3_unchanged: ok")
 
 
@@ -340,6 +486,32 @@ def _finance_metrics() -> dict[str, str]:
     }
 
 
+def _zero_finance_metrics() -> dict[str, str]:
+    return {
+        **{key: "0" for key in _finance_metrics()},
+        "net_revenue": "1000",
+    }
+
+
+def _scaled_finance_metrics(
+    *,
+    net_revenue: Decimal,
+    acquiring: Decimal,
+) -> dict[str, str]:
+    base = _finance_metrics()
+    scale = net_revenue / Decimal("1000")
+    return {
+        key: (
+            str(net_revenue)
+            if key == "net_revenue"
+            else str(acquiring)
+            if key == "acquiring"
+            else str(Decimal(value) * scale)
+        )
+        for key, value in base.items()
+    }
+
+
 def _ensure_finance_tables(db_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
@@ -376,7 +548,13 @@ def _ensure_finance_tables(db_path: Path) -> None:
         )
 
 
-def _save_finance_week(db_path: Path, week_start: str, first_loaded_at: str) -> None:
+def _save_finance_week(
+    db_path: Path,
+    week_start: str,
+    first_loaded_at: str,
+    *,
+    metrics: dict[str, str] | None = None,
+) -> None:
     start = date.fromisoformat(week_start)
     week_end = (start + timedelta(days=6)).isoformat()
     with sqlite3.connect(db_path) as conn:
@@ -390,7 +568,7 @@ def _save_finance_week(db_path: Path, week_start: str, first_loaded_at: str) -> 
                 week_start,
                 week_end,
                 WB_FINANCE_CLASSIFIER_VERSION,
-                json.dumps(_finance_metrics(), sort_keys=True),
+                json.dumps(metrics or _finance_metrics(), sort_keys=True),
                 "[]",
                 "[]",
                 "[]",
@@ -422,6 +600,39 @@ def _delete_finance_week(db_path: Path, week_start: str) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("DELETE FROM wb_finance_weekly_aggregates WHERE week_start=?", (week_start,))
         conn.execute("DELETE FROM wb_finance_weekly_sync WHERE week_start=?", (week_start,))
+
+
+def _save_partial_buyout_day(
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_date: str,
+    nm_ids: list[int],
+) -> None:
+    day = date.fromisoformat(snapshot_date)
+    items = [
+        SalesFunnelHistoryItem(
+            date=snapshot_date,
+            nm_id=nm_id,
+            metric="buyoutPercent",
+            value=0.95,
+        )
+        for nm_id in nm_ids
+    ]
+    runtime.save_temporal_source_snapshot(
+        source_key="sales_funnel_history",
+        snapshot_date=snapshot_date,
+        captured_at=datetime.combine(
+            day + timedelta(days=6),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).replace(hour=12).isoformat().replace("+00:00", "Z"),
+        payload=SalesFunnelHistorySuccess(
+            kind="success",
+            date_from=snapshot_date,
+            date_to=snapshot_date,
+            count=len(items),
+            items=items,
+        ),
+    )
 
 
 def _install_historical_versions(db_path: Path, versions: list[object]) -> None:

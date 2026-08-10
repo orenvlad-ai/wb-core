@@ -482,7 +482,7 @@
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
 
         <h2 style="margin-top: 30px;">Proxy прибыль и маржинальность · V4</h2>
-        <p class="calculation-reference-meta">Фиксированная граница публикации: 2026-08-01. Автоматические ставки заморожены в immutable version по полностью подтверждённому общему окну Buyout + Finance; вручную меняется только налог.</p>
+        <p class="calculation-reference-meta">Фиксированная граница публикации: 2026-08-01. Автоматические ставки заморожены в immutable version по точному общему пересечению READY COMPLETE недель Buyout + Finance среди трёх календарных слотов; достаточно 1–3 недель, вручную меняется только налог.</p>
         <div id="proxyV4ParametersForm" class="calculation-grid">
           <label class="field"><span>Расчётный выкуп (подтверждённый), %</span><input type="number" readonly data-proxy-v4-rate="buyout_rate"></label>
           <label class="field"><span>Налог, %</span><input id="proxyV4TaxRate" type="number" min="0" max="100" step="0.01"></label>
@@ -504,7 +504,7 @@
           <button id="saveProxyV4TaxButton" class="primary" type="button" disabled>Сохранить новую V4 version</button>
         </div>
         <h2 style="margin-top: 22px;">История версий V4</h2>
-        <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective from</th><th>Source three-week range</th><th>Выкуп</th><th>Налог</th><th>Расходы</th><th>Статус</th><th>Создано</th></tr></thead><tbody id="proxyV4HistoryRows"><tr><td colspan="8">История загружается...</td></tr></tbody></table></div>
+        <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective from</th><th>Source weeks</th><th>Выкуп</th><th>Налог</th><th>Расходы</th><th>Статус</th><th>Создано</th></tr></thead><tbody id="proxyV4HistoryRows"><tr><td colspan="8">История загружается...</td></tr></tbody></table></div>
       </section>
 
       <section id="autoUpdatesGroupPanel" class="block settings-group-panel" data-settings-group-panel="auto-updates" aria-labelledby="autoUpdatesTitle" hidden>
@@ -2563,7 +2563,7 @@
         calculationReferenceHead.innerHTML = "<tr><th>Статья</th>" + weeks.map((week) => (
           "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) +
           (String(week.status || "") !== "ready" ? "<span class=\"calculation-reference-week-status\">" + escapeHtml(({missing:"нет данных", partial:"неполный набор", stale:"устаревшая семантика"})[week.status] || String(week.status || "нет данных")) + "</span>" : "") + "</th>"
-        )).join("") + "<th>Итог 3 недели<br><span class=\"calculation-reference-meta\">SUM / SUM</span></th></tr>";
+        )).join("") + "<th>Итог подтверждённых недель<br><span class=\"calculation-reference-meta\">1–3 недели · SUM / SUM</span></th></tr>";
         const buyoutWeeks = Array.isArray(buyoutReference.weeks) ? buyoutReference.weeks : [];
         const buyoutWeekByRange = new Map(buyoutWeeks.map((week) => (
           [String(week.week_start || "") + "|" + String(week.week_end || ""), week]
@@ -2591,7 +2591,7 @@
               : "Неделя не опубликована: " + String(week.status || "нет полного подтверждения")
           )),
           weighted_average_pct: buyoutReference.weighted_average_pct,
-          note: "Только подтверждённые данные возрастом не менее 6 дней. " + buyoutWeekStatus
+          note: String(buyoutReference.status_message || "") + " " + buyoutWeekStatus
         };
         const financeRows = Array.isArray(reference && reference.rows) ? reference.rows : [];
         const rows = [buyoutRow, ...financeRows];
@@ -2614,6 +2614,10 @@
             "<tr data-calculation-reference-key=\"" + escapeHtml(String(row.key || "")) + "\"><td>" + escapeHtml(row.label) +
             "<div class=\"calculation-reference-meta\">" + escapeHtml(audit) + "</div>" +
             (treatment ? "<div class=\"calculation-reference-meta\">Учёт: " + escapeHtml(treatment) + "</div>" : "") +
+            (row.coverage_text ? "<div class=\"user-source-note\">" + escapeHtml(row.coverage_text) +
+              (Array.isArray(row.contributing_week_ranges) && row.contributing_week_ranges.length
+                ? ": " + escapeHtml(row.contributing_week_ranges.map((range) => range.join(" — ")).join("; "))
+                : "") + "</div>" : "") +
             (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
             (row.weekly_rate_pct || []).map((value, index) => "<td title=\"" + escapeHtml((row.weekly_cell_titles || [])[index] || ((row.weekly_amount_rub || [])[index] == null ? "Нет полного канонического значения" : "Сумма: " + String((row.weekly_amount_rub || [])[index]) + " ₽")) + "\">" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
             "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
@@ -3203,11 +3207,19 @@
         proxyV4ExpenseTotal.textContent = formatCalculationReferencePct(parameters.included_expense_rate_pct);
         proxyV4RetainedShare.textContent = formatCalculationReferencePct(parameters.retained_share_pct);
         const aligned = payload && payload.aligned_window && typeof payload.aligned_window === "object" ? payload.aligned_window : {};
+        const rangesText = (ranges) => Array.isArray(ranges) && ranges.length
+          ? ranges.map((range) => Array.isArray(range) ? range.join(" — ") : String(range)).join("; ")
+          : "—";
         proxyV4SourceMeta.textContent = current
           ? "Version: " + String(current.version_id || "—") +
             " · effective from: " + String(current.effective_date || "—") +
-            " · frozen source: " + String(parameters.source_window_from || "—") + " — " + String(parameters.source_window_to || "—") +
-            " · latest aligned candidate: " + String(aligned.source_window_from || "—") + " — " + String(aligned.source_window_to || "—") +
+            " · frozen coverage: " + String(parameters.coverage_text || "—") +
+            " · frozen weeks: " + rangesText(parameters.source_week_ranges) +
+            " · denominators: Buyout orderCount " + String(parameters.buyout_order_count_weight || "—") +
+            ", Finance net_revenue " + String(parameters.finance_net_revenue_weight || "—") +
+            " · latest candidate: " + String(aligned.coverage_text || "—") +
+            " · candidate weeks: " + rangesText(aligned.source_week_ranges) +
+            (Array.isArray(aligned.blockers) && aligned.blockers.length ? " · pending: " + aligned.blockers.join(" ") : "") +
             " · Finance: SUM(signed amount) / SUM(net_revenue) · Buyout: SUM(buyoutPercent × orderCount) / SUM(orderCount)"
           : "V4 не публикуется до guarded historical initialization с фиксированной границей 2026-08-01.";
         proxyV4Message.textContent = String(payload && payload.status_message || "Статус V4 неизвестен.");
@@ -3219,7 +3231,7 @@
         proxyV4HistoryRows.innerHTML = history.length ? history.map((item) => {
           const values = item.parameters || {};
           return "<tr><td>" + escapeHtml(item.version_id || "—") + "</td><td>" + escapeHtml(item.effective_date || "—") +
-            "</td><td>" + escapeHtml(String(values.source_window_from || "—") + " — " + String(values.source_window_to || "—")) +
+            "</td><td>" + escapeHtml(rangesText(values.source_week_ranges) + " · " + String(values.coverage_text || "—")) +
             "</td><td>" + escapeHtml(formatCalculationReferencePct(values.buyout_rate_pct)) +
             "</td><td>" + escapeHtml(formatCalculationReferencePct(values.tax_rate_pct)) +
             "</td><td>" + escapeHtml(formatCalculationReferencePct(values.included_expense_rate_pct)) +

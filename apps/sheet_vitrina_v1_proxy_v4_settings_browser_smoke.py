@@ -134,7 +134,56 @@ def _v3_payload() -> dict[str, object]:
             "created_at": "2026-07-01T00:00:00Z",
         },
         "history": [],
-        "reference": {"status": "unavailable", "weeks": [], "rows": []},
+        "reference": {
+            "status": "partial",
+            "status_message": "Расчёт по 2 из 3 подтверждённых недель: 2026-07-20 — 2026-07-26; 2026-07-27 — 2026-08-02. Недоступная неделя остаётся «—».",
+            "weeks": [
+                {"week_start": "2026-07-20", "week_end": "2026-07-26", "status": "ready"},
+                {"week_start": "2026-07-27", "week_end": "2026-08-02", "status": "ready"},
+                {"week_start": "2026-08-03", "week_end": "2026-08-09", "status": "missing"},
+            ],
+            "missing_weeks": [
+                {"week_start": "2026-08-03", "week_end": "2026-08-09"}
+            ],
+            "rows": [
+                {
+                    "key": "agent_remuneration",
+                    "label": "Агентское вознаграждение WB",
+                    "group": "Удержания WB",
+                    "source_fields": ["agent_remuneration", "commission"],
+                    "source_mode": "first_available",
+                    "sign_rule": "canonical signed expense",
+                    "denominator": "net_revenue",
+                    "aggregation_rule": "SUM(amount) / SUM(net_revenue)",
+                    "weekly_rate_pct": ["10", "20", None],
+                    "weekly_amount_rub": ["100", "200", None],
+                    "weighted_average_pct": "15",
+                    "coverage_text": "расчёт по 2 из 3 подтверждённых недель",
+                    "contributing_week_ranges": [
+                        ["2026-07-20", "2026-07-26"],
+                        ["2026-07-27", "2026-08-02"],
+                    ],
+                    "proxy_treatment": "V4 automatic source",
+                    "note": "Missing is excluded, never zero.",
+                }
+            ],
+            "buyout_percent": {
+                "label": "Расчётный выкуп (подтверждённый)",
+                "status": "partial",
+                "status_message": "Расчёт по 2 из 3 подтверждённых недель; последняя неделя остаётся «—».",
+                "weighted_average_pct": "92.5",
+                "date_from": "2026-07-20",
+                "date_to": "2026-08-09",
+                "trusted_cutoff": "2026-08-04",
+                "business_timezone": "Asia/Yekaterinburg",
+                "aggregation_rule": "SUM(buyoutPercent * orderCount) / SUM(orderCount)",
+                "weeks": [
+                    {"week_start": "2026-07-20", "week_end": "2026-07-26", "status": "ready", "weighted_average_pct": "90"},
+                    {"week_start": "2026-07-27", "week_end": "2026-08-02", "status": "ready", "weighted_average_pct": "95"},
+                    {"week_start": "2026-08-03", "week_end": "2026-08-09", "status": "immature", "weighted_average_pct": None},
+                ],
+            },
+        },
     }
 
 
@@ -156,6 +205,16 @@ def _v4_payload(*, saved: bool) -> dict[str, object]:
         "tax_rate_pct": "7" if saved else "6",
         "source_window_from": "2026-07-13",
         "source_window_to": "2026-08-02",
+        "source_week_ranges": [
+            ["2026-07-13", "2026-07-19"],
+            ["2026-07-20", "2026-07-26"],
+            ["2026-07-27", "2026-08-02"],
+        ],
+        "source_slot_from": "2026-07-13",
+        "source_slot_to": "2026-08-02",
+        "buyout_order_count_weight": "63804",
+        "finance_net_revenue_weight": "3000000",
+        "coverage_text": "расчёт по 3 из 3 подтверждённых недель",
     }
     current = {
         "version_id": version,
@@ -171,8 +230,16 @@ def _v4_payload(*, saved: bool) -> dict[str, object]:
         "current": current,
         "history": [current],
         "aligned_window": {
-            "source_window_from": "2026-07-13",
+            "source_window_from": "2026-07-20",
             "source_window_to": "2026-08-02",
+            "source_week_ranges": [
+                ["2026-07-20", "2026-07-26"],
+                ["2026-07-27", "2026-08-02"],
+            ],
+            "coverage_text": "расчёт по 2 из 3 подтверждённых недель",
+            "blockers": [
+                "2026-08-03..2026-08-09 excluded (Buyout=immature, Finance=missing)."
+            ],
             "status": "ready",
         },
     }
@@ -212,8 +279,11 @@ def main() -> None:
                 "Proxy прибыль и маржинальность · V3",
                 "Proxy прибыль и маржинальность · V4",
                 "Агентское вознаграждение WB",
-                "2026-07-13 — 2026-08-02",
+                "2026-07-13 — 2026-07-19",
                 "Действует последняя подтверждённая immutable V4 version.",
+                "расчёт по 3 из 3 подтверждённых недель",
+                "latest candidate: расчёт по 2 из 3 подтверждённых недель",
+                "2026-08-03..2026-08-09 excluded",
             ):
                 if token not in text:
                     raise AssertionError(f"Settings V4 visible token missing: {token}")
@@ -223,6 +293,16 @@ def main() -> None:
                 raise AssertionError("V4 automatic fields must be read-only")
             if page.locator("#calculationEffectiveDate").count() != 1:
                 raise AssertionError("V3 manual effective-date/history behavior must remain present")
+            buyout_cells = page.locator(
+                '[data-calculation-reference-key="buyout_percent_confirmed"] td'
+            ).all_inner_texts()
+            finance_cells = page.locator(
+                '[data-calculation-reference-key="agent_remuneration"] td'
+            ).all_inner_texts()
+            if buyout_cells[-2:] != ["—", "92,5%"]:
+                raise AssertionError(f"missing latest Buyout cell/combined fallback drifted: {buyout_cells}")
+            if finance_cells[-2:] != ["—", "15%"]:
+                raise AssertionError(f"missing latest Finance cell/combined fallback drifted: {finance_cells}")
 
             page.locator("#proxyV4TaxRate").fill("7")
             page.locator("#previewProxyV4TaxButton").click()

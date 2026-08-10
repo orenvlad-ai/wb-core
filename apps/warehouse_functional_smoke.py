@@ -2724,12 +2724,14 @@ def _test_versioned_parameters_and_reference() -> None:
             conn.commit()
         stale = block.get_payload()["reference"]
         _assert(
-            stale["status"] == "stale"
+            stale["status"] == "partial"
             and stale["weeks"][-1]["status"] == "missing"
-            and stale["rows"][0]["weighted_average_pct"] is None
+            and Decimal(stale["rows"][0]["weighted_average_pct"]) == Decimal("33.96")
+            and stale["rows"][0]["ready_week_count"] == 2
+            and stale["ready_week_count"] == 2
             and [(item["week_start"], item["week_end"]) for item in stale["weeks"]]
             == [(start, end) for start, end, _metrics in week_payloads],
-            "missing latest mandatory week is stale and never replaced by an arbitrary older week",
+            "missing latest cell stays blank while combined uses the two READY in-slot weeks",
         )
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
@@ -2755,8 +2757,10 @@ def _test_versioned_parameters_and_reference() -> None:
         _assert(
             partial["status"] == "partial"
             and partial["weeks"][1]["status"] == "missing"
-            and partial["rows"][0]["weekly_rate_pct"][1] is None,
-            "missing middle calendar week is an honest partial set",
+            and partial["rows"][0]["weekly_rate_pct"][1] is None
+            and Decimal(partial["rows"][0]["weighted_average_pct"]) == Decimal("33.96")
+            and partial["rows"][0]["ready_week_count"] == 2,
+            "missing middle calendar week is excluded from a direct two-week combined",
         )
 
 
