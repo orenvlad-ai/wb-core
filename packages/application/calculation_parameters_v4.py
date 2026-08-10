@@ -38,6 +38,9 @@ PROXY_V4_BLOCK_KEY = "proxy_profit_margin_v4"
 PROXY_V4_FIXED_BOUNDARY = "2026-08-01"
 PROXY_V4_CONTRACT_VERSION = "sheet_vitrina_v1_proxy_v4_parameters_v2"
 PROXY_V4_FORMULA_VERSION = "proxy_profit_4_v1"
+PROXY_V4_LATEST_WEEK_SELECTION_CONTRACT_VERSION = (
+    "sheet_vitrina_v1_proxy_v4_latest_confirmed_week_v1"
+)
 PROXY_V4_INITIAL_EFFECTIVE_DATES = ("2026-08-01", "2026-08-08")
 
 AUTOMATIC_RATE_FIELDS: tuple[str, ...] = (
@@ -134,6 +137,21 @@ class ProxyV4Parameters:
             f"{field}_pct": _text(getattr(self, field) * Decimal("100"))
             for field in ("buyout_rate", *EXPENSE_RATE_FIELDS)
         }
+        latest_week_mode = len(self.source_week_ranges) == 1
+        source_selection_mode = (
+            "latest_confirmed_week"
+            if latest_week_mode
+            else "frozen_legacy_multi_week"
+        )
+        coverage_text = (
+            "последняя подтверждённая неделя: "
+            f"{self.source_week_ranges[0][0]} — {self.source_week_ranges[0][1]}"
+            if latest_week_mode
+            else (
+                "историческая frozen version: расчёт по "
+                f"{len(self.source_week_ranges)} подтверждённым неделям"
+            )
+        )
         return {
             "version_id": self.version_id,
             "revision": self.revision,
@@ -151,13 +169,15 @@ class ProxyV4Parameters:
             "source_window_fingerprint": self.source_window_fingerprint,
             "source_week_ranges": [list(item) for item in self.source_week_ranges],
             "source_week_count": len(self.source_week_ranges),
+            "source_selection_mode": source_selection_mode,
+            "selected_week_range": (
+                list(self.source_week_ranges[0]) if latest_week_mode else None
+            ),
             "source_slot_from": self.source_slot_from,
             "source_slot_to": self.source_slot_to,
             "buyout_order_count_weight": _text(self.buyout_order_count_weight),
             "finance_net_revenue_weight": _text(self.finance_net_revenue_weight),
-            "coverage_text": (
-                f"расчёт по {len(self.source_week_ranges)} из 3 подтверждённых недель"
-            ),
+            "coverage_text": coverage_text,
             "version_kind": self.version_kind,
             "created_at": self.created_at,
             "created_by": self.created_by,
@@ -377,6 +397,143 @@ def build_confirmed_aligned_window(
     }
 
 
+def build_latest_confirmed_week_window(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    today: date,
+    finance_available_by: str | None = None,
+) -> dict[str, Any]:
+    """Select one freshest week that is READY COMPLETE in Buyout and Finance."""
+
+    reference = build_confirmed_aligned_window(
+        runtime=runtime,
+        today=today,
+        finance_available_by=finance_available_by,
+    )
+    week_keys = [
+        (str(item[0]), str(item[1])) for item in reference.get("week_keys") or []
+    ]
+    common_ready_ranges = [
+        (str(item[0]), str(item[1]))
+        for item in reference.get("source_week_ranges") or []
+    ]
+    selected_ranges = common_ready_ranges[-1:]
+    buyout_by_range = {
+        (str(item.get("week_start") or ""), str(item.get("week_end") or "")): item
+        for item in reference.get("buyout", {}).get("weeks") or []
+    }
+    finance_by_range = {
+        (str(item.get("week_start") or ""), str(item.get("week_end") or "")): item
+        for item in reference.get("finance", {}).get("weeks") or []
+    }
+    buyout_selected = _combine_buyout_week_results(
+        buyout_by_range,
+        selected_ranges,
+    )
+    finance_selected = _combine_finance_week_results(
+        finance_by_range,
+        selected_ranges,
+    )
+    ready = (
+        bool(selected_ranges)
+        and buyout_selected["value"] is not None
+        and finance_selected["status"] == "ready"
+    )
+    automatic_rates: dict[str, str] = {}
+    if ready:
+        automatic_rates = {
+            "buyout_rate": _text(_decimal(buyout_selected["value"])),
+            **{
+                field: _text(_decimal(finance_selected["rates"][field]))
+                for field in AUTOMATIC_RATE_FIELDS
+                if field != "buyout_rate"
+            },
+        }
+    selected = selected_ranges[0] if selected_ranges else ("", "")
+    fingerprint_payload = {
+        "contract": PROXY_V4_LATEST_WEEK_SELECTION_CONTRACT_VERSION,
+        "selection_policy": "latest_confirmed_common_week",
+        "selected_week_range": selected_ranges,
+        "buyout": {
+            "value": buyout_selected["value"],
+            "order_count_weight": buyout_selected["order_count_weight"],
+            "included_sku_day_count": buyout_selected["included_sku_day_count"],
+            "source_payload_digest": (
+                _buyout_source_payload_digest(
+                    runtime,
+                    date_from=selected[0],
+                    date_to=selected[1],
+                )
+                if selected_ranges
+                else ""
+            ),
+        },
+        "finance": finance_selected["fingerprint_payload"],
+        "automatic_rates": automatic_rates,
+    }
+    common_coverage = (
+        f"общих READY COMPLETE недель: {len(common_ready_ranges)} из {len(week_keys)}"
+    )
+    coverage_text = (
+        f"последняя подтверждённая неделя: {selected[0]} — {selected[1]}; "
+        + common_coverage
+        if ready
+        else common_coverage
+    )
+    return {
+        "status": "ready" if ready else "unavailable",
+        "status_message": (
+            "Формула V4 использует ровно одну самую свежую общую READY COMPLETE неделю: "
+            f"{selected[0]} — {selected[1]}."
+            if ready
+            else (
+                "Новая V4 version не создаётся: среди трёх последних закрытых недель "
+                "нет общей READY COMPLETE недели Buyout и Finance. "
+                + " ".join(str(item) for item in reference.get("blockers") or [])
+            )
+        ),
+        "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "business_date": today.isoformat(),
+        "selection_policy": "latest_confirmed_common_week",
+        "selection_contract_version": PROXY_V4_LATEST_WEEK_SELECTION_CONTRACT_VERSION,
+        "source_window_from": selected[0],
+        "source_window_to": selected[1],
+        "source_slot_from": str(reference.get("source_slot_from") or ""),
+        "source_slot_to": str(reference.get("source_slot_to") or ""),
+        "week_keys": [list(item) for item in week_keys],
+        "common_ready_week_ranges": [list(item) for item in common_ready_ranges],
+        "common_ready_week_count": len(common_ready_ranges),
+        "source_week_ranges": [list(item) for item in selected_ranges],
+        "selected_week_range": list(selected) if selected_ranges else None,
+        "selected_week_count": 1 if ready else 0,
+        "ready_week_count": len(common_ready_ranges),
+        "required_week_count": len(week_keys),
+        "coverage_text": coverage_text,
+        "buyout": reference.get("buyout") or {},
+        "aligned_buyout": {
+            "value": buyout_selected["value"],
+            "weighted_average_pct": (
+                None
+                if buyout_selected["value"] is None
+                else _text(_decimal(buyout_selected["value"]) * Decimal("100"))
+            ),
+            "order_count_weight": buyout_selected["order_count_weight"],
+            "included_sku_day_count": buyout_selected["included_sku_day_count"],
+        },
+        "finance": reference.get("finance") or {},
+        "aligned_finance": {
+            key: value
+            for key, value in finance_selected.items()
+            if key != "fingerprint_payload"
+        },
+        "automatic_rates": automatic_rates,
+        "source_window_fingerprint": _digest(fingerprint_payload),
+        "buyout_aggregation_rule": BUYOUT_PERCENT_AGGREGATION_RULE,
+        "finance_aggregation_rule": "SUM(signed amount) / SUM(net_revenue)",
+        "blockers": list(reference.get("blockers") or []),
+    }
+
+
 class ProxyV4ParametersBlock:
     def __init__(
         self,
@@ -430,7 +587,7 @@ class ProxyV4ParametersBlock:
                 "effective_date": effective_date,
                 "detail": "Guarded historical initialization must create the 2026-08-01 as-of version first.",
             }
-        window = build_confirmed_aligned_window(
+        window = build_latest_confirmed_week_window(
             runtime=self.runtime,
             today=date.fromisoformat(effective_date),
         )
@@ -449,11 +606,6 @@ class ProxyV4ParametersBlock:
             (str(item[0]), str(item[1])) for item in window["source_week_ranges"]
         )
         current_weeks = current.source_week_ranges
-        candidate_slot = (
-            str(window["source_slot_from"]),
-            str(window["source_slot_to"]),
-        )
-        current_slot = (current.source_slot_from, current.source_slot_to)
         if candidate_fingerprint == current.source_window_fingerprint:
             return {
                 "status": "already_materialized",
@@ -462,7 +614,7 @@ class ProxyV4ParametersBlock:
                 "current_version_id": current.version_id,
                 "window": window,
             }
-        if candidate_slot == current_slot and candidate_weeks == current_weeks:
+        if candidate_weeks == current_weeks:
             return {
                 "status": "historical_repair_required",
                 "created": False,
@@ -471,22 +623,25 @@ class ProxyV4ParametersBlock:
                 "detail": "Те же contributing weeks изменили payload; обычный rollover не переписывает frozen V4 history.",
                 "window": window,
             }
-        if candidate_slot == current_slot and not set(candidate_weeks) > set(current_weeks):
+        legacy_to_latest_transition = (
+            len(current_weeks) > 1
+            and len(candidate_weeks) == 1
+            and candidate_weeks[0] == current_weeks[-1]
+        )
+        if (
+            not legacy_to_latest_transition
+            and candidate_weeks
+            and candidate_weeks[-1][1] <= current.source_window_to
+        ):
             return {
                 "status": "stale",
                 "created": False,
                 "effective_date": effective_date,
                 "current_version_id": current.version_id,
-                "detail": "READY coverage сократился внутри того же окна; последняя immutable V4 version сохранена.",
-                "window": window,
-            }
-        if candidate_slot[1] < current_slot[1]:
-            return {
-                "status": "stale",
-                "created": False,
-                "effective_date": effective_date,
-                "current_version_id": current.version_id,
-                "detail": "Latest three-slot window does not advance the frozen V4 source window.",
+                "detail": (
+                    "Самая свежая общая READY COMPLETE неделя не продвинулась; "
+                    "последняя immutable V4 version сохранена."
+                ),
                 "window": window,
             }
         try:
@@ -498,7 +653,7 @@ class ProxyV4ParametersBlock:
                     window=window,
                     effective_date=effective_date,
                     tax_rate=latest.tax_rate,
-                    version_kind="automatic_window",
+                    version_kind="automatic_latest_week",
                     created_by=created_by,
                 )
         except WarehouseSyncBusyError:
@@ -584,14 +739,17 @@ class ProxyV4ParametersBlock:
             (item for item in history if str(item["effective_date"]) <= today.isoformat()),
             None,
         )
-        window = build_confirmed_aligned_window(runtime=self.runtime, today=today)
+        window = build_latest_confirmed_week_window(runtime=self.runtime, today=today)
         status = "initialization_required"
         message = "V4 ожидает guarded historical initialization с 2026-08-01."
         if current is not None:
             current_parameters = dict(current["parameters"])
             if window["status"] != "ready":
                 status = "stale"
-                message = "Используется последняя подтверждённая V4 version; в трёх slot-неделях нет общего READY периода."
+                message = (
+                    "Используется последняя подтверждённая V4 version; "
+                    "среди трёх slot-недель нет общей READY COMPLETE недели."
+                )
             elif str(window.get("source_window_fingerprint") or "") == str(
                 current_parameters.get("source_window_fingerprint") or ""
             ):
@@ -611,16 +769,31 @@ class ProxyV4ParametersBlock:
             ):
                 status = "historical_repair_required"
                 message = "Frozen contributing weeks изменили source payload; требуется guarded reconciliation."
+            elif (
+                current_parameters.get("source_selection_mode")
+                == "latest_confirmed_week"
+                and str(window.get("source_window_to") or "")
+                <= str(current_parameters.get("source_window_to") or "")
+            ):
+                status = "stale"
+                message = (
+                    "Самая свежая общая READY COMPLETE неделя не продвинулась; "
+                    "продолжает действовать последняя immutable V4 version. "
+                    + str(window.get("coverage_text") or "")
+                    + "."
+                )
             else:
                 status = "pending_new_window"
                 message = (
-                    "Новое общее READY-покрытие ожидает ближайший штатный Vitrina refresh; "
+                    "Новая последняя общая READY COMPLETE неделя ожидает ближайший "
+                    "штатный Vitrina refresh; "
                     + str(window.get("coverage_text") or "")
                     + "."
                 )
         return {
             "contract_name": "sheet_vitrina_v1_proxy_v4_parameters",
             "contract_version": PROXY_V4_CONTRACT_VERSION,
+            "selection_contract_version": PROXY_V4_LATEST_WEEK_SELECTION_CONTRACT_VERSION,
             "formula_version": PROXY_V4_FORMULA_VERSION,
             "fixed_boundary": PROXY_V4_FIXED_BOUNDARY,
             "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -629,6 +802,8 @@ class ProxyV4ParametersBlock:
             "current_business_date": today.isoformat(),
             "current": current,
             "history": history,
+            "formula_input_policy": "latest_confirmed_common_week",
+            "latest_confirmed_week": window,
             "aligned_window": window,
             "automatic_rate_fields": list(AUTOMATIC_RATE_FIELDS),
             "manual_rate_fields": ["tax_rate"],

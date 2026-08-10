@@ -25,6 +25,7 @@ from packages.application.calculation_parameters_v4 import (  # noqa: E402
     ProxyV4ParametersBlock,
     aggregate_proxy_4,
     build_confirmed_aligned_window,
+    build_latest_confirmed_week_window,
     calculate_proxy_4,
     ensure_proxy_v4_schema,
     plan_initial_historical_versions,
@@ -155,9 +156,44 @@ def main() -> None:
         if block.parameters_for_date("2026-08-08").buyout_rate != Decimal("0.9"):  # type: ignore[union-attr]
             raise AssertionError("second aligned window was not selected on its boundary")
         rollover = block.materialize_latest_confirmed_window(business_date="2026-08-09")
-        if rollover["status"] != "already_materialized" or rollover["created"]:
-            raise AssertionError(f"same-window rollover must be idempotent: {rollover}")
-        version_count = len(block.get_payload()["history"])
+        if (
+            rollover["status"] != "materialized"
+            or not rollover["created"]
+            or rollover["window"]["source_week_ranges"]
+            != [["2026-07-27", "2026-08-02"]]
+            or rollover["window"]["automatic_rates"]["buyout_rate"] != "1"
+        ):
+            raise AssertionError(
+                "legacy combined revision must transition prospectively to one latest "
+                f"week: {rollover}"
+            )
+        if block.parameters_for_date("2026-08-08").buyout_rate != Decimal("0.9"):  # type: ignore[union-attr]
+            raise AssertionError("same-day selection transition rewrote a prior V4 date")
+        if block.parameters_for_date("2026-08-09").buyout_rate != Decimal("1"):  # type: ignore[union-attr]
+            raise AssertionError("higher current-day revision did not become effective immediately")
+        repeated_transition = block.materialize_latest_confirmed_window(
+            business_date="2026-08-09"
+        )
+        if (
+            repeated_transition["status"] != "already_materialized"
+            or repeated_transition["created"]
+        ):
+            raise AssertionError(
+                f"same latest-week fingerprint must be idempotent: {repeated_transition}"
+            )
+        transitioned_payload = block.get_payload()
+        if (
+            transitioned_payload["formula_input_policy"]
+            != "latest_confirmed_common_week"
+            or transitioned_payload["current"]["parameters"]["source_selection_mode"]
+            != "latest_confirmed_week"
+            or transitioned_payload["history"][-1]["parameters"]["source_selection_mode"]
+            != "frozen_legacy_multi_week"
+        ):
+            raise AssertionError(
+                f"latest-week/current and frozen legacy metadata are ambiguous: {transitioned_payload}"
+            )
+        version_count = len(transitioned_payload["history"])
         _save_buyout_week(runtime, "2026-07-27", enabled_nm_ids, Decimal("0.99"))
         repaired_source = block.materialize_latest_confirmed_window(business_date="2026-08-09")
         if repaired_source["status"] != "historical_repair_required" or repaired_source["created"]:
@@ -220,6 +256,8 @@ def main() -> None:
         )
         if not saved["created_version_id"] or block.parameters_for_date("2026-08-09").tax_rate != Decimal("0.07"):  # type: ignore[union-attr]
             raise AssertionError("manual V4 tax must create a current-business-date version")
+        if block.parameters_for_date("2026-08-09").buyout_rate != Decimal("1"):  # type: ignore[union-attr]
+            raise AssertionError("manual tax revision changed the selected automatic week")
         if block.parameters_for_date("2026-08-08").tax_rate != Decimal("0.06"):  # type: ignore[union-attr]
             raise AssertionError("manual tax change rewrote frozen history")
         next_business_day = ProxyV4ParametersBlock(
@@ -243,9 +281,29 @@ def main() -> None:
             or two_ready["aligned_finance"]["net_revenue"] != "2000"
         ):
             raise AssertionError(f"missing latest week must yield exact 2-of-3 intersection: {two_ready}")
+        latest_from_two = build_latest_confirmed_week_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if (
+            latest_from_two["status"] != "ready"
+            or latest_from_two["common_ready_week_count"] != 2
+            or latest_from_two["source_week_ranges"]
+            != [["2026-07-27", "2026-08-02"]]
+            or latest_from_two["automatic_rates"]["buyout_rate"] != "1"
+            or Decimal(latest_from_two["aligned_buyout"]["order_count_weight"])
+            != Decimal(len(enabled_nm_ids) * 7 * 10)
+            or latest_from_two["aligned_finance"]["net_revenue"] != "1000"
+        ):
+            raise AssertionError(
+                f"formula must select the freshest one of two common READY weeks: {latest_from_two}"
+            )
         two_ready_rollover = block.materialize_latest_confirmed_window(business_date="2026-08-15")
-        if two_ready_rollover["status"] != "materialized" or not two_ready_rollover["created"]:
-            raise AssertionError(f"new 2-of-3 slot window must materialize once: {two_ready_rollover}")
+        if two_ready_rollover["status"] != "already_materialized" or two_ready_rollover["created"]:
+            raise AssertionError(
+                "missing newest slot must retain the already selected freshest READY "
+                f"week: {two_ready_rollover}"
+            )
         if block.materialize_latest_confirmed_window(business_date="2026-08-15")["created"]:
             raise AssertionError("same 2-of-3 source fingerprint was not idempotent")
 
@@ -260,6 +318,7 @@ def main() -> None:
             yield
 
         calculation_parameters_v4.warehouse_sync_lock = _busy_lock
+        pre_advance_count = len(block.get_payload()["history"])
         try:
             lock_busy = block.materialize_latest_confirmed_window(business_date="2026-08-15")
         finally:
@@ -267,15 +326,22 @@ def main() -> None:
         if lock_busy["status"] != "pending_lock_busy" or lock_busy["created"]:
             raise AssertionError(f"busy rollover must retain the prior immutable version: {lock_busy}")
         advanced = block.materialize_latest_confirmed_window(business_date="2026-08-15")
-        if advanced["status"] != "materialized" or not advanced["created"]:
+        if (
+            advanced["status"] != "materialized"
+            or not advanced["created"]
+            or advanced["window"]["source_week_ranges"]
+            != [["2026-08-03", "2026-08-09"]]
+            or advanced["window"]["automatic_rates"]["buyout_rate"] != "0.95"
+            or len(block.get_payload()["history"]) != pre_advance_count + 1
+        ):
             raise AssertionError(f"arrival of third READY week must create one version: {advanced}")
         repeated = block.materialize_latest_confirmed_window(business_date="2026-08-15")
         if repeated["status"] != "already_materialized" or repeated["created"]:
             raise AssertionError("same-day next-window rollover was not idempotent")
         if block.parameters_for_date("2026-08-15").tax_rate != Decimal("0.07"):  # type: ignore[union-attr]
             raise AssertionError("automatic rollover must carry the latest manual tax")
-        if block.parameters_for_date("2026-08-09").buyout_rate != Decimal("0.9"):  # type: ignore[union-attr]
-            raise AssertionError("later 2/3 or 3/3 rollover rewrote Aug 8-9 history")
+        if block.parameters_for_date("2026-08-09").buyout_rate != Decimal("1"):  # type: ignore[union-attr]
+            raise AssertionError("later latest-week rollover rewrote Aug 9 history")
 
         _delete_finance_week(runtime.db_path, "2026-08-03")
         _delete_finance_week(runtime.db_path, "2026-07-27")
@@ -299,6 +365,8 @@ def main() -> None:
             raise AssertionError(f"zero READY weeks must retain the last version: {zero_ready}")
         if len(block.get_payload()["history"]) != retained_history_count:
             raise AssertionError("zero-ready fallback created a blank or zero V4 version")
+        if block.get_payload()["status"] != "stale":
+            raise AssertionError("zero-ready Settings status did not expose last-version fallback")
 
         _save_finance_week(
             runtime.db_path,
@@ -325,6 +393,22 @@ def main() -> None:
             )
         ):
             raise AssertionError(f"proven canonical zero was confused with missing: {proven_zero}")
+        latest_zero = build_latest_confirmed_week_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if (
+            latest_zero["status"] != "ready"
+            or latest_zero["source_week_ranges"]
+            != [["2026-07-20", "2026-07-26"]]
+            or any(
+                Decimal(value) != 0
+                for value in latest_zero["automatic_rates"].values()
+            )
+        ):
+            raise AssertionError(
+                f"latest-week selection confused proven zero with missing: {latest_zero}"
+            )
 
         _save_buyout_week(runtime, "2026-07-20", enabled_nm_ids, Decimal("0.90"))
         _save_finance_week(
@@ -347,6 +431,20 @@ def main() -> None:
             or weighted_two["aligned_finance"]["net_revenue"] != "4000"
         ):
             raise AssertionError(f"2-of-3 Finance rate is not direct SUM/SUM: {weighted_two}")
+        latest_weighted = build_latest_confirmed_week_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if (
+            latest_weighted["source_week_ranges"]
+            != [["2026-07-27", "2026-08-02"]]
+            or latest_weighted["automatic_rates"]["acquiring_rate"] != "0.05"
+            or latest_weighted["aligned_finance"]["net_revenue"] != "3000"
+        ):
+            raise AssertionError(
+                "formula averaged weeks instead of selecting the latest exact week: "
+                + repr(latest_weighted)
+            )
         _delete_finance_week(runtime.db_path, "2026-07-27")
         weighted_one = build_confirmed_aligned_window(runtime=runtime, today=date(2026, 8, 15))
         if (
@@ -394,6 +492,14 @@ def main() -> None:
             or ["2026-08-03", "2026-08-09"] in partial["source_week_ranges"]
         ):
             raise AssertionError(f"partial week was not excluded atomically: {partial}")
+        partial_latest = build_latest_confirmed_week_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if partial_latest["source_week_ranges"] != [["2026-07-27", "2026-08-02"]]:
+            raise AssertionError(
+                f"partial newest slot did not fall back to the previous common READY week: {partial_latest}"
+            )
         _delete_finance_week(runtime.db_path, "2026-07-20")
         exact_intersection = build_confirmed_aligned_window(
             runtime=runtime,
@@ -408,10 +514,20 @@ def main() -> None:
                 "V4 silently mixed unrelated Buyout/Finance week sets: "
                 + repr(exact_intersection)
             )
+        exact_latest = build_latest_confirmed_week_window(
+            runtime=runtime,
+            today=date(2026, 8, 15),
+        )
+        if exact_latest["source_week_ranges"] != [["2026-07-27", "2026-08-02"]]:
+            raise AssertionError(
+                "latest-week V4 silently mixed or selected unrelated periods: "
+                + repr(exact_latest)
+            )
 
     print("proxy_v4_formula_boundary_total: ok")
     print("proxy_v4_aligned_window_sum_sum_expense_exclusions: ok")
-    print("proxy_v4_as_of_versions_tax_rollover_idempotency: ok")
+    print("proxy_v4_as_of_versions_tax_latest_week_rollover_idempotency: ok")
+    print("proxy_v4_latest_common_week_no_average_current_day_freeze: ok")
     print("proxy_v4_one_two_three_week_intersection_zero_fallback: ok")
     print("proxy_v4_public_metric_pairs_v3_unchanged: ok")
 
