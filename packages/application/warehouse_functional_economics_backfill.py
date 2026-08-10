@@ -550,33 +550,42 @@ def apply_functional_economics_backfill_plan(
         schema_conn.commit()
     before_images: list[dict[str, Any]] = []
     after_images: list[dict[str, Any]] = []
-    with _connect(runtime.db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+    try:
+        with _connect(runtime.db_path) as conn:
+            # Hold an idle connection as a global mutation detector while the
+            # expensive full revalidation runs without any SQLite transaction.
+            # PRAGMA data_version changes on this connection after every commit
+            # by another connection.  Once the exact plan is revalidated, a
+            # bounded BEGIN IMMEDIATE plus a second check closes the race.
+            # Thus the writer slot covers only optimistic row updates/readback,
+            # in both WAL and rollback-journal modes.
+            data_version_before = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            final_fresh = build_functional_economics_backfill_plan(
+                runtime,
+                business_date=operation_business_date,
+                affected_nm_ids=target_nm_ids,
+                earliest_business_date=target_earliest_date,
+                latest_business_date=target_latest_date,
+            )
+            if str(final_fresh.get("plan_fingerprint") or "") != fingerprint:
+                raise FunctionalEconomicsBackfillError(
+                    "functional warehouse/cost/settings inputs drifted during lock-free revalidation"
+                )
+            _before_functional_economics_write_lock()
+            data_version_validated = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            if data_version_validated != data_version_before:
+                raise FunctionalEconomicsBackfillError(
+                    "operational store changed during lock-free economics revalidation"
+                )
+            conn.execute("BEGIN IMMEDIATE")
+            data_version_locked = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            if data_version_locked != data_version_validated:
+                raise FunctionalEconomicsBackfillError(
+                    "operational store changed before bounded economics write lock"
+                )
             if current_business_date_iso() != operation_business_date:
                 raise FunctionalEconomicsBackfillError(
                     "functional economics apply crossed the canonical business-date boundary before write"
-                )
-            locked_snapshots = [dict(row) for row in conn.execute(
-                """SELECT bundle_version,as_of_date,plan_json,refreshed_at
-                   FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date"""
-            ).fetchall()]
-            if _snapshot_manifest_digest(locked_snapshots) != str(
-                normalized.get("ready_snapshot_manifest_digest") or ""
-            ):
-                raise FunctionalEconomicsBackfillError(
-                    "ready snapshot manifest drifted before atomic backfill"
-                )
-            locked_input_digest = _warehouse_input_manifest_digest(
-                runtime,
-                dates=_plan_dates(normalized),
-                connection=conn,
-            )
-            if locked_input_digest != str(
-                normalized.get("warehouse_input_manifest_digest") or ""
-            ):
-                raise FunctionalEconomicsBackfillError(
-                    "functional warehouse/cost/settings inputs drifted before atomic backfill"
                 )
             for item in normalized["updates"]:
                 before = conn.execute(
@@ -660,14 +669,13 @@ def apply_functional_economics_backfill_plan(
                     "functional economics apply crossed the canonical business-date boundary before commit"
                 )
             conn.commit()
-        except Exception:
-            conn.rollback()
-            recovery_registry.fail_recoverable(
-                str(recovery["operation_id"]),
-                error="functional economics transaction failed",
-                next_action="resume_targeted_economics_publication",
-            )
-            raise
+    except Exception:
+        recovery_registry.fail_recoverable(
+            str(recovery["operation_id"]),
+            error="functional economics transaction failed",
+            next_action="resume_targeted_economics_publication",
+        )
+        raise
     try:
         readback = build_functional_economics_backfill_plan(
             runtime,
@@ -2108,6 +2116,10 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
 
 def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
     return "sha256:" + _hash({key: value for key, value in plan.items() if key != "plan_fingerprint"})
+
+
+def _before_functional_economics_write_lock() -> None:
+    """Test seam after full validation and before the bounded writer phase."""
 
 
 def _hash(value: Any) -> str:

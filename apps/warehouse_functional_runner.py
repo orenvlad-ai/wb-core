@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.stocks_block import HttpBackedStocksSource  # noqa: E402
 from packages.application.our_wb_costs import OurWbCostBlock  # noqa: E402
+from packages.application.ff_document_workflow import mark_ff_replay_economics  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
     registry_runtime_sqlite_busy_timeout,
@@ -59,6 +60,30 @@ WAREHOUSE_SYNC_SQLITE_BUSY_TIMEOUT_ENV = (
 WAREHOUSE_SYNC_COMMANDS = frozenset({"hourly-sync", "manual-sync", "sync-apply"})
 AUTONOMOUS_TRANSIT_COST_BATCH_LIMIT = 250
 AUTONOMOUS_TRANSIT_COST_MAX_BATCHES = 4
+
+
+def _mark_plan_ff_replays(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+    *,
+    status: str,
+    occurred_at: str,
+    error: str = "",
+) -> int:
+    queue_ids = [
+        str(item.get("queue_id") or "")
+        for item in plan.get("targeted_recalc_requests") or []
+        if str(item.get("stable_source_id") or "").startswith(
+            ("ff_inventory:", "ff_overhead:")
+        )
+    ]
+    return mark_ff_replay_economics(
+        runtime,
+        queue_ids=queue_ids,
+        status=status,
+        occurred_at=occurred_at,
+        error=error,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -247,6 +272,12 @@ def _run(
                     )
                 )
                 retention_after = _run_bounded_recovery_retention(runtime)
+                _mark_plan_ff_replays(
+                    runtime,
+                    reviewed_plan,
+                    status="complete",
+                    occurred_at=block.timestamp_factory(),
+                )
                 backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
@@ -276,6 +307,16 @@ def _run(
                     },
                 }
             except Exception as exc:
+                try:
+                    _mark_plan_ff_replays(
+                        runtime,
+                        reviewed_plan,
+                        status="error",
+                        occurred_at=block.timestamp_factory(),
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass
                 block.record_failed_sync(exc)
                 raise
     if args.command in {"hourly-sync", "manual-sync"}:
@@ -414,6 +455,12 @@ def _run(
                     phase_timings_ms,
                     lambda: _run_bounded_recovery_retention(runtime),
                 )
+                _mark_plan_ff_replays(
+                    runtime,
+                    plan,
+                    status="complete",
+                    occurred_at=block.timestamp_factory(),
+                )
                 completed_backup = backup_result
                 journal.phase_finished(
                     durable_run_id,
@@ -456,6 +503,17 @@ def _run(
                 journal.finish(durable_run_id, status="success", result=payload)
                 return payload
             except Exception as exc:
+                if durable_phase == "dependent_replay_economics" and "plan" in locals():
+                    try:
+                        _mark_plan_ff_replays(
+                            runtime,
+                            plan,
+                            status="error",
+                            occurred_at=block.timestamp_factory(),
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass
                 if durable_phase:
                     try:
                         journal.phase_finished(

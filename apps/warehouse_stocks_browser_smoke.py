@@ -161,6 +161,7 @@ def main() -> None:
                 _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
                 _assert_stock_report_frame(f"http://127.0.0.1:{config.port}")
                 _assert_sku_management_loaded(f"http://127.0.0.1:{config.port}")
+                _assert_ff_workflow_visuals(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -358,6 +359,199 @@ def _assert_incident_policy_local_draft() -> None:
             "incident policy local draft restores persisted selection",
         )
         browser.close()
+
+
+def _assert_ff_workflow_visuals(base_url: str) -> None:
+    inventory_state = {"value": "processing"}
+    overhead_state = {"value": "replay_complete"}
+
+    def steps(state: str) -> list[dict[str, str]]:
+        labels = [
+            ("accepted", "Файл/данные приняты сервером"),
+            ("checked", "Проверка завершена"),
+            ("ready", "Готово к подтверждению"),
+            ("applied", "Документ проведён"),
+            ("replay_complete", "Распределение/складской пересчёт завершён"),
+        ]
+        rank = {"processing": 0, "blocked": 1, "ready": 2, "applied": 3, "replay_error": 3, "replay_complete": 4}[state]
+        return [
+            {
+                "key": key,
+                "label_ru": label,
+                "status": (
+                    "running" if state == "processing" and key == "checked"
+                    else "blocked" if state == "blocked" and key == "checked"
+                    else "complete" if index <= rank and not (state in {"processing", "blocked"} and index == rank)
+                    else "pending"
+                ),
+            }
+            for index, (key, label) in enumerate(labels)
+        ]
+
+    def inventory_payload() -> dict[str, object]:
+        state = inventory_state["value"]
+        return {
+            "contract_name": "ff_document_workflow_v1",
+            "action_type": "inventory",
+            "state": state,
+            "preview_id": "ffip_browser_fixture",
+            "request_id": "ffi_browser_fixture",
+            "fingerprint": "sha256:inventory-browser",
+            "source": {
+                "filename": "Инвентаризация_FF.xlsx",
+                "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "business_date": "2026-08-09",
+            },
+            "summary": {
+                "before_total": "120",
+                "target_total": "115",
+                "inventory_quantity_delta": "-5",
+                "receipt_document_count": 1,
+                "writeoff_document_count": 1,
+                "changed_sku_count": 4,
+                "changed_skus": [{"nm_id": 111111111, "sku_comment": "Тестовый SKU", "before_quantity": "20", "target_quantity": "15", "inventory_delta": "-5"}],
+            },
+            "validation": {
+                "code": "invalid_workbook_rows" if state == "blocked" else "",
+                "message_ru": "Дата в файле: 09.08.2026; дата в форме: 10.08.2026. Исправьте колонку «Дата остатка» или выберите в форме дату 09.08.2026. Затронуты строки 2–72 (71 строка)." if state == "blocked" else "",
+                "affected_count": 71 if state == "blocked" else 0,
+                "examples": [{"row": 2, "code": "business_date_mismatch", "message_ru": "Дата остатка не совпадает с датой в форме"}] if state == "blocked" else [],
+            },
+            "confirm_allowed": state == "ready",
+            "document": {},
+            "replay": {"status": "not_started"},
+            "actor": "owner",
+            "updated_at": "2026-08-10T12:26:48Z",
+            "steps": steps(state),
+        }
+
+    def overhead_payload() -> dict[str, object]:
+        state = overhead_state["value"]
+        return {
+            "contract_name": "ff_document_workflow_v1",
+            "action_type": "overhead",
+            "state": state,
+            "preview_id": "",
+            "request_id": "",
+            "fingerprint": "sha256:overhead-browser",
+            "confirm_allowed": False,
+            "details": {
+                "business_date": "2026-08-07",
+                "amount_rub": "1200",
+                "reason": "тестовое основание",
+                "allocated_sku_count": 27,
+                "denominator_quantity": "120",
+                "physical_quantity_unchanged": True,
+            },
+            "document": {
+                "document_id": "ffoh_browser_fixture",
+                "status": "applied",
+                "created_by": "owner",
+                "created_at": "2026-08-10T12:12:08Z",
+            },
+            "replay": {
+                "status": "complete" if state == "replay_complete" else "error" if state == "replay_error" else "queued",
+                "error": "контрольная ошибка экономики" if state == "replay_error" else "",
+            },
+            "validation": {"code": "", "message_ru": "", "details": None},
+            "actor": "owner",
+            "updated_at": "2026-08-10T12:12:11Z",
+            "steps": steps(state),
+        }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.add_init_script(
+                """
+                localStorage.setItem('wb-core:ff-workflow:inventory', JSON.stringify({request_id:'ffi_stale_browser'}));
+                localStorage.setItem('wb-core:ff-workflow:overhead', JSON.stringify({request_id:'ffo_stale_browser'}));
+                """
+            )
+            page.route(
+                "**/v1/sheet-vitrina-v1/warehouses/ff/inventory/status*",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {"contract_name": "ff_document_workflow_v1", "state": "not_found", "action_type": "inventory"}
+                        if "request_id=ffi_stale_browser" in route.request.url
+                        else inventory_payload(),
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            page.route(
+                "**/v1/sheet-vitrina-v1/warehouses/ff/overhead/status*",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {"contract_name": "ff_document_workflow_v1", "state": "not_found", "action_type": "overhead"}
+                        if "request_id=ffo_stale_browser" in route.request.url
+                        else overhead_payload(),
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            url = f"{base_url}/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=ff"
+            page.goto(url, wait_until="domcontentloaded")
+            inventory_card = page.locator('[data-ff-inventory-result] [data-ff-state="processing"]')
+            overhead_card = page.locator('[data-ff-overhead-result] [data-ff-state="replay_complete"]')
+            inventory_card.wait_for()
+            overhead_card.wait_for()
+            _assert(inventory_card.get_attribute("data-tone") == "pending", "processing inventory must be neutral/yellow")
+            _assert(inventory_card.locator(".is-spinning").count() == 1, "processing inventory must show a spinner")
+            _assert(page.locator("[data-ff-inventory-confirm]").is_disabled(), "confirm must stay disabled while planning")
+            _assert(overhead_card.get_attribute("data-tone") == "success", "completed replay must be final green")
+            _assert("Принято и проведено" in overhead_card.inner_text() and "Распределено и пересчитано" in overhead_card.inner_text(), "final green wording changed")
+            _assert("Количество товара не изменено" in overhead_card.inner_text(), "overhead quantity invariant must be obvious")
+            page.evaluate(
+                "renderFfWorkflow('inventory', {state:'submitting', request_id:'ffi_before_server_ack', confirm_allowed:false, steps:[]})"
+            )
+            submitting_card = page.locator('[data-ff-inventory-result] [data-ff-state="submitting"]')
+            _assert("Отправка на сервер" in submitting_card.inner_text(), "pre-ack UI must not claim durable server acceptance")
+            _assert("Данные приняты сервером" not in submitting_card.inner_text(), "server-owned accepted stage must fail closed before readback")
+
+            inventory_state["value"] = "ready"
+            overhead_state["value"] = "applied"
+            page.reload(wait_until="domcontentloaded")
+            ready_card = page.locator('[data-ff-inventory-result] [data-ff-state="ready"]')
+            partial_card = page.locator('[data-ff-overhead-result] [data-ff-state="applied"]')
+            ready_card.wait_for()
+            partial_card.wait_for()
+            _assert(ready_card.get_attribute("data-tone") == "pending", "preview alone must never render green")
+            _assert(not page.locator("[data-ff-inventory-confirm]").is_disabled(), "ready recovered preview must enable owner confirm")
+            _assert(partial_card.get_attribute("data-tone") == "partial", "applied-with-replay-pending must not be final green")
+            _assert("Документ проведён; пересчёт выполняется" in partial_card.inner_text(), "partial success copy changed")
+
+            inventory_state["value"] = "blocked"
+            overhead_state["value"] = "replay_complete"
+            page.reload(wait_until="domcontentloaded")
+            blocked_card = page.locator('[data-ff-inventory-result] [data-ff-state="blocked"]')
+            blocked_card.wait_for()
+            _assert(blocked_card.get_attribute("data-tone") == "error", "blocked validation must render red")
+            _assert("Дата в файле: 09.08.2026; дата в форме: 10.08.2026" in blocked_card.inner_text(), "grouped date mismatch must be visible in Russian")
+            _assert("Failed to fetch" not in page.locator("[data-warehouse-ff-actions]").inner_text(), "raw network error must never be operator copy")
+
+            overhead_state["value"] = "replay_error"
+            page.reload(wait_until="domcontentloaded")
+            replay_error_card = page.locator('[data-ff-overhead-result] [data-ff-state="replay_error"]')
+            replay_error_card.wait_for()
+            _assert(replay_error_card.get_attribute("data-tone") == "error", "failed replay must render red")
+            _assert("Документ проведён; пересчёт требует внимания" in replay_error_card.inner_text(), "failed replay must retain durable document success and localized action")
+            _assert("Распределено и пересчитано" not in replay_error_card.inner_text(), "failed replay must never render final green")
+
+            page.set_viewport_size({"width": 560, "height": 900})
+            _assert(
+                page.locator("[data-warehouse-ff-actions]").evaluate("element => element.scrollWidth <= element.clientWidth + 1"),
+                "FF workflow cards must remain responsive",
+            )
+            background = blocked_card.evaluate("element => getComputedStyle(element).backgroundColor")
+            _assert(background not in {"rgb(255, 255, 255)", "rgba(0, 0, 0, 0)"}, "FF workflow cards must preserve dark UI")
+        finally:
+            browser.close()
 
 
 def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:

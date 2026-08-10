@@ -15,6 +15,8 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -4719,6 +4721,73 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         race_blocked_plan == json.dumps(plan),
         "concurrent source drift leaves the ready snapshot unchanged",
     )
+    # The heavy full-manifest validation must hold only a WAL read snapshot.
+    # An interactive FF writer is allowed to commit immediately; the stale
+    # background snapshot then aborts before any ready-snapshot mutation.
+    from packages.application import warehouse_functional_economics_backfill as economics_module
+
+    dry_run = build_functional_economics_backfill_plan(runtime)
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ff_interactive_writer_probe(id TEXT PRIMARY KEY,created_at TEXT NOT NULL)"
+        )
+        conn.commit()
+    validation_entered = threading.Event()
+    release_validation = threading.Event()
+
+    def pause_before_write_lock() -> None:
+        validation_entered.set()
+        if not release_validation.wait(timeout=5):
+            raise AssertionError("concurrent economics validation probe timed out")
+
+    background_errors: list[Exception] = []
+
+    def apply_background() -> None:
+        try:
+            apply_functional_economics_backfill_plan(
+                runtime,
+                dry_run,
+                confirm_fingerprint=dry_run["plan_fingerprint"],
+                backup_dir=root / "economics-backups",
+            )
+        except Exception as exc:  # expected stale-snapshot abort
+            background_errors.append(exc)
+
+    with patch.object(
+        economics_module,
+        "_before_functional_economics_write_lock",
+        side_effect=pause_before_write_lock,
+    ):
+        background = threading.Thread(target=apply_background, daemon=True)
+        background.start()
+        _assert(validation_entered.wait(timeout=5), "background economics entered deferred validation")
+        interactive_started = time.monotonic()
+        with sqlite3.connect(runtime.db_path, timeout=2) as interactive:
+            interactive.execute(
+                "INSERT INTO ff_interactive_writer_probe(id,created_at) VALUES(?,?)",
+                ("ff-preview-status", NOW),
+            )
+            interactive.commit()
+        interactive_ms = int((time.monotonic() - interactive_started) * 1000)
+        release_validation.set()
+        background.join(timeout=5)
+    _assert(not background.is_alive(), "background economics aborts without a multi-minute writer wait")
+    _assert(interactive_ms < 1_500, f"interactive writer starved for {interactive_ms}ms")
+    _assert(
+        background_errors
+        and "changed during lock-free economics revalidation" in str(background_errors[0]),
+        f"concurrent commit must fail the guarded background plan: {background_errors}",
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        concurrent_plan = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()[0]
+        probe_count = conn.execute(
+            "SELECT COUNT(*) FROM ff_interactive_writer_probe WHERE id='ff-preview-status'"
+        ).fetchone()[0]
+    _assert(concurrent_plan == json.dumps(plan), "failed stale snapshot preserves last-good economics")
+    _assert(probe_count == 1, "interactive FF writer commit must survive background abort")
     dry_run = build_functional_economics_backfill_plan(runtime)
     operation_business_date = str(dry_run["business_date"])
     next_business_date = (
