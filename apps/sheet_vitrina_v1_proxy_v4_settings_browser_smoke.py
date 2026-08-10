@@ -189,7 +189,7 @@ def _v3_payload() -> dict[str, object]:
 
 def _v4_payload(*, saved: bool) -> dict[str, object]:
     tax = "0.07" if saved else "0.06"
-    version = "proxy_v4_v3_20260809" if saved else "proxy_v4_v2_20260808"
+    version = "proxy_v4_v5_20260809" if saved else "proxy_v4_v4_20260809"
     parameters = {
         "buyout_rate": "0.9622",
         "tax_rate": tax,
@@ -203,23 +203,23 @@ def _v4_payload(*, saved: bool) -> dict[str, object]:
         "retained_share_pct": "74.9" if saved else "75.9",
         "buyout_rate_pct": "96.22",
         "tax_rate_pct": "7" if saved else "6",
-        "source_window_from": "2026-07-13",
+        "source_window_from": "2026-07-27",
         "source_window_to": "2026-08-02",
         "source_week_ranges": [
-            ["2026-07-13", "2026-07-19"],
-            ["2026-07-20", "2026-07-26"],
             ["2026-07-27", "2026-08-02"],
         ],
         "source_slot_from": "2026-07-13",
         "source_slot_to": "2026-08-02",
-        "buyout_order_count_weight": "63804",
-        "finance_net_revenue_weight": "3000000",
-        "coverage_text": "расчёт по 3 из 3 подтверждённых недель",
+        "buyout_order_count_weight": "21000",
+        "finance_net_revenue_weight": "1000000",
+        "coverage_text": "последняя подтверждённая неделя: 2026-07-27 — 2026-08-02",
+        "source_selection_mode": "latest_confirmed_week",
+        "source_window_fingerprint": "sha256:latest-week",
     }
     current = {
         "version_id": version,
         "effective_date": "2026-08-09" if saved else "2026-08-08",
-        "version_kind": "operator_tax" if saved else "historical_initialization",
+        "version_kind": "operator_tax" if saved else "automatic_latest_week",
         "created_at": "2026-08-09T08:00:00Z" if saved else "2026-08-08T00:00:00Z",
         "parameters": parameters,
     }
@@ -229,14 +229,19 @@ def _v4_payload(*, saved: bool) -> dict[str, object]:
         "fixed_boundary": "2026-08-01",
         "current": current,
         "history": [current],
-        "aligned_window": {
-            "source_window_from": "2026-07-20",
+        "formula_input_policy": "latest_confirmed_common_week",
+        "latest_confirmed_week": {
+            "source_window_from": "2026-07-27",
             "source_window_to": "2026-08-02",
             "source_week_ranges": [
+                ["2026-07-27", "2026-08-02"],
+            ],
+            "common_ready_week_ranges": [
                 ["2026-07-20", "2026-07-26"],
                 ["2026-07-27", "2026-08-02"],
             ],
-            "coverage_text": "расчёт по 2 из 3 подтверждённых недель",
+            "coverage_text": "последняя подтверждённая неделя: 2026-07-27 — 2026-08-02; общих READY COMPLETE недель: 2 из 3",
+            "source_window_fingerprint": "sha256:latest-week",
             "blockers": [
                 "2026-08-03..2026-08-09 excluded (Buyout=immature, Finance=missing)."
             ],
@@ -279,10 +284,13 @@ def main() -> None:
                 "Proxy прибыль и маржинальность · V3",
                 "Proxy прибыль и маржинальность · V4",
                 "Агентское вознаграждение WB",
-                "2026-07-13 — 2026-07-19",
+                "2026-07-20 — 2026-07-26",
                 "Действует последняя подтверждённая immutable V4 version.",
-                "расчёт по 3 из 3 подтверждённых недель",
-                "latest candidate: расчёт по 2 из 3 подтверждённых недель",
+                "Combined 1–3 READY weeks в справочной таблице выше — только аналитическая информация",
+                "последняя подтверждённая неделя: 2026-07-27 — 2026-08-02",
+                "source mode: latest_confirmed_week",
+                "latest candidate: последняя подтверждённая неделя: 2026-07-27 — 2026-08-02",
+                "candidate fingerprint: sha256:latest-week",
                 "2026-08-03..2026-08-09 excluded",
             ):
                 if token not in text:

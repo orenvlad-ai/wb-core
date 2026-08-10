@@ -482,7 +482,7 @@
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
 
         <h2 style="margin-top: 30px;">Proxy прибыль и маржинальность · V4</h2>
-        <p class="calculation-reference-meta">Фиксированная граница публикации: 2026-08-01. Автоматические ставки заморожены в immutable version по точному общему пересечению READY COMPLETE недель Buyout + Finance среди трёх календарных слотов; достаточно 1–3 недель, вручную меняется только налог.</p>
+        <p class="calculation-reference-meta">Фиксированная граница публикации: 2026-08-01. Формула использует ровно одну последнюю подтверждённую Monday–Sunday неделю, одновременно READY COMPLETE для Buyout и Finance. Combined 1–3 READY weeks в справочной таблице выше — только аналитическая информация и не является input формулы. Автоматические ставки заморожены в immutable version; вручную меняется только налог.</p>
         <div id="proxyV4ParametersForm" class="calculation-grid">
           <label class="field"><span>Расчётный выкуп (подтверждённый), %</span><input type="number" readonly data-proxy-v4-rate="buyout_rate"></label>
           <label class="field"><span>Налог, %</span><input id="proxyV4TaxRate" type="number" min="0" max="100" step="0.01"></label>
@@ -3206,20 +3206,28 @@
         previewProxyV4TaxButton.disabled = !current;
         proxyV4ExpenseTotal.textContent = formatCalculationReferencePct(parameters.included_expense_rate_pct);
         proxyV4RetainedShare.textContent = formatCalculationReferencePct(parameters.retained_share_pct);
-        const aligned = payload && payload.aligned_window && typeof payload.aligned_window === "object" ? payload.aligned_window : {};
+        const latest = payload && payload.latest_confirmed_week && typeof payload.latest_confirmed_week === "object"
+          ? payload.latest_confirmed_week
+          : payload && payload.aligned_window && typeof payload.aligned_window === "object"
+            ? payload.aligned_window
+            : {};
         const rangesText = (ranges) => Array.isArray(ranges) && ranges.length
           ? ranges.map((range) => Array.isArray(range) ? range.join(" — ") : String(range)).join("; ")
           : "—";
         proxyV4SourceMeta.textContent = current
           ? "Version: " + String(current.version_id || "—") +
             " · effective from: " + String(current.effective_date || "—") +
-            " · frozen coverage: " + String(parameters.coverage_text || "—") +
-            " · frozen weeks: " + rangesText(parameters.source_week_ranges) +
+            " · formula input: " + String(parameters.coverage_text || "—") +
+            " · frozen source: " + rangesText(parameters.source_week_ranges) +
+            " · source mode: " + String(parameters.source_selection_mode || "—") +
+            " · source fingerprint: " + String(parameters.source_window_fingerprint || "—") +
             " · denominators: Buyout orderCount " + String(parameters.buyout_order_count_weight || "—") +
             ", Finance net_revenue " + String(parameters.finance_net_revenue_weight || "—") +
-            " · latest candidate: " + String(aligned.coverage_text || "—") +
-            " · candidate weeks: " + rangesText(aligned.source_week_ranges) +
-            (Array.isArray(aligned.blockers) && aligned.blockers.length ? " · pending: " + aligned.blockers.join(" ") : "") +
+            " · latest candidate: " + String(latest.coverage_text || "—") +
+            " · candidate selected week: " + rangesText(latest.source_week_ranges) +
+            " · common slot coverage: " + rangesText(latest.common_ready_week_ranges) +
+            " · candidate fingerprint: " + String(latest.source_window_fingerprint || "—") +
+            (Array.isArray(latest.blockers) && latest.blockers.length ? " · pending: " + latest.blockers.join(" ") : "") +
             " · Finance: SUM(signed amount) / SUM(net_revenue) · Buyout: SUM(buyoutPercent × orderCount) / SUM(orderCount)"
           : "V4 не публикуется до guarded historical initialization с фиксированной границей 2026-08-01.";
         proxyV4Message.textContent = String(payload && payload.status_message || "Статус V4 неизвестен.");
