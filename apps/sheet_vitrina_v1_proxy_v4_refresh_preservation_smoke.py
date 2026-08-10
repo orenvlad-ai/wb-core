@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.proxy_v4_historical_projection import (  # noqa: E402
     PROXY_V4_PROJECTION_METADATA_KEY,
+    PROXY_V4_RECONCILIATION_METADATA_KEY,
     preserve_proxy_v4_historical_cells,
 )
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
@@ -68,6 +69,11 @@ def main() -> None:
         "2026-08-09",
     ]:
         raise AssertionError(f"historical initialization marker was not bounded: {marker}")
+    reconciliation = dict(
+        metadata.get(PROXY_V4_RECONCILIATION_METADATA_KEY) or {}
+    )
+    if reconciliation.get("approval_reference") != "owner-repair-gate-test":
+        raise AssertionError("ordinary refresh lost the guarded repair provenance")
     summary = dict(metadata.get("proxy_v4_history_preservation") or {})
     if (
         summary.get("business_date") != "2026-08-10"
@@ -125,6 +131,10 @@ def _plan(
                 "2026-08-09": {"version_id": "v2"},
                 "2026-08-10": {"version_id": "v3"},
             },
+        }
+        metadata[PROXY_V4_RECONCILIATION_METADATA_KEY] = {
+            "contract_version": "proxy_v4_historical_reconciliation_v1",
+            "approval_reference": "owner-repair-gate-test",
         }
     return SheetVitrinaV1Envelope(
         plan_version="proxy_v4_refresh_preservation_smoke",

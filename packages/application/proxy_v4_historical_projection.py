@@ -142,6 +142,13 @@ def preserve_proxy_v4_historical_cells(
             marker["date_to"] = marker_dates[-1] if marker_dates else ""
         marker["preserved_before_business_date"] = current_business_date
         metadata[PROXY_V4_PROJECTION_METADATA_KEY] = marker
+    previous_reconciliation = previous_metadata.get(
+        PROXY_V4_RECONCILIATION_METADATA_KEY
+    )
+    if isinstance(previous_reconciliation, Mapping):
+        metadata[PROXY_V4_RECONCILIATION_METADATA_KEY] = deepcopy(
+            dict(previous_reconciliation)
+        )
     summary = {
         "contract_version": "proxy_v4_ordinary_refresh_history_preservation_v1",
         "business_date": current_business_date,

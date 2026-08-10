@@ -201,6 +201,15 @@ def _build_manifest(
             date_to=date_to,
             reconciled_at=created_at,
         )
+        transformed_window = proxy_v4_window_digest(
+            str(transformed["after_plan_json"]),
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if transformed_window != reference_window:
+            raise ProxyV4ReconciliationError(
+                f"V4 reconciliation could not reproduce the reviewed window for {key[1]}"
+            )
         if transformed["non_target_before"] != transformed["non_target_after"]:
             raise ProxyV4ReconciliationError(
                 f"V4 reconciliation changed non-V4 fields for {key[1]}"
@@ -358,6 +367,13 @@ def _apply_manifest(
         for item in current_snapshots
     }
     if _repairs_are_applied(current_by_key, repairs):
+        _validate_idempotent_readback(
+            runtime=runtime,
+            manifest=manifest,
+            current_versions=current_versions,
+            current_snapshots=current_snapshots,
+            target_keys=target_keys,
+        )
         return {
             "schema_version": SCHEMA_VERSION,
             "mode": "apply",
@@ -569,6 +585,46 @@ def _load_required_snapshots(
         return _load_exact_snapshots(db_path, keys=keys)
     except ProxyV4InitializationError as exc:
         raise ProxyV4ReconciliationError(str(exc)) from exc
+
+
+def _validate_idempotent_readback(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    manifest: Mapping[str, Any],
+    current_versions: list[Mapping[str, Any]],
+    current_snapshots: list[Mapping[str, Any]],
+    target_keys: list[tuple[str, str]],
+) -> None:
+    pre = dict(manifest.get("pre_change") or {})
+    if _digest(current_versions) != str(pre.get("v4_version_rows_digest") or ""):
+        raise ProxyV4ReconciliationError(
+            "idempotent readback found V4 parameter-version drift"
+        )
+    if _v3_parameter_digest(runtime.db_path) != str(
+        pre.get("v3_parameter_digest") or ""
+    ):
+        raise ProxyV4ReconciliationError("idempotent readback found V3 parameter drift")
+    current_non_v4 = _digest(
+        [
+            [
+                item["bundle_version"],
+                item["as_of_date"],
+                proxy_v4_non_target_digest(str(item["plan_json"])),
+            ]
+            for item in current_snapshots
+        ]
+    )
+    if current_non_v4 != str(pre.get("target_snapshot_non_v4_digest") or ""):
+        raise ProxyV4ReconciliationError(
+            "idempotent readback found target non-V4 drift"
+        )
+    if _non_target_ready_snapshot_digest(
+        runtime.db_path,
+        targets=set(target_keys),
+    ) != str(pre.get("non_target_ready_snapshot_digest") or ""):
+        raise ProxyV4ReconciliationError(
+            "idempotent readback found non-target ready-snapshot drift"
+        )
 
 
 def _plan_digest(plan_json: str) -> str:
