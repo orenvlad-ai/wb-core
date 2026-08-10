@@ -44,6 +44,10 @@ Matching indexes primary `barcode` plus every value in `barcodes_json` for all a
 
 `sheet_vitrina_v1_supplier_shipment_lines` gains nullable `barcode TEXT`. The runtime migration uses `ALTER TABLE ... ADD COLUMN` through the existing idempotent schema guard, so old shipment rows remain readable with an empty barcode. New parsed uploads and saved lines persist the exact normalized source barcode. This migration performs no production backfill; legacy rematch without a stored barcode is skipped safely with diagnostics.
 
+## FF Inventory Barcode Identity
+
+The FF manager inventory template projects the canonical primary `barcode` as an XLSX text cell beside `nmId`; the upload resolver indexes that primary plus every normalized `barcodes_json` value only for active/non-hidden rows. A row may identify one position by unique `nmId`, by unique exact barcode, or by both when they resolve to the same position. Unknown/shared/conflicting barcode, duplicate resolved SKU, empty identity and any lossy numeric/formula/scientific barcode representation fail closed. The earlier exact four-column `nmId` workbook remains readable; no second nomenclature or warehouse ledger is introduced.
+
 ## Out Of Scope
 
 No WB mutations, no fuzzy auto-match by WB title, no FBW supply planning, no FBW/FBS supply creation, no Google Sheets/GAS, no localStorage truth.

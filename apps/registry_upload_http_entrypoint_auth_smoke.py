@@ -22,6 +22,8 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
+    DEFAULT_FF_INVENTORY_CONFIRM_PATH,
+    DEFAULT_FF_INVENTORY_PREVIEW_PATH,
     DEFAULT_FF_INVENTORY_TEMPLATE_PATH,
     DEFAULT_FF_OVERHEAD_PREVIEW_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
@@ -147,6 +149,25 @@ def main() -> None:
                     or inventory_template_payload.get("error") != "authentication_required"
                 ):
                     raise AssertionError("unauthenticated FF inventory template must be denied")
+                inventory_preview_code, inventory_preview_payload = _post_multipart(
+                    f"{base_url}{DEFAULT_FF_INVENTORY_PREVIEW_PATH}",
+                    b"not-authenticated",
+                    filename="inventory.xlsx",
+                )
+                if (
+                    inventory_preview_code != 401
+                    or inventory_preview_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated FF inventory preview must be denied")
+                inventory_confirm_code, inventory_confirm_payload = _post_json(
+                    f"{base_url}{DEFAULT_FF_INVENTORY_CONFIRM_PATH}",
+                    {"confirm": True, "preview_id": "none", "fingerprint": "none"},
+                )
+                if (
+                    inventory_confirm_code != 401
+                    or inventory_confirm_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated FF inventory confirm must be denied")
                 overhead_code, overhead_payload = _post_json(
                     f"{base_url}{DEFAULT_FF_OVERHEAD_PREVIEW_PATH}",
                     {"business_date": "2026-08-10", "amount_rub": "1", "reason": "auth smoke"},

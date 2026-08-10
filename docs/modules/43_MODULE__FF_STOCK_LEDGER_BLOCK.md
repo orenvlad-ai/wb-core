@@ -111,7 +111,7 @@ Enabling `Показать технический архив` requests `show_tec
 
 На unified FF page рядом с остатками находятся два business-document action:
 
-- `Скачать шаблон` строит полный XLSX по всем active/non-hidden `nmId` на выбранную business date; явная строка с нулём обязательна, поэтому отсутствие SKU не может означать ни «не считали», ни «считать нулём»;
+- `Скачать шаблон` строит полный XLSX по всем active/non-hidden `nmId` на выбранную business date с отдельным текстовым `Штрихкод` из canonical primary barcode; ведущие нули и длинные identifiers сохраняются, а явная строка с нулём обязательна, поэтому отсутствие SKU не может означать ни «не считали», ни «считать нулём»;
 - `Загрузить инвентаризацию` сохраняет original bytes/SHA в preview, показывает blockers/deltas/cost basis и требует отдельный explicit confirm;
 - `Накладные расходы FF` принимает business date, положительную RUB-сумму и основание, показывает exact allocation preview и только после отдельного confirm создаёт immutable cost-only документ.
 
@@ -231,7 +231,7 @@ preservation rule.
 
 `apps/ff_inventory_reconciliation.py` is the only runner for a manager XLSX
 physical target. Dry-run is default. It validates exact headers/business date,
-unique `nmId`, one active nomenclature identity, полное покрытие каждой active/non-hidden nomenclature identity (включая явные zero targets), current FF balances, confirmed
+one resolved active/non-hidden nomenclature identity per row and полное покрытие каждой active/non-hidden identity (включая явные zero targets), current FF balances, confirmed
 supply-return proofs and a frozen same-SKU FF cost basis no later than the
 business date. The hierarchy is exact original debit, same-date FF WAC, last
 earlier FF WAC, latest certified landed inbound cost, then only an explicit
@@ -243,6 +243,8 @@ respectively; direct balance updates and synthetic zero cost are forbidden.
 The source bytes/SHA-256, per-SKU before/return/inventory/target/cost/capital,
 source revisions, target and non-target digests, approval reference and exact
 operation ids form the immutable manifest/fingerprint.
+
+Новый default header profile — `nmId / Штрихкод / Комментарий SKU / Остаток ФФ / Дата остатка`; прежний exact четырёхколоночный `nmId` profile остаётся совместимым. Строка может использовать unique `nmId`, text-only primary/additional barcode из `barcode + barcodes_json` или оба поля, если они разрешаются в одну позицию. Empty/unknown/ambiguous/conflicting identity, duplicate SKU после resolution, numeric/formula/scientific/fractional barcode representation и неполный active target fail closed до confirm.
 
 Apply requires that exact fresh fingerprint and human approval reference,
 rechecks all guards under `BEGIN IMMEDIATE`, stores the XLSX content-addressed
