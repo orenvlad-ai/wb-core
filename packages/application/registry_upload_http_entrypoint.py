@@ -25,6 +25,10 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.ff_inventory_reconciliation import FfInventoryReconciliation
 from packages.application.ff_overhead_allocation import FfOverheadAllocation
+from packages.application.ff_document_workflow import (
+    FfDocumentWorkflow,
+    mark_ff_replay_economics,
+)
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1157,6 +1161,12 @@ class RegistryUploadHttpEntrypoint:
         )
         self.ff_overhead_allocation = FfOverheadAllocation(
             runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_document_workflow = FfDocumentWorkflow(
+            runtime=self.runtime,
+            inventory=self.ff_inventory_reconciliation,
+            overhead=self.ff_overhead_allocation,
             timestamp_factory=self.activated_at_factory,
         )
         self.warehouse_stocks_block = WarehouseStocksBlock(
@@ -5276,10 +5286,29 @@ class RegistryUploadHttpEntrypoint:
         *,
         business_date: str,
         uploaded_filename: str,
+        request_id: str,
+        actor: str,
     ) -> dict[str, Any]:
-        return self.ff_inventory_reconciliation.create_preview(
+        return self.ff_document_workflow.accept_inventory(
             source_bytes=workbook_bytes,
             source_filename=uploaded_filename,
+            business_date=business_date,
+            request_id=request_id,
+            actor=actor,
+        )
+
+    def handle_ff_inventory_status_request(
+        self,
+        *,
+        preview_id: str = "",
+        request_id: str = "",
+        source_sha256: str = "",
+        business_date: str = "",
+    ) -> dict[str, Any]:
+        return self.ff_document_workflow.inventory_status(
+            preview_id=preview_id,
+            request_id=request_id,
+            source_sha256=source_sha256,
             business_date=business_date,
         )
 
@@ -5289,16 +5318,24 @@ class RegistryUploadHttpEntrypoint:
         *,
         actor: str,
     ) -> dict[str, Any]:
+        started_at = time.monotonic()
         result = self.ff_inventory_reconciliation.confirm_preview(
             preview_id=str(payload.get("preview_id") or ""),
             confirmation_fingerprint=str(payload.get("fingerprint") or ""),
             created_by=actor,
         )
-        result["replay"] = self._enqueue_and_replay_ff_inventory(
+        self.ff_document_workflow.note_inventory_confirmed(
+            preview_id=str(payload.get("preview_id") or ""),
             reconciliation_id=str(result.get("reconciliation_id") or ""),
-            reversal=False,
+            actor=actor,
+            duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
         )
-        return result
+        return {
+            **result,
+            "workflow": self.ff_document_workflow.inventory_status(
+                preview_id=str(payload.get("preview_id") or "")
+            ),
+        }
 
     def handle_ff_inventory_rollback_request(
         self,
@@ -5321,11 +5358,28 @@ class RegistryUploadHttpEntrypoint:
     def handle_ff_overhead_preview_request(
         self,
         payload: Mapping[str, Any],
+        *,
+        actor: str,
     ) -> dict[str, Any]:
-        return self.ff_overhead_allocation.build_plan(
+        return self.ff_document_workflow.accept_overhead(
             business_date=str(payload.get("business_date") or ""),
             amount_rub=payload.get("amount_rub"),
             reason=str(payload.get("reason") or ""),
+            request_id=str(payload.get("request_id") or ""),
+            actor=actor,
+        )
+
+    def handle_ff_overhead_status_request(
+        self,
+        *,
+        preview_id: str = "",
+        request_id: str = "",
+        document_id: str = "",
+    ) -> dict[str, Any]:
+        return self.ff_document_workflow.overhead_status(
+            preview_id=preview_id,
+            request_id=request_id,
+            document_id=document_id,
         )
 
     def handle_ff_overhead_confirm_request(
@@ -5334,17 +5388,33 @@ class RegistryUploadHttpEntrypoint:
         *,
         actor: str,
     ) -> dict[str, Any]:
+        started_at = time.monotonic()
+        preview_id = str(payload.get("preview_id") or "")
+        workflow = (
+            self.ff_document_workflow.overhead_status(preview_id=preview_id)
+            if preview_id
+            else {}
+        )
+        details = dict(workflow.get("details") or {})
         result = self.ff_overhead_allocation.apply_plan(
-            business_date=str(payload.get("business_date") or ""),
-            amount_rub=payload.get("amount_rub"),
-            reason=str(payload.get("reason") or ""),
+            business_date=str(details.get("business_date") or payload.get("business_date") or ""),
+            amount_rub=details.get("amount_rub", payload.get("amount_rub")),
+            reason=str(details.get("reason") or payload.get("reason") or ""),
             confirmation_fingerprint=str(payload.get("fingerprint") or ""),
             created_by=actor,
         )
-        result["replay"] = self._replay_ff_document_queue(
-            stable_source_ids=["ff_overhead:" + str(result.get("document_id") or "")]
+        self.ff_document_workflow.note_overhead_confirmed(
+            preview_id=preview_id,
+            document_id=str(result.get("document_id") or ""),
+            actor=actor,
+            duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
         )
-        return result
+        return {
+            **result,
+            "workflow": self.ff_document_workflow.overhead_status(
+                document_id=str(result.get("document_id") or "")
+            ),
+        }
 
     def handle_ff_overhead_reversal_preview_request(
         self,
@@ -5477,6 +5547,12 @@ class RegistryUploadHttpEntrypoint:
             )
             economics = self.calculation_parameters_block.publish_current_functional_economics(
                 verified_backup=self.calculation_parameters_block.prepare_functional_economics_backup(),
+            )
+            mark_ff_replay_economics(
+                self.runtime,
+                queue_ids=[str(item["queue_id"]) for item in rows],
+                status="complete",
+                occurred_at=self.activated_at_factory(),
             )
         except Exception as exc:
             error_text = str(exc)[:1000]

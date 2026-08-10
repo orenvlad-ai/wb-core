@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import sqlite3
 import sys
 import time
@@ -196,6 +197,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
     _contention_timeout_ms: int
     _contention_priority: str
     _transaction_started_at: float | None
+    _transaction_write_phase_at: float | None
     _transaction_retry_count: int
     _transaction_wait_ms: int
 
@@ -203,6 +205,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         self._contention_timeout_ms = int(timeout_ms)
         self._contention_priority = _normalize_priority(priority)
         self._transaction_started_at = None
+        self._transaction_write_phase_at = None
         self._transaction_retry_count = 0
         self._transaction_wait_ms = 0
         sqlite3.Connection.execute(
@@ -212,15 +215,18 @@ class ObservedSQLiteConnection(sqlite3.Connection):
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
         was_in_transaction = self.in_transaction
+        phase = _sql_phase(sql)
         cursor = self._retry(
-            phase=_sql_phase(sql),
+            phase=phase,
             action=lambda: sqlite3.Connection.execute(self, sql, parameters),
         )
         self._track_transaction_after_statement(was_in_transaction)
+        self._track_write_phase(phase, sql=sql)
         return cursor
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> sqlite3.Cursor:
         was_in_transaction = self.in_transaction
+        phase = _sql_phase(sql)
         cursor: sqlite3.Cursor | None = None
         # sqlite3.executemany() may have executed earlier parameter sets before
         # a later one reports BUSY.  Retrying the whole batch could therefore
@@ -229,7 +235,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         # explicit transaction.
         for parameters in seq_of_parameters:
             cursor = self._retry(
-                phase=_sql_phase(sql),
+                phase=phase,
                 action=lambda parameters=parameters: sqlite3.Connection.execute(
                     self,
                     sql,
@@ -239,6 +245,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         if cursor is None:
             cursor = sqlite3.Connection.executemany(self, sql, ())
         self._track_transaction_after_statement(was_in_transaction)
+        self._track_write_phase(phase, sql=sql)
         return cursor
 
     def executescript(self, sql_script: str, /) -> sqlite3.Cursor:
@@ -248,6 +255,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         # Schema migrations are serialized by their repo-owned file locks.
         cursor = sqlite3.Connection.executescript(self, sql_script)
         self._track_transaction_after_statement(was_in_transaction)
+        self._track_write_phase("schema", sql=sql_script)
         return cursor
 
     def commit(self) -> None:
@@ -290,6 +298,32 @@ class ObservedSQLiteConnection(sqlite3.Connection):
                     raise
                 retries += 1
                 elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+                # A deferred WAL read transaction cannot ever upgrade after a
+                # newer writer committed (SQLITE_BUSY_SNAPSHOT). Retrying the
+                # same statement inside that stale snapshot only prolongs the
+                # transaction; fail immediately so the caller can rollback and
+                # rebuild from a fresh source revision.
+                busy_snapshot = int(getattr(sqlite3, "SQLITE_BUSY_SNAPSHOT", 517))
+                if self.in_transaction and int(getattr(exc, "sqlite_errorcode", -1)) == busy_snapshot:
+                    state = SQLiteContentionState(
+                        wait_ms=elapsed_ms,
+                        retries=retries,
+                        phase=phase,
+                        exhausted=True,
+                    )
+                    _LAST_CONTENTION.set(state)
+                    self._record_retry(state)
+                    _emit_contention_event(
+                        event="sqlite_contention_snapshot_restart_required",
+                        state=state,
+                        transaction_duration_ms=self._transaction_duration_ms(),
+                        context=_effective_connection_context(self._contention_priority),
+                    )
+                    raise SQLiteContentionExhausted(
+                        wait_ms=elapsed_ms,
+                        retries=retries,
+                        phase=phase,
+                    ) from exc
                 remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     state = SQLiteContentionState(
@@ -344,8 +378,25 @@ class ObservedSQLiteConnection(sqlite3.Connection):
     def _track_transaction_after_statement(self, was_in_transaction: bool) -> None:
         if not was_in_transaction and self.in_transaction:
             self._transaction_started_at = time.monotonic()
+            self._transaction_write_phase_at = None
             self._transaction_retry_count = 0
             self._transaction_wait_ms = 0
+
+    def _track_write_phase(self, phase: str, *, sql: str) -> None:
+        begins_with_writer_lock = bool(
+            phase == "begin"
+            and re.match(
+                r"\s*BEGIN\s+(?:IMMEDIATE|EXCLUSIVE)\b",
+                str(sql),
+                re.IGNORECASE,
+            )
+        )
+        if (
+            self.in_transaction
+            and self._transaction_write_phase_at is None
+            and (phase in {"write_statement", "schema"} or begins_with_writer_lock)
+        ):
+            self._transaction_write_phase_at = time.monotonic()
 
     def _record_retry(self, state: SQLiteContentionState) -> None:
         if self.in_transaction:
@@ -363,9 +414,10 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         *,
         outcome: str,
     ) -> None:
+        write_started_at = self._transaction_write_phase_at
         duration_ms = (
-            max(0, int((time.monotonic() - started_at) * 1000))
-            if started_at is not None
+            max(0, int((time.monotonic() - write_started_at) * 1000))
+            if write_started_at is not None
             else None
         )
         if (
@@ -389,6 +441,7 @@ class ObservedSQLiteConnection(sqlite3.Connection):
                 ),
             )
         self._transaction_started_at = None
+        self._transaction_write_phase_at = None
         self._transaction_retry_count = 0
         self._transaction_wait_ms = 0
 

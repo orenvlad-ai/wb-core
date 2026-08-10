@@ -363,9 +363,11 @@ DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergenc
 DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
 DEFAULT_FF_INVENTORY_TEMPLATE_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/template.xlsx"
 DEFAULT_FF_INVENTORY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/preview"
+DEFAULT_FF_INVENTORY_STATUS_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/status"
 DEFAULT_FF_INVENTORY_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/confirm"
 DEFAULT_FF_INVENTORY_ROLLBACK_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/rollback"
 DEFAULT_FF_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/preview"
+DEFAULT_FF_OVERHEAD_STATUS_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/status"
 DEFAULT_FF_OVERHEAD_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/confirm"
 DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/preview"
 DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/confirm"
@@ -851,6 +853,11 @@ def _build_handler(
                             upload_payload["workbook_bytes"],
                             business_date=str(fields.get("business_date") or ""),
                             uploaded_filename=str(upload_payload.get("filename") or "inventory.xlsx"),
+                            request_id=str(
+                                fields.get("request_id")
+                                or f"ffi_{uuid4().hex}"
+                            ),
+                            actor=actor,
                         )
                     else:
                         body = _load_request_payload(self)
@@ -866,7 +873,12 @@ def _build_handler(
                         elif parsed.path == DEFAULT_FF_INVENTORY_ROLLBACK_PATH:
                             payload = entrypoint.handle_ff_inventory_rollback_request(body, actor=actor)
                         elif parsed.path == DEFAULT_FF_OVERHEAD_PREVIEW_PATH:
-                            payload = entrypoint.handle_ff_overhead_preview_request(body)
+                            if not body.get("request_id"):
+                                body = {**body, "request_id": f"ffo_{uuid4().hex}"}
+                            payload = entrypoint.handle_ff_overhead_preview_request(
+                                body,
+                                actor=actor,
+                            )
                         elif parsed.path == DEFAULT_FF_OVERHEAD_CONFIRM_PATH:
                             payload = entrypoint.handle_ff_overhead_confirm_request(body, actor=actor)
                         elif parsed.path == DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH:
@@ -893,7 +905,8 @@ def _build_handler(
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = int(payload.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
             if parsed.path in {
@@ -4192,6 +4205,21 @@ def _build_handler(
                                 as_attachment=True,
                             )
                             return
+                        elif parts == ["ff", "inventory", "status"]:
+                            query = _flatten_query_params(parsed.query)
+                            payload = entrypoint.handle_ff_inventory_status_request(
+                                preview_id=str(query.get("preview_id") or ""),
+                                request_id=str(query.get("request_id") or ""),
+                                source_sha256=str(query.get("source_sha256") or ""),
+                                business_date=str(query.get("business_date") or ""),
+                            )
+                        elif parts == ["ff", "overhead", "status"]:
+                            query = _flatten_query_params(parsed.query)
+                            payload = entrypoint.handle_ff_overhead_status_request(
+                                preview_id=str(query.get("preview_id") or ""),
+                                request_id=str(query.get("request_id") or ""),
+                                document_id=str(query.get("document_id") or ""),
+                            )
                         elif len(parts) == 2 and parts[1] == "documents":
                             query = _flatten_query_params(parsed.query)
                             payload = entrypoint.handle_warehouse_documents_request(

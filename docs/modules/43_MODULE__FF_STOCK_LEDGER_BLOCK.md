@@ -14,6 +14,7 @@ related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
+  - "packages/application/ff_document_workflow.py"
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_supply.py"
@@ -33,7 +34,10 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_wb_supply_lifecycle"
   - "sheet_vitrina_v1_ff_inventory_reconciliations"
   - "sheet_vitrina_v1_ff_inventory_previews"
+  - "sheet_vitrina_v1_ff_overhead_previews"
   - "sheet_vitrina_v1_ff_overhead_documents"
+  - "sheet_vitrina_v1_ff_workflow_request_aliases"
+  - "sheet_vitrina_v1_ff_workflow_events"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -42,9 +46,11 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/template.xlsx"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/preview"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/status"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/confirm"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/rollback"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/preview"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/overhead/status"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
@@ -66,7 +72,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory targets use one content-addressed dry-run/apply/compensating-rollback contour."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -114,6 +120,30 @@ Enabling `Показать технический архив` requests `show_tec
 - `Скачать шаблон` строит полный XLSX по всем active/non-hidden `nmId` на выбранную business date с отдельным текстовым `Штрихкод` из canonical primary barcode; ведущие нули и длинные identifiers сохраняются, а явная строка с нулём обязательна, поэтому отсутствие SKU не может означать ни «не считали», ни «считать нулём»;
 - `Загрузить инвентаризацию` сохраняет original bytes/SHA в preview, показывает blockers/deltas/cost basis и требует отдельный explicit confirm;
 - `Накладные расходы FF` принимает business date, положительную RUB-сумму и основание, показывает exact allocation preview и только после отдельного confirm создаёт immutable cost-only документ.
+
+Оба action используют server-owned `ff_document_workflow_v1`, а не локальное
+состояние вкладки. Клиент создаёт `request_id` до upload, сервер быстро и
+идемпотентно фиксирует exact input identity, затем тяжёлый plan выполняется
+асинхронно. `GET .../inventory/status` и `GET .../overhead/status` восстанавливают
+те же preview/document/replay после network abort, reload или restart. Exact
+repeat с новым request id создаёт только alias к тому же content-addressed
+preview и остаётся T0.
+
+Публичные стадии фиксированы: `данные приняты` → `проверка завершена` → `готово
+к подтверждению` → `документ проведён` → `распределение/пересчёт завершён`.
+Preview/ready остаются жёлтыми и никогда не означают проведение. Большая зелёная
+отметка `Принято и проведено` допустима только после exact document readback, а
+финальная `Распределено и пересчитано` — только после durable functional и
+economics completion. Проведённый документ с queued/running replay показывается
+как partial, а replay error — отдельно красным без предложения повторить
+business document.
+
+Inventory делает bounded DB-free проверку XLSX до постановки plan job. Row-level
+`code/details` сохраняются структурированно; одинаковые date mismatch
+группируются в одно русское сообщение с датами, диапазонами и количеством
+строк, остальные ошибки получают краткую локализованную сводку и не более
+ограниченного набора примеров. Blocker всегда держит confirm disabled и не
+очищает file/date fields.
 
 Открытие страницы, раскрытие реестра, фильтрация и download шаблона не проводят документов. Все mutation routes защищены тем же supply-operator auth boundary.
 
@@ -248,7 +278,9 @@ operation ids form the immutable manifest/fingerprint.
 
 Apply requires that exact fresh fingerprint and human approval reference,
 rechecks all guards under `BEGIN IMMEDIATE`, stores the XLSX content-addressed
-evidence and appends documents atomically. Exact repeat is T0. Readback proves
+evidence, appends documents and inserts the canonical targeted replay queue row
+atomically. HTTP confirm заканчивается после durable ledger+queue readback и не
+выполняет functional/economics replay синхронно. Exact repeat is T0. Readback proves
 every target SKU and total. Recovery tier T1 appends exact inverse-cost
 compensating documents; it never deletes or rewrites the source/audit history.
 
@@ -259,6 +291,11 @@ compensating documents; it never deletes or rewrites the source/audit history.
 Allocation uses `Decimal`: `amount * qty_i / total_positive_qty`, rounds down to kopecks and assigns the deterministic remainder by largest fractional part then `nmId`. The exact sum must equal the header amount. Ledger lines carry `quantity_delta=0` and immutable `cost_adjustment` with allocation capital, physical basis quantity, per-unit amount, date, reason and revision. Functional replay applies them at the end of their business date, increases capital/WAC only, proves the physical basis unchanged and publishes only the affected SKU/economics closure. It never copies supply-specific Fulfillment service/storage already accounted in WB supply layers.
 
 Exact input repeat is T0. Reversal requires preview/fingerprint and appends `ff_overhead_reversal` lines with the exact negative original allocations. It neither hard-deletes nor recalculates historical allocation proportions.
+Primary overhead confirm also returns immediately after its existing atomic
+document+queue commit. The hourly/manual warehouse worker owns the durable
+functional/economics continuation and records its economics completion on the
+same queue row; an HTTP response loss is therefore recovered by exact
+document/status readback and cannot create a second document or replay row.
 
 ## 6.1. Bounded Targeted Checkpoint Reconciliation
 
@@ -314,7 +351,7 @@ Targeted smoke:
 
 The smokes cover manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status idempotency, statuses `1/2` skip, `Допринято` skip, future-arrival reservation, multiple reservations of one SKU, supply adjustment/cancellation, waiting-for-cost isolation, full-composition atomic fulfillment, no negative physical/capital and factory-order/WB regional source compatibility.
 It also covers operation journal pagination metadata/second page retrieval, default status backward compatibility, archive-off visibility versus archive-on retrieval, and verifies that the archive view filter does not change computed balances.
-The FF document pilot smokes additionally cover complete template/preview/confirm/repeat/compensating rollback, missing cost rejection, exact quantity-proportional overhead with quantity invariant and reversal, business/technical projection separation, localized receipt/shipment/reservation rows, server-side filters/search/date/pagination and legacy journal compatibility.
+The FF document pilot smokes additionally cover complete template/async-preview/status/confirm/repeat/compensating rollback, grouped localized validation, network loss at accept and post-commit response, reload/restart recovery, exact retry/double click without duplicate preview/document/reconciliation/queue/event rows, functional-only partial state, economics error and final completion, exact quantity-proportional overhead with quantity invariant and reversal, business/technical projection separation, localized receipt/shipment/reservation rows, server-side filters/search/date/pagination and legacy journal compatibility.
 The targeted reconciliation smokes separately cover the baseline-known status `1/2 -> 3` transition with source timestamp earlier than activation, preservation of ordinary checkpoint and ordinary pre-activation fail-closed paths, missing/invalid activation and other-supply blockers, hard-guarded exact `38 250 - 31 500 = 6 750` totals across 13 SKU, dry-run immutability and stable v2 fingerprint, one linked apply plus ordinary-sync idempotency, statuses `1/2`, `Допринято`, missing goods, inactive nomenclature, changed activation/global total and per-SKU shortage blockers, stale goods/status/nomenclature/activation/balance/total plans, coherent CLI backup with `integrity_check=ok`, post-run reconciliation and an audited history-preserving reversal.
 
 # 9. Explicit Non-Scope

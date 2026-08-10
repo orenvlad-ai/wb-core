@@ -5263,7 +5263,59 @@
     .warehouse-ff-form label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
     .warehouse-ff-form .wide { grid-column: 1 / -1; }
     .warehouse-ff-actions-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .warehouse-ff-result { margin: 10px 0 0; white-space: pre-line; }
+    .warehouse-ff-result { margin: 12px 0 0; }
+    .warehouse-ff-state-card {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px;
+      border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+      background: var(--panel-bg); color: var(--text);
+    }
+    .warehouse-ff-state-card[data-tone="pending"],
+    .warehouse-ff-state-card[data-tone="partial"] {
+      border-color: color-mix(in srgb, var(--warning-text) 55%, var(--border));
+      background: var(--warning-bg);
+    }
+    .warehouse-ff-state-card[data-tone="success"] {
+      border-color: color-mix(in srgb, var(--success-text) 62%, var(--border));
+      background: var(--success-bg);
+    }
+    .warehouse-ff-state-card[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error-text) 62%, var(--border));
+      background: var(--error-bg);
+    }
+    .warehouse-ff-state-icon {
+      display: grid; place-items: center; width: 34px; height: 34px;
+      border: 2px solid currentColor; border-radius: 50%; color: var(--muted-strong);
+      font-size: 21px; font-weight: 900; line-height: 1;
+    }
+    .warehouse-ff-state-card[data-tone="success"] .warehouse-ff-state-icon { color: var(--success-text); }
+    .warehouse-ff-state-card[data-tone="error"] .warehouse-ff-state-icon { color: var(--error-text); }
+    .warehouse-ff-state-card[data-tone="pending"] .warehouse-ff-state-icon,
+    .warehouse-ff-state-card[data-tone="partial"] .warehouse-ff-state-icon { color: var(--warning-text); }
+    .warehouse-ff-state-icon.is-spinning {
+      border-right-color: transparent; font-size: 0; animation: warehouseFfSpin .8s linear infinite;
+    }
+    @keyframes warehouseFfSpin { to { transform: rotate(360deg); } }
+    .warehouse-ff-state-body { min-width: 0; }
+    .warehouse-ff-state-title { margin: 0; font-size: 15px; line-height: 1.3; }
+    .warehouse-ff-state-copy { margin: 4px 0 0; color: var(--muted-strong); font-size: 12px; line-height: 1.45; }
+    .warehouse-ff-state-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 12px; margin: 10px 0 0; }
+    .warehouse-ff-state-details div { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+    .warehouse-ff-state-details dt { display: inline; color: var(--muted); }
+    .warehouse-ff-state-details dd { display: inline; margin: 0 0 0 4px; }
+    .warehouse-ff-steps { grid-column: 1 / -1; display: grid; gap: 5px; margin: 1px 0 0; padding: 0; list-style: none; }
+    .warehouse-ff-step { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 11px; }
+    .warehouse-ff-step::before { content: "○"; width: 14px; text-align: center; }
+    .warehouse-ff-step[data-status="complete"] { color: var(--success-text); }
+    .warehouse-ff-step[data-status="complete"]::before { content: "✓"; }
+    .warehouse-ff-step[data-status="running"] { color: var(--warning-text); }
+    .warehouse-ff-step[data-status="running"]::before { content: "●"; }
+    .warehouse-ff-step[data-status="blocked"], .warehouse-ff-step[data-status="error"] { color: var(--error-text); }
+    .warehouse-ff-step[data-status="blocked"]::before, .warehouse-ff-step[data-status="error"]::before { content: "!"; }
+    .warehouse-ff-state-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+    .warehouse-ff-validation { grid-column: 1 / -1; color: var(--muted-strong); font-size: 12px; }
+    .warehouse-ff-validation summary { cursor: pointer; color: var(--accent); }
+    .warehouse-ff-validation ul { margin: 7px 0 0; padding-left: 20px; }
+    .warehouse-document-highlight { outline: 2px solid var(--success-text); outline-offset: -2px; background: var(--success-bg); }
     .warehouse-document-filters { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 8px; margin: 12px 0; align-items: end; }
     .warehouse-document-filters label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
     .warehouse-document-filters .search { grid-column: span 2; }
@@ -5332,6 +5384,7 @@
     @media (max-width: 780px) {
       .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
       .warehouse-ff-actions, .warehouse-document-filters { grid-template-columns: minmax(0, 1fr); }
+      .warehouse-ff-state-details { grid-template-columns: minmax(0, 1fr); }
       .warehouse-document-filters .search { grid-column: auto; }
       .warehouse-incident-grid { grid-template-columns: 1fr; }
       .warehouse-card { padding: 12px; min-width: 0; }
@@ -5643,7 +5696,7 @@
               <label class="wide">Заполненный XLSX<input class="input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-ff-inventory-file></label>
               <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-inventory-preview>Загрузить инвентаризацию</button><button class="button primary" type="button" data-ff-inventory-confirm disabled>Подтвердить проведение</button></div>
             </div>
-            <p class="warehouse-ff-result" data-ff-inventory-result hidden></p>
+            <div class="warehouse-ff-result" data-ff-inventory-result role="status" aria-live="polite" hidden></div>
           </div>
           <div class="warehouse-ff-action">
             <h3>Накладные расходы FF</h3>
@@ -5654,7 +5707,7 @@
               <label class="wide">Основание / комментарий<textarea class="input" rows="2" data-ff-overhead-reason></textarea></label>
               <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-overhead-preview>Проверить распределение</button><button class="button primary" type="button" data-ff-overhead-confirm disabled>Подтвердить проведение</button></div>
             </div>
-            <p class="warehouse-ff-result" data-ff-overhead-result hidden></p>
+            <div class="warehouse-ff-result" data-ff-overhead-result role="status" aria-live="polite" hidden></div>
           </div>
         </div>
       </section>
@@ -7154,6 +7207,9 @@
         },
         inventoryPreview: null,
         overheadPreview: null,
+        ffWorkflowPollTimers: {inventory: null, overhead: null},
+        ffWorkflowPollAttempts: {inventory: 0, overhead: 0},
+        ffWorkflowRecovered: false,
         error: "",
         updateRunId: "",
         updatePollTimer: null,
@@ -7757,6 +7813,13 @@
     if (ffInventoryConfirm) ffInventoryConfirm.addEventListener("click", confirmFfInventory);
     if (ffOverheadPreview) ffOverheadPreview.addEventListener("click", previewFfOverhead);
     if (ffOverheadConfirm) ffOverheadConfirm.addEventListener("click", confirmFfOverhead);
+    [ffInventoryResult, ffOverheadResult].forEach(function(node) {
+      if (!node) return;
+      node.addEventListener("click", function(event) {
+        const button = event.target.closest("[data-ff-show-document]");
+        if (button) showFfDocumentInRegistry(String(button.getAttribute("data-ff-show-document") || ""));
+      });
+    });
     if (warehouseDocumentFilterApply) warehouseDocumentFilterApply.addEventListener("click", function() {
       readWarehouseDocumentFilters();
       clearWarehouseDocumentPageCache(state.warehouses.activeKey);
@@ -8898,15 +8961,270 @@
       return values.year + "-" + values.month + "-" + values.day;
     }
 
-    function setFfResult(node, message, tone) {
-      if (!node) return;
-      node.textContent = String(message || "");
-      node.setAttribute("data-tone", String(tone || "neutral"));
-      node.hidden = !message;
-    }
-
     function ffDocumentBasePath() {
       return String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "") + "/ff";
+    }
+
+    function ffRequestId(prefix) {
+      const token = window.crypto && typeof window.crypto.randomUUID === "function"
+        ? window.crypto.randomUUID().replace(/-/g, "")
+        : String(Date.now()) + Math.random().toString(16).slice(2);
+      return String(prefix || "ffr") + "_" + token;
+    }
+
+    function ffWorkflowStorageKey(actionType) {
+      return "wb-core:ff-workflow:" + String(actionType || "");
+    }
+
+    function rememberFfWorkflow(actionType, payload) {
+      try {
+        const identity = {
+          request_id: String(payload && payload.request_id || ""),
+          preview_id: String(payload && payload.preview_id || ""),
+          document_id: String(payload && payload.document && payload.document.document_id || "")
+        };
+        if (!identity.request_id && !identity.preview_id && !identity.document_id) return;
+        window.localStorage.setItem(ffWorkflowStorageKey(actionType), JSON.stringify({
+          request_id: identity.request_id,
+          preview_id: identity.preview_id,
+          document_id: identity.document_id
+        }));
+      } catch (_error) {}
+    }
+
+    function rememberedFfWorkflow(actionType) {
+      try { return JSON.parse(window.localStorage.getItem(ffWorkflowStorageKey(actionType)) || "{}"); }
+      catch (_error) { return {}; }
+    }
+
+    function ffWorkflowStatusQuery(actionType, identity) {
+      const query = new URLSearchParams();
+      const selected = identity || rememberedFfWorkflow(actionType);
+      ["preview_id", "request_id", "document_id", "source_sha256", "business_date"].forEach(function(key) {
+        if (selected && selected[key]) query.set(key, String(selected[key]));
+      });
+      return query.toString();
+    }
+
+    function ffWorkflowNode(actionType) {
+      return actionType === "inventory" ? ffInventoryResult : ffOverheadResult;
+    }
+
+    function ffWorkflowConfirmButton(actionType) {
+      return actionType === "inventory" ? ffInventoryConfirm : ffOverheadConfirm;
+    }
+
+    function ffWorkflowStateCopy(payload) {
+      const stateName = String(payload && payload.state || "error");
+      if (stateName === "submitting") return {tone: "pending", icon: "", spin: true, title: "Отправка на сервер", copy: "Не закрывайте вкладку, пока сервер не подтвердит приём данных."};
+      if (stateName === "accepted") return {tone: "pending", icon: "", spin: true, title: "Данные приняты сервером", copy: "Проверка начнётся автоматически. Можно безопасно обновить страницу."};
+      if (stateName === "processing") return {tone: "pending", icon: "", spin: true, title: "Проверка выполняется", copy: "Данные сохранены на сервере. Можно безопасно обновить страницу или закрыть вкладку."};
+      if (stateName === "ready") return {tone: "pending", icon: "✓", spin: false, title: "Готово к подтверждению", copy: "Проверка завершена без блокеров. Документ ещё не проведён — требуется отдельное подтверждение владельца."};
+      if (stateName === "applied") return {tone: "partial", icon: "✓", spin: false, title: "Документ проведён; пересчёт выполняется", copy: "Принято и проведено по точному server readback. Итоговый складской пересчёт ещё не завершён; повторно проводить документ не нужно."};
+      if (stateName === "replay_error") {
+        const replayReason = String(payload && payload.replay && payload.replay.error || "причина не передана сервером");
+        return {tone: "error", icon: "!", spin: false, title: "Документ проведён; пересчёт требует внимания", copy: "Ошибка пересчёта: " + replayReason + ". Документ повторно не проводите; обновите страницу позже — штатный worker безопасно повторит очередь."};
+      }
+      if (stateName === "replay_complete") return {tone: "success", icon: "✓", spin: false, title: "Распределено и пересчитано", copy: "Принято и проведено. Документ и итоговый пересчёт подтверждены сервером."};
+      if (stateName === "blocked") return {tone: "error", icon: "!", spin: false, title: "Проверка выявила ошибку", copy: String(payload && payload.validation && payload.validation.message_ru || "Исправьте указанные данные и повторите проверку.")};
+      if (stateName === "not_found") return {tone: "error", icon: "!", spin: false, title: "Результат на сервере не найден", copy: "Если документ не проводился, можно безопасно повторить проверку с теми же данными."};
+      return {tone: "error", icon: "!", spin: false, title: "Проверка не завершена", copy: String(payload && payload.validation && payload.validation.message_ru || "Обновите страницу и повторите проверку позже. Введённые значения сохранены.")};
+    }
+
+    function ffDetail(label, value) {
+      if (value === undefined || value === null || value === "") return "";
+      return '<div><dt>' + escapeHtml(label) + ':</dt><dd>' + escapeHtml(String(value)) + '</dd></div>';
+    }
+
+    function ffWorkflowDetails(actionType, payload) {
+      const documentRow = payload && payload.document || {};
+      const replay = payload && payload.replay || {};
+      const actorTime = [
+        String(payload && payload.actor || ""),
+        payload && payload.updated_at ? warehouseDate(payload.updated_at) : ""
+      ].filter(Boolean).join(" · ");
+      if (actionType === "inventory") {
+        const source = payload && payload.source || {};
+        const summary = payload && payload.summary || {};
+        return [
+          ffDetail("Файл", source.filename),
+          ffDetail("SHA", source.sha256 ? String(source.sha256).slice(0, 20) + "…" : ""),
+          ffDetail("Дата учёта", warehouseBusinessDate(source.business_date)),
+          ffDetail("Preview ID", payload && payload.preview_id),
+          ffDetail("Document ID", documentRow.document_id),
+          ffDetail("Остаток", summary.before_total !== "" ? warehouseNumber(summary.before_total) + " → " + warehouseNumber(summary.target_total) : ""),
+          ffDetail("Чистая дельта", summary.inventory_quantity_delta !== "" ? warehouseNumber(summary.inventory_quantity_delta) : ""),
+          ffDetail("Приход / списание", String(summary.receipt_document_count || 0) + " док. · " + String(summary.receipt_line_count || 0) + " поз. / " + String(summary.writeoff_document_count || 0) + " док. · " + String(summary.writeoff_line_count || 0) + " поз."),
+          ffDetail("Изменено SKU", summary.changed_sku_count),
+          ffDetail("Автор / время", actorTime || ""),
+          ffDetail("Пересчёт", ffReplayLabel(replay))
+        ].join("");
+      }
+      const details = payload && payload.details || {};
+      return [
+        ffDetail("Document ID", documentRow.document_id),
+        ffDetail("Дата учёта", warehouseBusinessDate(details.business_date)),
+        ffDetail("Сумма", details.amount_rub !== "" ? warehouseMoney(details.amount_rub) : ""),
+        ffDetail("Основание", details.reason),
+        ffDetail("Распределено SKU", details.allocated_sku_count),
+        ffDetail("База распределения", details.denominator_quantity !== "" ? warehouseNumber(details.denominator_quantity) + " ед." : ""),
+        ffDetail("Количество", documentRow.document_id ? "Количество товара не изменено" : "Не изменяется при проведении"),
+        ffDetail("Автор / время", actorTime || ""),
+        ffDetail("Пересчёт", ffReplayLabel(replay))
+      ].join("");
+    }
+
+    function ffReplayLabel(replay) {
+      const status = String(replay && replay.status || "not_started");
+      return ({not_started: "не запускался", missing: "очередь не найдена", queued: "в очереди", running: "выполняется", economics_pending: "склад проведён, экономика пересчитывается", complete: "завершён", error: "ошибка"})[status] || status;
+    }
+
+    function ffWorkflowSteps(payload) {
+      const steps = Array.isArray(payload && payload.steps) ? payload.steps : [];
+      return '<ol class="warehouse-ff-steps">' + steps.map(function(step) {
+        return '<li class="warehouse-ff-step" data-status="' + escapeHtml(step.status || "pending") + '">' + escapeHtml(step.label_ru || "") + '</li>';
+      }).join("") + '</ol>';
+    }
+
+    function ffWorkflowValidation(payload) {
+      const validation = payload && payload.validation || {};
+      const examples = Array.isArray(validation.examples) ? validation.examples : [];
+      const changed = payload && payload.summary && Array.isArray(payload.summary.changed_skus) ? payload.summary.changed_skus : [];
+      if (examples.length) {
+        return '<details class="warehouse-ff-validation"><summary>Показать примеры строк (' + escapeHtml(String(validation.affected_count || examples.length)) + ')</summary><ul>' + examples.map(function(item) {
+          return '<li>Строка ' + escapeHtml(String(item.row || "—")) + ': ' + escapeHtml(String(item.message_ru || "Проверьте данные строки")) + '</li>';
+        }).join("") + '</ul></details>';
+      }
+      if (changed.length) {
+        return '<details class="warehouse-ff-validation"><summary>Показать изменяемые позиции (' + escapeHtml(String(payload.summary.changed_sku_count || changed.length)) + ')</summary><ul>' + changed.map(function(item) {
+          return '<li>nmId ' + escapeHtml(String(item.nm_id || "—")) + ' · ' + escapeHtml(String(item.sku_comment || item.sku || "SKU")) + ': ' + escapeHtml(warehouseNumber(item.before_quantity)) + ' → ' + escapeHtml(warehouseNumber(item.target_quantity)) + ' (' + escapeHtml(warehouseNumber(item.inventory_delta)) + ')</li>';
+        }).join("") + '</ul></details>';
+      }
+      return "";
+    }
+
+    function renderFfWorkflow(actionType, payload) {
+      const node = ffWorkflowNode(actionType);
+      if (!node || !payload) return;
+      const visual = ffWorkflowStateCopy(payload);
+      const documentRow = payload.document || {};
+      const registryId = actionType === "inventory"
+        ? String((documentRow.operation_ids || [])[0] || documentRow.document_id || "")
+        : String(documentRow.document_id || "");
+      const actions = registryId
+        ? '<div class="warehouse-ff-state-actions"><button class="button secondary" type="button" data-ff-show-document="' + escapeHtml(registryId) + '">Показать документ в реестре</button></div>'
+        : "";
+      node.innerHTML = '<section class="warehouse-ff-state-card" data-ff-state="' + escapeHtml(String(payload.state || "error")) + '" data-tone="' + escapeHtml(visual.tone) + '">' +
+        '<span class="warehouse-ff-state-icon' + (visual.spin ? ' is-spinning' : '') + '" aria-hidden="true">' + escapeHtml(visual.icon) + '</span>' +
+        '<div class="warehouse-ff-state-body"><h4 class="warehouse-ff-state-title">' + escapeHtml(visual.title) + '</h4><p class="warehouse-ff-state-copy">' + escapeHtml(visual.copy) + '</p><dl class="warehouse-ff-state-details">' + ffWorkflowDetails(actionType, payload) + '</dl></div>' +
+        ffWorkflowSteps(payload) + ffWorkflowValidation(payload) + actions + '</section>';
+      node.hidden = false;
+      const confirm = ffWorkflowConfirmButton(actionType);
+      if (confirm) confirm.disabled = payload.confirm_allowed !== true;
+      if (actionType === "inventory") {
+        state.warehouses.inventoryPreview = payload;
+        if (ffInventoryDate && payload.source && payload.source.business_date) ffInventoryDate.value = String(payload.source.business_date);
+      } else {
+        state.warehouses.overheadPreview = payload;
+        const details = payload.details || {};
+        if (ffOverheadDate && details.business_date) ffOverheadDate.value = String(details.business_date);
+        if (ffOverheadAmount && details.amount_rub) ffOverheadAmount.value = String(details.amount_rub);
+        if (ffOverheadReason && details.reason) ffOverheadReason.value = String(details.reason);
+      }
+      rememberFfWorkflow(actionType, payload);
+      scheduleFfWorkflowPoll(actionType, payload);
+    }
+
+    function renderFfLocalError(actionType, message) {
+      renderFfWorkflow(actionType, {
+        state: "error", confirm_allowed: false,
+        validation: {message_ru: String(message || "Проверьте данные и повторите действие.")},
+        steps: []
+      });
+    }
+
+    function stopFfWorkflowPoll(actionType) {
+      const timer = state.warehouses.ffWorkflowPollTimers[actionType];
+      if (timer) window.clearTimeout(timer);
+      state.warehouses.ffWorkflowPollTimers[actionType] = null;
+    }
+
+    function scheduleFfWorkflowPoll(actionType, payload) {
+      stopFfWorkflowPoll(actionType);
+      const stateName = String(payload && payload.state || "");
+      if (!["accepted", "processing", "applied"].includes(stateName)) {
+        state.warehouses.ffWorkflowPollAttempts[actionType] = 0;
+        return;
+      }
+      const attempt = Number(state.warehouses.ffWorkflowPollAttempts[actionType] || 0);
+      if (attempt >= 24) return;
+      const delay = Math.min(15000, Math.round(1200 * Math.pow(1.35, attempt)));
+      state.warehouses.ffWorkflowPollAttempts[actionType] = attempt + 1;
+      const identity = {preview_id: payload.preview_id, request_id: payload.request_id, document_id: payload.document && payload.document.document_id};
+      state.warehouses.ffWorkflowPollTimers[actionType] = window.setTimeout(function() {
+        recoverFfWorkflow(actionType, identity, {quiet: true});
+      }, delay);
+    }
+
+    async function recoverFfWorkflow(actionType, identity, options) {
+      const query = ffWorkflowStatusQuery(actionType, identity);
+      const retryAttempt = Number(options && options.retryAttempt || 0);
+      try {
+        const response = await fetch(ffDocumentBasePath() + "/" + actionType + "/status" + (query ? "?" + query : ""), {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error("status_readback_failed");
+        if (String(payload.state || "") !== "not_found") renderFfWorkflow(actionType, payload);
+        return payload;
+      } catch (_error) {
+        if (!(options && options.quiet) && retryAttempt < 3) {
+          await new Promise(function(resolve) {
+            window.setTimeout(resolve, Math.min(1800, 250 * Math.pow(2, retryAttempt)));
+          });
+          return recoverFfWorkflow(actionType, identity, {retryAttempt: retryAttempt + 1});
+        }
+        if (options && options.quiet) {
+          const current = actionType === "inventory"
+            ? state.warehouses.inventoryPreview
+            : state.warehouses.overheadPreview;
+          if (current) scheduleFfWorkflowPoll(actionType, current);
+        }
+        if (!(options && options.quiet)) {
+          renderFfLocalError(actionType, "Серверный статус временно недоступен. Введённые данные сохранены; обновите страницу и повторите проверку статуса.");
+        }
+        return {state: "readback_unavailable"};
+      }
+    }
+
+    function recoverFfWorkflows() {
+      if (state.warehouses.ffWorkflowRecovered) return;
+      state.warehouses.ffWorkflowRecovered = true;
+      ["inventory", "overhead"].forEach(function(actionType) {
+        const remembered = rememberedFfWorkflow(actionType);
+        recoverFfWorkflow(actionType, remembered, {quiet: false}).then(function(payload) {
+          if (String(payload && payload.state || "") === "not_found" && Object.keys(remembered).some(function(key) { return Boolean(remembered[key]); })) {
+            recoverFfWorkflow(actionType, {}, {quiet: false});
+          }
+        });
+      });
+    }
+
+    function showFfDocumentInRegistry(documentId) {
+      if (!documentId) return;
+      if (warehouseDocumentSearch) warehouseDocumentSearch.value = documentId;
+      if (warehouseDocumentEffect) warehouseDocumentEffect.value = "all";
+      if (warehouseDocumentReason) warehouseDocumentReason.value = "all";
+      readWarehouseDocumentFilters();
+      clearWarehouseDocumentPageCache("ff");
+      if (warehouseDocumentsDrawer) warehouseDocumentsDrawer.open = true;
+      loadWarehouseDocuments("ff", 1).then(function() {
+        const row = warehouseDocumentsNode && warehouseDocumentsNode.querySelector('[data-warehouse-document-id="' + CSS.escape(documentId) + '"]');
+        if (row) {
+          row.classList.add("warehouse-document-highlight");
+          row.scrollIntoView({behavior: "smooth", block: "center"});
+        } else if (warehouseDocumentsDrawer) {
+          warehouseDocumentsDrawer.scrollIntoView({behavior: "smooth", block: "start"});
+        }
+      });
     }
 
     function downloadFfInventoryTemplate() {
@@ -8916,50 +9234,45 @@
 
     async function previewFfInventory() {
       const file = ffInventoryFile && ffInventoryFile.files && ffInventoryFile.files[0];
-      if (!file) { setFfResult(ffInventoryResult, "Выберите заполненный XLSX.", "error"); return; }
+      if (!file) { renderFfLocalError("inventory", "Выберите заполненный XLSX."); return; }
       ffInventoryPreview.disabled = true;
       if (ffInventoryConfirm) ffInventoryConfirm.disabled = true;
-      state.warehouses.inventoryPreview = null;
+      state.warehouses.ffWorkflowPollAttempts.inventory = 0;
+      const requestId = ffRequestId("ffi");
+      rememberFfWorkflow("inventory", {request_id: requestId});
+      renderFfWorkflow("inventory", {state: "submitting", request_id: requestId, confirm_allowed: false, steps: []});
       try {
         const form = new FormData();
         form.append("file", file, file.name);
         form.append("business_date", String(ffInventoryDate && ffInventoryDate.value || ""));
+        form.append("request_id", requestId);
         const response = await fetch(ffDocumentBasePath() + "/inventory/preview", {method: "POST", headers: {Accept: "application/json"}, body: form});
         const payload = await response.json().catch(function() { return {}; });
-        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
-        const blockers = Array.isArray(payload.blockers) ? payload.blockers : [];
-        if (!payload.apply_allowed || blockers.length) throw new Error(blockers.map(function(item) { return String(item.message || item.code || item); }).join("\n") || "Проведение заблокировано.");
-        state.warehouses.inventoryPreview = payload;
-        if (ffInventoryConfirm) ffInventoryConfirm.disabled = false;
-        const manifest = payload.manifest || {};
-        setFfResult(ffInventoryResult, "Проверка пройдена. SKU: " + String((manifest.per_sku || []).length) + "; целевой остаток: " + String(manifest.target_total || "0") + ". Для проведения нажмите отдельное подтверждение.", "success");
-      } catch (error) {
-        setFfResult(ffInventoryResult, String(error && error.message ? error.message : error), "error");
+        if (payload && payload.contract_name === "ff_document_workflow_v1") {
+          renderFfWorkflow("inventory", payload);
+        } else {
+          renderFfLocalError("inventory", "Файл не принят сервером. Проверьте формат и безопасно повторите загрузку.");
+        }
+      } catch (_error) {
+        const recovered = await recoverFfWorkflow("inventory", {request_id: requestId});
+        if (String(recovered.state || "") === "not_found") renderFfLocalError("inventory", "Файл не найден на сервере после обрыва связи. Безопасно повторите загрузку с теми же данными.");
       } finally { ffInventoryPreview.disabled = false; }
     }
 
     async function confirmFfInventory() {
       const preview = state.warehouses.inventoryPreview;
-      if (!preview || !ffInventoryConfirm) return;
+      if (!preview || !preview.confirm_allowed || !ffInventoryConfirm) return;
       ffInventoryConfirm.disabled = true;
       try {
         const response = await fetch(ffDocumentBasePath() + "/inventory/confirm", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify({confirm: true, preview_id: preview.preview_id, fingerprint: preview.fingerprint})});
         const payload = await response.json().catch(function() { return {}; });
-        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
-        state.warehouses.inventoryPreview = null;
+        if (!response.ok) throw new Error("confirm_failed");
+        renderFfWorkflow("inventory", payload.workflow || payload);
         clearWarehouseDocumentPageCache("ff");
-        const replay = payload.replay || {};
-        const replayFailed = String(replay.status || "") === "failed";
-        setFfResult(
-          ffInventoryResult,
-          "Инвентаризация проведена append-only. Документ: " + String(payload.reconciliation_id || "—") + "." +
-            (replayFailed ? " Пересчёт оставлен в штатной очереди: " + String(replay.error || "ошибка пересчёта") + "." : " Пересчёт: " + String(replay.status || "queued") + "."),
-          replayFailed ? "error" : "success"
-        );
-        loadWarehouse("ff", {force: true});
-      } catch (error) {
-        setFfResult(ffInventoryResult, String(error && error.message ? error.message : error), "error");
-        ffInventoryConfirm.disabled = false;
+        loadWarehouse("ff", {background: true});
+      } catch (_error) {
+        const recovered = await recoverFfWorkflow("inventory", {preview_id: preview.preview_id, request_id: preview.request_id});
+        if (!["applied", "replay_complete"].includes(String(recovered.state || ""))) ffInventoryConfirm.disabled = false;
       }
     }
 
@@ -8967,43 +9280,38 @@
       if (!ffOverheadPreview) return;
       ffOverheadPreview.disabled = true;
       if (ffOverheadConfirm) ffOverheadConfirm.disabled = true;
-      state.warehouses.overheadPreview = null;
-      const request = {business_date: String(ffOverheadDate && ffOverheadDate.value || ""), amount_rub: String(ffOverheadAmount && ffOverheadAmount.value || ""), reason: String(ffOverheadReason && ffOverheadReason.value || "")};
+      state.warehouses.ffWorkflowPollAttempts.overhead = 0;
+      const requestId = ffRequestId("ffo");
+      const request = {request_id: requestId, business_date: String(ffOverheadDate && ffOverheadDate.value || ""), amount_rub: String(ffOverheadAmount && ffOverheadAmount.value || ""), reason: String(ffOverheadReason && ffOverheadReason.value || "")};
+      rememberFfWorkflow("overhead", {request_id: requestId});
+      renderFfWorkflow("overhead", {state: "submitting", request_id: requestId, details: request, confirm_allowed: false, steps: []});
       try {
         const response = await fetch(ffDocumentBasePath() + "/overhead/preview", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify(request)});
         const payload = await response.json().catch(function() { return {}; });
-        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
-        state.warehouses.overheadPreview = {request: request, payload: payload};
-        if (ffOverheadConfirm) ffOverheadConfirm.disabled = false;
-        const manifest = payload.manifest || {};
-        setFfResult(ffOverheadResult, "Проверка пройдена. " + String((manifest.allocations || []).length) + " SKU, denominator " + String(manifest.denominator_quantity || "0") + " ед.; распределено " + String(manifest.amount_rub || "0") + " ₽. Для проведения нажмите отдельное подтверждение.", "success");
-      } catch (error) { setFfResult(ffOverheadResult, String(error && error.message ? error.message : error), "error"); }
+        if (payload && payload.contract_name === "ff_document_workflow_v1") renderFfWorkflow("overhead", payload);
+        else renderFfLocalError("overhead", "Данные не приняты сервером. Проверьте поля и безопасно повторите проверку.");
+      } catch (_error) {
+        const recovered = await recoverFfWorkflow("overhead", {request_id: requestId});
+        if (String(recovered.state || "") === "not_found") renderFfLocalError("overhead", "Данные не найдены на сервере после обрыва связи. Безопасно повторите проверку.");
+      }
       finally { ffOverheadPreview.disabled = false; }
     }
 
     async function confirmFfOverhead() {
       const preview = state.warehouses.overheadPreview;
-      if (!preview || !ffOverheadConfirm) return;
+      if (!preview || !preview.confirm_allowed || !ffOverheadConfirm) return;
       ffOverheadConfirm.disabled = true;
       try {
-        const body = Object.assign({}, preview.request, {confirm: true, fingerprint: preview.payload.fingerprint});
+        const body = {confirm: true, preview_id: preview.preview_id, fingerprint: preview.fingerprint};
         const response = await fetch(ffDocumentBasePath() + "/overhead/confirm", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify(body)});
         const payload = await response.json().catch(function() { return {}; });
-        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
-        state.warehouses.overheadPreview = null;
+        if (!response.ok) throw new Error("confirm_failed");
+        renderFfWorkflow("overhead", payload.workflow || payload);
         clearWarehouseDocumentPageCache("ff");
-        const replay = payload.replay || {};
-        const replayFailed = String(replay.status || "") === "failed";
-        setFfResult(
-          ffOverheadResult,
-          "Накладные расходы проведены без изменения количества. Документ: " + String(payload.document_id || "—") + "." +
-            (replayFailed ? " Пересчёт оставлен в штатной очереди: " + String(replay.error || "ошибка пересчёта") + "." : " Пересчёт: " + String(replay.status || "queued") + "."),
-          replayFailed ? "error" : "success"
-        );
-        loadWarehouse("ff", {force: true});
-      } catch (error) {
-        setFfResult(ffOverheadResult, String(error && error.message ? error.message : error), "error");
-        ffOverheadConfirm.disabled = false;
+        loadWarehouse("ff", {background: true});
+      } catch (_error) {
+        const recovered = await recoverFfWorkflow("overhead", {preview_id: preview.preview_id, request_id: preview.request_id});
+        if (!["applied", "replay_complete"].includes(String(recovered.state || ""))) ffOverheadConfirm.disabled = false;
       }
     }
 
@@ -9445,6 +9753,7 @@
         const today = warehouseBusinessDateToday();
         if (ffInventoryDate && !ffInventoryDate.value) ffInventoryDate.value = today;
         if (ffOverheadDate && !ffOverheadDate.value) ffOverheadDate.value = today;
+        recoverFfWorkflows();
       }
       if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Склады и себестоимость");
       if (warehouseMetaNode) {

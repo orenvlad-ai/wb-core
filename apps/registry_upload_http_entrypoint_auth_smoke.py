@@ -24,8 +24,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
     DEFAULT_FF_INVENTORY_CONFIRM_PATH,
     DEFAULT_FF_INVENTORY_PREVIEW_PATH,
+    DEFAULT_FF_INVENTORY_STATUS_PATH,
     DEFAULT_FF_INVENTORY_TEMPLATE_PATH,
     DEFAULT_FF_OVERHEAD_PREVIEW_PATH,
+    DEFAULT_FF_OVERHEAD_STATUS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
@@ -84,6 +86,13 @@ def main() -> None:
         != WEB_AUTH_SECTION_SUPPLY
     ):
         raise AssertionError("FF business-document mutations must use the supply boundary")
+    if (
+        _required_section_for_path(DEFAULT_FF_INVENTORY_STATUS_PATH)
+        != WEB_AUTH_SECTION_SUPPLY
+        or _required_section_for_path(DEFAULT_FF_OVERHEAD_STATUS_PATH)
+        != WEB_AUTH_SECTION_SUPPLY
+    ):
+        raise AssertionError("FF workflow readback must use the supply boundary")
     if (
         _required_section_for_path(
             DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
@@ -174,6 +183,13 @@ def main() -> None:
                 )
                 if overhead_code != 401 or overhead_payload.get("error") != "authentication_required":
                     raise AssertionError("unauthenticated FF overhead preview must be denied")
+                for status_path in (
+                    DEFAULT_FF_INVENTORY_STATUS_PATH,
+                    DEFAULT_FF_OVERHEAD_STATUS_PATH,
+                ):
+                    workflow_code, workflow_payload = _get_json(f"{base_url}{status_path}")
+                    if workflow_code != 401 or workflow_payload.get("error") != "authentication_required":
+                        raise AssertionError("unauthenticated FF workflow readback must be denied")
                 sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
                 if sku_code != 401 or sku_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")
@@ -301,6 +317,19 @@ def main() -> None:
                         raise AssertionError(
                             "authenticated operator must read the supply calculation registry"
                         )
+                for status_path in (
+                    DEFAULT_FF_INVENTORY_STATUS_PATH,
+                    DEFAULT_FF_OVERHEAD_STATUS_PATH,
+                ):
+                    status_request = urllib_request.Request(
+                        f"{base_url}{status_path}",
+                        headers={"Accept": "application/json"},
+                        method="GET",
+                    )
+                    with opener.open(status_request, timeout=5) as response:
+                        workflow = json.loads(response.read().decode("utf-8"))
+                        if response.status != 200 or workflow.get("contract_name") != "ff_document_workflow_v1":
+                            raise AssertionError("authenticated operator must read FF workflow status")
                 settings_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_SETTINGS_UI_PATH}",
                     headers={"Accept": "text/html"},

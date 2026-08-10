@@ -646,7 +646,20 @@ class FfInventoryReconciliation:
                     "The prior reconciliation exists but its exact FF target no longer holds",
                     details=plan.get("readback") or {},
                 )
-            return {"status": "already_applied", "idempotent": True, "plan": plan}
+            replay = _ensure_existing_inventory_replay(
+                self.runtime,
+                reconciliation_id=str(plan.get("reconciliation_id") or ""),
+                requested_at=str(self.timestamp_factory()),
+            )
+            return {
+                "status": "already_applied",
+                "idempotent": True,
+                "reconciliation_id": str(plan.get("reconciliation_id") or ""),
+                "fingerprint": str(plan.get("fingerprint") or ""),
+                "readback": dict(plan.get("readback") or {}),
+                "replay": replay,
+                "plan": plan,
+            }
         if confirmation_fingerprint != str(plan.get("fingerprint") or ""):
             raise FfInventoryReconciliationError(
                 "stale_or_invalid_fingerprint",
@@ -881,6 +894,15 @@ class FfInventoryReconciliation:
                     """,
                     (after_digest, _json(readback), reconciliation_id),
                 )
+                replay = _enqueue_inventory_replay(
+                    conn,
+                    reconciliation_id=reconciliation_id,
+                    plan_fingerprint=confirmation_fingerprint,
+                    business_date=business_date,
+                    nm_ids=target_nm_ids,
+                    readback=readback,
+                    requested_at=_format_timestamp(now),
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -900,6 +922,7 @@ class FfInventoryReconciliation:
                 "return_delta_rub": manifest["return_capital_delta_rub"],
                 "inventory_delta_rub": manifest["inventory_capital_delta_rub"],
             },
+            "replay": replay,
         }
 
     def readback(
@@ -1224,6 +1247,126 @@ def ensure_inventory_reconciliation_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _enqueue_inventory_replay(
+    conn: sqlite3.Connection,
+    *,
+    reconciliation_id: str,
+    plan_fingerprint: str,
+    business_date: str,
+    nm_ids: Iterable[int],
+    readback: Mapping[str, Any],
+    requested_at: str,
+) -> dict[str, Any]:
+    """Persist exact functional replay in the same transaction as the ledger.
+
+    This removes the crash window between durable reconciliation commit and a
+    second enqueue transaction.  The existing canonical warehouse queue and
+    hourly worker remain the only replay executor.
+    """
+
+    stable_source_id = "ff_inventory:" + reconciliation_id
+    source_revision = "sha256:" + _digest(
+        {
+            "fingerprint": plan_fingerprint,
+            "status": "applied",
+            "reversal": False,
+            "audit": _json(dict(readback)),
+        }
+    )
+    queue_id = "whrq_" + _digest(
+        {
+            "stable_source_id": stable_source_id,
+            "source_revision": source_revision,
+        }
+    )[:24]
+    affected_nm_ids = sorted({int(item) for item in nm_ids if int(item) > 0})
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_warehouse_targeted_recalc_queue(
+            queue_id,stable_source_id,source_revision,effective_date,
+            affected_nm_ids_json,status,requested_at,started_at,finished_at,error
+        ) VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL)
+        ON CONFLICT(stable_source_id,source_revision) DO NOTHING
+        """,
+        (
+            queue_id,
+            stable_source_id,
+            source_revision,
+            business_date,
+            _json(affected_nm_ids),
+            requested_at,
+        ),
+    )
+    row = conn.execute(
+        "SELECT queue_id,status,requested_at FROM "
+        "sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+        "WHERE stable_source_id=? AND source_revision=?",
+        (stable_source_id, source_revision),
+    ).fetchone()
+    return {
+        "status": str(row["status"] if row is not None else "queued"),
+        "queue_id": str(row["queue_id"] if row is not None else queue_id),
+        "requested_at": str(row["requested_at"] if row is not None else requested_at),
+    }
+
+
+def _ensure_existing_inventory_replay(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    reconciliation_id: str,
+    requested_at: str,
+) -> dict[str, Any]:
+    """Repair only the legacy commit-to-enqueue gap on an exact T0 retry."""
+
+    with _connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        row = conn.execute(
+            "SELECT business_date,plan_fingerprint,manifest_json,reconciliation_json "
+            "FROM sheet_vitrina_v1_ff_inventory_reconciliations "
+            "WHERE reconciliation_id=? AND status='applied'",
+            (reconciliation_id,),
+        ).fetchone()
+        if row is None:
+            raise FfInventoryReconciliationError(
+                "applied_reconciliation_missing",
+                "Applied inventory reconciliation is missing during replay readback",
+            )
+        manifest = dict(_loads(row["manifest_json"], {}))
+        readback = dict(_loads(row["reconciliation_json"], {}))
+        stable_source_id = "ff_inventory:" + reconciliation_id
+        source_revision = "sha256:" + _digest(
+            {
+                "fingerprint": str(row["plan_fingerprint"] or ""),
+                "status": "applied",
+                "reversal": False,
+                "audit": _json(readback),
+            }
+        )
+        existing = conn.execute(
+            "SELECT queue_id,status,requested_at FROM "
+            "sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+            "WHERE stable_source_id=? AND source_revision=?",
+            (stable_source_id, source_revision),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "status": str(existing["status"] or "queued"),
+                "queue_id": str(existing["queue_id"] or ""),
+                "requested_at": str(existing["requested_at"] or ""),
+            }
+        replay = _enqueue_inventory_replay(
+            conn,
+            reconciliation_id=reconciliation_id,
+            plan_fingerprint=str(row["plan_fingerprint"] or ""),
+            business_date=str(row["business_date"] or ""),
+            nm_ids=[int(item.get("nm_id") or 0) for item in manifest.get("per_sku") or []],
+            readback=readback,
+            requested_at=requested_at,
+        )
+        conn.commit()
+        return replay
 
 
 def _parse_target_workbook(

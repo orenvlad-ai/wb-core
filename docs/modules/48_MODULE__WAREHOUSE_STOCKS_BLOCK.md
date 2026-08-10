@@ -15,6 +15,7 @@ related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/ff_overhead_allocation.py"
+  - "packages/application/ff_document_workflow.py"
   - "packages/application/warehouse_archival_estimate.py"
   - "packages/application/calculation_parameters.py"
   - "packages/application/stocks_block.py"
@@ -30,6 +31,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/sync"
   - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/apply"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/status"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/overhead/status"
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
@@ -147,7 +150,7 @@ Dry-run фиксирует одну canonical business date в fingerprint на 
 
 Source change/archive/exclusion ставит одну coalesced queue revision по stable source id/source revision/earliest business date и affected SKU, затем coherent calculation публикует новую version atomically. Physical source rows не удаляются и quantity не двигается повторно. Failed calculation оставляет last good active version.
 
-Inventory confirm/rollback and overhead confirm/reversal use the same exact targeted queue contract. The HTTP application attempts the bounded local functional + economics replay immediately when a functional cutover is active; otherwise it truthfully returns a durable queued state for the normal repo-owned replay contour. Exact queue identity, affected `nmId`, earliest business date and source revision are pinned, and an overlapping unselected queue fails closed.
+Inventory confirm/rollback and overhead confirm/reversal use the same exact targeted queue contract. Primary inventory/overhead confirm atomically commits its append-only document and canonical queue row, returns the exact durable readback immediately and never holds interactive HTTP for functional/economics replay. Inventory inserts that queue row inside the same ledger transaction, closing the former commit-to-enqueue crash window. The normal hourly/manual warehouse worker owns the continuation and persists the separate economics completion/error fields on the same queue row. Exact queue identity, affected `nmId`, earliest business date and source revision are pinned, and an overlapping unselected queue fails closed. Rollback/reversal retain their existing guarded compensating contracts.
 
 Routine header-only factual-date correction is a distinct target-scoped publication. Query-only preview reads the exact shipment closure and compact active functional rows, never the Finance raw table or a disposable database copy. Apply and hourly/manual publication share `.warehouse-functional-sync.lock`; a bounded capacity check and stale target/non-target digests run before the single transaction. The successor version carries a coherent active WB snapshot/document projection, exact affected balance rows, queue/audit diagnostics and a target before-image rollback manifest. Unrelated global source anomalies and anomaly budgets remain diagnostics and cannot gate this local correction.
 
@@ -299,6 +302,26 @@ The supplier exact-cost cell follows its canonical proof independently of the op
 ## Contention and targeted replay boundary
 
 Warehouse writers use the shared bounded SQLite recovery contract, while the functional sync alone preserves its documented 120-second process-local wait. It does not widen web or feature-worker budgets. A failed commit leaves the immutable last-good functional version active.
+
+Functional economics publication never performs full ready-snapshot/source
+digest calculation while holding a SQLite write transaction. Apply first
+rebuilds and compares the complete exact plan without a transaction while an
+idle connection pins `PRAGMA data_version`. It checks the version again before
+and immediately after a bounded `BEGIN IMMEDIATE`; only optimistic target-row
+updates, exact readback and the undo manifest live inside that writer phase.
+Any concurrent commit causes a fast fail-closed replan/retry instead of a
+multi-minute rollback-journal reader blocking interactive FF
+preview/status/confirm. This preserves atomic publication and last-good safety
+in both WAL and rollback-journal modes. Contention telemetry measures writer
+duration from an explicit `BEGIN IMMEDIATE/EXCLUSIVE` lock, or from the first
+actual write for a deferred transaction, and aborts an unrecoverable
+`SQLITE_BUSY_SNAPSHOT` immediately rather than retrying a stale snapshot.
+
+FF inventory/overhead preview jobs persist accepted/processing/terminal state,
+request aliases and per-stage latency events in the operational store. The
+status surfaces remain bounded readbacks during concurrent background sync;
+worker restart returns orphaned processing previews to accepted and resumes
+the same deterministic identity without duplicating heavy planning.
 
 A confirmed supplier bank-fee group changes only its exact shipment source revision. The existing targeted queue derives the shipment's exact matched SKU set and actually dependent warehouse stages/projections from canonical provenance. It never invokes Finance raw/history loading or a global/full-history rebuild. Publication still requires the existing immutable functional version, source/calculation fingerprints, conservation and certification gates; unrelated shipment/SKU/version digests remain invariant.
 
