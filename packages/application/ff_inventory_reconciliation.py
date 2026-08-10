@@ -8,10 +8,11 @@ receipt/write-off documents and freezes every cost basis before mutation.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 
@@ -19,8 +20,9 @@ from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
 from packages.application.simple_xlsx import (
+    XlsxCell,
     build_single_sheet_workbook_bytes,
-    read_first_sheet_rows,
+    read_first_sheet_cells,
 )
 from packages.application.warehouse_business_projection import (
     ensure_warehouse_projection_source_outbox,
@@ -33,7 +35,19 @@ from packages.application.warehouse_functional import (
 CONTRACT_NAME = "ff_inventory_reconciliation_v1"
 PLAN_VERSION = "v1"
 ZERO = Decimal("0")
-REQUIRED_HEADERS = ("nmId", "Комментарий SKU", "Остаток ФФ", "Дата остатка")
+REQUIRED_HEADERS = (
+    "nmId",
+    "Штрихкод",
+    "Комментарий SKU",
+    "Остаток ФФ",
+    "Дата остатка",
+)
+LEGACY_NM_ID_HEADERS = (
+    "nmId",
+    "Комментарий SKU",
+    "Остаток ФФ",
+    "Дата остатка",
+)
 
 OPERATION_RETURN = "auto_return"
 OPERATION_INVENTORY_RECEIPT = "inventory_receipt"
@@ -78,6 +92,7 @@ class FfInventoryReconciliation:
             ) from exc
         with _connect(self.runtime.db_path, query_only=True) as conn:
             catalog, blockers = _complete_active_nomenclature(conn)
+            blockers.extend(_template_barcode_blockers(catalog))
             if blockers:
                 raise FfInventoryReconciliationError(
                     "active_nomenclature_ambiguous",
@@ -100,12 +115,18 @@ class FfInventoryReconciliation:
             rows.append(
                 [
                     nm_id,
+                    str(item.get("barcode") or ""),
                     str(item.get("our_sku") or item.get("nomenclature_name") or nm_id),
                     int(balance),
                     normalized_date,
                 ]
             )
-        workbook = build_single_sheet_workbook_bytes("Инвентаризация FF", rows)
+        workbook = build_single_sheet_workbook_bytes(
+            "Инвентаризация FF",
+            rows,
+            column_widths=[14, 34, 36, 16, 18],
+            text_columns={2},
+        )
         return (
             workbook,
             f"Инвентаризация_FF_{normalized_date}.xlsx",
@@ -209,11 +230,35 @@ class FfInventoryReconciliation:
         return_supply_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
         source_sha256 = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
-        target_rows = _parse_target_workbook(source_bytes, business_date=business_date)
-        target_nm_ids = sorted(target_rows)
+        parsed_rows = _parse_target_workbook(source_bytes, business_date=business_date)
         source_key = f"{source_sha256}:{business_date}"
         with _connect(self.runtime.db_path, query_only=True) as conn:
             _require_tables(conn)
+            active_catalog, _ = _complete_active_nomenclature(conn)
+            target_rows, identity_blockers = _resolve_target_rows(
+                parsed_rows,
+                active_catalog=active_catalog,
+            )
+            target_nm_ids = sorted(target_rows)
+            nomenclature, nomenclature_blockers = _exact_nomenclature(
+                conn, target_nm_ids
+            )
+            blockers: list[dict[str, Any]] = [
+                *identity_blockers,
+                *nomenclature_blockers,
+            ]
+            missing_nm_ids = sorted(set(active_catalog) - set(target_nm_ids))
+            if missing_nm_ids:
+                blockers.append(
+                    {
+                        "code": "active_nomenclature_rows_missing",
+                        "nm_ids": missing_nm_ids,
+                        "message": (
+                            "Manager workbook must contain every active FF nomenclature identity, "
+                            "including explicit zero targets"
+                        ),
+                    }
+                )
             existing = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_ff_inventory_reconciliations
@@ -223,7 +268,11 @@ class FfInventoryReconciliation:
             ).fetchone()
             before = _ff_balances(conn, target_nm_ids)
             whole_before = _ff_total(conn)
-            if existing is not None and str(existing["status"] or "") == "applied":
+            if (
+                not blockers
+                and existing is not None
+                and str(existing["status"] or "") == "applied"
+            ):
                 target_matches = all(
                     before.get(nm_id, ZERO) == target_rows[nm_id]["target_quantity"]
                     for nm_id in target_nm_ids
@@ -251,7 +300,7 @@ class FfInventoryReconciliation:
                         )),
                     },
                 }
-            if existing is not None:
+            if not blockers and existing is not None:
                 return {
                     "contract_name": CONTRACT_NAME,
                     "plan_version": PLAN_VERSION,
@@ -274,24 +323,6 @@ class FfInventoryReconciliation:
                     ],
                 }
 
-            nomenclature, nomenclature_blockers = _exact_nomenclature(
-                conn, target_nm_ids
-            )
-            blockers: list[dict[str, Any]] = list(nomenclature_blockers)
-            active_catalog, active_catalog_blockers = _complete_active_nomenclature(conn)
-            blockers.extend(active_catalog_blockers)
-            missing_nm_ids = sorted(set(active_catalog) - set(target_nm_ids))
-            if missing_nm_ids:
-                blockers.append(
-                    {
-                        "code": "active_nomenclature_rows_missing",
-                        "nm_ids": missing_nm_ids,
-                        "message": (
-                            "Manager workbook must contain every active FF nomenclature identity, "
-                            "including explicit zero targets"
-                        ),
-                    }
-                )
             returns: list[dict[str, Any]] = []
             return_by_nm: dict[int, Decimal] = {}
             for supply_id in sorted({str(item).strip() for item in return_supply_ids if str(item).strip()}):
@@ -408,6 +439,10 @@ class FfInventoryReconciliation:
                 per_sku.append(
                     {
                         "nm_id": nm_id,
+                        "source_nm_id": item.get("source_nm_id"),
+                        "source_barcode": item.get("source_barcode") or "",
+                        "identity_source": item.get("identity_source") or "",
+                        "source_row": item.get("row_no"),
                         "sku_comment": item["sku_comment"],
                         "before_quantity": _text(before.get(nm_id, ZERO)),
                         "return_quantity": _text(return_quantity_for_sku),
@@ -514,6 +549,10 @@ class FfInventoryReconciliation:
                 "sha256": source_sha256,
                 "business_date": business_date,
                 "row_count": len(target_rows),
+                "input_row_count": len(parsed_rows),
+                "header_profile": (
+                    parsed_rows[0].get("header_profile") if parsed_rows else ""
+                ),
             },
             "before_total": _text(whole_before),
             "target_total": _text(target_total),
@@ -533,7 +572,20 @@ class FfInventoryReconciliation:
             "expected_operation_ids": operation_ids,
             "invariants": {
                 "target_sku_count": len(target_rows),
-                "unmatched_or_ambiguous_count": len(nomenclature_blockers),
+                "unmatched_or_ambiguous_count": sum(
+                    1
+                    for item in blockers
+                    if str(item.get("code") or "")
+                    in {
+                        "unknown_nm_id",
+                        "unknown_barcode",
+                        "ambiguous_barcode",
+                        "nm_id_barcode_conflict",
+                        "empty_inventory_identity",
+                        "duplicate_resolved_sku",
+                        "nomenclature_unmatched_or_ambiguous",
+                    }
+                ),
                 "negative_target_count": sum(
                     1 for item in target_rows.values() if item["target_quantity"] < ZERO
                 ),
@@ -1178,43 +1230,78 @@ def _parse_target_workbook(
     source_bytes: bytes,
     *,
     business_date: str,
-) -> dict[int, dict[str, Any]]:
-    rows = read_first_sheet_rows(source_bytes)
-    if not rows or tuple(str(item or "").strip() for item in rows[0][:4]) != REQUIRED_HEADERS:
+) -> list[dict[str, Any]]:
+    rows = read_first_sheet_cells(source_bytes)
+    actual_headers = tuple(
+        str(cell.value or "").strip() for cell in (rows[0] if rows else [])
+    )
+    if actual_headers == REQUIRED_HEADERS:
+        header_profile = "barcode_v2"
+        barcode_index: int | None = 1
+        comment_index = 2
+        quantity_index = 3
+        date_index = 4
+    elif actual_headers == LEGACY_NM_ID_HEADERS:
+        header_profile = "legacy_nm_id_v1"
+        barcode_index = None
+        comment_index = 1
+        quantity_index = 2
+        date_index = 3
+    else:
         raise FfInventoryReconciliationError(
             "invalid_workbook_headers",
             "Manager workbook headers do not match the exact inventory contract",
-            details={"expected": REQUIRED_HEADERS, "actual": rows[0][:4] if rows else []},
+            details={
+                "expected": [REQUIRED_HEADERS, LEGACY_NM_ID_HEADERS],
+                "actual": actual_headers,
+            },
         )
-    result: dict[int, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for row_no, row in enumerate(rows[1:], start=2):
-        if not any(value not in (None, "") for value in row):
+        if not any(cell.value not in (None, "") for cell in row):
             continue
         try:
-            nm_id = int(row[0])
-            quantity = _decimal(row[2])
-        except (ValueError, TypeError, InvalidOperation):
-            errors.append({"row": row_no, "code": "invalid_nm_or_quantity"})
+            nm_id = _parse_optional_nm_id_cell(_cell_at(row, 0))
+        except ValueError as exc:
+            errors.append({"row": row_no, "code": str(exc), "field": "nmId"})
             continue
-        row_date = str(row[3] or "")[:10]
-        if nm_id <= 0 or quantity < ZERO or quantity != quantity.to_integral_value():
-            errors.append({"row": row_no, "code": "invalid_target", "nm_id": nm_id})
+        try:
+            barcode = (
+                _parse_barcode_cell(_cell_at(row, barcode_index))
+                if barcode_index is not None
+                else ""
+            )
+        except ValueError as exc:
+            errors.append({"row": row_no, "code": str(exc), "field": "Штрихкод"})
+            continue
+        try:
+            quantity = _parse_target_quantity_cell(_cell_at(row, quantity_index))
+        except ValueError as exc:
+            errors.append({"row": row_no, "code": str(exc), "field": "Остаток ФФ"})
+            continue
+        try:
+            row_date = _parse_business_date_cell(_cell_at(row, date_index))
+        except ValueError as exc:
+            errors.append({"row": row_no, "code": str(exc), "field": "Дата остатка"})
             continue
         if row_date != business_date:
             errors.append(
                 {"row": row_no, "code": "business_date_mismatch", "actual": row_date}
             )
             continue
-        if nm_id in result:
-            errors.append({"row": row_no, "code": "duplicate_nm_id", "nm_id": nm_id})
-            continue
-        result[nm_id] = {
-            "nm_id": nm_id,
-            "sku_comment": str(row[1] or "").strip(),
-            "target_quantity": quantity,
-            "row_no": row_no,
-        }
+        result.append(
+            {
+                "source_nm_id": nm_id,
+                "source_barcode": barcode,
+                "sku_comment": str(
+                    _cell_at(row, comment_index).value or ""
+                ).strip(),
+                "target_quantity": quantity,
+                "row_no": row_no,
+                "header_profile": header_profile,
+            }
+        )
     if errors or not result:
         raise FfInventoryReconciliationError(
             "invalid_workbook_rows",
@@ -1222,6 +1309,184 @@ def _parse_target_workbook(
             details=errors,
         )
     return result
+
+
+def _cell_at(row: list[XlsxCell], index: int | None) -> XlsxCell:
+    if index is None or index < 0 or index >= len(row):
+        return XlsxCell(
+            value=None,
+            kind="blank",
+            raw_value="",
+            cell_type="",
+            style_index=0,
+        )
+    return row[index]
+
+
+def _parse_optional_nm_id_cell(cell: XlsxCell) -> int | None:
+    if cell.value in (None, ""):
+        return None
+    if cell.kind not in {"number", "text"}:
+        raise ValueError("unsafe_nm_id_cell")
+    token = cell.raw_value if cell.kind == "number" else str(cell.value or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]*", token):
+        raise ValueError(
+            "scientific_notation_nm_id"
+            if re.search(r"[eE]", token)
+            else "invalid_nm_id"
+        )
+    value = int(token)
+    if value > 9_223_372_036_854_775_807:
+        raise ValueError("unsafe_nm_id_cell")
+    return value
+
+
+def _parse_barcode_cell(cell: XlsxCell) -> str:
+    if cell.value in (None, ""):
+        return ""
+    if cell.kind != "text":
+        raise ValueError("barcode_must_be_text")
+    try:
+        return _normalize_barcode_text(str(cell.value))
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _parse_target_quantity_cell(cell: XlsxCell) -> Decimal:
+    if cell.value in (None, "") or cell.kind not in {"number", "text"}:
+        raise ValueError("invalid_target_quantity")
+    token = cell.raw_value if cell.kind == "number" else str(cell.value or "").strip()
+    if re.search(r"[eE]", token):
+        raise ValueError("scientific_notation_target_quantity")
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", token):
+        raise ValueError("invalid_target_quantity")
+    return Decimal(token)
+
+
+def _parse_business_date_cell(cell: XlsxCell) -> str:
+    if cell.value in (None, "") or cell.kind not in {"date", "text"}:
+        raise ValueError("invalid_business_date_cell")
+    value = str(cell.value or "").strip()
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise ValueError("invalid_business_date_cell")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("invalid_business_date_cell") from exc
+    return value
+
+
+def _resolve_target_rows(
+    rows: list[Mapping[str, Any]],
+    *,
+    active_catalog: Mapping[int, Mapping[str, Any]],
+) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    barcode_candidates: dict[str, list[dict[str, Any]]] = {}
+    for item in active_catalog.values():
+        for barcode in item.get("barcodes") or []:
+            candidates = barcode_candidates.setdefault(str(barcode), [])
+            if not any(
+                int(candidate["nm_id"]) == int(item["nm_id"])
+                for candidate in candidates
+            ):
+                candidates.append(dict(item))
+
+    result: dict[int, dict[str, Any]] = {}
+    blockers: list[dict[str, Any]] = []
+    for row in rows:
+        row_no = int(row.get("row_no") or 0)
+        source_nm_id = row.get("source_nm_id")
+        source_barcode = str(row.get("source_barcode") or "")
+        nm_candidate = (
+            active_catalog.get(int(source_nm_id))
+            if source_nm_id is not None
+            else None
+        )
+        by_barcode = barcode_candidates.get(source_barcode, []) if source_barcode else []
+
+        row_blocked = False
+        if source_nm_id is None and not source_barcode:
+            blockers.append({"row": row_no, "code": "empty_inventory_identity"})
+            row_blocked = True
+        if source_nm_id is not None and nm_candidate is None:
+            blockers.append(
+                {"row": row_no, "code": "unknown_nm_id", "nm_id": source_nm_id}
+            )
+            row_blocked = True
+        if source_barcode and not by_barcode:
+            blockers.append(
+                {"row": row_no, "code": "unknown_barcode", "barcode": source_barcode}
+            )
+            row_blocked = True
+        if source_barcode and len(by_barcode) > 1:
+            blockers.append(
+                {
+                    "row": row_no,
+                    "code": "ambiguous_barcode",
+                    "barcode": source_barcode,
+                    "nm_ids": sorted(int(item["nm_id"]) for item in by_barcode),
+                }
+            )
+            row_blocked = True
+        if row_blocked:
+            continue
+
+        barcode_candidate = by_barcode[0] if by_barcode else None
+        if (
+            nm_candidate is not None
+            and barcode_candidate is not None
+            and int(nm_candidate["nm_id"]) != int(barcode_candidate["nm_id"])
+        ):
+            blockers.append(
+                {
+                    "row": row_no,
+                    "code": "nm_id_barcode_conflict",
+                    "nm_id": int(nm_candidate["nm_id"]),
+                    "barcode": source_barcode,
+                    "barcode_nm_id": int(barcode_candidate["nm_id"]),
+                }
+            )
+            continue
+
+        resolved = nm_candidate or barcode_candidate
+        if resolved is None:
+            continue
+        resolved_nm_id = int(resolved["nm_id"])
+        if resolved_nm_id in result:
+            blockers.append(
+                {
+                    "row": row_no,
+                    "code": "duplicate_resolved_sku",
+                    "nm_id": resolved_nm_id,
+                    "first_row": int(result[resolved_nm_id]["row_no"]),
+                }
+            )
+            continue
+        identity_source = (
+            "nm_id+barcode"
+            if source_nm_id is not None and source_barcode
+            else "nm_id"
+            if source_nm_id is not None
+            else "barcode"
+        )
+        result[resolved_nm_id] = {
+            "nm_id": resolved_nm_id,
+            "source_nm_id": source_nm_id,
+            "source_barcode": source_barcode,
+            "matched_barcode_role": (
+                "primary"
+                if source_barcode and source_barcode == str(resolved.get("barcode") or "")
+                else "additional"
+                if source_barcode
+                else ""
+            ),
+            "identity_source": identity_source,
+            "sku_comment": str(row.get("sku_comment") or ""),
+            "target_quantity": _decimal(row.get("target_quantity")),
+            "row_no": row_no,
+            "header_profile": str(row.get("header_profile") or ""),
+        }
+    return result, blockers
 
 
 def _plan_supply_return(
@@ -1815,35 +2080,30 @@ def _exact_nomenclature(
     conn: sqlite3.Connection,
     nm_ids: Iterable[int],
 ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
-    normalized = sorted({int(item) for item in nm_ids})
-    placeholders = ",".join("?" for _ in normalized)
-    rows = conn.execute(
-        f"""
-        SELECT item_id,nm_id,our_sku,nomenclature_name,barcode,
-               product_type AS group_name,updated_at
-        FROM sheet_vitrina_v1_nomenclature_items
-        WHERE nm_id IN ({placeholders}) AND is_active=1 AND is_hidden=0
-        ORDER BY nm_id,item_id
-        """,
-        tuple(normalized),
-    ).fetchall()
-    grouped: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(int(row["nm_id"]), []).append(dict(row))
+    requested = {int(item) for item in nm_ids}
+    catalog, blockers = _complete_active_nomenclature(conn)
+    current = set(catalog)
+    if requested != current:
+        blockers.append(
+            {
+                "code": "active_nomenclature_target_changed",
+                "missing_nm_ids": sorted(current - requested),
+                "unexpected_nm_ids": sorted(requested - current),
+            }
+        )
     result: dict[int, dict[str, Any]] = {}
-    blockers: list[dict[str, Any]] = []
-    for nm_id in normalized:
-        candidates = grouped.get(nm_id, [])
-        if len(candidates) != 1:
+    for nm_id in sorted(requested):
+        item = catalog.get(nm_id)
+        if item is None:
             blockers.append(
                 {
                     "code": "nomenclature_unmatched_or_ambiguous",
                     "nm_id": nm_id,
-                    "active_candidate_count": len(candidates),
+                    "active_candidate_count": 0,
                 }
             )
         else:
-            result[nm_id] = candidates[0]
+            result[nm_id] = dict(item)
     return result, blockers
 
 
@@ -1852,7 +2112,7 @@ def _complete_active_nomenclature(
 ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
     rows = conn.execute(
         """
-        SELECT item_id,nm_id,our_sku,nomenclature_name,barcode,
+        SELECT item_id,nm_id,our_sku,nomenclature_name,barcode,barcodes_json,
                product_type AS group_name,updated_at
         FROM sheet_vitrina_v1_nomenclature_items
         WHERE is_active=1 AND is_hidden=0
@@ -1870,7 +2130,23 @@ def _complete_active_nomenclature(
                 }
             )
             continue
-        grouped.setdefault(int(row["nm_id"]), []).append(dict(row))
+        item = dict(row)
+        try:
+            item["barcode"], item["barcodes"] = _canonical_nomenclature_barcodes(
+                item
+            )
+        except ValueError as exc:
+            blockers.append(
+                {
+                    "code": "active_nomenclature_barcode_invalid",
+                    "item_id": str(row["item_id"] or ""),
+                    "nm_id": int(row["nm_id"]),
+                    "reason": str(exc),
+                }
+            )
+            item["barcode"] = ""
+            item["barcodes"] = []
+        grouped.setdefault(int(row["nm_id"]), []).append(item)
     result: dict[int, dict[str, Any]] = {}
     for nm_id, items in sorted(grouped.items()):
         if len(items) != 1:
@@ -1884,6 +2160,69 @@ def _complete_active_nomenclature(
         else:
             result[nm_id] = items[0]
     return result, blockers
+
+
+def _canonical_nomenclature_barcodes(
+    item: Mapping[str, Any],
+) -> tuple[str, list[str]]:
+    primary_raw = item.get("barcode")
+    raw_json = str(item.get("barcodes_json") or "[]")
+    try:
+        decoded = json.loads(raw_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("barcodes_json_invalid") from exc
+    if not isinstance(decoded, list):
+        raise ValueError("barcodes_json_must_be_list")
+    raw_values = [primary_raw, *decoded]
+    normalized: list[str] = []
+    for raw in raw_values:
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, str):
+            raise ValueError("canonical_barcode_must_be_text")
+        barcode = _normalize_barcode_text(raw)
+        if barcode and barcode not in normalized:
+            normalized.append(barcode)
+    primary = _normalize_barcode_text(str(primary_raw)) if primary_raw not in (None, "") else ""
+    return primary, normalized
+
+
+def _normalize_barcode_text(value: str) -> str:
+    text = str(value).replace("\u00a0", "").replace("\u202f", "")
+    text = re.sub(r"\s+", "", text)
+    if text.startswith("'"):
+        text = text[1:]
+    if not text:
+        return ""
+    if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", text):
+        raise ValueError("scientific_notation_barcode")
+    if not text.isascii() or not text.isdigit():
+        raise ValueError("malformed_barcode")
+    return text
+
+
+def _template_barcode_blockers(
+    catalog: Mapping[int, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    by_barcode: dict[str, set[int]] = {}
+    for nm_id, item in catalog.items():
+        for barcode in item.get("barcodes") or []:
+            by_barcode.setdefault(str(barcode), set()).add(int(nm_id))
+    blockers: list[dict[str, Any]] = []
+    for nm_id, item in catalog.items():
+        primary = str(item.get("barcode") or "")
+        if not primary:
+            continue
+        owners = sorted(by_barcode.get(primary, set()))
+        if owners != [int(nm_id)]:
+            blockers.append(
+                {
+                    "code": "active_nomenclature_primary_barcode_ambiguous",
+                    "barcode": primary,
+                    "nm_ids": owners,
+                }
+            )
+    return blockers
 
 
 def _ff_balances_as_of(

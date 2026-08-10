@@ -6,7 +6,7 @@
 
 ## Инвентаризация
 
-UI download строит полный XLSX на business date по каждой active/non-hidden stable `nmId`. Upload требует ровно одну строку на весь этот catalog, включая явные нули. Duplicate, unknown, missing/ambiguous identity, negative target, future/missing/non-positive cost basis и stale fingerprint блокируют confirm.
+UI download строит полный XLSX на business date по каждой active/non-hidden stable `nmId` и записывает canonical primary `Штрихкод` как text, не теряя leading zero/long identifiers. Новый upload profile принимает identity по unique `nmId`, только по exact primary/additional barcode из `barcode + barcodes_json` или по согласованной паре; прежний exact четырёхколоночный `nmId` workbook остаётся допустимым. Upload требует ровно одну resolved SKU-строку на весь catalog, включая явные нули. Duplicate после resolution, empty/unknown/ambiguous/conflicting identity, numeric/formula/scientific/fractional barcode representation, negative target, future/missing/non-positive cost basis и stale fingerprint блокируют confirm.
 
 Stored preview и parent `Инвентаризация склада FF` сохраняют original bytes/SHA, actor/date, exact target/readback, manifest/fingerprint и child operation identities. Parent has zero movement. Positive/negative differences become `Оприходование излишков` / `Списание недостач` with frozen same-SKU cost hierarchy already owned by `ff_inventory_reconciliation`. Exact repeat is T0; rollback appends exact inverse-cost documents and preserves all source/audit rows.
 
@@ -36,5 +36,6 @@ All endpoints retain the supply-operator auth boundary. Page open, template down
 - `python3 apps/ff_overhead_allocation_smoke.py`;
 - `python3 apps/ff_warehouse_documents_smoke.py`;
 - `python3 apps/ff_stock_ledger_http_smoke.py`;
+- `python3 apps/registry_upload_http_entrypoint_auth_smoke.py`;
 - `python3 apps/warehouse_functional_smoke.py`;
 - `python3 apps/warehouse_stocks_browser_smoke.py`.
