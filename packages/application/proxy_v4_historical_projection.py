@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -29,9 +30,12 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
 )
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 
 PROXY_V4_PROJECTION_METADATA_KEY = "proxy_v4_historical_initialization"
+PROXY_V4_PRESERVATION_METADATA_KEY = "proxy_v4_history_preservation"
+PROXY_V4_RECONCILIATION_METADATA_KEY = "proxy_v4_historical_reconciliation"
 PROXY_V4_TARGET_KEYS = frozenset(
     {
         PROXY_V4_PROFIT_RUB_METRIC_KEY,
@@ -40,6 +44,260 @@ PROXY_V4_TARGET_KEYS = frozenset(
         PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     }
 )
+
+
+def preserve_proxy_v4_historical_cells(
+    plan: SheetVitrinaV1Envelope,
+    *,
+    previous_plan: SheetVitrinaV1Envelope,
+    business_date: str,
+) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
+    """Freeze already-published V4 history during an ordinary full refresh.
+
+    Only the current business date may be recalculated by the regular refresh.
+    A missing prior V4 row/cell is preserved as missing instead of being
+    retroactively invented; historical repairs remain an explicit guarded
+    reconciliation.
+    """
+
+    current_business_date = str(business_date or "")[:10]
+    if not current_business_date:
+        raise ValueError("Proxy V4 history preservation requires business_date")
+    data_sheet = _envelope_data_sheet(plan)
+    previous_data = _envelope_data_sheet(previous_plan)
+    if data_sheet is None or previous_data is None:
+        return plan, _empty_preservation_summary(current_business_date)
+
+    current_dates = {
+        day
+        for day in plan.date_columns
+        if str(day)[:10] < current_business_date
+    }
+    previous_dates = {str(day)[:10] for day in previous_plan.date_columns}
+    preserved_dates = sorted(current_dates & previous_dates)
+    if not preserved_dates:
+        return plan, _empty_preservation_summary(current_business_date)
+
+    current_indexes = _header_indexes_by_date(data_sheet.header)
+    previous_indexes = _header_indexes_by_date(previous_data.header)
+    previous_rows = {
+        _row_identifier(row): list(row)
+        for row in previous_data.rows
+        if _row_identifier(row)
+    }
+    merged_rows: list[list[Any]] = []
+    preserved_row_ids: set[str] = set()
+    preserved_cell_count = 0
+    changed_cell_count = 0
+    for raw_row in data_sheet.rows:
+        row = list(raw_row)
+        row_id = _row_identifier(row)
+        if _metric_key(row_id) not in PROXY_V4_TARGET_KEYS:
+            merged_rows.append(row)
+            continue
+        previous_row = previous_rows.get(row_id)
+        for day in preserved_dates:
+            target_indexes = current_indexes.get(day) or []
+            source_indexes = previous_indexes.get(day) or []
+            for offset, target_index in enumerate(target_indexes):
+                frozen_value: Any = ""
+                if previous_row is not None and source_indexes:
+                    source_index = source_indexes[min(offset, len(source_indexes) - 1)]
+                    if source_index < len(previous_row):
+                        frozen_value = previous_row[source_index]
+                while target_index >= len(row):
+                    row.append("")
+                if row[target_index] != frozen_value:
+                    row[target_index] = frozen_value
+                    changed_cell_count += 1
+                preserved_cell_count += 1
+                preserved_row_ids.add(row_id)
+        merged_rows.append(row)
+
+    merged_sheets = [
+        replace(
+            sheet,
+            rows=merged_rows,
+            row_count=len(merged_rows),
+            column_count=len(sheet.header),
+        )
+        if sheet.sheet_name == "DATA_VITRINA"
+        else sheet
+        for sheet in plan.sheets
+    ]
+    metadata = deepcopy(dict(getattr(plan, "metadata", {}) or {}))
+    previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
+    previous_marker = previous_metadata.get(PROXY_V4_PROJECTION_METADATA_KEY)
+    if isinstance(previous_marker, Mapping):
+        marker = deepcopy(dict(previous_marker))
+        eligibility = marker.get("eligibility_by_date")
+        if isinstance(eligibility, Mapping):
+            marker["eligibility_by_date"] = {
+                day: deepcopy(value)
+                for day, value in eligibility.items()
+                if str(day)[:10] in preserved_dates
+            }
+            marker_dates = sorted(marker["eligibility_by_date"])
+            marker["date_from"] = marker_dates[0] if marker_dates else ""
+            marker["date_to"] = marker_dates[-1] if marker_dates else ""
+        marker["preserved_before_business_date"] = current_business_date
+        metadata[PROXY_V4_PROJECTION_METADATA_KEY] = marker
+    summary = {
+        "contract_version": "proxy_v4_ordinary_refresh_history_preservation_v1",
+        "business_date": current_business_date,
+        "preserved_dates": preserved_dates,
+        "preserved_row_ids": sorted(preserved_row_ids),
+        "preserved_row_count": len(preserved_row_ids),
+        "preserved_cell_count": preserved_cell_count,
+        "changed_cell_count": changed_cell_count,
+    }
+    metadata[PROXY_V4_PRESERVATION_METADATA_KEY] = summary
+    return replace(plan, sheets=merged_sheets, metadata=metadata), summary
+
+
+def _empty_preservation_summary(business_date: str) -> dict[str, Any]:
+    return {
+        "contract_version": "proxy_v4_ordinary_refresh_history_preservation_v1",
+        "business_date": business_date,
+        "preserved_dates": [],
+        "preserved_row_ids": [],
+        "preserved_row_count": 0,
+        "preserved_cell_count": 0,
+        "changed_cell_count": 0,
+    }
+
+
+def _envelope_data_sheet(plan: SheetVitrinaV1Envelope):
+    return next((sheet for sheet in plan.sheets if sheet.sheet_name == "DATA_VITRINA"), None)
+
+
+def _header_indexes_by_date(header: list[Any]) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for index, value in enumerate(header):
+        normalized = str(value or "")[:10]
+        if len(normalized) == 10 and normalized[4:5] == "-" and normalized[7:8] == "-":
+            result.setdefault(normalized, []).append(index)
+    return result
+
+
+def _row_identifier(row: list[Any]) -> str:
+    return str(row[1] or "") if len(row) > 1 else ""
+
+
+def reconcile_proxy_v4_target_window(
+    current_plan_json: str,
+    *,
+    reference_plan_json: str,
+    date_from: str,
+    date_to: str,
+    reconciled_at: str,
+) -> dict[str, Any]:
+    """Restore only reviewed V4 cells from an initialization reference plan."""
+
+    current = json.loads(str(current_plan_json))
+    reference = json.loads(str(reference_plan_json))
+    plan = deepcopy(current)
+    sheet = _data_sheet(plan)
+    reference_sheet = _data_sheet(reference)
+    rows = sheet.get("rows")
+    reference_rows = reference_sheet.get("rows")
+    if not isinstance(rows, list) or not isinstance(reference_rows, list):
+        raise ValueError("Proxy V4 reconciliation requires DATA_VITRINA rows")
+    current_dates = _date_columns(plan)
+    reference_dates = _date_columns(reference)
+    scoped_dates = sorted(
+        day
+        for day in set(current_dates) & set(reference_dates)
+        if str(date_from)[:10] <= day <= str(date_to)[:10]
+    )
+    if not scoped_dates:
+        raise ValueError("Proxy V4 reconciliation reference has no dates in the bounded window")
+
+    by_id = _rows_by_id(rows)
+    reference_by_id = _rows_by_id(reference_rows)
+    reference_target_ids = sorted(
+        row_id
+        for row_id in reference_by_id
+        if _metric_key(row_id) in PROXY_V4_TARGET_KEYS
+    )
+    if not reference_target_ids:
+        raise ValueError("Proxy V4 reconciliation reference contains no V4 target rows")
+    inserted_rows = 0
+    changed_cells = 0
+    for row_id in reference_target_ids:
+        reference_row = reference_by_id[row_id]
+        row = by_id.get(row_id)
+        if row is None:
+            row = [reference_row[0], row_id, *([""] * len(current_dates))]
+            rows.append(row)
+            by_id[row_id] = row
+            inserted_rows += 1
+        for day in scoped_dates:
+            current_index = current_dates.index(day) + 2
+            reference_index = reference_dates.index(day) + 2
+            while current_index >= len(row):
+                row.append("")
+            reference_value = (
+                reference_row[reference_index]
+                if reference_index < len(reference_row)
+                else ""
+            )
+            if row[current_index] != reference_value:
+                row[current_index] = reference_value
+                changed_cells += 1
+
+    metadata = plan.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("Proxy V4 reconciliation requires object metadata")
+    reference_metadata = reference.get("metadata")
+    reference_marker = (
+        reference_metadata.get(PROXY_V4_PROJECTION_METADATA_KEY)
+        if isinstance(reference_metadata, Mapping)
+        else None
+    )
+    if isinstance(reference_marker, Mapping):
+        marker = deepcopy(dict(reference_marker))
+        eligibility = marker.get("eligibility_by_date")
+        if isinstance(eligibility, Mapping):
+            marker["eligibility_by_date"] = {
+                day: deepcopy(value)
+                for day, value in eligibility.items()
+                if str(day)[:10] in scoped_dates
+            }
+        marker["date_from"] = scoped_dates[0]
+        marker["date_to"] = scoped_dates[-1]
+        marker["reconciled_at"] = reconciled_at
+        metadata[PROXY_V4_PROJECTION_METADATA_KEY] = marker
+    metadata[PROXY_V4_RECONCILIATION_METADATA_KEY] = {
+        "contract_version": "proxy_v4_historical_reconciliation_v1",
+        "date_from": scoped_dates[0],
+        "date_to": scoped_dates[-1],
+        "reconciled_at": reconciled_at,
+        "target_metric_keys": sorted(PROXY_V4_TARGET_KEYS),
+    }
+    timestamps = metadata.setdefault("row_last_updated_at_by_row_id", {})
+    if isinstance(timestamps, dict):
+        for row_id in reference_target_ids:
+            timestamps[row_id] = reconciled_at
+    _update_data_dimensions(sheet)
+    after = json.dumps(
+        plan,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return {
+        "after_plan_json": after,
+        "changed_cells": changed_cells,
+        "inserted_rows": inserted_rows,
+        "dates": scoped_dates,
+        "target_row_ids": reference_target_ids,
+        "target_before": proxy_v4_target_digest(current),
+        "target_after": proxy_v4_target_digest(plan),
+        "non_target_before": proxy_v4_non_target_digest(current),
+        "non_target_after": proxy_v4_non_target_digest(plan),
+    }
 
 
 def project_proxy_v4_ready_snapshot(
@@ -185,20 +443,70 @@ def proxy_v4_target_digest(plan_or_json: Mapping[str, Any] | str) -> str:
     rows = sheet.get("rows") or []
     metadata = dict(plan.get("metadata") or {})
     timestamps = dict(metadata.get("row_last_updated_at_by_row_id") or {})
+    payload = {
+        "rows": [
+            row
+            for row in rows
+            if isinstance(row, list)
+            and len(row) > 1
+            and _metric_key(str(row[1])) in PROXY_V4_TARGET_KEYS
+        ],
+        # Preserve the historical initialization digest shape. New
+        # preservation/reconciliation metadata is appended only when present,
+        # so already-reviewed initialization manifests remain reproducible.
+        "metadata": metadata.get(PROXY_V4_PROJECTION_METADATA_KEY),
+        "timestamps": {
+            row_id: value
+            for row_id, value in sorted(timestamps.items())
+            if _metric_key(str(row_id)) in PROXY_V4_TARGET_KEYS
+        },
+    }
+    preservation_metadata = metadata.get(PROXY_V4_PRESERVATION_METADATA_KEY)
+    if preservation_metadata is not None:
+        payload["preservation_metadata"] = preservation_metadata
+    reconciliation_metadata = metadata.get(PROXY_V4_RECONCILIATION_METADATA_KEY)
+    if reconciliation_metadata is not None:
+        payload["reconciliation_metadata"] = reconciliation_metadata
+    return _digest(payload)
+
+
+def proxy_v4_window_digest(
+    plan_or_json: Mapping[str, Any] | str,
+    *,
+    date_from: str,
+    date_to: str,
+) -> str:
+    """Digest V4 row values only inside one explicit business-date window."""
+
+    plan = json.loads(plan_or_json) if isinstance(plan_or_json, str) else deepcopy(dict(plan_or_json))
+    sheet = _data_sheet(plan)
+    rows = sheet.get("rows") or []
+    dates = _date_columns(plan)
+    indexes = [
+        index + 2
+        for index, day in enumerate(dates)
+        if str(date_from)[:10] <= day <= str(date_to)[:10]
+    ]
     return _digest(
-        {
-            "rows": [
-                row
-                for row in rows
-                if isinstance(row, list) and len(row) > 1 and _metric_key(str(row[1])) in PROXY_V4_TARGET_KEYS
-            ],
-            "metadata": metadata.get(PROXY_V4_PROJECTION_METADATA_KEY),
-            "timestamps": {
-                row_id: value
-                for row_id, value in sorted(timestamps.items())
-                if _metric_key(str(row_id)) in PROXY_V4_TARGET_KEYS
-            },
-        }
+        [
+            [
+                str(row[1]),
+                *[
+                    row[index] if index < len(row) else ""
+                    for index in indexes
+                ],
+            ]
+            for row in sorted(
+                (
+                    list(item)
+                    for item in rows
+                    if isinstance(item, list)
+                    and len(item) > 1
+                    and _metric_key(str(item[1])) in PROXY_V4_TARGET_KEYS
+                ),
+                key=lambda item: str(item[1]),
+            )
+        ]
     )
 
 
@@ -220,6 +528,8 @@ def proxy_v4_non_target_digest(plan_or_json: Mapping[str, Any] | str) -> str:
     metadata = plan.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop(PROXY_V4_PROJECTION_METADATA_KEY, None)
+        metadata.pop(PROXY_V4_PRESERVATION_METADATA_KEY, None)
+        metadata.pop(PROXY_V4_RECONCILIATION_METADATA_KEY, None)
         timestamps = metadata.get("row_last_updated_at_by_row_id")
         if isinstance(timestamps, dict):
             for row_id in list(timestamps):

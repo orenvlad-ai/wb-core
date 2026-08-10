@@ -127,6 +127,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     extend_metrics_with_our_wb_cost_metrics,
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import extend_metrics_with_proxy_v4
+from packages.application.proxy_v4_historical_projection import (
+    preserve_proxy_v4_historical_cells,
+)
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_METRIC_KEYS,
     OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
@@ -6097,6 +6100,7 @@ class RegistryUploadHttpEntrypoint:
                     refreshed_at=refreshed_at,
                     previous_plan=previous_plan,
                     previous_refreshed_at=previous_refreshed_at,
+                    business_date=current_business_date_iso(self.now_factory()),
                 )
                 save_snapshot_phase = _start_operator_phase(
                     "save_ready_snapshot",
@@ -10056,12 +10060,19 @@ def _with_full_refresh_metadata(
     refreshed_at: str,
     previous_plan: SheetVitrinaV1Envelope | None = None,
     previous_refreshed_at: str = "",
+    business_date: str = "",
 ) -> SheetVitrinaV1Envelope:
     preservation_summary: dict[str, Any] | None = None
+    proxy_v4_preservation: dict[str, Any] | None = None
     if previous_plan is not None:
         plan, preservation_summary = _preserve_unconfirmed_source_cells_from_previous_plan(
             plan=plan,
             previous_plan=previous_plan,
+        )
+        plan, proxy_v4_preservation = preserve_proxy_v4_historical_cells(
+            plan,
+            previous_plan=previous_plan,
+            business_date=business_date,
         )
     data_sheet = _find_sheet(plan, "DATA_VITRINA")
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {}) if previous_plan is not None else {}
@@ -10113,6 +10124,8 @@ def _with_full_refresh_metadata(
     }
     if preservation_summary and preservation_summary.get("preserved_cell_count"):
         metadata["last_full_refresh_preservation"] = preservation_summary
+    if proxy_v4_preservation and proxy_v4_preservation.get("preserved_cell_count"):
+        metadata["proxy_v4_history_preservation"] = proxy_v4_preservation
     return replace(plan, metadata=metadata)
 
 
