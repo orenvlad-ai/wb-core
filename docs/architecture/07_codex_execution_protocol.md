@@ -16,7 +16,9 @@ Change-задача без отдельной пользовательской �
 ## Действующий последовательный flow
 
 1. Пользователь согласует с куратором цель, bounded scope, acceptance и closure.
-2. Куратор создаёт ровно одного прямого видимого user-owned исполнителя.
+2. Куратор создаёт ровно одного прямого видимого user-owned исполнителя и
+   завершает executor prompt обязательным terminal-handoff указанием из раздела
+   [Prompt Contract](#prompt-contract-и-technical-path-revalidation).
 3. Исполнитель начинает от fresh `origin/main` в отдельной branch/worktree,
    реализует bounded change, синхронизирует необходимые authoritative docs,
    запускает targeted checks и читает полный semantic diff.
@@ -30,8 +32,9 @@ Change-задача без отдельной пользовательской �
 7. Terminal state — `release:done` для `scope:repo-only` либо
    `release:production` для `scope:live-runtime`. Production mutation закрывает
    только отдельный human-gated exact-evidence contract.
-8. Исполнитель возвращает куратору короткий технический отчёт. Куратор
-   проверяет evidence и делает owner handoff; только владелец принимает задачу.
+8. Исполнитель возвращает куратору один финальный technical handoff. Куратор
+   без повторной технической проверки тезисно передаёт его владельцу; только
+   владелец принимает задачу.
 
 `WB_CORE_ORCHESTRATION_REQUIRED=false`. Legacy Global Watcher, orchestration
 registry, Task Passport, acceptance envelope, logical release lane,
@@ -81,9 +84,15 @@ Title и pin назначаются агентом один раз при пол
 supported title/pin capability честно отмечается, но не заменяется
 repository/runtime automation и не влияет на PR eligibility.
 
-После terminal technical state исполнитель передаёт куратору PR, final SHA,
-checks и применимый deploy/verify evidence. Куратор проверяет факты и просит
-владельца ответить ровно: `Задача принята`.
+После `COMPLETE` либо доказанного `BLOCKED` исполнитель передаёт в исходную
+кураторскую задачу один финальный technical handoff. Он содержит итоговый
+статус; что сделано; что не сделано или осталось вне scope; PR и final SHA;
+проверки; merge/release/deploy/production state; сложности, риски и blockers.
+
+Получив handoff, куратор без повторной технической проверки тезисно сообщает
+владельцу статус, сделанное, не сделанное или исключённое, выполненные проверки
+и достигнутый production/terminal state, а также сложности, риски или blocker,
+после чего просит владельца ответить ровно: `Задача принята`.
 
 Merge, `release:done`, `release:production` и handoff не являются owner
 acceptance. Куратор, исполнитель и другие агенты не синтезируют
@@ -104,10 +113,22 @@ Discussion-задача остаётся curator surface. Когда польз�
 прямого исполнителя.
 
 Куратор передаёт исполнителю цель, ожидаемый результат, included/excluded scope,
-constraints, acceptance/closure и правило technical-path revalidation. Он не
-создаёт registry entry, passport, monitor, heartbeat automation или callback
-контур. После запуска исполнителя куратор остаётся доступным для пользователя и
-ждёт technical handoff без второго GitHub/release implementation контура.
+constraints, acceptance/closure, правило technical-path revalidation и
+обязательный terminal-handoff contract. Он не создаёт registry entry, passport,
+monitor, heartbeat automation или callback контур.
+
+После успешного dispatch куратор немедленно завершает текущий turn. `Ждёт`
+означает quiet wait: отсутствие активных model/tool calls, а не `wait`/poll
+loop. Куратор не инициирует wait/read/list/status опросы исполнителя,
+GitHub/CI/runtime/production audit его работы, follow-up prompts, промежуточные
+сводки, параллельную реализацию, независимую перепроверку handoff, heartbeat,
+automation или любой другой мониторинговый контур.
+
+Куратор пробуждается только по финальному handoff, доказанному strict human-only
+обращению исполнителя либо новому явному указанию владельца. Обычный progress
+исполнителя не является поводом просыпаться. Вся technical verification,
+evidence и terminal closure до handoff — ответственность исполнителя; куратор
+не создаёт второй audit contour.
 
 ## Prompt Contract И Technical Path Revalidation
 
@@ -120,6 +141,15 @@ read, если сам пользователь отдельно и явно не
 Каждый prompt содержит provenance-правило:
 
 `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
+
+Каждый executor task prompt обязательно заканчивается следующим по смыслу и
+составу полей указанием, после которого нет иных task directives:
+
+`Исполнитель самостоятельно доводит задачу до применимого terminal state. После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую задачу один финальный technical handoff: итоговый статус; что сделано; что не сделано или осталось вне scope; PR и final SHA; проверки; merge/release/deploy/production state; сложности, риски и blockers.`
+
+До terminal state исполнитель не отправляет обычный progress как callback.
+Единственное pre-terminal исключение — доказанное strict human-only обращение,
+без которого безопасное продолжение невозможно.
 
 До выполнения Codex повторно проверяет proposed technical path по current
 `origin/main`, root `AGENTS.md`, релевантным authoritative docs и code truth.
@@ -328,16 +358,19 @@ input или business mutation вне explicit UI Flow. Browser/auth прове�
 `PRODUCTION_UI_PREFLIGHT`, поэтому будущая UI capability не блокирует
 repository work.
 
-## Documentation Sync И Independent Evidence
+## Documentation Sync И Executor Evidence
 
 Authoritative docs: `README.md`, `docs/architecture/*`, `docs/modules/*`,
 `migration/*`. Contract/runtime/module status change обновляет их в той же
 задаче.
 
-Отчёт агента не является proof. Перед подтверждением результата проверь GitHub
-state, branch/final SHA, semantic diff, tests/checks, review threads, docs и,
-если применимо, deployed SHA, live/service/UI evidence, mutation dry-run,
-backup/reversibility, audit, reconciliation и non-target invariants.
+Исполнитель не подменяет собственную verification отчётами других агентов.
+Перед финальным handoff он сам проверяет GitHub state, branch/final SHA,
+semantic diff, tests/checks, review threads, docs и, если применимо, deployed
+SHA, live/service/UI evidence, mutation dry-run, backup/reversibility, audit,
+reconciliation и non-target invariants. Эти executor checks и механические
+Release Train gates являются техническим proof; куратор после handoff не
+повторяет их как независимый audit.
 
 ## Human-Only Boundary
 
