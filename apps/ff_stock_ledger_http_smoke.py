@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import socket
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -86,6 +87,16 @@ def main() -> None:
         try:
             base_url = f"http://127.0.0.1:{config.port}"
 
+            inventory_counts_before_page = _inventory_document_counts(runtime)
+            page_code, page_bytes, _ = _get_bytes(
+                f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}"
+            )
+            _assert(page_code == 200 and page_bytes, "operator page must render")
+            _assert(
+                _inventory_document_counts(runtime) == inventory_counts_before_page,
+                "opening the operator page must not create inventory preview/document state",
+            )
+
             status_code, status_payload = _get_json(f"{base_url}{DEFAULT_FF_STOCKS_PATH}")
             _assert(status_code == 200, f"status route must return 200, got {status_code}")
             _assert(status_payload["contract_name"] == "sheet_vitrina_v1_ff_stock_ledger", "status contract changed")
@@ -97,7 +108,9 @@ def main() -> None:
             export_rows = read_first_sheet_rows(export_bytes)
             _assert(export_rows[0] == ["barcode", "nmId", "SKU/название/комментарий", "группа", "количество"], "export headers changed")
 
-            upload_bytes = _operation_xlsx([[f"460{probe_nm_id}", probe_nm_id, "Probe", "Clear", 12]])
+            upload_bytes = _operation_xlsx(
+                [[f"000460{probe_nm_id}", probe_nm_id, "Probe", "Clear", 12]]
+            )
             preview_code, preview_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FF_STOCKS_PREVIEW_PATH}",
                 upload_bytes,
@@ -129,10 +142,36 @@ def main() -> None:
             _assert(inventory_headers.get("Content-Type", "").startswith(XLSX_TYPE), "FF inventory template must be XLSX")
             inventory_rows = read_first_sheet_rows(inventory_template)
             _assert(len(inventory_rows) == len(active_nm_ids) + 1, "FF inventory template must contain every active SKU")
+            _assert(
+                inventory_rows[0]
+                == ["nmId", "Штрихкод", "Комментарий SKU", "Остаток ФФ", "Дата остатка"],
+                "FF inventory template headers must expose barcode identity",
+            )
+            probe_template_row = next(
+                row for row in inventory_rows[1:] if int(row[0]) == probe_nm_id
+            )
+            _assert(
+                probe_template_row[1] == f"000460{probe_nm_id}",
+                "FF inventory template must preserve a leading-zero barcode",
+            )
+            _assert(
+                _inventory_document_counts(runtime) == inventory_counts_before_page,
+                "template download must not create inventory preview/document state",
+            )
+            barcode_only_inventory = build_single_sheet_workbook_bytes(
+                "Инвентаризация FF",
+                [
+                    list(inventory_rows[0]),
+                    *[
+                        [None, row[1], row[2], row[3], row[4]]
+                        for row in inventory_rows[1:]
+                    ],
+                ],
+            )
             inventory_preview_code, inventory_preview = _post_multipart(
                 f"{base_url}{DEFAULT_FF_INVENTORY_PREVIEW_PATH}",
-                inventory_template,
-                filename="inventory-full.xlsx",
+                barcode_only_inventory,
+                filename="inventory-barcode-only.xlsx",
                 fields={"business_date": "2026-04-18"},
             )
             _assert(inventory_preview_code == 200, f"inventory preview failed: {inventory_preview}")
@@ -223,6 +262,23 @@ def _operation_xlsx(rows: list[list[object]]) -> bytes:
     )
 
 
+def _inventory_document_counts(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> tuple[int, int]:
+    with sqlite3.connect(runtime.db_path) as conn:
+        preview_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_inventory_previews"
+            ).fetchone()[0]
+        )
+        reconciliation_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+            ).fetchone()[0]
+        )
+    return preview_count, reconciliation_count
+
+
 def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, active_nm_ids: list[int]) -> None:
     runtime.save_sku_group(
         {
@@ -242,8 +298,8 @@ def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, active_nm_ids: li
                 "is_hidden": False,
                 "our_sku": f"SKU-{index}",
                 "nm_id": nm_id,
-                "barcode": f"460{nm_id}",
-                "barcodes": [f"460{nm_id}"],
+                "barcode": f"000460{nm_id}",
+                "barcodes": [f"000460{nm_id}", f"990{nm_id}"],
                 "nomenclature_name": f"SKU name {index}",
                 "product_type": "clear",
                 "match_key": f"sku-{index}",

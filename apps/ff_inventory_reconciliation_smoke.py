@@ -23,7 +23,11 @@ from packages.application.ff_warehouse_documents import FfWarehouseDocumentView 
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
-from packages.application.simple_xlsx import build_single_sheet_workbook_bytes  # noqa: E402
+from packages.application.simple_xlsx import (  # noqa: E402
+    build_single_sheet_workbook_bytes,
+    read_first_sheet_cells,
+    read_first_sheet_rows,
+)
 from packages.application.warehouse_functional import ensure_warehouse_functional_schema  # noqa: E402
 
 
@@ -47,12 +51,27 @@ def main() -> None:
         )
         assert template.startswith(b"PK") and template_name.endswith(".xlsx")
         assert "spreadsheetml" in template_type
+        template_rows = read_first_sheet_rows(template)
+        template_cells = read_first_sheet_cells(template)
+        assert template_rows[0] == [
+            "nmId",
+            "Штрихкод",
+            "Комментарий SKU",
+            "Остаток ФФ",
+            "Дата остатка",
+        ]
+        assert template_rows[1][1] == _primary_barcode(101)
+        assert len(template_rows[1][1]) > 15
+        assert template_cells[1][1].kind == "text"
+        assert template_cells[1][1].style_index == 1
+        assert template_cells[1][1].raw_value == _primary_barcode(101)
         preview = block.create_preview(
             source_bytes=workbook,
             source_filename="manager.xlsx",
             business_date=BUSINESS_DATE,
         )
         assert preview["apply_allowed"] is True and preview["preview_id"].startswith("ffip_")
+        assert preview["manifest"]["source"]["header_profile"] == "legacy_nm_id_v1"
 
         plan = block.build_plan(
             source_bytes=workbook,
@@ -285,8 +304,219 @@ def main() -> None:
         assert lifecycle[0] == "rollback_pending_reobservation"
         assert lifecycle[1] == "" and str(lifecycle[2]).startswith("rollback:")
 
+    _test_barcode_identity_profiles()
     _test_repeated_apply_fails_closed_after_target_drift()
     print("ff_inventory_reconciliation_smoke: OK")
+
+
+def _test_barcode_identity_profiles() -> None:
+    with TemporaryDirectory(prefix="ff-inventory-barcode-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_nomenclature(runtime, [301, 302])
+        _seed_opening(runtime, {301: 5, 302: 5})
+        _seed_ff_cost_version(runtime, {301: (5, 100), 302: (5, 200)})
+        block = FfInventoryReconciliation(runtime=runtime, timestamp_factory=lambda: NOW)
+
+        template, _, _ = block.build_template(business_date=BUSINESS_DATE)
+        template_rows = read_first_sheet_rows(template)
+        template_cells = read_first_sheet_cells(template)
+        assert template_rows[1][1] == _primary_barcode(301)
+        assert len(template_rows[1][1]) > 15
+        assert template_cells[1][1].kind == "text"
+        assert template_cells[1][1].style_index == 1
+
+        barcode_only = _barcode_workbook(
+            [
+                (None, _primary_barcode(301), "SKU 301 primary", 6),
+                (None, "990302", "SKU 302 additional", 4),
+            ]
+        )
+        preview = block.create_preview(
+            source_bytes=barcode_only,
+            source_filename="barcode-only.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert preview["apply_allowed"] is True
+        barcode_rows = {int(item["nm_id"]): item for item in preview["manifest"]["per_sku"]}
+        assert barcode_rows[301]["identity_source"] == "barcode"
+        assert barcode_rows[301]["source_barcode"] == _primary_barcode(301)
+        assert barcode_rows[302]["identity_source"] == "barcode"
+        confirmed = block.confirm_preview(
+            preview_id=preview["preview_id"],
+            confirmation_fingerprint=preview["fingerprint"],
+            created_by="smoke",
+        )
+        assert confirmed["status"] == "applied"
+        assert confirmed["readback"]["target_matches"] is True
+
+        matching_both = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (301, _primary_barcode(301), "SKU 301", 6),
+                    (302, _primary_barcode(302), "SKU 302", 4),
+                ]
+            ),
+            source_filename="matching-both.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert matching_both["status"] == "ready"
+        assert all(
+            item["identity_source"] == "nm_id+barcode"
+            for item in matching_both["manifest"]["per_sku"]
+        )
+        stale_identity_bytes = _barcode_workbook(
+            [
+                (301, _primary_barcode(301), "SKU 301", 6),
+                (302, _primary_barcode(302), "SKU 302", 4),
+            ]
+        )
+        stale_identity_preview = block.create_preview(
+            source_bytes=stale_identity_bytes,
+            source_filename="stale-identity.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_nomenclature_items SET barcodes_json=? WHERE nm_id=302",
+                (
+                    json.dumps(
+                        [_primary_barcode(302), "990302", "880302"],
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            conn.commit()
+        try:
+            block.confirm_preview(
+                preview_id=stale_identity_preview["preview_id"],
+                confirmation_fingerprint=stale_identity_preview["fingerprint"],
+                created_by="smoke",
+            )
+        except FfInventoryReconciliationError as exc:
+            assert exc.code == "stale_or_invalid_fingerprint"
+        else:
+            raise AssertionError("nomenclature barcode changes must stale the stored preview")
+
+        unknown = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (301, _primary_barcode(301), "SKU 301", 6),
+                    (302, _primary_barcode(302), "SKU 302", 4),
+                    (None, "7777777700000", "Unknown", 0),
+                ]
+            ),
+            source_filename="unknown-barcode.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert unknown["status"] == "blocked"
+        assert any(item["code"] == "unknown_barcode" for item in unknown["blockers"])
+
+        conflict = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (301, _primary_barcode(302), "Conflict", 0),
+                    (301, _primary_barcode(301), "SKU 301", 6),
+                    (302, _primary_barcode(302), "SKU 302", 4),
+                ]
+            ),
+            source_filename="conflicting-identity.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert conflict["status"] == "blocked"
+        assert any(item["code"] == "nm_id_barcode_conflict" for item in conflict["blockers"])
+
+        duplicate = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (None, _primary_barcode(301), "SKU 301 primary", 6),
+                    (None, "990301", "SKU 301 additional", 6),
+                    (None, _primary_barcode(302), "SKU 302", 4),
+                ]
+            ),
+            source_filename="duplicate-resolved-sku.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert duplicate["status"] == "blocked"
+        assert any(item["code"] == "duplicate_resolved_sku" for item in duplicate["blockers"])
+
+        empty_identity = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (301, _primary_barcode(301), "SKU 301", 6),
+                    (302, _primary_barcode(302), "SKU 302", 4),
+                    (None, "", "No identity", 0),
+                ]
+            ),
+            source_filename="empty-identity.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert any(
+            item["code"] == "empty_inventory_identity"
+            for item in empty_identity["blockers"]
+        )
+
+        missing = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [(None, _primary_barcode(301), "SKU 301 only", 6)]
+            ),
+            source_filename="missing-active.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert any(
+            item["code"] == "active_nomenclature_rows_missing"
+            and item["nm_ids"] == [302]
+            for item in missing["blockers"]
+        )
+
+        for unsafe_barcode, expected_code in (
+            (460301, "barcode_must_be_text"),
+            (460301.5, "barcode_must_be_text"),
+            ("4.60301E+5", "scientific_notation_barcode"),
+            ("barcode-301", "malformed_barcode"),
+        ):
+            try:
+                block.build_plan(
+                    source_bytes=_barcode_workbook(
+                        [
+                            (None, unsafe_barcode, "Unsafe barcode", 6),
+                            (302, _primary_barcode(302), "SKU 302", 4),
+                        ]
+                    ),
+                    source_filename="unsafe-barcode.xlsx",
+                    business_date=BUSINESS_DATE,
+                )
+            except FfInventoryReconciliationError as exc:
+                assert exc.code == "invalid_workbook_rows"
+                assert any(item["code"] == expected_code for item in exc.details)
+            else:
+                raise AssertionError(f"unsafe barcode must fail closed: {unsafe_barcode!r}")
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            for nm_id in (301, 302):
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_nomenclature_items SET barcodes_json=? WHERE nm_id=?",
+                    (
+                        json.dumps(
+                            [_primary_barcode(nm_id), f"990{nm_id}", "7777777777777"],
+                            ensure_ascii=False,
+                        ),
+                        nm_id,
+                    ),
+                )
+            conn.commit()
+        ambiguous = block.build_plan(
+            source_bytes=_barcode_workbook(
+                [
+                    (301, _primary_barcode(301), "SKU 301", 6),
+                    (302, _primary_barcode(302), "SKU 302", 4),
+                    (None, "7777777777777", "Ambiguous", 0),
+                ]
+            ),
+            source_filename="ambiguous-barcode.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert ambiguous["status"] == "blocked"
+        assert any(item["code"] == "ambiguous_barcode" for item in ambiguous["blockers"])
 
 
 def _test_repeated_apply_fails_closed_after_target_drift() -> None:
@@ -351,6 +581,25 @@ def _workbook(rows: list[tuple[int, str, int]]) -> bytes:
     )
 
 
+def _barcode_workbook(
+    rows: list[tuple[int | None, object, str, int]],
+) -> bytes:
+    return build_single_sheet_workbook_bytes(
+        "Инвентаризация FF",
+        [
+            ["nmId", "Штрихкод", "Комментарий SKU", "Остаток ФФ", "Дата остатка"],
+            *[
+                [nm_id, barcode, comment, quantity, BUSINESS_DATE]
+                for nm_id, barcode, comment, quantity in rows
+            ],
+        ],
+    )
+
+
+def _primary_barcode(nm_id: int) -> str:
+    return f"00000000000000000000000{nm_id}"
+
+
 def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, nm_ids: list[int]) -> None:
     runtime.save_sku_group(
         {
@@ -370,8 +619,8 @@ def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, nm_ids: list[int]
                 "is_hidden": False,
                 "our_sku": f"INV-{nm_id}",
                 "nm_id": nm_id,
-                "barcode": f"460{nm_id}",
-                "barcodes": [f"460{nm_id}"],
+                "barcode": _primary_barcode(nm_id),
+                "barcodes": [_primary_barcode(nm_id), f"990{nm_id}"],
                 "nomenclature_name": f"Inventory SKU {nm_id}",
                 "product_type": "inventory-smoke",
                 "match_key": f"inventory-{nm_id}",

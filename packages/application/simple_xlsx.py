@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import io
 from typing import Any
@@ -10,6 +11,18 @@ import zipfile
 
 
 CellValue = str | int | float | None
+
+
+@dataclass(frozen=True)
+class XlsxCell:
+    """Parsed cell value plus the source representation needed by strict imports."""
+
+    value: Any
+    kind: str
+    raw_value: str
+    cell_type: str
+    style_index: int
+
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -135,7 +148,13 @@ _THEME_XML = """<?xml version="1.0"?>
 """
 
 
-def build_single_sheet_workbook_bytes(sheet_name: str, rows: list[list[CellValue]]) -> bytes:
+def build_single_sheet_workbook_bytes(
+    sheet_name: str,
+    rows: list[list[CellValue]],
+    *,
+    column_widths: list[float] | None = None,
+    text_columns: set[int] | None = None,
+) -> bytes:
     normalized_sheet_name = _normalize_sheet_name(sheet_name)
     created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     buffer = io.BytesIO()
@@ -147,12 +166,29 @@ def build_single_sheet_workbook_bytes(sheet_name: str, rows: list[list[CellValue
         archive.writestr("xl/workbook.xml", _build_workbook_xml(normalized_sheet_name))
         archive.writestr("xl/_rels/workbook.xml.rels", _build_workbook_rels_xml())
         archive.writestr("xl/theme/theme1.xml", _THEME_XML.encode("utf-8"))
-        archive.writestr("xl/styles.xml", _build_styles_xml())
-        archive.writestr("xl/worksheets/sheet1.xml", _build_sheet_xml(rows))
+        archive.writestr(
+            "xl/styles.xml",
+            _build_styles_xml(include_text_style=bool(text_columns)),
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            _build_sheet_xml(
+                rows,
+                column_widths=column_widths,
+                text_columns=text_columns,
+            ),
+        )
     return buffer.getvalue()
 
 
 def read_first_sheet_rows(workbook_bytes: bytes) -> list[list[Any]]:
+    return [
+        [cell.value for cell in row]
+        for row in read_first_sheet_cells(workbook_bytes)
+    ]
+
+
+def read_first_sheet_cells(workbook_bytes: bytes) -> list[list[XlsxCell]]:
     try:
         archive = zipfile.ZipFile(io.BytesIO(workbook_bytes), "r")
     except zipfile.BadZipFile as exc:
@@ -165,7 +201,11 @@ def read_first_sheet_rows(workbook_bytes: bytes) -> list[list[Any]]:
         shared_strings = _load_shared_strings(archive)
         date_style_indexes = _load_date_style_indexes(archive)
         sheet_xml = _read_xml(archive, sheet_path)
-        return _parse_sheet_rows(sheet_xml, shared_strings=shared_strings, date_style_indexes=date_style_indexes)
+        return _parse_sheet_cells(
+            sheet_xml,
+            shared_strings=shared_strings,
+            date_style_indexes=date_style_indexes,
+        )
 
 
 def _build_content_types_xml() -> bytes:
@@ -312,7 +352,7 @@ def _build_workbook_rels_xml() -> bytes:
     return _xml_bytes(root)
 
 
-def _build_styles_xml() -> bytes:
+def _build_styles_xml(*, include_text_style: bool = False) -> bytes:
     root = ET.Element(f"{{{_MAIN_NS}}}styleSheet")
     ET.SubElement(root, f"{{{_MAIN_NS}}}numFmts", count="0")
     fonts = ET.SubElement(root, f"{{{_MAIN_NS}}}fonts", count="1")
@@ -343,7 +383,11 @@ def _build_styles_xml() -> bytes:
         fillId="0",
         borderId="0",
     )
-    cell_xfs = ET.SubElement(root, f"{{{_MAIN_NS}}}cellXfs", count="1")
+    cell_xfs = ET.SubElement(
+        root,
+        f"{{{_MAIN_NS}}}cellXfs",
+        count="2" if include_text_style else "1",
+    )
     ET.SubElement(
         cell_xfs,
         f"{{{_MAIN_NS}}}xf",
@@ -355,6 +399,19 @@ def _build_styles_xml() -> bytes:
         pivotButton="0",
         quotePrefix="0",
     )
+    if include_text_style:
+        ET.SubElement(
+            cell_xfs,
+            f"{{{_MAIN_NS}}}xf",
+            numFmtId="49",
+            fontId="0",
+            fillId="0",
+            borderId="0",
+            xfId="0",
+            applyNumberFormat="1",
+            pivotButton="0",
+            quotePrefix="0",
+        )
     cell_styles = ET.SubElement(root, f"{{{_MAIN_NS}}}cellStyles", count="1")
     ET.SubElement(cell_styles, f"{{{_MAIN_NS}}}cellStyle", name="Normal", xfId="0", builtinId="0", hidden="0")
     ET.SubElement(
@@ -367,7 +424,12 @@ def _build_styles_xml() -> bytes:
     return _xml_bytes(root)
 
 
-def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
+def _build_sheet_xml(
+    rows: list[list[CellValue]],
+    *,
+    column_widths: list[float] | None = None,
+    text_columns: set[int] | None = None,
+) -> bytes:
     root = ET.Element(f"{{{_MAIN_NS}}}worksheet")
     sheet_pr = ET.SubElement(root, f"{{{_MAIN_NS}}}sheetPr")
     ET.SubElement(sheet_pr, f"{{{_MAIN_NS}}}outlinePr", summaryBelow="1", summaryRight="1")
@@ -377,6 +439,17 @@ def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
     sheet_view = ET.SubElement(sheet_views, f"{{{_MAIN_NS}}}sheetView", workbookViewId="0")
     ET.SubElement(sheet_view, f"{{{_MAIN_NS}}}selection", activeCell="A1", sqref="A1")
     ET.SubElement(root, f"{{{_MAIN_NS}}}sheetFormatPr", baseColWidth="8", defaultRowHeight="15")
+    if column_widths:
+        cols = ET.SubElement(root, f"{{{_MAIN_NS}}}cols")
+        for index, width in enumerate(column_widths, start=1):
+            ET.SubElement(
+                cols,
+                f"{{{_MAIN_NS}}}col",
+                min=str(index),
+                max=str(index),
+                width=str(float(width)),
+                customWidth="1",
+            )
     sheet_data = ET.SubElement(root, f"{{{_MAIN_NS}}}sheetData")
     for row_index, row in enumerate(rows, start=1):
         row_el = ET.SubElement(sheet_data, f"{{{_MAIN_NS}}}row", r=str(row_index))
@@ -384,16 +457,34 @@ def _build_sheet_xml(rows: list[list[CellValue]]) -> bytes:
             if value in (None, ""):
                 continue
             cell_ref = f"{_column_name(col_index)}{row_index}"
+            cell_attributes = {"r": cell_ref}
+            if text_columns and col_index in text_columns:
+                cell_attributes["s"] = "1"
             if isinstance(value, bool):
-                cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref, t="inlineStr")
+                cell = ET.SubElement(
+                    row_el,
+                    f"{{{_MAIN_NS}}}c",
+                    **cell_attributes,
+                    t="inlineStr",
+                )
                 is_el = ET.SubElement(cell, f"{{{_MAIN_NS}}}is")
                 ET.SubElement(is_el, f"{{{_MAIN_NS}}}t").text = "TRUE" if value else "FALSE"
                 continue
             if isinstance(value, (int, float)):
-                cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref, t="n")
+                cell = ET.SubElement(
+                    row_el,
+                    f"{{{_MAIN_NS}}}c",
+                    **cell_attributes,
+                    t="n",
+                )
                 ET.SubElement(cell, f"{{{_MAIN_NS}}}v").text = _format_number(value)
                 continue
-            cell = ET.SubElement(row_el, f"{{{_MAIN_NS}}}c", r=cell_ref, t="inlineStr")
+            cell = ET.SubElement(
+                row_el,
+                f"{{{_MAIN_NS}}}c",
+                **cell_attributes,
+                t="inlineStr",
+            )
             is_el = ET.SubElement(cell, f"{{{_MAIN_NS}}}is")
             text = ET.SubElement(is_el, f"{{{_MAIN_NS}}}t")
             text.text = str(value)
@@ -473,18 +564,18 @@ def _load_date_style_indexes(archive: zipfile.ZipFile) -> set[int]:
     return indexes
 
 
-def _parse_sheet_rows(
+def _parse_sheet_cells(
     root: ET.Element,
     *,
     shared_strings: list[str],
     date_style_indexes: set[int],
-) -> list[list[Any]]:
-    parsed_rows: list[list[Any]] = []
+) -> list[list[XlsxCell]]:
+    parsed_rows: list[list[XlsxCell]] = []
     sheet_data = root.find(f"{{{_MAIN_NS}}}sheetData")
     if sheet_data is None:
         return parsed_rows
     for row_el in sheet_data.findall(f"{{{_MAIN_NS}}}row"):
-        values_by_col: dict[int, Any] = {}
+        values_by_col: dict[int, XlsxCell] = {}
         max_col = 0
         for cell in row_el.findall(f"{{{_MAIN_NS}}}c"):
             cell_ref = cell.get("r", "")
@@ -497,18 +588,73 @@ def _parse_sheet_rows(
                 style_index = int(cell.get("s", "0") or "0")
             except ValueError:
                 style_index = 0
-            values_by_col[col_index] = _parse_cell_value(
+            value = _parse_cell_value(
                 cell,
                 cell_type=cell_type,
                 style_index=style_index,
                 shared_strings=shared_strings,
                 date_style_indexes=date_style_indexes,
             )
+            raw_value = _raw_cell_value(cell, cell_type=cell_type)
+            values_by_col[col_index] = XlsxCell(
+                value=value,
+                kind=_cell_kind(
+                    cell,
+                    cell_type=cell_type,
+                    style_index=style_index,
+                    date_style_indexes=date_style_indexes,
+                ),
+                raw_value=raw_value,
+                cell_type=cell_type,
+                style_index=style_index,
+            )
         if max_col == 0:
             parsed_rows.append([])
             continue
-        parsed_rows.append([values_by_col.get(index) for index in range(1, max_col + 1)])
-    return _trim_empty_rows(parsed_rows)
+        parsed_rows.append(
+            [
+                values_by_col.get(
+                    index,
+                    XlsxCell(
+                        value=None,
+                        kind="blank",
+                        raw_value="",
+                        cell_type="",
+                        style_index=0,
+                    ),
+                )
+                for index in range(1, max_col + 1)
+            ]
+        )
+    return _trim_empty_cell_rows(parsed_rows)
+
+
+def _raw_cell_value(cell: ET.Element, *, cell_type: str) -> str:
+    if cell_type == "inlineStr":
+        is_el = cell.find(f"{{{_MAIN_NS}}}is")
+        return _extract_text(is_el) if is_el is not None else ""
+    value_el = cell.find(f"{{{_MAIN_NS}}}v")
+    return str(value_el.text or "") if value_el is not None else ""
+
+
+def _cell_kind(
+    cell: ET.Element,
+    *,
+    cell_type: str,
+    style_index: int,
+    date_style_indexes: set[int],
+) -> str:
+    if cell.find(f"{{{_MAIN_NS}}}f") is not None:
+        return "formula"
+    if cell_type in {"inlineStr", "s", "str"}:
+        return "text"
+    if cell_type == "b":
+        return "boolean"
+    if cell_type == "e":
+        return "error"
+    if style_index in date_style_indexes:
+        return "date"
+    return "number"
 
 
 def _parse_cell_value(
@@ -593,15 +739,15 @@ def _column_index_from_ref(cell_ref: str) -> int:
     return value
 
 
-def _trim_empty_rows(rows: list[list[Any]]) -> list[list[Any]]:
-    trimmed: list[list[Any]] = []
+def _trim_empty_cell_rows(rows: list[list[XlsxCell]]) -> list[list[XlsxCell]]:
+    trimmed: list[list[XlsxCell]] = []
     last_nonempty_index = -1
     for index, row in enumerate(rows):
         normalized = list(row)
-        while normalized and normalized[-1] in ("", None):
+        while normalized and normalized[-1].value in ("", None):
             normalized.pop()
         trimmed.append(normalized)
-        if any(value not in ("", None) for value in normalized):
+        if any(cell.value not in ("", None) for cell in normalized):
             last_nonempty_index = index
     if last_nonempty_index < 0:
         return []
