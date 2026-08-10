@@ -5256,6 +5256,17 @@
     .warehouse-summary-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-subtle); }
     .warehouse-summary-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
     .warehouse-summary-value { display: block; font-size: 21px; font-weight: 750; }
+    .warehouse-ff-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .warehouse-ff-action { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--panel-subtle); }
+    .warehouse-ff-action h3 { margin: 0 0 6px; font-size: 16px; }
+    .warehouse-ff-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; align-items: end; margin-top: 12px; }
+    .warehouse-ff-form label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+    .warehouse-ff-form .wide { grid-column: 1 / -1; }
+    .warehouse-ff-actions-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .warehouse-ff-result { margin: 10px 0 0; white-space: pre-line; }
+    .warehouse-document-filters { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 8px; margin: 12px 0; align-items: end; }
+    .warehouse-document-filters label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+    .warehouse-document-filters .search { grid-column: span 2; }
     .warehouse-section-title { margin: 0 0 10px; font-size: 17px; }
     .warehouse-incident-card { border-color: color-mix(in srgb, var(--accent-border) 66%, var(--border)); }
     .warehouse-incident-head, .warehouse-incident-footer { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
@@ -5320,6 +5331,8 @@
     }
     @media (max-width: 780px) {
       .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      .warehouse-ff-actions, .warehouse-document-filters { grid-template-columns: minmax(0, 1fr); }
+      .warehouse-document-filters .search { grid-column: auto; }
       .warehouse-incident-grid { grid-template-columns: 1fr; }
       .warehouse-card { padding: 12px; min-width: 0; }
       .warehouse-switcher { max-width: 100%; }
@@ -5617,6 +5630,35 @@
         <p class="warehouse-incident-result" data-wb-incident-result hidden></p>
       </section>
 
+      <section class="warehouse-card" data-warehouse-ff-actions hidden>
+        <h2 class="warehouse-section-title">Документы склада FF</h2>
+        <p class="warehouse-meta">Открытие страницы ничего не проводит: сначала проверка, затем отдельное явное подтверждение.</p>
+        <div class="warehouse-ff-actions">
+          <div class="warehouse-ff-action">
+            <h3>Инвентаризация FF</h3>
+            <p class="warehouse-meta">Полный фактический target по всей активной номенклатуре. Пропущенные SKU блокируют проведение.</p>
+            <div class="warehouse-ff-form">
+              <label>Дата учёта<input class="input" type="date" data-ff-inventory-date></label>
+              <div class="warehouse-ff-actions-row"><button class="button secondary" type="button" data-ff-inventory-template>Скачать шаблон</button></div>
+              <label class="wide">Заполненный XLSX<input class="input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-ff-inventory-file></label>
+              <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-inventory-preview>Загрузить инвентаризацию</button><button class="button primary" type="button" data-ff-inventory-confirm disabled>Подтвердить проведение</button></div>
+            </div>
+            <p class="warehouse-ff-result" data-ff-inventory-result hidden></p>
+          </div>
+          <div class="warehouse-ff-action">
+            <h3>Накладные расходы FF</h3>
+            <p class="warehouse-meta">Сумма распределяется по положительному физическому остатку на дату; количество не меняется.</p>
+            <div class="warehouse-ff-form">
+              <label>Дата учёта<input class="input" type="date" data-ff-overhead-date></label>
+              <label>Сумма, RUB<input class="input" type="number" min="0.01" step="0.01" inputmode="decimal" data-ff-overhead-amount></label>
+              <label class="wide">Основание / комментарий<textarea class="input" rows="2" data-ff-overhead-reason></textarea></label>
+              <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-overhead-preview>Проверить распределение</button><button class="button primary" type="button" data-ff-overhead-confirm disabled>Подтвердить проведение</button></div>
+            </div>
+            <p class="warehouse-ff-result" data-ff-overhead-result hidden></p>
+          </div>
+        </div>
+      </section>
+
       <section class="warehouse-card" data-warehouse-unmatched-card hidden>
         <h2 class="warehouse-section-title">Неразнесённые доприёмки переходного периода</h2>
         <div class="warehouse-table-wrap">
@@ -5640,9 +5682,18 @@
       <section class="warehouse-card">
         <details data-warehouse-documents-drawer>
           <summary class="warehouse-section-title">Реестр документов <small>загружается при раскрытии</small></summary>
+          <div class="warehouse-document-filters" data-warehouse-document-filters>
+            <label>Эффект<select class="input" data-warehouse-document-effect><option value="all">Все</option><option value="incoming">Приход</option><option value="outgoing">Расход</option><option value="cost_only">Только стоимость</option><option value="reservation">Резерв</option></select></label>
+            <label>Причина<select class="input" data-warehouse-document-reason><option value="all">Все</option><option value="supplier_receipt">Поступление поставщика</option><option value="wb_shipment">Отгрузка WB</option><option value="inventory">Инвентаризация</option><option value="return">Возврат</option><option value="manual">Ручная операция</option><option value="overhead">Накладные расходы</option><option value="correction">Корректировка / сторно</option><option value="opening">Начальные остатки</option></select></label>
+            <label>Дата с<input class="input" type="date" data-warehouse-document-date-from></label>
+            <label>Дата по<input class="input" type="date" data-warehouse-document-date-to></label>
+            <label class="search">Поиск<input class="input" type="search" placeholder="Номер, поставка, invoice, nmId, SKU, штрихкод" data-warehouse-document-search></label>
+            <label><span>Технический аудит</span><span><input type="checkbox" data-warehouse-document-technical> Показать технические документы</span></label>
+            <div class="warehouse-ff-actions-row"><button class="button secondary" type="button" data-warehouse-document-filter-apply>Применить</button><button class="button ghost" type="button" data-warehouse-document-filter-reset>Сбросить</button></div>
+          </div>
           <div class="warehouse-table-wrap">
             <table class="warehouse-table">
-              <thead><tr><th>Номер</th><th>Дата и время</th><th>Тип</th><th>Склад</th><th>Отправитель → получатель</th><th>Документ / источник-основание</th><th>SKU</th><th>Количество</th><th>Себестоимость</th><th>Товарный капитал</th><th>Статус</th><th>Состав</th></tr></thead>
+              <thead><tr><th>Номер</th><th>Бизнес-дата</th><th>Тип</th><th>Склад</th><th>Отправитель → получатель</th><th>Документ / источник-основание</th><th>SKU</th><th>Количество</th><th>Расход</th><th>Капитал</th><th>Статус</th><th>Состав</th></tr></thead>
               <tbody data-warehouse-documents><tr><td colspan="12"><p class="warehouse-empty">Раскройте реестр, чтобы загрузить первую страницу.</p></td></tr></tbody>
             </table>
           </div>
@@ -6521,6 +6572,28 @@
     const warehouseBalancesNode = document.querySelector("[data-warehouse-balances]");
     const warehouseDocumentsNode = document.querySelector("[data-warehouse-documents]");
     const warehouseDocumentsDrawer = document.querySelector("[data-warehouse-documents-drawer]");
+    const warehouseFfActions = document.querySelector("[data-warehouse-ff-actions]");
+    const ffInventoryDate = document.querySelector("[data-ff-inventory-date]");
+    const ffInventoryTemplate = document.querySelector("[data-ff-inventory-template]");
+    const ffInventoryFile = document.querySelector("[data-ff-inventory-file]");
+    const ffInventoryPreview = document.querySelector("[data-ff-inventory-preview]");
+    const ffInventoryConfirm = document.querySelector("[data-ff-inventory-confirm]");
+    const ffInventoryResult = document.querySelector("[data-ff-inventory-result]");
+    const ffOverheadDate = document.querySelector("[data-ff-overhead-date]");
+    const ffOverheadAmount = document.querySelector("[data-ff-overhead-amount]");
+    const ffOverheadReason = document.querySelector("[data-ff-overhead-reason]");
+    const ffOverheadPreview = document.querySelector("[data-ff-overhead-preview]");
+    const ffOverheadConfirm = document.querySelector("[data-ff-overhead-confirm]");
+    const ffOverheadResult = document.querySelector("[data-ff-overhead-result]");
+    const warehouseDocumentEffect = document.querySelector("[data-warehouse-document-effect]");
+    const warehouseDocumentReason = document.querySelector("[data-warehouse-document-reason]");
+    const warehouseDocumentDateFrom = document.querySelector("[data-warehouse-document-date-from]");
+    const warehouseDocumentDateTo = document.querySelector("[data-warehouse-document-date-to]");
+    const warehouseDocumentSearch = document.querySelector("[data-warehouse-document-search]");
+    const warehouseDocumentTechnical = document.querySelector("[data-warehouse-document-technical]");
+    const warehouseDocumentFilters = document.querySelector("[data-warehouse-document-filters]");
+    const warehouseDocumentFilterApply = document.querySelector("[data-warehouse-document-filter-apply]");
+    const warehouseDocumentFilterReset = document.querySelector("[data-warehouse-document-filter-reset]");
     const warehouseDetailView = document.querySelector("[data-warehouse-detail-view]");
     const warehouseUpdateView = document.querySelector("[data-warehouse-update-view]");
     const warehouseUpdateStartButton = document.querySelector("[data-warehouse-update-start]");
@@ -7071,6 +7144,16 @@
         documentPagesByKey: {},
         documentDetails: {},
         balanceDetails: {},
+        documentFilters: {
+          effect: "all",
+          reason: "all",
+          business_date_from: "",
+          business_date_to: "",
+          search: "",
+          include_technical: false
+        },
+        inventoryPreview: null,
+        overheadPreview: null,
         error: "",
         updateRunId: "",
         updatePollTimer: null,
@@ -7669,6 +7752,24 @@
         loadWarehouseDocuments(state.warehouses.activeKey, 1);
       });
     }
+    if (ffInventoryTemplate) ffInventoryTemplate.addEventListener("click", downloadFfInventoryTemplate);
+    if (ffInventoryPreview) ffInventoryPreview.addEventListener("click", previewFfInventory);
+    if (ffInventoryConfirm) ffInventoryConfirm.addEventListener("click", confirmFfInventory);
+    if (ffOverheadPreview) ffOverheadPreview.addEventListener("click", previewFfOverhead);
+    if (ffOverheadConfirm) ffOverheadConfirm.addEventListener("click", confirmFfOverhead);
+    if (warehouseDocumentFilterApply) warehouseDocumentFilterApply.addEventListener("click", function() {
+      readWarehouseDocumentFilters();
+      clearWarehouseDocumentPageCache(state.warehouses.activeKey);
+      loadWarehouseDocuments(state.warehouses.activeKey, 1);
+    });
+    if (warehouseDocumentFilterReset) warehouseDocumentFilterReset.addEventListener("click", function() {
+      [warehouseDocumentEffect, warehouseDocumentReason].forEach(function(node) { if (node) node.value = "all"; });
+      [warehouseDocumentDateFrom, warehouseDocumentDateTo, warehouseDocumentSearch].forEach(function(node) { if (node) node.value = ""; });
+      if (warehouseDocumentTechnical) warehouseDocumentTechnical.checked = false;
+      readWarehouseDocumentFilters();
+      clearWarehouseDocumentPageCache(state.warehouses.activeKey);
+      loadWarehouseDocuments(state.warehouses.activeKey, 1);
+    });
     if (warehouseBalancesNode) {
       warehouseBalancesNode.addEventListener("toggle", function(event) {
         const details = event.target.closest("[data-warehouse-balance-evidence]");
@@ -8721,13 +8822,17 @@
       const key = normalizeWarehouseKey(warehouseKey);
       if (key === "update") return;
       const requestedPage = Math.max(1, Number(page || 1));
-      const cacheKey = key + ":" + String(requestedPage);
+      const filterQuery = warehouseDocumentFilterQuery();
+      const filterKey = filterQuery.toString();
+      const cacheKey = key + ":" + filterKey + ":" + String(requestedPage);
       const cached = state.warehouses.documentPagesByKey[cacheKey] || {};
       try {
         const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
         const headers = {Accept: "application/json"};
         if (cached.etag) headers["If-None-Match"] = cached.etag;
-        const response = await fetch(basePath + "/" + encodeURIComponent(key) + "/documents?page=" + encodeURIComponent(requestedPage) + "&limit=25", {headers: headers});
+        filterQuery.set("page", String(requestedPage));
+        filterQuery.set("limit", "25");
+        const response = await fetch(basePath + "/" + encodeURIComponent(key) + "/documents?" + filterQuery.toString(), {headers: headers});
         let payload = cached.payload;
         if (response.status !== 304) {
           payload = await response.json().catch(function() { return {}; });
@@ -8740,7 +8845,7 @@
         if (key !== state.warehouses.activeKey || !payload) return;
         const documents = [];
         for (let currentPage = 1; currentPage <= requestedPage; currentPage += 1) {
-          const pagePayload = (state.warehouses.documentPagesByKey[key + ":" + String(currentPage)] || {}).payload;
+          const pagePayload = (state.warehouses.documentPagesByKey[key + ":" + filterKey + ":" + String(currentPage)] || {}).payload;
           if (pagePayload && Array.isArray(pagePayload.documents)) documents.push.apply(documents, pagePayload.documents);
         }
         const pageState = payload.page || {};
@@ -8753,6 +8858,152 @@
         if (warehouseDocumentsNode && key === state.warehouses.activeKey) {
           warehouseDocumentsNode.innerHTML = '<tr><td colspan="12"><p class="warehouse-empty">Документы временно недоступны: ' + escapeHtml(String(error && error.message ? error.message : error)) + '</p></td></tr>';
         }
+      }
+    }
+
+    function readWarehouseDocumentFilters() {
+      state.warehouses.documentFilters = {
+        effect: String(warehouseDocumentEffect && warehouseDocumentEffect.value || "all"),
+        reason: String(warehouseDocumentReason && warehouseDocumentReason.value || "all"),
+        business_date_from: String(warehouseDocumentDateFrom && warehouseDocumentDateFrom.value || ""),
+        business_date_to: String(warehouseDocumentDateTo && warehouseDocumentDateTo.value || ""),
+        search: String(warehouseDocumentSearch && warehouseDocumentSearch.value || "").trim(),
+        include_technical: Boolean(warehouseDocumentTechnical && warehouseDocumentTechnical.checked)
+      };
+    }
+
+    function warehouseDocumentFilterQuery() {
+      const filters = state.warehouses.documentFilters || {};
+      const query = new URLSearchParams();
+      query.set("effect", String(filters.effect || "all"));
+      query.set("reason", String(filters.reason || "all"));
+      if (filters.business_date_from) query.set("business_date_from", filters.business_date_from);
+      if (filters.business_date_to) query.set("business_date_to", filters.business_date_to);
+      if (filters.search) query.set("search", filters.search);
+      if (filters.include_technical) query.set("include_technical", "true");
+      return query;
+    }
+
+    function clearWarehouseDocumentPageCache(warehouseKey) {
+      const prefix = String(warehouseKey || "") + ":";
+      Object.keys(state.warehouses.documentPagesByKey).forEach(function(key) {
+        if (key.indexOf(prefix) === 0) delete state.warehouses.documentPagesByKey[key];
+      });
+    }
+
+    function warehouseBusinessDateToday() {
+      const parts = new Intl.DateTimeFormat("en-CA", {timeZone: "Asia/Yekaterinburg", year: "numeric", month: "2-digit", day: "2-digit"}).formatToParts(new Date());
+      const values = {};
+      parts.forEach(function(part) { values[part.type] = part.value; });
+      return values.year + "-" + values.month + "-" + values.day;
+    }
+
+    function setFfResult(node, message, tone) {
+      if (!node) return;
+      node.textContent = String(message || "");
+      node.setAttribute("data-tone", String(tone || "neutral"));
+      node.hidden = !message;
+    }
+
+    function ffDocumentBasePath() {
+      return String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "") + "/ff";
+    }
+
+    function downloadFfInventoryTemplate() {
+      const businessDate = String(ffInventoryDate && ffInventoryDate.value || warehouseBusinessDateToday());
+      window.location.assign(ffDocumentBasePath() + "/inventory/template.xlsx?business_date=" + encodeURIComponent(businessDate));
+    }
+
+    async function previewFfInventory() {
+      const file = ffInventoryFile && ffInventoryFile.files && ffInventoryFile.files[0];
+      if (!file) { setFfResult(ffInventoryResult, "Выберите заполненный XLSX.", "error"); return; }
+      ffInventoryPreview.disabled = true;
+      if (ffInventoryConfirm) ffInventoryConfirm.disabled = true;
+      state.warehouses.inventoryPreview = null;
+      try {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        form.append("business_date", String(ffInventoryDate && ffInventoryDate.value || ""));
+        const response = await fetch(ffDocumentBasePath() + "/inventory/preview", {method: "POST", headers: {Accept: "application/json"}, body: form});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        const blockers = Array.isArray(payload.blockers) ? payload.blockers : [];
+        if (!payload.apply_allowed || blockers.length) throw new Error(blockers.map(function(item) { return String(item.message || item.code || item); }).join("\n") || "Проведение заблокировано.");
+        state.warehouses.inventoryPreview = payload;
+        if (ffInventoryConfirm) ffInventoryConfirm.disabled = false;
+        const manifest = payload.manifest || {};
+        setFfResult(ffInventoryResult, "Проверка пройдена. SKU: " + String((manifest.per_sku || []).length) + "; целевой остаток: " + String(manifest.target_total || "0") + ". Для проведения нажмите отдельное подтверждение.", "success");
+      } catch (error) {
+        setFfResult(ffInventoryResult, String(error && error.message ? error.message : error), "error");
+      } finally { ffInventoryPreview.disabled = false; }
+    }
+
+    async function confirmFfInventory() {
+      const preview = state.warehouses.inventoryPreview;
+      if (!preview || !ffInventoryConfirm) return;
+      ffInventoryConfirm.disabled = true;
+      try {
+        const response = await fetch(ffDocumentBasePath() + "/inventory/confirm", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify({confirm: true, preview_id: preview.preview_id, fingerprint: preview.fingerprint})});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        state.warehouses.inventoryPreview = null;
+        clearWarehouseDocumentPageCache("ff");
+        const replay = payload.replay || {};
+        const replayFailed = String(replay.status || "") === "failed";
+        setFfResult(
+          ffInventoryResult,
+          "Инвентаризация проведена append-only. Документ: " + String(payload.reconciliation_id || "—") + "." +
+            (replayFailed ? " Пересчёт оставлен в штатной очереди: " + String(replay.error || "ошибка пересчёта") + "." : " Пересчёт: " + String(replay.status || "queued") + "."),
+          replayFailed ? "error" : "success"
+        );
+        loadWarehouse("ff", {force: true});
+      } catch (error) {
+        setFfResult(ffInventoryResult, String(error && error.message ? error.message : error), "error");
+        ffInventoryConfirm.disabled = false;
+      }
+    }
+
+    async function previewFfOverhead() {
+      if (!ffOverheadPreview) return;
+      ffOverheadPreview.disabled = true;
+      if (ffOverheadConfirm) ffOverheadConfirm.disabled = true;
+      state.warehouses.overheadPreview = null;
+      const request = {business_date: String(ffOverheadDate && ffOverheadDate.value || ""), amount_rub: String(ffOverheadAmount && ffOverheadAmount.value || ""), reason: String(ffOverheadReason && ffOverheadReason.value || "")};
+      try {
+        const response = await fetch(ffDocumentBasePath() + "/overhead/preview", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify(request)});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        state.warehouses.overheadPreview = {request: request, payload: payload};
+        if (ffOverheadConfirm) ffOverheadConfirm.disabled = false;
+        const manifest = payload.manifest || {};
+        setFfResult(ffOverheadResult, "Проверка пройдена. " + String((manifest.allocations || []).length) + " SKU, denominator " + String(manifest.denominator_quantity || "0") + " ед.; распределено " + String(manifest.amount_rub || "0") + " ₽. Для проведения нажмите отдельное подтверждение.", "success");
+      } catch (error) { setFfResult(ffOverheadResult, String(error && error.message ? error.message : error), "error"); }
+      finally { ffOverheadPreview.disabled = false; }
+    }
+
+    async function confirmFfOverhead() {
+      const preview = state.warehouses.overheadPreview;
+      if (!preview || !ffOverheadConfirm) return;
+      ffOverheadConfirm.disabled = true;
+      try {
+        const body = Object.assign({}, preview.request, {confirm: true, fingerprint: preview.payload.fingerprint});
+        const response = await fetch(ffDocumentBasePath() + "/overhead/confirm", {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify(body)});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        state.warehouses.overheadPreview = null;
+        clearWarehouseDocumentPageCache("ff");
+        const replay = payload.replay || {};
+        const replayFailed = String(replay.status || "") === "failed";
+        setFfResult(
+          ffOverheadResult,
+          "Накладные расходы проведены без изменения количества. Документ: " + String(payload.document_id || "—") + "." +
+            (replayFailed ? " Пересчёт оставлен в штатной очереди: " + String(replay.error || "ошибка пересчёта") + "." : " Пересчёт: " + String(replay.status || "queued") + "."),
+          replayFailed ? "error" : "success"
+        );
+        loadWarehouse("ff", {force: true});
+      } catch (error) {
+        setFfResult(ffOverheadResult, String(error && error.message ? error.message : error), "error");
+        ffOverheadConfirm.disabled = false;
       }
     }
 
@@ -8781,7 +9032,13 @@
       const target = detailsNode.querySelector("[data-warehouse-document-detail-body]");
       if (!target) return;
       const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
-      target.innerHTML = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.human_evidence, "Основание документа", documentRow.provenance) + '</div>' +
+      const links = Array.isArray(documentRow.linked_document_ids) ? documentRow.linked_document_ids : [];
+      const sourceFile = documentRow.source_file_path
+        ? '<p><a class="button secondary" href="' + escapeHtml(documentRow.source_file_path) + '">Скачать исходный файл</a></p>'
+        : '';
+      target.innerHTML = '<div class="warehouse-document-provenance"><p><strong>Создан:</strong> ' + escapeHtml(warehouseDate(documentRow.created_at)) + ' · <strong>Автор:</strong> ' + escapeHtml(documentRow.actor || "—") + '</p>' +
+        (links.length ? '<p><strong>Связанные документы:</strong> ' + escapeHtml(links.join(", ")) + '</p>' : '') + sourceFile +
+        warehouseEvidenceDetails(documentRow.human_evidence, "Основание документа", documentRow.provenance) + '</div>' +
         '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Основание</th></tr></thead><tbody>' +
         (lines.length ? lines.map(function(line) {
           return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.human_evidence, "Основание", line.provenance) + '</td></tr>';
@@ -9134,8 +9391,18 @@
         : (raw || "—");
     }
 
+    function warehouseBusinessDate(value) {
+      const raw = String(value || "").slice(0, 10);
+      const parts = raw.split("-");
+      return parts.length === 3 ? parts[2] + "." + parts[1] + "." + parts[0] : (raw || "—");
+    }
+
     function warehouseEvidenceDetails(summary, label, rawValue) {
-      const items = Array.isArray(summary && summary.items) ? summary.items : [];
+      const items = Array.isArray(summary && summary.items)
+        ? summary.items
+        : (Array.isArray(summary) ? summary.map(function(item) {
+            return {document: item.label || "Основание", confirmation_status: item.value || "—"};
+          }) : []);
       const fields = [
         ["document", "Документ"],
         ["date", "Дата"],
@@ -9171,6 +9438,14 @@
       const documents = Array.isArray(payload && payload.documents) ? payload.documents : [];
       const unmatched = Array.isArray(payload && payload.unmatched_doprinato) ? payload.unmatched_doprinato : [];
       const initialized = String((payload && payload.status) || "") === "ready";
+      const isFf = String(warehouse.warehouse_key || "") === "ff";
+      if (warehouseFfActions) warehouseFfActions.hidden = !isFf;
+      if (warehouseDocumentFilters) warehouseDocumentFilters.hidden = !isFf;
+      if (isFf) {
+        const today = warehouseBusinessDateToday();
+        if (ffInventoryDate && !ffInventoryDate.value) ffInventoryDate.value = today;
+        if (ffOverheadDate && !ffOverheadDate.value) ffOverheadDate.value = today;
+      }
       if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Склады и себестоимость");
       if (warehouseMetaNode) {
         warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—") +
@@ -9474,13 +9749,13 @@
     }
 
     function renderWarehouseDocumentRow(documentRow) {
-      const movement = String(documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
+      const movement = String(documentRow.warehouse_from_label || documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_label || documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
       return '<tr data-warehouse-document-id="' + escapeHtml(documentRow.document_id || "") + '">' +
-        '<td>' + escapeHtml(documentRow.document_number || "—") + '</td><td>' + escapeHtml(warehouseDate(documentRow.occurred_at)) + '</td>' +
+        '<td>' + escapeHtml(documentRow.document_number || "—") + '</td><td>' + escapeHtml(warehouseBusinessDate(documentRow.business_date || documentRow.occurred_at)) + '</td>' +
         '<td>' + escapeHtml(documentRow.document_type_label || "—") + '</td><td>' + escapeHtml(documentRow.warehouse_name || "—") + '</td>' +
         '<td>' + escapeHtml(movement) + '</td><td>' + escapeHtml(documentRow.source_basis || "—") + '</td>' +
         '<td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.sku_count)) + '</td><td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.total_quantity)) + '</td>' +
-        '<td>' + escapeHtml(warehouseMoney(documentRow.total_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(documentRow.total_capital_rub)) + '</td><td>' + escapeHtml(documentRow.status_label || "—") + '</td>' +
+        '<td>' + escapeHtml(warehouseMoney(documentRow.total_expense_rub)) + '</td><td>' + escapeHtml(warehouseMoney(documentRow.total_capital_rub)) + '</td><td>' + escapeHtml(documentRow.status_label || "—") + '</td>' +
         '<td><details class="warehouse-source-details" data-warehouse-document-detail="' + escapeHtml(documentRow.document_id || "") + '"><summary>Открыть</summary><div data-warehouse-document-detail-body><p class="warehouse-empty">Строки и основания загрузятся при раскрытии.</p></div></details></td></tr>';
     }
 

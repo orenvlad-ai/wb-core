@@ -465,8 +465,42 @@ def _run_warehouse_ui_flow(
             documents_drawer = page.locator("[data-warehouse-documents-drawer]")
             if not documents_drawer.evaluate("node => node.open"):
                 documents_drawer.locator("summary").click()
+            registry_document_id = str(expected["document_id"])
+            documents_query = "?page=1&limit=25"
+            if warehouse_key == "ff":
+                page.wait_for_function(
+                    "() => document.querySelectorAll('[data-warehouse-document-id]').length > 0",
+                    timeout=60_000,
+                )
+                _assert(
+                    page.locator(f'[data-warehouse-document-id="{registry_document_id}"]').count() == 0,
+                    "Склад FF: technical functional document is hidden by default",
+                )
+                technical_toggle = page.locator("[data-warehouse-document-technical]")
+                technical_toggle.check()
+                page.locator("[data-warehouse-document-search]").fill(registry_document_id)
+                page.locator("[data-warehouse-document-filter-apply]").click()
+                technical_query = (
+                    "?include_technical=true&search="
+                    + quote(registry_document_id, safe="")
+                    + "&page=1&limit=25"
+                )
+                technical_payload = _protected_json_get(
+                    context,
+                    normalized_base_url
+                    + "/v1/sheet-vitrina-v1/warehouses/ff/documents"
+                    + technical_query,
+                    label="Склад FF: technical documents API",
+                )
+                technical_matches = [
+                    item for item in technical_payload.get("documents") or []
+                    if str(item.get("document_id") or "").endswith(":" + registry_document_id)
+                ]
+                _assert(len(technical_matches) == 1, "Склад FF: one version-qualified technical document")
+                registry_document_id = str(technical_matches[0]["document_id"])
+                documents_query = technical_query
             document_row = page.locator(
-                f'[data-warehouse-document-id="{expected["document_id"]}"]'
+                f'[data-warehouse-document-id="{registry_document_id}"]'
             )
             document_row.wait_for(timeout=60_000)
 
@@ -483,14 +517,15 @@ def _run_warehouse_ui_flow(
                 normalized_base_url
                 + "/v1/sheet-vitrina-v1/warehouses/"
                 + warehouse_key
-                + "/documents?page=1&limit=25",
+                + "/documents"
+                + documents_query,
                 label=f"{warehouse_name}: paginated documents API",
             )
             detail_documents = list(documents_payload.get("documents") or [])
             matching_documents = [
                 item
                 for item in detail_documents
-                if str(item.get("document_id") or "") == str(expected.get("document_id") or "")
+                if str(item.get("document_id") or "") == registry_document_id
             ]
             _assert(len(matching_documents) == 1, f"{warehouse_name}: active version document is in detail registry")
             document_payload = _protected_json_get(
@@ -499,12 +534,12 @@ def _run_warehouse_ui_flow(
                 + "/v1/sheet-vitrina-v1/warehouses/"
                 + warehouse_key
                 + "/documents/"
-                + str(expected.get("document_id") or ""),
+                + registry_document_id,
                 label=f"{warehouse_name}: lazy document detail API",
             )
             detail_document = dict(document_payload.get("document") or {})
             _assert(
-                str(detail_document.get("document_id") or "") == str(expected.get("document_id") or ""),
+                str(detail_document.get("document_id") or "") == registry_document_id,
                 f"{warehouse_name}: detail/readback document identity",
             )
             _assert(
@@ -561,6 +596,21 @@ def _run_warehouse_ui_flow(
                         "Необеспеченный резерв",
                     ],
                     "Склад FF: physical and reservation summary labels",
+                )
+                ff_actions = page.locator("[data-warehouse-ff-actions]")
+                _assert(ff_actions.is_visible(), "Склад FF: inventory and overhead document controls are visible")
+                _assert(
+                    ff_actions.get_by_text("Скачать шаблон", exact=True).count() == 1
+                    and ff_actions.get_by_text("Загрузить инвентаризацию", exact=True).count() == 1
+                    and ff_actions.get_by_text("Накладные расходы FF", exact=True).count() == 1,
+                    "Склад FF: localized pilot actions",
+                )
+                _assert(
+                    page.locator("[data-warehouse-document-effect]").count() == 1
+                    and page.locator("[data-warehouse-document-reason]").count() == 1
+                    and page.locator("[data-warehouse-document-search]").count() == 1
+                    and page.locator("[data-warehouse-document-technical]").is_checked(),
+                    "Склад FF: server-side registry filters and explicit technical toggle",
                 )
             expected_status = str(detail_summary.get("status_label") or "").strip()
             expected_status_detail = str(
@@ -803,7 +853,7 @@ def _run_warehouse_ui_flow(
                     '[data-warehouse-document-id="' + expected.documentId + '"] .warehouse-document-lines tbody tr'
                 ).length === expected.lineCount""",
                 arg={
-                    "documentId": str(expected.get("document_id") or ""),
+                    "documentId": registry_document_id,
                     "lineCount": max(1, len(expected_lines)),
                 },
                 timeout=60_000,
@@ -814,9 +864,18 @@ def _run_warehouse_ui_flow(
                 f"{warehouse_name}: opening document line count",
             )
             document_text = document_row.inner_text()
-            _assert(str(expected.get("document_id") or "") in document_text, f"{warehouse_name}: document number")
+            if warehouse_key != "ff":
+                _assert(str(expected.get("document_id") or "") in document_text, f"{warehouse_name}: document number")
             _assert(
-                any(label in document_text for label in ("Функциональный cutover", "Почасовая версия склада")),
+                any(
+                    label in document_text
+                    for label in (
+                        "Функциональный cutover",
+                        "Почасовая версия склада",
+                        "Технический переход функционального контура",
+                        "Техническая синхронизация склада",
+                    )
+                ),
                 f"{warehouse_name}: functional document type",
             )
             document_provenance = document_row.locator(
@@ -857,6 +916,7 @@ def _run_warehouse_ui_flow(
                     "warehouse_key": warehouse_key,
                     "warehouse_name": warehouse_name,
                     "document_id": str(expected.get("document_id") or ""),
+                    "registry_document_id": registry_document_id,
                     "sku_count": int(expected_sku_count),
                     "total_quantity": str(detail_summary.get("total_quantity") or 0),
                     "opening_sku_count": int(expected.get("sku_count") or 0),
@@ -882,7 +942,7 @@ def _run_warehouse_ui_flow(
             item for item in warehouse_evidence if item.get("warehouse_key") == "ff"
         )
         legacy_ff_document = page.locator(
-            f'[data-warehouse-document-id="{legacy_ff_expected["document_id"]}"]'
+            f'[data-warehouse-document-id="{legacy_ff_expected["registry_document_id"]}"]'
         )
         legacy_ff_document.wait_for(timeout=60_000)
         legacy_summary_values = page.locator(

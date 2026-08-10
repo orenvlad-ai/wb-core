@@ -218,6 +218,8 @@ Denominator priority for per-unit display:
 
 Only active uploads with `validation_status=ok`, `deleted_at IS NULL` and ordinary matched lines enter the overlay. STORAGE rows enter only through their allocated amount on ordinary lines. Failed, unmatched, duplicate and deleted uploads are excluded.
 
+`Распределение накладных расходов FF` on the warehouse FF page is a separate same-date warehouse-capital document. It may capitalize only the user-entered general FF amount over positive physical FF quantity. It must not import, infer or repeat supply-specific `Услуги ФФ`, allocated `STORAGE`, transit or paid WB acceptance amounts from this module: those remain attached to their exact WB supply cost layer and are accounted once through the established overlay/canonical-cost contract.
+
 # 8. Smokes
 
 Targeted smokes:

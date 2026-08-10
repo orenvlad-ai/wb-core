@@ -73,6 +73,9 @@ from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.partner_report import PartnerReportError
 from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
 from packages.application.warehouse_functional import WarehouseFunctionalError
+from packages.application.ff_inventory_reconciliation import FfInventoryReconciliationError
+from packages.application.ff_overhead_allocation import FfOverheadAllocationError
+from packages.application.ff_warehouse_documents import FfWarehouseDocumentsError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
@@ -358,6 +361,14 @@ DEFAULT_WAREHOUSES_SYNC_STATUS_PATH = f"{DEFAULT_WAREHOUSES_SYNC_PATH}/status"
 DEFAULT_WAREHOUSES_RECOVERY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/recovery"
 DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/preview"
 DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
+DEFAULT_FF_INVENTORY_TEMPLATE_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/template.xlsx"
+DEFAULT_FF_INVENTORY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/preview"
+DEFAULT_FF_INVENTORY_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/confirm"
+DEFAULT_FF_INVENTORY_ROLLBACK_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/inventory/rollback"
+DEFAULT_FF_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/preview"
+DEFAULT_FF_OVERHEAD_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/confirm"
+DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/preview"
+DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/confirm"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -816,6 +827,75 @@ def _build_handler(
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
+            if parsed.path in {
+                DEFAULT_FF_INVENTORY_PREVIEW_PATH,
+                DEFAULT_FF_INVENTORY_CONFIRM_PATH,
+                DEFAULT_FF_INVENTORY_ROLLBACK_PATH,
+                DEFAULT_FF_OVERHEAD_PREVIEW_PATH,
+                DEFAULT_FF_OVERHEAD_CONFIRM_PATH,
+                DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH,
+                DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH,
+            }:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    actor = _current_web_user_actor(self)
+                    if parsed.path == DEFAULT_FF_INVENTORY_PREVIEW_PATH:
+                        upload_payload = _load_uploaded_file_payload(self)
+                        fields = (
+                            upload_payload.get("fields")
+                            if isinstance(upload_payload.get("fields"), Mapping)
+                            else {}
+                        )
+                        payload = entrypoint.handle_ff_inventory_preview_request(
+                            upload_payload["workbook_bytes"],
+                            business_date=str(fields.get("business_date") or ""),
+                            uploaded_filename=str(upload_payload.get("filename") or "inventory.xlsx"),
+                        )
+                    else:
+                        body = _load_request_payload(self)
+                        if body.get("confirm") is not True and parsed.path in {
+                            DEFAULT_FF_INVENTORY_CONFIRM_PATH,
+                            DEFAULT_FF_INVENTORY_ROLLBACK_PATH,
+                            DEFAULT_FF_OVERHEAD_CONFIRM_PATH,
+                            DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH,
+                        }:
+                            raise ValueError("explicit confirm is required")
+                        if parsed.path == DEFAULT_FF_INVENTORY_CONFIRM_PATH:
+                            payload = entrypoint.handle_ff_inventory_confirm_request(body, actor=actor)
+                        elif parsed.path == DEFAULT_FF_INVENTORY_ROLLBACK_PATH:
+                            payload = entrypoint.handle_ff_inventory_rollback_request(body, actor=actor)
+                        elif parsed.path == DEFAULT_FF_OVERHEAD_PREVIEW_PATH:
+                            payload = entrypoint.handle_ff_overhead_preview_request(body)
+                        elif parsed.path == DEFAULT_FF_OVERHEAD_CONFIRM_PATH:
+                            payload = entrypoint.handle_ff_overhead_confirm_request(body, actor=actor)
+                        elif parsed.path == DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH:
+                            payload = entrypoint.handle_ff_overhead_reversal_preview_request(body)
+                        else:
+                            payload = entrypoint.handle_ff_overhead_reversal_confirm_request(body, actor=actor)
+                except (FfInventoryReconciliationError, FfOverheadAllocationError) as exc:
+                    status = (
+                        HTTPStatus.CONFLICT
+                        if "stale" in getattr(exc, "code", "")
+                        or "changed" in getattr(exc, "code", "")
+                        else HTTPStatus.UNPROCESSABLE_ENTITY
+                    )
+                    _write_json_response(
+                        self,
+                        status,
+                        {
+                            "error": str(exc),
+                            "code": getattr(exc, "code", "ff_document_blocked"),
+                            "details": getattr(exc, "details", None),
+                        },
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path in {
                 DEFAULT_WAREHOUSES_SYNC_PATH,
                 DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH,
@@ -4093,18 +4173,60 @@ def _build_handler(
                         warehouse_key = parts[0]
                         if len(parts) == 1:
                             payload = entrypoint.handle_warehouse_detail_request(warehouse_key)
+                        elif parts == ["ff", "inventory", "template.xlsx"]:
+                            query = _flatten_query_params(parsed.query)
+                            workbook_bytes, filename, content_type = (
+                                entrypoint.handle_ff_inventory_template_request(
+                                    business_date=str(
+                                        query.get("business_date")
+                                        or current_business_date_iso()
+                                    )
+                                )
+                            )
+                            _write_binary_response(
+                                self,
+                                HTTPStatus.OK,
+                                workbook_bytes,
+                                content_type=content_type,
+                                filename=filename,
+                                as_attachment=True,
+                            )
+                            return
                         elif len(parts) == 2 and parts[1] == "documents":
                             query = _flatten_query_params(parsed.query)
                             payload = entrypoint.handle_warehouse_documents_request(
                                 warehouse_key,
                                 page=int(query.get("page") or 1),
                                 limit=int(query.get("limit") or 25),
+                                effect=str(query.get("effect") or "all"),
+                                reason=str(query.get("reason") or "all"),
+                                business_date_from=str(query.get("business_date_from") or ""),
+                                business_date_to=str(query.get("business_date_to") or ""),
+                                search=str(query.get("search") or ""),
+                                include_technical=str(query.get("include_technical") or "").lower()
+                                in {"1", "true", "yes", "on"},
                             )
                         elif len(parts) == 3 and parts[1] == "documents":
                             payload = entrypoint.handle_warehouse_document_detail_request(
                                 warehouse_key,
                                 parts[2],
                             )
+                        elif len(parts) == 4 and parts[1] == "documents" and parts[3] == "file":
+                            data, filename, content_type = (
+                                entrypoint.handle_warehouse_document_source_file_request(
+                                    warehouse_key,
+                                    parts[2],
+                                )
+                            )
+                            _write_binary_response(
+                                self,
+                                HTTPStatus.OK,
+                                data,
+                                content_type=content_type,
+                                filename=filename,
+                                as_attachment=True,
+                            )
+                            return
                         elif len(parts) == 3 and parts[1] == "balances":
                             payload = entrypoint.handle_warehouse_balance_detail_request(
                                 warehouse_key,
@@ -4112,7 +4234,13 @@ def _build_handler(
                             )
                         else:
                             raise WarehouseOpeningSnapshotError("invalid warehouse path")
-                except (WarehouseOpeningSnapshotError, WarehouseFunctionalError, ValueError) as exc:
+                except (
+                    WarehouseOpeningSnapshotError,
+                    WarehouseFunctionalError,
+                    FfInventoryReconciliationError,
+                    FfWarehouseDocumentsError,
+                    ValueError,
+                ) as exc:
                     message = str(exc)
                     status = (
                         HTTPStatus.NOT_FOUND

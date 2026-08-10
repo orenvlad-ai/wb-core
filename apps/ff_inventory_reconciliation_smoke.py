@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 import sqlite3
 import sys
@@ -18,6 +19,7 @@ from packages.application.ff_inventory_reconciliation import (  # noqa: E402
     FfInventoryReconciliationError,
     ensure_inventory_reconciliation_schema,
 )
+from packages.application.ff_warehouse_documents import FfWarehouseDocumentView  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
@@ -35,8 +37,22 @@ def main() -> None:
         _seed_nomenclature(runtime, [101, 102, 103, 104])
         _seed_opening(runtime, {101: 10, 102: 20})
         _seed_ff_cost_version(runtime, {101: (10, 100), 102: (20, 200)})
-        workbook = _workbook([(101, "SKU 101", 12), (102, "SKU 102", 18)])
+        workbook = _workbook(
+            [(101, "SKU 101", 12), (102, "SKU 102", 18), (103, "SKU 103", 0), (104, "SKU 104", 0)]
+        )
         block = FfInventoryReconciliation(runtime=runtime, timestamp_factory=lambda: NOW)
+
+        template, template_name, template_type = block.build_template(
+            business_date=BUSINESS_DATE
+        )
+        assert template.startswith(b"PK") and template_name.endswith(".xlsx")
+        assert "spreadsheetml" in template_type
+        preview = block.create_preview(
+            source_bytes=workbook,
+            source_filename="manager.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert preview["apply_allowed"] is True and preview["preview_id"].startswith("ffip_")
 
         plan = block.build_plan(
             source_bytes=workbook,
@@ -70,6 +86,26 @@ def main() -> None:
         assert readback["status"] == "applied"
         assert readback["target_readback"]["target_matches"] is True
         assert readback["non_target_digest_matches"] is True
+        inventory_page = FfWarehouseDocumentView(db_path=runtime.db_path).page(
+            reason="inventory",
+            limit=100,
+        )
+        parent = next(
+            item
+            for item in inventory_page["documents"]
+            if item["document_type_label"] == "Инвентаризация склада FF"
+        )
+        children = [
+            item
+            for item in inventory_page["documents"]
+            if item["document_type_label"]
+            in {"Оприходование излишков", "Списание недостач"}
+        ]
+        assert parent["total_quantity"] == "0" and parent["total_capital_rub"] == "0"
+        assert set(parent["linked_document_ids"]) == {
+            item["document_id"] for item in children
+        }
+        assert sum(Decimal(item["total_capital_rub"]) for item in children) == Decimal("-200")
         with sqlite3.connect(runtime.db_path) as conn:
             audit = conn.execute(
                 "SELECT source_file_blob,source_sha256,approval_reference FROM sheet_vitrina_v1_ff_inventory_reconciliations"
@@ -109,6 +145,15 @@ def main() -> None:
         )
         assert rolled_back["status"] == "rolled_back"
         assert rolled_back["readback"]["target_matches"] is True
+        correction_page = FfWarehouseDocumentView(db_path=runtime.db_path).page(
+            reason="correction",
+            limit=100,
+        )
+        assert correction_page["documents"]
+        assert all(
+            any(link.startswith("ffop:") for link in item["linked_document_ids"])
+            for item in correction_page["documents"]
+        )
         assert block.rollback(
             confirmation_fingerprint=plan["fingerprint"],
             approval_reference="github-comment:fixture-rollback-gate",
@@ -124,7 +169,7 @@ def main() -> None:
             basis_version_id="inventory-original-v1",
         )
         original_basis_workbook = _workbook(
-            [(101, "SKU 101", 11), (102, "SKU 102", 20)]
+            [(101, "SKU 101", 11), (102, "SKU 102", 20), (103, "SKU 103", 0), (104, "SKU 104", 0)]
         )
         original_basis_plan = block.build_plan(
             source_bytes=original_basis_workbook,
@@ -138,8 +183,15 @@ def main() -> None:
         assert original_basis_row["cost_basis"]["basis_kind"] == "exact_original_source_debit"
         assert original_basis_row["unit_cost_rub"] == "250"
 
+        _seed_explicit_inventory_cost_basis(
+            runtime,
+            nm_id=103,
+            unit_cost=0,
+            basis_kind="business_approved_estimate",
+            basis_version_id="zero-cost-must-not-qualify",
+        )
         missing_cost_workbook = _workbook(
-            [(101, "SKU 101", 10), (102, "SKU 102", 20), (103, "SKU 103", 1)]
+            [(101, "SKU 101", 10), (102, "SKU 102", 20), (103, "SKU 103", 1), (104, "SKU 104", 0)]
         )
         missing_cost = block.build_plan(
             source_bytes=missing_cost_workbook,
@@ -167,7 +219,7 @@ def main() -> None:
 
         _seed_explicit_inventory_cost_basis(runtime, nm_id=104, unit_cost=225)
         explicit_workbook = _workbook(
-            [(101, "SKU 101", 10), (102, "SKU 102", 20), (104, "SKU 104", 1)]
+            [(101, "SKU 101", 10), (102, "SKU 102", 20), (103, "SKU 103", 0), (104, "SKU 104", 1)]
         )
         explicit_plan = block.build_plan(
             source_bytes=explicit_workbook,

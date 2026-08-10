@@ -16,6 +16,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_FF_INVENTORY_CONFIRM_PATH,
+    DEFAULT_FF_INVENTORY_PREVIEW_PATH,
+    DEFAULT_FF_INVENTORY_TEMPLATE_PATH,
+    DEFAULT_FF_OVERHEAD_CONFIRM_PATH,
+    DEFAULT_FF_OVERHEAD_PREVIEW_PATH,
     DEFAULT_FF_STOCKS_CONFIRM_PATH,
     DEFAULT_FF_STOCKS_EXPORT_PATH,
     DEFAULT_FF_STOCKS_PATH,
@@ -116,6 +121,47 @@ def main() -> None:
             _assert(status_after_code == 200, "status after confirm must return 200")
             probe_row = next(item for item in status_after_payload["registry"]["rows"] if int(item["nm_id"]) == probe_nm_id)
             _assert(probe_row["current_stock_ff"] == 12.0, "confirmed receipt must affect computed balance")
+
+            inventory_template_code, inventory_template, inventory_headers = _get_bytes(
+                f"{base_url}{DEFAULT_FF_INVENTORY_TEMPLATE_PATH}?business_date=2026-04-18"
+            )
+            _assert(inventory_template_code == 200, "FF inventory template route must return 200")
+            _assert(inventory_headers.get("Content-Type", "").startswith(XLSX_TYPE), "FF inventory template must be XLSX")
+            inventory_rows = read_first_sheet_rows(inventory_template)
+            _assert(len(inventory_rows) == len(active_nm_ids) + 1, "FF inventory template must contain every active SKU")
+            inventory_preview_code, inventory_preview = _post_multipart(
+                f"{base_url}{DEFAULT_FF_INVENTORY_PREVIEW_PATH}",
+                inventory_template,
+                filename="inventory-full.xlsx",
+                fields={"business_date": "2026-04-18"},
+            )
+            _assert(inventory_preview_code == 200, f"inventory preview failed: {inventory_preview}")
+            _assert(inventory_preview["apply_allowed"] is True, "complete inventory preview must be confirmable")
+            inventory_confirm_code, inventory_confirm = _post_json(
+                f"{base_url}{DEFAULT_FF_INVENTORY_CONFIRM_PATH}",
+                {"confirm": True, "preview_id": inventory_preview["preview_id"], "fingerprint": inventory_preview["fingerprint"]},
+            )
+            _assert(inventory_confirm_code == 200, f"inventory confirm failed: {inventory_confirm}")
+            _assert(inventory_confirm["status"] == "applied", "inventory confirm must create immutable parent")
+
+            overhead_preview_code, overhead_preview = _post_json(
+                f"{base_url}{DEFAULT_FF_OVERHEAD_PREVIEW_PATH}",
+                {"business_date": "2026-04-18", "amount_rub": "12.00", "reason": "HTTP fixture overhead"},
+            )
+            _assert(overhead_preview_code == 200, f"overhead preview failed: {overhead_preview}")
+            overhead_confirm_code, overhead_confirm = _post_json(
+                f"{base_url}{DEFAULT_FF_OVERHEAD_CONFIRM_PATH}",
+                {"confirm": True, "business_date": "2026-04-18", "amount_rub": "12.00", "reason": "HTTP fixture overhead", "fingerprint": overhead_preview["fingerprint"]},
+            )
+            _assert(overhead_confirm_code == 200, f"overhead confirm failed: {overhead_confirm}")
+            _assert(overhead_confirm["readback"]["physical_quantity_unchanged"] is True, "overhead must preserve quantity")
+
+            documents_code, documents_payload = _get_json(
+                f"{base_url}/v1/sheet-vitrina-v1/warehouses/ff/documents?effect=cost_only&reason=overhead&business_date_from=2026-04-18&business_date_to=2026-04-18&search=ffoh&include_technical=false&page=1&limit=25"
+            )
+            _assert(documents_code == 200, f"FF business registry failed: {documents_payload}")
+            _assert(documents_payload["page"]["total_count"] == 1, "all document filters must operate server-side")
+            _assert(documents_payload["documents"][0]["document_type_label"] == "Распределение накладных расходов FF", "overhead localization changed")
 
             source_path = f"{DEFAULT_FF_STOCKS_PATH}/operations/{operation['operation_id']}/file"
             file_code, file_bytes, file_headers = _get_bytes(f"{base_url}{source_path}")
