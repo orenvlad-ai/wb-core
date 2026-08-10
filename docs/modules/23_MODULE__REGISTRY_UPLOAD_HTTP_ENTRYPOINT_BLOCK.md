@@ -129,6 +129,17 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/auto-updates/status"
   - "POST /v1/sheet-vitrina-v1/warehouses/sync"
   - "GET /v1/sheet-vitrina-v1/warehouses/sync/status"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/documents"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/documents/{document_id}/file"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/template.xlsx"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/rollback"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
@@ -408,6 +419,10 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `POST /v1/sheet-vitrina-v1/supply/ff-stocks/preview` = manual receipt/writeoff Excel parse preview without applying balance movements
   - `POST /v1/sheet-vitrina-v1/supply/ff-stocks/confirm` = explicit confirm of a clean preview into a durable ledger operation/document
   - `GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file` = download original Excel file for a manual ФФ stock operation
+  - `GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/template.xlsx?business_date=YYYY-MM-DD` = complete active-nomenclature FF count template; missing/ambiguous stable identity fails closed
+  - `POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/preview|confirm|rollback` = stored XLSX preview, explicit exact-fingerprint append-only inventory apply and exact-cost compensating rollback
+  - `POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/preview|confirm` and `/reversal/preview|confirm` = exact quantity-proportional cost-only allocation and immutable storno; physical quantity is outside the write set
+  - `GET /v1/sheet-vitrina-v1/warehouses/ff/documents` = lazy unified business projection with whole-selection `effect`, `reason`, date, bounded search, pagination and `include_technical`; document detail/source-file routes load lines/XLSX only on demand
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx` = проверочный XLSX из 1C FF_STOCK with the same headers as the manual `stock_ff` template
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/uploaded/*` = download exactly the current uploaded operator workbook for the selected dataset
@@ -537,6 +552,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
     - factory = `30 / 30 / 15 / 15 / 15 / 14 / 250 / 14` for `prod / factory->ff / ff->wb / safety_mp / safety_ff / cycle_order / batch / sales_avg`
     - regional = `14 / 7 / 15 / 15 / 250` for `sales_avg / cycle_supply / lead_time_to_region / safety / batch`
   - `Остатки → Склады и себестоимость` has six read-only warehouse detail tabs plus `Обновление и пересчёт`. Detail pages contain no manual sync/rebuild action. The new tab starts the canonical current-source pipeline as an observable background job, returns `run_id`, polls `/warehouses/sync/status`, persists status across browser reloads in the live server process and renders last attempt/success, changed warehouses/SKU, new functional version/business date and a short Russian log. Page open is read-only; concurrent starts return `Уже выполняется другой пересчёт`; historical emergency rebuild remains outside this endpoint;
+  - `Склад FF` is the bounded exception for explicit business-document authoring, not for page-open mutation: it exposes complete inventory template/upload preview/confirm and overhead preview/confirm. Its existing lazy `Реестр документов` is the only FF business registry; filters and pagination are server-side, technical cutover/sync/repair/archive rows are hidden by default, and the legacy `Поставки → ФФ → Операции остатков ФФ` journal remains compatible without becoming a second source of truth;
   - authoritative `orderCount` history для расчёта живёт только server-side в `temporal_source_snapshots[source_key=sales_funnel_history]`;
   - UI больше не hard-cap'ит `sales_avg_period_days`; operator может ввести любой положительный период. Для factory-order этот период теперь означает число валидных торговых дней, которые нужно собрать для availability-adjusted demand estimate, а не простое деление последних N календарных дней;
   - factory-order demand estimation now uses deterministic sales-history heuristic over authoritative `orderCount`: `sales_lookup_days = min(120, max(period, period * 4))`, positive samples define `baseline_daily_sales = median(positive orderCount)`, and a day is valid when `orderCount >= max(1, baseline * 0.45)`;

@@ -23,6 +23,8 @@ from uuid import uuid4
 from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
+from packages.application.ff_inventory_reconciliation import FfInventoryReconciliation
+from packages.application.ff_overhead_allocation import FfOverheadAllocation
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1143,6 +1145,14 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.ff_stock_ledger_block = FfStockLedgerBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_inventory_reconciliation = FfInventoryReconciliation(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_overhead_allocation = FfOverheadAllocation(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -5209,11 +5219,23 @@ class RegistryUploadHttpEntrypoint:
         *,
         page: int = 1,
         limit: int = 25,
+        effect: str = "all",
+        reason: str = "all",
+        business_date_from: str = "",
+        business_date_to: str = "",
+        search: str = "",
+        include_technical: bool = False,
     ) -> dict[str, Any]:
         return self.warehouse_functional_block.warehouse_documents_page(
             warehouse_key,
             page=page,
             limit=limit,
+            effect=effect,
+            reason=reason,
+            business_date_from=business_date_from,
+            business_date_to=business_date_to,
+            search=search,
+            include_technical=include_technical,
         )
 
     def handle_warehouse_document_detail_request(
@@ -5225,6 +5247,259 @@ class RegistryUploadHttpEntrypoint:
             warehouse_key,
             document_id,
         )
+
+    def handle_warehouse_document_source_file_request(
+        self,
+        warehouse_key: str,
+        document_id: str,
+    ) -> tuple[bytes, str, str]:
+        return self.warehouse_functional_block.warehouse_document_source_file(
+            warehouse_key,
+            document_id,
+        )
+
+    def handle_ff_inventory_template_request(
+        self,
+        *,
+        business_date: str,
+    ) -> tuple[bytes, str, str]:
+        return self.ff_inventory_reconciliation.build_template(
+            business_date=business_date,
+        )
+
+    def handle_ff_inventory_preview_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        business_date: str,
+        uploaded_filename: str,
+    ) -> dict[str, Any]:
+        return self.ff_inventory_reconciliation.create_preview(
+            source_bytes=workbook_bytes,
+            source_filename=uploaded_filename,
+            business_date=business_date,
+        )
+
+    def handle_ff_inventory_confirm_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        result = self.ff_inventory_reconciliation.confirm_preview(
+            preview_id=str(payload.get("preview_id") or ""),
+            confirmation_fingerprint=str(payload.get("fingerprint") or ""),
+            created_by=actor,
+        )
+        result["replay"] = self._enqueue_and_replay_ff_inventory(
+            reconciliation_id=str(result.get("reconciliation_id") or ""),
+            reversal=False,
+        )
+        return result
+
+    def handle_ff_inventory_rollback_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        result = self.ff_inventory_reconciliation.rollback(
+            confirmation_fingerprint=str(payload.get("fingerprint") or ""),
+            approval_reference=str(payload.get("approval_reference") or "ui-explicit-storno"),
+            reason=str(payload.get("reason") or ""),
+            created_by=actor,
+        )
+        result["replay"] = self._enqueue_and_replay_ff_inventory(
+            reconciliation_id=str(result.get("reconciliation_id") or ""),
+            reversal=True,
+        )
+        return result
+
+    def handle_ff_overhead_preview_request(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.ff_overhead_allocation.build_plan(
+            business_date=str(payload.get("business_date") or ""),
+            amount_rub=payload.get("amount_rub"),
+            reason=str(payload.get("reason") or ""),
+        )
+
+    def handle_ff_overhead_confirm_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        result = self.ff_overhead_allocation.apply_plan(
+            business_date=str(payload.get("business_date") or ""),
+            amount_rub=payload.get("amount_rub"),
+            reason=str(payload.get("reason") or ""),
+            confirmation_fingerprint=str(payload.get("fingerprint") or ""),
+            created_by=actor,
+        )
+        result["replay"] = self._replay_ff_document_queue(
+            stable_source_ids=["ff_overhead:" + str(result.get("document_id") or "")]
+        )
+        return result
+
+    def handle_ff_overhead_reversal_preview_request(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.ff_overhead_allocation.build_reversal_plan(
+            document_id=str(payload.get("document_id") or ""),
+            reason=str(payload.get("reason") or ""),
+        )
+
+    def handle_ff_overhead_reversal_confirm_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        result = self.ff_overhead_allocation.apply_reversal(
+            document_id=str(payload.get("document_id") or ""),
+            reason=str(payload.get("reason") or ""),
+            confirmation_fingerprint=str(payload.get("fingerprint") or ""),
+            created_by=actor,
+        )
+        result["replay"] = self._replay_ff_document_queue(
+            stable_source_ids=["ff_overhead_reversal:" + str(result.get("document_id") or "")]
+        )
+        return result
+
+    def _enqueue_and_replay_ff_inventory(
+        self,
+        *,
+        reconciliation_id: str,
+        reversal: bool,
+    ) -> dict[str, Any]:
+        if not reconciliation_id:
+            return {"status": "idle", "reason": "inventory_identity_missing"}
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_inventory_reconciliations WHERE reconciliation_id=?",
+                (reconciliation_id,),
+            ).fetchone()
+        if row is None:
+            return {"status": "failed", "error": "inventory audit row is missing"}
+        manifest = json.loads(str(row["manifest_json"] or "{}"))
+        nm_ids = sorted(
+            {
+                int(item.get("nm_id") or 0)
+                for item in manifest.get("per_sku") or []
+                if int(item.get("nm_id") or 0) > 0
+            }
+        )
+        stable_source_id = "ff_inventory:" + reconciliation_id
+        source_revision = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "fingerprint": str(row["plan_fingerprint"]),
+                    "status": str(row["status"]),
+                    "reversal": bool(reversal),
+                    "audit": str(row["reconciliation_json"]),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        enqueue_warehouse_targeted_recalculation(
+            runtime=self.runtime,
+            stable_source_id=stable_source_id,
+            source_revision=source_revision,
+            effective_date=str(row["business_date"]),
+            affected_nm_ids=nm_ids,
+            requested_at=self.activated_at_factory(),
+        )
+        return self._replay_ff_document_queue(stable_source_ids=[stable_source_id])
+
+    def _replay_ff_document_queue(
+        self,
+        *,
+        stable_source_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        stable_ids = sorted({str(item) for item in stable_source_ids if str(item)})
+        if not stable_ids:
+            return {"status": "idle", "reason": "stable_source_missing"}
+        placeholders = ",".join("?" for _ in stable_ids)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [
+                dict(item)
+                for item in conn.execute(
+                    f"""
+                    SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    WHERE stable_source_id IN ({placeholders}) AND status IN ('queued','running')
+                    ORDER BY requested_at,queue_id
+                    """,
+                    tuple(stable_ids),
+                ).fetchall()
+            ]
+        if not rows:
+            return {"status": "complete", "idempotent": True, "queue_count": 0}
+        if self.warehouse_functional_block.readback().get("status") != "ready":
+            return {
+                "status": "queued",
+                "reason": "functional_cutover_not_ready",
+                "queue_ids": [str(item["queue_id"]) for item in rows],
+            }
+        affected_nm_ids = sorted(
+            {
+                int(nm_id)
+                for item in rows
+                for nm_id in json.loads(str(item["affected_nm_ids_json"] or "[]"))
+                if int(nm_id) > 0
+            }
+        )
+        exact_requests = [
+            {
+                **item,
+                "affected_nm_ids": json.loads(str(item["affected_nm_ids_json"] or "[]")),
+            }
+            for item in rows
+        ]
+        try:
+            plan = self.warehouse_functional_block.build_targeted_recovery_plan(
+                affected_nm_ids=affected_nm_ids,
+                stable_source_ids=stable_ids,
+                targeted_recalc_requests=exact_requests,
+            )
+            publication = self.warehouse_functional_block.apply_plan(
+                plan,
+                confirm_fingerprint=str(plan["plan_fingerprint"]),
+            )
+            economics = self.calculation_parameters_block.publish_current_functional_economics(
+                verified_backup=self.calculation_parameters_block.prepare_functional_economics_backup(),
+            )
+        except Exception as exc:
+            error_text = str(exc)[:1000]
+            queue_ids = [str(item["queue_id"]) for item in rows]
+            retry_placeholders = ",".join("?" for _ in queue_ids)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute(
+                    f"""
+                    UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    SET status='queued',started_at=NULL,finished_at=NULL,error=?
+                    WHERE queue_id IN ({retry_placeholders})
+                    """,
+                    (error_text, *queue_ids),
+                )
+                conn.commit()
+            return {
+                "status": "failed",
+                "error": error_text,
+                "queue_ids": queue_ids,
+            }
+        return {
+            "status": "complete",
+            "queue_ids": [str(item["queue_id"]) for item in rows],
+            "functional_version_id": str((publication.get("active_version") or {}).get("version_id") or ""),
+            "economics_plan_fingerprint": str(economics.get("plan_fingerprint") or ""),
+        }
 
     def handle_warehouse_balance_detail_request(
         self,

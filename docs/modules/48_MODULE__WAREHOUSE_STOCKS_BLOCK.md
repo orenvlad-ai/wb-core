@@ -13,6 +13,8 @@ source_basis:
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
+  - "packages/application/ff_warehouse_documents.py"
+  - "packages/application/ff_overhead_allocation.py"
   - "packages/application/warehouse_archival_estimate.py"
   - "packages/application/calculation_parameters.py"
   - "packages/application/stocks_block.py"
@@ -23,6 +25,8 @@ related_modules:
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}"
+  - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}/documents"
+  - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}/documents/{document_id}"
   - "POST /v1/sheet-vitrina-v1/warehouses/sync"
   - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/apply"
@@ -66,6 +70,8 @@ Active supplier source view contains only non-excluded financial documents and e
 WB status `Отгрузка разрешена` creates one idempotent canonical FF debit of the full exact packed composition when identity is confirmed and physical FF quantity is sufficient. The separate reservation ledger is used only for physical shortage or unresolved identity/composition; it never represents missing transit or another cost component. A later supplier receipt fulfils a physically justified reservation atomically. Known FF capital follows the quantity; absent downstream transit/services/storage/paid-acceptance amounts make the cost layer preliminary or unavailable with an explicit blocker and never synthetic zero. Late cost replay enriches that supply layer without another debit. `Допринято` does not create a second debit.
 
 Successful positive Seller Portal transit enrichment is joined into this same downstream supply layer. It does not overwrite official WB facts. The full corrected sent composition remains the denominator, and one post-save callback idempotently rematerializes only dependent cost layers. Confirmed zero is distinct from not-requested/updating/not-found/source-error/session-expired; error or missing cost stays a truthful cost-freshness blocker and repeat sync/recovery cannot debit twice.
+
+Audited FF inventory and overhead remain operations of the same append-only ledger. Inventory parent is an audit/document link only and contributes zero movement to functional replay; its linked receipt/writeoff children carry the physical and frozen capital effects. Overhead and its reversal carry zero quantity plus exact positive/negative `cost_adjustment` capital. Replay places these cost-only lines at the end of their business date, requires current physical quantity to equal the frozen allocation basis and then recalculates WAC. A changed basis, non-positive result capital or ambiguous late-loaded chronology blocks publication and leaves last-good active version.
 
 ## 2.3 FF → WB and discrepancies
 
@@ -140,6 +146,8 @@ Dry-run фиксирует одну canonical business date в fingerprint на 
 # 4. Targeted replay and certification
 
 Source change/archive/exclusion ставит одну coalesced queue revision по stable source id/source revision/earliest business date и affected SKU, затем coherent calculation публикует новую version atomically. Physical source rows не удаляются и quantity не двигается повторно. Failed calculation оставляет last good active version.
+
+Inventory confirm/rollback and overhead confirm/reversal use the same exact targeted queue contract. The HTTP application attempts the bounded local functional + economics replay immediately when a functional cutover is active; otherwise it truthfully returns a durable queued state for the normal repo-owned replay contour. Exact queue identity, affected `nmId`, earliest business date and source revision are pinned, and an overlapping unselected queue fails closed.
 
 Routine header-only factual-date correction is a distinct target-scoped publication. Query-only preview reads the exact shipment closure and compact active functional rows, never the Finance raw table or a disposable database copy. Apply and hourly/manual publication share `.warehouse-functional-sync.lock`; a bounded capacity check and stale target/non-target digests run before the single transaction. The successor version carries a coherent active WB snapshot/document projection, exact affected balance rows, queue/audit diagnostics and a target before-image rollback manifest. Unrelated global source anomalies and anomaly budgets remain diagnostics and cannot gate this local correction.
 
@@ -244,6 +252,10 @@ Hosted backup-only, manual and reviewed sync-apply actions derive the restore-po
 
 Navigation is `Остатки → Склады и себестоимость / Отчёт об остатках`. One component renders quantity, WAC, capital, localized quality, sync status, SKU and document registry for all stages. Exact active nomenclature by `nm_id` enriches name/barcode; conflicting active identities remain visibly ambiguous and are never guessed. Every applicable row exposes a centralized Russian status plus human-readable evidence fields (document/date/invoice or supply/quantity source/cost source/confirmation/allocation/contribution). Source/stage date and per-source quality are persisted in provenance; a mixed SKU therefore shows the exact certified/provisional status of each contributing invoice, while a document line uses its known document occurrence as a bounded date fallback. For several FF→WB supplies each evidence row owns its exact open quantity and capital, and their sums equal the displayed SKU balance. FF evidence expands the cutover opening and every post-cutover append-only ledger operation with signed quantity/capital and operation date instead of duplicating an aggregate wrapper. Raw provenance JSON exists only in a nested technical disclosure.
 
+The lazy FF `Реестр документов` is the single business read model over canonical FF quantity/reservation ledgers, inventory/overhead audit headers, legacy opening document and versioned functional technical records. It does not persist a second ledger. Business rows are newest business-date first and localize supplier receipt, WB shipment, inventory parent/children, return, manual receipt/writeoff, overhead, reservation lifecycle, opening and storno. Parent inventory has zero header movement, so linked children alone contribute quantity/capital. Canonical receipt/shipment/return rows expose a warehouse-neutral `warehouse-transfer:{source_type}:{source_object_id}` identity for future read projection on both ends without another movement; this pilot renders only FF. Technical cutover/sync/repair/archive is hidden until `Показать технические документы`.
+
+FF document query applies `effect`, `reason`, inclusive business-date range, bounded search and `include_technical` before pagination over the whole server selection; `total_count`, `page_count` and `has_next` therefore describe the filtered result, not the first 25 already loaded rows. Search covers stable number, source object, supply/invoice and line `nmId`/SKU/barcode. Header shows total quantity/capital/expense and never derives a meaningless multi-SKU unit cost; per-line detail owns unit cost and created timestamp/actor/source/links. Projection uses a bounded fixed number of queries and lazy line detail, not N+1, and repeated functional sync may add technical audit versions but cannot clone the canonical business movement.
+
 The six warehouse detail pages are read-only and contain no duplicated update/rebuild buttons. Every published version materializes a compact read model per warehouse. The initial endpoint returns only summary, current SKU balances, localized quality, lazy-document metadata and an ETag; it never embeds document lines or raw provenance. Documents are paginated separately, lines/provenance load only on expansion, SQL uses one grouped line-count query instead of N+1, and direct active-version lookup removes the former duplicate global readback. Browser cache is per every visited `(version_id, warehouse_key)`/ETag, not only the last tab. Initial payload budget is hundreds of KB and page open invokes no producer or external API.
 
 Sibling tab `Обновление и пересчёт` separates durable `Автоматические обновления` from `Ручные обновления`. SQLite run/phase journal survives restart and exposes last attempt, last success, start/end/duration, next scheduled run, active version/business date/freshness, item counts, last-good and concise sanitized error for phases `WB supply registry`, `transit enrichment`, `FF ledger/reservations`, `official complete WB stocks`, `cost materialization`, `functional publication`, `dependent replay/economics`. Failure retains the last-good functional version and is visibly degraded. `Пересчитать все склады и себестоимости` starts the same canonical current-source pipeline behind a background server job; a parallel start returns `Уже выполняется другой пересчёт`. Page open performs no mutation. Synchronous long apply through the proxy is forbidden; reviewed bounded recovery uses `warehouse-functional-sync-dry-run` followed by exact-fingerprint `warehouse-functional-sync-apply`, which refreshes official supplies and current downstream layers, reconciles reservations/physical movements, takes a coherent verified restore point before production source mutation, rechecks semantic source/snapshot/diff/invariants under the shared lock and publishes only the new current functional version plus actually dependent economics. Neither page open nor global vitrina refresh launches a warehouse mutation.
@@ -266,6 +278,9 @@ Targeted verification:
 - `python3 apps/warehouse_archival_estimate_smoke.py`;
 - `python3 apps/warehouse_supplier_cost_state_replay_smoke.py`;
 - `python3 apps/ff_stock_reservation_smoke.py`;
+- `python3 apps/ff_inventory_reconciliation_smoke.py`;
+- `python3 apps/ff_overhead_allocation_smoke.py`;
+- `python3 apps/ff_warehouse_documents_smoke.py`;
 - `python3 apps/stocks_block_smoke.py`;
 - `python3 apps/warehouse_stocks_smoke.py` (immutable legacy opening regression);
 - `python3 apps/our_wb_costs_smoke.py`;
