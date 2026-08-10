@@ -8142,6 +8142,8 @@ def _required_section_for_path(path: str) -> str:
         or normalized.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/")
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PATH
         or normalized == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH
+        or normalized == DEFAULT_PROXY_V4_PARAMETERS_PATH
+        or normalized == DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH
         or normalized == DEFAULT_AUTO_UPDATES_PATH
         or normalized == DEFAULT_SOURCES_SESSIONS_PATH
         or normalized == DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH

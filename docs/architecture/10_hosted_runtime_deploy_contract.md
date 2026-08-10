@@ -84,6 +84,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options`
 - `GET|POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings`
 - `GET|POST /v1/sheet-vitrina-v1/settings/auto-updates`
+- `GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters`
+- `POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview`
+- `GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4`
+- `POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview`
 - `GET /v1/sheet-vitrina-v1/auto-updates/status`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`
