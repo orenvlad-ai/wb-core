@@ -152,6 +152,7 @@ def main() -> None:
                     ),
                     allowed_console_error_messages=(
                         "Failed to load resource: the server responded with a status of 422 (Unprocessable Content)",
+                        "Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
                         "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
                     ),
                 )

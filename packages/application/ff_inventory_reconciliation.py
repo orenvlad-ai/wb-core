@@ -18,7 +18,10 @@ from typing import Any, Iterable, Mapping
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
-from packages.application.simple_xlsx import read_first_sheet_rows
+from packages.application.simple_xlsx import (
+    build_single_sheet_workbook_bytes,
+    read_first_sheet_rows,
+)
 from packages.application.warehouse_business_projection import (
     ensure_warehouse_projection_source_outbox,
 )
@@ -56,6 +59,146 @@ class FfInventoryReconciliation:
     ) -> None:
         self.runtime = runtime
         self.timestamp_factory = timestamp_factory or _now
+        with _connect(self.runtime.db_path) as conn:
+            ensure_inventory_reconciliation_schema(conn)
+            conn.commit()
+
+    def build_template(
+        self,
+        *,
+        business_date: str,
+    ) -> tuple[bytes, str, str]:
+        normalized_date = str(business_date or "").strip()[:10]
+        try:
+            datetime.fromisoformat(normalized_date)
+        except ValueError as exc:
+            raise FfInventoryReconciliationError(
+                "invalid_business_date",
+                "Business date must be YYYY-MM-DD",
+            ) from exc
+        with _connect(self.runtime.db_path, query_only=True) as conn:
+            catalog, blockers = _complete_active_nomenclature(conn)
+            if blockers:
+                raise FfInventoryReconciliationError(
+                    "active_nomenclature_ambiguous",
+                    "Active nomenclature cannot produce one stable FF inventory template",
+                    details=blockers,
+                )
+            balances = _ff_balances_as_of(
+                conn,
+                catalog,
+                business_date=normalized_date,
+            )
+        rows = [list(REQUIRED_HEADERS)]
+        for nm_id, item in sorted(catalog.items()):
+            balance = balances.get(nm_id, ZERO)
+            if balance != balance.to_integral_value():
+                raise FfInventoryReconciliationError(
+                    "non_integral_physical_balance",
+                    f"FF balance for nmId {nm_id} is not an integral physical quantity",
+                )
+            rows.append(
+                [
+                    nm_id,
+                    str(item.get("our_sku") or item.get("nomenclature_name") or nm_id),
+                    int(balance),
+                    normalized_date,
+                ]
+            )
+        workbook = build_single_sheet_workbook_bytes("Инвентаризация FF", rows)
+        return (
+            workbook,
+            f"Инвентаризация_FF_{normalized_date}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def create_preview(
+        self,
+        *,
+        source_bytes: bytes,
+        source_filename: str,
+        business_date: str,
+        return_supply_ids: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        normalized_returns = sorted(
+            {str(item).strip() for item in return_supply_ids if str(item).strip()}
+        )
+        plan = self.build_plan(
+            source_bytes=source_bytes,
+            source_filename=source_filename,
+            business_date=business_date,
+            return_supply_ids=normalized_returns,
+        )
+        source_sha256 = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        preview_id = "ffip_" + hashlib.sha256(
+            f"{source_sha256}:{business_date}:{plan.get('fingerprint') or ''}".encode("utf-8")
+        ).hexdigest()[:24]
+        created_at = str(self.timestamp_factory())
+        with _connect(self.runtime.db_path) as conn:
+            ensure_inventory_reconciliation_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_inventory_previews(
+                    preview_id,source_sha256,source_filename,source_file_blob,
+                    business_date,return_supply_ids_json,plan_fingerprint,
+                    plan_json,created_at,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,'previewed')
+                ON CONFLICT(preview_id) DO UPDATE SET
+                    plan_json=excluded.plan_json,created_at=excluded.created_at
+                """,
+                (
+                    preview_id,
+                    source_sha256,
+                    source_filename,
+                    sqlite3.Binary(source_bytes),
+                    str(business_date),
+                    _json(normalized_returns),
+                    str(plan.get("fingerprint") or ""),
+                    _json(plan),
+                    created_at,
+                ),
+            )
+            conn.commit()
+        return {**plan, "preview_id": preview_id, "source_sha256": source_sha256}
+
+    def confirm_preview(
+        self,
+        *,
+        preview_id: str,
+        confirmation_fingerprint: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        with _connect(self.runtime.db_path, query_only=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_inventory_previews WHERE preview_id=?",
+                (str(preview_id),),
+            ).fetchone()
+        if row is None:
+            raise FfInventoryReconciliationError(
+                "preview_not_found",
+                "Inventory preview not found",
+            )
+        if confirmation_fingerprint != str(row["plan_fingerprint"] or ""):
+            raise FfInventoryReconciliationError(
+                "stale_or_invalid_fingerprint",
+                "Confirmation fingerprint does not match the stored preview",
+            )
+        result = self.apply_plan(
+            source_bytes=bytes(row["source_file_blob"]),
+            source_filename=str(row["source_filename"]),
+            business_date=str(row["business_date"]),
+            return_supply_ids=_loads(row["return_supply_ids_json"], []),
+            confirmation_fingerprint=confirmation_fingerprint,
+            approval_reference=f"ui-explicit-confirm:{preview_id}",
+            created_by=created_by,
+        )
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_inventory_previews SET status='confirmed' WHERE preview_id=?",
+                (str(preview_id),),
+            )
+            conn.commit()
+        return {**result, "preview_id": str(preview_id)}
 
     def build_plan(
         self,
@@ -135,6 +278,20 @@ class FfInventoryReconciliation:
                 conn, target_nm_ids
             )
             blockers: list[dict[str, Any]] = list(nomenclature_blockers)
+            active_catalog, active_catalog_blockers = _complete_active_nomenclature(conn)
+            blockers.extend(active_catalog_blockers)
+            missing_nm_ids = sorted(set(active_catalog) - set(target_nm_ids))
+            if missing_nm_ids:
+                blockers.append(
+                    {
+                        "code": "active_nomenclature_rows_missing",
+                        "nm_ids": missing_nm_ids,
+                        "message": (
+                            "Manager workbook must contain every active FF nomenclature identity, "
+                            "including explicit zero targets"
+                        ),
+                    }
+                )
             returns: list[dict[str, Any]] = []
             return_by_nm: dict[int, Decimal] = {}
             for supply_id in sorted({str(item).strip() for item in return_supply_ids if str(item).strip()}):
@@ -959,6 +1116,22 @@ class FfInventoryReconciliation:
 def ensure_inventory_reconciliation_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_inventory_previews(
+            preview_id TEXT PRIMARY KEY,
+            source_sha256 TEXT NOT NULL,
+            source_filename TEXT NOT NULL,
+            source_file_blob BLOB NOT NULL,
+            business_date TEXT NOT NULL,
+            return_supply_ids_json TEXT NOT NULL,
+            plan_fingerprint TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_inventory_reconciliations(
             reconciliation_id TEXT PRIMARY KEY,
             source_sha256 TEXT NOT NULL,
@@ -1672,6 +1845,72 @@ def _exact_nomenclature(
         else:
             result[nm_id] = candidates[0]
     return result, blockers
+
+
+def _complete_active_nomenclature(
+    conn: sqlite3.Connection,
+) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT item_id,nm_id,our_sku,nomenclature_name,barcode,
+               product_type AS group_name,updated_at
+        FROM sheet_vitrina_v1_nomenclature_items
+        WHERE is_active=1 AND is_hidden=0
+        ORDER BY nm_id,item_id
+        """
+    ).fetchall()
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    blockers: list[dict[str, Any]] = []
+    for row in rows:
+        if row["nm_id"] is None or int(row["nm_id"] or 0) <= 0:
+            blockers.append(
+                {
+                    "code": "active_nomenclature_identity_missing",
+                    "item_id": str(row["item_id"] or ""),
+                }
+            )
+            continue
+        grouped.setdefault(int(row["nm_id"]), []).append(dict(row))
+    result: dict[int, dict[str, Any]] = {}
+    for nm_id, items in sorted(grouped.items()):
+        if len(items) != 1:
+            blockers.append(
+                {
+                    "code": "active_nomenclature_identity_ambiguous",
+                    "nm_id": nm_id,
+                    "active_candidate_count": len(items),
+                }
+            )
+        else:
+            result[nm_id] = items[0]
+    return result, blockers
+
+
+def _ff_balances_as_of(
+    conn: sqlite3.Connection,
+    nm_ids: Iterable[int],
+    *,
+    business_date: str,
+) -> dict[int, Decimal]:
+    normalized = sorted({int(item) for item in nm_ids})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"""
+        SELECT line.nm_id,SUM(line.quantity_delta) AS quantity
+        FROM sheet_vitrina_v1_ff_stock_operation_lines line
+        JOIN sheet_vitrina_v1_ff_stock_operations operation
+          ON operation.operation_id=line.operation_id
+        WHERE line.nm_id IN ({placeholders})
+          AND COALESCE(NULLIF(operation.business_effective_date,''),
+                       substr(operation.created_at,1,10))<=?
+        GROUP BY line.nm_id
+        """,
+        (*normalized, business_date),
+    ).fetchall()
+    result = {int(row["nm_id"]): _decimal(row["quantity"]) for row in rows}
+    return {nm_id: result.get(nm_id, ZERO) for nm_id in normalized}
 
 
 def _target_readback(

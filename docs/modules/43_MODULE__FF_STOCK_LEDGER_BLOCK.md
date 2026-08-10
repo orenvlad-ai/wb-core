@@ -12,6 +12,9 @@ source_basis:
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
+  - "packages/application/ff_inventory_reconciliation.py"
+  - "packages/application/ff_overhead_allocation.py"
+  - "packages/application/ff_warehouse_documents.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_supply.py"
   - "packages/application/wb_regional_supply.py"
@@ -29,12 +32,22 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_reservation_lines"
   - "sheet_vitrina_v1_ff_stock_wb_supply_lifecycle"
   - "sheet_vitrina_v1_ff_inventory_reconciliations"
+  - "sheet_vitrina_v1_ff_inventory_previews"
+  - "sheet_vitrina_v1_ff_overhead_documents"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
   - "POST /v1/sheet-vitrina-v1/supply/ff-stocks/preview"
   - "POST /v1/sheet-vitrina-v1/supply/ff-stocks/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/template.xlsx"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/inventory/rollback"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
@@ -44,6 +57,8 @@ related_runners:
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
+  - "apps/ff_overhead_allocation_smoke.py"
+  - "apps/ff_warehouse_documents_smoke.py"
   - "apps/warehouse_targeted_replay_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
   - "apps/factory_order_supply_smoke.py"
@@ -93,6 +108,14 @@ The journal is paginated server-side. Operator UI requests `GET .../ff-stocks?op
 - returns `hidden_archive_count`, `total_count` and `total_all_count` so the operator can see that archived rows exist.
 
 Enabling `Показать технический архив` requests `show_technical_archive=1` and exposes old erroneous WB `auto_writeoff` rows, runtime repair/correction rows and their source diagnostics. It does not mutate balances. Physical delete is not part of this UI.
+
+На unified FF page рядом с остатками находятся два business-document action:
+
+- `Скачать шаблон` строит полный XLSX по всем active/non-hidden `nmId` на выбранную business date; явная строка с нулём обязательна, поэтому отсутствие SKU не может означать ни «не считали», ни «считать нулём»;
+- `Загрузить инвентаризацию` сохраняет original bytes/SHA в preview, показывает blockers/deltas/cost basis и требует отдельный explicit confirm;
+- `Накладные расходы FF` принимает business date, положительную RUB-сумму и основание, показывает exact allocation preview и только после отдельного confirm создаёт immutable cost-only документ.
+
+Открытие страницы, раскрытие реестра, фильтрация и download шаблона не проводят документов. Все mutation routes защищены тем же supply-operator auth boundary.
 
 Access uses the same supply-operator boundary as `Поставки`: owner/admin and users with access to `Поставки`. Supplier-only users are not granted this contour.
 
@@ -208,7 +231,7 @@ preservation rule.
 
 `apps/ff_inventory_reconciliation.py` is the only runner for a manager XLSX
 physical target. Dry-run is default. It validates exact headers/business date,
-unique `nmId`, one active nomenclature identity, current FF balances, confirmed
+unique `nmId`, one active nomenclature identity, полное покрытие каждой active/non-hidden nomenclature identity (включая явные zero targets), current FF balances, confirmed
 supply-return proofs and a frozen same-SKU FF cost basis no later than the
 business date. The hierarchy is exact original debit, same-date FF WAC, last
 earlier FF WAC, latest certified landed inbound cost, then only an explicit
@@ -226,6 +249,14 @@ rechecks all guards under `BEGIN IMMEDIATE`, stores the XLSX content-addressed
 evidence and appends documents atomically. Exact repeat is T0. Readback proves
 every target SKU and total. Recovery tier T1 appends exact inverse-cost
 compensating documents; it never deletes or rewrites the source/audit history.
+
+### FF overhead allocation
+
+`sheet_vitrina_v1_ff_overhead_documents` stores one immutable header for `Распределение накладных расходов FF`: business date, positive two-decimal RUB amount, reason, actor, idempotency key, exact source revision/fingerprint, positive physical denominator, per-SKU allocations and readback. Eligible denominator is the sum of positive physical FF quantity on that date. Reservation rows, `FF → WB`, zero/negative quantities and arrivals after the date are excluded.
+
+Allocation uses `Decimal`: `amount * qty_i / total_positive_qty`, rounds down to kopecks and assigns the deterministic remainder by largest fractional part then `nmId`. The exact sum must equal the header amount. Ledger lines carry `quantity_delta=0` and immutable `cost_adjustment` with allocation capital, physical basis quantity, per-unit amount, date, reason and revision. Functional replay applies them at the end of their business date, increases capital/WAC only, proves the physical basis unchanged and publishes only the affected SKU/economics closure. It never copies supply-specific Fulfillment service/storage already accounted in WB supply layers.
+
+Exact input repeat is T0. Reversal requires preview/fingerprint and appends `ff_overhead_reversal` lines with the exact negative original allocations. It neither hard-deletes nor recalculates historical allocation proportions.
 
 ## 6.1. Bounded Targeted Checkpoint Reconciliation
 
@@ -275,9 +306,13 @@ Targeted smoke:
 - `python3 apps/ff_stock_ledger_smoke.py`
 - `python3 apps/ff_stock_reservation_smoke.py`
 - `python3 apps/ff_stock_ledger_http_smoke.py`
+- `python3 apps/ff_inventory_reconciliation_smoke.py`
+- `python3 apps/ff_overhead_allocation_smoke.py`
+- `python3 apps/ff_warehouse_documents_smoke.py`
 
 The smokes cover manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status idempotency, statuses `1/2` skip, `Допринято` skip, future-arrival reservation, multiple reservations of one SKU, supply adjustment/cancellation, waiting-for-cost isolation, full-composition atomic fulfillment, no negative physical/capital and factory-order/WB regional source compatibility.
 It also covers operation journal pagination metadata/second page retrieval, default status backward compatibility, archive-off visibility versus archive-on retrieval, and verifies that the archive view filter does not change computed balances.
+The FF document pilot smokes additionally cover complete template/preview/confirm/repeat/compensating rollback, missing cost rejection, exact quantity-proportional overhead with quantity invariant and reversal, business/technical projection separation, localized receipt/shipment/reservation rows, server-side filters/search/date/pagination and legacy journal compatibility.
 The targeted reconciliation smokes separately cover the baseline-known status `1/2 -> 3` transition with source timestamp earlier than activation, preservation of ordinary checkpoint and ordinary pre-activation fail-closed paths, missing/invalid activation and other-supply blockers, hard-guarded exact `38 250 - 31 500 = 6 750` totals across 13 SKU, dry-run immutability and stable v2 fingerprint, one linked apply plus ordinary-sync idempotency, statuses `1/2`, `Допринято`, missing goods, inactive nomenclature, changed activation/global total and per-SKU shortage blockers, stale goods/status/nomenclature/activation/balance/total plans, coherent CLI backup with `integrity_check=ok`, post-run reconciliation and an audited history-preserving reversal.
 
 # 9. Explicit Non-Scope

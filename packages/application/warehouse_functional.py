@@ -38,6 +38,7 @@ from packages.application.warehouse_business_projection import (
 from packages.application.warehouse_event_order import (
     ff_operation_replay_sort_key as _ff_operation_replay_sort_key,
 )
+from packages.application.ff_warehouse_documents import FfWarehouseDocumentView
 from packages.application.wb_supply_box_correction import (
     BOX_CORRECTION_TABLE,
     corrected_goods,
@@ -4990,6 +4991,10 @@ class WarehouseFunctionalBlock:
             },
             "legacy_ff_route": "/v1/sheet-vitrina-v1/supply/ff-stocks" if warehouse_key == STAGE_FF else None,
         }
+        if warehouse_key == STAGE_FF:
+            result["documents_page"]["total_count"] = FfWarehouseDocumentView(
+                db_path=self.runtime.db_path
+            ).count_business_documents()
         result["etag"] = stored_etag or (
             '"sha256:'
             + _hash({"version_id": version_id, "warehouse_key": warehouse_key})
@@ -5004,9 +5009,26 @@ class WarehouseFunctionalBlock:
         *,
         page: int = 1,
         limit: int = 25,
+        effect: str = "all",
+        reason: str = "all",
+        business_date_from: str = "",
+        business_date_to: str = "",
+        search: str = "",
+        include_technical: bool = False,
     ) -> dict[str, Any]:
         if warehouse_key not in STAGES:
             raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        if warehouse_key == STAGE_FF:
+            return FfWarehouseDocumentView(db_path=self.runtime.db_path).page(
+                page=page,
+                limit=limit,
+                effect=effect,
+                reason=reason,
+                business_date_from=business_date_from,
+                business_date_to=business_date_to,
+                search=search,
+                include_technical=include_technical,
+            )
         normalized_limit = min(100, max(1, int(limit)))
         normalized_page = max(1, int(page))
         offset = (normalized_page - 1) * normalized_limit
@@ -5097,6 +5119,8 @@ class WarehouseFunctionalBlock:
     ) -> dict[str, Any]:
         if warehouse_key not in STAGES:
             raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")
+        if warehouse_key == STAGE_FF:
+            return FfWarehouseDocumentView(db_path=self.runtime.db_path).detail(document_id)
         with _connect_readonly(self.runtime.db_path) as conn:
             names = _nomenclature_names_from_connection(conn)
             document = conn.execute(
@@ -5163,6 +5187,15 @@ class WarehouseFunctionalBlock:
         }
         payload["etag"] = '"sha256:' + _hash(payload) + '"'
         return payload
+
+    def warehouse_document_source_file(
+        self,
+        warehouse_key: str,
+        document_id: str,
+    ) -> tuple[bytes, str, str]:
+        if warehouse_key != STAGE_FF:
+            raise WarehouseFunctionalError("warehouse document source file not found")
+        return FfWarehouseDocumentView(db_path=self.runtime.db_path).source_file(document_id)
 
     def warehouse_balance_detail(self, warehouse_key: str, nm_id: int) -> dict[str, Any]:
         if warehouse_key not in STAGES or int(nm_id) <= 0:
@@ -5956,7 +5989,10 @@ class WarehouseFunctionalBlock:
             for row in capture["ff_lines"]:
                 ff_lines_by_operation[str(row.get("operation_id") or "")].append(row)
             boundary = str((cutover or {}).get("cutover_at") or "")
-            for operation in capture["ff_operations"]:
+            for operation in _ff_operations_for_replay(
+                capture["ff_operations"],
+                boundary=boundary,
+            ):
                 if str(operation.get("created_at") or "") <= boundary:
                     continue
                 operation_id = str(operation.get("operation_id") or "")
@@ -5965,9 +6001,14 @@ class WarehouseFunctionalBlock:
                 for raw_line in ff_lines_by_operation.get(operation_id, []):
                     nm_id = int(raw_line.get("nm_id") or 0)
                     delta = _decimal(raw_line.get("quantity_delta"))
-                    if nm_id <= 0 or delta == ZERO:
+                    cost_adjustment = _ff_ledger_line_cost_adjustment(raw_line)
+                    if nm_id <= 0 or (delta == ZERO and cost_adjustment is None):
                         continue
-                    exact_cost = _ff_ledger_line_cost_snapshot(raw_line)
+                    exact_cost = (
+                        _ff_ledger_line_cost_snapshot(raw_line)
+                        if delta != ZERO
+                        else None
+                    )
                     pool = ff_pools.setdefault(
                         nm_id,
                         {"quantity": ZERO, "capital": ZERO, "operations": [], "opening_version_id": ""},
@@ -5975,6 +6016,35 @@ class WarehouseFunctionalBlock:
                     current_qty = _decimal(pool["quantity"])
                     current_capital = _decimal(pool["capital"])
                     current_wac = current_capital / current_qty if current_qty > ZERO else None
+                    if cost_adjustment is not None:
+                        capital_delta = cost_adjustment["capital_delta_rub"]
+                        adjusted_capital, inbound_wac = _ff_cost_adjusted_state(
+                            current_quantity=current_qty,
+                            current_capital=current_capital,
+                            adjustment=cost_adjustment,
+                            operation_id=operation_id,
+                            nm_id=nm_id,
+                        )
+                        pool["capital"] = adjusted_capital
+                        inbound_provenance = {
+                            "quality": "audited_ff_cost_only_allocation",
+                            "source": "append_only_ff_overhead_allocation",
+                            **dict(cost_adjustment["provenance"]),
+                        }
+                        pool["operations"].append(
+                            {
+                                "operation_id": operation_id,
+                                "created_at": operation.get("created_at"),
+                                "business_effective_date": operation.get("business_effective_date"),
+                                "source_type": source_type,
+                                "source_object_id": source_object_id,
+                                "quantity_delta": "0",
+                                "capital_delta_rub": _text(capital_delta),
+                                "unit_cost_rub": _text(inbound_wac),
+                                "source": inbound_provenance,
+                            }
+                        )
+                        continue
                     if delta > ZERO:
                         if exact_cost is not None:
                             inbound_wac = exact_cost["unit_cost_rub"]
@@ -9065,7 +9135,14 @@ def _expand_ff_ledger_evidence_record(
     for operation in operations:
         delta = _optional_decimal(operation.get("quantity_delta"))
         unit_cost = _optional_decimal(operation.get("unit_cost_rub"))
-        capital_delta = delta * unit_cost if delta is not None and unit_cost is not None else None
+        explicit_capital_delta = _optional_decimal(operation.get("capital_delta_rub"))
+        capital_delta = (
+            explicit_capital_delta
+            if explicit_capital_delta is not None
+            else delta * unit_cost
+            if delta is not None and unit_cost is not None
+            else None
+        )
         if delta is not None:
             operation_quantity += delta
         if capital_delta is None:
@@ -9561,6 +9638,124 @@ def _ff_ledger_line_cost_snapshot(
         "quality": quality,
         "provenance": dict(snapshot.get("provenance") or {}),
     }
+
+
+def _ff_ledger_line_cost_adjustment(
+    row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return an exact zero-quantity capital delta for audited FF overhead."""
+
+    raw = row.get("raw")
+    if not isinstance(raw, Mapping):
+        raw = _loads(row.get("raw_json"), {})
+    adjustment = raw.get("cost_adjustment") if isinstance(raw, Mapping) else None
+    if not isinstance(adjustment, Mapping):
+        return None
+    if _decimal(row.get("quantity_delta")) != ZERO:
+        raise WarehouseFunctionalError("FF cost-only adjustment must not change quantity")
+    capital_delta = _optional_decimal(adjustment.get("capital_delta_rub"))
+    basis_quantity = _optional_decimal(adjustment.get("allocation_basis_quantity"))
+    if capital_delta is None or capital_delta == ZERO or basis_quantity is None or basis_quantity <= ZERO:
+        raise WarehouseFunctionalError("invalid FF cost-only allocation snapshot")
+    document_id = str(adjustment.get("document_id") or "").strip()
+    business_date = str(adjustment.get("business_date") or "").strip()
+    source_revision = str(adjustment.get("source_revision") or "").strip()
+    if not document_id or len(business_date) != 10 or not source_revision:
+        raise WarehouseFunctionalError("incomplete FF cost-only allocation provenance")
+    return {
+        "capital_delta_rub": capital_delta,
+        "allocation_basis_quantity": basis_quantity,
+        "provenance": dict(adjustment),
+    }
+
+
+def _ff_cost_adjusted_state(
+    *,
+    current_quantity: Decimal,
+    current_capital: Decimal,
+    adjustment: Mapping[str, Any],
+    operation_id: str,
+    nm_id: int,
+) -> tuple[Decimal, Decimal]:
+    basis_quantity = _decimal(adjustment.get("allocation_basis_quantity"))
+    capital_delta = _decimal(adjustment.get("capital_delta_rub"))
+    if current_quantity <= ZERO or current_quantity != basis_quantity:
+        raise WarehouseFunctionalError(
+            "FF cost-only allocation basis changed for "
+            f"{operation_id}:{nm_id}: {current_quantity} != {basis_quantity}"
+        )
+    adjusted_capital = current_capital + capital_delta
+    if adjusted_capital <= ZERO:
+        raise WarehouseFunctionalError(
+            f"FF cost-only adjustment {operation_id}:{nm_id} would make capital non-positive"
+        )
+    return adjusted_capital, adjusted_capital / current_quantity
+
+
+def _ff_operations_for_replay(
+    operations: Iterable[Mapping[str, Any]],
+    *,
+    boundary: str,
+) -> list[dict[str, Any]]:
+    """Insert cost-only FF documents at end-of-business-date without reordering quantity history."""
+
+    normalized = [
+        dict(item)
+        for item in operations
+        if str(item.get("created_at") or "") > boundary
+    ]
+    adjustment_types = {"ff_overhead_allocation", "ff_overhead_reversal"}
+    base = [
+        item for item in normalized
+        if str(item.get("operation_type") or "") not in adjustment_types
+    ]
+    adjustments = [
+        item for item in normalized
+        if str(item.get("operation_type") or "") in adjustment_types
+    ]
+    if not adjustments:
+        return base
+
+    def business_date(item: Mapping[str, Any]) -> str:
+        return str(
+            item.get("business_effective_date")
+            or str(item.get("created_at") or "")[:10]
+        )[:10]
+
+    buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for adjustment in sorted(
+        adjustments,
+        key=lambda item: (
+            business_date(item),
+            str(item.get("created_at") or ""),
+            str(item.get("operation_id") or ""),
+        ),
+    ):
+        target_date = business_date(adjustment)
+        later_seen = False
+        eligible_count = 0
+        ambiguous: list[str] = []
+        for item in base:
+            item_date = business_date(item)
+            if item_date <= target_date:
+                if later_seen:
+                    ambiguous.append(str(item.get("operation_id") or ""))
+                eligible_count += 1
+            else:
+                later_seen = True
+        if ambiguous:
+            raise WarehouseFunctionalError(
+                "FF cost-only business chronology is ambiguous for "
+                f"{adjustment.get('operation_id')}: {','.join(ambiguous[:20])}"
+            )
+        buckets[eligible_count].append(adjustment)
+
+    result: list[dict[str, Any]] = []
+    result.extend(buckets.get(0, []))
+    for index, item in enumerate(base, start=1):
+        result.append(item)
+        result.extend(buckets.get(index, []))
+    return result
 
 
 def _decimal(value: Any) -> Decimal:

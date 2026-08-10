@@ -22,6 +22,8 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
+    DEFAULT_FF_INVENTORY_TEMPLATE_PATH,
+    DEFAULT_FF_OVERHEAD_PREVIEW_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH,
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
@@ -75,6 +77,11 @@ def main() -> None:
         raise AssertionError(
             "supply calculation registry must use the supply authorization boundary"
         )
+    if (
+        _required_section_for_path(DEFAULT_FF_OVERHEAD_PREVIEW_PATH)
+        != WEB_AUTH_SECTION_SUPPLY
+    ):
+        raise AssertionError("FF business-document mutations must use the supply boundary")
     if (
         _required_section_for_path(
             DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
@@ -132,6 +139,20 @@ def main() -> None:
                     raise AssertionError(
                         "unauthenticated supply calculation registry must return 401 JSON"
                     )
+                inventory_template_code, inventory_template_payload = _get_json(
+                    f"{base_url}{DEFAULT_FF_INVENTORY_TEMPLATE_PATH}?business_date=2026-08-10"
+                )
+                if (
+                    inventory_template_code != 401
+                    or inventory_template_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError("unauthenticated FF inventory template must be denied")
+                overhead_code, overhead_payload = _post_json(
+                    f"{base_url}{DEFAULT_FF_OVERHEAD_PREVIEW_PATH}",
+                    {"business_date": "2026-08-10", "amount_rub": "1", "reason": "auth smoke"},
+                )
+                if overhead_code != 401 or overhead_payload.get("error") != "authentication_required":
+                    raise AssertionError("unauthenticated FF overhead preview must be denied")
                 sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
                 if sku_code != 401 or sku_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")

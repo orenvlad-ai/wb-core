@@ -70,6 +70,10 @@ jobs:
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
           python3 apps/warehouse_functional_smoke.py
+          python3 apps/ff_inventory_reconciliation_smoke.py
+          python3 apps/ff_overhead_allocation_smoke.py
+          python3 apps/ff_warehouse_documents_smoke.py
+          python3 apps/ff_stock_ledger_http_smoke.py
           python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
 
       - name: Install Chromium for projection UI smoke
@@ -84,7 +88,9 @@ jobs:
         run: python3 apps/business_data_write_barrier_browser_smoke.py
 
       - name: Validate automatic projection table reread
-        run: python3 apps/warehouse_business_projection_browser_smoke.py
+        run: |
+          python3 apps/warehouse_business_projection_browser_smoke.py
+          python3 apps/warehouse_stocks_browser_smoke.py
 
       - name: Validate Finance storage pre-cutover
         run: |
