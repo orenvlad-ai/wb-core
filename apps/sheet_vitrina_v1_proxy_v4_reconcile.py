@@ -497,9 +497,13 @@ def _apply_manifest(
 
 
 def _validate_window(*, date_from: str, date_to: str, business_date: str) -> tuple[str, str]:
+    raw_from = str(date_from).strip()
+    raw_to = str(date_to).strip()
+    if len(raw_from) != 10 or len(raw_to) != 10:
+        raise ProxyV4ReconciliationError("date window must use exact YYYY-MM-DD values")
     try:
-        start = date.fromisoformat(str(date_from)[:10])
-        end = date.fromisoformat(str(date_to)[:10])
+        start = date.fromisoformat(raw_from)
+        end = date.fromisoformat(raw_to)
     except ValueError as exc:
         raise ProxyV4ReconciliationError("date window must use YYYY-MM-DD") from exc
     if end < start:

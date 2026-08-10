@@ -20,6 +20,8 @@ from apps.sheet_vitrina_v1_proxy_v4_initialize import (  # noqa: E402
     run_initialization,
 )
 from apps.sheet_vitrina_v1_proxy_v4_reconcile import (  # noqa: E402
+    ProxyV4ReconciliationError,
+    _validate_window,
     run_reconciliation,
 )
 from apps.sheet_vitrina_v1_proxy_v4_smoke import (  # noqa: E402
@@ -50,6 +52,16 @@ DEPLOYED_SHA = "1" * 40
 
 
 def main() -> None:
+    try:
+        _validate_window(
+            date_from="2026-08-01T00:00:00Z",
+            date_to="2026-08-09",
+            business_date="2026-08-10",
+        )
+    except ProxyV4ReconciliationError:
+        pass
+    else:
+        raise AssertionError("V4 reconciliation accepted a non-exact date scope")
     with TemporaryDirectory(prefix="proxy-v4-init-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime_dir = root / "runtime"
