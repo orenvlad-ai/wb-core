@@ -5694,7 +5694,7 @@
               <label>Дата учёта<input class="input" type="date" data-ff-inventory-date></label>
               <div class="warehouse-ff-actions-row"><button class="button secondary" type="button" data-ff-inventory-template>Скачать шаблон</button></div>
               <label class="wide">Заполненный XLSX<input class="input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-ff-inventory-file></label>
-              <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-inventory-preview>Загрузить инвентаризацию</button><button class="button primary" type="button" data-ff-inventory-confirm disabled>Подтвердить проведение</button></div>
+              <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-inventory-preview>Загрузить инвентаризацию</button><button class="button primary" type="button" data-ff-inventory-confirm disabled>Провести инвентаризацию</button></div>
             </div>
             <div class="warehouse-ff-result" data-ff-inventory-result role="status" aria-live="polite" hidden></div>
           </div>
@@ -9016,15 +9016,24 @@
 
     function ffWorkflowStateCopy(payload) {
       const stateName = String(payload && payload.state || "error");
+      const inventory = String(payload && payload.action_type || "") === "inventory";
+      const summary = payload && payload.summary || {};
+      const transition = summary.before_total !== undefined && summary.before_total !== null && summary.before_total !== ""
+        && summary.target_total !== undefined && summary.target_total !== null && summary.target_total !== ""
+        ? warehouseNumber(summary.before_total) + " → " + warehouseNumber(summary.target_total)
+        : "";
       if (stateName === "submitting") return {tone: "pending", icon: "", spin: true, title: "Отправка на сервер", copy: "Не закрывайте вкладку, пока сервер не подтвердит приём данных."};
       if (stateName === "accepted") return {tone: "pending", icon: "", spin: true, title: "Данные приняты сервером", copy: "Проверка начнётся автоматически. Можно безопасно обновить страницу."};
       if (stateName === "processing") return {tone: "pending", icon: "", spin: true, title: "Проверка выполняется", copy: "Данные сохранены на сервере. Можно безопасно обновить страницу или закрыть вкладку."};
+      if (stateName === "ready" && inventory) return {tone: "pending", icon: "✓", spin: false, title: "Файл загружен и проверен — итоговый остаток " + warehouseNumber(summary.target_total), copy: "Нажмите «Провести инвентаризацию». Сервер сам учтёт актуальный остаток и рассчитает корректирующую дельту к этому итогу."};
       if (stateName === "ready") return {tone: "pending", icon: "✓", spin: false, title: "Готово к подтверждению", copy: "Проверка завершена без блокеров. Документ ещё не проведён — требуется отдельное подтверждение владельца."};
+      if (stateName === "applied" && inventory) return {tone: "partial", icon: "✓", spin: false, title: "Документ проведён; пересчёт выполняется", copy: (transition ? "Зафиксирован остаток " + transition + ". " : "") + "Повторно проводить инвентаризацию не нужно; итог появится после точного пересчёта."};
       if (stateName === "applied") return {tone: "partial", icon: "✓", spin: false, title: "Документ проведён; пересчёт выполняется", copy: "Принято и проведено по точному server readback. Итоговый складской пересчёт ещё не завершён; повторно проводить документ не нужно."};
       if (stateName === "replay_error") {
         const replayReason = String(payload && payload.replay && payload.replay.error || "причина не передана сервером");
         return {tone: "error", icon: "!", spin: false, title: "Документ проведён; пересчёт требует внимания", copy: "Ошибка пересчёта: " + replayReason + ". Документ повторно не проводите; обновите страницу позже — штатный worker безопасно повторит очередь."};
       }
+      if (stateName === "replay_complete" && inventory) return {tone: "success", icon: "✓", spin: false, title: "Инвентаризация проведена" + (transition ? ": " + transition : ""), copy: "Остатки обновлены. Документ и итоговый пересчёт подтверждены точным server readback."};
       if (stateName === "replay_complete") return {tone: "success", icon: "✓", spin: false, title: "Распределено и пересчитано", copy: "Принято и проведено. Документ и итоговый пересчёт подтверждены сервером."};
       if (stateName === "blocked") return {tone: "error", icon: "!", spin: false, title: "Проверка выявила ошибку", copy: String(payload && payload.validation && payload.validation.message_ru || "Исправьте указанные данные и повторите проверку.")};
       if (stateName === "not_found") return {tone: "error", icon: "!", spin: false, title: "Результат на сервере не найден", copy: "Если документ не проводился, можно безопасно повторить проверку с теми же данными."};
@@ -9109,7 +9118,7 @@
       const visual = ffWorkflowStateCopy(payload);
       const documentRow = payload.document || {};
       const registryId = actionType === "inventory"
-        ? String((documentRow.operation_ids || [])[0] || documentRow.document_id || "")
+        ? String(documentRow.document_id || (documentRow.operation_ids || [])[0] || "")
         : String(documentRow.document_id || "");
       const actions = registryId
         ? '<div class="warehouse-ff-state-actions"><button class="button secondary" type="button" data-ff-show-document="' + escapeHtml(registryId) + '">Показать документ в реестре</button></div>'

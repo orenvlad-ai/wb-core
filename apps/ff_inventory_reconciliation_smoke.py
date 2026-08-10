@@ -19,6 +19,11 @@ from packages.application.ff_inventory_reconciliation import (  # noqa: E402
     FfInventoryReconciliationError,
     ensure_inventory_reconciliation_schema,
 )
+from packages.application.ff_document_workflow import (  # noqa: E402
+    FfDocumentWorkflow,
+    mark_ff_replay_economics,
+)
+from packages.application.ff_overhead_allocation import FfOverheadAllocation  # noqa: E402
 from packages.application.ff_warehouse_documents import FfWarehouseDocumentView  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -40,7 +45,10 @@ def main() -> None:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         _seed_nomenclature(runtime, [101, 102, 103, 104])
         _seed_opening(runtime, {101: 10, 102: 20})
-        _seed_ff_cost_version(runtime, {101: (10, 100), 102: (20, 200)})
+        _seed_ff_cost_version(
+            runtime,
+            {101: (10, 100), 102: (20, 200), 103: (0, 300), 104: (0, 400)},
+        )
         workbook = _workbook(
             [(101, "SKU 101", 12), (102, "SKU 102", 18), (103, "SKU 103", 0), (104, "SKU 104", 0)]
         )
@@ -180,6 +188,13 @@ def main() -> None:
             created_by="smoke",
         )["idempotent"] is True
 
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='inventory-cost-v1' AND nm_id IN (103,104)"
+            )
+            conn.commit()
+
         _seed_explicit_inventory_cost_basis(
             runtime,
             nm_id=101,
@@ -223,6 +238,7 @@ def main() -> None:
             for item in missing_cost["blockers"]
         )
         _seed_certified_inbound_cost(runtime, nm_id=103, unit_cost=175)
+        _seed_explicit_inventory_cost_basis(runtime, nm_id=104, unit_cost=225)
         certified_inbound = block.build_plan(
             source_bytes=missing_cost_workbook,
             source_filename="certified-inbound-cost.xlsx",
@@ -236,7 +252,6 @@ def main() -> None:
         assert inbound_row["cost_basis"]["basis_kind"] == "latest_certified_inbound_landed_ff_cost"
         assert inbound_row["unit_cost_rub"] == "175"
 
-        _seed_explicit_inventory_cost_basis(runtime, nm_id=104, unit_cost=225)
         explicit_workbook = _workbook(
             [(101, "SKU 101", 10), (102, "SKU 102", 20), (103, "SKU 103", 0), (104, "SKU 104", 1)]
         )
@@ -305,7 +320,8 @@ def main() -> None:
         assert lifecycle[1] == "" and str(lifecycle[2]).startswith("rollback:")
 
     _test_barcode_identity_profiles()
-    _test_repeated_apply_fails_closed_after_target_drift()
+    _test_production_target_confirm_and_internal_retries()
+    _test_repeated_apply_never_reapplies_target_after_later_movement()
     print("ff_inventory_reconciliation_smoke: OK")
 
 
@@ -386,16 +402,13 @@ def _test_barcode_identity_profiles() -> None:
                 ),
             )
             conn.commit()
-        try:
-            block.confirm_preview(
-                preview_id=stale_identity_preview["preview_id"],
-                confirmation_fingerprint=stale_identity_preview["fingerprint"],
-                created_by="smoke",
-            )
-        except FfInventoryReconciliationError as exc:
-            assert exc.code == "stale_or_invalid_fingerprint"
-        else:
-            raise AssertionError("nomenclature barcode changes must stale the stored preview")
+        identity_confirmed = block.confirm_preview(
+            preview_id=stale_identity_preview["preview_id"],
+            confirmation_fingerprint=stale_identity_preview["fingerprint"],
+            created_by="smoke",
+        )
+        assert identity_confirmed["status"] == "applied"
+        assert identity_confirmed["readback"]["target_matches"] is True
 
         unknown = block.build_plan(
             source_bytes=_barcode_workbook(
@@ -519,7 +532,230 @@ def _test_barcode_identity_profiles() -> None:
         assert any(item["code"] == "ambiguous_barcode" for item in ambiguous["blockers"])
 
 
-def _test_repeated_apply_fails_closed_after_target_drift() -> None:
+def _test_production_target_confirm_and_internal_retries() -> None:
+    with TemporaryDirectory(prefix="ff-inventory-production-regression-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_nomenclature(runtime, [501, 502])
+        _seed_opening(runtime, {501: 30_000, 502: 23_750})
+        _seed_ff_cost_version(runtime, {501: (30_000, 100), 502: (23_750, 125)})
+        workbook = _workbook(
+            [(501, "Production FF A", 30_100), (502, "Production FF B", 23_400)]
+        )
+        block = FfInventoryReconciliation(runtime=runtime, timestamp_factory=lambda: NOW)
+        preview = block.create_preview(
+            source_bytes=workbook,
+            source_filename="production-stored.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert preview["manifest"]["before_total"] == "53750"
+        assert preview["manifest"]["target_total"] == "53500"
+        target_fingerprint = str(preview["fingerprint"])
+
+        # Reproduce the deployed row shape: a ready v1 preview whose token was
+        # calculated from the full semantic snapshot rather than target intent.
+        legacy_plan = json.loads(json.dumps(preview, ensure_ascii=False))
+        legacy_plan.pop("preview_id", None)
+        legacy_plan.pop("source_sha256", None)
+        legacy_plan["plan_version"] = "v1"
+        legacy_plan["manifest"].pop("target_intent", None)
+        legacy_plan["manifest"].pop("semantic_snapshot_fingerprint", None)
+        legacy_fingerprint = "sha256:" + hashlib.sha256(
+            json.dumps(legacy_plan["manifest"], sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        legacy_plan["fingerprint"] = legacy_fingerprint
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_inventory_previews "
+                "SET plan_fingerprint=?,plan_json=?,status='previewed' WHERE preview_id=?",
+                (
+                    legacy_fingerprint,
+                    json.dumps(legacy_plan, ensure_ascii=False, sort_keys=True),
+                    preview["preview_id"],
+                ),
+            )
+            _publish_unrelated_functional_version(
+                conn,
+                balances={501: (30_000, 100), 502: (23_750, 125)},
+            )
+            conn.commit()
+
+        fresh = block.build_plan(
+            source_bytes=workbook,
+            source_filename="production-stored.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        assert fresh["fingerprint"] == target_fingerprint
+        assert fresh["fingerprint"] != legacy_fingerprint
+        confirmed = block.confirm_preview(
+            preview_id=preview["preview_id"],
+            confirmation_fingerprint=legacy_fingerprint,
+            created_by="owner",
+        )
+        assert confirmed["status"] == "applied"
+        assert confirmed["readback"]["actual_total"] == "53500"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            reconciliation = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+            ).fetchone()
+            assert reconciliation is not None
+            manifest = json.loads(str(reconciliation["manifest_json"]))
+            assert manifest["before_total"] == "53750"
+            assert manifest["inventory_quantity_delta"] == "-250"
+            assert manifest["target_total"] == "53500"
+            assert manifest["source_revisions"]["audit_active_functional_version"]["version_id"] == "inventory-unrelated-v2"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations "
+                "WHERE source_type='inventory_reconciliation'"
+            ).fetchone()[0] == 2
+            queue = conn.execute(
+                "SELECT queue_id FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                "WHERE stable_source_id=?",
+                ("ff_inventory:" + str(reconciliation["reconciliation_id"]),),
+            ).fetchone()
+            assert queue is not None
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                "SET status='complete',started_at=?,finished_at=?,error='' WHERE queue_id=?",
+                (NOW, NOW, str(queue["queue_id"])),
+            )
+            conn.commit()
+        assert mark_ff_replay_economics(
+            runtime,
+            queue_ids=[str(queue["queue_id"])],
+            status="complete",
+            occurred_at=NOW,
+        ) == 1
+        workflow = FfDocumentWorkflow(
+            runtime=runtime,
+            inventory=block,
+            overhead=FfOverheadAllocation(runtime=runtime, timestamp_factory=lambda: NOW),
+            timestamp_factory=lambda: NOW,
+            start_workers=False,
+        )
+        final_status = workflow.inventory_status(preview_id=preview["preview_id"])
+        assert final_status["state"] == "replay_complete"
+        assert final_status["summary"]["before_total"] == "53750"
+        assert final_status["summary"]["target_total"] == "53500"
+        page = FfWarehouseDocumentView(db_path=runtime.db_path).page(reason="inventory", limit=20)
+        parent = next(
+            item for item in page["documents"]
+            if item["document_type_label"] == "Инвентаризация склада FF"
+        )
+        children = [
+            item for item in page["documents"]
+            if item["document_type_label"] in {"Оприходование излишков", "Списание недостач"}
+        ]
+        assert len(children) == 2
+        assert set(parent["linked_document_ids"]) == {
+            item["document_id"] for item in children
+        }
+
+    with TemporaryDirectory(prefix="ff-inventory-confirm-race-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_nomenclature(runtime, [601])
+        _seed_opening(runtime, {601: 10})
+        _seed_ff_cost_version(runtime, {601: (10, 125)})
+        workbook = _workbook([(601, "Race FF", 20)])
+        block = FfInventoryReconciliation(runtime=runtime, timestamp_factory=lambda: NOW)
+        preview = block.create_preview(
+            source_bytes=workbook,
+            source_filename="race.xlsx",
+            business_date=BUSINESS_DATE,
+        )
+        original_build_plan = block.build_plan
+        injected = {"count": 0}
+
+        def build_plan_with_races(**kwargs: object) -> dict[str, object]:
+            plan = original_build_plan(**kwargs)
+            if kwargs.get("_confirmed_target_intent") is not None and not plan.get("idempotent") and injected["count"] < 2:
+                injected["count"] += 1
+                runtime.create_ff_stock_operation(
+                    operation_id=f"ffso-confirm-race-{injected['count']}",
+                    operation_type="manual_receipt",
+                    source_type="manual_excel",
+                    source_key=f"inventory-smoke:confirm-race:{injected['count']}",
+                    source_object_id=f"confirm-race-{injected['count']}",
+                    source_object_label="Concurrent inventory writer",
+                    created_at=f"2026-08-02T09:00:0{injected['count']}Z",
+                    business_effective_date=BUSINESS_DATE,
+                    created_by="concurrent-writer",
+                    warnings=[],
+                    diagnostics={},
+                    lines=[{"nm_id": 601, "quantity_delta": 1}],
+                )
+            return plan
+
+        block.build_plan = build_plan_with_races  # type: ignore[method-assign]
+        confirmed = block.confirm_preview(
+            preview_id=preview["preview_id"],
+            confirmation_fingerprint=preview["fingerprint"],
+            created_by="owner",
+        )
+        assert injected["count"] == 2
+        assert confirmed["readback"]["actual_total"] == "20"
+        with sqlite3.connect(runtime.db_path) as conn:
+            manifest = json.loads(
+                str(conn.execute(
+                    "SELECT manifest_json FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+                ).fetchone()[0])
+            )
+            assert manifest["before_total"] == "12"
+            assert manifest["inventory_quantity_delta"] == "8"
+            assert manifest["target_total"] == "20"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations "
+                "WHERE source_type='inventory_reconciliation'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                "WHERE stable_source_id LIKE 'ff_inventory:%'"
+            ).fetchone()[0] == 1
+
+
+def _publish_unrelated_functional_version(
+    conn: sqlite3.Connection,
+    *,
+    balances: dict[int, tuple[int, int]],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+            version_id,cutover_id,version_kind,effective_at,status,
+            plan_fingerprint,local_source_digest,source_watermarks_json,
+            created_at,business_effective_date,published_at
+        ) VALUES('inventory-unrelated-v2','warehouse_functional_cutover_v1','fixture',
+                 '2026-07-31T15:18:00Z','good','sha256:inventory-unrelated-v2',
+                 'sha256:inventory-source-v2','{}','2026-07-31T15:18:00Z',
+                 '2026-07-31','2026-07-31T15:18:00Z')
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+            version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+            cost_covered_quantity,quality,certified,wb_quantity,
+            wb_in_way_to_client,wb_in_way_from_client,provenance_json
+        ) VALUES('inventory-unrelated-v2','ff',?,?,?,?,?,'certified',1,'0','0','0','{}')
+        """,
+        [
+            (nm_id, str(quantity), str(wac), str(quantity * wac), str(quantity))
+            for nm_id, (quantity, wac) in sorted(balances.items())
+        ],
+    )
+    conn.execute(
+        "UPDATE sheet_vitrina_v1_warehouse_functional_active "
+        "SET version_id='inventory-unrelated-v2',updated_at='2026-07-31T15:18:00Z' WHERE slot=1"
+    )
+
+
+def _test_repeated_apply_never_reapplies_target_after_later_movement() -> None:
     with TemporaryDirectory(prefix="ff-inventory-repeat-drift-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         _seed_nomenclature(runtime, [101])
@@ -555,20 +791,26 @@ def _test_repeated_apply_fails_closed_after_target_drift() -> None:
             diagnostics={},
             lines=[{"nm_id": 101, "quantity_delta": 1}],
         )
-        try:
-            block.apply_plan(
-                source_bytes=workbook,
-                source_filename="manager-drift.xlsx",
-                business_date=BUSINESS_DATE,
-                return_supply_ids=[],
-                confirmation_fingerprint=plan["fingerprint"],
-                approval_reference="github-comment:fixture-gate",
-                created_by="smoke",
-            )
-        except FfInventoryReconciliationError as exc:
-            assert exc.code == "applied_target_drifted"
-        else:
-            raise AssertionError("repeated apply must fail closed after target drift")
+        repeated = block.apply_plan(
+            source_bytes=workbook,
+            source_filename="manager-drift.xlsx",
+            business_date=BUSINESS_DATE,
+            return_supply_ids=[],
+            confirmation_fingerprint=plan["fingerprint"],
+            approval_reference="github-comment:fixture-gate",
+            created_by="smoke",
+        )
+        assert repeated["status"] == "already_applied"
+        assert repeated["idempotent"] is True
+        assert repeated["readback"]["target_matches"] is False
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_inventory_reconciliations"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations "
+                "WHERE source_type='inventory_reconciliation'"
+            ).fetchone()[0] == 1
 
 
 def _workbook(rows: list[tuple[int, str, int]]) -> bytes:

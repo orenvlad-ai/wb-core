@@ -770,10 +770,16 @@ class FfDocumentWorkflow:
         row: Mapping[str, Any],
     ) -> dict[str, Any]:
         plan = dict(_loads(row["plan_json"], {}))
-        manifest = dict(plan.get("manifest") or {})
+        preview_manifest = dict(plan.get("manifest") or {})
         error_code = str(row["error_code"] or "")
         error_details = _loads(row["error_details_json"], None)
         reconciliation = _inventory_reconciliation(conn, row)
+        applied_manifest = (
+            dict(_loads(reconciliation["manifest_json"], {}))
+            if reconciliation is not None
+            else {}
+        )
+        manifest = applied_manifest or preview_manifest
         replay = _replay_state(
             conn,
             stable_source_id=(
@@ -799,7 +805,7 @@ class FfDocumentWorkflow:
             state = "blocked"
         else:
             state = "error"
-        source = dict(manifest.get("source") or {})
+        source = dict(preview_manifest.get("source") or manifest.get("source") or {})
         if not source:
             source = {
                 "filename": str(row["source_filename"] or ""),
@@ -1497,7 +1503,7 @@ def _steps(state: str, replay: Mapping[str, Any]) -> list[dict[str, str]]:
     order = [
         ("accepted", "Файл/данные приняты сервером"),
         ("checked", "Проверка завершена"),
-        ("ready", "Готово к подтверждению"),
+        ("ready", "Готово к проведению"),
         ("applied", "Документ проведён"),
         ("replay_complete", "Распределение/складской пересчёт завершён"),
     ]

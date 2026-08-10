@@ -369,7 +369,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
         labels = [
             ("accepted", "Файл/данные приняты сервером"),
             ("checked", "Проверка завершена"),
-            ("ready", "Готово к подтверждению"),
+            ("ready", "Готово к проведению"),
             ("applied", "Документ проведён"),
             ("replay_complete", "Распределение/складской пересчёт завершён"),
         ]
@@ -418,8 +418,20 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
                 "examples": [{"row": 2, "code": "business_date_mismatch", "message_ru": "Дата остатка не совпадает с датой в форме"}] if state == "blocked" else [],
             },
             "confirm_allowed": state == "ready",
-            "document": {},
-            "replay": {"status": "not_started"},
+            "document": (
+                {
+                    "document_id": "ffir_browser_fixture",
+                    "operation_ids": ["ffio_browser_receipt", "ffio_browser_writeoff"],
+                    "status": "applied",
+                    "created_by": "owner",
+                    "created_at": "2026-08-10T12:26:48Z",
+                }
+                if state in {"applied", "replay_complete"}
+                else {}
+            ),
+            "replay": {
+                "status": "complete" if state == "replay_complete" else "queued" if state == "applied" else "not_started"
+            },
             "actor": "owner",
             "updated_at": "2026-08-10T12:26:48Z",
             "steps": steps(state),
@@ -523,8 +535,32 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
             partial_card.wait_for()
             _assert(ready_card.get_attribute("data-tone") == "pending", "preview alone must never render green")
             _assert(not page.locator("[data-ff-inventory-confirm]").is_disabled(), "ready recovered preview must enable owner confirm")
+            _assert(
+                "Файл загружен и проверен — итоговый остаток 115" in ready_card.inner_text(),
+                "ready inventory must present the absolute confirmed target",
+            )
+            _assert(
+                page.locator("[data-ff-inventory-confirm]").inner_text().strip() == "Провести инвентаризацию",
+                "inventory must expose one explicit target-confirm action",
+            )
             _assert(partial_card.get_attribute("data-tone") == "partial", "applied-with-replay-pending must not be final green")
             _assert("Документ проведён; пересчёт выполняется" in partial_card.inner_text(), "partial success copy changed")
+
+            inventory_state["value"] = "applied"
+            page.reload(wait_until="domcontentloaded")
+            inventory_partial = page.locator('[data-ff-inventory-result] [data-ff-state="applied"]')
+            inventory_partial.wait_for()
+            _assert(inventory_partial.get_attribute("data-tone") == "partial", "inventory commit before replay must not be green")
+            _assert("Документ проведён; пересчёт выполняется" in inventory_partial.inner_text(), "inventory partial status changed")
+            _assert("Инвентаризация проведена" not in inventory_partial.inner_text(), "inventory must not show final success before exact replay")
+
+            inventory_state["value"] = "replay_complete"
+            page.reload(wait_until="domcontentloaded")
+            inventory_complete = page.locator('[data-ff-inventory-result] [data-ff-state="replay_complete"]')
+            inventory_complete.wait_for()
+            _assert(inventory_complete.get_attribute("data-tone") == "success", "exact inventory replay must render final green")
+            _assert("Инвентаризация проведена: 120 → 115" in inventory_complete.inner_text(), "final target transition changed")
+            _assert("Остатки обновлены" in inventory_complete.inner_text(), "final exact-readback copy changed")
 
             inventory_state["value"] = "blocked"
             overhead_state["value"] = "replay_complete"
