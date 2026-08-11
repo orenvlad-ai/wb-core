@@ -7,7 +7,6 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import threading
-from urllib import request as urllib_request
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -19,6 +18,7 @@ from apps.cny_ledger_smoke import (  # noqa: E402
     HTTP_NOW,
     _fixture_text_extractor,
     _get_json,
+    _post_multipart,
     _reserve_free_port,
     _seed_supplier_order,
 )
@@ -199,36 +199,39 @@ def main() -> None:
                     raise AssertionError("genuine pre-save failure must not persist a CNY document")
 
                 ambiguous_url = f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}"
-
-                def apply_then_drop_response(route: object) -> None:
-                    browser_request = route.request
-                    content_type = browser_request.headers.get("content-type", "")
-                    replay_request = urllib_request.Request(
-                        browser_request.url,
-                        data=browser_request.post_data_buffer,
-                        headers={
-                            "Accept": "application/json",
-                            "Content-Type": content_type,
-                        },
-                        method="POST",
-                    )
-                    with urllib_request.urlopen(replay_request, timeout=10) as response:
-                        status = int(response.status)
-                        response.read()
-                    if status not in {200, 202}:
-                        raise AssertionError(
-                            f"ambiguous transport fixture did not apply the upload: {status}"
-                        )
-                    route.abort("failed")
-
-                page.route(ambiguous_url, apply_then_drop_response, times=1)
-                operator_frame.locator("#cnyAccountFileInput").set_input_files(
-                    {
-                        "name": "browser-ambiguous.pdf",
-                        "mimeType": "application/pdf",
-                        "buffer": b"browser-ambiguous-conversion",
-                    }
+                ambiguous_body = b"browser-ambiguous-conversion"
+                # Establish the exact durable postcondition first, then make the
+                # browser's matching upload lose its response.  Backend same-file
+                # idempotency is covered by cny_ledger_smoke; this fixture owns the
+                # UI's SHA-based reconciliation without a nested loopback request
+                # inside Playwright's synchronous route callback.
+                ambiguous_status, ambiguous_payload = _post_multipart(
+                    ambiguous_url,
+                    ambiguous_body,
+                    filename="browser-ambiguous.pdf",
                 )
+                if ambiguous_status not in {200, 202}:
+                    raise AssertionError(
+                        "ambiguous transport fixture did not establish the durable upload: "
+                        f"{ambiguous_status} {ambiguous_payload}"
+                    )
+                page.route(
+                    ambiguous_url,
+                    lambda route: route.abort("failed"),
+                    times=1,
+                )
+                with page.expect_event(
+                    "requestfailed",
+                    predicate=lambda browser_request: browser_request.url == ambiguous_url,
+                    timeout=10000,
+                ):
+                    operator_frame.locator("#cnyAccountFileInput").set_input_files(
+                        {
+                            "name": "browser-ambiguous.pdf",
+                            "mimeType": "application/pdf",
+                            "buffer": ambiguous_body,
+                        }
+                    )
                 expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
                     "Ответ загрузки не был получен полностью", timeout=10000
                 )
