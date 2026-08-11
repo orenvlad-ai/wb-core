@@ -1,0 +1,131 @@
+# Migration 134: FF facility × pool business documents
+
+## Goal and rollout boundary
+
+This Stage 2 change adds the durable backend contract for immutable business
+documents inside the Stage 1 facility × `FBS|FBO` detail. Deployment creates
+only additive empty schema. The service is default-off and is not imported by
+public HTTP routes, operator UI or any current aggregate FF producer/consumer.
+No facility seed, feature epoch, opening, backfill or production business-data
+apply is part of this migration.
+
+The existing six warehouse stages remain unchanged. Facility and pool are
+dimensions inside `ff`; their quantity/capital is explanatory detail and is
+never added to stage or TOTAL values a second time. Stage 1 operations and
+movement lines remain the only dimensional movement ledger. Warehouse-domain
+T2 checkpoints include the facility registry together with the pool tables;
+workflow events remain operational audit rather than restored business state.
+
+## Durable documents and workflow
+
+`packages/application/ff_pool_documents.py` adds one application/domain
+service and the following operational objects:
+
+- `sheet_vitrina_v1_ff_pool_document_requests` and request aliases persist
+  exact source identity/revision/idempotency epoch, actor, UTC audit time,
+  Asia/Yekaterinburg business date, source/file SHA, accepted source bytes,
+  parsed manifest, blockers and immutable posted manifest;
+- `sheet_vitrina_v1_ff_pool_documents`, document lines and positive immutable
+  RUB expense lines are append-only roots/evidence above Stage 1 movements;
+- `sheet_vitrina_v1_ff_pool_document_relations` supports forward-only typed
+  shipment, receipt, loss, discrepancy, cancellation, inventory child,
+  correction, storno and late-expense edges with allowlists, uniqueness,
+  chronology and recursive cycle protection;
+- existing `sheet_vitrina_v1_ff_workflow_events` records
+  `accepted/processing/blocked/ready/posted/replay/complete/error` transitions.
+
+Legacy documents are not related or backfilled. Correction, storno and late
+expense edges are also mirrored into the narrower Stage 1 operation relation
+table. All other child types use the new document graph so Stage 1 schema is
+not rewritten.
+
+Exact semantic repeat is T0. A new posting uses recovery policy
+`ff_pool_document_posting` at T1 with bounded request/balance before-images and
+an undo manifest that also enumerates every inserted immutable operation,
+movement, document, line, expense and relation. The append-only guards make a
+generic row-deletion rollback fail atomically before any balance/request
+before-image can be restored; business reversal is a related storno/correction,
+never a partial physical delete. It never takes a full-store backup or
+integrity scan. A
+process restart returns an interrupted `processing` request to `accepted`, and
+`posted/replay` resumes by immutable readback. Exact retry, concurrent duplicate
+and response loss cannot create a second operation or movement; one runtime-
+local posting lock serializes recovery preparation and the short SQLite writer
+closure. Request acceptance also serializes the client alias and binds each
+external source revision/epoch to one semantic manifest across all document
+kinds; an audit filename is not part of that business identity.
+
+## Accounting contracts
+
+All quantities are SQLite `INTEGER`. Capital and WAC remain minor-unit integer
+or canonical Decimal TEXT; no new accounting field uses `REAL`.
+
+- A future opening decomposes an externally supplied aggregate FF snapshot
+  into facility/pool lines only when exact per-SKU quantity/capital parity
+  holds and the whole detail contour is empty. It does not reuse
+  `warehouse_opening_v1` or change aggregate FF.
+- A China acceptance allocation selects one facility and exact FBS/FBO line
+  quantities. Common expenses are distributed deterministically across the
+  whole accepted quantity, with exact nmId/barcode identity and no fuzzy match.
+- One inter-facility transfer root owns immutable shipment, receipt, loss,
+  discrepancy, cancellation, correction, storno and late-expense children.
+  Shipment freezes source WAC/capital. Receipt posts only actual accepted
+  quantity. Open in-flight quantity/capital is derived from the root and
+  children, not stored in a transit warehouse or reservation. Loss retains its
+  proportional frozen source capital and expense share. Mis-sort returns an
+  expected-not-sent line at frozen source capital and moves an unexpected SKU
+  only at its positive current source WAC; the displaced transfer-expense share
+  is redistributed over the actual unexpected receipt. Insufficient stock/cost
+  blocks that discrepancy child without duplicating independent accepted
+  lines. Generic signed corrections cannot bypass the transfer state machine:
+  transfer changes use typed outcomes or storno followed by a replacement.
+  A receipt with active capitalized late expense must storno that late-expense
+  child before the receipt itself can be reversed.
+- FBO ↔ FBS reallocation stays inside one facility and preserves physical
+  facility quantity. Pool WAC remains independent; optional expense increases
+  destination capital with deterministic exact allocation.
+- Inventory has one facility and selected FBS, FBO or both pools. Selected
+  values are absolute targets; an unselected pool is unchanged. Positive
+  surplus and shortage are separate linked children with a positive same-SKU
+  cost basis and no zero/synthetic fallback.
+- Scoped overhead allocates one positive RUB amount across FBS, FBO or both,
+  using only positive selected physical quantities and stable largest-remainder
+  kopeck rounding. Reversal and late expense are append-only linked documents.
+
+One or more immutable positive RUB expense lines may carry a safe free-text
+basis and optional source-file digest. Their cents are allocated over the whole
+shipped/reallocated quantity in stable-line order; partial loss retains the
+same deterministic proportional share.
+
+## XLSX boundary
+
+`packages/application/ff_pool_documents_xlsx.py` generates and parses server-
+side China acceptance and inventory workbooks using openpyxl data validation.
+An empty active facility registry returns `no_active_facilities`; templates do
+not create seeds. Barcodes are text. Accepted sheet names, headers, contract,
+template/source fingerprints and complete selected-scope coverage are exact.
+
+Before openpyxl parsing, reusable limits reject excessive request/file bytes,
+ZIP entry count, total/per-entry uncompressed bytes, compression ratio, rows,
+columns/cells and shared-string size. Only `.xlsx` and the allowlisted MIME are
+accepted. Macros, formulas, external links, unsafe/duplicate ZIP members,
+embedded active content, malformed OOXML, numeric/scientific/fractional
+barcodes, duplicate resolved SKU and unknown/ambiguous/conflicting identity
+fail with machine-readable errors. XML parts must be UTF-8, self-closing row/
+cell/formula tags count toward the same bounds, and generated server/catalog
+text is forced to string cells so formula-like labels/SKUs cannot execute in a
+downloaded template. A blocked preview can never be posted.
+Stage 3 must additionally enforce the HTTP request read limit before buffering.
+
+## Verification and later stages
+
+`python3 apps/ff_pool_documents_smoke.py` covers empty/default-off bootstrap,
+XLSX generation and attack/identity limits, lifecycle recovery/idempotency,
+transfer conservation and partial outcomes, mis-sort fail-closed behavior,
+reallocation, inventory, overhead/reversal, relations, bounded access plans and
+T1 evidence. Existing Stage 1, FF ledger/reservation/inventory/overhead/
+documents, functional warehouse, capital and recovery smokes remain required.
+
+Stage 3 public API/UI/document registry and later facility CRUD/seeds, opening,
+shadow writer/reader activation, supplier-trigger switch, FBS lifecycle,
+cutover and live business-data apply remain outside this migration.

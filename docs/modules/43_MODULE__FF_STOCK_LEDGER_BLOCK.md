@@ -14,6 +14,9 @@ related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
+  - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_documents_xlsx.py"
+  - "packages/contracts/ff_pool_documents.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
   - "packages/application/ff_document_workflow.py"
@@ -47,6 +50,12 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_feature_epochs"
   - "sheet_vitrina_v1_ff_pool_balances"
   - "sheet_vitrina_v1_ff_pool_parity_diagnostics"
+  - "sheet_vitrina_v1_ff_pool_document_requests"
+  - "sheet_vitrina_v1_ff_pool_document_request_aliases"
+  - "sheet_vitrina_v1_ff_pool_documents"
+  - "sheet_vitrina_v1_ff_pool_document_lines"
+  - "sheet_vitrina_v1_ff_pool_document_expense_lines"
+  - "sheet_vitrina_v1_ff_pool_document_relations"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -69,6 +78,7 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
+  - "apps/ff_pool_documents_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -81,7 +91,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. An inert, default-off facility × FBS|FBO foundation now exists strictly below this aggregate authority; no current writer or reader uses it. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation and durable Stage 2 document/XLSX service now exist strictly below this aggregate authority; they are non-routed and no current producer or reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -455,8 +465,8 @@ does not seed Moscow, Orenburg or any other business facility. Generic posted
 operation headers carry exact source identity, revision, idempotency epoch,
 Yekaterinburg `business_date` and UTC audit time. Their pool lines carry
 `facility_id`, `FBS|FBO`, `nm_id`, exact SQLite `INTEGER` quantity and Decimal
-TEXT capital/WAC. The new header/line contour is append-only and has no posting
-service or route in this stage.
+TEXT capital/WAC. The new header/line contour is append-only. Stage 1 itself
+introduced no posting service or route.
 
 `correction_of`, `storno_of` and `late_expense_for` are the only initial typed
 relations. A child type must match its relation, the parent cannot be later
@@ -475,6 +485,20 @@ reader and never edits or invalidates the aggregate ledger. Current FF writers,
 reservations, warehouse publication, public totals, Vitrina and recommendations
 remain unchanged.
 
-Transfer expense allocation and open-transfer/in-flight materialization are
-intentionally deferred until a later writer contract exists. No transit
-warehouse or reservation is introduced by this foundation.
+Migration 134 adds the Stage 2 posting contract above those same operations and
+movements. Immutable request/document/line/expense evidence and a guarded typed
+document graph cover future opening, China allocation, transfer children,
+FBO↔FBS reallocation, inventory, pool-scoped overhead, correction, storno and
+late expense. Open transfer quantity/capital is derived from the immutable root
+and children; no transit warehouse or reservation is introduced. T1 recovery
+stores only exact request/balance before-images. Quantity remains INTEGER;
+capital/expense allocation is Decimal/minor-unit exact and deterministic.
+
+The Stage 2 XLSX helpers generate/parse China allocation and one-table FBS/FBO
+inventory workbooks with facility dropdowns. They enforce bounded ZIP/OOXML,
+sheet/header/profile/fingerprint limits before openpyxl, text-safe exact
+nmId/barcode resolution, complete selected-scope coverage and fail closed on
+formulas, macros, external links, malformed/ambiguous evidence or an empty
+facility registry. The service is deployed but default-off and non-routed: it
+does not seed facilities/epochs, switch current supplier/FF writers or readers,
+or apply production business data.

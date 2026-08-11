@@ -14,6 +14,8 @@ source_basis:
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
+  - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/ff_overhead_allocation.py"
   - "packages/application/ff_document_workflow.py"
@@ -37,7 +39,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migration 133 adds only a default-off facility × pool diagnostic seam beneath `ff`; it does not add a warehouse stage, replace an active balance or publish a second total."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migrations 133–134 add a default-off facility × pool foundation and non-routed document/XLSX service beneath `ff`; they do not add a warehouse stage, replace an active balance or publish a second total."
 ---
 
 # 1. Active warehouse contract
@@ -59,6 +61,14 @@ is empty and feature-off after deploy, and no active functional writer, read
 route, compact read model, public total, Vitrina cell or recommendation imports
 it. A mismatch diagnostic can only keep the future detail reader disabled; it
 cannot change the current global FF value or its certification.
+
+Migration 134 additionally deploys an additive empty Stage 2 document schema
+and domain service. It can post only when a future explicit writer epoch is
+enabled and therefore remains inert in production. No public API/UI imports
+it; supplier acceptance, aggregate inventory/overhead, functional publication
+and all six-stage readers retain their current paths. Its immutable movements
+can later support exact pool WAC, transfer/loss conservation and linked
+correction/storno/late-expense evidence without becoming a second FF ledger.
 
 Supplier registry и warehouse projection не смешиваются. Invoice получает один стабильный `supplier_flow_id`; display name строится из invoice, но linkage и replay используют stable id. После смешивания на FF downstream identity принадлежит WB supply. Каждая positive line хранит exact text quantity, capital, WAC, coverage/quality и source provenance. Вычисления используют `Decimal`; UI округляет только display.
 

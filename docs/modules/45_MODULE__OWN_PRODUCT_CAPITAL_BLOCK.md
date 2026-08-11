@@ -13,6 +13,7 @@ source_basis:
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 related_modules:
   - "packages/application/ff_pool_foundation.py"
+  - "packages/application/ff_pool_documents.py"
   - "packages/application/warehouse_functional.py"
   - "packages/application/own_product_capital.py"
   - "packages/application/sheet_vitrina_v1_own_product_capital.py"
@@ -27,7 +28,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
 source_of_truth_level: "module_canonical"
-update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive. Default-off FF facility × pool detail is a parity-checked decomposition of the existing `ff` operand and is never added to TOTAL separately."
+update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive. Default-off FF facility × pool detail and its non-routed Stage 2 document service are a parity-checked decomposition of the existing `ff` operand and are never added to TOTAL separately."
 ---
 
 # 1. Единственные шесть стадий
@@ -50,6 +51,9 @@ feature epoch отсутствует, detail tables пусты и canonical capi
 их не читает. После cutover detail лишь объясняет уже учтённый `ff`: public
 stage/TOTAL formula не может прибавлять его второй раз. Любой mismatch держит
 detail reader fail-closed и оставляет существующий aggregate FF без изменений.
+Stage 2 immutable documents may prove facility/pool conservation on fixtures,
+but until a later explicit writer/reader cutover they are not an active capital
+source, consumer or TOTAL operand and do not alter the aggregate FF ledger.
 
 # 2. Количество и капитал
 

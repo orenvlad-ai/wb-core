@@ -21,6 +21,8 @@ related_modules:
   - "packages/application/supplier_expense_allocation.py"
   - "packages/application/cny_ledger.py"
   - "packages/application/ff_stock_ledger.py"
+  - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -180,6 +182,13 @@ barcode_identity_update_note: "Supplier invoice parser v2 detects a confirmed ba
 - Shipment headers may persist `order_status` only as a backward-compatible derived cache. It is not independent business truth. A status-only PATCH is idempotent only when the requested value equals the current derived value and rejects every divergent/unknown value; the UI renders badges and no status selector.
 - Factory-order supplier-registry inbound uses `order_status` server-side: only `production` and `in_transit` shipments can become `Товары в пути от фабрики`; `accepted_ff` shipments are excluded because their goods are already accepted on FF and must enter calculation through FF stock, not as factory inbound.
 - When `actual_ff_acceptance_date` is saved, `packages/application/our_wb_costs.py` materializes versioned SKU-level FF source cost evidence and `packages/application/ff_stock_ledger.py` creates an idempotent ledger receipt by fully matched product-line quantity. The receipt source key is `supplier_shipment_acceptance:<shipment_id>`; repeat cannot duplicate quantity. `packages/application/canonical_cost_engine.py` consumes these sources into recognized/paid components and FF WAC. Late cost evidence creates a new component/layer version and downstream replay from factual effective date; it never changes the receipt quantity or uses upload time as business date.
+- Migration 134 adds only a default-off future China → FF facility/pool
+  allocation contract and protected XLSX preview helpers. One shipment selects
+  one active geographic facility and allocates every exact server-resolved
+  nmId/barcode line into FBS, FBO or both; common expense is allocated over the
+  full accepted composition rather than entered independently per pool. It has
+  no public route and does not switch the `actual_ff_acceptance_date` trigger,
+  create a second live receipt, seed facilities or mutate supplier evidence.
 
 ## Unified cost/physical boundary (2026-07-01)
 
