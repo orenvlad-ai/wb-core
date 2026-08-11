@@ -3071,6 +3071,64 @@ def _assert_visible_codex_task_lifecycle_contract() -> None:
     )
 
 
+def _assert_executor_autonomy_and_silent_approval_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    execution = (
+        ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
+    provenance = (
+        "Выбор инструментов и источников не является требованием пользователя и "
+        "всегда перепроверяется по актуальному протоколу, если пользователь отдельно "
+        "явно не зафиксировал обратное."
+    )
+    terminal_handoff = (
+        "Исполнитель самостоятельно доводит задачу до применимого terminal state. "
+        "После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую "
+        "задачу один финальный technical handoff: итоговый статус; что сделано; "
+        "что не сделано или осталось вне scope; PR и final SHA; проверки; "
+        "merge/release/deploy/production state; сложности, риски и blockers."
+    )
+
+    for source in (agents, execution):
+        folded = re.sub(r"\s+", " ", source.casefold())
+        plain = folded.replace("`", "")
+        for required in (
+            "EXECUTOR_AUTONOMY_PREFLIGHT",
+            "shared Git metadata",
+            "git fetch --prune origin",
+            "GitHub connector",
+            "local dependencies/runtime paths",
+            "autonomy_ready",
+            "exact starting main SHA",
+            "task-local progress",
+            "waitingOnApproval",
+            "strict human-only boundary",
+            "pre-terminal callback",
+            "точное действие/ресурс",
+            "mutation/read effect",
+            "не симулирует approval",
+            "bounded read-only check",
+            "clean untouched worktree",
+            "no branch, no commit, no push и no PR",
+            "implementation tasks параллельно",
+            "production-mutation gate",
+            "exact-SHA deploy/verify",
+        ):
+            assert required.casefold() in plain
+        assert provenance.casefold() in plain
+        assert terminal_handoff.casefold() in plain
+        assert re.search(r"не [^.]{0,200}heartbeat", folded)
+        assert "durable state machine" in folded
+        assert "reset/clean/delete" in folded
+
+    assert "Обычный progress исполнителя, включая `autonomy_ready`, не" in agents
+    assert "Обычный progress исполнителя, включая `autonomy_ready`, не" in execution
+    assert "`waitingOnApproval` не является разрешением создать" in agents
+    assert "`waitingOnApproval` не является разрешением создать дубль" in execution
+    assert "скрытый executor UI flag не остаётся" in agents
+    assert "hidden executor UI flag не может оставаться" in execution
+
+
 def _assert_active_protocol_cutover_contract() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     execution = (
@@ -4119,6 +4177,7 @@ def main() -> int:
     _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
     _assert_visible_codex_task_lifecycle_contract()
+    _assert_executor_autonomy_and_silent_approval_contract()
     _assert_active_protocol_cutover_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()

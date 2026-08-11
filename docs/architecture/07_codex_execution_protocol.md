@@ -20,8 +20,10 @@ Change-задача без отдельной пользовательской �
    завершает executor prompt обязательным terminal-handoff указанием из раздела
    [Prompt Contract](#prompt-contract-и-technical-path-revalidation).
 3. Исполнитель начинает от fresh `origin/main` в отдельной branch/worktree,
-   реализует bounded change, синхронизирует необходимые authoritative docs,
-   запускает targeted checks и читает полный semantic diff.
+   немедленно выполняет executor autonomy preflight, фиксирует task-local
+   `autonomy_ready` и только затем реализует bounded change, синхронизирует
+   необходимые authoritative docs, запускает targeted checks и читает полный
+   semantic diff.
 4. Исполнитель открывает один open non-draft same-repository PR в `main` с
    `task:standard` и ровно одной `scope:*` label.
 5. После successful `baseline` на current exact head исполнитель добавляет
@@ -124,11 +126,66 @@ GitHub/CI/runtime/production audit его работы, follow-up prompts, пр�
 сводки, параллельную реализацию, независимую перепроверку handoff, heartbeat,
 automation или любой другой мониторинговый контур.
 
-Куратор пробуждается только по финальному handoff, доказанному strict human-only
-обращению исполнителя либо новому явному указанию владельца. Обычный progress
-исполнителя не является поводом просыпаться. Вся technical verification,
-evidence и terminal closure до handoff — ответственность исполнителя; куратор
-не создаёт второй audit contour.
+Куратор пробуждается только по финальному handoff, direct strict human-only
+pre-terminal callback исполнителя либо новому явному указанию владельца.
+Обычный progress исполнителя, включая `autonomy_ready`, не является поводом
+просыпаться. Вся technical verification, evidence и terminal closure до
+handoff — ответственность исполнителя; куратор не создаёт второй audit
+contour.
+
+## Executor Autonomy Preflight И Silent Approval Prevention
+
+Новый repo-backed executor выполняет `EXECUTOR_AUTONOMY_PREFLIGHT` немедленно
+после dispatch и до длительного domain analysis/implementation. Он фактически
+проверяет:
+
+1. чтение/запись собственного worktree и shared Git metadata;
+2. status, remotes, GitHub auth, обязательный `git fetch --prune origin` и
+   возможность создать собственную branch от current `origin/main`;
+3. GitHub connector и доступный fallback;
+4. необходимые local dependencies/runtime paths;
+5. ожидаемые permission/credential gates.
+
+Все предсказуемые approval/permission requests front-load-ятся, пока владелец
+ещё онлайн. После успешного preflight исполнитель кратко фиксирует в своей
+видимой задаче `autonomy_ready`: exact starting main SHA, branch и отсутствие
+ожидающего approval. Эта запись — task-local progress, не callback куратору и
+не новая durable state machine; она не запускает heartbeat, automation,
+periodic monitor или registry.
+
+`waitingOnApproval`, missing permission/credential, interactive
+login/2FA/captcha и platform hard stop — strict human-only boundary. Для
+предсказуемого gate исполнитель до approval-gated call отправляет один короткий
+pre-terminal callback в исходную кураторскую задачу. Если gate стал известен
+только после platform/tool call, callback отправляется сразу после получения
+возможности продолжить model turn: hidden executor UI flag не может оставаться
+единственным сигналом.
+
+Callback содержит только тип gate, точное действие/ресурс, почему безопасного
+non-gated path нет, ожидаемый mutation/read effect и одно минимальное действие
+владельца. Обычный progress и технический audit в него не входят. После
+callback исполнитель остаётся на безопасной точке, не симулирует approval и не
+обходит permission/security policy.
+
+### Duplicate-Executor Guard После Wake Signal
+
+`waitingOnApproval` не является разрешением создать дубль. Только после одного
+из допустимых wake signals и до решения «перезапустить в новом executor»
+куратор делает один bounded read-only check:
+
+- terminal/unavailable state исходной задачи;
+- worktree status и branch;
+- uncommitted diff;
+- commits/push;
+- open PR.
+
+При branch/diff/commit/push/PR или возможности resume продолжается тот же
+executor либо фиксируется human-only blocker. Новый executor допустим только
+если исходный доказанно terminal/unrecoverable и незавершённого implementation
+state нет: clean untouched worktree, no branch, no commit, no push и no PR
+должны быть явно доказаны. Automatic reset/clean/delete чужого state,
+параллельный takeover, duplicate implementation и monitoring contour
+запрещены.
 
 ## Prompt Contract И Technical Path Revalidation
 
@@ -142,14 +199,23 @@ read, если сам пользователь отдельно и явно не
 
 `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
 
+Каждый новый repo-backed executor prompt до terminal-handoff указания явно
+включает contract из предыдущего раздела: немедленный
+`EXECUTOR_AUTONOMY_PREFLIGHT`, task-local `autonomy_ready`, front-loaded
+approval/permission requests, direct strict human-only callback, safe stop без
+симуляции approval и duplicate-executor guard после wake signal. В prompt также
+однозначно сказано, что `waitingOnApproval` не разрешает автоматический restart
+или duplicate executor, а `autonomy_ready` не создаёт callback/heartbeat/
+monitoring contour.
+
 Каждый executor task prompt обязательно заканчивается следующим по смыслу и
 составу полей указанием, после которого нет иных task directives:
 
 `Исполнитель самостоятельно доводит задачу до применимого terminal state. После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую задачу один финальный technical handoff: итоговый статус; что сделано; что не сделано или осталось вне scope; PR и final SHA; проверки; merge/release/deploy/production state; сложности, риски и blockers.`
 
 До terminal state исполнитель не отправляет обычный progress как callback.
-Единственное pre-terminal исключение — доказанное strict human-only обращение,
-без которого безопасное продолжение невозможно.
+Единственное pre-terminal исключение — direct strict human-only callback по
+описанному выше составу, без которого безопасное продолжение невозможно.
 
 До выполнения Codex повторно проверяет proposed technical path по current
 `origin/main`, root `AGENTS.md`, релевантным authoritative docs и code truth.
@@ -244,6 +310,22 @@ runner, reconciliation и non-target invariants.
 Только явно заданный bounded archive guard change. Он не возвращает Google
 Sheets/GAS в active runtime и требует targeted guard checks и bounded verify.
 
+## Unattended Execution Boundary
+
+Широкое предварительное разрешение пользователя покрывает последовательный
+запуск заранее согласованных ordinary repo/live stages и устранение
+non-material технических blockers внутри scope. Оно не делегирует exact
+production-mutation gate, missing credentials/permission, login/2FA/captcha,
+approval при proven irreversible data risk, security change, new external data
+destination или material product/risk choice.
+
+Отсутствие владельца не ослабляет `baseline`, GitHub Release Train, exact-SHA
+deploy/verify и production-mutation evidence. Для новой unattended цепочки
+curator/executor заранее пытаются довести ближайшего исполнителя до
+`autonomy_ready`, но не создают зависимые implementation tasks параллельно
+только ради раннего permission prompt. Quiet curator после dispatch остаётся
+quiet до одного из трёх допустимых wake signals.
+
 ## Phase-Local Preflight И Production Safety
 
 Preflight не является глобальным барьером. Dependency order:
@@ -295,14 +377,24 @@ capacity, backup/restore, writer/timer, SHA and reconciliation contracts из
 
 ## Repository Implementation И GitHub Closure
 
-Перед repo change:
+До длительного repo analysis/implementation `EXECUTOR_AUTONOMY_PREFLIGHT`
+подтверждает:
 
-- проверить `git status --short`, branch, remotes и GitHub auth;
+- доступ к worktree и shared Git metadata;
+- `git status --short`, branch, remotes и GitHub auth;
 - выполнить `git fetch --prune origin`;
 - сравнить `HEAD` с current `origin/main`;
 - создать separate branch/worktree от current `origin/main`;
+- проверить GitHub connector/fallback и необходимые local dependencies/runtime
+  paths;
+- front-load-ить предсказуемые permission/credential gates;
 - проверить open PR и не включать unmerged foreign changes;
 - не reset/clean и не изменять чужой dirty state.
+
+Успешный preflight завершается task-local `autonomy_ready` с exact starting
+main SHA/branch и подтверждением отсутствия pending approval. Gate вместо
+success обрабатывается через direct strict human-only callback; скрытый
+`waitingOnApproval` не считается достаточным уведомлением.
 
 Executor выполняет:
 
@@ -374,11 +466,14 @@ Release Train gates являются техническим proof; курато�
 
 ## Human-Only Boundary
 
-User action требуется только для missing credential/permission/approval,
-interactive login/2FA/captcha, proven irreversible data risk, security change,
-new external data destination, material scope/risk change или platform hard
-stop. Обычные Git, GitHub, checks, review, merge, queue wait, deploy/verify и
-доступная UI automation не перекладываются на пользователя.
+User action требуется только для `waitingOnApproval`, missing
+credential/permission/approval, interactive login/2FA/captcha, proven
+irreversible data risk, security change, new external data destination,
+material scope/risk change или platform hard stop. Такой gate сообщает direct
+pre-terminal callback с exact resource/effect/minimal action; hidden executor
+UI flag не заменяет callback. Обычные Git, GitHub, checks, review, merge, queue
+wait, deploy/verify и доступная UI automation не перекладываются на
+пользователя.
 
 Blocker final содержит exact error, выполненную безопасную работу и один
 минимальный human-only step.
