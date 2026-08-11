@@ -13,6 +13,7 @@ source_basis:
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
+  - "packages/application/ff_pool_foundation.py"
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/ff_overhead_allocation.py"
   - "packages/application/ff_document_workflow.py"
@@ -36,7 +37,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migration 133 adds only a default-off facility × pool diagnostic seam beneath `ff`; it does not add a warehouse stage, replace an active balance or publish a second total."
 ---
 
 # 1. Active warehouse contract
@@ -49,6 +50,15 @@ Active state содержит ровно шесть складов:
 4. `ff_to_wb` — `FF → WB`;
 5. `wb` — `Склад WB`;
 6. `wb_acceptance_discrepancy` — `Расхождения приёмки WB`.
+
+Migration 133 does not extend this list or `warehouse_key`. Facilities and
+`FBS|FBO` pools are dimensional detail strictly inside `ff`. The only future
+admissible aggregate is `ff quantity/capital = SUM(facility × pool)` per SKU;
+detail rows are never additional stage or all-stage operands. The foundation
+is empty and feature-off after deploy, and no active functional writer, read
+route, compact read model, public total, Vitrina cell or recommendation imports
+it. A mismatch diagnostic can only keep the future detail reader disabled; it
+cannot change the current global FF value or its certification.
 
 Supplier registry и warehouse projection не смешиваются. Invoice получает один стабильный `supplier_flow_id`; display name строится из invoice, но linkage и replay используют stable id. После смешивания на FF downstream identity принадлежит WB supply. Каждая positive line хранит exact text quantity, capital, WAC, coverage/quality и source provenance. Вычисления используют `Decimal`; UI округляет только display.
 
