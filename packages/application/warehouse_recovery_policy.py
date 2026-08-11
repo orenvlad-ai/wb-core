@@ -183,6 +183,9 @@ OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
     "ff_inventory_reconciliation": _policy(
         "ff_inventory_reconciliation", RecoveryTier.T1, "sku_date"
     ),
+    "ff_pool_document_posting": _policy(
+        "ff_pool_document_posting", RecoveryTier.T1, "document"
+    ),
     "wb_supplies_refresh": _policy(
         "wb_supplies_refresh", RecoveryTier.T1, "shipment", "sku_date"
     ),
@@ -255,6 +258,7 @@ DOMAIN_TABLE_PREFIXES = (
     "sheet_vitrina_v1_onec_",
     "sheet_vitrina_v1_own_capital_",
     "sheet_vitrina_v1_ff_stock_",
+    "sheet_vitrina_v1_ff_pool_",
     "sheet_vitrina_v1_wb_suppl",
     "sheet_vitrina_v1_supplier_",
     "sheet_vitrina_v1_supplier_cost",
@@ -269,6 +273,7 @@ DOMAIN_EXACT_TABLES = frozenset(
     {
         "sheet_vitrina_v1_ready_snapshots",
         "sheet_vitrina_v1_nomenclature_items",
+        "sheet_vitrina_v1_ff_facilities",
         "sheet_vitrina_v1_wb_opening_baseline",
         "sheet_vitrina_v1_cny_documents",
         "sheet_vitrina_v1_cny_ledger_operations",

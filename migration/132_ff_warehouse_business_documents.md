@@ -45,6 +45,13 @@ Legacy `Поставки → ФФ → Операции остатков ФФ` re
 
 All endpoints retain the supply-operator auth boundary. Page open, template download, registry/filter/detail/status reads are mutation-free. Preview and confirm are separate routes. `ff_document_workflow_v1` exposes five durable stages from server acceptance through document and economics completion. Inventory ready shows `Файл загружен и проверен — итоговый остаток <target>` and one explicit `Провести инвентаризацию`; there is no user-facing stale/revalidate action. UI yellow/partial/red/final-green semantics are derived only from server readback; local storage contains identities, not business truth. After commit it shows partial `Документ проведён; пересчёт выполняется`; final green `Инвентаризация проведена: <actual before> → <target>` / `Остатки обновлены` is allowed only after exact replay completion and target readback. Inventory/overhead apply and storno enqueue one exact targeted warehouse replay. Primary confirms do not run heavy replay in HTTP; the canonical hourly/manual worker records functional queue and separate economics completion on the same row. No production business-data fixture is required for deployment verification.
 
+Migration 134 adds a separate default-off facility × pool document service.
+It reuses the durable lifecycle vocabulary and the Stage 1 dimensional
+movement ledger, but it does not replace these aggregate FF routes, inventory,
+overhead, supplier-acceptance trigger or read model. No public Stage 2 route is
+introduced; existing aggregate behavior remains authoritative until a later
+explicit cutover.
+
 Functional economics full plan/digest revalidation runs outside a SQLite
 transaction under a `PRAGMA data_version` mutation guard. Only guarded target
 updates/readback/undo manifest run inside bounded `BEGIN IMMEDIATE`; concurrent

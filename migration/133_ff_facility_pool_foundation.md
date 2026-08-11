@@ -134,3 +134,11 @@ The baseline also retains the existing FF ledger/reservation/inventory/overhead/
 documents, warehouse functional/business projection and operational storage
 smokes. Semantic acceptance requires no imports from current producer/consumer,
 HTTP/UI, stage mapping or public-total code.
+
+## Stage 2 follow-on
+
+Migration 134 adds a durable immutable document/request/evidence service and
+protected XLSX generation/parser contracts above these same Stage 1 operations
+and movements. Its additive schema is deployed by operational ensure, but the
+service remains default-off and non-routed: no facility seed, feature epoch,
+opening/backfill or current writer/reader switch is introduced.

@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 from packages.business_time import business_date_from_timestamp
 
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
+from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
 from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_schema
 from packages.application.registry_upload_bundle_v1 import (
     RegistryUploadBundleV1Block,
@@ -11930,6 +11931,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_ff_pool_foundation_schema(conn)
+    ensure_ff_pool_document_schema(conn)
     ambiguous_bank_assignment = conn.execute(
         """
         SELECT 1
