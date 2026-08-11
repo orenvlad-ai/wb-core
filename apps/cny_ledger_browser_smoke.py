@@ -215,26 +215,25 @@ def main() -> None:
                         "ambiguous transport fixture did not establish the durable upload: "
                         f"{ambiguous_status} {ambiguous_payload}"
                     )
-                page.route(
-                    ambiguous_url,
-                    lambda route: route.abort("failed"),
-                    times=1,
+                _fail_next_cny_upload_transport(operator_frame, ambiguous_url)
+                operator_frame.locator("#cnyAccountFileInput").set_input_files(
+                    {
+                        "name": "browser-ambiguous.pdf",
+                        "mimeType": "application/pdf",
+                        "buffer": ambiguous_body,
+                    }
                 )
-                with page.expect_event(
-                    "requestfailed",
-                    predicate=lambda browser_request: browser_request.url == ambiguous_url,
-                    timeout=10000,
-                ):
-                    operator_frame.locator("#cnyAccountFileInput").set_input_files(
-                        {
-                            "name": "browser-ambiguous.pdf",
-                            "mimeType": "application/pdf",
-                            "buffer": ambiguous_body,
-                        }
-                    )
                 expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
                     "Ответ загрузки не был получен полностью", timeout=10000
                 )
+                transport_failure_triggered = operator_frame.locator("body").evaluate(
+                    """(body) => Boolean(
+                      body.ownerDocument.defaultView.__cnyLostResponseFixture
+                      && body.ownerDocument.defaultView.__cnyLostResponseFixture.triggered
+                    )"""
+                )
+                if not transport_failure_triggered:
+                    raise AssertionError("ambiguous transport fixture did not reject the browser upload")
                 expect(operator_frame.locator("#cnyAccountMessage")).to_have_class(
                     "section-message is-warning"
                 )
@@ -437,6 +436,31 @@ def _upload_pdf(operator_frame: object, filename: str, body: bytes) -> None:
         "Документ CNY сохранён и ledger пересчитан", timeout=10000
     )
     expect(operator_frame.locator("#cnyConversionsBody tr", has_text=filename)).to_be_visible()
+
+
+def _fail_next_cny_upload_transport(operator_frame: object, upload_url: str) -> None:
+    operator_frame.locator("body").evaluate(
+        """(body, exactUploadUrl) => {
+          const view = body.ownerDocument.defaultView;
+          const originalFetch = view.fetch.bind(view);
+          const fixture = { triggered: false };
+          view.__cnyLostResponseFixture = fixture;
+          view.fetch = (input, init) => {
+            const requestUrl = typeof input === "string" ? input : String(input && input.url || "");
+            const requestMethod = String(
+              init && init.method || input && input.method || "GET"
+            ).toUpperCase();
+            const resolvedUrl = new URL(requestUrl, view.location.href).href;
+            if (!fixture.triggered && requestMethod === "POST" && resolvedUrl === exactUploadUrl) {
+              fixture.triggered = true;
+              view.fetch = originalFetch;
+              return Promise.reject(new TypeError("injected lost CNY upload response"));
+            }
+            return originalFetch(input, init);
+          };
+        }""",
+        upload_url,
+    )
 
 
 def _cny_ui_snapshot(operator_frame: object) -> dict[str, object]:
