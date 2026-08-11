@@ -1968,7 +1968,8 @@ def _build_handler(
                         {"error": f"CNY account document upload failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = int(payload.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
             if parsed.path == DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH:
@@ -1987,7 +1988,8 @@ def _build_handler(
                         {"error": f"CNY opening balance save failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = int(result.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), result)
                 return
 
             if parsed.path == DEFAULT_CNY_ACCOUNT_REPLAY_PATH:
@@ -2002,7 +2004,8 @@ def _build_handler(
                         {"error": f"CNY ledger replay failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = int(result.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), result)
                 return
 
             if _is_supplier_shipment_contract_path(parsed.path):
@@ -2078,7 +2081,8 @@ def _build_handler(
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = int(payload.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
             if _is_supplier_financial_document_delete_preview_path(parsed.path):
@@ -2112,7 +2116,8 @@ def _build_handler(
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = int(payload.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
             if _is_supplier_financial_documents_collection_path(parsed.path):
@@ -5226,7 +5231,8 @@ def _build_handler(
                         {"error": f"supplier financial document patch failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = int(result.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), result)
                 return
 
             if _is_supplier_shipment_expenses_complete_path(parsed.path):
@@ -5447,7 +5453,8 @@ def _build_handler(
                         {"error": f"CNY account document delete failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                response_status = int(payload.pop("http_status", HTTPStatus.OK))
+                _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
             if _is_trade_document_contract_link_path(parsed.path):

@@ -312,7 +312,25 @@ def enqueue_warehouse_targeted_recalculation(
                 "queue_id": str(noop_row["queue_id"]),
             },
         )
-        return {**noop_row, "recovery_policy": recovery}
+        try:
+            from packages.application.warehouse_business_projection import (
+                drain_warehouse_business_projection_outbox,
+            )
+
+            business_projection = drain_warehouse_business_projection_outbox(
+                runtime,
+                published_at=now,
+            )
+        except Exception as exc:  # source queue identity remains durable
+            business_projection = {
+                "status": "error",
+                "error": str(exc).replace("\n", " ")[:1000],
+            }
+        return {
+            **noop_row,
+            "recovery_policy": recovery,
+            "business_projection": business_projection,
+        }
     if not any(
         str((image.get("key") or {}).get("queue_id") or "") == queue_id
         for image in before_images

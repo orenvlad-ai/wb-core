@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import hashlib
 import json
 from pathlib import Path
 import socket
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -32,9 +34,11 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     build_registry_upload_http_server,
 )
 from packages.application.cny_ledger import CnyLedgerBlock, parse_cny_document_text  # noqa: E402
+from packages.application.own_product_capital import OwnProductCapitalBlock  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sqlite_contention import SQLiteContentionExhausted  # noqa: E402
+from packages.application import warehouse_business_projection as warehouse_projection  # noqa: E402
 from packages.application.supplier_financial_documents import (  # noqa: E402
     build_bank_fee_statement_import_preview,
     build_financial_summary,
@@ -125,7 +129,10 @@ class Clock:
 
     def __call__(self) -> str:
         self.value += 1
-        return f"2026-05-01T08:{self.value:02d}:00Z"
+        return (
+            datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+            + timedelta(minutes=self.value)
+        ).isoformat().replace("+00:00", "Z")
 
 
 def main() -> None:
@@ -135,6 +142,7 @@ def main() -> None:
     _assert_application_ledger_replay()
     _assert_same_day_date_only_financial_priority()
     _assert_blocked_states()
+    _assert_mixed_shipment_durable_pending_and_idempotent_retry()
     _assert_http_delete_replays_and_removes_owned_file()
     _assert_http_routes_and_order_integration()
 
@@ -542,6 +550,266 @@ def _assert_blocked_states() -> None:
             raise AssertionError(f"insufficient balance order status changed: {header}")
 
 
+def _assert_mixed_shipment_durable_pending_and_idempotent_retry() -> None:
+    """Reproduce the 26GN237 mixed-state closure and post-commit failure."""
+
+    clock = Clock()
+    with TemporaryDirectory(prefix="cny-ledger-mixed-durable-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        block = CnyLedgerBlock(
+            runtime=runtime,
+            timestamp_factory=clock,
+            pdf_text_extractor=_fixture_text_extractor,
+        )
+        opening = block.create_opening_balance(
+            {
+                "operation_date": "2026-05-01",
+                "cny_amount": "100",
+                "rub_value": "1000",
+            }
+        )
+        if opening.get("readback_confirmed") is not True:
+            raise AssertionError(f"opening durable boundary was not confirmed: {opening}")
+        _seed_mapped_supplier_order(runtime, "mixed-events", nm_id=101)
+        _seed_mapped_supplier_order(runtime, "mixed-mapped-no-events", nm_id=202)
+        capital = OwnProductCapitalBlock(runtime=runtime, timestamp_factory=clock)
+        capital.record_supplier_payment(
+            payment_id="mixed-seed-payment",
+            shipment_id="mixed-events",
+            effective_date="2026-05-02",
+            invoice_total_cny="1",
+            paid_cny="1",
+            paid_rub="10",
+            product_lines=[
+                {
+                    "line_id": "mixed-events-line",
+                    "nm_id": 101,
+                    "qty": 1,
+                    "amount": 1,
+                    "match_status": "matched",
+                }
+            ],
+            expenses_complete=True,
+            recalculate=False,
+        )
+        capital.set_expenses_certifications(
+            shipment_ids=["mixed-events", "mixed-mapped-no-events"],
+            expenses_complete=True,
+            recalculate=False,
+        )
+
+        config = RegistryUploadHttpEntrypointConfig(
+            host="127.0.0.1",
+            port=_reserve_free_port(),
+            upload_path=DEFAULT_UPLOAD_PATH,
+            sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path="/v1/sheet-vitrina-v1/refresh",
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
+            runtime_dir=runtime_dir,
+        )
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=runtime_dir,
+            runtime=runtime,
+            activated_at_factory=lambda: "2026-05-12T08:00:00Z",
+            now_factory=lambda: HTTP_NOW,
+        )
+        entrypoint.cny_ledger_block.timestamp_factory = clock
+        entrypoint.cny_ledger_block.pdf_text_extractor = _fixture_text_extractor
+        server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{config.port}"
+            first_body = b"mixed-state-standalone-conversion"
+            upload_status, uploaded = _post_multipart(
+                f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}",
+                first_body,
+                filename="mixed-state-conversion.pdf",
+            )
+            if upload_status != 200 or uploaded.get("readback_confirmed") is not True:
+                raise AssertionError(
+                    "mapped SKU without capital events must not fail standalone CNY upload: "
+                    f"{upload_status} {uploaded}"
+                )
+            affected = set(
+                (uploaded.get("warehouse_targeted_recalculation") or {}).get(
+                    "affected_nm_ids"
+                )
+                or []
+            )
+            if affected != {101, 202}:
+                raise AssertionError(f"mixed shipment SKU closure changed: {uploaded}")
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                certification_rows = conn.execute(
+                    """
+                    SELECT stable_source_id,status,error
+                    FROM sheet_vitrina_v1_warehouse_business_projection_outbox
+                    WHERE source_kind='supplier_expense_certification'
+                    ORDER BY stable_source_id,requested_at
+                    """
+                ).fetchall()
+            mapped_without_events = [
+                dict(row)
+                for row in certification_rows
+                if str(row["stable_source_id"]) ==
+                "supplier_certification:mixed-mapped-no-events"
+            ]
+            if not mapped_without_events or any(
+                str(row.get("status") or "") != "complete"
+                for row in mapped_without_events
+            ):
+                raise AssertionError(
+                    "certification-only mapped SKU scope must reach complete: "
+                    f"{mapped_without_events}"
+                )
+
+            # Model a later standalone conversion after the shipment expense
+            # certification has advanced.  The next CNY replay must reset the
+            # two shipments in one batch and publish that exact derived scope.
+            capital.set_expenses_certifications(
+                shipment_ids=["mixed-events", "mixed-mapped-no-events"],
+                expenses_complete=True,
+                recalculate=False,
+                update_shipment_headers=True,
+                preserve_unchanged=True,
+            )
+            advanced_projection = (
+                warehouse_projection.drain_warehouse_business_projection_outbox(
+                    runtime,
+                    published_at="2026-05-01T18:23:30Z",
+                )
+            )
+            if advanced_projection.get("status") not in {"success", "no_op"}:
+                raise AssertionError(
+                    "advanced certification fixture did not publish: "
+                    f"{advanced_projection}"
+                )
+
+            pending_body = b"mixed-state-derived-failure"
+            drain_projection = (
+                warehouse_projection.drain_warehouse_business_projection_outbox
+            )
+
+            def fail_projection_after_candidate(runtime_arg, *, published_at=None, **_kwargs):
+                def inject(phase: str) -> None:
+                    if phase == "business_projection_candidate_ready":
+                        raise RuntimeError("injected derived replay failure")
+
+                return drain_projection(
+                    runtime_arg,
+                    published_at=published_at,
+                    inject_failure=inject,
+                )
+
+            warehouse_projection.drain_warehouse_business_projection_outbox = (
+                fail_projection_after_candidate
+            )
+            try:
+                pending_status, pending = _post_multipart(
+                    f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}",
+                    pending_body,
+                    filename="derived-failure.pdf",
+                )
+            finally:
+                warehouse_projection.drain_warehouse_business_projection_outbox = (
+                    drain_projection
+                )
+            retry_identity = dict(pending.get("durable_retry_identity") or {})
+            if (
+                pending_status != 202
+                or pending.get("status") != "pending"
+                or pending.get("operation_applied") is not True
+                or pending.get("readback_confirmed") is not True
+                or pending.get("pending_phase") != "derived_replay"
+                or not retry_identity.get("stable_source_id")
+                or not retry_identity.get("source_revision")
+            ):
+                raise AssertionError(
+                    "post-readback derived failure must be a truthful HTTP 202: "
+                    f"{pending_status} {pending}"
+                )
+            pending_document_id = str(pending.get("document_id") or "")
+            document_count = len(runtime.list_cny_documents())
+            operation_count = len(runtime.list_cny_ledger_operations())
+            with sqlite3.connect(runtime.db_path) as conn:
+                capital_event_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_events"
+                    ).fetchone()[0]
+                )
+            retry_status, retried = _post_multipart(
+                f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}",
+                pending_body,
+                filename="derived-failure-retry.pdf",
+            )
+            if (
+                retry_status != 200
+                or retried.get("idempotent") is not True
+                or str(retried.get("document_id") or "") != pending_document_id
+                or len(runtime.list_cny_documents()) != document_count
+                or len(runtime.list_cny_ledger_operations()) != operation_count
+            ):
+                raise AssertionError(
+                    "same-file retry must reconcile without document/ledger duplication: "
+                    f"{retry_status} {retried}"
+                )
+            pending_sha = hashlib.sha256(pending_body).hexdigest()
+            matching_documents = [
+                item
+                for item in runtime.list_cny_documents()
+                if str(item.get("file_sha256") or "") == pending_sha
+            ]
+            matching_operations = [
+                item
+                for item in runtime.list_cny_ledger_operations()
+                if str(item.get("source_document_id") or "") == pending_document_id
+            ]
+            with sqlite3.connect(runtime.db_path) as conn:
+                capital_event_count_after = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_events"
+                    ).fetchone()[0]
+                )
+                queue_rows = conn.execute(
+                    """
+                    SELECT queue_id,stable_source_id,source_revision,status,
+                           affected_nm_ids_json,error
+                    FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    WHERE stable_source_id=?
+                    """,
+                    (f"cny_document:{pending_document_id}",),
+                ).fetchall()
+                outbox_errors = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM sheet_vitrina_v1_warehouse_business_projection_outbox
+                        WHERE status='error'
+                        """
+                    ).fetchone()[0]
+                )
+            if (
+                len(matching_documents) != 1
+                or len(matching_operations) != 1
+                or capital_event_count_after != capital_event_count
+                or len(queue_rows) != 1
+                or outbox_errors
+            ):
+                raise AssertionError(
+                    "reconciled retry terminal state is not exact: "
+                    f"documents={matching_documents} operations={matching_operations} "
+                    f"capital_events={capital_event_count}->{capital_event_count_after} "
+                    f"queue={[tuple(row) for row in queue_rows]} outbox_errors={outbox_errors}"
+                )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+
 def _assert_http_delete_replays_and_removes_owned_file() -> None:
     clock = Clock()
     with TemporaryDirectory(prefix="cny-ledger-http-delete-") as tmp:
@@ -894,12 +1162,15 @@ def _assert_http_routes_and_order_integration() -> None:
                 },
             )
             if (
-                confirm_status != 200
+                confirm_status != 202
                 or confirmed_statement.get("parse_status") != "confirmed"
                 or not confirmed_statement.get("already_added")
+                or confirmed_statement.get("status") != "pending"
+                or confirmed_statement.get("operation_applied") is not True
+                or confirmed_statement.get("readback_confirmed") is not True
             ):
                 raise AssertionError(
-                    "statement confirm resume changed: "
+                    "statement confirm with no mapped SKU must retain a truthful pending blocker: "
                     f"{confirm_status} {confirmed_statement}"
                 )
             imported_lines = runtime.list_supplier_financial_expense_lines("http-order")
@@ -945,7 +1216,11 @@ def _assert_http_routes_and_order_integration() -> None:
                     "target_revision": import_preview.get("target_revision"),
                 },
             )
-            if duplicate_confirm_status != 200 or not duplicate_confirm.get("already_added"):
+            if (
+                duplicate_confirm_status != 202
+                or not duplicate_confirm.get("already_added")
+                or duplicate_confirm.get("status") != "pending"
+            ):
                 raise AssertionError(f"duplicate confirm must be idempotent: {duplicate_confirm_status} {duplicate_confirm}")
             if len(runtime.list_supplier_financial_expense_lines("http-order")) != 3:
                 raise AssertionError("duplicate confirm must not duplicate expense lines")
@@ -1003,13 +1278,21 @@ def _assert_http_routes_and_order_integration() -> None:
                 },
             )
             if (
-                delete_statement_status != 200
+                delete_statement_status != 202
                 or delete_statement.get("deleted") is not False
                 or delete_statement.get("archived") is not True
                 or len(delete_statement.get("cny_documents_archived") or []) != 3
                 or not delete_statement.get("cny_replay")
+                or delete_statement.get("status") != "pending"
+                or delete_statement.get("operation_applied") is not True
+                or delete_statement.get("readback_confirmed") is not True
+                or delete_statement.get("retryable") is not False
             ):
-                raise AssertionError(f"bank statement delete must cleanup linked CNY fees: {delete_statement_status} {delete_statement}")
+                raise AssertionError(
+                    "bank statement delete must truthfully report durable archive "
+                    "with a mapping blocker: "
+                    f"{delete_statement_status} {delete_statement}"
+                )
             remaining_fee_documents = [
                 item
                 for item in runtime.list_cny_documents()
@@ -1189,6 +1472,32 @@ def _base_cny_document(
         "warnings": [],
         "errors": [],
     }
+
+
+def _seed_mapped_supplier_order(
+    runtime: RegistryUploadDbBackedRuntime,
+    shipment_id: str,
+    *,
+    nm_id: int,
+) -> None:
+    _seed_supplier_order(runtime, shipment_id)
+    detail = runtime.load_supplier_shipment(shipment_id) or {}
+    runtime.save_supplier_shipment(
+        header=dict(detail.get("header") or {}),
+        lines=[
+            {
+                "line_id": f"{shipment_id}-line",
+                "shipment_id": shipment_id,
+                "line_type": "product",
+                "sort_order": 1,
+                "internal_nm_id": nm_id,
+                "qty": 1,
+                "unit_price": 1,
+                "amount": 1,
+                "match_status": "matched",
+            }
+        ],
+    )
 
 
 def _seed_supplier_order(

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from urllib import request as urllib_request
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -21,6 +23,7 @@ from apps.cny_ledger_smoke import (  # noqa: E402
     _seed_supplier_order,
 )
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
     DEFAULT_CNY_ACCOUNT_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -44,6 +47,8 @@ class ObservedCnyEntrypoint(RegistryUploadHttpEntrypoint):
         self.slow_delete_document_id = ""
         self.slow_delete_started = threading.Event()
         self.slow_delete_release = threading.Event()
+        self.next_upload_pending = False
+        self.next_upload_failure = False
 
     def handle_cny_account_status_request(self) -> dict[str, object]:
         self.cny_status_request_count += 1
@@ -56,6 +61,40 @@ class ObservedCnyEntrypoint(RegistryUploadHttpEntrypoint):
             if not self.slow_delete_release.wait(timeout=5):
                 raise RuntimeError("browser smoke did not release bounded CNY delete")
         return super().handle_cny_account_document_delete_request(document_id)
+
+    def handle_cny_account_upload_request(
+        self,
+        file_bytes: bytes,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        if self.next_upload_failure:
+            self.next_upload_failure = False
+            raise ValueError("injected pre-save validation failure")
+        result = super().handle_cny_account_upload_request(file_bytes, **kwargs)
+        if self.next_upload_pending:
+            self.next_upload_pending = False
+            document_id = str(result.get("document_id") or "")
+            result.update(
+                {
+                    "contract_name": "sheet_vitrina_v1_cny_write_pending_v1",
+                    "status": "pending",
+                    "document_status": "posted",
+                    "operation_applied": True,
+                    "readback_confirmed": True,
+                    "pending_phase": "derived_replay",
+                    "retryable": True,
+                    "message": (
+                        "Операция CNY сохранена, ledger подтверждён; "
+                        "связанный пересчёт ожидает безопасного повтора."
+                    ),
+                    "durable_retry_identity": {
+                        "stable_source_id": f"cny_document:{document_id}",
+                        "source_revision": "sha256:browser-pending",
+                    },
+                    "http_status": 202,
+                }
+            )
+        return result
 
 
 def main() -> None:
@@ -117,6 +156,102 @@ def main() -> None:
                 expect(direct_one_row).to_be_visible()
                 expect(direct_two_row).to_be_visible()
                 expect(direct_one_row.locator("[data-cny-delete-document]")).to_be_enabled()
+
+                status_count_before_pending = entrypoint.cny_status_request_count
+                entrypoint.next_upload_pending = True
+                operator_frame.locator("#cnyAccountFileInput").set_input_files(
+                    {
+                        "name": "browser-pending.pdf",
+                        "mimeType": "application/pdf",
+                        "buffer": b"browser-pending-conversion",
+                    }
+                )
+                pending_message = operator_frame.locator("#cnyAccountMessage")
+                expect(pending_message).to_contain_text(
+                    "сохранена, ledger подтверждён", timeout=10000
+                )
+                expect(pending_message).to_have_class("section-message is-warning")
+                expect(operator_frame.locator("#cnyAccountFileInput")).to_have_value("")
+                expect(
+                    operator_frame.locator(
+                        "#cnyConversionsBody tr", has_text="browser-pending.pdf"
+                    )
+                ).to_be_visible()
+                if entrypoint.cny_status_request_count <= status_count_before_pending:
+                    raise AssertionError("HTTP 202 must immediately reload the CNY account read model")
+
+                document_count_before_failure = len(runtime.list_cny_documents())
+                entrypoint.next_upload_failure = True
+                operator_frame.locator("#cnyAccountFileInput").set_input_files(
+                    {
+                        "name": "browser-genuine-failure.pdf",
+                        "mimeType": "application/pdf",
+                        "buffer": b"browser-genuine-failure",
+                    }
+                )
+                expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
+                    "Не удалось загрузить CNY документ", timeout=10000
+                )
+                expect(operator_frame.locator("#cnyAccountMessage")).to_have_class(
+                    "section-message is-error"
+                )
+                if len(runtime.list_cny_documents()) != document_count_before_failure:
+                    raise AssertionError("genuine pre-save failure must not persist a CNY document")
+
+                ambiguous_url = f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}"
+
+                def apply_then_drop_response(route: object) -> None:
+                    browser_request = route.request
+                    content_type = browser_request.headers.get("content-type", "")
+                    replay_request = urllib_request.Request(
+                        browser_request.url,
+                        data=browser_request.post_data_buffer,
+                        headers={
+                            "Accept": "application/json",
+                            "Content-Type": content_type,
+                        },
+                        method="POST",
+                    )
+                    with urllib_request.urlopen(replay_request, timeout=10) as response:
+                        status = int(response.status)
+                        response.read()
+                    if status not in {200, 202}:
+                        raise AssertionError(
+                            f"ambiguous transport fixture did not apply the upload: {status}"
+                        )
+                    route.abort("failed")
+
+                page.route(ambiguous_url, apply_then_drop_response, times=1)
+                operator_frame.locator("#cnyAccountFileInput").set_input_files(
+                    {
+                        "name": "browser-ambiguous.pdf",
+                        "mimeType": "application/pdf",
+                        "buffer": b"browser-ambiguous-conversion",
+                    }
+                )
+                expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
+                    "Ответ загрузки не был получен полностью", timeout=10000
+                )
+                expect(operator_frame.locator("#cnyAccountMessage")).to_have_class(
+                    "section-message is-warning"
+                )
+                expect(operator_frame.locator("#cnyAccountFileInput")).to_have_value("")
+                expect(
+                    operator_frame.locator(
+                        "#cnyConversionsBody tr", has_text="browser-ambiguous.pdf"
+                    )
+                ).to_be_visible()
+                ambiguous_documents = [
+                    item
+                    for item in runtime.list_cny_documents()
+                    if str(item.get("original_filename") or "")
+                    == "browser-ambiguous.pdf"
+                ]
+                if len(ambiguous_documents) != 1:
+                    raise AssertionError(
+                        "ambiguous response reconciliation must retain exactly one document: "
+                        f"{ambiguous_documents}"
+                    )
 
                 source_relative_path = Path(
                     "supplier_financial_documents/files/browser-source-financial/browser-source-owned.pdf"
@@ -192,12 +327,14 @@ def main() -> None:
                     )
                 expect(direct_one_row).to_have_count(0)
                 ui_after_success = _cny_ui_snapshot(operator_frame)
-                for field in ("balance_cny", "balance_rub", "average_rate", "replay", "state"):
+                for field in ("balance_cny", "balance_rub", "replay", "state"):
                     if ui_after_success[field] == ui_before_error[field]:
                         raise AssertionError(
                             f"successful delete must refresh CNY UI field {field}: "
                             f"{ui_before_error} -> {ui_after_success}"
                         )
+                if ui_after_success["average_rate"] in {"", "—"}:
+                    raise AssertionError("successful delete reload lost the CNY average-rate read model")
                 if ui_after_success["ledger_row_count"] != ui_before_error["ledger_row_count"] - 1:
                     raise AssertionError(
                         f"successful delete must remove its replayed ledger operation: "
@@ -259,6 +396,12 @@ def main() -> None:
                 expect(
                     operator_frame.locator("#cnyConversionsBody tr", has_text="browser-source-owned.pdf")
                 ).to_be_visible()
+                expect(
+                    operator_frame.locator("#cnyConversionsBody tr", has_text="browser-pending.pdf")
+                ).to_be_visible()
+                expect(
+                    operator_frame.locator("#cnyConversionsBody tr", has_text="browser-ambiguous.pdf")
+                ).to_be_visible()
                 browser.close()
         finally:
             entrypoint.slow_delete_release.set()
@@ -314,7 +457,10 @@ def _clock():
 
     def now() -> str:
         counter["value"] += 1
-        return f"2026-05-01T09:{counter['value']:02d}:00Z"
+        return (
+            datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
+            + timedelta(minutes=counter["value"])
+        ).isoformat().replace("+00:00", "Z")
 
     return now
 

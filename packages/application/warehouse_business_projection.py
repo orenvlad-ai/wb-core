@@ -1702,7 +1702,135 @@ def _resolve_outbox_scope(
             affected.add(int(row["nm_id"]))
             if str(row["first_date"] or ""):
                 earliest = min(earliest, str(row["first_date"])[:10])
+        shipment_rows = conn.execute(
+            f"""
+            SELECT shipment_id,internal_nm_id
+            FROM sheet_vitrina_v1_supplier_shipment_lines
+            WHERE shipment_id IN ({placeholders})
+              AND line_type='product'
+              AND internal_nm_id IS NOT NULL
+              AND internal_nm_id > 0
+            ORDER BY shipment_id,sort_order,line_id
+            """,
+            certification_shipments,
+        ).fetchall()
+        for row in shipment_rows:
+            # Certification may be reset before the first paid-capital event.
+            # The canonical shipment line mapping is already exact SKU evidence
+            # and must close that certification-only projection scope.
+            affected.add(int(row["internal_nm_id"]))
     return earliest, sorted(affected)
+
+
+def _certification_empty_scope_evidence(
+    conn: sqlite3.Connection,
+    requests: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Classify only an exact certification-only empty scope as no-op/blocker."""
+
+    if not requests or any(
+        str(request.get("source_kind") or "")
+        != "supplier_expense_certification"
+        for request in requests
+    ):
+        return None
+    shipment_ids = sorted(
+        {
+            str(request.get("stable_source_id") or "").split(":", 1)[-1]
+            for request in requests
+            if str(request.get("stable_source_id") or "").startswith(
+                "supplier_certification:"
+            )
+            and str(request.get("stable_source_id") or "").split(":", 1)[-1]
+        }
+    )
+    if not shipment_ids:
+        return {
+            "status": "blocked",
+            "code": "supplier_certification_identity_missing",
+            "shipment_ids": [],
+        }
+    placeholders = ",".join("?" for _ in shipment_ids)
+    existing_ids = {
+        str(row["shipment_id"])
+        for row in conn.execute(
+            f"""
+            SELECT shipment_id
+            FROM sheet_vitrina_v1_supplier_shipments
+            WHERE shipment_id IN ({placeholders})
+            """,
+            shipment_ids,
+        ).fetchall()
+    }
+    missing_ids = sorted(set(shipment_ids) - existing_ids)
+    if missing_ids:
+        return {
+            "status": "blocked",
+            "code": "supplier_certification_shipment_missing",
+            "shipment_ids": shipment_ids,
+            "missing_shipment_ids": missing_ids,
+        }
+    mapped_event_count = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM sheet_vitrina_v1_own_capital_events
+            WHERE shipment_id IN ({placeholders})
+              AND nm_id > 0
+            """,
+            shipment_ids,
+        ).fetchone()[0]
+    )
+    if mapped_event_count:
+        return {
+            "status": "blocked",
+            "code": "supplier_certification_scope_resolution_inconsistent",
+            "shipment_ids": shipment_ids,
+            "mapped_event_count": mapped_event_count,
+        }
+    line_counts = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS product_line_count,
+            SUM(
+                CASE
+                    WHEN internal_nm_id IS NOT NULL AND internal_nm_id > 0
+                    THEN 1 ELSE 0
+                END
+            ) AS mapped_product_line_count
+        FROM sheet_vitrina_v1_supplier_shipment_lines
+        WHERE shipment_id IN ({placeholders})
+          AND line_type='product'
+        """,
+        shipment_ids,
+    ).fetchone()
+    product_line_count = int(line_counts["product_line_count"] or 0)
+    mapped_product_line_count = int(
+        line_counts["mapped_product_line_count"] or 0
+    )
+    if mapped_product_line_count:
+        return {
+            "status": "blocked",
+            "code": "supplier_certification_scope_resolution_inconsistent",
+            "shipment_ids": shipment_ids,
+            "product_line_count": product_line_count,
+            "mapped_product_line_count": mapped_product_line_count,
+        }
+    if product_line_count:
+        return {
+            "status": "blocked",
+            "code": "supplier_certification_product_mapping_missing",
+            "shipment_ids": shipment_ids,
+            "product_line_count": product_line_count,
+            "mapped_product_line_count": 0,
+        }
+    return {
+        "status": "no_op",
+        "code": "supplier_certification_has_no_mapped_sku",
+        "shipment_ids": shipment_ids,
+        "product_line_count": 0,
+        "mapped_product_line_count": 0,
+    }
 
 
 def _persist_projection_revision(
@@ -2016,6 +2144,80 @@ def publish_functional_version_business_projection(
     }
 
 
+def terminalize_supplier_certification_noop(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    shipment_ids: Iterable[str],
+    finished_at: str | None = None,
+) -> dict[str, Any]:
+    """Close only a proven certification scope with no canonical mapped SKU."""
+
+    normalized_ids = sorted(
+        {str(shipment_id or "").strip() for shipment_id in shipment_ids}
+        - {""}
+    )
+    if not normalized_ids:
+        return {
+            "status": "no_op",
+            "request_count": 0,
+            "terminal_no_op": True,
+            "diagnostic_code": "supplier_certification_scope_empty",
+        }
+    timestamp = str(finished_at or _now())
+    stable_ids = [f"supplier_certification:{item}" for item in normalized_ids]
+    placeholders = ",".join("?" for _ in stable_ids)
+    with sqlite3.connect(runtime.db_path, timeout=30) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_warehouse_projection_source_outbox(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        requests = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT * FROM {OUTBOX_TABLE}
+                WHERE source_kind='supplier_expense_certification'
+                  AND stable_source_id IN ({placeholders})
+                  AND status IN ('queued','error')
+                ORDER BY request_id
+                """,
+                stable_ids,
+            ).fetchall()
+        ]
+        evidence_requests = requests or [
+            {
+                "source_kind": "supplier_expense_certification",
+                "stable_source_id": stable_id,
+            }
+            for stable_id in stable_ids
+        ]
+        evidence = _certification_empty_scope_evidence(conn, evidence_requests)
+        if not evidence or evidence.get("status") != "no_op":
+            conn.rollback()
+            raise WarehouseBusinessProjectionError(
+                "certification no-op is not proven: "
+                + str((evidence or {}).get("code") or "unknown")
+            )
+        request_ids = [str(item["request_id"]) for item in requests]
+        if request_ids:
+            request_placeholders = ",".join("?" for _ in request_ids)
+            conn.execute(
+                f"""
+                UPDATE {OUTBOX_TABLE}
+                SET status='complete',finished_at=?,error=NULL
+                WHERE request_id IN ({request_placeholders})
+                  AND status IN ('queued','error')
+                """,
+                (timestamp, *request_ids),
+            )
+        conn.commit()
+    return {
+        "status": "no_op",
+        "request_count": len(requests),
+        "terminal_no_op": True,
+        "diagnostics": evidence,
+    }
+
+
 def drain_warehouse_business_projection_outbox(
     runtime: RegistryUploadDbBackedRuntime,
     *,
@@ -2083,6 +2285,38 @@ def drain_warehouse_business_projection_outbox(
                 conn, scope_rows
             )
             if not affected_nm_ids:
+                empty_scope = _certification_empty_scope_evidence(
+                    conn,
+                    request_rows,
+                )
+                if empty_scope and empty_scope.get("status") == "no_op":
+                    conn.execute(
+                        f"""
+                        UPDATE {OUTBOX_TABLE}
+                        SET status='complete',finished_at=?,error=NULL
+                        WHERE request_id IN ({placeholders}) AND status='running'
+                        """,
+                        (timestamp, *request_ids),
+                    )
+                    conn.commit()
+                    return {
+                        "status": "no_op",
+                        "request_count": len(request_rows),
+                        "business_effective_date": business_effective_date,
+                        "affected_nm_ids": [],
+                        "diagnostics": {
+                            **empty_scope,
+                            "terminal_no_op": True,
+                            "external_source_refresh_count": 0,
+                            "full_vitrina_refresh_count": 0,
+                            "all_history_rebuild": False,
+                        },
+                    }
+                if empty_scope and empty_scope.get("status") == "blocked":
+                    raise WarehouseBusinessProjectionError(
+                        "certification-only outbox scope is a data-quality blocker: "
+                        + str(empty_scope.get("code") or "unknown")
+                    )
                 raise WarehouseBusinessProjectionError(
                     "coalesced source outbox has no affected SKU closure"
                 )

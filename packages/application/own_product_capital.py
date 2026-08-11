@@ -936,12 +936,103 @@ class OwnProductCapitalBlock:
         shipment_id: str,
         expenses_complete: bool,
         actor: str = "",
+        recalculate: bool = True,
+        update_shipment_headers: bool = False,
+        preserve_unchanged: bool = False,
     ) -> dict[str, Any]:
         shipment_id = _required_text(shipment_id, "shipment_id")
+        result = self.set_expenses_certifications(
+            shipment_ids=[shipment_id],
+            expenses_complete=expenses_complete,
+            actor=actor,
+            recalculate=recalculate,
+            update_shipment_headers=update_shipment_headers,
+            preserve_unchanged=preserve_unchanged,
+        )
+        return {
+            "shipment_id": shipment_id,
+            "expenses_complete": bool(expenses_complete),
+            "certified_at": result["certified_at"],
+            "daily_rows_changed": result["daily_rows_changed"],
+        }
+
+    def set_expenses_certifications(
+        self,
+        *,
+        shipment_ids: Iterable[str],
+        expenses_complete: bool,
+        actor: str = "",
+        recalculate: bool = True,
+        update_shipment_headers: bool = False,
+        preserve_unchanged: bool = False,
+    ) -> dict[str, Any]:
+        """Reset one exact shipment scope atomically and rebuild at most once."""
+
+        normalized_ids = sorted(
+            {
+                _required_text(shipment_id, "shipment_id")
+                for shipment_id in shipment_ids
+            }
+        )
+        if not normalized_ids:
+            raise ValueError("at least one shipment_id is required")
         now = self.timestamp_factory()
         with _connect(self.runtime.db_path) as conn:
+            _ensure_schema(conn)
             _ensure_own_capital_schema(conn)
-            conn.execute(
+            placeholders = ",".join("?" for _ in normalized_ids)
+            shipment_rows = {
+                str(row["shipment_id"]): bool(row["expenses_complete"])
+                for row in conn.execute(
+                    f"""
+                    SELECT shipment_id, expenses_complete
+                    FROM sheet_vitrina_v1_supplier_shipments
+                    WHERE shipment_id IN ({placeholders})
+                    """,
+                    normalized_ids,
+                ).fetchall()
+            }
+            certification_rows = {
+                str(row["shipment_id"]): {
+                    "expenses_complete": bool(row["expenses_complete"]),
+                    "certified_at": str(row["certified_at"] or ""),
+                }
+                for row in conn.execute(
+                    f"""
+                    SELECT shipment_id, expenses_complete, certified_at
+                    FROM sheet_vitrina_v1_own_capital_expense_certifications
+                    WHERE shipment_id IN ({placeholders})
+                    """,
+                    normalized_ids,
+                ).fetchall()
+            }
+            desired = bool(expenses_complete)
+            changed_header_ids = [
+                shipment_id
+                for shipment_id in normalized_ids
+                if update_shipment_headers
+                and shipment_id in shipment_rows
+                and shipment_rows[shipment_id] != desired
+            ]
+            changed_certification_ids = [
+                shipment_id
+                for shipment_id in normalized_ids
+                if not preserve_unchanged
+                or shipment_id not in certification_rows
+                or certification_rows[shipment_id]["expenses_complete"] != desired
+            ]
+            conn.executemany(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET expenses_complete = ?, updated_at = ?
+                WHERE shipment_id = ?
+                """,
+                [
+                    (1 if expenses_complete else 0, now, shipment_id)
+                    for shipment_id in changed_header_ids
+                ],
+            )
+            conn.executemany(
                 """
                 INSERT INTO sheet_vitrina_v1_own_capital_expense_certifications (
                     shipment_id, expenses_complete, actor, certified_at
@@ -951,15 +1042,28 @@ class OwnProductCapitalBlock:
                     actor = excluded.actor,
                     certified_at = excluded.certified_at
                 """,
-                (shipment_id, 1 if expenses_complete else 0, str(actor or ""), now),
+                [
+                    (
+                        shipment_id,
+                        1 if expenses_complete else 0,
+                        str(actor or ""),
+                        now,
+                    )
+                    for shipment_id in changed_certification_ids
+                ],
             )
             conn.commit()
-        result = self.recalculate()
+        changed_count = len(set(changed_header_ids) | set(changed_certification_ids))
+        rebuild = self.recalculate() if recalculate and changed_count else None
         return {
-            "shipment_id": shipment_id,
+            "shipment_ids": normalized_ids,
+            "shipment_count": len(normalized_ids),
             "expenses_complete": bool(expenses_complete),
             "certified_at": now,
-            "daily_rows_changed": result.daily_rows_changed,
+            "changed_shipment_count": changed_count,
+            "daily_rows_changed": (
+                rebuild.daily_rows_changed if rebuild is not None else 0
+            ),
         }
 
     def record_ff_receipt(
@@ -1762,6 +1866,7 @@ class OwnProductCapitalBlock:
         *,
         date_from: str | None = None,
         date_to: str | None = None,
+        drain_projection: bool = True,
     ) -> OwnProductCapitalRebuildResult:
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
@@ -1910,14 +2015,15 @@ class OwnProductCapitalBlock:
                 "date_to": end,
             }
         )
-        from packages.application.warehouse_business_projection import (
-            drain_warehouse_business_projection_outbox,
-        )
+        if drain_projection:
+            from packages.application.warehouse_business_projection import (
+                drain_warehouse_business_projection_outbox,
+            )
 
-        drain_warehouse_business_projection_outbox(
-            self.runtime,
-            published_at=self.timestamp_factory(),
-        )
+            drain_warehouse_business_projection_outbox(
+                self.runtime,
+                published_at=self.timestamp_factory(),
+            )
         return OwnProductCapitalRebuildResult(len(events), len(dates), changed, blockers, run_fingerprint)
 
     def load_daily_metric_lookup(
