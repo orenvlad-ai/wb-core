@@ -4439,7 +4439,27 @@ class RegistryUploadHttpEntrypoint:
         ):
             raise ValueError("confirmation token does not match CNY upload")
         if preview.get("consumed_at"):
-            return {**dict(preview.get("result") or {}), "idempotent": True}
+            stored_result = dict(preview.get("result") or {})
+            if str(stored_result.get("status") or "") == "pending":
+                document_id = str(stored_result.get("document_id") or "")
+                recovery = self.cny_ledger_block.reconcile_document(
+                    document_id,
+                    reason="idempotent_supplier_document_upload",
+                )
+                resumed = {
+                    **stored_result,
+                    **recovery,
+                    "status": (
+                        "pending" if recovery.get("http_status") == 202 else "ok"
+                    ),
+                    "outcome": str(stored_result.get("outcome") or "already_present"),
+                    "supplier_order_id": shipment_id,
+                    "idempotent": True,
+                }
+                if recovery.get("http_status") != 202:
+                    resumed.pop("http_status", None)
+                return resumed
+            return {**stored_result, "idempotent": True}
         if _timestamp_as_utc(str(preview.get("expires_at") or "")) <= _timestamp_as_utc(
             self.activated_at_factory()
         ):
@@ -4479,15 +4499,15 @@ class RegistryUploadHttpEntrypoint:
                 == CNY_DOCUMENT_STATUS_EXCLUDED
             )
             if existing_shipment_id == shipment_id and not is_excluded:
-                replay = self.cny_ledger_block.replay_ledger(
+                result = self.cny_ledger_block.reconcile_document(
+                    existing_id,
                     reason="idempotent_supplier_document_upload"
                 )
                 result = {
-                    **existing,
+                    **result,
                     "outcome": "already_present",
                     "supplier_order_id": shipment_id,
                     "idempotent": True,
-                    "replay": replay.get("replay") or replay,
                 }
             elif is_excluded:
                 if existing_shipment_id != shipment_id and not allow_relink:
@@ -4675,13 +4695,15 @@ class RegistryUploadHttpEntrypoint:
                 original_filename=str(payload.get("original_filename") or ""),
                 stored_file_path=str(payload.get("stored_file_path") or ""),
                 file_content_type=str(payload.get("file_content_type") or ""),
+                replay=False,
             )
         replay_required = bool(
             payload.pop("cny_ledger_replay_required", False) or cny_rows
         )
+        replay_outcome: dict[str, Any] = {}
         try:
             if replay_required:
-                self.cny_ledger_block.replay_ledger(
+                replay_outcome = self.cny_ledger_block.replay_ledger(
                     reason="bank_fee_statement_confirm"
                 )
             downstream = (
@@ -4690,7 +4712,7 @@ class RegistryUploadHttpEntrypoint:
                     document_id,
                 )
             )
-        except SQLiteContentionExhausted as exc:
+        except Exception as exc:  # noqa: BLE001 - parent import is already durable.
             result = self.supplier_financial_documents_block.get_document(
                 shipment_id,
                 document_id,
@@ -4709,15 +4731,95 @@ class RegistryUploadHttpEntrypoint:
                         "Комиссии сохранены атомарно. Связанные расчёты "
                         "заняты; безопасно повторите подтверждение."
                     ),
-                    "waited_ms": exc.wait_ms,
-                    "retry_count": exc.retries,
+                    "derived_replay_error": str(exc).replace("\n", " ")[:1000],
+                    "waited_ms": (
+                        exc.wait_ms if isinstance(exc, SQLiteContentionExhausted) else 0
+                    ),
+                    "retry_count": (
+                        exc.retries if isinstance(exc, SQLiteContentionExhausted) else 0
+                    ),
                     "retry_after_ms": 1_500,
+                    "durable_retry_identity": {
+                        "stable_source_id": f"supplier_bank_fee:{document_id}",
+                        "source_revision": str(expected_target_revision or ""),
+                    },
                     "http_status": 202,
                 }
             )
             return result
         result = self.supplier_financial_documents_block.get_document(shipment_id, document_id)
         result.update(downstream)
+        downstream_queue = dict(
+            downstream.get("warehouse_targeted_recalculation") or {}
+        )
+        downstream_projection = dict(
+            downstream_queue.get("business_projection") or {}
+        )
+        downstream_pending = (
+            str(downstream_queue.get("status") or "")
+            in {"error", "replay_error"}
+            or str(downstream_projection.get("status") or "") == "error"
+        )
+        if str(replay_outcome.get("status") or "") == "pending":
+            result.update(
+                {
+                    key: value
+                    for key, value in replay_outcome.items()
+                    if key
+                    in {
+                        "contract_name",
+                        "status",
+                        "retryable",
+                        "operation_applied",
+                        "readback_confirmed",
+                        "pending_phase",
+                        "message",
+                        "durable_retry_identity",
+                        "http_status",
+                    }
+                }
+            )
+        elif downstream_pending:
+            downstream_retryable = bool(
+                downstream_queue.get("affected_nm_ids")
+                or downstream_queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+            )
+            result.update(
+                {
+                    "contract_name": (
+                        "sheet_vitrina_v1_supplier_bank_fee_confirm_pending_v1"
+                    ),
+                    "status": "pending",
+                    "retryable": downstream_retryable,
+                    "operation_applied": True,
+                    "readback_confirmed": True,
+                    "pending_phase": "derived_replay",
+                    "message": (
+                        "Комиссии сохранены атомарно. Связанный пересчёт "
+                        + (
+                            "ожидает безопасного повтора."
+                            if downstream_retryable
+                            else "заблокирован: в поставке нет канонически сопоставленных SKU."
+                        )
+                    ),
+                    "durable_retry_identity": (
+                        {
+                            key: str(downstream_queue.get(key) or "")
+                            for key in (
+                                "queue_id",
+                                "stable_source_id",
+                                "source_revision",
+                            )
+                            if str(downstream_queue.get(key) or "")
+                        }
+                        or {
+                            "stable_source_id": f"supplier_bank_fee:{document_id}",
+                            "source_revision": str(expected_target_revision or ""),
+                        }
+                    ),
+                    "http_status": 202,
+                }
+            )
         for key in ("idempotent", "already_added"):
             if key in payload:
                 result[key] = payload[key]
@@ -4773,10 +4875,12 @@ class RegistryUploadHttpEntrypoint:
             str(payload.get("parse_status") or ""),
         )
         if result.get("cny_documents_status_changed"):
-            replay = self.cny_ledger_block.replay_ledger(
+            replay = self.cny_ledger_block.replay_account(
                 reason="supplier_financial_document_status_change"
             )
             result["cny_replay"] = replay.get("replay") or replay
+            if str(replay.get("status") or "") == "pending":
+                result.update(self._cny_pending_outcome(replay))
         return result
 
     def handle_supplier_financial_document_delete_preview_request(
@@ -4889,7 +4993,29 @@ class RegistryUploadHttpEntrypoint:
             ):
                 raise ValueError("confirmation token does not match CNY document")
             if preview.get("consumed_at"):
-                return {**dict(preview.get("result") or {}), "idempotent": True}
+                stored_result = dict(preview.get("result") or {})
+                if str(stored_result.get("status") or "") == "pending":
+                    recovery = self.cny_ledger_block.reconcile_document(
+                        document_id,
+                        reason="idempotent_document_archive",
+                    )
+                    resumed = {
+                        **stored_result,
+                        **recovery,
+                        "status": (
+                            "pending"
+                            if recovery.get("http_status") == 202
+                            else "ok"
+                        ),
+                        "archived": True,
+                        "audit_record_retained": True,
+                        "outcome": "excluded",
+                        "idempotent": True,
+                    }
+                    if recovery.get("http_status") != 202:
+                        resumed.pop("http_status", None)
+                    return resumed
+                return {**stored_result, "idempotent": True}
             if _timestamp_as_utc(
                 str(preview.get("expires_at") or "")
             ) <= _timestamp_as_utc(self.activated_at_factory()):
@@ -4938,10 +5064,83 @@ class RegistryUploadHttpEntrypoint:
             document_id,
             confirmation_token=confirmation_token,
         )
-        if payload.get("cny_documents_archived") and not payload.get("idempotent"):
-            replay = self.cny_ledger_block.replay_ledger(reason="supplier_financial_document_archive")
+        if payload.get("cny_documents_archived"):
+            replay = self.cny_ledger_block.replay_account(reason="supplier_financial_document_archive")
             payload["cny_replay"] = replay.get("replay") or replay
+            if str(replay.get("status") or "") == "pending":
+                payload.update(self._cny_pending_outcome(replay))
+            else:
+                queue = dict(payload.get("warehouse_targeted_recalculation") or {})
+                projection = dict(queue.get("business_projection") or {})
+                if (
+                    str(queue.get("status") or "") in {"error", "replay_error"}
+                    or str(projection.get("status") or "") == "error"
+                ):
+                    retryable = bool(
+                        queue.get("affected_nm_ids")
+                        or queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                    )
+                    payload.update(
+                        {
+                            "contract_name": (
+                                "sheet_vitrina_v1_supplier_financial_write_pending_v1"
+                            ),
+                            "status": "pending",
+                            "retryable": retryable,
+                            "operation_applied": True,
+                            "readback_confirmed": True,
+                            "pending_phase": "derived_replay",
+                            "message": (
+                                "Документ исключён и CNY-ledger подтверждён. "
+                                + (
+                                    "Связанный пересчёт ожидает безопасного повтора."
+                                    if retryable
+                                    else (
+                                        "Связанный пересчёт заблокирован: в поставке "
+                                        "нет канонически сопоставленных SKU."
+                                    )
+                                )
+                            ),
+                            "durable_retry_identity": (
+                                {
+                                    key: str(queue.get(key) or "")
+                                    for key in (
+                                        "queue_id",
+                                        "stable_source_id",
+                                        "source_revision",
+                                    )
+                                    if str(queue.get(key) or "")
+                                }
+                                or {
+                                    "stable_source_id": f"supplier_document:{document_id}",
+                                    "source_revision": str(
+                                        queue.get("source_revision") or ""
+                                    ),
+                                }
+                            ),
+                            "http_status": 202,
+                        }
+                    )
         return payload
+
+    @staticmethod
+    def _cny_pending_outcome(replay: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in replay.items()
+            if key
+            in {
+                "contract_name",
+                "status",
+                "retryable",
+                "operation_applied",
+                "readback_confirmed",
+                "pending_phase",
+                "message",
+                "durable_retry_identity",
+                "http_status",
+            }
+        }
 
     def handle_supplier_financial_document_file_request(self, shipment_id: str, document_id: str) -> tuple[bytes, str, str]:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
@@ -4979,7 +5178,7 @@ class RegistryUploadHttpEntrypoint:
         return self.cny_ledger_block.create_opening_balance(payload)
 
     def handle_cny_account_replay_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.replay_ledger(reason="manual_api")
+        return self.cny_ledger_block.replay_account(reason="manual_api")
 
     def handle_cny_account_document_file_request(self, document_id: str) -> tuple[bytes, str, str]:
         return self.cny_ledger_block.download_document_file(document_id)

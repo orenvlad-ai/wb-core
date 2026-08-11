@@ -1573,6 +1573,14 @@ class SupplierFinancialDocumentsBlock:
                 supplier_order_id
             )
         }
+        cost_affecting = (
+            str(document.get("document_type") or "")
+            in COST_AFFECTING_DOCUMENT_TYPES
+        )
+        capital_preparation = self._recalculate_own_capital_preparation(
+            drain_projection=not cost_affecting
+        )
+        result["own_product_capital_preparation"] = capital_preparation
         changed_cny_documents: list[str] = []
         target_cny_status = (
             CNY_DOCUMENT_STATUS_POSTED
@@ -1596,11 +1604,15 @@ class SupplierFinancialDocumentsBlock:
             )
             changed_cny_documents.append(str(saved_cny.get("document_id") or ""))
         result["cny_documents_status_changed"] = changed_cny_documents
-        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            result["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
-                supplier_order_id,
-                source_id=document_id,
-                source_payload=payload,
+        if cost_affecting:
+            result["warehouse_targeted_recalculation"] = (
+                capital_preparation
+                if capital_preparation.get("status") == "replay_error"
+                else self._enqueue_functional_recalculation(
+                    supplier_order_id,
+                    source_id=document_id,
+                    source_payload=payload,
+                )
             )
         return result
 
@@ -1839,11 +1851,23 @@ class SupplierFinancialDocumentsBlock:
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
-        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
-                supplier_order_id,
-                source_id=document_id,
-                source_payload=payload,
+        cost_affecting = (
+            str(document.get("document_type") or "")
+            in COST_AFFECTING_DOCUMENT_TYPES
+        )
+        capital_preparation = self._recalculate_own_capital_preparation(
+            drain_projection=not cost_affecting
+        )
+        payload["own_product_capital_preparation"] = capital_preparation
+        if cost_affecting:
+            payload["warehouse_targeted_recalculation"] = (
+                capital_preparation
+                if capital_preparation.get("status") == "replay_error"
+                else self._enqueue_functional_recalculation(
+                    supplier_order_id,
+                    source_id=document_id,
+                    source_payload=payload,
+                )
             )
         return payload
 
@@ -1883,11 +1907,23 @@ class SupplierFinancialDocumentsBlock:
             payload["own_product_capital"] = (
                 self._materialize_own_capital_expense_events(supplier_order_id)
             )
-        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
-                supplier_order_id,
-                source_id=document_id,
-                source_payload=payload,
+        cost_affecting = (
+            str(document.get("document_type") or "")
+            in COST_AFFECTING_DOCUMENT_TYPES
+        )
+        capital_preparation = self._recalculate_own_capital_preparation(
+            drain_projection=not cost_affecting
+        )
+        payload["own_product_capital_preparation"] = capital_preparation
+        if cost_affecting:
+            payload["warehouse_targeted_recalculation"] = (
+                capital_preparation
+                if capital_preparation.get("status") == "replay_error"
+                else self._enqueue_functional_recalculation(
+                    supplier_order_id,
+                    source_id=document_id,
+                    source_payload=payload,
+                )
             )
         return payload
 
@@ -1940,11 +1976,23 @@ class SupplierFinancialDocumentsBlock:
         payload["own_product_capital"] = self._remove_own_capital_expense_events(
             document_id
         )
-        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
-                supplier_order_id,
-                source_id=document_id,
-                source_payload=payload,
+        cost_affecting = (
+            str(document.get("document_type") or "")
+            in COST_AFFECTING_DOCUMENT_TYPES
+        )
+        capital_preparation = self._recalculate_own_capital_preparation(
+            drain_projection=not cost_affecting
+        )
+        payload["own_product_capital_preparation"] = capital_preparation
+        if cost_affecting:
+            payload["warehouse_targeted_recalculation"] = (
+                capital_preparation
+                if capital_preparation.get("status") == "replay_error"
+                else self._enqueue_functional_recalculation(
+                    supplier_order_id,
+                    source_id=document_id,
+                    source_payload=payload,
+                )
             )
         return payload
 
@@ -1957,6 +2005,7 @@ class SupplierFinancialDocumentsBlock:
         ).set_expenses_certification(
             shipment_id=supplier_order_id,
             expenses_complete=False,
+            recalculate=False,
         )
 
     def _remove_own_capital_expense_events(
@@ -1967,7 +2016,35 @@ class SupplierFinancialDocumentsBlock:
         return OwnProductCapitalBlock(
             runtime=self.runtime,
             timestamp_factory=self.timestamp_factory,
-        ).remove_financial_document_expenses(financial_document_id)
+        ).remove_financial_document_expenses(
+            financial_document_id,
+            recalculate=False,
+        )
+
+    def _recalculate_own_capital_preparation(
+        self,
+        *,
+        drain_projection: bool,
+    ) -> dict[str, Any]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        try:
+            result = OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).recalculate(drain_projection=drain_projection)
+            return {
+                "status": "ok",
+                "daily_rows_changed": result.daily_rows_changed,
+                "run_fingerprint": result.fingerprint,
+            }
+        except Exception as exc:  # noqa: BLE001 - source rows are already durable.
+            return {
+                "status": "replay_error",
+                "presentation_status": "Ошибка пересчёта",
+                "pending_phase": "derived_replay",
+                "error": str(exc).replace("\n", " ")[:500],
+            }
 
     def _enqueue_functional_recalculation(
         self,
@@ -2046,7 +2123,10 @@ class SupplierFinancialDocumentsBlock:
         return OwnProductCapitalBlock(
             runtime=self.runtime,
             timestamp_factory=self.timestamp_factory,
-        ).materialize_persisted_expense_events(shipment_id=supplier_order_id)
+        ).materialize_persisted_expense_events(
+            shipment_id=supplier_order_id,
+            recalculate=False,
+        )
 
     def download_document_file(self, supplier_order_id: str, document_id: str) -> tuple[bytes, str, str]:
         self._ensure_supplier_order(supplier_order_id)
