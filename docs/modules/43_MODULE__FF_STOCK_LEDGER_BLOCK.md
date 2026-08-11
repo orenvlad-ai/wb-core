@@ -12,6 +12,8 @@ source_basis:
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
+  - "packages/application/ff_pool_foundation.py"
+  - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
   - "packages/application/ff_document_workflow.py"
@@ -38,6 +40,13 @@ related_tables:
   - "sheet_vitrina_v1_ff_overhead_documents"
   - "sheet_vitrina_v1_ff_workflow_request_aliases"
   - "sheet_vitrina_v1_ff_workflow_events"
+  - "sheet_vitrina_v1_ff_facilities"
+  - "sheet_vitrina_v1_warehouse_business_operations"
+  - "sheet_vitrina_v1_ff_pool_movement_lines"
+  - "sheet_vitrina_v1_warehouse_business_operation_relations"
+  - "sheet_vitrina_v1_ff_pool_feature_epochs"
+  - "sheet_vitrina_v1_ff_pool_balances"
+  - "sheet_vitrina_v1_ff_pool_parity_diagnostics"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -72,7 +81,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. An inert, default-off facility × FBS|FBO foundation now exists strictly below this aggregate authority; no current writer or reader uses it. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -436,3 +445,36 @@ provisional or unavailable and leaves every non-owned Vitrina cell untouched.
 The subsequent canonical event/full functional publication consumes the same
 source revision; no second FF ledger and no Vitrina-side quantity calculator
 are introduced.
+
+## Default-off facility × pool foundation
+
+Migration 133 adds an empty dimensional subledger contract below the existing
+aggregate FF ledger. `sheet_vitrina_v1_ff_facilities` is a stable registry with
+immutable identity/code and mutable display/active metadata, but deployment
+does not seed Moscow, Orenburg or any other business facility. Generic posted
+operation headers carry exact source identity, revision, idempotency epoch,
+Yekaterinburg `business_date` and UTC audit time. Their pool lines carry
+`facility_id`, `FBS|FBO`, `nm_id`, exact SQLite `INTEGER` quantity and Decimal
+TEXT capital/WAC. The new header/line contour is append-only and has no posting
+service or route in this stage.
+
+`correction_of`, `storno_of` and `late_expense_for` are the only initial typed
+relations. A child type must match its relation, the parent cannot be later
+than the child, duplicates are rejected and a recursive insert guard prevents
+cycles. Relations exist only between new operation roots; legacy FF rows are
+not backfilled and their missing root/relation remains normal.
+
+Feature epochs are absent by default, which means both future writer and reader
+are off. A reader cannot be configured before the writer and does not become
+effective until a current-epoch parity diagnostic passes. Empty detail is a
+neutral `detail_empty` state. A populated fixture compares every SKU and the
+exact quantity/capital totals against the caller-owned aggregate FF readback;
+the reader also requires the same current aggregate revision and unchanged
+detail fingerprint. Any mismatch or drift is fail-closed for the future detail
+reader and never edits or invalidates the aggregate ledger. Current FF writers,
+reservations, warehouse publication, public totals, Vitrina and recommendations
+remain unchanged.
+
+Transfer expense allocation and open-transfer/in-flight materialization are
+intentionally deferred until a later writer contract exists. No transit
+warehouse or reservation is introduced by this foundation.

@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 related_modules:
+  - "packages/application/ff_pool_foundation.py"
   - "packages/application/warehouse_functional.py"
   - "packages/application/own_product_capital.py"
   - "packages/application/sheet_vitrina_v1_own_product_capital.py"
@@ -26,7 +27,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
 source_of_truth_level: "module_canonical"
-update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive."
+update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive. Default-off FF facility × pool detail is a parity-checked decomposition of the existing `ff` operand and is never added to TOTAL separately."
 ---
 
 # 1. Единственные шесть стадий
@@ -41,6 +42,14 @@ update_note: "Active vitrina содержит только quantity/WAC/capital 
 6. `Расхождения приёмки WB` (`wb_acceptance_discrepancy`).
 
 Supplier registry не является седьмым складом. Он хранит состояние invoice/order и stable `supplier_flow_id`; warehouse projection агрегирует все активные flows по SKU. На FF одинаковые SKU смешиваются moving WAC. После смешивания downstream identity принадлежит WB supply.
+
+Facility и pool не являются седьмой/восьмой стадией. Когда отдельный будущий
+cutover активирует dimensional FF reader, сумма `facility × (FBS|FBO)` обязана
+в точности совпасть с текущим `ff` quantity/capital по каждому SKU. До этого
+feature epoch отсутствует, detail tables пусты и canonical capital calculation
+их не читает. После cutover detail лишь объясняет уже учтённый `ff`: public
+stage/TOTAL formula не может прибавлять его второй раз. Любой mismatch держит
+detail reader fail-closed и оставляет существующий aggregate FF без изменений.
 
 # 2. Количество и капитал
 

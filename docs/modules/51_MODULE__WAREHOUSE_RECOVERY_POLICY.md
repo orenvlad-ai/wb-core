@@ -140,6 +140,22 @@ files are shown as `sanitation_verified`. A standard-looking archive without
 that audit remains unclassified, so the recovery policy does not silently
 adopt foreign evidence.
 
+## Additive FF facility/pool schema boundary
+
+Migration 133 is a live/runtime deploy because ordinary operational schema
+ensure materializes new empty tables, indexes and integrity triggers. It is not
+a production business-data apply: there is no facility seed, legacy backfill,
+balance projection, feature epoch or writer invocation. The ensure path performs
+only bounded `CREATE ... IF NOT EXISTS` metadata work and neither scans nor
+rewrites existing warehouse/FF rows, changes journal mode, reserves recovery
+bytes or selects T1/T2/T3. Existing 4+ GiB store size therefore does not turn
+this empty additive deploy into a full-store schema migration.
+
+Any later activation, seeding, historical opening/cutover or population of the
+facility/pool contour is a separate mutation and must be classified from its
+actual closure under this recovery policy. A future wide/rewrite migration
+cannot inherit migration 133's deploy-only treatment.
+
 ## Operator and production acceptance
 
 The warehouse update tab loads the protected recovery API and visibly renders
