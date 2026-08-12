@@ -3748,6 +3748,15 @@
       line-height: 1.25;
     }
 
+    #wbSupplyFfOriginPanel,
+    #wbSupplyFfOriginPanel .field,
+    #wbSupplyFfOriginPanel input,
+    #wbSupplyFfOriginPanel select,
+    #wbSupplyFfOriginPanel button {
+      min-width: 0;
+      max-width: 100%;
+    }
+
     .wb-supplies-goods-table {
       min-width: 960px;
     }
@@ -5274,6 +5283,32 @@
               </div>
               <div id="wbSuppliesDetailSummary" class="wb-supplies-summary"></div>
               <p id="wbSuppliesDetailMessage" class="wb-supplies-message"></p>
+              <section id="wbSupplyFfOriginPanel" class="block" aria-labelledby="wbSupplyFfOriginTitle">
+                <div class="block-header">
+                  <div>
+                    <h4 id="wbSupplyFfOriginTitle" class="block-title">Источник FF</h4>
+                    <p class="field-note">Склад, с которого отправлена эта FBW-поставка. Назначение фиксируется только как аудит и не списывает остатки.</p>
+                  </div>
+                  <span class="wb-supplies-chip">Пул FBO</span>
+                </div>
+                <div class="wb-supplies-filters">
+                  <div class="field">
+                    <label for="wbSupplyFfOriginSelect">Склад FF</label>
+                    <select id="wbSupplyFfOriginSelect" disabled>
+                      <option value="">Сначала откройте поставку</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="wbSupplyFfOriginReason">Причина изменения</label>
+                    <input id="wbSupplyFfOriginReason" type="text" maxlength="500" placeholder="Необязательно" autocomplete="off" disabled>
+                  </div>
+                  <div class="field">
+                    <label>&nbsp;</label>
+                    <button id="wbSupplyFfOriginSaveButton" class="action-button primary-button" type="button" disabled>Сохранить источник</button>
+                  </div>
+                </div>
+                <p id="wbSupplyFfOriginMessage" class="wb-supplies-message">Назначение ещё не загружено.</p>
+              </section>
               <div class="wb-supplies-table-wrap">
                 <table class="wb-supplies-table wb-supplies-goods-table">
                   <thead>
@@ -5622,6 +5657,10 @@
       const wbSuppliesDetailSummary = document.getElementById("wbSuppliesDetailSummary");
       const wbSuppliesDetailMessage = document.getElementById("wbSuppliesDetailMessage");
       const wbSuppliesGoodsTableBody = document.getElementById("wbSuppliesGoodsTableBody");
+      const wbSupplyFfOriginSelect = document.getElementById("wbSupplyFfOriginSelect");
+      const wbSupplyFfOriginReason = document.getElementById("wbSupplyFfOriginReason");
+      const wbSupplyFfOriginSaveButton = document.getElementById("wbSupplyFfOriginSaveButton");
+      const wbSupplyFfOriginMessage = document.getElementById("wbSupplyFfOriginMessage");
       const cnyAccountState = document.getElementById("cnyAccountState");
       const cnyAccountUploadButton = document.getElementById("cnyAccountUploadButton");
       const cnyAccountFileInput = document.getElementById("cnyAccountFileInput");
@@ -5903,6 +5942,10 @@
       let wbSuppliesSearchTimer = 0;
       let wbSuppliesLoadSeq = 0;
       let wbSuppliesSyncSeq = 0;
+      let wbSupplyFfOriginLoading = false;
+      let wbSupplyFfOriginSaving = false;
+      let wbSupplyFfOriginSupplyId = "";
+      let wbSupplyFfOriginPayload = null;
       let wbSupplyOverlayLoading = false;
       let wbSupplyOverlayOptionsPayload = null;
       let selectedWbSupplyIds = [];
@@ -13254,6 +13297,189 @@
         }).join("");
       }
 
+      function setWbSupplyFfOriginMessage(message, tone) {
+        if (!wbSupplyFfOriginMessage) {
+          return;
+        }
+        wbSupplyFfOriginMessage.textContent = message || "";
+        wbSupplyFfOriginMessage.className = "wb-supplies-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateWbSupplyFfOriginSaveState() {
+        if (!wbSupplyFfOriginSaveButton) {
+          return;
+        }
+        const facilities = Array.isArray(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.facilities)
+          ? wbSupplyFfOriginPayload.facilities
+          : [];
+        const current = wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.current_assignment
+          ? wbSupplyFfOriginPayload.current_assignment
+          : null;
+        const selected = wbSupplyFfOriginSelect ? String(wbSupplyFfOriginSelect.value || "") : "";
+        const unchanged = Boolean(current && String(current.facility_id || "") === selected);
+        wbSupplyFfOriginSaveButton.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving ||
+          !Boolean(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.assignment_allowed) ||
+          !facilities.length || !selected || unchanged;
+      }
+
+      function renderWbSupplyFfOrigin(payload) {
+        wbSupplyFfOriginPayload = payload && typeof payload === "object" ? payload : null;
+        const current = wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.current_assignment
+          ? wbSupplyFfOriginPayload.current_assignment
+          : null;
+        const facilities = Array.isArray(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.facilities)
+          ? wbSupplyFfOriginPayload.facilities
+          : [];
+        const allowed = Boolean(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.assignment_allowed);
+        if (wbSupplyFfOriginSelect) {
+          wbSupplyFfOriginSelect.textContent = "";
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = facilities.length ? "Выберите склад FF" : "Активных складов FF нет";
+          wbSupplyFfOriginSelect.appendChild(placeholder);
+          facilities.forEach((facility) => {
+            const option = document.createElement("option");
+            option.value = String(facility.facility_id || "");
+            option.textContent = [facility.code, facility.name].filter(Boolean).join(" · ") || option.value;
+            wbSupplyFfOriginSelect.appendChild(option);
+          });
+          if (current && !facilities.some((facility) => String(facility.facility_id || "") === String(current.facility_id || ""))) {
+            const retained = document.createElement("option");
+            retained.value = String(current.facility_id || "");
+            retained.textContent = [current.facility_code, current.facility_name, "неактивен"].filter(Boolean).join(" · ");
+            retained.disabled = true;
+            wbSupplyFfOriginSelect.appendChild(retained);
+          }
+          wbSupplyFfOriginSelect.value = current ? String(current.facility_id || "") : "";
+          wbSupplyFfOriginSelect.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving || !allowed;
+        }
+        if (wbSupplyFfOriginReason) {
+          wbSupplyFfOriginReason.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving || !allowed;
+        }
+        if (wbSupplyFfOriginSaveButton) {
+          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : "Сохранить источник";
+        }
+        updateWbSupplyFfOriginSaveState();
+        if (!wbSupplyFfOriginPayload || wbSupplyFfOriginPayload.status !== "ready") {
+          setWbSupplyFfOriginMessage("Назначение источника FF недоступно.", "warning");
+          return;
+        }
+        if (current) {
+          setWbSupplyFfOriginMessage(
+            "Текущий источник: " + [current.facility_code, current.facility_name].filter(Boolean).join(" · ") +
+              ". Изменение добавит новую запись аудита; движение товара не создаётся.",
+            allowed ? "success" : "warning"
+          );
+          return;
+        }
+        const reason = String(wbSupplyFfOriginPayload.reason || "");
+        const copy = reason === "facility_pool_feature_off"
+          ? "Назначение источника FF выключено. Текущая складская схема продолжает работать без изменений."
+          : reason === "wb_supply_has_no_real_id"
+          ? "Предзаказ без реального номера поставки WB нельзя привязать к источнику FF."
+          : reason === "no_active_facilities"
+          ? "Нет активных складов FF для назначения."
+          : reason === "facility_options_truncated"
+          ? "Список активных складов FF превышает безопасный лимит. Уточните склад через администратора."
+          : "Источник FF ещё не назначен.";
+        setWbSupplyFfOriginMessage(copy, allowed ? "" : "warning");
+      }
+
+      async function loadWbSupplyFfOrigin(supplyId) {
+        const basePath = String(config.wb_supply_ff_origins_path || "").replace(/\/$/, "");
+        if (!basePath || !supplyId) {
+          renderWbSupplyFfOrigin(null);
+          return;
+        }
+        const requestSupplyId = String(supplyId);
+        wbSupplyFfOriginSupplyId = requestSupplyId;
+        wbSupplyFfOriginLoading = true;
+        renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
+        setWbSupplyFfOriginMessage("Читаем назначение источника FF...", "");
+        try {
+          const response = await fetch(basePath + "/" + encodeURIComponent(requestSupplyId), {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (wbSupplyFfOriginSupplyId !== requestSupplyId) {
+            return;
+          }
+          wbSupplyFfOriginPayload = payload;
+        } catch (error) {
+          if (wbSupplyFfOriginSupplyId === requestSupplyId) {
+            wbSupplyFfOriginPayload = null;
+            setWbSupplyFfOriginMessage(
+              "Назначение источника не загружено: " + (error instanceof Error ? error.message : String(error)),
+              "error"
+            );
+          }
+        } finally {
+          if (wbSupplyFfOriginSupplyId === requestSupplyId) {
+            wbSupplyFfOriginLoading = false;
+            renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
+            scheduleEmbeddedHeightPost();
+          }
+        }
+      }
+
+      async function saveWbSupplyFfOrigin() {
+        const basePath = String(config.wb_supply_ff_origins_path || "").replace(/\/$/, "");
+        const supplyId = String(wbSupplyFfOriginSupplyId || "");
+        const facilityId = wbSupplyFfOriginSelect ? String(wbSupplyFfOriginSelect.value || "") : "";
+        if (!basePath || !supplyId || !facilityId || wbSupplyFfOriginSaving || !wbSupplyFfOriginPayload) {
+          return;
+        }
+        const current = wbSupplyFfOriginPayload.current_assignment || null;
+        if (current && String(current.facility_id || "") === facilityId) {
+          setWbSupplyFfOriginMessage("Этот склад FF уже назначен источником поставки.", "warning");
+          return;
+        }
+        const randomPart = window.crypto && typeof window.crypto.randomUUID === "function"
+          ? window.crypto.randomUUID()
+          : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+        wbSupplyFfOriginSaving = true;
+        renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
+        setWbSupplyFfOriginMessage("Сохраняем источник FF...", "");
+        try {
+          const response = await fetch(basePath + "/" + encodeURIComponent(supplyId), {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+              "X-WB-FF-Pool-CSRF": "1"
+            },
+            body: JSON.stringify({
+              request_id: "wbff:" + randomPart,
+              facility_id: facilityId,
+              expected_assignment_id: current ? String(current.assignment_id || "") : "",
+              reason: wbSupplyFfOriginReason ? String(wbSupplyFfOriginReason.value || "") : ""
+            })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (wbSupplyFfOriginReason) {
+            wbSupplyFfOriginReason.value = "";
+          }
+          await loadWbSupplyFfOrigin(supplyId);
+          setWbSupplyFfOriginMessage("Источник FF сохранён. Движение товара не создавалось.", "success");
+        } catch (error) {
+          setWbSupplyFfOriginMessage(
+            "Источник FF не сохранён: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          wbSupplyFfOriginSaving = false;
+          renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
       async function openWbSupplyDetail(supplyId) {
         if (!config.wb_supplies_path || !supplyId || wbSuppliesDetailLoading) {
           return;
@@ -13285,6 +13511,8 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           renderWbSupplyDetail(payload);
+          const originSupplyId = String((payload.supply && payload.supply.wb_supply_id) || supplyId);
+          await loadWbSupplyFfOrigin(originSupplyId);
         } catch (error) {
           if (wbSuppliesDetailMessage) {
             wbSuppliesDetailMessage.textContent = "Состав не загружен: " + (error instanceof Error ? error.message : String(error));
@@ -13364,6 +13592,8 @@
         if (wbSuppliesDetailPanel) {
           wbSuppliesDetailPanel.hidden = true;
         }
+        wbSupplyFfOriginSupplyId = "";
+        wbSupplyFfOriginPayload = null;
       }
 
       function renderWbSuppliesPagination(payload) {
@@ -15251,6 +15481,12 @@
       }
       if (wbSuppliesDetailCloseButton) {
         wbSuppliesDetailCloseButton.addEventListener("click", closeWbSupplyDetail);
+      }
+      if (wbSupplyFfOriginSaveButton) {
+        wbSupplyFfOriginSaveButton.addEventListener("click", saveWbSupplyFfOrigin);
+      }
+      if (wbSupplyFfOriginSelect) {
+        wbSupplyFfOriginSelect.addEventListener("change", updateWbSupplyFfOriginSaveState);
       }
       stockReportSelectAllButton.addEventListener("click", () => {
         setStockReportDraftSelection(allStockReportSkuIds);

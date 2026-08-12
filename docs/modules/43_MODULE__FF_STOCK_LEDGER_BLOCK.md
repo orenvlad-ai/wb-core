@@ -16,6 +16,7 @@ related_modules:
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_documents_xlsx.py"
+  - "packages/application/ff_wb_supply_origins.py"
   - "packages/contracts/ff_pool_documents.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
@@ -56,6 +57,7 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_document_lines"
   - "sheet_vitrina_v1_ff_pool_document_expense_lines"
   - "sheet_vitrina_v1_ff_pool_document_relations"
+  - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -72,6 +74,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
+  - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins[/{supply_ref}]"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
@@ -90,8 +93,11 @@ related_runners:
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
+  - "apps/ff_wb_supply_origins_smoke.py"
+  - "apps/ff_wb_supply_origins_http_smoke.py"
+  - "apps/ff_wb_supply_origins_browser_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents and protected Stage 3 explanatory surface now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents, protected Stage 3 explanatory surface and append-only Stage 4 FBW origin evidence now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -512,3 +518,11 @@ write-barrier and same-origin CSRF gates. Deploy adds only an empty immutable
 facility-change audit table and creates no facility, epoch, opening, document,
 movement, ledger operation or projection. Existing aggregate FF inventory,
 overhead, reservations and physical ledger behavior are unchanged.
+
+Migration 136 adds only append-only FBW supply origin evidence: an existing real
+WB supply may point to one existing active FF facility in fixed pool `FBO`.
+Assignment/correction is guarded by the same absent-by-default writer epoch,
+idempotent request identity, current-assignment CAS, supply-role, write barrier
+and same-origin CSRF. It does not invoke the existing WB auto-writeoff,
+reservation or lifecycle paths, and creates no operation, document, movement or
+balance. No producer consumes this evidence in Stage 4.

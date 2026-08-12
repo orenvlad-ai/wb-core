@@ -30,6 +30,7 @@ from packages.application.ff_document_workflow import (
     mark_ff_replay_economics,
 )
 from packages.application.ff_pool_surfaces import FfPoolSurface
+from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1173,6 +1174,10 @@ class RegistryUploadHttpEntrypoint:
         self.ff_pool_surface = FfPoolSurface(
             db_path=self.runtime.db_path,
             runtime_dir=self.runtime.runtime_dir,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_wb_supply_origins = FfWbSupplyOriginAssignments(
+            db_path=self.runtime.db_path,
             timestamp_factory=self.activated_at_factory,
         )
         self.warehouse_stocks_block = WarehouseStocksBlock(
@@ -5437,6 +5442,21 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_ff_pool_capabilities_request(self) -> dict[str, Any]:
         return self.ff_pool_surface.capabilities(aggregate_revision=self._ff_aggregate_revision())
+
+    def handle_ff_wb_supply_origins_request(self, **filters: Any) -> dict[str, Any]:
+        return self.ff_wb_supply_origins.assignments_page(
+            aggregate_revision=self._ff_aggregate_revision(), **filters
+        )
+
+    def handle_ff_wb_supply_origin_detail_request(self, supply_ref: str) -> dict[str, Any]:
+        return self.ff_wb_supply_origins.assignment_detail(
+            supply_ref, aggregate_revision=self._ff_aggregate_revision()
+        )
+
+    def handle_ff_wb_supply_origin_assign_request(
+        self, supply_ref: str, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.ff_wb_supply_origins.assign_origin(supply_ref, payload, actor=actor)
 
     def handle_ff_pool_facilities_request(self, **filters: Any) -> dict[str, Any]:
         return self.ff_pool_surface.facilities_page(

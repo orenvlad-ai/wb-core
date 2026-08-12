@@ -20,6 +20,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_FF_POOL_FACILITIES_PATH,
     DEFAULT_FF_POOL_PATH,
     DEFAULT_FF_POOL_DOCUMENTS_PATH,
+    DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -237,12 +238,20 @@ def _authorization_contract() -> None:
                     supply, f"{base}{DEFAULT_FF_POOL_PATH}/capabilities"
                 )
                 assert supply_code == 200 and supply_payload["contract_name"] == "ff_facility_pool_surfaces_v1"
+                origin_code, origin_payload = _opener_json(
+                    supply, f"{base}{DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH}"
+                )
+                assert origin_code == 200 and origin_payload["contract_name"] == "ff_wb_supply_origin_assignments_v1"
                 supplier = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
                 _login(supplier, base, "ff_pool_supplier", supplier_password, DEFAULT_SHEET_SUPPLIER_UI_PATH)
                 supplier_code, supplier_payload = _opener_json(
                     supplier, f"{base}{DEFAULT_FF_POOL_PATH}/capabilities"
                 )
                 assert supplier_code == 403 and supplier_payload["error"] == "forbidden"
+                supplier_origin_code, supplier_origin_payload = _opener_json(
+                    supplier, f"{base}{DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH}"
+                )
+                assert supplier_origin_code == 403 and supplier_origin_payload["error"] == "forbidden"
             finally:
                 server.shutdown()
                 server.server_close()
