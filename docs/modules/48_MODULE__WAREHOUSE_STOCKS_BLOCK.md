@@ -16,6 +16,7 @@ related_modules:
   - "packages/application/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_documents_xlsx.py"
+  - "packages/application/ff_pool_surfaces.py"
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/ff_overhead_allocation.py"
   - "packages/application/ff_document_workflow.py"
@@ -36,10 +37,11 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/apply"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/inventory/status"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/overhead/status"
+  - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/*"
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migrations 133–134 add a default-off facility × pool foundation and non-routed document/XLSX service beneath `ff`; they do not add a warehouse stage, replace an active balance or publish a second total."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migrations 133–135 add a default-off facility × pool foundation, immutable documents and protected bounded API/operator detail beneath `ff`; they do not add a warehouse stage, replace an active balance or publish a second total."
 ---
 
 # 1. Active warehouse contract
@@ -69,6 +71,17 @@ it; supplier acceptance, aggregate inventory/overhead, functional publication
 and all six-stage readers retain their current paths. Its immutable movements
 can later support exact pool WAC, transfer/loss conservation and linked
 correction/storno/late-expense evidence without becoming a second FF ledger.
+
+Migration 135 routes bounded read models and guarded operator orchestration
+under the existing protected warehouse prefix. Facility/pool GET models use
+query-only connections, exact Decimal aggregation, server pagination, ETags
+and lazy document evidence. Their aggregate revision is the current immutable
+functional `ff` version; a stale/missing parity proof keeps only detail hidden
+and cannot replace the active aggregate balance. The compact modal is
+explanatory and never adds its quantities/capital to the existing six-stage
+summary or TOTAL. Facility/document writes remain fail-closed until a separate
+writer feature epoch exists; deploy creates no epoch, seed, opening or
+movement.
 
 Supplier registry и warehouse projection не смешиваются. Invoice получает один стабильный `supplier_flow_id`; display name строится из invoice, но linkage и replay используют stable id. После смешивания на FF downstream identity принадлежит WB supply. Каждая positive line хранит exact text quantity, capital, WAC, coverage/quality и source provenance. Вычисления используют `Decimal`; UI округляет только display.
 

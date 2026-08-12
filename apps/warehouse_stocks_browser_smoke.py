@@ -509,6 +509,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
             )
             url = f"{base_url}/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=ff"
             page.goto(url, wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             inventory_card = page.locator('[data-ff-inventory-result] [data-ff-state="processing"]')
             overhead_card = page.locator('[data-ff-overhead-result] [data-ff-state="replay_complete"]')
             inventory_card.wait_for()
@@ -529,6 +530,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
             inventory_state["value"] = "ready"
             overhead_state["value"] = "applied"
             page.reload(wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             ready_card = page.locator('[data-ff-inventory-result] [data-ff-state="ready"]')
             partial_card = page.locator('[data-ff-overhead-result] [data-ff-state="applied"]')
             ready_card.wait_for()
@@ -548,6 +550,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
 
             inventory_state["value"] = "applied"
             page.reload(wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             inventory_partial = page.locator('[data-ff-inventory-result] [data-ff-state="applied"]')
             inventory_partial.wait_for()
             _assert(inventory_partial.get_attribute("data-tone") == "partial", "inventory commit before replay must not be green")
@@ -556,6 +559,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
 
             inventory_state["value"] = "replay_complete"
             page.reload(wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             inventory_complete = page.locator('[data-ff-inventory-result] [data-ff-state="replay_complete"]')
             inventory_complete.wait_for()
             _assert(inventory_complete.get_attribute("data-tone") == "success", "exact inventory replay must render final green")
@@ -565,6 +569,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
             inventory_state["value"] = "blocked"
             overhead_state["value"] = "replay_complete"
             page.reload(wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             blocked_card = page.locator('[data-ff-inventory-result] [data-ff-state="blocked"]')
             blocked_card.wait_for()
             _assert(blocked_card.get_attribute("data-tone") == "error", "blocked validation must render red")
@@ -573,6 +578,7 @@ def _assert_ff_workflow_visuals(base_url: str) -> None:
 
             overhead_state["value"] = "replay_error"
             page.reload(wait_until="domcontentloaded")
+            page.locator("details.ff-pool-legacy > summary").click()
             replay_error_card = page.locator('[data-ff-overhead-result] [data-ff-state="replay_error"]')
             replay_error_card.wait_for()
             _assert(replay_error_card.get_attribute("data-tone") == "error", "failed replay must render red")

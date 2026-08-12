@@ -91,7 +91,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation and durable Stage 2 document/XLSX service now exist strictly below this aggregate authority; they are non-routed and no current producer or reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents and protected Stage 3 explanatory surface now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -502,3 +502,13 @@ formulas, macros, external links, malformed/ambiguous evidence or an empty
 facility registry. The service is deployed but default-off and non-routed: it
 does not seed facilities/epochs, switch current supplier/FF writers or readers,
 or apply production business data.
+
+Migration 135 exposes protected bounded facility/pool reads and a compact
+operator document lifecycle above this inert foundation. GET paths are
+strictly query-only and use current aggregate-revision parity, exact Decimal
+summation, pagination/ETag and lazy evidence. Facility management and document
+preview/confirm remain behind the existing writer epoch plus supply-role,
+write-barrier and same-origin CSRF gates. Deploy adds only an empty immutable
+facility-change audit table and creates no facility, epoch, opening, document,
+movement, ledger operation or projection. Existing aggregate FF inventory,
+overhead, reservations and physical ledger behavior are unchanged.

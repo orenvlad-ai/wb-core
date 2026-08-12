@@ -40,6 +40,7 @@ from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
     validate_xlsx_request_seam,
 )
 from packages.application.ff_pool_foundation import (  # noqa: E402
+    FACILITY_CHANGES_TABLE,
     BALANCES_TABLE,
     FACILITIES_TABLE,
     FEATURE_EPOCHS_TABLE,
@@ -1094,6 +1095,7 @@ def _property_checks() -> None:
 
 def _assert_recovery(service: FfPoolDocumentService) -> None:
     assert FACILITIES_TABLE in DOMAIN_EXACT_TABLES
+    assert FACILITY_CHANGES_TABLE in DOMAIN_EXACT_TABLES
     registry = WarehouseRecoveryRegistry(runtime_dir=service.runtime_dir, db_path=service.db_path)
     rows = registry.list_operations(limit=500)
     pool_rows = [item for item in rows if item["operation_kind"] == "ff_pool_document_posting"]

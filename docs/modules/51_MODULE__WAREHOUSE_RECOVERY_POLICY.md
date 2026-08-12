@@ -156,6 +156,17 @@ facility/pool contour is a separate mutation and must be classified from its
 actual closure under this recovery policy. A future wide/rewrite migration
 cannot inherit migration 133's deploy-only treatment.
 
+Migration 135 has the same bounded deploy-only schema treatment for its single
+empty `sheet_vitrina_v1_ff_facility_changes` audit table, index and immutable
+triggers. Query-only facility/pool/document/status/template GET routes create
+no recovery operation. Feature-off POST requests fail before a facility,
+document, movement or recovery row is created. Once a separately authorized
+writer epoch exists, facility metadata management keeps stable no-delete
+identity plus an immutable before/after request audit; it does not change stock
+or capital. Document posting uses the existing bounded T1 closure. The UI
+cannot select a recovery tier. Deployment, read acceptance and authenticated
+browser rendering remain outside production business-data apply.
+
 ## Operator and production acceptance
 
 The warehouse update tab loads the protected recovery API and visibly renders

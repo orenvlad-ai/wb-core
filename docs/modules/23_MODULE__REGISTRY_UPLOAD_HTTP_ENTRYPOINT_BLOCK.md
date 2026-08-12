@@ -1021,3 +1021,20 @@ not start a full Vitrina refresh or an external producer fetch. Source mutation
 handlers keep their existing business response and may additionally return the
 terminal `business_projection` result; supplier factual-date Apply still owns
 its durable background job and exact terminal readback.
+
+## FF facility/pool surface boundary
+
+Migration 135 publishes the protected
+`/v1/sheet-vitrina-v1/warehouses/ff/facility-pools` family through the already
+managed `/warehouses/` nginx prefix. GET exposes capability, paginated
+facility/pool and document read models, lazy evidence/status and bounded XLSX
+templates. GET always uses SQLite mode-ro/query-only and does not initialize or
+resume the Stage 2 service. ETag/304 is supported for JSON reads.
+
+Only principals with the server-owned `supply` section may read the family;
+supplier-only principals receive 403. POST additionally requires the business
+write barrier, exact `X-WB-FF-Pool-CSRF: 1` marker and same-origin fetch
+evidence. Multipart Content-Length is rejected before buffering above the
+Stage 2 request limit, then the canonical XLSX envelope/file/OOXML checks run.
+The writer feature epoch remains the authoritative business gate, so default
+deployment returns the explicit read-only state and creates no business data.

@@ -274,6 +274,7 @@ DOMAIN_EXACT_TABLES = frozenset(
         "sheet_vitrina_v1_ready_snapshots",
         "sheet_vitrina_v1_nomenclature_items",
         "sheet_vitrina_v1_ff_facilities",
+        "sheet_vitrina_v1_ff_facility_changes",
         "sheet_vitrina_v1_wb_opening_baseline",
         "sheet_vitrina_v1_cny_documents",
         "sheet_vitrina_v1_cny_ledger_operations",

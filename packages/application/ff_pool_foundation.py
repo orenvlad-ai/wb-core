@@ -26,6 +26,7 @@ POOLS = ("FBS", "FBO")
 RELATION_TYPES = ("correction_of", "storno_of", "late_expense_for")
 
 FACILITIES_TABLE = "sheet_vitrina_v1_ff_facilities"
+FACILITY_CHANGES_TABLE = "sheet_vitrina_v1_ff_facility_changes"
 OPERATIONS_TABLE = "sheet_vitrina_v1_warehouse_business_operations"
 LINES_TABLE = "sheet_vitrina_v1_ff_pool_movement_lines"
 RELATIONS_TABLE = "sheet_vitrina_v1_warehouse_business_operation_relations"
@@ -58,6 +59,26 @@ def ensure_ff_pool_foundation_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ff_facilities_by_active_code
         ON {FACILITIES_TABLE}(active,code);
+
+        CREATE TABLE IF NOT EXISTS {FACILITY_CHANGES_TABLE}(
+            change_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            request_identity TEXT NOT NULL,
+            facility_id TEXT NOT NULL REFERENCES {FACILITIES_TABLE}(facility_id),
+            action TEXT NOT NULL CHECK(action IN ('created','renamed','activated','deactivated','timezone_changed')),
+            actor TEXT NOT NULL,
+            previous_json TEXT NOT NULL DEFAULT '{{}}',
+            current_json TEXT NOT NULL,
+            changed_at TEXT NOT NULL
+                CHECK(substr(changed_at,-1,1)='Z' AND julianday(changed_at) IS NOT NULL),
+            CHECK(length(trim(change_id)) BETWEEN 1 AND 120),
+            CHECK(length(trim(request_id)) BETWEEN 8 AND 120),
+            CHECK(length(trim(request_identity)) BETWEEN 1 AND 80),
+            UNIQUE(request_id,action),
+            CHECK(length(trim(actor)) BETWEEN 1 AND 160)
+        );
+        CREATE INDEX IF NOT EXISTS ff_facility_changes_by_facility_time
+        ON {FACILITY_CHANGES_TABLE}(facility_id,changed_at DESC,change_id DESC);
 
         CREATE TABLE IF NOT EXISTS {OPERATIONS_TABLE}(
             operation_id TEXT PRIMARY KEY,
@@ -282,6 +303,16 @@ def ensure_ff_pool_foundation_schema(conn: sqlite3.Connection) -> None:
         BEFORE DELETE ON {FACILITIES_TABLE}
         BEGIN
             SELECT RAISE(ABORT,'ff facilities are retained');
+        END;
+        CREATE TRIGGER IF NOT EXISTS ff_facility_changes_no_update
+        BEFORE UPDATE ON {FACILITY_CHANGES_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT,'ff facility audit is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS ff_facility_changes_no_delete
+        BEFORE DELETE ON {FACILITY_CHANGES_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT,'ff facility audit is append-only');
         END;
 
         CREATE TRIGGER IF NOT EXISTS warehouse_business_operations_no_update

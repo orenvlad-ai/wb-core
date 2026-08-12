@@ -29,6 +29,7 @@ from packages.application.ff_document_workflow import (
     FfDocumentWorkflow,
     mark_ff_replay_economics,
 )
+from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1167,6 +1168,11 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             inventory=self.ff_inventory_reconciliation,
             overhead=self.ff_overhead_allocation,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_pool_surface = FfPoolSurface(
+            db_path=self.runtime.db_path,
+            runtime_dir=self.runtime.runtime_dir,
             timestamp_factory=self.activated_at_factory,
         )
         self.warehouse_stocks_block = WarehouseStocksBlock(
@@ -5423,6 +5429,108 @@ class RegistryUploadHttpEntrypoint:
             functional
             if functional.get("status") == "ready"
             else self.warehouse_stocks_block.warehouse_detail(warehouse_key)
+        )
+
+    def _ff_aggregate_revision(self) -> str:
+        detail = self.warehouse_functional_block.compact_warehouse_detail("ff")
+        return str((detail.get("active_version") or {}).get("version_id") or "")
+
+    def handle_ff_pool_capabilities_request(self) -> dict[str, Any]:
+        return self.ff_pool_surface.capabilities(aggregate_revision=self._ff_aggregate_revision())
+
+    def handle_ff_pool_facilities_request(self, **filters: Any) -> dict[str, Any]:
+        return self.ff_pool_surface.facilities_page(
+            aggregate_revision=self._ff_aggregate_revision(), **filters
+        )
+
+    def handle_ff_pool_facility_detail_request(self, facility_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.facility_detail(
+            facility_id, aggregate_revision=self._ff_aggregate_revision()
+        )
+
+    def handle_ff_pool_detail_request(
+        self, facility_id: str, pool: str, **filters: Any
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.pool_detail(
+            facility_id,
+            pool,
+            aggregate_revision=self._ff_aggregate_revision(),
+            **filters,
+        )
+
+    def handle_ff_pool_documents_request(self, **filters: Any) -> dict[str, Any]:
+        return self.ff_pool_surface.documents_page(**filters)
+
+    def handle_ff_pool_document_detail_request(self, document_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.document_detail(document_id)
+
+    def handle_ff_pool_document_lines_request(
+        self, document_id: str, **pagination: Any
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.document_lines(document_id, **pagination)
+
+    def handle_ff_pool_document_expenses_request(
+        self, document_id: str, **pagination: Any
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.document_expenses(document_id, **pagination)
+
+    def handle_ff_pool_document_relations_request(self, document_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.document_relations(document_id)
+
+    def handle_ff_pool_document_graph_request(self, document_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.document_graph(document_id)
+
+    def handle_ff_pool_request_status_request(self, request_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.request_status(request_id)
+
+    def handle_ff_pool_request_preview_request(
+        self, request_id: str, **pagination: Any
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.request_preview(request_id, **pagination)
+
+    def handle_ff_pool_source_file_request(self, document_id: str) -> tuple[bytes, str, str]:
+        return self.ff_pool_surface.source_file(document_id)
+
+    def handle_ff_pool_facility_create_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.create_facility(payload, actor=actor)
+
+    def handle_ff_pool_facility_update_request(
+        self, facility_id: str, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.update_facility(facility_id, payload, actor=actor)
+
+    def handle_ff_pool_document_preview_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.accept_document_preview(payload, actor=actor)
+
+    def handle_ff_pool_china_preview_request(self, **payload: Any) -> dict[str, Any]:
+        return self.ff_pool_surface.accept_china_workbook(**payload)
+
+    def handle_ff_pool_inventory_preview_request(self, **payload: Any) -> dict[str, Any]:
+        return self.ff_pool_surface.accept_inventory_workbook(**payload)
+
+    def handle_ff_pool_confirm_request(self, request_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.confirm_document(request_id)
+
+    def handle_ff_pool_china_template_request(
+        self, shipment_id: str, *, facility_id: str = ""
+    ) -> tuple[bytes, str, str]:
+        data, filename = self.ff_pool_surface.china_template(
+            shipment_id, facility_id=facility_id
+        )
+        return data, filename, (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    def handle_ff_pool_inventory_template_request(
+        self, facility_id: str, *, scope: str
+    ) -> tuple[bytes, str, str]:
+        data, filename = self.ff_pool_surface.inventory_template(facility_id, scope)
+        return data, filename, (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     def handle_warehouse_documents_request(
