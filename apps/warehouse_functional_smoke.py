@@ -913,6 +913,8 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                     "actual_ff_acceptance_date": "",
                     "order_status": "active",
                     "expenses_complete": 1,
+                    "invoice_amount_total": "541962.5",
+                    "cny_paid_amount": "541962.5",
                 }
             ],
             "shipment_lines": [
@@ -931,6 +933,7 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
                     "linked_financial_document_id": "payment-financial",
                     "document_type": "supplier_cny_payment",
                     "status": "posted",
+                    "cny_amount": "541962.5",
                 },
                 {
                     "document_id": "fee-doc",
