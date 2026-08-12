@@ -190,7 +190,7 @@
     .registry-wrap, .line-wrap { width: 100%; max-width: 100%; min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .registry-wrap, .line-wrap { background: rgba(16, 19, 27, 0.48); }
     table { width: 100%; border-collapse: collapse; min-width: 1180px; }
-    th, td { padding: 10px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
+    th, td { padding: 7px 8px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: middle; line-height: 1.25; word-break: normal; overflow-wrap: normal; }
     th {
       position: sticky;
       top: 0;
@@ -214,9 +214,24 @@
     }
     .exact-cost-complete { color: var(--success); font-weight: 800; }
     .exact-cost-incomplete { color: var(--warning); font-weight: 800; }
-    .line-cost-cell { min-width: 330px; max-width: 520px; }
-    .line-cost-value { display: block; font-size: 14px; font-weight: 900; }
-    .line-cost-status { display: block; margin-top: 4px; font-size: 11px; font-weight: 800; }
+    .supplier-registry-table { table-layout: fixed; min-width: 2280px; }
+    .supplier-registry-table th, .supplier-registry-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .supplier-registry-table th:nth-child(6) { width: 220px; }
+    .supplier-registry-table th:nth-child(11), .supplier-registry-table th:nth-child(12), .supplier-registry-table th:nth-child(13) { width: 170px; }
+    .supplier-registry-table th:nth-child(14) { width: 190px; }
+    .composition-table { table-layout: fixed; min-width: 1900px; }
+    .composition-table th, .composition-table td, #supplierOrderDocumentsTable th, #supplierOrderDocumentsTable td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .composition-table th:first-child { width: 190px; }
+    .composition-table th:nth-child(2), .composition-table th:nth-child(4), .composition-table th:nth-child(7), .composition-table th:nth-child(13) { width: 220px; }
+    .composition-table th:nth-child(12) { width: 240px; }
+    #supplierOrderDocumentsTable { table-layout: fixed; min-width: 1500px; }
+    #supplierOrderDocumentsTable th:first-child { width: 210px; }
+    #supplierOrderDocumentsTable th:nth-child(3) { width: 190px; }
+    #supplierOrderDocumentsTable th:nth-child(6), #supplierOrderDocumentsTable th:nth-child(9) { width: 220px; }
+    .cell-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .line-cost-cell { min-width: 220px; max-width: 300px; }
+    .line-cost-value { display: inline; font-size: 14px; font-weight: 900; }
+    .line-cost-status { display: inline; margin-left: 6px; font-size: 11px; font-weight: 800; }
     .line-cost-proof { margin-top: 8px; }
     .line-cost-proof > summary { color: var(--accent-2); cursor: pointer; font-size: 12px; font-weight: 900; }
     .line-cost-proof-body { display: grid; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; }
@@ -323,16 +338,23 @@
     .card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
     #shipmentCard > .card-head > div:first-child { min-width: 0; max-width: 100%; }
     #cardTitle, #cardMessage { overflow-wrap: anywhere; }
-    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, 0.14); color: var(--accent); }
+    .badge { display: inline-flex; align-items: center; max-width: 100%; border-radius: 999px; padding: 3px 8px; font-size: 12px; line-height: 1.2; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: rgba(167, 139, 250, 0.14); color: var(--accent); }
     .badge.neutral { background: rgba(170, 176, 197, 0.12); color: var(--muted); }
     .badge.info { background: rgba(56, 189, 248, 0.13); color: var(--accent-2); }
     .badge.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .badge.warning { background: rgba(251, 191, 36, 0.14); color: var(--warning); }
     .badge.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
-    .supplier-allocation { display: grid; gap: 4px; min-width: 220px; color: var(--text); font-size: 12px; line-height: 1.35; }
-    .supplier-allocation .badge { justify-self: start; }
-    .supplier-allocation-details summary { cursor: pointer; color: var(--muted); font-weight: 800; }
+    .supplier-allocation { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; color: var(--text); font-size: 12px; }
+    .supplier-allocation-details { min-width: 0; max-width: 100%; }
+    .supplier-allocation-details summary { cursor: pointer; color: var(--muted); font-weight: 800; list-style: none; }
+    .supplier-allocation-details summary::-webkit-details-marker { display: none; }
     .supplier-allocation-details ul { margin: 6px 0 0; padding-left: 18px; color: var(--warning); }
+    .compact-details { display: inline-block; min-width: 0; max-width: 100%; }
+    .compact-details > summary { cursor: pointer; list-style: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compact-details > summary::-webkit-details-marker { display: none; }
+    .icon-action { display: inline-flex; align-items: center; justify-content: center; width: 30px; min-width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; color: var(--accent-2); text-decoration: none; }
+    .icon-action:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+    .match-check { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 999px; background: rgba(52, 211, 153, 0.12); color: var(--success); font-size: 17px; font-weight: 900; }
     .price-conformity { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; font-size: 18px; font-weight: 900; }
     .price-conformity.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .price-conformity.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
@@ -533,6 +555,7 @@
                 <th>商品金额 / Product amount / Сумма товаров</th>
                 <th>其他费用 / Extras amount / Прочие позиции</th>
                 <th>发票总额 / Invoice total / Итого invoice</th>
+                <th>Оплата поставщику</th>
                 <th>预估成本 / Est. cost / Ориент. себестоимость, ₽/шт</th>
                     <th>Точная себестоимость, ₽/шт</th>
                     <th>Распределение расходов</th>
@@ -545,7 +568,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
-              <tr data-registry-state="loading"><td colspan="19"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
+              <tr data-registry-state="loading"><td colspan="20"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -631,7 +654,7 @@
 
         <h3 style="margin-top: 18px;">商品明细 / Product lines / Товарные строки</h3>
         <div class="line-wrap">
-          <table>
+          <table class="composition-table">
             <thead>
               <tr>
                 <th>SKU组 / Nomenclature group / Группа номенклатуры</th>
@@ -905,6 +928,7 @@
             ["product_amount", "Сумма товаров"],
             ["extras_amount", "Прочие позиции"],
             ["invoice_total", "Итого invoice"],
+            ["supplier_payment", "Оплата поставщику"],
             ["approx_cost", "Ориент. себестоимость, ₽/шт"],
             ["exact_cost", "Точная себестоимость, ₽/шт"],
             ["expense_allocation", "Распределение расходов"],
@@ -959,9 +983,17 @@
       function closeSystemModal(result) {
         if (systemModal.hidden) return;
         const reasonInput = systemModalBody.querySelector("[data-confirmation-reason]");
+        const selectedResultIdsByToken = {};
+        Array.from(systemModalBody.querySelectorAll("[data-preview-result]:checked")).forEach((input) => {
+          const token = String(input.dataset.previewToken || "");
+          if (!token) return;
+          if (!selectedResultIdsByToken[token]) selectedResultIdsByToken[token] = [];
+          selectedResultIdsByToken[token].push(String(input.value || ""));
+        });
         const payload = {
           confirmed: Boolean(result),
-          reason: reasonInput ? String(reasonInput.value || "").trim() : ""
+          reason: reasonInput ? String(reasonInput.value || "").trim() : "",
+          selectedResultIdsByToken
         };
         systemModal.hidden = true;
         const resolver = systemModalResolver;
@@ -982,6 +1014,15 @@
         systemModalConfirm.classList.toggle("danger", Boolean(options.danger));
         systemModalConfirm.disabled = false;
         systemModal.hidden = false;
+        const allPreviewResults = Array.from(systemModalBody.querySelectorAll("[data-preview-result]"));
+        const selectableResults = allPreviewResults.filter((input) => !input.disabled);
+        if (allPreviewResults.length) {
+          const syncPreviewConfirmation = () => {
+            systemModalConfirm.disabled = !systemModalBody.querySelector("[data-preview-result]:checked");
+          };
+          selectableResults.forEach((input) => input.addEventListener("change", syncPreviewConfirmation));
+          syncPreviewConfirmation();
+        }
         window.setTimeout(() => systemModalCancel.focus(), 0);
         return new Promise((resolve) => { systemModalResolver = resolve; });
       }
@@ -1059,7 +1100,7 @@
             bank_transfer_application: "Заявление на перевод ВТБ / платёжка",
             bank_fee_statement: "Банковская выписка для комиссий",
             bank_fee: "Комиссия банка CNY",
-            supplier_cny_payment: "Оплата поставщику CNY",
+            supplier_cny_payment: "Оплата поставщику",
             cny_conversion_purchase: "Конвертация RUB → CNY",
             packing_list: "Packing list / Упаковочный лист"
           };
@@ -1155,15 +1196,16 @@
           ? row.cost_freshness
           : {};
         const freshnessLabel = String(freshness.label || "").trim();
+        const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
         if (row && row.exact_landed_cost_per_unit_rub !== null && row.exact_landed_cost_per_unit_rub !== undefined && row.exact_landed_cost_per_unit_rub !== "") {
           const certification = row.supplier_cost_breakdown && row.supplier_cost_breakdown.certification;
-          return freshnessLabel || (certification && certification.status_label_ru
+          const status = freshnessLabel || (certification && certification.status_label_ru
             ? String(certification.status_label_ru)
             : (row.exact_cost_status === "certified"
               ? "Все расходы учтены / Подтверждено документами"
               : "Предварительная себестоимость — не все расходы учтены"));
+          return [status, ...blockers].filter(Boolean).join(" · ");
         }
-        const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
         return blockers.length
           ? blockers.join("; ")
           : (freshnessLabel || "точная себестоимость недоступна");
@@ -1178,6 +1220,20 @@
         const className = row && row.exact_cost_status === "certified" ? "exact-cost-complete" : "exact-cost-incomplete";
         return '<span class="' + className + '">' + escapeHtml(display) + '</span>' +
           (freshnessLabel ? '<small>' + escapeHtml(freshnessLabel) + '</small>' : "");
+      }
+
+      function renderSupplierPayment(value) {
+        const readiness = value && typeof value === "object" ? value : {};
+        const currency = String(readiness.currency || "CNY");
+        const invoice = formatMoney(readiness.invoice_total);
+        const paid = formatMoney(readiness.confirmed_paid);
+        const display = invoice + " / " + paid + " " + currency;
+        const blockers = Array.isArray(readiness.blockers)
+          ? readiness.blockers.map((item) => item.reason_ru || item.code || "").filter(Boolean)
+          : [];
+        const title = [readiness.status_label_ru || "Проверить оплату", ...blockers].join(" · ");
+        const tone = readiness.complete === true ? "success" : "warning";
+        return '<span class="badge ' + tone + '" title="' + escapeHtml(title) + '">' + escapeHtml(display) + '</span>';
       }
 
       function formatAmount(value, currency) {
@@ -1362,6 +1418,7 @@
               "Сумма товаров",
               "Прочие позиции",
               "Итого invoice",
+              "Оплата поставщику",
               "Ориент. себестоимость, ₽/шт",
               "Точная себестоимость, ₽/шт",
               "Распределение расходов",
@@ -1532,14 +1589,14 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="19"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="20"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
         if (registryColumnPreference) registryColumnPreference.apply();
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="19">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="20">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
         if (registryColumnPreference) registryColumnPreference.apply();
       }
 
@@ -1551,7 +1608,7 @@
           const emptyText = hasUnfilteredRows
             ? "Нет заказов в выбранных статусах."
             : uiText("暂无订单 / No orders yet / Заказов пока нет.", "Заказов пока нет.");
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="19">' + escapeHtml(emptyText) + '</td></tr>';
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="20">' + escapeHtml(emptyText) + '</td></tr>';
           if (registryColumnPreference) registryColumnPreference.apply();
           return;
         }
@@ -1567,11 +1624,12 @@
                 '<td>' + escapeHtml(row.actual_ff_acceptance_date || "-") + '</td>',
                 '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
                 '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
-                '<td>' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
+                '<td title="' + escapeHtml(row.supplier_name || defaultSupplierName) + '">' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
+                '<td>' + renderSupplierPayment(row.payment_readiness) + '</td>',
                 '<td>' + escapeHtml(formatRegistryMoney(row.approx_landed_cost_per_unit_rub)) + '</td>',
                 '<td title="' + escapeHtml(exactCostTooltip(row)) + '">' + renderExactCostValue(row) + '</td>',
                 '<td>' + renderExpenseAllocation(row.expense_allocation) + '</td>',
@@ -1607,12 +1665,12 @@
           function renderExpenseAllocation(value) {
             const projection = value && typeof value === "object" ? value : {};
             const status = String(projection.status || "none");
-            const label = projection.label || {
-              all: "Все расходы распределены",
-              partial: "Расходы распределены частично",
-              none: "Расходы не распределены",
-              not_applicable: "Не требует распределения"
-            }[status] || "Расходы не распределены";
+            const label = {
+              all: "Распределено",
+              partial: "Частично",
+              none: "Не распределено",
+              not_applicable: "Не требуется"
+            }[status] || "Не распределено";
             const diagnostics = projection.diagnostics && typeof projection.diagnostics === "object" ? projection.diagnostics : {};
             const reasons = Array.isArray(projection.reasons) ? projection.reasons : [];
             const rub = (raw) => {
@@ -1627,16 +1685,15 @@
             const unallocatedSummary = "Не распределено " + rub(diagnostics.unallocated_amount_rub);
             const componentSummary = "Компонентов: " + Number(diagnostics.allocated_components || 0) + " из " + Number(diagnostics.eligible_components || 0);
             const tooltip = [
+              projection.label || "",
               diagnostics.eligible_documents != null ? "Документов: " + diagnostics.eligible_documents : "",
               diagnostics.eligible_components != null ? "Компонентов: " + diagnostics.eligible_components : "",
               diagnostics.allocated_components != null ? "Распределено: " + diagnostics.allocated_components : "",
               ...reasons
             ].filter(Boolean).join(" · ");
             const tone = status === "all" ? "success" : status === "partial" ? "warning" : status === "not_applicable" ? "neutral" : "error";
-            const details = reasons.length
-              ? '<details class="supplier-allocation-details"><summary>Почему</summary><ul>' + reasons.map((reason) => '<li>' + escapeHtml(reason) + '</li>').join("") + '</ul></details>'
-              : "";
-            return '<div class="supplier-allocation"><span class="badge ' + tone + '"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : "") + '>' + escapeHtml(label) + '</span><span>' + escapeHtml(amountSummary) + '</span><span>' + escapeHtml(unallocatedSummary) + '</span><span>' + escapeHtml(componentSummary) + '</span>' + details + '</div>';
+            const detailRows = [amountSummary, unallocatedSummary, componentSummary, ...reasons];
+            return '<div class="supplier-allocation"><details class="supplier-allocation-details"><summary><span class="badge ' + tone + '"' + (tooltip ? ' title="' + escapeHtml(tooltip) + '"' : "") + '>' + escapeHtml(label) + '</span></summary><ul>' + detailRows.map((reason) => '<li>' + escapeHtml(reason) + '</li>').join("") + '</ul></details></div>';
           }
 
           function syncActiveRegistryRow() {
@@ -1649,11 +1706,15 @@
           function renderRegistryDocumentCell(row) {
             const invoiceLabel = uiText("Invoice", "Скачать invoice");
             const contractLabel = uiText("Contract", "Скачать контракт");
-            const invoiceLink = '<a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="' + escapeHtml(invoiceLabel + " " + (row.invoice_no || row.shipment_id || "")) + '" title="' + escapeHtml(invoiceLabel) + '">' + escapeHtml(invoiceLabel) + '</a>';
+            const invoiceLink = renderDownloadAction(row.invoice_download_path || "#", invoiceLabel + " " + (row.invoice_no || row.shipment_id || ""));
             const contractPart = row.contract_download_path
-              ? '<a class="button-link compact" href="' + escapeHtml(row.contract_download_path || "#") + '" data-download aria-label="' + escapeHtml(contractLabel) + '">' + escapeHtml(contractLabel) + '</a>'
+              ? renderDownloadAction(row.contract_download_path, contractLabel)
               : '<span class="muted-dash">Контракт: выбрать</span>';
             return '<div class="row-actions">' + invoiceLink + contractPart + '</div>';
+          }
+
+          function renderDownloadAction(path, label) {
+            return '<a class="icon-action" href="' + escapeHtml(path || "#") + '" data-download title="' + escapeHtml(label || "Скачать") + '" aria-label="' + escapeHtml(label || "Скачать") + '"><span aria-hidden="true">⇩</span></a>';
           }
 
           function renderOrderStatusCell(row) {
@@ -2418,7 +2479,21 @@
           }
         });
         financialWarnings.hidden = !unique.length;
-        financialWarnings.innerHTML = unique.map((warning) => '<li>' + escapeHtml(warning) + '</li>').join("");
+        financialWarnings.innerHTML = unique.map((warning) => '<li>' + renderParserWarning(warning) + '</li>').join("");
+      }
+
+      function renderParserWarning(rawWarning) {
+        const technical = String(rawWarning || "").trim();
+        if (!technical) return '<span class="muted-dash">-</span>';
+        const lower = technical.toLowerCase();
+        const label = lower.includes("missing") || lower.includes("not recognize")
+          ? "Не все поля распознаны"
+          : lower.includes("review") || lower.includes("ambig")
+          ? "Нужна проверка"
+          : lower.includes("rate") || lower.includes("cbr")
+          ? "Курс требует проверки"
+          : "Есть предупреждение";
+        return '<details class="compact-details"><summary><span class="badge warning" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span></summary><small title="Техническая подробность">' + escapeHtml(technical) + '</small></details>';
       }
 
       function renderFinancialDocumentRows() {
@@ -2442,7 +2517,7 @@
           const actionReason = String(action.reason || "");
           const amount = document.amount != null ? formatAmount(document.amount, document.currency) : "-";
           const file = document.download_path
-            ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>Скачать</a>'
+            ? renderDownloadAction(document.download_path, "Скачать " + (document.file_original_name || document.document_name || "документ"))
             : '<span class="muted-dash">-</span>';
           const warning = (Array.isArray(document.warnings) && document.warnings.length) ? document.warnings[0] : "";
           const deleteButton = canExclude
@@ -2451,8 +2526,8 @@
           const originBadge = document.document_origin === "operator" || (
             !document.document_origin && operatorDocument
           )
-            ? '<span class="badge">Пользовательский</span>'
-            : '<span class="badge">Системный</span>';
+            ? '<span class="badge" title="Пользовательский документ">Польз.</span>'
+            : '<span class="badge" title="Системный документ">Системный</span>';
           const status = document.status || (document.is_uploaded ? "uploaded" : "missing");
           const rowClass = [
             selected ? "finance-row-selected" : "",
@@ -2461,15 +2536,15 @@
           ].filter(Boolean).join(" ");
           return [
             '<tr data-financial-document-row="' + escapeHtml(canSelect ? (document.document_id || "") : "") + '"' + (rowClass ? ' class="' + escapeHtml(rowClass) + '"' : "") + '>',
-            '<td>' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '<br>' + originBadge + '</td>',
+            '<td><span class="cell-clip" title="' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '">' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</span>' + originBadge + '</td>',
             '<td><span class="badge ' + financialStatusTone(status) + '">' + escapeHtml(document.status_label || orderDocumentStatusLabels[status] || status || "-") + '</span></td>',
             '<td>' + renderExpenseAllocation(document.expense_allocation) + '</td>',
             '<td>' + escapeHtml(document.document_number || "-") + '</td>',
             '<td>' + escapeHtml(document.document_date || "-") + '</td>',
-            '<td>' + escapeHtml(document.counterparty || "-") + '</td>',
+            '<td><span class="cell-clip" title="' + escapeHtml(document.counterparty || "-") + '">' + escapeHtml(document.counterparty || "-") + '</span></td>',
             '<td>' + escapeHtml(amount) + '</td>',
             '<td>' + file + '</td>',
-            '<td>' + escapeHtml(warning || "-") + '</td>',
+            '<td>' + renderParserWarning(warning) + '</td>',
             '<td>' + deleteButton + '</td>',
             '</tr>'
           ].join("");
@@ -2849,7 +2924,7 @@
               : "";
             return [
               '<label class="finance-field" data-bank-fee-status="' + escapeHtml(status) + '">',
-              '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '">',
+              '<input type="checkbox" data-bank-fee-operation="' + escapeHtml(operationId) + '" checked>',
               '<span><strong>' + escapeHtml(details) + '</strong>',
               atomicDetails,
               '</span></label>'
@@ -2988,6 +3063,7 @@
             const rows = previews.map((item) => {
               const document = item.document || {};
               const duplicateText = (item.warnings || []).join("; ");
+              const detectedResults = Array.isArray(item.detected_results) ? item.detected_results : [];
               const duplicateLocations = (item.duplicates || []).map((duplicate) => {
                 const shipment = duplicate.shipment || {};
                 return [
@@ -2996,7 +3072,26 @@
                   duplicate.status || ""
                 ].filter(Boolean).join(" · ");
               }).filter(Boolean).join("; ");
+              const resultRows = detectedResults.map((result) => {
+                const confidence = { strong: "высокая", probable: "достаточная", weak: "низкая" }[result.confidence] || result.confidence || "не указана";
+                const technical = []
+                  .concat(Array.isArray(result.reasons) ? result.reasons : [])
+                  .concat(Array.isArray(result.warnings) ? result.warnings : []);
+                return '<label class="finance-field">'
+                  + '<input type="checkbox" data-preview-result data-preview-token="' + escapeHtml(item.confirmation_token || "") + '" value="' + escapeHtml(result.result_id || "") + '"'
+                  + (result.default_selected ? ' checked' : '')
+                  + (result.import_allowed === false ? ' disabled' : '') + '>'
+                  + '<span><strong>' + escapeHtml([
+                    financialCategoryLabels[result.category] || financialDocumentTypeLabels[result.document_type] || result.category || result.document_type || "Результат",
+                    result.description || "",
+                    formatAmount(result.amount, result.currency)
+                  ].filter(Boolean).join(" · ")) + '</strong>'
+                  + '<small>Уверенность: ' + escapeHtml(confidence) + (result.import_allowed === false ? ' · импорт недоступен' : '') + '</small>'
+                  + (technical.length ? '<details><summary>Основания и предупреждения (' + String(technical.length) + ')</summary><small>' + escapeHtml(technical.join("; ")) + '</small></details>' : '')
+                  + '</span></label>';
+              }).join("");
               return '<li><strong>' + escapeHtml(document.filename || "Документ") + '</strong>'
+                + '<br><span class="badge info">' + escapeHtml(financialDocumentTypeLabels[document.document_type] || document.document_type || "Тип не определён") + '</span>'
                 + '<br>' + escapeHtml([
                   financialDocumentTypeLabels[document.document_type] || document.document_type,
                   document.document_number ? ("№" + document.document_number) : "",
@@ -3004,7 +3099,9 @@
                   document.vendor,
                   formatAmount(document.amount, document.currency)
                 ].filter(Boolean).join(" · "))
-                + (duplicateText ? '<br><span class="message warning">' + escapeHtml(duplicateText) + '</span>' : "")
+                + '<br><small>Найдено позиций: ' + String(detectedResults.length) + '</small>'
+                + (resultRows ? '<div class="finance-summary-stack">' + resultRows + '</div>' : '<p class="message warning">Импортируемых позиций не найдено.</p>')
+                + (duplicateText ? '<details><summary><span class="badge warning">Есть предупреждения</span></summary><small>' + escapeHtml(duplicateText) + '</small></details>' : "")
                 + (duplicateLocations ? '<br><span>Найдено: ' + escapeHtml(duplicateLocations) + '</span>' : "")
                 + '</li>';
             }).join("");
@@ -3025,11 +3122,16 @@
               setMessage(financialDocumentsMessage, "Добавление отменено; активные документы и расходы не изменены.", "");
               return;
             }
+            const selectedResultIdsByToken = decision.selectedResultIdsByToken || {};
+            const selectedTokens = previews
+              .map((item) => item.confirmation_token)
+              .filter((token) => Array.isArray(selectedResultIdsByToken[token]) && selectedResultIdsByToken[token].length);
             const batchPayload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id) + "/confirm-upload", {
               method: "POST",
               headers: { "Content-Type": "application/json", Accept: "application/json" },
               body: JSON.stringify({
-                confirmation_tokens: previews.map((item) => item.confirmation_token),
+                confirmation_tokens: selectedTokens,
+                selected_result_ids_by_token: selectedResultIdsByToken,
                 allow_relink: requiresRelink,
                 allow_semantic_duplicate: requiresReason,
                 duplicate_reason: decision.reason
@@ -3278,6 +3380,13 @@
       }
 
       function renderProductLine(line, index) {
+        const matched = !line.manual_override && ["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status);
+        const matchingLabel = line.manual_override
+          ? lineStatusLabels.manual_override
+          : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched);
+        const matching = matched
+          ? '<span class="match-check" role="img" tabindex="0" title="' + escapeHtml(matchingLabel) + '" aria-label="' + escapeHtml(matchingLabel) + '">✓</span>'
+          : '<span class="badge warning" data-match-status title="' + escapeHtml(matchingLabel) + '">' + escapeHtml(matchingLabel) + '</span>';
         return [
           '<tr data-line-kind="product" data-line-index="' + index + '">',
           '<td data-authoritative-group>' + renderAuthoritativeGroup(line) + '</td>',
@@ -3293,7 +3402,7 @@
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
           '<td class="line-cost-cell">' + renderLineCost(line) + '</td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
-          '<td><span class="badge ' + (line.manual_override ? "warning" : (["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status)) ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
+          '<td>' + matching + '</td>',
           '</tr>'
         ].join("");
       }
@@ -3312,7 +3421,7 @@
             ? blockers.map((item) => item.reason_ru || item.code || "Недостающие данные").join("; ")
             : "Канонический расчёт ещё не опубликован для этой строки.");
           return '<span class="line-cost-value muted-dash">—</span>' +
-            '<span class="line-cost-status exact-cost-incomplete">' + escapeHtml(reason) + '</span>';
+            '<span class="line-cost-status exact-cost-incomplete" title="' + escapeHtml(reason) + '">' + escapeHtml(reason) + '</span>';
         }
         const certified = certification.certified === true;
         const tone = certified ? "exact-cost-complete" : "exact-cost-incomplete";

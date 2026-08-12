@@ -346,7 +346,7 @@ def main() -> None:
                 expect(supplier_column_toggle).to_be_checked()
                 supplier_column_toggle.uncheck()
                 expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_hidden()
-                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "18")
+                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "19")
                 frame.locator("body").evaluate("() => window.location.reload()")
                 expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
                 expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_hidden()
@@ -354,7 +354,7 @@ def main() -> None:
                 frame.locator("#registryColumnChooser > summary").click()
                 frame.locator("#registryColumnChooser [data-column-reset]").click()
                 expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_visible()
-                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "19")
+                expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "20")
                 column_storage_keys = frame.locator("body").evaluate(
                     "() => Object.keys(window.localStorage).filter((key) => key.includes('operator:') && key.includes('columns'))"
                 )
@@ -372,7 +372,7 @@ def main() -> None:
                     raise AssertionError(f"narrow registry layout must contain horizontal scrolling without fatal body overflow: {narrow_layout}")
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 expect(frame.get_by_role("columnheader", name="Матчинг")).to_be_visible()
-                expect(frame.get_by_role("columnheader", name="Поставщик")).to_be_visible()
+                expect(frame.get_by_role("columnheader", name="Поставщик", exact=True)).to_be_visible()
                 expect(frame.get_by_text("匹配 / Matching / Матчинг")).to_have_count(0)
                 expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_have_count(0)
                 expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
@@ -470,8 +470,22 @@ def main() -> None:
                     raise AssertionError(f"price conformity symbols must map to success/error classes, got {first_price_class!r}, {second_price_class!r}")
                 expect(frame.locator("#contractNoInput")).to_have_value("CNT-2026-0513")
                 expect(frame.locator("#contractDateInput")).to_have_value("2026-05-13")
-                expect(frame.locator("#productLines").get_by_text("Сопоставлено по штрихкоду", exact=True)).to_have_count(3)
+                expect(frame.locator("#productLines .match-check")).to_have_count(3)
+                expect(frame.locator("#productLines .match-check").first).to_have_text("✓")
+                expect(frame.locator("#productLines .match-check").first).to_have_attribute("aria-label", "Сопоставлено по штрихкоду")
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено по штрихкоду", exact=True)).to_have_count(0)
                 expect(frame.locator("#productLines").get_by_text("Сопоставлено по совместимости", exact=True)).to_have_count(0)
+                compact_product_layout = frame.locator("#productLines tr").first.evaluate(
+                    """(row) => ({
+                        height: row.getBoundingClientRect().height,
+                        verticalWords: Array.from(row.querySelectorAll('td')).some((cell) => {
+                          const style = getComputedStyle(cell);
+                          return style.wordBreak === 'break-all' || style.writingMode !== 'horizontal-tb';
+                        })
+                    })"""
+                )
+                if compact_product_layout["height"] > 86 or compact_product_layout["verticalWords"]:
+                    raise AssertionError(f"product rows must stay compact with horizontal text: {compact_product_layout}")
                 expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
@@ -480,6 +494,10 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
                 expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
+                created_registry_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
+                payment_cell = created_registry_row.locator("td[data-column-key='supplier_payment']")
+                expect(payment_cell).to_contain_text("CNY")
+                expect(payment_cell.locator(".badge.warning")).to_be_visible()
                 expect(frame.locator("#supplyCompositionPanel #documentInvoiceDownloadLink")).to_have_count(0)
                 expect(frame.locator("#supplyCompositionPanel #contractManageControls")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
@@ -502,7 +520,7 @@ def main() -> None:
                 if exact_cost_value in {"—", "-", "0", "0,00 ₽"}:
                     raise AssertionError(f"documents tab exact cost tile must show money value, got {exact_cost_value!r}")
                 expect(exact_cost_tile).to_have_attribute(
-                    "title", "Себестоимость ожидает пересчёта"
+                    "title", re.compile(r"^Себестоимость ожидает пересчёта")
                 )
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel .document-label-primary")).to_contain_text("26GN390")
@@ -517,11 +535,26 @@ def main() -> None:
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Контракт")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("КП логистов")
                 expect(frame.locator("#financialDocumentsRows")).to_contain_text("Не загружен")
+                download_icon = frame.locator("#financialDocumentsRows a.icon-action[data-download]").first
+                expect(download_icon).to_be_visible()
+                expect(download_icon).to_have_attribute("aria-label", re.compile(r"^Скачать"))
+                expect(download_icon).to_have_attribute("title", re.compile(r"^Скачать"))
                 allocation_row = frame.locator(
                     "#financialDocumentsRows tr[data-financial-document-row]",
                     has_text="BROWSER-EXPENSE",
                 ).first
                 expect(allocation_row).to_contain_text("Распределено")
+                allocation_layout = allocation_row.evaluate(
+                    """(row) => ({
+                        height: row.getBoundingClientRect().height,
+                        expanded: Array.from(row.querySelectorAll('details')).some((item) => item.open),
+                        overlap: Array.from(row.querySelectorAll('td')).some((cell, index, cells) => (
+                          index > 0 && cell.getBoundingClientRect().left < cells[index - 1].getBoundingClientRect().right - 1
+                        ))
+                    })"""
+                )
+                if allocation_layout["height"] > 76 or allocation_layout["expanded"] or allocation_layout["overlap"]:
+                    raise AssertionError(f"document rows must keep diagnostics collapsed without overlap: {allocation_layout}")
                 for document_number, amount_pattern, warning_text in (
                     (
                         "VTB-26GN582-COMPLETE",
@@ -576,11 +609,9 @@ def main() -> None:
                 expect(logical_transfer).to_be_visible()
                 expect(logical_transfer).to_contain_text("20 000,00 RUB")
                 expect(logical_transfer).to_contain_text("58 113,66 RUB")
-                expect(logical_transfer.locator("input")).not_to_be_checked()
+                expect(logical_transfer.locator("input")).to_be_checked()
                 expect(logical_transfer.locator("input")).to_be_enabled()
                 expect(frame.locator("#bankFeePreviewContent input")).to_have_count(1)
-                expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
-                logical_transfer.locator("input").check()
                 expect(frame.locator("#confirmBankFeeImportButton")).to_be_enabled()
                 logical_transfer.locator("input").uncheck()
                 expect(frame.locator("#confirmBankFeeImportButton")).to_be_disabled()
@@ -831,7 +862,9 @@ def main() -> None:
                 active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
                 expect(active_row.locator("[data-order-status-shipment]")).to_have_count(0)
                 expect(active_row.locator(".badge", has_text="В пути с 16.05.2026")).to_be_visible()
-                expect(active_row.locator("a[data-download]").first).to_have_text("Скачать invoice")
+                expect(active_row.locator("a[data-download]").first).to_have_text("⇩")
+                expect(active_row.locator("a[data-download]").first).to_have_attribute("aria-label", re.compile(r"^Скачать invoice"))
+                expect(active_row.locator("a[data-download]").first).to_have_attribute("title", re.compile(r"^Скачать invoice"))
                 expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
                 active_row.click()
                 expect(active_row).to_have_class(re.compile(r"(^|\\s)is-active(\\s|$)"))

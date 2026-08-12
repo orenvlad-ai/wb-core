@@ -3276,8 +3276,12 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"order documents must include uploaded contract: {order_documents}")
             if _required_document_status(required_rows, "bank_control_statement") != "Не загружен":
                 raise AssertionError(f"missing bank control statement must be shown: {order_documents}")
-            if _required_document_status(required_rows, "bank_transfer_application") != "Не загружен":
-                raise AssertionError(f"missing bank transfer application must be shown: {order_documents}")
+            if _required_document_status(required_rows, "bank_transfer_application"):
+                raise AssertionError(f"legacy bank transfer must not be a required checklist row: {order_documents}")
+            if _required_document_status(required_rows, "supplier_cny_payment") != "Не оплачено полностью":
+                raise AssertionError(f"canonical supplier payment missing row must be shown once: {order_documents}")
+            if sum(1 for item in required_rows if item.get("document_type") == "supplier_cny_payment") != 1:
+                raise AssertionError(f"supplier payment checklist must not duplicate the missing row: {order_documents}")
             if _required_document_status(required_rows, "bank_fee_statement") != "Не загружен":
                 raise AssertionError(f"missing bank fees must be shown: {order_documents}")
             if _required_document_status(required_rows, "packing_list") != "Загружен":
@@ -3286,7 +3290,7 @@ def _assert_http_api_smoke() -> None:
             if archive_status != 200:
                 raise AssertionError(f"all-documents archive route failed: {archive_status}")
             archive_manifest = _zip_manifest(archive_bytes)
-            if not set(archive_manifest.get("missing_required_types", [])) >= {"bank_control_statement", "bank_transfer_application", "bank_fee_statement"}:
+            if not set(archive_manifest.get("missing_required_types", [])) >= {"bank_control_statement", "supplier_cny_payment", "bank_fee_statement"}:
                 raise AssertionError(f"all-documents archive must warn about missing bank docs: {archive_manifest}")
 
             for filename in ("bank-control.pdf", "bank-transfer.pdf"):
@@ -3313,8 +3317,10 @@ def _assert_http_api_smoke() -> None:
             bank_rows = bank_order_documents.get("required_documents", [])
             if _required_document_status(bank_rows, "bank_control_statement") != "Проверить":
                 raise AssertionError(f"uploaded bank control statement must be shown: {bank_order_documents}")
-            if _required_document_status(bank_rows, "bank_transfer_application") != "Проверить":
-                raise AssertionError(f"uploaded bank transfer application must be shown: {bank_order_documents}")
+            if _required_document_status(bank_rows, "bank_transfer_application"):
+                raise AssertionError(f"legacy bank transfer must not return to required checklist: {bank_order_documents}")
+            if _required_document_status(bank_rows, "supplier_cny_payment") != "Не оплачено полностью":
+                raise AssertionError(f"ambiguous legacy evidence must leave canonical payment missing: {bank_order_documents}")
             if _required_document_status(bank_rows, "bank_fee_statement") != "Не загружен":
                 raise AssertionError(f"missing bank fee import must still be shown: {bank_order_documents}")
             if _required_document_status(bank_rows, "packing_list") != "Загружен":

@@ -18,11 +18,17 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _build_supplier_payment_checklist,
+)
 from packages.application.supplier_financial_documents import (  # noqa: E402
     _exact_landed_cost_cell,
     _functional_stage_cost_cell,
+    build_supplier_financial_readiness,
+    build_supplier_payment_readiness,
 )
 from packages.application.warehouse_functional import (  # noqa: E402
+    _supplier_allocation_with_certification,
     ensure_warehouse_functional_schema,
     load_supplier_flow_cost_state,
 )
@@ -33,6 +39,7 @@ VERSION_ID = "whfv_stage_cost_smoke"
 
 
 def main() -> int:
+    _assert_supplier_financial_readiness_contract()
     with TemporaryDirectory(prefix="supplier-cost-status-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         _seed(runtime)
@@ -186,6 +193,130 @@ def main() -> int:
         )
     print("supplier_cost_status_smoke: ok")
     return 0
+
+
+def _assert_supplier_financial_readiness_contract() -> None:
+    compatible_existing = _supplier_allocation_with_certification(
+        {
+            "source_fingerprint": "current-contract",
+            "compatible_source_fingerprints": [
+                "legacy-expenses-false",
+                "legacy-expenses-true",
+            ],
+            "calculation_fingerprint": "calculation",
+            "financial_readiness": {"ready": True},
+            "document_controls": [
+                {
+                    "conserved": True,
+                    "eligible_component_count": 1,
+                    "allocated_component_count": 1,
+                }
+            ],
+        },
+        active_version_id="legacy-version",
+        active_fingerprints=("legacy-expenses-true", "calculation"),
+    )
+    _assert(
+        compatible_existing["certification"]["certified"] is True,
+        "existing shipment certification survives derived legacy expenses-complete fingerprint compatibility",
+    )
+    shipment = {"invoice_amount_total": 100, "currency": "CNY"}
+    first = {
+        "document_id": "payment-1",
+        "document_type": "supplier_cny_payment",
+        "status": "posted",
+        "cny_amount": 40,
+    }
+    partial = build_supplier_payment_readiness(shipment, [first, dict(first)])
+    _assert(
+        partial["status"] == "partial"
+        and partial["confirmed_paid"] == 40.0
+        and partial["remaining"] == 60.0
+        and partial["confirmed_document_count"] == 1,
+        "canonical payment readiness aggregates without duplicate documents",
+    )
+    partial_rows = _build_supplier_payment_checklist(
+        payment_readiness=partial,
+        payment_documents=[
+            {
+                "document_id": "payment-1",
+                "document_type": "supplier_cny_payment",
+                "is_uploaded": True,
+                "status": "posted",
+            },
+            {
+                "document_id": "payment-1",
+                "document_type": "supplier_cny_payment",
+                "is_uploaded": True,
+                "status": "posted",
+            },
+        ],
+    )
+    _assert(
+        len(partial_rows) == 2
+        and sum(1 for item in partial_rows if not item.get("is_uploaded")) == 1,
+        "partial payment checklist has confirmed rows plus exactly one missing remainder",
+    )
+    complete = build_supplier_payment_readiness(
+        shipment,
+        [
+            first,
+            {
+                "document_id": "payment-2",
+                "document_type": "supplier_cny_payment",
+                "status": "posted",
+                "cny_amount": 60,
+            },
+        ],
+    )
+    _assert(complete["complete"] is True and complete["status"] == "full", "100% payment is green-ready")
+    _assert(
+        all(item.get("is_uploaded") for item in _build_supplier_payment_checklist(
+            payment_readiness=complete,
+            payment_documents=[
+                {
+                    "document_id": "payment-1",
+                    "document_type": "supplier_cny_payment",
+                    "is_uploaded": True,
+                    "status": "posted",
+                }
+            ],
+        )),
+        "100% payment checklist has no synthetic missing row",
+    )
+    financial = build_supplier_financial_readiness(
+        payment_readiness=complete,
+        financial_documents=[
+            {"document_type": "logistics_invoice", "parse_status": "parsed"},
+            {"document_type": "customs_declaration", "parse_status": "confirmed"},
+            {"document_type": "bank_fee_statement", "parse_status": "parsed"},
+            {"document_type": "packing_list", "parse_status": "needs_review"},
+            {"document_type": "bank_control_statement", "parse_status": "needs_review"},
+        ],
+        document_controls=[
+            {"cost_affecting": True, "conserved": True},
+        ],
+    )
+    _assert(
+        financial["ready"] is True
+        and set(financial["excluded_informational_types"])
+        == {"packing_list", "bank_control_statement"},
+        "packing list and bank-control statement do not hold exact-cost readiness yellow",
+    )
+    pending = build_supplier_financial_readiness(
+        payment_readiness=partial,
+        financial_documents=[
+            {"document_type": "logistics_invoice", "parse_status": "parsed"},
+            {"document_type": "customs_declaration", "parse_status": "parsed"},
+            {"document_type": "bank_fee_statement", "parse_status": "parsed"},
+        ],
+        document_controls=[{"cost_affecting": True, "conserved": True}],
+    )
+    _assert(
+        pending["ready"] is False
+        and any(item["code"] == "supplier_payment_incomplete" for item in pending["blockers"]),
+        "partial supplier payment keeps exact cost yellow",
+    )
 
 
 def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:

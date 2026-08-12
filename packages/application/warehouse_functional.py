@@ -1193,15 +1193,21 @@ def _supplier_allocation_with_certification(
     active_fingerprints: tuple[str, str] | None,
 ) -> dict[str, Any]:
     result = json.loads(json.dumps(dict(allocation), ensure_ascii=False, default=str))
+    compatible_source_fingerprints = {
+        str(result.get("source_fingerprint") or ""),
+        *{
+            str(item or "")
+            for item in result.get("compatible_source_fingerprints") or []
+        },
+    } - {""}
     matches_active = bool(
         active_fingerprints
-        and active_fingerprints
-        == (
-            str(result.get("source_fingerprint") or ""),
-            str(result.get("calculation_fingerprint") or ""),
-        )
+        and active_fingerprints[0] in compatible_source_fingerprints
+        and active_fingerprints[1]
+        == str(result.get("calculation_fingerprint") or "")
     )
-    expenses_complete = bool(result.get("expenses_complete"))
+    financial_readiness = dict(result.get("financial_readiness") or {})
+    financial_ready = bool(financial_readiness.get("ready"))
     document_controls = list(result.get("document_controls") or [])
     allocation_complete = bool(
         document_controls
@@ -1212,11 +1218,12 @@ def _supplier_allocation_with_certification(
             for item in document_controls
         )
     )
-    certified = expenses_complete and matches_active and allocation_complete
+    certified = financial_ready and matches_active and allocation_complete
     result["certification"] = {
         "certified": certified,
         "source_fingerprint_matches": matches_active,
         "allocation_complete": allocation_complete,
+        "financial_ready": financial_ready,
         "source_fingerprint": result.get("source_fingerprint"),
         "calculation_fingerprint": result.get("calculation_fingerprint"),
         "certified_source_fingerprint": active_fingerprints[0] if active_fingerprints else None,
@@ -1232,9 +1239,9 @@ def _supplier_allocation_with_certification(
             "Актуальные source/calculation fingerprints совпадают с сертифицированной версией."
             if certified
             else (
-                "Поставка отмечена закрытой, но актуальный расчёт ещё не совпал с сертифицированной версией или не прошёл полный контроль распределения."
-                if expenses_complete
-                else "Не все расходы поставки подтверждены."
+                "Актуальный расчёт ещё не совпал с сертифицированной версией или не прошёл полный контроль распределения."
+                if financial_ready
+                else "Не все финансово влияющие документы, компоненты и платежи подтверждены."
             )
         ),
     }
@@ -1668,6 +1675,9 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
         str(row.get("document_id") or ""): dict(row)
         for row in sources.get("cny_documents") or []
     }
+    cny_documents_by_shipment: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for document in cny_documents.values():
+        cny_documents_by_shipment[str(document.get("source_order_id") or "")].append(document)
     operations: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     cost_operation_candidates: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in sources.get("cny_operations") or []:
@@ -1681,6 +1691,9 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
         for row in sources.get("financial_documents") or []
         if str(row.get("parse_status") or "") != "excluded"
     }
+    financial_documents_by_shipment: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for document in financial_documents.values():
+        financial_documents_by_shipment[str(document.get("supplier_order_id") or "")].append(document)
     expenses: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in sources.get("financial_expense_lines") or []:
         if str(raw.get("financial_document_id") or "") in financial_documents:
@@ -2283,7 +2296,6 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                     "actual_shipment_date",
                     "actual_ff_acceptance_date",
                     "order_status",
-                    "expenses_complete",
                     "declared_invoice_total",
                     "invoice_amount_total",
                     "match_status",
@@ -2308,7 +2320,30 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "stage": stage,
         }
         source_fingerprint = "sha256:" + _hash(source_payload)
+        compatible_source_fingerprints = [source_fingerprint]
+        for legacy_expenses_complete in (False, True):
+            legacy_source_payload = json.loads(_json(source_payload))
+            legacy_source_payload["shipment"]["expenses_complete"] = (
+                legacy_expenses_complete
+            )
+            compatible_source_fingerprints.append(
+                "sha256:" + _hash(legacy_source_payload)
+            )
         calculation_fingerprint = "sha256:" + _hash(calculation_payload)
+        from packages.application.supplier_financial_documents import (
+            build_supplier_financial_readiness,
+            build_supplier_payment_readiness,
+        )
+
+        payment_readiness = build_supplier_payment_readiness(
+            shipment,
+            cny_documents_by_shipment.get(shipment_id, []),
+        )
+        financial_readiness = build_supplier_financial_readiness(
+            payment_readiness=payment_readiness,
+            financial_documents=financial_documents_by_shipment.get(shipment_id, []),
+            document_controls=document_controls,
+        )
         result[shipment_id] = {
             "shipment_id": shipment_id,
             "invoice_no": str(shipment.get("invoice_no") or ""),
@@ -2327,6 +2362,9 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "stage": stage,
             "expenses_complete": bool(shipment.get("expenses_complete")),
             "source_fingerprint": source_fingerprint,
+            "compatible_source_fingerprints": sorted(
+                set(compatible_source_fingerprints)
+            ),
             "calculation_fingerprint": calculation_fingerprint,
             "quantity": _text(total_quantity),
             "capital_rub": _text(total_capital) if not blockers else None,
@@ -2342,6 +2380,8 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                 SUPPLIER_COST_AFFECTING_DOCUMENT_TYPES
             ),
             "document_controls": document_controls,
+            "payment_readiness": payment_readiness,
+            "financial_readiness": financial_readiness,
             "controls": {
                 "document_allocation_conserved": all(item["conserved"] for item in component_controls),
                 "document_counted_once": len(seen_source_components) == len(component_controls),
@@ -2385,9 +2425,17 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
                 for item in blockers
             ] or ["Каноническая расшифровка себестоимости недоступна."],
             "exact_cost_warnings": [],
+            "payment_readiness": dict(canonical.get("payment_readiness") or {}),
+            "financial_readiness": dict(canonical.get("financial_readiness") or {}),
         }
     controls = list(canonical.get("component_controls") or [])
     certification = dict(canonical.get("certification") or {})
+    financial_readiness = dict(canonical.get("financial_readiness") or {})
+    readiness_blockers = [
+        str(item.get("reason_ru") or item.get("code") or "")
+        for item in financial_readiness.get("blockers") or []
+        if str(item.get("reason_ru") or item.get("code") or "")
+    ]
     cost_replay = dict(canonical.get("cost_replay") or {})
     replay_status = str(cost_replay.get("status") or "")
     cost_freshness = (
@@ -2400,7 +2448,7 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
         else "current_certified"
         if certification.get("certified")
         else "awaiting_recalculation"
-        if bool(canonical.get("expenses_complete"))
+        if bool(financial_readiness.get("ready"))
         else "preliminary"
     )
     return {
@@ -2453,8 +2501,10 @@ def supplier_cost_summary_fields(breakdown: Mapping[str, Any]) -> dict[str, Any]
             "queue_id": str(cost_replay.get("queue_id") or ""),
             "error": str(cost_replay.get("error") or "")[:500],
         },
-        "exact_cost_blockers": [],
+        "exact_cost_blockers": readiness_blockers,
         "exact_cost_warnings": [],
+        "payment_readiness": dict(canonical.get("payment_readiness") or {}),
+        "financial_readiness": financial_readiness,
     }
 
 
