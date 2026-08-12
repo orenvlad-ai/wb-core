@@ -112,6 +112,7 @@ is part of Stage 3.
 ## Explicit later scope
 
 Migration 136 adds the separate default-off FBW/WB-supply origin-assignment
-evidence without movement or activation. The official read-only FBS collector,
+evidence, and Migration 137 adds the default-off official GET-only FBS order
+observation cache. Collector activation/backfill, FBS order-origin assignment,
 shadow writers/readers, facility seeds, historical opening/cutover and live
 activation remain later stages with their own worktrees, PRs and release gates.

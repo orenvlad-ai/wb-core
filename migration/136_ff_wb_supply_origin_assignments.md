@@ -81,6 +81,7 @@ part of acceptance.
 
 ## Explicit later scope
 
-The official read-only FBS collector, FBS order-origin assignment, shadow
+Migration 137 adds the separate default-off official GET-only FBS observation
+collector. Its activation/backfill, FBS order-origin assignment, shadow
 movement writers/readers, facility seeds, historical opening/backfill/cutover
 and live activation remain separate later stages and gates.

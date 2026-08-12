@@ -667,6 +667,9 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_STATISTICS_API_BASE_URL`
 - `WB_FEEDBACKS_API_BASE_URL`
 - `WB_SUPPLIES_API_BASE_URL`
+- `WB_FBS_API_BASE_URL`
+- `WB_FBS_COLLECTOR_ENABLED` (optional explicit Stage 5 activation; absent/false
+  is the deploy default and performs no FBS upstream request or cache write)
 - `WB_PRICES_API_BASE_URL`
 - `OPENAI_MODEL`
 - `OPENAI_API_BASE_URL`

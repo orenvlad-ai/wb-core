@@ -17,6 +17,7 @@ related_modules:
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
+  - "packages/application/wb_fbs_orders.py"
   - "packages/contracts/ff_pool_documents.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
@@ -58,6 +59,8 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_document_expense_lines"
   - "sheet_vitrina_v1_ff_pool_document_relations"
   - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
+  - "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+  - "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -75,6 +78,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
   - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins[/{supply_ref}]"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders[/{order_id}]"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
@@ -96,8 +100,10 @@ related_runners:
   - "apps/ff_wb_supply_origins_smoke.py"
   - "apps/ff_wb_supply_origins_http_smoke.py"
   - "apps/ff_wb_supply_origins_browser_smoke.py"
+  - "apps/wb_fbs_orders_collector_smoke.py"
+  - "apps/wb_fbs_orders_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents, protected Stage 3 explanatory surface and append-only Stage 4 FBW origin evidence now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents, protected Stage 3 explanatory surface, append-only Stage 4 FBW origin evidence and default-off Stage 5 official GET-only FBS observations now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. Stage 5 does not assign an FBS origin or create a reservation/movement. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
