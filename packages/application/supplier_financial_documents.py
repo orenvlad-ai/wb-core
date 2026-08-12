@@ -178,6 +178,196 @@ COST_AFFECTING_DOCUMENT_TYPES = {
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
     FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
 }
+FINANCIAL_READINESS_REQUIRED_DOCUMENT_TYPES = {
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
+}
+_CNY_INVOICE_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
+
+
+def build_supplier_payment_readiness(
+    shipment: Mapping[str, Any],
+    cny_documents: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Project one fail-closed supplier-payment contract for every UI surface."""
+
+    invoice_total = _parse_decimal(
+        shipment.get("invoice_amount_total")
+        if shipment.get("invoice_amount_total") is not None
+        else shipment.get("declared_invoice_total")
+    )
+    invoice_currency = str(shipment.get("currency") or "").strip().upper()
+    posted_documents: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    derived_paid = Decimal("0")
+    for raw in cny_documents:
+        document = dict(raw)
+        if str(document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
+            continue
+        if str(document.get("status") or document.get("parse_status") or "") not in {
+            "posted",
+            FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+            FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+        }:
+            continue
+        identity = str(document.get("document_id") or "").strip() or "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "sha": str(document.get("file_sha256") or ""),
+                    "date": str(document.get("operation_date") or document.get("document_date") or ""),
+                    "amount": str(document.get("cny_amount") or document.get("amount") or ""),
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        posted_documents.append(document)
+        derived_paid += abs(
+            _parse_decimal(document.get("cny_amount") or document.get("amount"))
+            or Decimal("0")
+        )
+
+    header_paid = _parse_decimal(shipment.get("cny_paid_amount"))
+    confirmed_paid = max(Decimal("0"), header_paid or Decimal("0"), derived_paid)
+    blockers: list[dict[str, str]] = []
+    if invoice_total is None or invoice_total <= Decimal("0"):
+        blockers.append(
+            {"code": "invoice_total_missing", "reason_ru": "Не подтверждена сумма invoice."}
+        )
+    if invoice_currency not in _CNY_INVOICE_CURRENCIES:
+        blockers.append(
+            {
+                "code": "invoice_currency_not_cny",
+                "reason_ru": "Валюта invoice не подтверждена как CNY.",
+            }
+        )
+    remaining = max((invoice_total or Decimal("0")) - confirmed_paid, Decimal("0"))
+    overpaid = bool(invoice_total is not None and confirmed_paid > invoice_total)
+    if overpaid:
+        blockers.append(
+            {
+                "code": "supplier_payment_exceeds_invoice",
+                "reason_ru": "Подтверждённая оплата превышает сумму invoice; требуется проверка.",
+            }
+        )
+    complete = bool(not blockers and invoice_total is not None and confirmed_paid == invoice_total)
+    status = (
+        "full"
+        if complete
+        else "needs_review"
+        if blockers
+        else "partial"
+        if confirmed_paid > Decimal("0")
+        else "missing"
+    )
+    ratio = (
+        min(Decimal("1"), confirmed_paid / invoice_total)
+        if invoice_total is not None and invoice_total > Decimal("0")
+        else Decimal("0")
+    )
+    return {
+        "status": status,
+        "status_label_ru": {
+            "full": "Оплачено полностью",
+            "partial": "Оплачено частично",
+            "missing": "Оплата не подтверждена",
+            "needs_review": "Проверить оплату",
+        }[status],
+        "complete": complete,
+        "invoice_total": _decimal_to_float(invoice_total),
+        "confirmed_paid": _decimal_to_float(confirmed_paid),
+        "remaining": _decimal_to_float(remaining),
+        "currency": "CNY" if invoice_currency in _CNY_INVOICE_CURRENCIES else invoice_currency,
+        "ratio": float(ratio),
+        "confirmed_document_count": len(posted_documents),
+        "confirmed_document_ids": [str(item.get("document_id") or "") for item in posted_documents],
+        "blockers": blockers,
+    }
+
+
+def build_supplier_financial_readiness(
+    *,
+    payment_readiness: Mapping[str, Any],
+    financial_documents: Iterable[Mapping[str, Any]],
+    document_controls: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Combine payment and only money-affecting evidence into exact-cost readiness."""
+
+    active_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw in financial_documents:
+        document = dict(raw)
+        if str(document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
+            continue
+        active_by_type[str(document.get("document_type") or "")].append(document)
+    blockers = [dict(item) for item in payment_readiness.get("blockers") or []]
+    if not bool(payment_readiness.get("complete")) and not blockers:
+        blockers.append(
+            {"code": "supplier_payment_incomplete", "reason_ru": "Поставщик оплачен не полностью."}
+        )
+    for document_type in sorted(FINANCIAL_READINESS_REQUIRED_DOCUMENT_TYPES):
+        documents = active_by_type.get(document_type) or []
+        if not documents:
+            blockers.append(
+                {
+                    "code": f"financial_document_missing:{document_type}",
+                    "reason_ru": "Не загружен финансово влияющий документ.",
+                }
+            )
+            continue
+        if not any(
+            str(item.get("parse_status") or "")
+            in {FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+            for item in documents
+        ):
+            blockers.append(
+                {
+                    "code": f"financial_document_unconfirmed:{document_type}",
+                    "reason_ru": "Финансово влияющий документ требует проверки.",
+                }
+            )
+    for control in document_controls:
+        if bool(control.get("cost_affecting")) and not bool(control.get("conserved")):
+            blockers.append(
+                {
+                    "code": "financial_component_incomplete",
+                    "reason_ru": "Не все финансовые компоненты подтверждены и распределены.",
+                }
+            )
+            break
+    blockers = _dedupe_supplier_readiness_reasons(blockers)
+    return {
+        "status": "ready" if not blockers else "pending",
+        "ready": not blockers,
+        "status_label_ru": "Финансовая готовность подтверждена" if not blockers else "Не все финансовые данные подтверждены",
+        "payment": dict(payment_readiness),
+        "blockers": blockers,
+        "excluded_informational_types": [
+            FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
+            FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+        ],
+    }
+
+
+def _dedupe_supplier_readiness_reasons(
+    values: Iterable[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        code = str(value.get("code") or "financial_readiness_pending")
+        if code in seen:
+            continue
+        seen.add(code)
+        result.append(
+            {
+                "code": code,
+                "reason_ru": str(value.get("reason_ru") or "Финансовые данные требуют проверки."),
+            }
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -621,6 +811,9 @@ class SupplierFinancialDocumentsBlock:
             "normalized_parse": normalized,
             "warnings": warnings,
             "errors": errors,
+            "preview_results": _financial_document_preview_results(
+                {**dict(parsed), "normalized_parse": normalized}
+            ),
             "active_exact_document_id": str(
                 (active_exact or {}).get("document_id") or ""
             ),
@@ -700,6 +893,9 @@ class SupplierFinancialDocumentsBlock:
                 filename=filename,
                 file_sha256=file_sha256,
             ),
+            "detected_results": _financial_document_preview_results(
+                {**dict(parsed), "normalized_parse": normalized}
+            ),
             "warnings": _dedupe_strings([*warnings, *duplicate_warnings]),
             "errors": errors,
             "duplicate_action": duplicate_action,
@@ -716,6 +912,7 @@ class SupplierFinancialDocumentsBlock:
         confirmation_token: str,
         allow_semantic_duplicate: bool = False,
         duplicate_reason: str = "",
+        selected_result_ids: Iterable[str] | None = None,
         skip_target_revision_check: bool = False,
     ) -> dict[str, Any]:
         preview = self._validated_confirmation(
@@ -726,6 +923,34 @@ class SupplierFinancialDocumentsBlock:
         if preview.get("consumed_at"):
             return {**dict(preview.get("result") or {}), "idempotent": True}
         data = dict(preview.get("payload") or {})
+        preview_results = [dict(item) for item in data.get("preview_results") or []]
+        known_result_ids = {
+            str(item.get("result_id") or "") for item in preview_results
+        } - {""}
+        selected_ids = (
+            {
+                str(item or "").strip()
+                for item in selected_result_ids
+                if str(item or "").strip()
+            }
+            if selected_result_ids is not None
+            else {
+                str(item.get("result_id") or "")
+                for item in preview_results
+                if bool(item.get("default_selected"))
+            }
+        )
+        if selected_ids - known_result_ids:
+            raise ValueError("selected preview result does not belong to this confirmation token")
+        if (
+            preview_results
+            and not selected_ids
+            and not str(data.get("active_exact_document_id") or "")
+            and not str(data.get("excluded_exact_document_id") or "")
+            and str(dict(data.get("normalized_parse") or {}).get("document_type") or "")
+            != FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+        ):
+            raise ValueError("select at least one detected result before confirmation")
         if (
             not skip_target_revision_check
             and preview.get("target_revision")
@@ -897,6 +1122,8 @@ class SupplierFinancialDocumentsBlock:
                     uploaded_content_type=str(data.get("content_type") or ""),
                     manual_payment_date=str(data.get("manual_payment_date") or "") or None,
                     manual_payment_date_actor=str(data.get("actor") or ""),
+                    selected_result_ids=selected_ids,
+                    expected_result_ids=known_result_ids,
                 )
             result["duplicate_action"] = (
                 "parser_reclassification"
@@ -1712,6 +1939,8 @@ class SupplierFinancialDocumentsBlock:
         uploaded_content_type: str | None = None,
         manual_payment_date: str | None = None,
         manual_payment_date_actor: str | None = None,
+        selected_result_ids: Iterable[str] | None = None,
+        expected_result_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         if not file_bytes:
@@ -1733,6 +1962,38 @@ class SupplierFinancialDocumentsBlock:
         warnings = _string_list(parsed.get("warnings"))
         errors = _string_list(parsed.get("errors"))
         expense_lines = [dict(item) for item in parsed.get("expense_lines") or []]
+        preview_results = _financial_document_preview_results(parsed)
+        current_result_ids = {
+            str(item.get("result_id") or "") for item in preview_results
+        } - {""}
+        if expected_result_ids is not None and current_result_ids != {
+            str(item or "").strip() for item in expected_result_ids if str(item or "").strip()
+        }:
+            raise ValueError("parser preview results changed before confirmation; request a new preview")
+        selected_ids = (
+            current_result_ids
+            if selected_result_ids is None
+            else {str(item or "").strip() for item in selected_result_ids if str(item or "").strip()}
+        )
+        if selected_ids - current_result_ids:
+            raise ValueError("selected preview result is not present in the parsed document")
+        expense_result_ids = {
+            int(item.get("expense_line_index") or 0): str(item.get("result_id") or "")
+            for item in preview_results
+            if int(item.get("expense_line_index") or 0) > 0
+        }
+        if expense_result_ids:
+            expense_lines = [
+                line
+                for index, line in enumerate(expense_lines, start=1)
+                if expense_result_ids.get(index) in selected_ids
+            ]
+        normalized["preview_selection"] = {
+            "selected_result_ids": sorted(selected_ids),
+            "unselected_result_ids": sorted(current_result_ids - selected_ids),
+            "result_count": len(current_result_ids),
+        }
+        raw_parse["preview_results"] = preview_results
         if str(normalized.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
             missing_non_date = [
                 field
@@ -9618,6 +9879,113 @@ def _financial_document_preview_projection(
         "filename": filename,
         "file_sha256": file_sha256,
     }
+
+
+def _financial_document_preview_results(
+    parsed: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return stable selectable findings from the existing canonical parser."""
+
+    normalized = dict(parsed.get("normalized_parse") or {})
+    warnings = _string_list(parsed.get("warnings"))
+    errors = _string_list(parsed.get("errors"))
+    classification = dict(parsed.get("classification") or {})
+    classification_reasons = _string_list(classification.get("reasons"))
+    classification_warnings = _string_list(classification.get("warnings"))
+    expense_lines = [
+        dict(item) for item in parsed.get("expense_lines") or [] if isinstance(item, Mapping)
+    ]
+    source_rows = expense_lines or [
+        {
+            "category": str(normalized.get("document_type") or "document"),
+            "description": str(
+                normalized.get("document_title")
+                or normalized.get("document_number")
+                or "Документ"
+            ),
+            "amount": (
+                normalized.get("total_amount_rub")
+                if normalized.get("total_amount_rub") is not None
+                else normalized.get("total_amount")
+            ),
+            "currency": str(normalized.get("currency") or ""),
+            "status": (
+                FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR
+                if errors
+                else FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+                if warnings
+                else FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED
+            ),
+        }
+    ]
+    results: list[dict[str, Any]] = []
+    for index, row in enumerate(source_rows, start=1):
+        status = str(row.get("status") or "").strip().lower()
+        raw_confidence = row.get("confidence")
+        confidence = str(raw_confidence or "").strip().lower()
+        if isinstance(raw_confidence, (int, float, Decimal)):
+            numeric_confidence = Decimal(str(raw_confidence))
+            confidence = (
+                "strong"
+                if numeric_confidence >= Decimal("0.8")
+                else "probable"
+                if numeric_confidence >= Decimal("0.6")
+                else "weak"
+            )
+        if not confidence:
+            confidence = (
+                "weak"
+                if status
+                in {
+                    EXPENSE_LINE_STATUS_NEEDS_REVIEW,
+                    EXPENSE_LINE_STATUS_POSSIBLE_NOT_INCLUDED,
+                    FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW,
+                    FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR,
+                }
+                else "strong"
+            )
+        result_warnings = _dedupe_strings(
+            [
+                *warnings,
+                *classification_warnings,
+                *_string_list(row.get("warnings")),
+                *_string_list(row.get("reasons")),
+            ]
+        )
+        material = {
+            "index": index,
+            "document_type": str(normalized.get("document_type") or ""),
+            "category": str(row.get("category") or ""),
+            "description": str(row.get("description") or row.get("label") or ""),
+            "amount": str(row.get("amount") or ""),
+            "amount_rub": str(row.get("amount_rub") or ""),
+            "currency": str(row.get("currency") or ""),
+            "status": status,
+        }
+        result_id = "result_" + hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()[:24]
+        import_allowed = status != FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR
+        results.append(
+            {
+                "result_id": result_id,
+                "expense_line_index": index if expense_lines else None,
+                "document_type": str(normalized.get("document_type") or ""),
+                "category": str(row.get("category") or ""),
+                "description": str(row.get("description") or row.get("label") or ""),
+                "amount": row.get("amount_rub") if row.get("amount_rub") is not None else row.get("amount"),
+                "currency": "RUB" if row.get("amount_rub") is not None else str(row.get("currency") or ""),
+                "status": status or FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+                "confidence": confidence,
+                "reasons": _dedupe_strings(
+                    [*classification_reasons, *_string_list(row.get("reasons"))]
+                ),
+                "warnings": result_warnings,
+                "import_allowed": import_allowed,
+                "default_selected": bool(import_allowed),
+            }
+        )
+    return results
 
 
 def _financial_document_duplicate_projection(

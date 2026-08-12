@@ -215,8 +215,10 @@ from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaWriteTarget
 from packages.contracts.supplier_financial_documents import (
+    FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW,
+    FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR,
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
     FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
@@ -359,7 +361,7 @@ SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES = (
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
-    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
     FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
     FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
 )
@@ -380,11 +382,11 @@ SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE: "Счёт логистов",
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: "ДТ",
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
-    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Заявление на перевод ВТБ / платёжка",
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Оплата поставщику",
     FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT: "Комиссии банка",
     FINANCIAL_DOCUMENT_TYPE_PACKING_LIST: "Packing list / Упаковочный лист",
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: "Документ конвертации RUB -> CNY",
-    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику CNY",
+    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику",
     CNY_DOCUMENT_TYPE_BANK_FEE: "Комиссия банка CNY",
 }
 SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
@@ -3873,6 +3875,12 @@ class RegistryUploadHttpEntrypoint:
         ]
         financial_document_ids = {str(item.get("document_id") or "") for item in financial_documents if str(item.get("document_id") or "")}
         cny_status = self.cny_ledger_block.get_status()
+        shipment_cny_documents = [
+            item
+            for item in cny_status.get("documents") or []
+            if str(item.get("source_order_id") or "") == str(shipment_id or "")
+            and str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
+        ]
         cny_documents = [
             {
                 **self._supplier_order_cny_document_row(item),
@@ -3890,45 +3898,79 @@ class RegistryUploadHttpEntrypoint:
                     ),
                 },
             }
-            for item in cny_status.get("documents") or []
-            if str(item.get("source_order_id") or "") == str(shipment_id or "")
-            and str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
-            and str(item.get("linked_financial_document_id") or "").strip() not in financial_document_ids
+            for item in shipment_cny_documents
+            if str(item.get("linked_financial_document_id") or "").strip() not in financial_document_ids
+        ]
+        from packages.application.supplier_financial_documents import (
+            build_supplier_payment_readiness,
+        )
+
+        payment_readiness = dict(shipment.get("payment_readiness") or {}) or build_supplier_payment_readiness(
+            shipment,
+            shipment_cny_documents,
+        )
+        payment_documents = [
+            self._supplier_order_cny_document_row(item)
+            for item in shipment_cny_documents
+            if str(item.get("document_type") or "") == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
         ]
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
             financial_documents=financial_documents,
         )
+        checklist.extend(
+            _build_supplier_payment_checklist(
+                payment_readiness=payment_readiness,
+                payment_documents=payment_documents,
+            )
+        )
+        operator_document_ids = {
+            *financial_document_ids,
+            *{
+                str(item.get("document_id") or "")
+                for item in shipment_cny_documents
+                if str(item.get("document_id") or "")
+            },
+        }
+        actionable_document_ids = {
+            *financial_document_ids,
+            *{
+                str(item.get("document_id") or "")
+                for item in shipment_cny_documents
+                if str(item.get("document_id") or "")
+                and not str(item.get("linked_financial_document_id") or "").strip()
+            },
+        }
         checklist = [
             {
                 **item,
                 "document_origin": (
                     "operator"
                     if str(item.get("document_id") or "")
-                    in financial_document_ids
+                    in operator_document_ids
                     else "system"
                 ),
                 "document_action": {
                     "enabled": (
                         str(item.get("document_id") or "")
-                        in financial_document_ids
+                        in actionable_document_ids
                     ),
                     "kind": (
                         "audited_exclusion"
                         if str(item.get("document_id") or "")
-                        in financial_document_ids
+                        in actionable_document_ids
                         else "none"
                     ),
                     "label": (
                         "Исключить документ"
                         if str(item.get("document_id") or "")
-                        in financial_document_ids
+                        in actionable_document_ids
                         else "Системный документ"
                     ),
                     "reason": (
                         ""
                         if str(item.get("document_id") or "")
-                        in financial_document_ids
+                        in actionable_document_ids
                         else (
                             "Системный документ управляется из карточки поставки."
                             if item.get("is_uploaded")
@@ -3952,8 +3994,18 @@ class RegistryUploadHttpEntrypoint:
             "supplier_order_id": shipment_id,
             "shipment": shipment,
             "expense_allocation": project_supplier_order_expense_allocation(canonical_breakdown),
+            "payment_readiness": payment_readiness,
+            "financial_readiness": dict(shipment.get("financial_readiness") or {}),
             "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
-            "required_documents": [*checklist, *cny_documents],
+            "required_documents": [
+                *checklist,
+                *[
+                    item
+                    for item in cny_documents
+                    if str(item.get("document_type") or "")
+                    != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                ],
+            ],
             "documents": [*financial_documents, *cny_documents],
             "archived_documents": [
                 *list(financial_payload.get("archived_documents") or []),
@@ -4213,6 +4265,14 @@ class RegistryUploadHttpEntrypoint:
                 payload.get("allow_semantic_duplicate")
             ),
             duplicate_reason=str(payload.get("duplicate_reason") or ""),
+            selected_result_ids=(
+                dict(payload.get("selected_result_ids_by_token") or {}).get(
+                    confirmation_token
+                )
+                if confirmation_token
+                in dict(payload.get("selected_result_ids_by_token") or {})
+                else payload.get("selected_result_ids")
+            ),
             skip_target_revision_check=skip_target_revision_check,
         )
 
@@ -4383,6 +4443,28 @@ class RegistryUploadHttpEntrypoint:
             "restore_relink": "Тот же файл находится в архиве другой поставки; требуется явное восстановление с переносом.",
             "semantic_warning": "Реквизиты совпадают с другим документом при отличающемся SHA; вероятный дубликат.",
         }
+        preview_warnings = list(preview.get("warnings") or [])
+        preview_errors = list(preview.get("errors") or [])
+        detected_result = {
+            "result_id": "result_" + hashlib.sha256(
+                json.dumps(semantic_key, ensure_ascii=False).encode()
+            ).hexdigest()[:24],
+            "document_type": str(normalized.get("document_type") or ""),
+            "category": str(normalized.get("document_type") or ""),
+            "description": SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(
+                str(normalized.get("document_type") or ""), "Финансовая операция"
+            ),
+            "amount": normalized.get("cny_amount")
+            or normalized.get("transfer_amount")
+            or normalized.get("rub_amount"),
+            "currency": str(normalized.get("currency") or ""),
+            "status": "parse_error" if preview_errors else "parsed",
+            "confidence": "weak" if preview_errors else "probable" if preview_warnings else "strong",
+            "reasons": list(dict(preview.get("classification") or {}).get("reasons") or []),
+            "warnings": preview_warnings,
+            "import_allowed": not preview_errors,
+            "default_selected": not preview_errors,
+        }
         return {
             "contract_name": "sheet_vitrina_v1_supplier_financial_document_preview",
             "status": "preview",
@@ -4416,6 +4498,7 @@ class RegistryUploadHttpEntrypoint:
                 "filename": filename,
                 "file_sha256": source_sha256,
             },
+            "detected_results": [detected_result],
             "warnings": [
                 *list(preview.get("warnings") or []),
                 *(
@@ -4871,6 +4954,7 @@ class RegistryUploadHttpEntrypoint:
             ),
             "file_sha256": str(document.get("file_sha256") or ""),
             "parse_status": str(document.get("parse_status") or document.get("status") or ""),
+            "linked_financial_document_id": str(document.get("linked_financial_document_id") or ""),
             "warnings": list(document.get("warnings") or []),
             "errors": list(document.get("errors") or []),
             "normalized_parse": parsed,
@@ -9390,18 +9474,104 @@ def _build_supplier_order_documents_checklist(
         if document_type:
             financial_by_type.setdefault(document_type, []).append(document)
     for document_type in SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES:
-        if document_type in {TRADE_DOCUMENT_TYPE_INVOICE, TRADE_DOCUMENT_TYPE_CONTRACT}:
+        if document_type in {
+            TRADE_DOCUMENT_TYPE_INVOICE,
+            TRADE_DOCUMENT_TYPE_CONTRACT,
+            CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+        }:
             continue
         documents = financial_by_type.get(document_type) or []
         if documents:
             rows.extend(_supplier_order_financial_document_row(item) for item in documents)
         else:
             rows.append(_supplier_order_missing_document_row(document_type))
-    known_types = set(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES)
+    known_types = {
+        *SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES,
+        FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    }
     for document in financial_documents:
         document_type = str(document.get("document_type") or "").strip()
         if document_type and document_type not in known_types:
             rows.append(_supplier_order_financial_document_row(document, required=False))
+    return rows
+
+
+def _build_supplier_payment_checklist(
+    *,
+    payment_readiness: Mapping[str, Any],
+    payment_documents: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Render canonical posted payments plus at most one derived missing row."""
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in payment_documents:
+        row = dict(raw)
+        source_status = str(row.get("parse_status") or row.get("status") or "")
+        confirmed = source_status in {
+            CNY_DOCUMENT_STATUS_POSTED,
+            FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+            FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+        }
+        document_id = str(row.get("document_id") or "")
+        identity = document_id or str(row.get("file_sha256") or "")
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        row.update(
+            {
+                "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+                "document_name": "Оплата поставщику",
+                "required": True,
+                "is_uploaded": True,
+                "status": "uploaded" if confirmed else "needs_review",
+                "status_label": "Подтверждено" if confirmed else "Требует проверки",
+            }
+        )
+        rows.append(row)
+    if bool(payment_readiness.get("complete")):
+        if not rows:
+            aggregate = _supplier_order_base_document_row(
+                CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+                required=True,
+                is_uploaded=True,
+            )
+            aggregate.update(
+                {
+                    "source": "canonical_payment_aggregate",
+                    "amount": payment_readiness.get("confirmed_paid"),
+                    "currency": str(payment_readiness.get("currency") or "CNY"),
+                    "status_label": "Оплачено полностью",
+                }
+            )
+            rows.append(aggregate)
+        return rows
+    remaining = payment_readiness.get("remaining")
+    missing = _supplier_order_missing_document_row(CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT)
+    missing.update(
+        {
+            "source": "canonical_payment_readiness",
+            "amount": remaining,
+            "currency": str(payment_readiness.get("currency") or "CNY"),
+            "status": (
+                "missing"
+                if remaining not in (None, 0, 0.0, "0", "0.0")
+                else "needs_review"
+            ),
+            "status_label": (
+                "Не оплачено полностью"
+                if remaining not in (None, 0, 0.0, "0", "0.0")
+                else "Проверить оплату"
+            ),
+            "warnings": [
+                str(item.get("reason_ru") or "")
+                for item in payment_readiness.get("blockers") or []
+                if str(item.get("reason_ru") or "")
+            ],
+        }
+    )
+    rows.append(missing)
     return rows
 
 
@@ -9668,17 +9838,47 @@ def _build_supplier_order_documents_archive(
         "logistics": SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES,
         "accounting": SUPPLIER_ORDER_ACCOUNTING_PACKAGE_DOCUMENT_TYPES,
     }.get(package_type, SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES)
-    rows = [
-        dict(item)
-        for item in payload.get("required_documents") or []
-        if isinstance(item, Mapping)
-        and str(item.get("document_type") or "") in required_types
-        and not (
+    candidates = [
+        *list(payload.get("required_documents") or []),
+        *list(payload.get("documents") or []),
+    ]
+    rows: list[dict[str, Any]] = []
+    seen_rows: set[tuple[str, str]] = set()
+    seen_all_file_hashes: set[str] = set()
+    for raw in candidates:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        document_type = str(item.get("document_type") or "")
+        if "is_uploaded" not in item and str(item.get("document_id") or ""):
+            item["is_uploaded"] = (
+                str(item.get("parse_status") or item.get("status") or "")
+                != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+            )
+        item.setdefault(
+            "document_name",
+            SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(document_type, document_type),
+        )
+        if package_type in {"logistics", "accounting"} and document_type not in required_types:
+            continue
+        if package_type not in {"logistics", "accounting"} and not bool(item.get("required")) and not bool(item.get("is_uploaded")):
+            continue
+        if (
             package_type == "accounting"
             and str(item.get("parse_status") or "").strip().lower()
             == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
-        )
-    ]
+        ):
+            continue
+        identity = (document_type, str(item.get("document_id") or "missing"))
+        if identity in seen_rows:
+            continue
+        file_hash = str(item.get("file_sha256") or "").strip().lower()
+        if package_type not in {"logistics", "accounting"} and file_hash and file_hash in seen_all_file_hashes:
+            continue
+        seen_rows.add(identity)
+        if file_hash:
+            seen_all_file_hashes.add(file_hash)
+        rows.append(item)
     type_order = {document_type: index for index, document_type in enumerate(required_types)}
     rows.sort(
         key=lambda item: (
@@ -9715,6 +9915,9 @@ def _build_supplier_order_documents_archive(
             }
             expected.append(item)
             missing.append(item)
+    for row in uploaded_rows:
+        if str(row.get("document_type") or "") not in required_types:
+            expected.append(_package_expected_item(row, index=1, kind="document"))
     included: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     generated_files: list[dict[str, Any]] = []

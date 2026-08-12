@@ -344,6 +344,74 @@ def _assert_financial_contract(runtime: RegistryUploadDbBackedRuntime) -> None:
         and len(runtime.list_supplier_financial_documents(SHIPMENT_ID)) == 2,
         "semantic duplicate requires and records a reason",
     )
+    multi_parse = {
+        "normalized_parse": {
+            "document_type": "logistics_invoice",
+            "document_number": "MULTI-1",
+            "document_date": "2026-07-24",
+            "currency": "RUB",
+            "total_amount": 300,
+        },
+        "raw_parse": {"fixture": "multi-result"},
+        "expense_lines": [
+            {
+                "category": "delivery_cost",
+                "description": "Доставка",
+                "amount": 100,
+                "amount_rub": 100,
+                "currency": "RUB",
+                "status": "parsed",
+            },
+            {
+                "category": "other_bank_fee",
+                "description": "Дополнительная комиссия",
+                "amount": 200,
+                "amount_rub": 200,
+                "currency": "RUB",
+                "status": "parsed",
+            },
+        ],
+        "warnings": [],
+        "errors": [],
+        "parser_version": "multi-result-smoke-v1",
+    }
+    with patch(
+        "packages.application.supplier_financial_documents.parse_financial_document_upload",
+        return_value=multi_parse,
+    ):
+        multi_preview = block.preview_document_upload(
+            SHIPMENT_ID,
+            file_bytes=b"%PDF-1.4 multi-result",
+            uploaded_filename="multi-result.pdf",
+        )
+        results = multi_preview.get("detected_results") or []
+        _assert(
+            len(results) == 2 and all(item.get("default_selected") for item in results),
+            "multi-result preview exposes every detected line selected by default",
+        )
+        selected_id = str(results[1]["result_id"])
+        selected = block.confirm_document_upload(
+            SHIPMENT_ID,
+            confirmation_token=multi_preview["confirmation_token"],
+            selected_result_ids=[selected_id],
+        )
+        stored = block.get_document(SHIPMENT_ID, str(selected["document_id"]))
+        _assert(
+            len(stored.get("expense_lines") or []) == 1
+            and stored["expense_lines"][0]["category"] == "other_bank_fee"
+            and (stored.get("normalized_parse") or {}).get("preview_selection", {}).get("selected_result_ids") == [selected_id],
+            "confirmation imports only selected result and retains selection evidence on one parent document",
+        )
+        repeated_selected = block.confirm_document_upload(
+            SHIPMENT_ID,
+            confirmation_token=multi_preview["confirmation_token"],
+            selected_result_ids=[selected_id],
+        )
+        _assert(
+            repeated_selected.get("idempotent")
+            and len(block.get_document(SHIPMENT_ID, str(selected["document_id"])).get("expense_lines") or []) == 1,
+            "selected-result confirmation is idempotent",
+        )
 
 
 def _assert_batch_financial_contract(
