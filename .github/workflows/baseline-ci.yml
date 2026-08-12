@@ -71,6 +71,8 @@ jobs:
           python3 apps/cny_ledger_smoke.py
           python3 apps/ff_pool_foundation_smoke.py
           python3 apps/ff_pool_documents_smoke.py
+          python3 apps/ff_pool_surfaces_smoke.py
+          python3 apps/ff_pool_surfaces_http_smoke.py
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
           python3 apps/warehouse_functional_smoke.py
@@ -85,6 +87,7 @@ jobs:
 
       - name: Validate paired buyout metric presentation
         run: |
+          python3 apps/ff_pool_surfaces_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py
 

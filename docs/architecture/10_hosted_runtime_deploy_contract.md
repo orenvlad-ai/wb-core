@@ -59,6 +59,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/warehouses`
 - `GET /v1/sheet-vitrina-v1/warehouses/recovery`
 - `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`
+- `GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/*`
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
@@ -952,7 +953,7 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 - verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
-The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, authorized `GET /sheet-vitrina-v1/instructions`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`, `GET /v1/sheet-vitrina-v1/warehouses`, and one `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
+The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, authorized `GET /sheet-vitrina-v1/instructions`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`, `GET /v1/sheet-vitrina-v1/warehouses`, one `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`, and—when the facility/pool surface is in scope—protected `GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/capabilities`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
 
 Live/public verify that creates temporary runtime users must prefer temp/local runtime state. If a hosted verify must create a live runtime user, it must use an unmistakable service/test prefix or marker, run cleanup in a finally-style path, and verify that the default admin users list does not expose those rows. Archived/inactive service rows such as `codex_live_*`, `codex_debug_*`, `smoke_*` or `test_*` are not user-facing users and must be hidden by the default users API/UI even when cleanup cannot hard-delete an historical row; any bounded live cleanup for those prefixes must not touch env principals or real manual users.
 

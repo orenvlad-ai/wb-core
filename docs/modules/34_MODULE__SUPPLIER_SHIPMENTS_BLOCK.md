@@ -23,6 +23,7 @@ related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_documents_xlsx.py"
+  - "packages/application/ff_pool_surfaces.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -189,6 +190,12 @@ barcode_identity_update_note: "Supplier invoice parser v2 detects a confirmed ba
   full accepted composition rather than entered independently per pool. It has
   no public route and does not switch the `actual_ff_acceptance_date` trigger,
   create a second live receipt, seed facilities or mutate supplier evidence.
+- Migration 135 adds the protected China template/preview operator route, but
+  it still reads only one exact persisted shipment revision and server-owned
+  matched nmId/barcode/capital evidence. The multipart boundary rejects size
+  before buffering and then reuses the Stage 2 XLSX guards. Posting remains
+  disabled without a separate facility/pool writer epoch and cannot change the
+  current factual-acceptance trigger, shipment status or supplier rows.
 
 ## Unified cost/physical boundary (2026-07-01)
 

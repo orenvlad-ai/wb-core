@@ -75,6 +75,15 @@ from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
 from packages.application.warehouse_functional import WarehouseFunctionalError
 from packages.application.ff_inventory_reconciliation import FfInventoryReconciliationError
 from packages.application.ff_overhead_allocation import FfOverheadAllocationError
+from packages.application.ff_pool_surfaces import (
+    MAX_JSON_REQUEST_BYTES as FF_POOL_MAX_JSON_REQUEST_BYTES,
+    FfPoolSurfaceError,
+)
+from packages.application.ff_pool_documents_xlsx import (
+    DEFAULT_LIMITS as FF_POOL_XLSX_LIMITS,
+    FfPoolXlsxError,
+    validate_xlsx_request_seam,
+)
 from packages.application.ff_warehouse_documents import FfWarehouseDocumentsError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
@@ -371,6 +380,11 @@ DEFAULT_FF_OVERHEAD_STATUS_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/status
 DEFAULT_FF_OVERHEAD_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/confirm"
 DEFAULT_FF_OVERHEAD_REVERSAL_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/preview"
 DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overhead/reversal/confirm"
+DEFAULT_FF_POOL_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/facility-pools"
+DEFAULT_FF_POOL_PREFIX = f"{DEFAULT_FF_POOL_PATH}/"
+DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
+DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
+DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -587,6 +601,39 @@ def _build_handler(
             if not _ensure_business_data_write_allowed(self, parsed.path):
                 return
             if parsed.path in AUTOANSWERS_MUTATION_PATHS and not _ensure_autoanswers_csrf(self, parsed.path):
+                return
+            if _is_ff_pool_mutation_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                if not _ensure_ff_pool_csrf(self, parsed.path):
+                    return
+                try:
+                    payload = _handle_ff_pool_post(
+                        self,
+                        entrypoint=entrypoint,
+                        path=parsed.path,
+                        actor=_current_web_user_actor(self),
+                    )
+                except (FfPoolSurfaceError, FfPoolXlsxError) as exc:
+                    status = int(getattr(exc, "http_status", HTTPStatus.UNPROCESSABLE_ENTITY))
+                    _write_json_response(
+                        self,
+                        HTTPStatus(status),
+                        {
+                            "error": str(exc),
+                            "code": getattr(exc, "code", "ff_pool_request_invalid"),
+                            "details": getattr(exc, "details", None),
+                        },
+                    )
+                    return
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc), "code": "ff_pool_request_invalid"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
             if parsed.path in {
                 DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
@@ -4175,6 +4222,43 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_FF_POOL_PATH or parsed.path.startswith(DEFAULT_FF_POOL_PREFIX):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    result = _handle_ff_pool_get(
+                        entrypoint=entrypoint,
+                        path=parsed.path,
+                        query=parsed.query,
+                    )
+                except FfPoolSurfaceError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "code": exc.code, "details": exc.details},
+                    )
+                    return
+                except (TypeError, ValueError) as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc), "code": "ff_pool_request_invalid"},
+                    )
+                    return
+                if isinstance(result, tuple):
+                    data, filename, content_type = result
+                    _write_binary_response(
+                        self,
+                        HTTPStatus.OK,
+                        data,
+                        content_type=content_type,
+                        filename=filename,
+                        as_attachment=True,
+                    )
+                    return
+                _write_etag_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path == DEFAULT_WAREHOUSES_PATH or parsed.path.startswith(DEFAULT_WAREHOUSES_PREFIX):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -5556,7 +5640,11 @@ class RegistryUploadHttpServer(HTTPServer):
         self.server_port = port
 
 
-def _load_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[str, Any]:
+def _load_request_payload(
+    handler: BaseHTTPRequestHandler,
+    *,
+    max_request_bytes: int | None = None,
+) -> Mapping[str, Any]:
     raw_length = handler.headers.get("Content-Length", "").strip()
     if not raw_length:
         raise ValueError("request body is required")
@@ -5567,6 +5655,13 @@ def _load_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[str, Any]:
         raise ValueError(f"Content-Length must be integer, got {raw_length!r}") from exc
     if content_length <= 0:
         raise ValueError("request body must not be empty")
+    if max_request_bytes is not None and content_length > int(max_request_bytes):
+        raise FfPoolSurfaceError(
+            "request_too_large",
+            "JSON request exceeds the pre-buffering limit",
+            details={"limit_bytes": int(max_request_bytes), "actual_bytes": content_length},
+            http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
 
     raw_body = handler.rfile.read(content_length)
     try:
@@ -5603,7 +5698,11 @@ def _load_optional_request_payload(handler: BaseHTTPRequestHandler) -> Mapping[s
     return payload
 
 
-def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def _load_uploaded_file_payload(
+    handler: BaseHTTPRequestHandler,
+    *,
+    max_request_bytes: int | None = None,
+) -> dict[str, Any]:
     content_type = str(handler.headers.get("Content-Type", "") or "")
     if "multipart/form-data" not in content_type.lower():
         raise ValueError("file upload must use multipart/form-data")
@@ -5616,6 +5715,13 @@ def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, An
         raise ValueError(f"Content-Length must be integer, got {raw_length!r}") from exc
     if content_length <= 0:
         raise ValueError("uploaded file request body must not be empty")
+    if max_request_bytes is not None and content_length > int(max_request_bytes):
+        raise FfPoolSurfaceError(
+            "request_too_large",
+            "XLSX request exceeds the pre-buffering limit",
+            details={"limit_bytes": int(max_request_bytes), "actual_bytes": content_length},
+            http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
     raw_body = handler.rfile.read(content_length)
     message = BytesParser(policy=default_email_policy).parsebytes(
         (
@@ -5653,6 +5759,182 @@ def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, An
         "content_type": part_content_type,
         "fields": fields,
     }
+
+
+def _is_ff_pool_mutation_path(path: str) -> bool:
+    normalized = str(path or "").rstrip("/")
+    if normalized in {
+        DEFAULT_FF_POOL_FACILITIES_PATH,
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview",
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
+    }:
+        return True
+    relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
+    parts = [item for item in relative.split("/") if item]
+    return (
+        len(parts) == 2 and parts[0] == "facilities"
+    ) or (
+        len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm"
+    )
+
+
+def _handle_ff_pool_post(
+    handler: BaseHTTPRequestHandler,
+    *,
+    entrypoint: RegistryUploadHttpEntrypoint,
+    path: str,
+    actor: str,
+) -> dict[str, Any]:
+    normalized = str(path or "").rstrip("/")
+    if normalized == DEFAULT_FF_POOL_FACILITIES_PATH:
+        return entrypoint.handle_ff_pool_facility_create_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ), actor=actor
+        )
+    if normalized == f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview":
+        return entrypoint.handle_ff_pool_document_preview_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ), actor=actor
+        )
+    if normalized in {
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
+    }:
+        upload = _load_uploaded_file_payload(
+            handler, max_request_bytes=FF_POOL_XLSX_LIMITS.max_request_bytes
+        )
+        validate_xlsx_request_seam(
+            content_length=len(upload["workbook_bytes"]),
+            filename=str(upload.get("filename") or ""),
+            content_type=str(upload.get("content_type") or ""),
+        )
+        fields = dict(upload.get("fields") or {})
+        common = {
+            "request_id": str(fields.get("request_id") or ""),
+            "business_date": str(fields.get("business_date") or ""),
+            "workbook_bytes": upload["workbook_bytes"],
+            "filename": str(upload.get("filename") or ""),
+            "content_type": str(upload.get("content_type") or ""),
+            "actor": actor,
+        }
+        if normalized.endswith("/china/preview"):
+            expense_value = json.loads(str(fields.get("expenses_json") or "[]"))
+            if not isinstance(expense_value, list):
+                raise ValueError("expenses_json must be a JSON array")
+            return entrypoint.handle_ff_pool_china_preview_request(
+                **common,
+                shipment_id=str(fields.get("shipment_id") or ""),
+                expenses=expense_value,
+            )
+        return entrypoint.handle_ff_pool_inventory_preview_request(**common)
+    relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
+    parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
+    if len(parts) == 2 and parts[0] == "facilities":
+        return entrypoint.handle_ff_pool_facility_update_request(
+            parts[1],
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
+        )
+    if len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm":
+        body = _load_request_payload(
+            handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+        )
+        if body.get("confirm") is not True:
+            raise FfPoolSurfaceError(
+                "explicit_confirmation_required", "Explicit confirm=true is required"
+            )
+        return entrypoint.handle_ff_pool_confirm_request(parts[1])
+    raise FfPoolSurfaceError("invalid_ff_pool_path", "Invalid FF facility/pool mutation path", http_status=404)
+
+
+def _handle_ff_pool_get(
+    *,
+    entrypoint: RegistryUploadHttpEntrypoint,
+    path: str,
+    query: str,
+) -> dict[str, Any] | tuple[bytes, str, str]:
+    normalized = str(path or "").rstrip("/")
+    params = _flatten_query_params(query)
+    if normalized in {DEFAULT_FF_POOL_PATH, f"{DEFAULT_FF_POOL_PATH}/capabilities"}:
+        return entrypoint.handle_ff_pool_capabilities_request()
+    if normalized == DEFAULT_FF_POOL_FACILITIES_PATH:
+        return entrypoint.handle_ff_pool_facilities_request(
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 25),
+            search=str(params.get("search") or ""),
+            active=str(params.get("active") or "all"),
+        )
+    if normalized == DEFAULT_FF_POOL_DOCUMENTS_PATH:
+        return entrypoint.handle_ff_pool_documents_request(
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 25),
+            facility_id=str(params.get("facility_id") or ""),
+            pool=str(params.get("pool") or ""),
+            document_kind=str(params.get("document_kind") or "all"),
+            workflow_state=str(params.get("workflow_state") or "all"),
+            business_date_from=str(params.get("business_date_from") or ""),
+            business_date_to=str(params.get("business_date_to") or ""),
+            search=str(params.get("search") or ""),
+        )
+    relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
+    parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
+    if len(parts) == 2 and parts == ["documents", "china-template.xlsx"]:
+        return entrypoint.handle_ff_pool_china_template_request(
+            str(params.get("shipment_id") or ""),
+            facility_id=str(params.get("facility_id") or ""),
+        )
+    if len(parts) == 2 and parts == ["documents", "inventory-template.xlsx"]:
+        return entrypoint.handle_ff_pool_inventory_template_request(
+            str(params.get("facility_id") or ""),
+            scope=str(params.get("scope") or "both"),
+        )
+    if len(parts) == 2 and parts[0] == "facilities":
+        return entrypoint.handle_ff_pool_facility_detail_request(parts[1])
+    if len(parts) == 4 and parts[0] == "facilities" and parts[2] == "pools":
+        return entrypoint.handle_ff_pool_detail_request(
+            parts[1],
+            parts[3],
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 50),
+            search=str(params.get("search") or ""),
+        )
+    if len(parts) == 2 and parts[0] == "documents":
+        return entrypoint.handle_ff_pool_document_detail_request(parts[1])
+    if len(parts) == 3 and parts[0] == "documents":
+        document_id = parts[1]
+        if parts[2] == "lines":
+            return entrypoint.handle_ff_pool_document_lines_request(
+                document_id,
+                page=int(params.get("page") or 1),
+                limit=int(params.get("limit") or 100),
+            )
+        if parts[2] == "expenses":
+            return entrypoint.handle_ff_pool_document_expenses_request(
+                document_id,
+                page=int(params.get("page") or 1),
+                limit=int(params.get("limit") or 100),
+            )
+        if parts[2] == "relations":
+            return entrypoint.handle_ff_pool_document_relations_request(document_id)
+        if parts[2] == "graph":
+            return entrypoint.handle_ff_pool_document_graph_request(document_id)
+        if parts[2] == "file":
+            return entrypoint.handle_ff_pool_source_file_request(document_id)
+    if len(parts) == 2 and parts[0] == "requests":
+        return entrypoint.handle_ff_pool_request_status_request(parts[1])
+    if len(parts) == 3 and parts[0] == "requests" and parts[2] == "preview":
+        return entrypoint.handle_ff_pool_request_preview_request(
+            parts[1],
+            collection=str(params.get("collection") or ""),
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 100),
+        )
+    raise FfPoolSurfaceError("invalid_ff_pool_path", "Invalid FF facility/pool read path", http_status=404)
 
 
 def _resolve_as_of_date(query_string: str, payload: Mapping[str, Any]) -> str:
@@ -7168,6 +7450,30 @@ def _ensure_autoanswers_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool
         handler,
         HTTPStatus.FORBIDDEN,
         {"error": "autoanswers CSRF validation failed", "code": "csrf_failed", "path": path},
+    )
+    return False
+
+
+def _ensure_ff_pool_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    """Require an explicit same-origin marker for every FF facility/pool mutation."""
+
+    content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
+    marker = str(handler.headers.get("X-WB-FF-Pool-CSRF", "") or "").strip()
+    origin = str(handler.headers.get("Origin", "") or "").strip().rstrip("/")
+    request_origin = _request_origin(handler).rstrip("/")
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").strip().lower()
+    valid = (
+        content_type in {"application/json", "multipart/form-data"}
+        and marker == "1"
+        and (not origin or hmac.compare_digest(origin, request_origin))
+        and fetch_site not in {"cross-site", "same-site"}
+    )
+    if valid:
+        return True
+    _write_json_response(
+        handler,
+        HTTPStatus.FORBIDDEN,
+        {"error": "FF facility/pool CSRF validation failed", "code": "csrf_failed", "path": path},
     )
     return False
 

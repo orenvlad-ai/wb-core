@@ -28,7 +28,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
 source_of_truth_level: "module_canonical"
-update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive. Default-off FF facility × pool detail and its non-routed Stage 2 document service are a parity-checked decomposition of the existing `ff` operand and are never added to TOTAL separately."
+update_note: "Active vitrina содержит только quantity/WAC/capital для шести стадий и три общих итога; paid-equivalent, coverage, confirmation, underaccepted, Proxy 2, старые 1C totals и inventory return переведены в technical archive. Default-off FF facility × pool detail, its immutable documents and protected Stage 3 explanatory surface are a parity-checked decomposition of the existing `ff` operand and are never added to TOTAL separately."
 ---
 
 # 1. Единственные шесть стадий
@@ -54,6 +54,10 @@ detail reader fail-closed и оставляет существующий aggrega
 Stage 2 immutable documents may prove facility/pool conservation on fixtures,
 but until a later explicit writer/reader cutover they are not an active capital
 source, consumer or TOTAL operand and do not alter the aggregate FF ledger.
+Stage 3 API/UI reads that same detail only after the existing current-version
+parity gate. Its displayed facility/pool capital is exact Decimal explanatory
+evidence, never another input to stage capital, overall capital or overall WAC.
+Default deploy leaves the reader and writer off and publishes no capital row.
 
 # 2. Количество и капитал
 
