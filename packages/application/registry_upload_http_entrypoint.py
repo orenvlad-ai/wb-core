@@ -31,6 +31,7 @@ from packages.application.ff_document_workflow import (
 )
 from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
+from packages.application.wb_fbs_orders import WbFbsOrdersCollector
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1177,6 +1178,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.ff_wb_supply_origins = FfWbSupplyOriginAssignments(
+            db_path=self.runtime.db_path,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_fbs_orders = WbFbsOrdersCollector(
             db_path=self.runtime.db_path,
             timestamp_factory=self.activated_at_factory,
         )
@@ -5457,6 +5462,12 @@ class RegistryUploadHttpEntrypoint:
         self, supply_ref: str, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
         return self.ff_wb_supply_origins.assign_origin(supply_ref, payload, actor=actor)
+
+    def handle_wb_fbs_orders_request(self, **filters: Any) -> dict[str, Any]:
+        return self.wb_fbs_orders.orders_page(**filters)
+
+    def handle_wb_fbs_order_detail_request(self, order_id: str) -> dict[str, Any]:
+        return self.wb_fbs_orders.order_detail(order_id)
 
     def handle_ff_pool_facilities_request(self, **filters: Any) -> dict[str, Any]:
         return self.ff_pool_surface.facilities_page(

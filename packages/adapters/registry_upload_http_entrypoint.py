@@ -85,6 +85,7 @@ from packages.application.ff_pool_documents_xlsx import (
     validate_xlsx_request_seam,
 )
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginError
+from packages.application.wb_fbs_orders import WbFbsOrdersError
 from packages.application.ff_warehouse_documents import FfWarehouseDocumentsError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
@@ -387,6 +388,7 @@ DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
 DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
+DEFAULT_FF_POOL_FBS_ORDERS_PATH = f"{DEFAULT_FF_POOL_PATH}/fbs-orders"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -4233,7 +4235,7 @@ def _build_handler(
                         path=parsed.path,
                         query=parsed.query,
                     )
-                except (FfPoolSurfaceError, FfWbSupplyOriginError) as exc:
+                except (FfPoolSurfaceError, FfWbSupplyOriginError, WbFbsOrdersError) as exc:
                     _write_json_response(
                         self,
                         HTTPStatus(exc.http_status),
@@ -5906,6 +5908,14 @@ def _handle_ff_pool_get(
             search=str(params.get("search") or ""),
             current_only=current_only_value in {"1", "true", "yes"},
         )
+    if normalized == DEFAULT_FF_POOL_FBS_ORDERS_PATH:
+        return entrypoint.handle_wb_fbs_orders_request(
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 25),
+            search=str(params.get("search") or ""),
+            nm_id=params.get("nm_id"),
+            supply_id=str(params.get("supply_id") or ""),
+        )
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
     if len(parts) == 2 and parts == ["documents", "china-template.xlsx"]:
@@ -5922,6 +5932,8 @@ def _handle_ff_pool_get(
         return entrypoint.handle_ff_pool_facility_detail_request(parts[1])
     if len(parts) == 2 and parts[0] == "wb-supply-origins":
         return entrypoint.handle_ff_wb_supply_origin_detail_request(parts[1])
+    if len(parts) == 2 and parts[0] == "fbs-orders":
+        return entrypoint.handle_wb_fbs_order_detail_request(parts[1])
     if len(parts) == 4 and parts[0] == "facilities" and parts[2] == "pools":
         return entrypoint.handle_ff_pool_detail_request(
             parts[1],
