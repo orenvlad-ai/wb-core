@@ -84,6 +84,7 @@ from packages.application.ff_pool_documents_xlsx import (
     FfPoolXlsxError,
     validate_xlsx_request_seam,
 )
+from packages.application.ff_wb_supply_origins import FfWbSupplyOriginError
 from packages.application.ff_warehouse_documents import FfWarehouseDocumentsError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
@@ -385,6 +386,7 @@ DEFAULT_FF_POOL_PREFIX = f"{DEFAULT_FF_POOL_PATH}/"
 DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
+DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -614,7 +616,7 @@ def _build_handler(
                         path=parsed.path,
                         actor=_current_web_user_actor(self),
                     )
-                except (FfPoolSurfaceError, FfPoolXlsxError) as exc:
+                except (FfPoolSurfaceError, FfPoolXlsxError, FfWbSupplyOriginError) as exc:
                     status = int(getattr(exc, "http_status", HTTPStatus.UNPROCESSABLE_ENTITY))
                     _write_json_response(
                         self,
@@ -4231,7 +4233,7 @@ def _build_handler(
                         path=parsed.path,
                         query=parsed.query,
                     )
-                except FfPoolSurfaceError as exc:
+                except (FfPoolSurfaceError, FfWbSupplyOriginError) as exc:
                     _write_json_response(
                         self,
                         HTTPStatus(exc.http_status),
@@ -5775,6 +5777,8 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
     return (
         len(parts) == 2 and parts[0] == "facilities"
     ) or (
+        len(parts) == 2 and parts[0] == "wb-supply-origins"
+    ) or (
         len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm"
     )
 
@@ -5832,6 +5836,14 @@ def _handle_ff_pool_post(
         return entrypoint.handle_ff_pool_inventory_preview_request(**common)
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
+    if len(parts) == 2 and parts[0] == "wb-supply-origins":
+        return entrypoint.handle_ff_wb_supply_origin_assign_request(
+            parts[1],
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
+        )
     if len(parts) == 2 and parts[0] == "facilities":
         return entrypoint.handle_ff_pool_facility_update_request(
             parts[1],
@@ -5881,6 +5893,19 @@ def _handle_ff_pool_get(
             business_date_to=str(params.get("business_date_to") or ""),
             search=str(params.get("search") or ""),
         )
+    if normalized == DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH:
+        current_only_value = str(params.get("current_only") or "1").strip().lower()
+        if current_only_value not in {"0", "1", "false", "true", "no", "yes"}:
+            raise FfWbSupplyOriginError(
+                "invalid_current_only", "current_only must be a boolean"
+            )
+        return entrypoint.handle_ff_wb_supply_origins_request(
+            page=int(params.get("page") or 1),
+            limit=int(params.get("limit") or 25),
+            facility_id=str(params.get("facility_id") or ""),
+            search=str(params.get("search") or ""),
+            current_only=current_only_value in {"1", "true", "yes"},
+        )
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
     if len(parts) == 2 and parts == ["documents", "china-template.xlsx"]:
@@ -5895,6 +5920,8 @@ def _handle_ff_pool_get(
         )
     if len(parts) == 2 and parts[0] == "facilities":
         return entrypoint.handle_ff_pool_facility_detail_request(parts[1])
+    if len(parts) == 2 and parts[0] == "wb-supply-origins":
+        return entrypoint.handle_ff_wb_supply_origin_detail_request(parts[1])
     if len(parts) == 4 and parts[0] == "facilities" and parts[2] == "pools":
         return entrypoint.handle_ff_pool_detail_request(
             parts[1],
@@ -9092,6 +9119,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
+        "wb_supply_ff_origins_path": DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH,
         "wb_warehouse_exclusion_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
         "wb_warehouse_exclusion_settings_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
         "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,

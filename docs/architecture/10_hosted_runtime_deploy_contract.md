@@ -60,6 +60,13 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/warehouses/recovery`
 - `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`
 - `GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/*`
+- The protected facility-pool family includes bounded query-only
+  `GET .../wb-supply-origins[/{supply_ref}]` and guarded
+  `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only
+  real-FBW-supply → active-FF-facility evidence in fixed `FBO`; POST reuses the
+  supply role, business write barrier, 256 KiB JSON limit and same-origin
+  `X-WB-FF-Pool-CSRF: 1`. It never mutates WB or creates an FF operation,
+  reservation, document, movement, balance, epoch, seed, opening or cutover.
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`

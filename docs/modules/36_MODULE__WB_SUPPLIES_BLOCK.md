@@ -16,6 +16,7 @@ related_modules:
   - "packages/adapters/seller_portal_transit_costs.py"
   - "packages/application/fulfillment_services.py"
   - "packages/application/ff_stock_ledger.py"
+  - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/warehouse_stocks.py"
   - "packages/application/wb_supplies.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -30,6 +31,7 @@ related_tables:
   - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment"
   - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs"
   - "sheet_vitrina_v1_wb_supply_cost_layers"
+  - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
   - "sheet_vitrina_v1_fulfillment_service_uploads"
   - "sheet_vitrina_v1_fulfillment_service_lines"
   - "sheet_vitrina_v1_ff_stock_operations"
@@ -46,6 +48,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/wb-cost/status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins/{supply_ref}"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins/{supply_ref}"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx"
   - "POST /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads"
@@ -548,7 +552,14 @@ Supply composition UI:
 - clicking a WB supply row opens a read-only composition panel;
 - the panel calls `GET .../wb-supplies/{supply_id}`;
 - it shows supply header, composition status, totals and a goods table with `nmID`, barcode, vendorCode, size/color, added/accepted/unloading/ready quantities;
-- no mutations or Seller Portal actions are available from this panel.
+- Stage 4 adds a separate lazy `Источник FF` evidence block below that cached
+  composition. Only a real `wb_supply_id` may be linked to one existing active
+  FF facility; its commercial pool is fixed to `FBO`;
+- origin assignment is append-only, idempotent and current-assignment-CAS
+  guarded behind the absent-by-default FF writer epoch. It mutates neither WB
+  nor this cache and creates no FF reservation, debit, document, movement or
+  balance;
+- no Seller Portal action is available from the panel.
 
 Final acceptance keeps declared FF composition as plan and gross per-nmID evidence as fact. Factory box size is a positive per-SKU nomenclature field, not a global hardcode. Automatic correction is allowed only when whole-box deltas preserve total sent quantity, every corrected sent quantity is at least accepted quantity, the minimum replacement count has exactly one deterministic solution and final status/evidence are current. The applied row stores declared/accepted/corrected compositions, gross shortage/surplus, box deltas, source revision, fingerprint and exact rollback manifest. If an earlier FF debit exists, one append-only compensation returns the missing box SKU and debits the substituted box SKU; rollback appends the inverse. Ambiguous/non-final evidence remains `Требуется сопоставить пересорт`. `Допринято` reduces discrepancy only for the same nmID and surplus never becomes negative stock.
 
@@ -586,6 +597,9 @@ Targeted smokes:
 - `python3 apps/wb_transit_cost_replay_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`;
+- `python3 apps/ff_wb_supply_origins_smoke.py`;
+- `python3 apps/ff_wb_supply_origins_http_smoke.py`;
+- `python3 apps/ff_wb_supply_origins_browser_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_fulfillment_services_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_fulfillment_services_browser_smoke.py`.
 

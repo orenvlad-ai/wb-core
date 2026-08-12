@@ -111,6 +111,7 @@ is part of Stage 3.
 
 ## Explicit later scope
 
-FBW/WB-supply origin assignment, the official read-only FBS collector, shadow
-writers/readers, facility seeds, historical opening/cutover and live activation
-remain separate later stages with their own worktrees, PRs and release gates.
+Migration 136 adds the separate default-off FBW/WB-supply origin-assignment
+evidence without movement or activation. The official read-only FBS collector,
+shadow writers/readers, facility seeds, historical opening/cutover and live
+activation remain later stages with their own worktrees, PRs and release gates.
