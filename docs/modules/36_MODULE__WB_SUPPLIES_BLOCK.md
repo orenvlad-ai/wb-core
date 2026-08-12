@@ -189,6 +189,15 @@ The cache is an operator registry/cache only:
 
 `GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders[/{order_id}]`
 
+Migration 138 may pin Stage 5 observation identities and safe fingerprints in
+a dry-run cutover manifest, but it neither activates the collector nor turns an
+observation into a reservation or physical debit. Every order observed before
+the external boundary must be explicitly classified as absorbed closed,
+absorbed opening reservation or unmatched; post-boundary orders are deferred.
+An observation created before `T` but arriving outside the manifest belongs to
+the isolated `Поздний заказ до границы` lane and never silently debits stock or
+blocks unrelated processing.
+
 Returns only the Stage 5 safe observation cache and collector state through the
 existing protected `supply` role. Root is bounded/filterable; detail exposes
 current plus bounded append-only history. Both reads use SQLite `mode=ro`,

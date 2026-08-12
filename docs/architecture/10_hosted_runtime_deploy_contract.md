@@ -60,6 +60,12 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/warehouses/recovery`
 - `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`
 - `GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/*`
+- Migration 138 deploys only an unused query-only cutover planner/status CLI and
+  empty warehouse-domain guard/evidence schema. Ordinary deploy, page open,
+  timer and HTTP routes cannot acquire the epoch or apply an opening. Actual
+  facility creation, `T` selection, barrier acquisition, reviewed manifest,
+  opening/checkpoint and activation remain one separately authorized
+  `scope:production-mutation` run on exact trusted/deployed main.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

@@ -142,6 +142,27 @@ adopt foreign evidence.
 
 ## Additive FF facility/pool schema boundary
 
+### Stage 6 warehouse-domain write epoch
+
+Migration 138 adds an empty append-only DB epoch and trigger backstop over the
+canonical supplier-acceptance, aggregate FF, pool-document, FBW-origin,
+own-capital and functional-projection tables. Cache/shadow WB/FBS ingestion,
+preview/request state and recovery audit remain writable so a short hold does
+not jam observations or status reporting. The existing HTTP barrier and
+warehouse maintenance contract are still required: the DB epoch complements
+them and is not an alternative to draining the scheduled writer.
+
+`held → applying → readback_required` must be one `BEGIN IMMEDIATE`
+transaction; `applying` must never be committed. Recovery has its own
+one-transaction `recovery_applying → recovery_readback_required` lane. An
+ambiguous committed opening stays blocked until exact readback; after live
+events recovery is forward reconciliation/compensating documents, never row
+deletion or blind replay. Stage 6 ships no production acquisition/apply action.
+Readback recomputes the immutable manifest digest, exact allocation rows,
+aggregate/detail parity, feature epoch, checkpoint, order/origin counts and the
+opening document before reconciliation. Non-target planning uses indexed rowid
+watermarks rather than full-table counts under the write hold.
+
 Migration 133 is a live/runtime deploy because ordinary operational schema
 ensure materializes new empty tables, indexes and integrity triggers. It is not
 a production business-data apply: there is no facility seed, legacy backfill,

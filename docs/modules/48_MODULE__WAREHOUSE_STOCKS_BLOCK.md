@@ -87,6 +87,14 @@ Supplier registry и warehouse projection не смешиваются. Invoice �
 
 `GET .../warehouses` и detail routes сохраняют совместимость route/key, но после functional cutover читают только active functional version. Старые opening tables не суммируются с active balances.
 
+Migration 138 does not reuse `warehouse_opening_v1` and does not introduce a
+seventh stage. Its future opening manifest decomposes the exact active `ff`
+revision into existing active facilities and `FBS|FBO` pools with equality of
+integer quantity and Decimal capital for every `nmId`. Facility identity,
+Moscow/Orenburg allocation and `T` are external reviewed decisions, never
+deploy-time defaults. Detail remains unpublished and is never added a second
+time to total stock.
+
 # 2. Physical and cost rules
 
 ## 2.1 Production and China → FF
