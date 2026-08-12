@@ -470,6 +470,25 @@ are introduced.
 
 ## Default-off facility × pool foundation
 
+### Stage 6 cutover preparation (default-off, unapplied)
+
+Migration 138 adds a query-only manifest planner, immutable checkpoint/recovery
+evidence and a SQLite-local warehouse-domain write epoch for a later exact
+aggregate-FF opening into facility × `FBS|FBO`. Deployment creates no facility,
+feature epoch, opening, reservation, movement or historical FBS debit. The
+planner requires externally selected UTC `T`, exact active functional revision,
+per-SKU quantity/capital parity, exact mappings, complete pre/post-`T`
+classification and explicit active-FBW origin. `supplierStatus=complete` is
+explicitly forbidden as a debit trigger; Stage 6 defines no debit trigger.
+Classification is accepted only against append-only official-status shadow
+evidence with the exact order revision, evidence digest and positive quantity;
+Stage 5 identity observations alone cannot make a plan ready. Signed canonical
+quantity and exact Decimal capital, including fractional kopecks, are preserved.
+
+The shipped CLI is read-only and has no apply action. The transactional path is
+fixture-only and requires a marker absent from operational schema. Production
+opening remains a separate exact-SHA/human-gated mutation.
+
 Migration 133 adds an empty dimensional subledger contract below the existing
 aggregate FF ledger. `sheet_vitrina_v1_ff_facilities` is a stable registry with
 immutable identity/code and mutable display/active metadata, but deployment

@@ -23,6 +23,7 @@ from packages.business_time import business_date_from_timestamp
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
 from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
 from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_schema
+from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
 from packages.application.ff_wb_supply_origins import ensure_ff_wb_supply_origin_schema
 from packages.application.wb_fbs_orders import ensure_wb_fbs_orders_schema
 from packages.application.registry_upload_bundle_v1 import (
@@ -11936,6 +11937,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     ensure_ff_pool_document_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
+    ensure_ff_pool_cutover_schema(conn)
     ambiguous_bank_assignment = conn.execute(
         """
         SELECT 1
