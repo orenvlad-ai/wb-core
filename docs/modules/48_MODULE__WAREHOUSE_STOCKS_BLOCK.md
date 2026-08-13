@@ -441,3 +441,16 @@ other stages and all-stage totals remain unavailable with server provenance,
 never copied from an adjacent/current snapshot or replaced by zero. Both
 batches are external-manifest, exact-fingerprint, T1 rollback and T0-repeat
 operations, and Batch B cannot run before retained Batch A reconciliation.
+
+## Stage 7A FBS query-only lifecycle shadow
+
+Migration 139 extends the default-off FBS cache with append-only official
+status observations. `POST /api/v3/orders/status` is used only as a read
+semantic and stores exact order revision, status digest, observed time and
+positive quantity. Separate immutable contracts cover seller warehouse → FF
+facility and exact nmId/chrtId/barcode/SKU mapping; unmatched evidence stays
+isolated and visible. Settings reports cursor, last error, status count and
+unmatched counts. Review begins at `2026-08-01`, while earliest official order
+date is calculated from the observations. Collector/backfill, reservations,
+debit, movements, balances, routing and returns stay off. In particular,
+`supplierStatus=complete` never triggers physical stock.

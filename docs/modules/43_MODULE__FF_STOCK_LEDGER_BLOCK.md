@@ -551,3 +551,23 @@ idempotent request identity, current-assignment CAS, supply-role, write barrier
 and same-origin CSRF. It does not invoke the existing WB auto-writeoff,
 reservation or lifecycle paths, and creates no operation, document, movement or
 balance. No producer consumes this evidence in Stage 4.
+
+### Stage 7A default-off operator continuation
+
+Migration 139 adds `Настройки → Склады`, an additive facility profile (`city`
+plus reserved future fields), and guided China → FF acceptance. Facility
+identity/code remain immutable, city is not unique and no address or seed is
+introduced. Deactivation rejects unfinished requests and non-zero pool
+balances. The fixed FBS/FBO pools remain system-owned.
+
+The guided document replaces routine acceptance-date editing. Its workbook
+records immutable expected quantity, actual accepted quantity, exact
+nmId/barcode/SKU, FBS/FBO allocation, proportional pool-scoped expenses and
+discrepancy evidence. A related immutable discrepancy child is posted with the
+root. Template generation uses a non-persisting exact supplier-cost preview;
+future finalization pins the source revision and materializes the supplier FF
+cost layer with actual accepted quantities rather than shipped quantities. The
+service is the only future owner of the factual date, existing
+aggregate receipt, detail movements and targeted replay, and rejects a prior
+receipt/date. Confirm requires both the writer epoch and applied opening;
+without them preview is durable but all business posting remains zero.

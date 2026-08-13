@@ -959,6 +959,7 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                     "Расчётные параметры",
                     "Автообновления",
                     "Источники и сессии",
+                    "Склады",
                     "Пользователи",
                 ],
                 f"settings top-level navigation changed: {group_labels}",

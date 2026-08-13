@@ -613,6 +613,7 @@
           <div class="field">
             <label for="actualFfAcceptanceDateInput">实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ</label>
             <input id="actualFfAcceptanceDateInput" type="date">
+            <button id="guidedAcceptanceButton" class="compact" type="button" hidden>Принять на FF</button>
           </div>
           <div class="field">
             <label for="approxYuanRateInput">预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥</label>
@@ -819,6 +820,29 @@
     </section>
   </div>
 
+  <div id="guidedAcceptanceModal" class="system-modal-backdrop" hidden>
+    <section class="system-modal-card" role="dialog" aria-modal="true" aria-labelledby="guidedAcceptanceTitle">
+      <h2 id="guidedAcceptanceTitle">Принять на FF</h2>
+      <p>Один географический склад; распределение между его системными пулами FBS/FBO задаётся в шаблоне.</p>
+      <label class="field"><span>Фактическая дата приёмки</span><input id="guidedAcceptanceDate" type="date"></label>
+      <div class="grid" style="margin-top:10px;">
+        <label class="field"><span>Общий расход FBS, ₽</span><input id="guidedExpenseFbs" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field"><span>Общий расход FBO, ₽</span><input id="guidedExpenseFbo" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field"><span>Общий расход обоих пулов, ₽</span><input id="guidedExpenseBoth" type="number" min="0" step="0.01" value="0"></label>
+      </div>
+      <div class="toolbar" style="margin-top:10px;">
+        <a id="guidedAcceptanceTemplate" class="button-link" href="#">Скачать шаблон</a>
+        <button id="guidedAcceptanceUploadButton" type="button">Загрузить и проверить</button>
+        <input id="guidedAcceptanceFile" type="file" accept=".xlsx" hidden>
+      </div>
+      <div id="guidedAcceptanceStatus" class="system-modal-body">Выберите дату и заполните шаблон.</div>
+      <div class="system-modal-actions">
+        <button id="guidedAcceptanceClose" type="button">Закрыть</button>
+        <button id="guidedAcceptanceConfirm" class="primary" type="button" disabled>Не готово к проведению</button>
+      </div>
+    </section>
+  </div>
+
   <script id="sheet-vitrina-v1-supplier-config" type="application/json">__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__</script>
   <script>
     (() => {
@@ -826,6 +850,9 @@
       const queryParams = new URLSearchParams(window.location.search || "");
       const shipmentsPath = config.supplier_shipments_path;
       const parsePath = config.supplier_shipments_parse_path;
+      const ffPoolPath = config.ff_pool_path;
+      const ffPoolChinaTemplatePath = config.ff_pool_china_template_path;
+      const ffPoolChinaPreviewPath = config.ff_pool_china_preview_path;
       const tradeDocumentsPath = config.trade_documents_path;
       const addShipmentButton = document.getElementById("addShipmentButton");
       const registryMessage = document.getElementById("registryMessage");
@@ -838,6 +865,18 @@
       const shipmentDateInput = document.getElementById("shipmentDateInput");
       const actualShipmentDateInput = document.getElementById("actualShipmentDateInput");
       const actualFfAcceptanceDateInput = document.getElementById("actualFfAcceptanceDateInput");
+      const guidedAcceptanceButton = document.getElementById("guidedAcceptanceButton");
+      const guidedAcceptanceModal = document.getElementById("guidedAcceptanceModal");
+      const guidedAcceptanceDate = document.getElementById("guidedAcceptanceDate");
+      const guidedAcceptanceTemplate = document.getElementById("guidedAcceptanceTemplate");
+      const guidedAcceptanceUploadButton = document.getElementById("guidedAcceptanceUploadButton");
+      const guidedAcceptanceFile = document.getElementById("guidedAcceptanceFile");
+      const guidedAcceptanceStatus = document.getElementById("guidedAcceptanceStatus");
+      const guidedAcceptanceClose = document.getElementById("guidedAcceptanceClose");
+      const guidedAcceptanceConfirm = document.getElementById("guidedAcceptanceConfirm");
+      const guidedExpenseFbs = document.getElementById("guidedExpenseFbs");
+      const guidedExpenseFbo = document.getElementById("guidedExpenseFbo");
+      const guidedExpenseBoth = document.getElementById("guidedExpenseBoth");
       const approxYuanRateInput = document.getElementById("approxYuanRateInput");
       const saveShipmentButton = document.getElementById("saveShipmentButton");
       const closeShipmentButton = document.getElementById("closeShipmentButton");
@@ -1912,11 +1951,12 @@
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
         actualShipmentDateInput.value = shipment.actual_shipment_date || "";
         actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
-        actualFfAcceptanceDateInput.readOnly = !!(shipment.shipment_id && shipment.order_status === "accepted_ff" && shipment.actual_ff_acceptance_date);
-        actualFfAcceptanceDateInput.disabled = actualFfAcceptanceDateInput.readOnly;
-        actualFfAcceptanceDateInput.title = actualFfAcceptanceDateInput.readOnly
-          ? "Дата уже зафиксирована; корректировка заблокирована для MVP после материализации себестоимости."
-          : "";
+        actualFfAcceptanceDateInput.readOnly = true;
+        actualFfAcceptanceDateInput.disabled = true;
+        actualFfAcceptanceDateInput.title = "Дата — read-only результат документа «Принять на FF».";
+        guidedAcceptanceButton.hidden = !config.guided_ff_acceptance;
+        guidedAcceptanceButton.disabled = !shipment.shipment_id || Boolean(shipment.actual_ff_acceptance_date);
+        guidedAcceptanceButton.textContent = shipment.actual_ff_acceptance_date ? "Принято на FF" : "Принять на FF";
         approxYuanRateInput.value = shipment.approx_yuan_rate ?? "";
         metaInputs.forEach((input) => {
           input.value = metadata[input.dataset.metaField] ?? "";
@@ -4004,7 +4044,118 @@
         syncActiveRegistryRow();
       }
 
+      function guidedStorageKey(shipmentId) {
+        return "wb-core:guided-ff-acceptance:" + String(shipmentId || "");
+      }
+
+      function guidedRequestId() {
+        const suffix = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+        return "guided:" + suffix;
+      }
+
+      async function openGuidedAcceptance() {
+        if (!currentShipment || !currentShipment.shipment_id || currentShipment.actual_ff_acceptance_date) return;
+        guidedAcceptanceDate.value = config.business_today || new Date().toISOString().slice(0, 10);
+        guidedAcceptanceTemplate.href = ffPoolChinaTemplatePath + "?shipment_id=" + encodeURIComponent(currentShipment.shipment_id);
+        guidedAcceptanceModal.hidden = false;
+        guidedAcceptanceConfirm.disabled = true;
+        guidedAcceptanceConfirm.textContent = "Не готово к проведению";
+        guidedAcceptanceStatus.textContent = "Скачайте шаблон, укажите один FF и распределите фактическое количество между FBS/FBO.";
+        const saved = window.localStorage.getItem(guidedStorageKey(currentShipment.shipment_id)) || "";
+        if (saved) {
+          try { await refreshGuidedStatus(saved); } catch (error) { guidedAcceptanceStatus.textContent = error.message; }
+        }
+      }
+
+      function guidedExpenses() {
+        return [
+          [guidedExpenseFbs, "FBS", "Общие расходы FBS"],
+          [guidedExpenseFbo, "FBO", "Общие расходы FBO"],
+          [guidedExpenseBoth, "both", "Общие расходы FBS/FBO"]
+        ].filter((item) => Number(item[0].value || 0) > 0).map((item) => ({amount_rub:item[0].value, basis:item[2], metadata:{allocation_scope:item[1]}}));
+      }
+
+      async function uploadGuidedAcceptance(file) {
+        if (!file || !currentShipment || !guidedAcceptanceDate.value) return;
+        const requestId = guidedRequestId();
+        const form = new FormData();
+        form.append("request_id", requestId);
+        form.append("business_date", guidedAcceptanceDate.value);
+        form.append("shipment_id", currentShipment.shipment_id);
+        form.append("expenses_json", JSON.stringify(guidedExpenses()));
+        form.append("file", file, file.name);
+        guidedAcceptanceStatus.textContent = "Файл принят. Проверяем exact nmId/barcode, количества, расходы и расхождения...";
+        guidedAcceptanceUploadButton.disabled = true;
+        try {
+          const status = await fetchJson(ffPoolChinaPreviewPath, {method:"POST", body:form, headers:{Accept:"application/json"}});
+          window.localStorage.setItem(guidedStorageKey(currentShipment.shipment_id), status.request_id || requestId);
+          await renderGuidedStatus(status);
+        } catch (error) {
+          guidedAcceptanceStatus.textContent = error.message;
+        } finally {
+          guidedAcceptanceUploadButton.disabled = false;
+          guidedAcceptanceFile.value = "";
+        }
+      }
+
+      async function refreshGuidedStatus(requestId) {
+        const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId));
+        await renderGuidedStatus(status);
+      }
+
+      async function renderGuidedStatus(status) {
+        const activation = status.guided_acceptance_activation || {};
+        let rows = [];
+        if (status.preview && status.preview.available && status.request_id) {
+          const preview = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(status.request_id) + "/preview?collection=allocations&limit=100");
+          rows = preview.rows || [];
+        }
+        const pageTotals = rows.reduce((acc, row) => {
+          acc.expected += Number(row.expected_quantity || 0); acc.accepted += Number(row.accepted_quantity || 0);
+          acc.fbs += Number(row.quantity_fbs || 0); acc.fbo += Number(row.quantity_fbo || 0);
+          acc.discrepancies += Number(row.discrepancy_quantity || 0); return acc;
+        }, {expected:0,accepted:0,fbs:0,fbo:0,discrepancies:0});
+        const exactSummary = (status.preview && status.preview.summary) || {};
+        const totals = {
+          expected: Number(exactSummary.expected_quantity ?? pageTotals.expected),
+          accepted: Number(exactSummary.accepted_quantity ?? pageTotals.accepted),
+          fbs: Number(exactSummary.quantity_fbs ?? pageTotals.fbs),
+          fbo: Number(exactSummary.quantity_fbo ?? pageTotals.fbo),
+          discrepancies: Number(exactSummary.discrepancy_quantity ?? pageTotals.discrepancies)
+        };
+        guidedAcceptanceStatus.innerHTML = '<strong>' + escapeHtml(status.state_label_ru || status.state || "") + '</strong>' +
+          '<p>Отправлено: ' + totals.expected + ' · принято: ' + totals.accepted + ' · FBS: ' + totals.fbs + ' · FBO: ' + totals.fbo + ' · расхождения: ' + totals.discrepancies + '</p>' +
+          '<p>' + escapeHtml(activation.reason_ru || "") + '</p>' +
+          (status.error && status.error.code ? '<p class="message error">' + escapeHtml(status.error.code) + '</p>' : '');
+        guidedAcceptanceConfirm.dataset.requestId = status.request_id || "";
+        guidedAcceptanceConfirm.disabled = !status.confirm_allowed;
+        guidedAcceptanceConfirm.textContent = status.confirm_allowed ? "Необратимо провести приёмку" : "Проведение выключено";
+        if (status.state === "complete") {
+          window.localStorage.removeItem(guidedStorageKey(currentShipment.shipment_id));
+          currentShipment.actual_ff_acceptance_date = status.business_date;
+          currentShipment.order_status = "accepted_ff";
+          renderCard();
+          await loadRegistry();
+        }
+      }
+
+      async function confirmGuidedAcceptance() {
+        const requestId = guidedAcceptanceConfirm.dataset.requestId || "";
+        if (!requestId) return;
+        guidedAcceptanceConfirm.disabled = true;
+        guidedAcceptanceStatus.textContent = "Проводим единый idempotent документ...";
+        try {
+          const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId) + "/confirm", {method:"POST", headers:{"Content-Type":"application/json",Accept:"application/json"}, body:JSON.stringify({confirm:true})});
+          await renderGuidedStatus(status);
+        } catch (error) { guidedAcceptanceStatus.textContent = error.message; }
+      }
+
       addShipmentButton.addEventListener("click", openNewShipment);
+      guidedAcceptanceButton.addEventListener("click", openGuidedAcceptance);
+      guidedAcceptanceUploadButton.addEventListener("click", () => guidedAcceptanceFile.click());
+      guidedAcceptanceFile.addEventListener("change", () => uploadGuidedAcceptance(guidedAcceptanceFile.files && guidedAcceptanceFile.files[0]));
+      guidedAcceptanceClose.addEventListener("click", () => { guidedAcceptanceModal.hidden = true; });
+      guidedAcceptanceConfirm.addEventListener("click", confirmGuidedAcceptance);
       supplyCompositionTabButton.addEventListener("click", () => switchCardTab("supply"));
       financialDocumentsTabButton.addEventListener("click", () => switchCardTab("financial"));
       saveShipmentButton.addEventListener("click", saveCurrentShipment);

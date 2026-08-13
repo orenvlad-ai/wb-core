@@ -30,10 +30,13 @@ CHINA_HEADERS = (
     "nmId",
     "Штрихкод",
     "SKU",
+    "Отправлено, шт",
     "Принято, шт",
     "Капитал принятия, RUB",
     "FBO, шт",
     "FBS, шт",
+    "Расхождение",
+    "Комментарий",
 )
 INVENTORY_HEADERS = (
     "nmId",
@@ -126,21 +129,25 @@ def generate_china_acceptance_workbook(
                 item["barcode"],
                 item["sku"],
                 item["quantity"],
+                item["quantity"],
                 _decimal_text(item["capital_rub"]),
                 0,
                 0,
+                "",
+                "",
             ]
         )
         _set_text(sheet.cell(sheet.max_row, 2), item["barcode"])
         _set_text(sheet.cell(sheet.max_row, 3), item["sku"])
-    _format_sheet(sheet, header_row=5, max_row=max(5, sheet.max_row), max_column=7)
+    _format_sheet(sheet, header_row=5, max_row=max(5, sheet.max_row), max_column=10)
     for row in range(6, sheet.max_row + 1):
         sheet.cell(row, 2).number_format = "@"
         sheet.cell(row, 4).number_format = "0"
-        sheet.cell(row, 5).number_format = "#,##0.00"
-        sheet.cell(row, 6).number_format = "0"
+        sheet.cell(row, 5).number_format = "0"
+        sheet.cell(row, 6).number_format = "#,##0.00"
         sheet.cell(row, 7).number_format = "0"
-    _add_table(sheet, name="ChinaAcceptanceTable", ref=f"A5:G{max(6, sheet.max_row)}")
+        sheet.cell(row, 8).number_format = "0"
+    _add_table(sheet, name="ChinaAcceptanceTable", ref=f"A5:J{max(6, sheet.max_row)}")
     _add_lists_and_validation(
         workbook,
         sheet=sheet,
@@ -291,7 +298,7 @@ def parse_china_acceptance_workbook(
     allocations: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for row_no in range(6, sheet.max_row + 1):
-        values = [sheet.cell(row_no, column) for column in range(1, 8)]
+        values = [sheet.cell(row_no, column) for column in range(1, 11)]
         if all(cell.value in (None, "") for cell in values):
             continue
         try:
@@ -309,27 +316,48 @@ def parse_china_acceptance_workbook(
                     details={"nm_id": nm_id},
                 )
             seen.add(nm_id)
-            fbo = _whole_cell(values[5], field="FBO quantity")
-            fbs = _whole_cell(values[6], field="FBS quantity")
-            accepted = int(resolved["quantity"])
+            expected = _whole_cell(values[3], field="expected quantity", positive=True)
+            if expected != int(resolved["quantity"]):
+                raise FfPoolXlsxError(
+                    "source_quantity_tampered",
+                    "Expected shipment quantity differs from the immutable source",
+                    details={"nm_id": nm_id, "expected": int(resolved["quantity"]), "actual": expected},
+                )
+            accepted = _whole_cell(values[4], field="accepted quantity")
+            fbo = _whole_cell(values[6], field="FBO quantity")
+            fbs = _whole_cell(values[7], field="FBS quantity")
             if fbo + fbs != accepted:
                 raise FfPoolXlsxError(
                     "allocation_quantity_mismatch",
                     "FBO + FBS must exactly equal the accepted quantity",
                     details={"nm_id": nm_id, "accepted": accepted, "fbo": fbo, "fbs": fbs},
                 )
-            allocations.append(
-                {
+            discrepancy = str(values[8].value or "").strip().casefold()
+            derived = "" if accepted == expected else ("shortage" if accepted < expected else "surplus")
+            aliases = {"": "", "недостача": "shortage", "shortage": "shortage", "излишек": "surplus", "surplus": "surplus", "пересорт": "mis_sort", "mis-sort": "mis_sort", "mis_sort": "mis_sort"}
+            if discrepancy not in aliases:
+                raise FfPoolXlsxError("invalid_discrepancy_type", "Unsupported discrepancy type", details={"value": discrepancy})
+            declared = aliases[discrepancy]
+            if declared and declared != derived and declared != "mis_sort":
+                raise FfPoolXlsxError("discrepancy_type_mismatch", "Declared discrepancy does not match quantities")
+            base_capital = Decimal(str(resolved["capital_rub"]))
+            accepted_capital = base_capital * Decimal(accepted) / Decimal(expected)
+            row = {
                     "nm_id": nm_id,
                     "barcode": str(resolved["barcode"]),
+                    "sku": str(resolved["sku"]),
+                    "expected_quantity": expected,
                     "accepted_quantity": accepted,
-                    "accepted_capital_rub": _decimal_text(resolved["capital_rub"]),
+                    "accepted_capital_rub": _decimal_text(accepted_capital),
                     "quantity_fbo": fbo,
                     "quantity_fbs": fbs,
+                    "discrepancy_type": declared or derived,
+                    "discrepancy_quantity": abs(accepted - expected),
+                    "comment": str(values[9].value or "").strip()[:500],
                     "row_no": row_no,
                     "identity_evidence_digest": str(resolved["identity_evidence_digest"]),
                 }
-            )
+            allocations.append(row)
         except FfPoolXlsxError as exc:
             errors.append({"row": row_no, "code": exc.code, "details": exc.details})
     missing = sorted(set(resolved_source) - seen)
@@ -341,6 +369,8 @@ def parse_china_acceptance_workbook(
             "China acceptance workbook contains blocked rows",
             details=errors[:100],
         )
+    if not any(int(item["accepted_quantity"]) > 0 for item in allocations):
+        raise FfPoolXlsxError("empty_actual_acceptance", "At least one actual accepted quantity must be positive")
     return {
         "contract_name": CONTRACT_NAME,
         "profile": "china_acceptance_v1",
@@ -741,7 +771,7 @@ def _format_sheet(sheet: Any, *, header_row: int, max_row: int, max_column: int)
         cell.fill = PatternFill("solid", fgColor="0F766E")
         cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    widths = [16, 22, 36, 18, 24, 16, 16]
+    widths = [16, 22, 36, 18, 18, 24, 16, 16, 18, 34]
     for column in range(1, max_column + 1):
         sheet.column_dimensions[sheet.cell(1, column).column_letter].width = widths[column - 1]
     for row in range(header_row + 1, max_row + 1):

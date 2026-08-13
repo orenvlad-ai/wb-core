@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from io import BytesIO
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
@@ -13,16 +14,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.ff_pool_documents import FfPoolDocumentService  # noqa: E402
+from openpyxl import load_workbook  # noqa: E402
+
+from packages.application.ff_pool_documents import (  # noqa: E402
+    DOCUMENTS_TABLE,
+    FfPoolDocumentService,
+)
+from packages.application.ff_pool_documents_xlsx import CHINA_SHEET, XLSX_CONTENT_TYPE  # noqa: E402
 from packages.application.ff_pool_foundation import (  # noqa: E402
     BALANCES_TABLE,
     FACILITIES_TABLE,
     FACILITY_CHANGES_TABLE,
+    FACILITY_PROFILES_TABLE,
     FEATURE_EPOCHS_TABLE,
     evaluate_ff_pool_aggregate_parity,
     record_ff_pool_parity_diagnostic,
 )
 from packages.application.ff_pool_surfaces import FfPoolSurface, FfPoolSurfaceError  # noqa: E402
+from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 
 
 class Clock:
@@ -37,6 +46,7 @@ class Clock:
 
 def main() -> None:
     _schema_absence_is_controlled()
+    _guided_preview_is_default_off()
     with TemporaryDirectory(prefix="ff-pool-surfaces-") as directory:
         root = Path(directory)
         clock = Clock()
@@ -55,8 +65,68 @@ def main() -> None:
         facilities = _facility_management(surface, service.db_path, clock)
         request_id = _document_workflow(surface, facilities)
         _exact_reader_and_pagination(surface, service.db_path, clock, facilities)
+        _deactivation_with_dependencies_is_blocked(surface, facilities)
         _read_models(surface, request_id, facilities)
     print("ff_pool_surfaces_smoke: OK")
+
+
+def _guided_preview_is_default_off() -> None:
+    with TemporaryDirectory(prefix="ff-guided-default-off-") as directory:
+        root = Path(directory)
+        clock = Clock()
+        service = FfPoolDocumentService(
+            db_path=root / "state.sqlite3", runtime_dir=root, timestamp_factory=clock, resume=False
+        )
+        with sqlite3.connect(service.db_path) as conn:
+            conn.execute(
+                f"INSERT INTO {FACILITIES_TABLE} VALUES(?,?,?,?,?,?,?)",
+                ("fac_preview", "PREVIEW", "Preview FF", 1, "Europe/Moscow", clock(), clock()),
+            )
+            conn.execute(
+                f"INSERT INTO {FACILITY_PROFILES_TABLE} VALUES(?,?,?, ?,?)",
+                ("fac_preview", "Москва", "{}", clock(), clock()),
+            )
+            conn.commit()
+        lines = [{
+            "nm_id": 101, "barcode": "0000000000101", "sku": "SKU-101",
+            "accepted_quantity": 2, "accepted_capital_rub": "200.00",
+        }]
+        workbook_bytes = service.generate_china_acceptance_template(
+            shipment_lines=lines, source_revision="supplier-revision-v1", selected_facility_id="fac_preview"
+        )
+        workbook = load_workbook(BytesIO(workbook_bytes))
+        workbook[CHINA_SHEET]["G6"], workbook[CHINA_SHEET]["H6"] = 1, 1
+        output = BytesIO()
+        workbook.save(output)
+        preview = service.preview_china_acceptance_workbook(
+            identity=DocumentIdentity(
+                request_id="fixture:guided-preview:request",
+                source_system="supplier_registry",
+                source_type="china_acceptance_workbook",
+                source_id="shipment-preview",
+                source_revision="supplier-revision-v1",
+                idempotency_epoch=1,
+                actor="fixture",
+                business_date="2026-08-12",
+            ),
+            source_bytes=output.getvalue(),
+            source_filename="guided.xlsx",
+            source_content_type=XLSX_CONTENT_TYPE,
+            shipment_lines=lines,
+            template_source_revision="supplier-revision-v1",
+        )
+        assert preview["state"] == "ready"
+        surface = FfPoolSurface(db_path=service.db_path, runtime_dir=root, timestamp_factory=clock)
+        status = surface.request_status(str(preview["request_id"]))
+        assert not status["confirm_allowed"]
+        assert status["guided_acceptance_activation"]["reason"] == "writer_epoch_off"
+        try:
+            surface.confirm_document(str(preview["request_id"]))
+            raise AssertionError("default-off guided acceptance must fail closed")
+        except FfPoolSurfaceError as exc:
+            assert exc.code == "guided_acceptance_not_activated"
+        with sqlite3.connect(service.db_path) as conn:
+            assert conn.execute(f"SELECT COUNT(*) FROM {DOCUMENTS_TABLE}").fetchone()[0] == 0
 
 
 def _schema_absence_is_controlled() -> None:
@@ -115,6 +185,7 @@ def _facility_management(surface: FfPoolSurface, db_path: Path, clock: Clock) ->
     first_payload = {
         "request_id": "fixture:facility:moscow",
         "name": "Москва FF",
+        "city": "Москва",
         "active": True,
         "display_timezone": "Europe/Moscow",
     }
@@ -140,7 +211,8 @@ def _facility_management(surface: FfPoolSurface, db_path: Path, clock: Clock) ->
     second = surface.create_facility(
         {
             "request_id": "fixture:facility:orenburg",
-            "name": "Оренбург FF",
+            "name": "Москва Юг",
+            "city": "Москва",
             "active": True,
             "display_timezone": "Asia/Yekaterinburg",
         },
@@ -155,6 +227,29 @@ def _facility_management(surface: FfPoolSurface, db_path: Path, clock: Clock) ->
         else:
             raise AssertionError("facility physical delete must be blocked")
     return [dict(updated["facility"]), dict(second["facility"])]
+
+
+def _deactivation_with_dependencies_is_blocked(
+    surface: FfPoolSurface,
+    facilities: list[dict[str, object]],
+) -> None:
+    facility_id = str(facilities[1]["facility_id"])
+    detail = surface.facility_detail(facility_id)
+    try:
+        surface.update_facility(
+            facility_id,
+            {
+                "request_id": "fixture:facility:deactivation-blocked",
+                "expected_updated_at": detail["facility"]["updated_at"],
+                "active": False,
+            },
+            actor="fixture-operator",
+        )
+    except FfPoolSurfaceError as exc:
+        assert exc.code == "facility_deactivation_blocked"
+        assert exc.details["nonzero_balance_count"] == 2
+    else:
+        raise AssertionError("facility with non-zero balances must stay active")
 
 
 def _document_workflow(surface: FfPoolSurface, facilities: list[dict[str, object]]) -> str:

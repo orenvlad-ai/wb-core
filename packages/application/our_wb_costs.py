@@ -113,7 +113,12 @@ class OurWbCostBlock:
                 count += 1
         return count
 
-    def materialize_supplier_ff_cost_layer(self, shipment_id: str) -> dict[str, Any] | None:
+    def preview_supplier_ff_cost_layer(
+        self,
+        shipment_id: str,
+        *,
+        accepted_quantities_by_nm: Mapping[int, int] | None = None,
+    ) -> dict[str, Any]:
         shipment_id = str(shipment_id or "").strip()
         if not shipment_id:
             raise ValueError("supplier_shipment_id is required")
@@ -125,7 +130,11 @@ class OurWbCostBlock:
             raise ValueError(
                 "historical accepted-without-date status does not materialize an FF cost layer"
             )
-        lines = [dict(item or {}) for item in (detail.get("lines") or [])]
+        source_lines = [dict(item or {}) for item in (detail.get("lines") or [])]
+        lines = _supplier_lines_with_accepted_quantities(
+            source_lines,
+            accepted_quantities_by_nm=accepted_quantities_by_nm,
+        )
         all_financial_documents = self.runtime.list_supplier_financial_documents(shipment_id)
         financial_documents = [
             item
@@ -146,16 +155,43 @@ class OurWbCostBlock:
             financial_documents=financial_documents,
             expense_lines=expense_lines,
         )
-        now = self.timestamp_factory()
-        inputs_hash = _stable_hash(
+        hash_payload = (
             {
                 "schema": "supplier_ff_cost_layer_v1",
                 "header": _selected_supplier_header_inputs(header),
-                "lines": [_selected_supplier_line_inputs(line) for line in lines],
+                "lines": [_selected_supplier_line_inputs(line) for line in source_lines],
+                "financial_documents": [_selected_financial_document_inputs(item) for item in financial_documents],
+                "expense_lines": [_selected_expense_line_inputs(item) for item in expense_lines],
+            }
+            if accepted_quantities_by_nm is None else {
+                "schema": "supplier_ff_cost_layer_v2",
+                "header": _selected_supplier_header_inputs(header),
+                "source_lines": [_selected_supplier_line_inputs(line) for line in source_lines],
+                "accepted_quantities_by_nm": {
+                    str(key): int(value)
+                    for key, value in sorted((accepted_quantities_by_nm or {}).items())
+                },
                 "financial_documents": [_selected_financial_document_inputs(item) for item in financial_documents],
                 "expense_lines": [_selected_expense_line_inputs(item) for item in expense_lines],
             }
         )
+        inputs_hash = _stable_hash(hash_payload)
+        return {**calculation, "inputs_hash": inputs_hash}
+
+    def materialize_supplier_ff_cost_layer(
+        self,
+        shipment_id: str,
+        *,
+        accepted_quantities_by_nm: Mapping[int, int] | None = None,
+    ) -> dict[str, Any] | None:
+        shipment_id = str(shipment_id or "").strip()
+        calculation = self.preview_supplier_ff_cost_layer(
+            shipment_id,
+            accepted_quantities_by_nm=accepted_quantities_by_nm,
+        )
+        inputs_hash = str(calculation["inputs_hash"])
+        header = dict((self.runtime.load_supplier_shipment(shipment_id) or {}).get("header") or {})
+        now = self.timestamp_factory()
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
             existing = conn.execute(
@@ -1719,6 +1755,42 @@ def _canonical_seller_portal_transit_enrichment(
         and str(item.get("confidence") or "") in {"high", "medium"}
         and not str(item.get("error") or "")
     )
+
+
+def _supplier_lines_with_accepted_quantities(
+    source_lines: Iterable[Mapping[str, Any]],
+    *,
+    accepted_quantities_by_nm: Mapping[int, int] | None,
+) -> list[dict[str, Any]]:
+    lines = [dict(item) for item in source_lines]
+    if accepted_quantities_by_nm is None:
+        return lines
+    accepted: dict[int, int] = {}
+    for raw_nm_id, raw_quantity in accepted_quantities_by_nm.items():
+        if isinstance(raw_nm_id, bool) or isinstance(raw_quantity, bool):
+            raise ValueError("accepted quantity mapping must use exact integers")
+        nm_id, quantity = int(raw_nm_id), int(raw_quantity)
+        if nm_id <= 0 or quantity < 0:
+            raise ValueError("accepted quantity mapping is outside the allowed range")
+        accepted[nm_id] = quantity
+    result: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for line in lines:
+        if str(line.get("line_type") or "") != "product":
+            result.append(line)
+            continue
+        nm_id = _optional_int(line.get("internal_nm_id"))
+        if nm_id is None or nm_id not in accepted:
+            raise ValueError("accepted quantity mapping does not match the exact supplier composition")
+        if nm_id in seen:
+            raise ValueError("accepted quantity mapping requires one exact supplier line per nmId")
+        seen.add(nm_id)
+        quantity = accepted[nm_id]
+        if quantity > 0:
+            result.append({**line, "qty": quantity})
+    if seen != set(accepted):
+        raise ValueError("accepted quantity mapping contains an unknown nmId")
+    return result
 
 
 def _selected_supplier_header_inputs(header: Mapping[str, Any]) -> dict[str, Any]:

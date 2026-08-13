@@ -3544,6 +3544,11 @@ class RegistryUploadHttpEntrypoint:
         *,
         supplier_safe: bool = False,
     ) -> dict[str, Any]:
+        nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+        if str(payload.get("actual_ff_acceptance_date") or nested.get("actual_ff_acceptance_date") or "").strip():
+            raise ValueError(
+                "Новый заказ не может быть сохранён с приёмкой на FF; используйте «Принять на FF» после создания."
+            )
         if supplier_safe:
             return self.supplier_shipments_block.create_shipment_supplier_safe(payload)
         return self.supplier_shipments_block.create_shipment(payload)

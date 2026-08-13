@@ -1,7 +1,7 @@
 """Default-off official FBS order collection and query-only shadow reads.
 
-Stage 5 persists a privacy-minimized official observation only.  It never
-calls a WB mutation or status POST, assigns an FF facility, or creates an
+Stage 7A persists privacy-minimized official order and lifecycle observations.
+The status POST is an official read semantic only.  It never assigns an FF facility or creates an
 inventory document, operation, reservation, movement, balance, or cutover.
 """
 
@@ -21,15 +21,21 @@ from packages.adapters.wb_fbs_orders import (
     HttpBackedWbFbsOrdersSource,
     WbFbsOrdersHttpStatusError,
     WbFbsOrdersPage,
+    WbFbsOrderStatus,
     WbFbsOrdersTransportError,
 )
 
 
 CONTRACT_NAME = "wb_fbs_orders_readonly_shadow_v1"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 COLLECTOR_ENABLED_ENV = "WB_FBS_COLLECTOR_ENABLED"
 OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
 STATE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
+STATUS_OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+WAREHOUSE_MAPPINGS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
+IDENTITY_MAPPINGS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings"
+IDENTITY_EVIDENCE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence"
+BACKFILL_REVIEW_FROM = "2026-08-01"
 DEFAULT_LOOKBACK_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_PAGES = 10
 MAX_PAGES = 50
@@ -37,7 +43,10 @@ MAX_PAGE_SIZE = 100
 MAX_HISTORY_SIZE = 50
 SAFE_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-REQUIRED_TABLES = frozenset({OBSERVATIONS_TABLE, STATE_TABLE})
+REQUIRED_TABLES = frozenset({
+    OBSERVATIONS_TABLE, STATE_TABLE, STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE, IDENTITY_MAPPINGS_TABLE, IDENTITY_EVIDENCE_TABLE,
+})
 
 
 class WbFbsOrdersError(ValueError):
@@ -84,6 +93,7 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
             office_id INTEGER,
             nm_id INTEGER NOT NULL CHECK(nm_id > 0),
             chrt_id INTEGER,
+            seller_sku TEXT NOT NULL DEFAULT '',
             skus_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skus_json)),
             cargo_type INTEGER,
             cross_border_type INTEGER,
@@ -117,6 +127,82 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
             SELECT RAISE(ABORT,'WB FBS order observations are append-only');
         END;
 
+        CREATE TABLE IF NOT EXISTS {STATUS_OBSERVATIONS_TABLE}(
+            observation_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            observation_id TEXT NOT NULL UNIQUE,
+            order_id INTEGER NOT NULL CHECK(order_id > 0),
+            order_revision TEXT NOT NULL,
+            status_digest TEXT NOT NULL,
+            supplier_status TEXT NOT NULL DEFAULT '',
+            wb_status TEXT NOT NULL DEFAULT '',
+            positive_quantity INTEGER NOT NULL CHECK(positive_quantity > 0),
+            observed_at TEXT NOT NULL CHECK(substr(observed_at,-1,1)='Z' AND julianday(observed_at) IS NOT NULL),
+            UNIQUE(order_id,order_revision,status_digest)
+        );
+        CREATE INDEX IF NOT EXISTS wb_fbs_status_by_order
+        ON {STATUS_OBSERVATIONS_TABLE}(order_id,observation_sequence DESC);
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_status_no_update BEFORE UPDATE ON {STATUS_OBSERVATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS status observation is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_status_no_delete BEFORE DELETE ON {STATUS_OBSERVATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS status observations are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS {WAREHOUSE_MAPPINGS_TABLE}(
+            mapping_id TEXT PRIMARY KEY,
+            seller_warehouse_id INTEGER NOT NULL CHECK(seller_warehouse_id > 0),
+            facility_id TEXT NOT NULL,
+            mapping_digest TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            UNIQUE(seller_warehouse_id,mapping_digest)
+        );
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_warehouse_mapping_no_update BEFORE UPDATE ON {WAREHOUSE_MAPPINGS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS warehouse mapping is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_warehouse_mapping_no_delete BEFORE DELETE ON {WAREHOUSE_MAPPINGS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS warehouse mappings are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS {IDENTITY_MAPPINGS_TABLE}(
+            mapping_id TEXT PRIMARY KEY,
+            source_nm_id INTEGER NOT NULL CHECK(source_nm_id > 0),
+            source_chrt_id INTEGER NOT NULL CHECK(source_chrt_id > 0),
+            source_barcode TEXT NOT NULL,
+            source_sku TEXT NOT NULL,
+            target_nm_id INTEGER NOT NULL CHECK(target_nm_id > 0),
+            mapping_digest TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            UNIQUE(source_nm_id,source_chrt_id,source_barcode,source_sku,mapping_digest)
+        );
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_identity_mapping_no_update BEFORE UPDATE ON {IDENTITY_MAPPINGS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity mapping is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_identity_mapping_no_delete BEFORE DELETE ON {IDENTITY_MAPPINGS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity mappings are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS {IDENTITY_EVIDENCE_TABLE}(
+            evidence_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            evidence_id TEXT NOT NULL UNIQUE,
+            order_id INTEGER NOT NULL CHECK(order_id > 0),
+            order_revision TEXT NOT NULL,
+            warehouse_id INTEGER,
+            nm_id INTEGER NOT NULL CHECK(nm_id > 0),
+            chrt_id INTEGER,
+            barcode TEXT NOT NULL DEFAULT '',
+            seller_sku TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL CHECK(outcome IN ('matched','unmatched_warehouse','unmatched_identity','deferred')),
+            warehouse_mapping_id TEXT NOT NULL DEFAULT '',
+            identity_mapping_id TEXT NOT NULL DEFAULT '',
+            evidence_digest TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE(order_id,order_revision,evidence_digest)
+        );
+        CREATE INDEX IF NOT EXISTS wb_fbs_identity_evidence_by_outcome
+        ON {IDENTITY_EVIDENCE_TABLE}(outcome,evidence_sequence DESC);
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_identity_evidence_no_update BEFORE UPDATE ON {IDENTITY_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_identity_evidence_no_delete BEFORE DELETE ON {IDENTITY_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity evidence is append-only'); END;
+
         CREATE TABLE IF NOT EXISTS {STATE_TABLE}(
             state_id INTEGER PRIMARY KEY CHECK(state_id=1),
             last_run_id TEXT NOT NULL,
@@ -142,6 +228,11 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    observation_columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({OBSERVATIONS_TABLE})").fetchall()
+    }
+    if "seller_sku" not in observation_columns:
+        conn.execute(f"ALTER TABLE {OBSERVATIONS_TABLE} ADD COLUMN seller_sku TEXT NOT NULL DEFAULT ''")
 
 
 class WbFbsOrdersCollector:
@@ -250,6 +341,20 @@ class WbFbsOrdersCollector:
                         continue
                     seen_observations.add(identity)
                     normalized.append(row)
+            status_observations: list[dict[str, Any]] = []
+            status_reader = getattr(self.source, "list_statuses", None)
+            if callable(status_reader) and normalized:
+                by_order = {int(item["order_id"]): item for item in normalized}
+                for offset in range(0, len(by_order), 1000):
+                    batch_ids = sorted(by_order)[offset : offset + 1000]
+                    for status in status_reader(batch_ids):
+                        status_observations.append(
+                            _normalize_status(
+                                status,
+                                order=by_order[int(status.order_id)],
+                                observed_at=attempted_at,
+                            )
+                        )
             new_count = self._persist_success(
                 run_id=run_id,
                 attempted_at=attempted_at,
@@ -262,6 +367,7 @@ class WbFbsOrdersCollector:
                 ignored_count=ignored,
                 complete=complete,
                 observations=normalized,
+                status_observations=status_observations,
             )
         except Exception as exc:
             self._persist_failure(
@@ -294,6 +400,9 @@ class WbFbsOrdersCollector:
             "complete": complete,
             "next_cursor": cursor,
             "upstream_method": "GET",
+            "upstream_methods": ["GET /api/v3/orders"]
+            + (["POST /api/v3/orders/status (read semantic)"] if status_observations else []),
+            "status_observation_count": len(status_observations),
             "mutates_wb": False,
             "creates_inventory_movement": False,
         }
@@ -335,11 +444,13 @@ class WbFbsOrdersCollector:
                 (*params, page_size, offset),
             ).fetchall()
             state = _state(conn)
+            shadow = _shadow_state(conn, state)
         payload = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "ready",
             "collector": self._collector_status(state),
+            "shadow": shadow,
             "policy": _policy(),
             "filters": {"search": search_value, "nm_id": nm_value, "supply_id": supply_value},
             "page": _page(page_number, page_size, total),
@@ -362,6 +473,16 @@ class WbFbsOrdersCollector:
                 (order_value, limit),
             ).fetchall()
             state = _state(conn)
+            status_rows = conn.execute(
+                f"SELECT * FROM {STATUS_OBSERVATIONS_TABLE} WHERE order_id=? "
+                "ORDER BY observation_sequence DESC LIMIT ?",
+                (order_value, limit),
+            ).fetchall()
+            evidence_rows = conn.execute(
+                f"SELECT * FROM {IDENTITY_EVIDENCE_TABLE} WHERE order_id=? "
+                "ORDER BY evidence_sequence DESC LIMIT ?",
+                (order_value, limit),
+            ).fetchall()
         if not rows:
             raise WbFbsOrdersError(
                 "fbs_order_not_found", "Official FBS order was not found in the cache", http_status=404
@@ -375,6 +496,8 @@ class WbFbsOrdersCollector:
                 "policy": _policy(),
                 "current": _public_order(rows[0]),
                 "history": [_public_order(row) for row in rows],
+                "status_history": [dict(row) for row in status_rows],
+                "mapping_evidence": [dict(row) for row in evidence_rows],
             }
         )
 
@@ -392,6 +515,7 @@ class WbFbsOrdersCollector:
         ignored_count: int,
         complete: bool,
         observations: list[Mapping[str, Any]],
+        status_observations: list[Mapping[str, Any]],
     ) -> int:
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             ensure_wb_fbs_orders_schema(conn)
@@ -399,15 +523,15 @@ class WbFbsOrdersCollector:
             conn.executemany(
                 f"""INSERT OR IGNORE INTO {OBSERVATIONS_TABLE}(
                        observation_id,order_id,source_revision,supply_id,delivery_type,
-                       source_created_at,warehouse_id,office_id,nm_id,chrt_id,skus_json,
+                       source_created_at,warehouse_id,office_id,nm_id,chrt_id,seller_sku,skus_json,
                        cargo_type,cross_border_type,is_zero_order,observed_at,
                        collector_date_from,collector_date_to,collector_cursor
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         row["observation_id"], row["order_id"], row["source_revision"],
                         row["supply_id"], row["delivery_type"], row["source_created_at"],
-                        row["warehouse_id"], row["office_id"], row["nm_id"], row["chrt_id"],
+                        row["warehouse_id"], row["office_id"], row["nm_id"], row["chrt_id"], row["seller_sku"],
                         row["skus_json"], row["cargo_type"], row["cross_border_type"],
                         int(row["is_zero_order"]), row["observed_at"], row["collector_date_from"],
                         row["collector_date_to"], row["collector_cursor"],
@@ -416,6 +540,21 @@ class WbFbsOrdersCollector:
                 ],
             )
             new_count = conn.total_changes - before
+            conn.executemany(
+                f"""INSERT OR IGNORE INTO {STATUS_OBSERVATIONS_TABLE}(
+                       observation_id,order_id,order_revision,status_digest,supplier_status,
+                       wb_status,positive_quantity,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        row["observation_id"], row["order_id"], row["order_revision"],
+                        row["status_digest"], row["supplier_status"], row["wb_status"],
+                        row["positive_quantity"], row["observed_at"],
+                    )
+                    for row in status_observations
+                ],
+            )
+            self._persist_identity_evidence(conn, observations)
             _upsert_state(
                 conn,
                 run_id=run_id,
@@ -435,6 +574,57 @@ class WbFbsOrdersCollector:
             )
             conn.commit()
         return int(new_count)
+
+    def _persist_identity_evidence(
+        self, conn: sqlite3.Connection, observations: list[Mapping[str, Any]]
+    ) -> None:
+        for row in observations:
+            warehouse_id = row.get("warehouse_id")
+            barcodes = json.loads(str(row["skus_json"]))
+            barcode = str(barcodes[0] or "") if isinstance(barcodes, list) and len(barcodes) == 1 else ""
+            seller_sku = str(row.get("seller_sku") or "")
+            warehouse_mapping = conn.execute(
+                f"""SELECT mapping_id FROM {WAREHOUSE_MAPPINGS_TABLE}
+                    WHERE seller_warehouse_id=? AND active=1
+                    ORDER BY created_at DESC,mapping_id DESC LIMIT 1""",
+                (warehouse_id,),
+            ).fetchone() if warehouse_id else None
+            identity_mapping = conn.execute(
+                f"""SELECT mapping_id FROM {IDENTITY_MAPPINGS_TABLE}
+                    WHERE source_nm_id=? AND source_chrt_id=? AND source_barcode=?
+                      AND source_sku=? AND active=1
+                    ORDER BY created_at DESC,mapping_id DESC LIMIT 1""",
+                (row["nm_id"], row.get("chrt_id") or 0, barcode, seller_sku),
+            ).fetchone() if row.get("chrt_id") and barcode and seller_sku else None
+            outcome = "unmatched_warehouse" if warehouse_mapping is None else (
+                "deferred" if not row.get("chrt_id") or not barcode or not seller_sku else
+                "unmatched_identity" if identity_mapping is None else "matched"
+            )
+            evidence = {
+                "order_id": int(row["order_id"]),
+                "order_revision": str(row["source_revision"]),
+                "warehouse_id": warehouse_id,
+                "nm_id": int(row["nm_id"]),
+                "chrt_id": row.get("chrt_id"),
+                "barcode": barcode,
+                "seller_sku": seller_sku,
+                "warehouse_mapping_id": str(warehouse_mapping[0]) if warehouse_mapping else "",
+                "identity_mapping_id": str(identity_mapping[0]) if identity_mapping else "",
+                "outcome": outcome,
+            }
+            digest = _fingerprint(evidence)
+            conn.execute(
+                f"""INSERT OR IGNORE INTO {IDENTITY_EVIDENCE_TABLE}(
+                       evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,barcode,
+                       seller_sku,outcome,warehouse_mapping_id,identity_mapping_id,evidence_digest,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "fbs_map_" + digest.removeprefix("sha256:")[:32], evidence["order_id"],
+                    evidence["order_revision"], warehouse_id, evidence["nm_id"], evidence["chrt_id"],
+                    barcode, seller_sku, outcome, evidence["warehouse_mapping_id"],
+                    evidence["identity_mapping_id"], digest, row["observed_at"],
+                ),
+            )
 
     def _persist_failure(
         self,
@@ -488,7 +678,9 @@ class WbFbsOrdersCollector:
             "reason": "collector_enabled" if configured else "collector_default_off",
             "upstream": "WB Marketplace API / FBS Orders",
             "upstream_method": "GET",
-            "uses_status_post": False,
+            "upstream_methods": ["GET /api/v3/orders", "POST /api/v3/orders/status"],
+            "uses_status_post": True,
+            "status_post_semantic": "official_read_only",
             "last_run": dict(state),
         }
 
@@ -526,6 +718,7 @@ def _normalize_order(
         "office_id": _safe_nonnegative_int(raw.get("officeId")),
         "nm_id": nm_id,
         "chrt_id": _safe_nonnegative_int(raw.get("chrtId")),
+        "seller_sku": _safe_text(raw.get("article") or raw.get("vendorCode"), maximum=160),
         "skus": skus,
         "cargo_type": _safe_nonnegative_int(raw.get("cargoType")),
         "cross_border_type": _safe_nonnegative_int(raw.get("crossBorderType")),
@@ -544,6 +737,30 @@ def _normalize_order(
         "collector_date_from": date_from,
         "collector_date_to": date_to,
         "collector_cursor": cursor,
+    }
+
+
+def _normalize_status(
+    status: WbFbsOrderStatus,
+    *,
+    order: Mapping[str, Any],
+    observed_at: str,
+) -> dict[str, Any]:
+    safe = {
+        "order_id": int(status.order_id),
+        "order_revision": str(order["source_revision"]),
+        "supplier_status": _safe_text(status.supplier_status, maximum=80),
+        "wb_status": _safe_text(status.wb_status, maximum=80),
+        "positive_quantity": 1,
+    }
+    digest = _fingerprint(safe)
+    return {
+        **safe,
+        "status_digest": digest,
+        "observation_id": "fbs_status_" + hashlib.sha256(
+            f"{safe['order_id']}:{safe['order_revision']}:{digest}".encode("utf-8")
+        ).hexdigest()[:32],
+        "observed_at": observed_at,
     }
 
 
@@ -636,6 +853,7 @@ def _public_order(row: sqlite3.Row) -> dict[str, Any]:
         "office_id": row["office_id"],
         "nm_id": int(row["nm_id"]),
         "chrt_id": row["chrt_id"],
+        "seller_sku": str(row["seller_sku"] or ""),
         "skus": skus if isinstance(skus, list) else [],
         "cargo_type": row["cargo_type"],
         "cross_border_type": row["cross_border_type"],
@@ -668,6 +886,46 @@ def _state(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _shadow_state(conn: sqlite3.Connection, state: Mapping[str, Any]) -> dict[str, Any]:
+    earliest = conn.execute(
+        f"SELECT MIN(source_created_at) FROM {OBSERVATIONS_TABLE} WHERE source_created_at<>''"
+    ).fetchone()[0]
+    status_count = int(conn.execute(f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE}").fetchone()[0])
+    evidence_counts = {
+        str(row["outcome"]): int(row["count"])
+        for row in conn.execute(
+            f"SELECT outcome,COUNT(*) AS count FROM {IDENTITY_EVIDENCE_TABLE} GROUP BY outcome"
+        ).fetchall()
+    }
+    warehouse_mappings = int(
+        conn.execute(f"SELECT COUNT(*) FROM {WAREHOUSE_MAPPINGS_TABLE} WHERE active=1").fetchone()[0]
+    )
+    identity_mappings = int(
+        conn.execute(f"SELECT COUNT(*) FROM {IDENTITY_MAPPINGS_TABLE} WHERE active=1").fetchone()[0]
+    )
+    return {
+        "mode": "query_only_shadow",
+        "collector_default_off": True,
+        "backfill_execution_enabled": False,
+        "backfill_plan": {
+            "review_range_from": BACKFILL_REVIEW_FROM,
+            "earliest_official_order_date": str(earliest or "")[:10],
+            "earliest_date_is_computed": True,
+            "guessed_start_date": False,
+            "cursor": int(state.get("next_cursor") or 0),
+            "last_error": str(state.get("error") or ""),
+        },
+        "status_observation_count": status_count,
+        "warehouse_mapping_count": warehouse_mappings,
+        "identity_mapping_count": identity_mappings,
+        "mapping_outcomes": evidence_counts,
+        "unmatched_count": int(evidence_counts.get("unmatched_warehouse", 0))
+        + int(evidence_counts.get("unmatched_identity", 0)),
+        "live_physical_trigger": None,
+        "supplier_status_complete_triggers_debit": False,
+    }
+
+
 def _schema(conn: sqlite3.Connection) -> dict[str, Any]:
     tables = {
         str(row[0])
@@ -692,7 +950,8 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
 def _policy() -> dict[str, Any]:
     return {
         "official_source": True,
-        "upstream_get_only": True,
+        "upstream_get_only": False,
+        "status_post_is_read_semantic": True,
         "stores_customer_address": False,
         "stores_customer_comment": False,
         "append_only_observations": True,
@@ -704,6 +963,8 @@ def _policy() -> dict[str, Any]:
         "materializes_balance": False,
         "mutates_wb": False,
         "switches_writer_or_reader": False,
+        "supplier_status_complete_triggers_debit": False,
+        "live_physical_trigger_selected": False,
     }
 
 

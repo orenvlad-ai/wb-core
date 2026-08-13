@@ -9204,6 +9204,10 @@ def _render_sheet_vitrina_supplier_ui(
         "can_price_check": bool(can_recheck_prices),
         "business_today": current_business_date_iso(),
         "factual_date_correction_segment": DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT,
+        "guided_ff_acceptance": True,
+        "ff_pool_path": DEFAULT_FF_POOL_PATH,
+        "ff_pool_china_template_path": f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china-template.xlsx",
+        "ff_pool_china_preview_path": f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'
@@ -9261,6 +9265,9 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "proxy_v4_parameters_path": DEFAULT_PROXY_V4_PARAMETERS_PATH,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
         "sources_sessions_path": DEFAULT_SOURCES_SESSIONS_PATH,
+        "ff_pool_path": DEFAULT_FF_POOL_PATH,
+        "ff_pool_facilities_path": DEFAULT_FF_POOL_FACILITIES_PATH,
+        "ff_pool_fbs_orders_path": DEFAULT_FF_POOL_FBS_ORDERS_PATH,
         "spp_proxy_source_check_path": DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
