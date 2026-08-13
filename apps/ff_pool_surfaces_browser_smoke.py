@@ -23,6 +23,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -94,15 +95,16 @@ def _seed(runtime: RegistryUploadDbBackedRuntime, clock: Clock) -> None:
         )
         conn.commit()
     surface = FfPoolSurface(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir, timestamp_factory=clock)
-    for request_id, name in (
-        ("browser:facility:one", "Москва Север"),
-        ("browser:facility:two", "Оренбург"),
-        ("browser:facility:xss", "<img src=x onerror=window.__ffPoolXss=1>"),
+    for request_id, name, city in (
+        ("browser:facility:one", "Москва Север", "Москва"),
+        ("browser:facility:two", "Оренбург", "Оренбург"),
+        ("browser:facility:xss", "<img src=x onerror=window.__ffPoolXss=1>", "Москва"),
     ):
         surface.create_facility(
             {
                 "request_id": request_id,
                 "name": name,
+                "city": city,
                 "active": True,
                 "display_timezone": "Asia/Yekaterinburg",
             },
@@ -173,6 +175,21 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     page.keyboard.press("Escape")
     page.locator("[data-ff-pool-modal]").wait_for(state="hidden")
     assert page.evaluate("document.activeElement === document.querySelector('[data-ff-pool-open]')")
+
+    response = page.goto(f"{base}{DEFAULT_SETTINGS_UI_PATH}?embedded=1#warehouses", wait_until="domcontentloaded")
+    assert response is not None and response.status == 200
+    page.get_by_role("button", name="Склады").click()
+    page.locator("[data-facility-id]").first.wait_for(state="visible")
+    assert page.locator("[data-facility-id]").count() == 3
+    settings_text = page.locator("#warehousesGroupPanel").inner_text()
+    assert "Системные пулы: FBS · FBO" in settings_text
+    assert "Review range начинается с 2026-08-01" in settings_text
+    assert "Default-off" in settings_text
+    assert "Адрес в MVP отсутствует" in settings_text
+    assert page.locator("#warehousesGroupPanel img").count() == 0
+    assert page.evaluate("window.__ffPoolXss") is None
+    assert page.locator("#warehousesGroupPanel").evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    page.screenshot(path=str(screenshot_path.with_name(screenshot_path.stem + "-settings" + screenshot_path.suffix)), full_page=False)
     assert not page_errors, page_errors
     fatal_console_errors = [item for item in console_errors if not item.startswith("Failed to load resource:")]
     assert not fatal_console_errors, fatal_console_errors

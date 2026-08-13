@@ -733,6 +733,10 @@ class SupplierShipmentsBlock:
         new_acceptance = _resolve_optional_date_field(
             payload, edited, header, "actual_ff_acceptance_date"
         )
+        if old_acceptance != new_acceptance:
+            raise ValueError(
+                "Фактическая дата приёмки на FF проводится только единым документом «Принять на FF»."
+            )
         validate_supplier_factual_dates(
             actual_shipment_date=new_shipment,
             actual_ff_acceptance_date=new_acceptance,
@@ -856,6 +860,11 @@ class SupplierShipmentsBlock:
             raise ValueError("confirmation token does not match the shipment")
         if preview.get("consumed_at"):
             return preview
+        preview_changes = list((preview.get("payload") or {}).get("changes") or [])
+        if any(str(item.get("field") or "") == "actual_ff_acceptance_date" for item in preview_changes):
+            raise ValueError(
+                "Legacy confirmation token cannot post FF acceptance; use «Принять на FF»."
+            )
         if _supplier_confirmation_is_expired(
             str(preview.get("expires_at") or ""), self.timestamp_factory()
         ):

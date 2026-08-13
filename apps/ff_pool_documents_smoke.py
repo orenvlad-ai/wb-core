@@ -220,8 +220,8 @@ def _xlsx_contracts(
     assert len(sheet.data_validations.dataValidation) == 1
     assert sheet["B6"].number_format == "@"
     assert set(sheet.tables) == {"ChinaAcceptanceTable"}
-    sheet["F6"], sheet["G6"] = 4, 6
-    sheet["F7"], sheet["G7"] = 5, 0
+    sheet["G6"], sheet["H6"] = 4, 6
+    sheet["G7"], sheet["H7"] = 5, 0
     buffer = BytesIO()
     workbook.save(buffer)
     china_ready = service.preview_china_acceptance_workbook(

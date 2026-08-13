@@ -109,6 +109,12 @@
     .settings-tab-button:hover { border-color: var(--border); color: var(--text); background: var(--panel-2); }
     .settings-tab-button.is-active { border-color: rgba(167, 139, 250, .48); background: var(--panel-2); color: var(--text); }
     .settings-panels { min-width: 0; }
+    .warehouse-form { display: grid; grid-template-columns: minmax(180px,2fr) minmax(140px,1fr) minmax(190px,1fr) minmax(110px,.6fr) auto; gap: 10px; align-items: end; margin-top: 14px; }
+    .warehouse-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 10px; margin-top: 12px; }
+    .warehouse-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-2); }
+    .warehouse-card h3 { margin: 0 0 5px; font-size: 16px; }
+    .warehouse-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+    .warehouse-shadow { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 8px; margin-top: 12px; }
     .settings-panel[hidden], .settings-group-panel[hidden] { display: none; }
     .calculation-grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 12px; margin-top: 16px; }
     .calculation-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--panel-2); }
@@ -200,6 +206,7 @@
     .recovery-step.is-done { border-color: var(--success); color: var(--success); background: rgba(52, 211, 153, .08); }
     .source-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
     @media (max-width: 760px) {
+      .warehouse-form { grid-template-columns: 1fr; }
       main { padding: 16px; }
       button, .button-link { width: 100%; }
       .document-toolbar { grid-template-columns: 1fr; }
@@ -235,6 +242,7 @@
         <button class="settings-tab-button" type="button" data-settings-group-button="user-directory" aria-controls="userDirectoryGroupPanel" aria-selected="false">Расчётные параметры</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="auto-updates" aria-controls="autoUpdatesGroupPanel" aria-selected="false">Автообновления</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="sources-sessions" aria-controls="sourcesSessionsGroupPanel" aria-selected="false">Источники и сессии</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="warehouses" aria-controls="warehousesGroupPanel" aria-selected="false">Склады</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="users" aria-controls="usersGroupPanel" aria-selected="false">Пользователи</button>
       </nav>
 
@@ -507,6 +515,27 @@
         <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective from</th><th>Source weeks</th><th>Выкуп</th><th>Налог</th><th>Расходы</th><th>Статус</th><th>Создано</th></tr></thead><tbody id="proxyV4HistoryRows"><tr><td colspan="8">История загружается...</td></tr></tbody></table></div>
       </section>
 
+      <section id="warehousesGroupPanel" class="block settings-group-panel" data-settings-group-panel="warehouses" aria-labelledby="warehousesTitle" hidden>
+        <div class="toolbar" style="justify-content: space-between;">
+          <div><h2 id="warehousesTitle">Склады</h2><p>Географические FF. FBS и FBO — два фиксированных системных пула каждого склада.</p></div>
+          <button id="reloadWarehousesButton" type="button">Обновить</button>
+        </div>
+        <p id="warehousesActivationMessage" class="message warning">Читаем безопасный статус...</p>
+        <div class="warehouse-form">
+          <label class="field"><span>Название</span><input id="warehouseNameInput" placeholder="Например, FF Москва"></label>
+          <label class="field"><span>Город</span><input id="warehouseCityInput" placeholder="Москва"></label>
+          <label class="field"><span>Часовой пояс</span><input id="warehouseTimezoneInput" value="Asia/Yekaterinburg"></label>
+          <label class="field"><span>Статус</span><select id="warehouseActiveInput"><option value="true">Активен</option><option value="false">Неактивен</option></select></label>
+          <button id="createWarehouseButton" class="primary" type="button">Создать</button>
+        </div>
+        <p class="warehouse-meta">Identity и code назначает сервер и не меняет при переименовании. Адрес в MVP отсутствует. Удаление не поддерживается. Рекомендуемый будущий setup: FF Москва — active; FF Оренбург — inactive. Эта подсказка не создаёт строки.</p>
+        <div id="warehouseCards" class="warehouse-grid"><p>Склады загружаются...</p></div>
+        <h2 style="margin-top:22px;">FBS read-only shadow</h2>
+        <p class="warehouse-meta">Review range начинается с 2026-08-01; фактическая earliest official date вычисляется только из наблюдений. Сбор и backfill default-off.</p>
+        <div id="fbsShadowCards" class="warehouse-shadow"></div>
+        <p id="fbsShadowMessage" class="message">Читаем status/cursor/mapping observability...</p>
+      </section>
+
       <section id="autoUpdatesGroupPanel" class="block settings-group-panel" data-settings-group-panel="auto-updates" aria-labelledby="autoUpdatesTitle" hidden>
         <div class="toolbar" style="justify-content: space-between;">
           <div>
@@ -650,6 +679,9 @@
       const proxyV4ParametersPreviewPath = config.proxy_v4_parameters_preview_path;
       const autoUpdatesPath = config.auto_updates_path;
       const sourcesSessionsPath = config.sources_sessions_path;
+      const ffPoolPath = config.ff_pool_path;
+      const ffPoolFacilitiesPath = config.ff_pool_facilities_path;
+      const ffPoolFbsOrdersPath = config.ff_pool_fbs_orders_path;
       const sourceRoutes = {
         seller: {
           check: config.seller_session_check_path,
@@ -761,6 +793,16 @@
       const reloadAutoUpdatesButton = document.getElementById("reloadAutoUpdatesButton");
       const reloadSourcesSessionsButton = document.getElementById("reloadSourcesSessionsButton");
       const sourcesSessionsMessage = document.getElementById("sourcesSessionsMessage");
+      const reloadWarehousesButton = document.getElementById("reloadWarehousesButton");
+      const createWarehouseButton = document.getElementById("createWarehouseButton");
+      const warehouseNameInput = document.getElementById("warehouseNameInput");
+      const warehouseCityInput = document.getElementById("warehouseCityInput");
+      const warehouseTimezoneInput = document.getElementById("warehouseTimezoneInput");
+      const warehouseActiveInput = document.getElementById("warehouseActiveInput");
+      const warehouseCards = document.getElementById("warehouseCards");
+      const warehousesActivationMessage = document.getElementById("warehousesActivationMessage");
+      const fbsShadowCards = document.getElementById("fbsShadowCards");
+      const fbsShadowMessage = document.getElementById("fbsShadowMessage");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
       const NOMENCLATURE_COLUMNS_STORAGE_KEY = "wb-core:sheet-vitrina-v1:nomenclature-columns:v1";
@@ -893,7 +935,7 @@
       }
 
       function activateSettingsGroup(groupName, options) {
-        const allowed = ["user-directory", "auto-updates", "sources-sessions"].includes(groupName) || (groupName === "users" && canManageUsers);
+        const allowed = ["user-directory", "auto-updates", "sources-sessions", "warehouses"].includes(groupName) || (groupName === "users" && canManageUsers);
         const requested = allowed ? groupName : "directories";
         settingsGroupButtons.forEach((button) => {
           const isActive = button.dataset.settingsGroupButton === requested;
@@ -924,11 +966,14 @@
         if (requested === "sources-sessions") {
           loadSourcesSessions({refreshStale: true});
         }
+        if (requested === "warehouses") {
+          loadWarehouses();
+        }
       }
 
       function restoreSettingsGroup() {
         const requestedByHash = String(window.location.hash || "").replace(/^#/, "");
-        if (["users", "user-directory", "auto-updates", "sources-sessions"].includes(requestedByHash)) {
+        if (["users", "user-directory", "auto-updates", "sources-sessions", "warehouses"].includes(requestedByHash)) {
           activateSettingsGroup(requestedByHash, { persist: false });
           return;
         }
@@ -938,7 +983,7 @@
         } catch (error) {
           saved = "";
         }
-        activateSettingsGroup(["users", "user-directory", "auto-updates", "sources-sessions"].includes(saved) ? saved : "directories", { persist: false });
+        activateSettingsGroup(["users", "user-directory", "auto-updates", "sources-sessions", "warehouses"].includes(saved) ? saved : "directories", { persist: false });
       }
 
       function activateSettingsTab(tabName, options) {
@@ -984,6 +1029,104 @@
           throw new Error(payload.error || rowErrors || ("HTTP " + response.status));
         }
         return payload;
+      }
+
+      function warehouseRequestId(prefix) {
+        const suffix = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+        return String(prefix) + ":" + suffix;
+      }
+
+      async function loadWarehouses() {
+        warehousesActivationMessage.textContent = "Читаем склады и безопасные gates...";
+        try {
+          const [capabilities, facilities, fbs] = await Promise.all([
+            fetchJson(ffPoolPath + "/capabilities"),
+            fetchJson(ffPoolFacilitiesPath + "?limit=100&active=all"),
+            fetchJson(ffPoolFbsOrdersPath + "?limit=10")
+          ]);
+          const management = capabilities.facility_management || {};
+          const guided = capabilities.guided_acceptance || {};
+          const canWrite = Boolean(management.available);
+          createWarehouseButton.disabled = !canWrite;
+          warehousesActivationMessage.textContent = canWrite
+            ? (guided.reason_ru || "Управление складами включено.")
+            : "Создание и изменение выключены до exact production gate. Просмотр безопасен; production rows не создаются.";
+          warehousesActivationMessage.className = "message " + (canWrite ? "success" : "warning");
+          renderWarehouses(facilities.facilities || [], canWrite);
+          renderFbsShadow(fbs.shadow || {}, fbs.collector || {});
+        } catch (error) {
+          warehousesActivationMessage.textContent = error.message;
+          warehousesActivationMessage.className = "message error";
+        }
+      }
+
+      function renderWarehouses(rows, canWrite) {
+        if (!rows.length) {
+          warehouseCards.innerHTML = '<article class="warehouse-card"><h3>Склады ещё не созданы</h3><p class="warehouse-meta">FF Москва и FF Оренбург показаны только как reviewed setup contract; production rows отсутствуют.</p></article>';
+          return;
+        }
+        warehouseCards.innerHTML = rows.map((row) => '<article class="warehouse-card" data-facility-id="' + escapeHtml(row.facility_id) + '" data-active="' + (row.active ? 'true' : 'false') + '">' +
+          '<div class="toolbar" style="justify-content:space-between"><span class="pill ' + (row.active ? 'success' : 'warning') + '">' + (row.active ? 'Активен' : 'Неактивен') + '</span><span class="warehouse-meta">' + escapeHtml(row.code) + '</span></div>' +
+          '<label class="field"><span>Название</span><input data-warehouse-name value="' + escapeHtml(row.name) + '" ' + (canWrite ? '' : 'readonly') + '></label>' +
+          '<p class="warehouse-meta">Город: ' + escapeHtml(row.city || '—') + ' · Identity: ' + escapeHtml(row.facility_id) + '</p>' +
+          '<p class="warehouse-meta">Системные пулы: FBS · FBO. Документов: ' + Number(row.document_count || 0) + '</p>' +
+          '<div class="compact-actions"><button type="button" data-warehouse-save ' + (canWrite ? '' : 'disabled') + '>Сохранить имя</button><button type="button" data-warehouse-toggle ' + (canWrite ? '' : 'disabled') + '>' + (row.active ? 'Деактивировать' : 'Активировать') + '</button><button type="button" data-warehouse-audit>Аудит</button></div>' +
+          '<div class="warehouse-meta" data-warehouse-audit-output hidden></div></article>').join('');
+        warehouseCards.querySelectorAll('[data-warehouse-save]').forEach((button) => button.addEventListener('click', () => updateWarehouse(button, {name: button.closest('[data-facility-id]').querySelector('[data-warehouse-name]').value})));
+        warehouseCards.querySelectorAll('[data-warehouse-toggle]').forEach((button) => button.addEventListener('click', () => updateWarehouse(button, {active: button.closest('[data-facility-id]').dataset.active !== 'true'})));
+        warehouseCards.querySelectorAll('[data-warehouse-audit]').forEach((button) => button.addEventListener('click', () => loadWarehouseAudit(button)));
+      }
+
+      async function createWarehouse() {
+        createWarehouseButton.disabled = true;
+        try {
+          await fetchJson(ffPoolFacilitiesPath, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({request_id:warehouseRequestId('facility-create'), name:warehouseNameInput.value.trim(), city:warehouseCityInput.value.trim(), display_timezone:warehouseTimezoneInput.value.trim(), active:warehouseActiveInput.value === 'true'})});
+          warehouseNameInput.value = '';
+          warehouseCityInput.value = '';
+          await loadWarehouses();
+        } catch (error) {
+          warehousesActivationMessage.textContent = error.message;
+          warehousesActivationMessage.className = 'message error';
+        } finally { createWarehouseButton.disabled = false; }
+      }
+
+      async function updateWarehouse(button, changes) {
+        const card = button.closest('[data-facility-id]');
+        button.disabled = true;
+        try {
+          const detail = await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
+          await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...changes, request_id:warehouseRequestId('facility-update'), expected_updated_at:detail.facility.updated_at})});
+          await loadWarehouses();
+        } catch (error) {
+          warehousesActivationMessage.textContent = error.message;
+          warehousesActivationMessage.className = 'message error';
+          button.disabled = false;
+        }
+      }
+
+      async function loadWarehouseAudit(button) {
+        const card = button.closest('[data-facility-id]');
+        const output = card.querySelector('[data-warehouse-audit-output]');
+        try {
+          const detail = await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
+          output.hidden = false;
+          output.textContent = (detail.audit || []).map((item) => item.changed_at + ' · ' + item.action + ' · ' + item.actor).join('\n') || 'Аудит пока пуст.';
+        } catch (error) { output.hidden = false; output.textContent = error.message; }
+      }
+
+      function renderFbsShadow(shadow, collector) {
+        const plan = shadow.backfill_plan || {};
+        const cards = [
+          ['Collector', collector.effective ? 'Включён' : 'Default-off'],
+          ['Review range', plan.review_range_from || '2026-08-01'],
+          ['Earliest official', plan.earliest_official_order_date || 'Нет наблюдений'],
+          ['Status observations', shadow.status_observation_count || 0],
+          ['Unmatched', shadow.unmatched_count || 0],
+          ['Cursor', plan.cursor || 0]
+        ];
+        fbsShadowCards.innerHTML = cards.map((item) => '<div class="calculation-card"><span class="warehouse-meta">' + escapeHtml(item[0]) + '</span><div class="calculation-total" style="font-size:17px">' + escapeHtml(item[1]) + '</div></div>').join('');
+        fbsShadowMessage.textContent = plan.last_error ? ('Последняя ошибка: ' + plan.last_error) : 'Только query-only observability. supplierStatus=complete не является physical debit trigger.';
+        fbsShadowMessage.className = 'message ' + (plan.last_error ? 'error' : 'success');
       }
 
       function sourceTimestamp(...values) {
@@ -3382,6 +3525,8 @@
         loadVitrinaSchedules();
       });
       reloadSourcesSessionsButton.addEventListener("click", () => loadSourcesSessions({refreshStale: false}));
+      reloadWarehousesButton.addEventListener("click", loadWarehouses);
+      createWarehouseButton.addEventListener("click", createWarehouse);
       Array.from(document.querySelectorAll("[data-source-check]")).forEach((button) => {
         button.addEventListener("click", () => checkSource(button.dataset.sourceCheck || ""));
       });

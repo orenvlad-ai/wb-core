@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from decimal import Decimal
 import json
 import sys
 from tempfile import TemporaryDirectory
@@ -23,6 +24,7 @@ from packages.application.our_wb_costs import (  # noqa: E402
     OurWbCostBlock,
     classify_wb_supply_transit,
 )
+from packages.application.ff_pool_surfaces import FfPoolSurface  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
     _connect,
@@ -81,12 +83,32 @@ def main() -> None:
         )
         _seed_supplier_shipment(runtime)
         _seed_financial_inputs(runtime)
+        _seed_supplier_shipment(runtime, shipment_id="sup_preview", actual_ff_acceptance_date="")
+        _seed_financial_inputs(runtime, shipment_id="sup_preview")
 
         block = OurWbCostBlock(runtime=runtime, timestamp_factory=lambda: NOW)
-        materialized = block.materialize_supplier_ff_cost_layer("sup_smoke")
+        _shipment, acceptance_lines, _revision = FfPoolSurface(
+            db_path=runtime.db_path,
+            runtime_dir=runtime.runtime_dir,
+            timestamp_factory=lambda: NOW,
+        ).supplier_shipment_source("sup_preview")
+        if Decimal(acceptance_lines[0]["capital_rub"]) != Decimal("12600"):
+            raise AssertionError("guided acceptance template must use a non-persisting exact cost preview")
+        preview = block.preview_supplier_ff_cost_layer("sup_smoke")
+        if float(preview["lines"][0]["qty"]) != 10:
+            raise AssertionError("cost preview must calculate without a persisted accepted layer")
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            if conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers").fetchone()[0]:
+                raise AssertionError("cost preview must not persist a supplier FF layer")
+        materialized = block.materialize_supplier_ff_cost_layer(
+            "sup_smoke", accepted_quantities_by_nm={497413000: 7}
+        )
         if not materialized or not materialized.get("materialized"):
             raise AssertionError(f"first FF cost materialization must write a layer, got {materialized}")
-        second = block.materialize_supplier_ff_cost_layer("sup_smoke")
+        second = block.materialize_supplier_ff_cost_layer(
+            "sup_smoke", accepted_quantities_by_nm={497413000: 7}
+        )
         if second is None or second.get("materialized"):
             raise AssertionError(f"second FF cost materialization must be idempotent, got {second}")
         _assert_supplier_ff_reconciliation(runtime)
@@ -1278,9 +1300,11 @@ def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -
         _ensure_schema(conn)
         row = conn.execute(
             """
-            SELECT status, weighted_avg_ff_unit_cost_rub, reconciliation_status
-            FROM sheet_vitrina_v1_supplier_ff_cost_layers
-            WHERE supplier_shipment_id = 'sup_smoke' AND is_current = 1
+            SELECT layer.status,layer.weighted_avg_ff_unit_cost_rub,layer.reconciliation_status,
+                   line.qty AS accepted_qty
+            FROM sheet_vitrina_v1_supplier_ff_cost_layers layer
+            JOIN sheet_vitrina_v1_supplier_ff_cost_layer_lines line ON line.layer_id=layer.layer_id
+            WHERE layer.supplier_shipment_id = 'sup_smoke' AND layer.is_current = 1
             """
         ).fetchone()
     if row is None:
@@ -1291,6 +1315,8 @@ def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -
         raise AssertionError(f"weighted SKU FF average must reconcile to {expected}, got {actual}")
     if row["reconciliation_status"] != "ok":
         raise AssertionError(f"reconciliation must be ok, got {row['reconciliation_status']}")
+    if float(row["accepted_qty"]) != 7:
+        raise AssertionError("supplier FF cost layer must retain only actual accepted quantity")
 
 
 def _assert_proxy_profit_3_evaluator() -> None:

@@ -1,4 +1,4 @@
-"""GET-only adapter for the official Wildberries FBS orders feed."""
+"""Read-only adapter for official WB FBS orders and status observations."""
 
 from __future__ import annotations
 
@@ -46,8 +46,15 @@ class WbFbsOrdersPage:
     date_to: int | None
 
 
+@dataclass(frozen=True)
+class WbFbsOrderStatus:
+    order_id: int
+    supplier_status: str
+    wb_status: str
+
+
 class HttpBackedWbFbsOrdersSource:
-    """Reads only ``GET /api/v3/orders`` from the Marketplace API."""
+    """Uses GET orders plus POST status strictly as official read semantics."""
 
     def __init__(
         self,
@@ -148,6 +155,67 @@ class HttpBackedWbFbsOrdersSource:
             date_from=normalized_from,
             date_to=normalized_to,
         )
+
+    def list_statuses(self, order_ids: list[int]) -> list[WbFbsOrderStatus]:
+        normalized = sorted({_bounded_int(item, "order_id", minimum=1, maximum=2**63 - 1) for item in order_ids})
+        if not normalized:
+            return []
+        if len(normalized) > 1000:
+            raise ValueError("status read batch must not exceed 1000 orders")
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        body = json.dumps({"orders": normalized}, separators=(",", ":")).encode("utf-8")
+        request = urllib_request.Request(
+            url=f"{runtime.base_url}/api/v3/orders/status",
+            data=body,
+            headers={
+                "Authorization": runtime.token,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=runtime.timeout_seconds) as response:
+                status_code = _response_status(response)
+                content_type = _response_content_type(response)
+                raw_body = response.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
+            raise WbFbsOrdersHttpStatusError(
+                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
+            ) from exc
+        except (error.URLError, OSError) as exc:
+            raise WbFbsOrdersTransportError(f"WB FBS status API transport failed: {exc}") from exc
+        if status_code is not None and not 200 <= status_code < 300:
+            raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise WbFbsOrdersTransportError("WB FBS status API returned invalid JSON") from exc
+        rows = payload.get("orders") if isinstance(payload, Mapping) else None
+        if not isinstance(rows, list):
+            raise WbFbsOrdersTransportError("WB FBS status API returned an invalid status page")
+        result: list[WbFbsOrderStatus] = []
+        requested = set(normalized)
+        for item in rows:
+            if not isinstance(item, Mapping):
+                continue
+            order_id = _bounded_int(item.get("id"), "status order_id", minimum=1, maximum=2**63 - 1)
+            if order_id not in requested:
+                raise WbFbsOrdersTransportError("WB FBS status response escaped requested order scope")
+            result.append(
+                WbFbsOrderStatus(
+                    order_id=order_id,
+                    supplier_status=str(item.get("supplierStatus") or "")[:80],
+                    wb_status=str(item.get("wbStatus") or "")[:80],
+                )
+            )
+        return result
 
 
 def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:

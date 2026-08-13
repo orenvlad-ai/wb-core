@@ -481,6 +481,7 @@ class FfPoolDocumentService:
         source_content_type: str,
         shipment_lines: Iterable[Mapping[str, Any]],
         expenses: Iterable[Mapping[str, Any] | ExpenseLine] = (),
+        template_source_revision: str = "",
     ) -> dict[str, Any]:
         from packages.application.ff_pool_documents_xlsx import (
             FfPoolXlsxError,
@@ -495,7 +496,7 @@ class FfPoolDocumentService:
                 content_type=source_content_type,
                 facilities=self.active_facilities(),
                 shipment_lines=lines,
-                source_revision=identity.source_revision,
+                source_revision=str(template_source_revision or identity.source_revision),
             )
             manifest["expenses"] = [
                 asdict(item) if isinstance(item, ExpenseLine) else dict(item)
@@ -959,6 +960,8 @@ class FfPoolDocumentService:
                     details={"state": str(request["state"])},
                 )
             epoch = _writer_epoch(conn)
+            if _is_guided_china_request(request):
+                _require_guided_acceptance_activation(conn)
             manifest = _json_object(_loads(request["preview_manifest_json"], {}))
             plan = _build_posting_plan(conn, request=request, manifest=manifest, epoch=epoch)
             before_digest = _balance_digest(conn, plan["balance_keys"])
@@ -971,6 +974,19 @@ class FfPoolDocumentService:
                 }
             )
             before_images = _before_images(conn, request=request, plan=plan)
+        if _is_guided_china_request(request):
+            from packages.application.ff_pool_surfaces import FfPoolSurface
+
+            _shipment, _lines, current_source_revision = FfPoolSurface(
+                db_path=self.db_path,
+                runtime_dir=self.runtime_dir,
+                timestamp_factory=self.timestamp_factory,
+            ).supplier_shipment_source(str(request["source_id"]))
+            if current_source_revision != str(manifest.get("source_revision") or ""):
+                raise FfPoolDocumentError(
+                    "supplier_source_revision_changed",
+                    "Supplier composition or cost inputs changed after preview",
+                )
         recovery_registry = WarehouseRecoveryRegistry(
             runtime_dir=self.runtime_dir,
             db_path=self.db_path,
@@ -1028,6 +1044,13 @@ class FfPoolDocumentService:
                     raise FfPoolDocumentError(
                         "concurrent_pool_balance_drift",
                         "Pool balances changed after the posting plan was prepared",
+                    )
+                if _is_guided_china_request(current_request):
+                    _apply_guided_acceptance_legacy(
+                        conn,
+                        request=current_request,
+                        manifest=_json_object(_loads(current_request["preview_manifest_json"], {})),
+                        posted_at=self._now(),
                     )
                 _apply_plan(
                     conn,
@@ -1099,6 +1122,8 @@ class FfPoolDocumentService:
                 )
                 self._event(conn, request_id=request_id, stage="replay", status="running")
             conn.commit()
+        if _is_guided_china_request(request):
+            self._replay_guided_acceptance(request)
         readback = self._verify_posted_readback(request_id)
         with _connect(self.db_path, query_only=True) as conn:
             recovery_row = conn.execute(
@@ -1135,6 +1160,34 @@ class FfPoolDocumentService:
                 self._event(conn, request_id=request_id, stage="replay", status="complete", details=readback)
             conn.commit()
         return self.status(request_id=request_id)
+
+    def _replay_guided_acceptance(self, request: Mapping[str, Any]) -> None:
+        shipment_id = str(request["source_id"])
+        from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+        from packages.application.our_wb_costs import OurWbCostBlock
+        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
+
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=self.runtime_dir)
+        manifest = _json_object(_loads(request["preview_manifest_json"], {}))
+        accepted_quantities = {
+            int(item["nm_id"]): int(item.get("accepted_quantity") or 0)
+            for item in manifest.get("allocations") or []
+        }
+        OurWbCostBlock(
+            runtime=runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).materialize_supplier_ff_cost_layer(
+            shipment_id,
+            accepted_quantities_by_nm=accepted_quantities,
+        )
+        enqueue_warehouse_targeted_recalculation(
+            runtime=runtime,
+            stable_source_id=f"supplier_shipment:{shipment_id}",
+            source_revision=str(request["request_identity"]),
+            effective_date=str(request["business_date"]),
+            affected_nm_ids=[int(item["nm_id"]) for item in manifest.get("allocations") or []],
+            requested_at=self._now(),
+        )
 
     def _verify_posted_readback(self, request_id: str) -> dict[str, Any]:
         with _connect(self.db_path, query_only=True) as conn:
@@ -1302,6 +1355,105 @@ def _build_posting_plan(
     return plan
 
 
+def _require_guided_acceptance_activation(conn: sqlite3.Connection) -> None:
+    from packages.application.ff_pool_cutover import read_ff_pool_cutover_status
+
+    status = read_ff_pool_cutover_status(conn)
+    if str(status.get("status") or "") != "applied":
+        raise FfPoolDocumentError(
+            "guided_acceptance_opening_not_active",
+            "Guided China acceptance cannot post before exact opening/cutover activation",
+            details={"opening_status": str(status.get("status") or "not_applied")},
+        )
+
+
+def _is_guided_china_request(request: Mapping[str, Any]) -> bool:
+    return (
+        str(request["document_kind"] or "") == "china_acceptance"
+        and str(request["source_type"] or "") == "china_acceptance_workbook"
+    )
+
+
+def _apply_guided_acceptance_legacy(
+    conn: sqlite3.Connection,
+    *,
+    request: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    posted_at: str,
+) -> None:
+    """Atomically own factual date + aggregate FF receipt before pool detail."""
+
+    shipment_id = str(request["source_id"] or "").strip()
+    shipment = conn.execute(
+        """SELECT shipment_id,actual_ff_acceptance_date,archived_at,order_status
+           FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?""",
+        (shipment_id,),
+    ).fetchone()
+    if shipment is None or str(shipment["archived_at"] or ""):
+        raise FfPoolDocumentError("supplier_shipment_not_found", "Source shipment is missing or archived")
+    source_key = f"supplier_shipment_acceptance:{shipment_id}"
+    prior = conn.execute(
+        "SELECT operation_id FROM sheet_vitrina_v1_ff_stock_operations WHERE source_key=?",
+        (source_key,),
+    ).fetchone()
+    if str(shipment["actual_ff_acceptance_date"] or "") or prior is not None:
+        raise FfPoolDocumentError(
+            "supplier_shipment_already_accepted",
+            "Shipment already has a factual FF acceptance; double posting is forbidden",
+            details={"shipment_id": shipment_id},
+        )
+    allocations = [
+        dict(item) for item in manifest.get("allocations") or []
+        if int(item.get("accepted_quantity") or 0) > 0
+    ]
+    if not allocations:
+        raise FfPoolDocumentError("empty_actual_acceptance", "Actual acceptance has no positive rows")
+    operation_id = "ffop_guided_" + _fingerprint(
+        {"request_identity": str(request["request_identity"]), "shipment_id": shipment_id}
+    ).removeprefix("sha256:")[:28]
+    total = sum(int(item["accepted_quantity"]) for item in allocations)
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+               operation_id,operation_type,source_type,source_key,source_object_id,
+               source_object_label,created_at,business_effective_date,created_by,
+               sku_count,total_quantity_delta,total_quantity_abs,warnings_json,diagnostics_json,
+               source_filename,source_content_type,source_file_sha256,source_file_blob
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            operation_id, "receipt", "supplier_shipment_acceptance", source_key,
+            shipment_id, shipment_id, posted_at, str(request["business_date"]),
+            str(request["actor"]), len(allocations), total, total, "[]",
+            _json({
+                "single_owner": "guided_china_acceptance",
+                "request_id": str(request["request_id"]),
+                "facility_id": str(manifest.get("facility_id") or ""),
+            }),
+            str(request["source_filename"] or ""), str(request["source_content_type"] or ""),
+            str(request["source_sha256"] or ""), request["source_file_blob"],
+        ),
+    )
+    for line_no, item in enumerate(allocations, start=1):
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+                   operation_id,line_no,nm_id,barcode,sku,nomenclature_name,comment,
+                   group_name,quantity_delta,raw_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                operation_id, line_no, int(item["nm_id"]), str(item.get("barcode") or ""),
+                str(item.get("sku") or ""), "", str(item.get("comment") or ""), "",
+                int(item["accepted_quantity"]), _json(item),
+            ),
+        )
+    changed = conn.execute(
+        """UPDATE sheet_vitrina_v1_supplier_shipments
+           SET actual_ff_acceptance_date=?,order_status='accepted_ff',updated_at=?
+           WHERE shipment_id=? AND COALESCE(actual_ff_acceptance_date,'')='' AND archived_at IS NULL""",
+        (str(request["business_date"]), posted_at, shipment_id),
+    ).rowcount
+    if changed != 1:
+        raise FfPoolDocumentError("supplier_acceptance_concurrent_drift", "Shipment acceptance changed concurrently")
+
+
 def _plan_opening(
     conn: sqlite3.Connection,
     *,
@@ -1430,14 +1582,24 @@ def _plan_china_acceptance(
         nm_id = _positive_int(item.get("nm_id"), field="acceptance nm_id")
         fbo = _nonnegative_int(item.get("quantity_fbo"), field="FBO quantity")
         fbs = _nonnegative_int(item.get("quantity_fbs"), field="FBS quantity")
-        accepted = _positive_int(item.get("accepted_quantity"), field="accepted quantity")
+        accepted = _nonnegative_int(item.get("accepted_quantity"), field="accepted quantity")
         if fbo + fbs != accepted:
             raise FfPoolDocumentError(
                 "allocation_quantity_mismatch",
                 "FBO + FBS must equal accepted quantity",
                 details={"nm_id": nm_id},
             )
-        capital = _money_cents(item.get("accepted_capital_rub"), field="accepted capital", positive=True)
+        capital = _money_cents(
+            item.get("accepted_capital_rub"),
+            field="accepted capital",
+            positive=accepted > 0,
+        )
+        if accepted == 0 and capital != 0:
+            raise FfPoolDocumentError(
+                "zero_quantity_with_capital",
+                "Zero accepted quantity must have zero accepted capital",
+                details={"nm_id": nm_id},
+            )
         identity_digest = str(item.get("identity_evidence_digest") or "").strip()
         if not identity_digest.startswith("sha256:"):
             raise FfPoolDocumentError(
@@ -1454,7 +1616,26 @@ def _plan_china_acceptance(
         total_accepted_quantity += accepted
         total_accepted_capital += capital
     expense_total = sum(int(item["amount_cents"]) for item in expenses)
-    expense_allocations = _allocate_cents(expense_total, weights)
+    expense_allocations = {key: 0 for key, _quantity in weights}
+    for expense in expenses:
+        scope = str((expense.get("metadata") or {}).get("allocation_scope") or "both").strip().upper()
+        if scope not in {"FBS", "FBO", "BOTH"}:
+            raise FfPoolDocumentError(
+                "invalid_expense_allocation_scope",
+                "China acceptance expense scope must be FBS, FBO or both",
+            )
+        scoped_weights = [
+            (key, quantity) for key, quantity in weights if scope == "BOTH" or key[1] == scope
+        ]
+        if not scoped_weights:
+            raise FfPoolDocumentError(
+                "expense_allocation_scope_empty",
+                "Expense scope has no accepted quantity",
+                details={"allocation_scope": scope},
+            )
+        allocated = _allocate_cents(int(expense["amount_cents"]), scoped_weights)
+        for key, amount in allocated.items():
+            expense_allocations[key] += int(amount)
     movements: list[dict[str, Any]] = []
     lines: list[dict[str, Any]] = []
     for (nm_id, pool), quantity in sorted(weights):
@@ -1498,10 +1679,47 @@ def _plan_china_acceptance(
         movements=movements,
         expenses=expenses,
     )
+    documents = [document]
+    discrepancies = [
+        item for item in allocations if int(item.get("discrepancy_quantity") or 0) > 0
+    ]
+    if discrepancies:
+        discrepancy_id = document_id + "_discrepancy"
+        discrepancy_lines = [
+            _document_line(
+                role=str(item.get("discrepancy_type") or "discrepancy"),
+                facility_id=facility_id,
+                pool=None,
+                nm_id=_positive_int(item.get("nm_id"), field="discrepancy nm_id"),
+                quantity=_nonnegative_int(item.get("discrepancy_quantity"), field="discrepancy quantity"),
+                capital_cents=0,
+                metadata={
+                    "expected_quantity": int(item.get("expected_quantity") or 0),
+                    "accepted_quantity": int(item.get("accepted_quantity") or 0),
+                    "comment": str(item.get("comment") or "")[:500],
+                    "identity_evidence_digest": str(item.get("identity_evidence_digest") or ""),
+                },
+            )
+            for item in discrepancies
+        ]
+        documents.append(
+            _document_blueprint(
+                document_id=discrepancy_id,
+                document_kind="transfer_discrepancy",
+                document_role="china_discrepancy",
+                root_document_id=document_id,
+                lines=discrepancy_lines,
+                movements=[],
+                relation={
+                    "parent_document_id": document_id,
+                    "relation_type": "discrepancy_of",
+                },
+            )
+        )
     return {
         "primary_document_id": document_id,
         "root_document_id": document_id,
-        "documents": [document],
+        "documents": documents,
         "domain_manifest": {
             "facility_id": facility_id,
             "accepted_quantity": total_accepted_quantity,
@@ -1509,7 +1727,8 @@ def _plan_china_acceptance(
             "expense_rub": _cents_text(expense_total),
             "quantity_conserved": sum(int(item["quantity"]) for item in lines) == total_accepted_quantity,
             "capital_conserved": sum(int(item["capital_cents"]) for item in lines) == total_accepted_capital,
-            "actual_ff_acceptance_trigger_unchanged": True,
+            "discrepancy_document_id": documents[1]["document_id"] if len(documents) > 1 else "",
+            "actual_ff_acceptance_single_owner": "guided_china_acceptance",
         },
     }
 
@@ -3085,6 +3304,33 @@ def _before_images(
             "after": None,
         }
     ]
+    if _is_guided_china_request(request):
+        shipment_id = str(request["source_id"])
+        shipment = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+            (shipment_id,),
+        ).fetchone()
+        source_key = f"supplier_shipment_acceptance:{shipment_id}"
+        operation = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE source_key=?",
+            (source_key,),
+        ).fetchone()
+        images.extend(
+            [
+                {
+                    "table": "sheet_vitrina_v1_supplier_shipments",
+                    "key": {"shipment_id": shipment_id},
+                    "before": dict(shipment) if shipment is not None else None,
+                    "after": None,
+                },
+                {
+                    "table": "sheet_vitrina_v1_ff_stock_operations",
+                    "key": {"source_key": source_key},
+                    "before": dict(operation) if operation is not None else None,
+                    "after": None,
+                },
+            ]
+        )
     for facility_id, pool, nm_id in plan["balance_keys"]:
         row = conn.execute(
             f"SELECT * FROM {BALANCES_TABLE} WHERE facility_id=? AND pool=? AND nm_id=?",

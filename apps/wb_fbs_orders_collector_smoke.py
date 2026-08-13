@@ -1,4 +1,4 @@
-"""Stage 5 official GET-only FBS collector and shadow-cache checks."""
+"""Stage 7A official read-only FBS order/status shadow checks."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.wb_fbs_orders import (  # noqa: E402
     HttpBackedWbFbsOrdersSource,
+    WbFbsOrderStatus,
     WbFbsOrdersPage,
 )
 from packages.application.ff_pool_foundation import (  # noqa: E402
@@ -30,6 +31,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 )
 from packages.application.wb_fbs_orders import (  # noqa: E402
     OBSERVATIONS_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
     STATE_TABLE,
     WbFbsOrdersCollector,
     WbFbsOrdersError,
@@ -88,6 +90,12 @@ class _Source:
             )
         raise AssertionError(f"unexpected cursor {next_cursor}")
 
+    def list_statuses(self, order_ids: list[int]) -> list[WbFbsOrderStatus]:
+        return [
+            WbFbsOrderStatus(order_id=item, supplier_status="complete", wb_status="waiting")
+            for item in order_ids
+        ]
+
 
 class _Response:
     status = 200
@@ -143,6 +151,7 @@ def main() -> None:
         assert collected["ignored_order_count"] == 2
         assert collected["new_observation_count"] == 2
         assert collected["upstream_method"] == "GET" and not collected["mutates_wb"]
+        assert collected["status_observation_count"] == 2
         assert [call["next_cursor"] for call in source.calls] == [0, 101]
 
         repeated = collector.collect_default_window()
@@ -167,6 +176,8 @@ def _adapter_contract() -> None:
 
     def opener(request: object, *, timeout: float) -> _Response:
         calls.append((request, timeout))
+        if request.get_method() == "POST":
+            return _Response({"orders": [{"id": 42, "supplierStatus": "complete", "wbStatus": "waiting"}]})
         return _Response({"next": 42, "orders": [_order(42)]})
 
     prior_token = os.environ.get("WB_API_TOKEN")
@@ -193,12 +204,18 @@ def _adapter_contract() -> None:
             "dateFrom": ["1786435200"],
             "dateTo": ["1786522400"],
         }
+        statuses = source.list_statuses([42])
+        assert statuses == [WbFbsOrderStatus(order_id=42, supplier_status="complete", wb_status="waiting")]
+        status_request, _timeout = calls[1]
+        assert status_request.get_method() == "POST"
+        assert urllib_parse.urlparse(status_request.full_url).path == "/api/v3/orders/status"
+        assert json.loads(status_request.data) == {"orders": [42]}
         try:
             source.list_orders(date_from=1, date_to=31 * 24 * 60 * 60 + 2)
             raise AssertionError("wide FBS window must fail")
         except ValueError as exc:
             assert "30 calendar days" in str(exc)
-        assert len(calls) == 1
+        assert len(calls) == 2
     finally:
         _restore_env("WB_API_TOKEN", prior_token)
         _restore_env("WB_FBS_API_BASE_URL", prior_base)
@@ -244,7 +261,10 @@ def _empty_page_cursor_contract() -> None:
 def _read_and_immutability_contract(db_path: Path, collector: WbFbsOrdersCollector) -> None:
     page = collector.orders_page(limit=1)
     assert page["status"] == "ready" and page["page"]["total"] == 2
-    assert page["collector"]["uses_status_post"] is False
+    assert page["collector"]["uses_status_post"] is True
+    assert page["collector"]["status_post_semantic"] == "official_read_only"
+    assert page["shadow"]["backfill_plan"]["review_range_from"] == "2026-08-01"
+    assert page["shadow"]["supplier_status_complete_triggers_debit"] is False
     assert page["policy"]["stores_customer_address"] is False
     assert page["policy"]["assigns_ff_origin"] is False
     assert page["policy"]["creates_movement"] is False
@@ -252,7 +272,7 @@ def _read_and_immutability_contract(db_path: Path, collector: WbFbsOrdersCollect
     assert detail["current"]["warehouse_id"] == 777 and len(detail["history"]) == 2
     assert set(detail["current"]) == {
         "observation_id", "order_id", "source_revision", "supply_id", "delivery_type",
-        "source_created_at", "warehouse_id", "office_id", "nm_id", "chrt_id", "skus",
+        "source_created_at", "warehouse_id", "office_id", "nm_id", "chrt_id", "seller_sku", "skus",
         "cargo_type", "cross_border_type", "is_zero_order", "observed_at",
     }
     with sqlite3.connect(db_path) as conn:
@@ -278,6 +298,17 @@ def _read_and_immutability_contract(db_path: Path, collector: WbFbsOrdersCollect
         try:
             conn.execute(f"DELETE FROM {OBSERVATIONS_TABLE} WHERE order_id=1001")
             raise AssertionError("FBS observations must be append-only")
+        except sqlite3.IntegrityError:
+            pass
+        assert conn.execute(f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE}").fetchone()[0] == 3
+        row = conn.execute(
+            f"SELECT supplier_status,positive_quantity FROM {STATUS_OBSERVATIONS_TABLE} "
+            "WHERE order_id=1001 ORDER BY observation_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert row == ("complete", 1)
+        try:
+            conn.execute(f"UPDATE {STATUS_OBSERVATIONS_TABLE} SET wb_status='x' WHERE order_id=1001")
+            raise AssertionError("FBS status observations must be immutable")
         except sqlite3.IntegrityError:
             pass
 

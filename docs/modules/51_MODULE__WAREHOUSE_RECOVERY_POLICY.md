@@ -238,3 +238,14 @@ bound to the deployed head, fingerprint, counts/aggregates, non-target digest
 and reversibility. A second successful run is T0. Finance raw/T3, full-store
 copies, adjacent-day backfill, global rebuild, writeoff and compensation are
 outside this contract.
+
+## Stage 7A deploy-only and future T1 boundary
+
+Migration 139 is deploy-only in the current zero-state. It adds an empty
+facility-profile table and empty append-only FBS status/mapping/evidence tables,
+plus guarded UI/workflow code. Reads and durable previews are outside business
+apply. Facility/profile creation, activation, opening, guided final posting,
+collector enablement and backfill remain future production mutations. Guided
+posting, once separately activated, is one T1 owner covering the supplier
+factual row, exact aggregate receipt, pool document/movements and targeted
+replay; partial legacy acceptance beforehand is forbidden.

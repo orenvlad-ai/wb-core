@@ -26,6 +26,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
+    DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -176,6 +177,15 @@ def _ui_contract(base: str) -> None:
     assert "facility_pool_opening" not in page
     assert "state.capabilities.document_kinds" in page
     assert page.count('data-warehouse-key="') >= 6
+    with urllib_request.urlopen(f"{base}{DEFAULT_SETTINGS_UI_PATH}?embedded=1", timeout=10) as response:
+        settings = response.read().decode("utf-8")
+    assert 'data-settings-group-button="warehouses"' in settings
+    assert "FF Москва — active" in settings and "production rows" in settings
+    assert "supplierStatus=complete" in settings
+    with urllib_request.urlopen(f"{base}{DEFAULT_SHEET_SUPPLIER_UI_PATH}?embedded=operator", timeout=10) as response:
+        supplier = response.read().decode("utf-8")
+    assert 'id="guidedAcceptanceButton"' in supplier
+    assert "Принять на FF" in supplier and "Дата — read-only результат" in supplier
 
 
 def _authorization_contract() -> None:

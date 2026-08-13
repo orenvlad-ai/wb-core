@@ -66,6 +66,15 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   facility creation, `T` selection, barrier acquisition, reviewed manifest,
   opening/checkpoint and activation remain one separately authorized
   `scope:production-mutation` run on exact trusted/deployed main.
+- Migration 139 deploys the Stage 7A Settings/acceptance/shadow code in a
+  production zero-state. `Настройки → Склады` may read empty facilities and FBS
+  observability. Guided template/preview may run only after separately gated
+  facility creation; final confirm also requires both writer epoch and applied
+  opening. Deploy must not create Moscow/Orenburg rows, enable collector/env,
+  execute backfill, select a physical trigger or write a receipt/movement.
+- The Stage 7A FBS adapter may call `POST /api/v3/orders/status` strictly as an
+  official read semantic. Observations and exact mapping evidence are
+  append-only; `supplierStatus=complete` is never a debit trigger.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

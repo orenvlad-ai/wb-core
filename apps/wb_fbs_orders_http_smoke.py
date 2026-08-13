@@ -1,4 +1,4 @@
-"""Protected GET-only HTTP boundary checks for Stage 5 FBS observations."""
+"""Protected query-only HTTP boundary checks for Stage 7A FBS shadow."""
 
 from __future__ import annotations
 
@@ -115,7 +115,8 @@ def main() -> None:
             code, payload, headers = _json_request(root)
             assert code == 200 and payload["contract_name"] == "wb_fbs_orders_readonly_shadow_v1"
             assert payload["page"]["total"] == 1 and len(payload["rows"]) == 1
-            assert payload["policy"]["upstream_get_only"] is True
+            assert payload["policy"]["upstream_get_only"] is False
+            assert payload["policy"]["status_post_is_read_semantic"] is True
             assert payload["policy"]["creates_movement"] is False
             assert payload["policy"]["assigns_ff_origin"] is False
             assert "address" not in payload["rows"][0] and "comment" not in payload["rows"][0]

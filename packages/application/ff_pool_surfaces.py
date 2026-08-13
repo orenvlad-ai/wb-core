@@ -41,6 +41,7 @@ from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
     FACILITY_CHANGES_TABLE,
+    FACILITY_PROFILES_TABLE,
     FEATURE_EPOCHS_TABLE,
     LINES_TABLE,
     OPERATIONS_TABLE,
@@ -96,6 +97,7 @@ REQUIRED_TABLES = frozenset(
     {
         FACILITIES_TABLE,
         FACILITY_CHANGES_TABLE,
+        FACILITY_PROFILES_TABLE,
         FEATURE_EPOCHS_TABLE,
         BALANCES_TABLE,
         PARITY_TABLE,
@@ -147,6 +149,7 @@ class FfPoolSurface:
         with self._read() as conn:
             schema = self._schema(conn)
             feature = self._feature(conn, aggregate_revision=aggregate_revision, schema=schema)
+        guided_activation = self._guided_acceptance_activation()
         payload = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -157,7 +160,25 @@ class FfPoolSurface:
                 "reason": "writer_epoch_enabled" if feature["writer_effective"] else "facility_pool_feature_off",
                 "physical_delete_allowed": False,
                 "server_owned_identity": True,
+                "address_supported": False,
+                "fixed_system_pools": list(POOLS),
+                "multiple_facilities_per_city": True,
             },
+            "reviewed_initial_setup": [
+                {
+                    "name": "FF Москва",
+                    "city": "Москва",
+                    "proposed_active": True,
+                    "production_row_created": False,
+                },
+                {
+                    "name": "FF Оренбург",
+                    "city": "Оренбург",
+                    "proposed_active": False,
+                    "production_row_created": False,
+                },
+            ],
+            "guided_acceptance": guided_activation,
             "document_actions": [
                 {
                     "document_kind": kind,
@@ -213,9 +234,9 @@ class FfPoolSurface:
             clauses = ["1=1"]
             params: list[Any] = []
             if needle:
-                clauses.append("(lower(f.name) LIKE ? ESCAPE '\\' OR lower(f.code) LIKE ? ESCAPE '\\')")
+                clauses.append("(lower(f.name) LIKE ? ESCAPE '\\' OR lower(f.code) LIKE ? ESCAPE '\\' OR lower(COALESCE(profile.city,'')) LIKE ? ESCAPE '\\')")
                 pattern = "%" + _like(needle.lower()) + "%"
-                params.extend((pattern, pattern))
+                params.extend((pattern, pattern, pattern))
             if active_token != "all":
                 clauses.append("f.active=?")
                 params.append(1 if active_token == "active" else 0)
@@ -239,11 +260,12 @@ class FfPoolSurface:
                     JOIN {DOCUMENTS_TABLE} document ON document.document_id=line.document_id
                     WHERE line.facility_id IS NOT NULL GROUP BY line.facility_id
                 )
-                SELECT f.*,COALESCE(pool.quantity,0) AS quantity,
+                SELECT f.*,COALESCE(profile.city,'') AS city,COALESCE(pool.quantity,0) AS quantity,
                        COALESCE(pool.capital_rub,0) AS capital_rub,
                        COALESCE(pool.balance_count,0) AS balance_count,
                        COALESCE(document.document_count,0) AS document_count
                 FROM {FACILITIES_TABLE} f
+                LEFT JOIN {FACILITY_PROFILES_TABLE} profile ON profile.facility_id=f.facility_id
                 LEFT JOIN pool_summary pool ON pool.facility_id=f.facility_id
                 LEFT JOIN document_summary document ON document.facility_id=f.facility_id
                 WHERE {where}
@@ -274,7 +296,9 @@ class FfPoolSurface:
                 raise FfPoolSurfaceError("schema_absent", "FF facility/pool schema is not available", http_status=503)
             feature = self._feature(conn, aggregate_revision=aggregate_revision, schema=schema)
             facility = conn.execute(
-                f"SELECT * FROM {FACILITIES_TABLE} WHERE facility_id=?", (selected,)
+                f"""SELECT f.*,COALESCE(profile.city,'') AS city FROM {FACILITIES_TABLE} f
+                    LEFT JOIN {FACILITY_PROFILES_TABLE} profile ON profile.facility_id=f.facility_id
+                    WHERE f.facility_id=?""", (selected,)
             ).fetchone()
             if facility is None:
                 raise FfPoolSurfaceError("facility_not_found", "Facility was not found", http_status=404)
@@ -328,6 +352,7 @@ class FfPoolSurface:
                 "facility_id": str(facility["facility_id"]),
                 "code": str(facility["code"]),
                 "name": str(facility["name"]),
+                "city": str(facility["city"] or ""),
                 "active": bool(facility["active"]),
                 "display_timezone": str(facility["display_timezone"]),
                 "created_at": str(facility["created_at"]),
@@ -768,6 +793,17 @@ class FfPoolSurface:
             ).fetchall()
         state = str(row["state"])
         preview = _json_object(row["preview_manifest_json"])
+        preview_summary = {}
+        if str(row["document_kind"]) == "china_acceptance":
+            allocations = [dict(item) for item in preview.get("allocations") or []]
+            preview_summary = {
+                "expected_quantity": sum(int(item.get("expected_quantity") or 0) for item in allocations),
+                "accepted_quantity": sum(int(item.get("accepted_quantity") or 0) for item in allocations),
+                "quantity_fbs": sum(int(item.get("quantity_fbs") or 0) for item in allocations),
+                "quantity_fbo": sum(int(item.get("quantity_fbo") or 0) for item in allocations),
+                "discrepancy_quantity": sum(int(item.get("discrepancy_quantity") or 0) for item in allocations),
+            }
+        guided_activation = self._guided_acceptance_activation()
         payload = {
             "contract_name": CONTRACT_NAME,
             "workflow_contract": "ff_document_workflow_v1",
@@ -779,8 +815,11 @@ class FfPoolSurface:
             "document_label_ru": DOCUMENT_LABELS_RU.get(str(row["document_kind"]), str(row["document_kind"])),
             "state": state,
             "state_label_ru": WORKFLOW_LABELS_RU.get(state, state),
-            "confirm_allowed": state == "ready" and bool(feature["writer_effective"]),
+            "confirm_allowed": state == "ready" and bool(feature["writer_effective"])
+            and (str(row["document_kind"]) != "china_acceptance" or guided_activation["effective"]),
             "feature_blocked": not bool(feature["writer_effective"]),
+            "guided_acceptance_activation": guided_activation
+            if str(row["document_kind"]) == "china_acceptance" else None,
             "business_date": str(row["business_date"]),
             "source": {
                 "type": str(row["source_type"]),
@@ -792,6 +831,7 @@ class FfPoolSurface:
                 "available": bool(preview),
                 "collection_keys": [key for key, value in preview.items() if isinstance(value, list)],
                 "collection_counts": {key: len(value) for key, value in preview.items() if isinstance(value, list)},
+                "summary": preview_summary,
             },
             "document": {
                 "document_id": str(row["posted_document_id"]),
@@ -870,9 +910,11 @@ class FfPoolSurface:
     def create_facility(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         request_id = _request_id(payload.get("request_id"))
         name = _text(payload.get("name"), field="name", maximum=200)
+        city_raw = str(payload.get("city") or "").strip()
+        city = _text(city_raw, field="city", maximum=120) if city_raw else ""
         display_timezone = _timezone(payload.get("display_timezone") or "Asia/Yekaterinburg")
         active = _boolean(payload.get("active", True), field="active")
-        request_identity = _fingerprint({"action": "create", "name": name, "display_timezone": display_timezone, "active": active})
+        request_identity = _fingerprint({"action": "create", "name": name, "city": city, "display_timezone": display_timezone, "active": active})
         self._require_writer()
         facility_digest = _fingerprint({"request_id": request_id, "purpose": "facility_identity"}).removeprefix("sha256:")
         facility_id = "fff_" + facility_digest[:28]
@@ -893,6 +935,7 @@ class FfPoolSurface:
                 "facility_id": facility_id,
                 "code": code,
                 "name": name,
+                "city": city,
                 "active": active,
                 "display_timezone": display_timezone,
             }
@@ -900,6 +943,12 @@ class FfPoolSurface:
                 f"""INSERT INTO {FACILITIES_TABLE}(facility_id,code,name,active,display_timezone,created_at,updated_at)
                     VALUES(?,?,?,?,?,?,?)""",
                 (facility_id, code, name, int(active), display_timezone, now, now),
+            )
+            conn.execute(
+                f"""INSERT INTO {FACILITY_PROFILES_TABLE}(
+                       facility_id,city,future_fields_json,created_at,updated_at
+                   ) VALUES(?,?,'{{}}',?,?)""",
+                (facility_id, city, now, now),
             )
             self._append_facility_change(
                 conn,
@@ -946,7 +995,11 @@ class FfPoolSurface:
                     raise FfPoolSurfaceError("request_id_identity_conflict", "request_id was already used for another facility change", http_status=409)
                 conn.rollback()
                 return {**self.facility_detail(str(existing["facility_id"])), "idempotent": True}
-            row = conn.execute(f"SELECT * FROM {FACILITIES_TABLE} WHERE facility_id=?", (selected,)).fetchone()
+            row = conn.execute(
+                f"""SELECT f.*,COALESCE(profile.city,'') AS city FROM {FACILITIES_TABLE} f
+                    LEFT JOIN {FACILITY_PROFILES_TABLE} profile ON profile.facility_id=f.facility_id
+                    WHERE f.facility_id=?""", (selected,)
+            ).fetchone()
             if row is None:
                 raise FfPoolSurfaceError("facility_not_found", "Facility was not found", http_status=404)
             if str(row["updated_at"]) != expected:
@@ -960,6 +1013,7 @@ class FfPoolSurface:
                 "facility_id": str(row["facility_id"]),
                 "code": str(row["code"]),
                 "name": str(row["name"]),
+                "city": str(row["city"] or ""),
                 "active": bool(row["active"]),
                 "display_timezone": str(row["display_timezone"]),
             }
@@ -967,6 +1021,15 @@ class FfPoolSurface:
             if current == before:
                 conn.rollback()
                 return {**self.facility_detail(selected), "idempotent": True}
+            if before["active"] and not current["active"]:
+                blockers = self._facility_deactivation_blockers(conn, selected)
+                if blockers["has_unfinished_dependencies"]:
+                    raise FfPoolSurfaceError(
+                        "facility_deactivation_blocked",
+                        "Facility has unfinished dependencies or a non-zero pool balance",
+                        details=blockers,
+                        http_status=409,
+                    )
             conn.execute(
                 f"UPDATE {FACILITIES_TABLE} SET name=?,active=?,display_timezone=?,updated_at=? WHERE facility_id=? AND updated_at=?",
                 (current["name"], int(current["active"]), current["display_timezone"], now, selected, expected),
@@ -993,6 +1056,30 @@ class FfPoolSurface:
             conn.commit()
         return {**self.facility_detail(selected), "idempotent": False}
 
+    def _facility_deactivation_blockers(
+        self, conn: sqlite3.Connection, facility_id: str
+    ) -> dict[str, Any]:
+        pending_states = ("accepted", "processing", "blocked", "ready", "posted", "replay")
+        pending_requests = int(
+            conn.execute(
+                f"""SELECT COUNT(*) FROM {REQUESTS_TABLE}
+                    WHERE state IN ({','.join('?' for _ in pending_states)})
+                      AND instr(preview_manifest_json, ?) > 0""",
+                (*pending_states, json.dumps(facility_id, ensure_ascii=False)),
+            ).fetchone()[0]
+        )
+        nonzero_balances = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND quantity<>0",
+                (facility_id,),
+            ).fetchone()[0]
+        )
+        return {
+            "pending_request_count": pending_requests,
+            "nonzero_balance_count": nonzero_balances,
+            "has_unfinished_dependencies": bool(pending_requests or nonzero_balances),
+        }
+
     def accept_document_preview(
         self,
         payload: Mapping[str, Any],
@@ -1003,6 +1090,12 @@ class FfPoolSurface:
         kind = str(payload.get("document_kind") or "").strip()
         if kind not in VISIBLE_DOCUMENT_KINDS or kind in {"inventory_surplus", "inventory_shortage"}:
             raise FfPoolSurfaceError("invalid_document_kind", "Document kind is not available in the operator flow")
+        if kind == "china_acceptance":
+            raise FfPoolSurfaceError(
+                "guided_acceptance_required",
+                "China acceptance is available only through the guided workbook workflow",
+                http_status=409,
+            )
         request_id = _request_id(payload.get("request_id"))
         business_date = _date(payload.get("business_date"), field="business_date")
         manifest = payload.get("manifest")
@@ -1042,7 +1135,6 @@ class FfPoolSurface:
         expenses: Iterable[Mapping[str, Any]] = (),
         actor: str,
     ) -> dict[str, Any]:
-        self._require_writer()
         selected_request = _request_id(request_id)
         selected_date = _date(business_date, field="business_date")
         shipment, lines, source_revision = self.supplier_shipment_source(shipment_id)
@@ -1053,7 +1145,7 @@ class FfPoolSurface:
             source_type="china_acceptance_workbook",
             source_id=str(shipment["shipment_id"]),
             source_revision=revision,
-            idempotency_epoch=self._writer_epoch(),
+            idempotency_epoch=self._preview_epoch(),
             actor=_actor(actor),
             business_date=selected_date,
         )
@@ -1065,6 +1157,7 @@ class FfPoolSurface:
                 source_content_type=str(content_type),
                 shipment_lines=lines,
                 expenses=list(expenses),
+                template_source_revision=source_revision,
             )
         except FfPoolDocumentError as exc:
             raise _surface_from_document_error(exc) from exc
@@ -1110,8 +1203,18 @@ class FfPoolSurface:
         return self.request_status(str(result.get("request_id") or selected_request))
 
     def confirm_document(self, request_id: str) -> dict[str, Any]:
-        self._require_writer()
         selected = _identity_token(request_id, field="request_id")
+        status = self.request_status(selected)
+        if status.get("document_kind") == "china_acceptance":
+            activation = status.get("guided_acceptance_activation") or {}
+            if not bool(activation.get("effective")):
+                raise FfPoolSurfaceError(
+                    "guided_acceptance_not_activated",
+                    str(activation.get("reason_ru") or "Проведение приёмки ещё не активировано."),
+                    details=activation,
+                    http_status=409,
+                )
+        self._require_writer()
         try:
             self._service().post(selected)
         except FfPoolDocumentError as exc:
@@ -1159,47 +1262,73 @@ class FfPoolSurface:
             if not required.issubset(tables):
                 raise FfPoolSurfaceError("supplier_source_unavailable", "Supplier shipment source is unavailable", http_status=503)
             shipment = conn.execute(
-                "SELECT shipment_id,updated_at,archived_at,order_status FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                "SELECT shipment_id,updated_at,archived_at,order_status,actual_ff_acceptance_date FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
                 (selected,),
             ).fetchone()
             if shipment is None or str(shipment["archived_at"] or ""):
                 raise FfPoolSurfaceError("supplier_shipment_not_found", "Supplier shipment was not found", http_status=404)
+            if str(shipment["actual_ff_acceptance_date"] or ""):
+                raise FfPoolSurfaceError(
+                    "supplier_shipment_already_accepted",
+                    "Supplier shipment already has a factual FF acceptance",
+                    http_status=409,
+                )
             source_rows = conn.execute(
                 """SELECT line_id,sort_order,barcode,internal_sku,internal_nm_id,internal_name,qty,amount
                    FROM sheet_vitrina_v1_supplier_shipment_lines
                    WHERE shipment_id=? AND line_type='product' ORDER BY sort_order,line_id""",
                 (selected,),
             ).fetchall()
-            cost_rows: dict[int, Decimal] = {}
-            if "sheet_vitrina_v1_supplier_ff_cost_layer_lines" in tables:
-                for row in conn.execute(
-                    """SELECT nm_id,decimal_sum(line_total_cost_rub) AS capital_rub
-                       FROM sheet_vitrina_v1_supplier_ff_cost_layer_lines
-                       WHERE supplier_shipment_id=? AND nm_id IS NOT NULL GROUP BY nm_id""",
-                    (selected,),
-                ).fetchall():
-                    cost_rows[int(row["nm_id"])] = _decimal(row["capital_rub"])
-        lines: list[dict[str, Any]] = []
-        by_nm_quantity: dict[int, int] = {}
+        aggregated: dict[int, dict[str, Any]] = {}
         for row in source_rows:
             nm_id = _positive_integer(row["internal_nm_id"], field="supplier nm_id")
             quantity = _whole_number(row["qty"], field="supplier quantity", positive=True)
-            by_nm_quantity[nm_id] = by_nm_quantity.get(nm_id, 0) + quantity
-            lines.append(
-                {
-                    "nm_id": nm_id,
-                    "barcode": str(row["barcode"] or ""),
-                    "sku": str(row["internal_sku"] or row["internal_name"] or nm_id),
-                    "quantity": quantity,
-                    "capital_rub": "0",
-                }
-            )
+            identity = {
+                "barcode": str(row["barcode"] or ""),
+                "sku": str(row["internal_sku"] or row["internal_name"] or nm_id),
+            }
+            current = aggregated.get(nm_id)
+            if current is not None and any(current[key] != identity[key] for key in identity):
+                raise FfPoolSurfaceError(
+                    "ambiguous_supplier_identity",
+                    "Supplier composition contains conflicting exact identity for one nmId",
+                    details={"nm_id": nm_id},
+                    http_status=409,
+                )
+            aggregated[nm_id] = {
+                "nm_id": nm_id,
+                **identity,
+                "quantity": int((current or {}).get("quantity") or 0) + quantity,
+                "capital_rub": "0",
+            }
+        lines = [aggregated[nm_id] for nm_id in sorted(aggregated)]
         if not lines:
             raise FfPoolSurfaceError("supplier_lines_unavailable", "Supplier shipment has no exact matched product lines")
+        try:
+            from packages.application.our_wb_costs import OurWbCostBlock
+            from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+
+            preview = OurWbCostBlock(
+                runtime=RegistryUploadDbBackedRuntime(runtime_dir=self.runtime_dir),
+                timestamp_factory=self.timestamp_factory,
+            ).preview_supplier_ff_cost_layer(selected)
+        except (TypeError, ValueError) as exc:
+            raise FfPoolSurfaceError(
+                "supplier_capital_unavailable",
+                "China acceptance requires a complete exact supplier cost preview",
+                details={"reason": str(exc)[:240]},
+                http_status=409,
+            ) from exc
+        cost_rows: dict[int, Decimal] = {}
+        for item in preview.get("lines") or []:
+            nm_id = int(item.get("nm_id") or 0)
+            capital = _decimal(item.get("line_total_cost_rub") or 0)
+            if nm_id > 0:
+                cost_rows[nm_id] = cost_rows.get(nm_id, Decimal("0")) + capital
         for item in lines:
             nm_id = int(item["nm_id"])
             total_capital = cost_rows.get(nm_id, Decimal("0"))
-            total_quantity = by_nm_quantity[nm_id]
+            total_quantity = int(item["quantity"])
             if total_capital <= 0 or total_quantity <= 0:
                 raise FfPoolSurfaceError(
                     "supplier_capital_unavailable",
@@ -1208,7 +1337,7 @@ class FfPoolSurface:
                     http_status=409,
                 )
             item["capital_rub"] = canonical_decimal_text(total_capital * Decimal(int(item["quantity"])) / Decimal(total_quantity))
-        revision = _fingerprint({"shipment": dict(shipment), "lines": lines})
+        revision = _fingerprint({"shipment": dict(shipment), "lines": lines, "cost_inputs_hash": preview["inputs_hash"]})
         return dict(shipment), lines, revision
 
     def inventory_catalog(self) -> tuple[list[dict[str, Any]], str]:
@@ -1267,8 +1396,10 @@ class FfPoolSurface:
             return [
                 dict(row)
                 for row in conn.execute(
-                    f"SELECT facility_id,code,name,active,display_timezone FROM {FACILITIES_TABLE} "
-                    "WHERE active=1 ORDER BY code,facility_id"
+                    f"""SELECT f.facility_id,f.code,f.name,COALESCE(profile.city,'') AS city,
+                               f.active,f.display_timezone FROM {FACILITIES_TABLE} f
+                        LEFT JOIN {FACILITY_PROFILES_TABLE} profile ON profile.facility_id=f.facility_id
+                        WHERE f.active=1 ORDER BY f.code,f.facility_id"""
                 ).fetchall()
             ]
 
@@ -1279,6 +1410,40 @@ class FfPoolSurface:
             timestamp_factory=self.timestamp_factory,
             resume=resume,
         )
+
+    def _preview_epoch(self) -> int:
+        with self._read() as conn:
+            row = conn.execute(
+                f"SELECT COALESCE(MAX(epoch),1) FROM {FEATURE_EPOCHS_TABLE}"
+            ).fetchone()
+        return max(1, int(row[0] or 1))
+
+    def _guided_acceptance_activation(self) -> dict[str, Any]:
+        try:
+            with self._read() as conn:
+                feature = self._feature(conn, aggregate_revision="", schema=self._schema(conn))
+                from packages.application.ff_pool_cutover import read_ff_pool_cutover_status
+
+                opening = read_ff_pool_cutover_status(conn)
+        except Exception:
+            feature = {"writer_effective": False, "epoch": 0}
+            opening = {"status": "not_applied"}
+        writer = bool(feature.get("writer_effective"))
+        opening_ready = str(opening.get("status") or "") == "applied"
+        effective = writer and opening_ready
+        return {
+            "effective": effective,
+            "writer_epoch_active": writer,
+            "opening_active": opening_ready,
+            "reason": "active" if effective else (
+                "writer_epoch_off" if not writer else "opening_not_applied"
+            ),
+            "reason_ru": "Проведение доступно." if effective else (
+                "Проведение выключено: writer epoch не активирован. Шаблон и проверка доступны."
+                if not writer else
+                "Проведение выключено: opening/cutover не применён. Шаблон и проверка доступны."
+            ),
+        }
 
     def _writer_epoch(self) -> int:
         with self._read() as conn:
@@ -1455,6 +1620,7 @@ def _facility_public(row: Mapping[str, Any], *, detail_visible: bool) -> dict[st
         "facility_id": str(row["facility_id"]),
         "code": str(row["code"]),
         "name": str(row["name"]),
+        "city": str(row["city"] or ""),
         "active": bool(row["active"]),
         "display_timezone": str(row["display_timezone"]),
         "created_at": str(row["created_at"]),

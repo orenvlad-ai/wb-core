@@ -140,11 +140,12 @@ update_note: "Official FBW supplies sync remains read-only and independent from 
   - tariffs `GET /api/v1/tariffs/box` (`WB_TARIFFS_API_BASE_URL` override) is fallback; match is by normalized planned/target `warehouseName` and raw `geoName`;
   - bounded manual known-warehouse fallback covers live/cache warehouses missing from external references and publishes `source/confidence/evidence` as `manual_known_wb_warehouse`;
   - Supplies `warehouse_id` is not treated as Marketplace office id.
-- The separate Stage 5 official FBS boundary uses only Marketplace
-  `GET /api/v3/orders` (`WB_FBS_API_BASE_URL` override) with `limit<=1000`, an
-  advancing `next` cursor and an explicit period no wider than 30 days. It
-  never calls `POST /api/v3/orders/status`, FBS supply management, metadata,
-  sticker/pass or any other non-GET method.
+- The separate official FBS boundary uses Marketplace `GET /api/v3/orders`
+  (`WB_FBS_API_BASE_URL` override) with `limit<=1000`, an advancing `next`
+  cursor and an explicit period no wider than 30 days. Stage 7A may additionally
+  call `POST /api/v3/orders/status` only as the documented read semantic for an
+  exact bounded ID set. It never calls FBS supply management, metadata,
+  sticker/pass or another upstream mutation.
 - FBW/FBS supply creation, transit create/update methods and all WB mutations stay outside scope of this module and of the regional planning assistant.
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
@@ -646,7 +647,7 @@ This module does not implement:
 - warehouse restrictions screen;
 - transit directions screen;
 - unproven reverse-engineering of WB cabinet transit cost formula;
-- FBS supply management, status POST, metadata, stickers/passes, collector activation/backfill and any non-GET upstream method;
+- FBS supply management, stickers/passes, collector activation/backfill and every upstream mutation. Stage 7A permits only the official `POST /api/v3/orders/status` read semantic for append-only shadow evidence; it is not a WB write and never becomes a physical trigger;
 - FBS order-origin assignment or any FBS inventory/reservation/movement consumer;
 - general Seller Portal browser automation outside the bounded read-only transit-cost enrichment worker;
 - automatic Seller Portal scans on page open or inside the backend official WB sync route;

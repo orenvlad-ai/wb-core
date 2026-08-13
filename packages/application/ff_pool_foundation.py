@@ -27,6 +27,7 @@ RELATION_TYPES = ("correction_of", "storno_of", "late_expense_for")
 
 FACILITIES_TABLE = "sheet_vitrina_v1_ff_facilities"
 FACILITY_CHANGES_TABLE = "sheet_vitrina_v1_ff_facility_changes"
+FACILITY_PROFILES_TABLE = "sheet_vitrina_v1_ff_facility_profiles"
 OPERATIONS_TABLE = "sheet_vitrina_v1_warehouse_business_operations"
 LINES_TABLE = "sheet_vitrina_v1_ff_pool_movement_lines"
 RELATIONS_TABLE = "sheet_vitrina_v1_warehouse_business_operation_relations"
@@ -59,6 +60,17 @@ def ensure_ff_pool_foundation_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ff_facilities_by_active_code
         ON {FACILITIES_TABLE}(active,code);
+
+        CREATE TABLE IF NOT EXISTS {FACILITY_PROFILES_TABLE}(
+            facility_id TEXT PRIMARY KEY REFERENCES {FACILITIES_TABLE}(facility_id),
+            city TEXT NOT NULL DEFAULT '',
+            future_fields_json TEXT NOT NULL DEFAULT '{{}}' CHECK(json_valid(future_fields_json)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(length(trim(city)) <= 120)
+        );
+        CREATE INDEX IF NOT EXISTS ff_facility_profiles_by_city
+        ON {FACILITY_PROFILES_TABLE}(city COLLATE NOCASE,facility_id);
 
         CREATE TABLE IF NOT EXISTS {FACILITY_CHANGES_TABLE}(
             change_id TEXT PRIMARY KEY,
