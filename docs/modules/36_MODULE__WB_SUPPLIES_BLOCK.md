@@ -19,6 +19,9 @@ related_modules:
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/warehouse_stocks.py"
   - "packages/application/wb_supplies.py"
+  - "packages/application/wb_fbs_orders.py"
+  - "packages/application/ff_stage_7a_production.py"
+  - "packages/adapters/wb_fbs_orders.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -36,6 +39,12 @@ related_tables:
   - "sheet_vitrina_v1_fulfillment_service_lines"
   - "sheet_vitrina_v1_ff_stock_operations"
   - "sheet_vitrina_v1_ff_stock_operation_lines"
+  - "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+  - "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+  - "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
+  - "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
+  - "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings"
+  - "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
@@ -62,6 +71,8 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_smoke.py"
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/wb_supply_overlay_smoke.py"
+  - "apps/ff_stage_7a_production.py"
+  - "apps/ff_stage_7a_production_smoke.py"
   - "apps/wb_supplies_api_adapter_smoke.py"
   - "apps/wb_supplies_backfill_live.py"
   - "apps/wb_supplies_backfill_smoke.py"
@@ -146,6 +157,15 @@ update_note: "Official FBW supplies sync remains read-only and independent from 
   call `POST /api/v3/orders/status` only as the documented read semantic for an
   exact bounded ID set. It never calls FBS supply management, metadata,
   sticker/pass or another upstream mutation.
+- Migration 140 activates that official shadow only through the hosted
+  `ff-stage-7a-production-dry-run/apply/readback` contour. Seller warehouse
+  identity comes from `GET /api/v3/warehouses`; its exact `officeId` is joined
+  to `GET /api/v3/offices`. Only an explicitly accepted exact official Moscow
+  city maps to `FF Москва`; `FF Оренбург` remains unrouted. SKU mapping requires
+  one active nomenclature owner for exact `nmId/chrtId/one barcode/article`.
+  Ambiguous, unmatched and incomplete identities are counted and isolated.
+  Catch-up begins at `2026-08-01`, then the existing hourly warehouse timer
+  polls at minute `17` Europe/Moscow; it is not a real-time stream.
 - FBW/FBS supply creation, transit create/update methods and all WB mutations stay outside scope of this module and of the regional planning assistant.
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
@@ -168,6 +188,12 @@ Tables:
 - `sheet_vitrina_v1_wb_supply_cost_layers`: management proxy cost-by-supply/SKU rows keyed by `wb_supply_id + nm_id + version`, current-row partial unique index, explicit `transit_cost_status`, source ФФ layer ids, Fulfillment upload id, per-unit transit/services/storage components, `our_wb_unit_cost_rub`, `source_status`, component JSON, `inputs_hash` and supersession fields. This table is recomputable/idempotent and does not mutate WB official evidence.
 - `sheet_vitrina_v1_wb_supplies_fbs_order_observations`: Stage 5 append-only privacy-minimized official FBS order observations. It stores only order/supply/nmId/chrtId/warehouse/office/SKU/cargo identity, safe hash revision and collection provenance; address, comment, order UID, RID, price and raw JSON are excluded.
 - `sheet_vitrina_v1_wb_supplies_fbs_collector_state`: one bounded last-attempt/success/window/cursor/count state row, absent while the default-off collector has never run.
+- `sheet_vitrina_v1_wb_supplies_fbs_status_observations`: append-only exact
+  order-revision/status-digest evidence from the official status read semantic.
+- `sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings`,
+  `sheet_vitrina_v1_wb_supplies_fbs_identity_mappings` and
+  `sheet_vitrina_v1_wb_supplies_fbs_identity_evidence`: append-only exact-ID
+  warehouse/SKU mappings and per-order matched/unmatched/deferred evidence.
 - `sheet_vitrina_v1_fulfillment_service_uploads` and `sheet_vitrina_v1_fulfillment_service_lines`: server-owned Fulfillment upload/line persistence. The WB supplies block reads only fully valid uploads through the approved overlay provider and never treats them as WB official raw evidence.
 - `sheet_vitrina_v1_ff_stock_operations` and `sheet_vitrina_v1_ff_stock_operation_lines`: internal ФФ stock ledger writeoffs are created idempotently with source key `wb_supply_debit:<cache_key or supply_id>` for eligible statuses `3/4/5/6`; statuses `1/2` and `Допринято` are skipped.
 - `sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint`: current ФФ stock ledger WB auto-writeoff boundary. Sync/backfill/detail enrichment ensures it before debiting, captures baseline-known `cache_key`, `source_key` and `supply_id` values from the current cache, and prevents historical/backfilled/cache-known WB supplies from being debited retroactively.
@@ -647,7 +673,10 @@ This module does not implement:
 - warehouse restrictions screen;
 - transit directions screen;
 - unproven reverse-engineering of WB cabinet transit cost formula;
-- FBS supply management, stickers/passes, collector activation/backfill and every upstream mutation. Stage 7A permits only the official `POST /api/v3/orders/status` read semantic for append-only shadow evidence; it is not a WB write and never becomes a physical trigger;
+- FBS supply management, stickers/passes and every upstream mutation. Migration
+  140 activates only the official read-only collector/backfill and exact shadow
+  mappings; `POST /api/v3/orders/status` remains a read semantic and no
+  observation/status becomes a physical trigger;
 - FBS order-origin assignment or any FBS inventory/reservation/movement consumer;
 - general Seller Portal browser automation outside the bounded read-only transit-cost enrichment worker;
 - automatic Seller Portal scans on page open or inside the backend official WB sync route;

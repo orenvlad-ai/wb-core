@@ -24,9 +24,11 @@ related_modules:
   - "packages/application/calculation_parameters.py"
   - "packages/application/stocks_block.py"
   - "packages/application/registry_upload_http_entrypoint.py"
+  - "packages/application/ff_stage_7a_production.py"
   - "apps/warehouse_functional_runner.py"
   - "apps/warehouse_cost_queue_replay.py"
   - "apps/sqlite_backup_archive.py"
+  - "apps/ff_stage_7a_production.py"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}"
@@ -41,7 +43,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migrations 133–135 add a default-off facility × pool foundation, immutable documents and protected bounded API/operator detail beneath `ff`; they do not add a warehouse stage, replace an active balance or publish a second total."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Facility × pool dimensions, immutable documents and protected bounded API/operator detail remain beneath `ff`; Migration 140 creates only Moscow/Orenburg facility dimensions and exact official FBS shadow evidence. It does not add a warehouse stage, replace an active balance, publish a second total or activate opening/cutover."
 ---
 
 # 1. Active warehouse contract
@@ -454,3 +456,13 @@ unmatched counts. Review begins at `2026-08-01`, while earliest official order
 date is calculated from the observations. Collector/backfill, reservations,
 debit, movements, balances, routing and returns stay off. In particular,
 `supplierStatus=complete` never triggers physical stock.
+
+Migration 140 separately turns on only collection and exact shadow mapping.
+Its owner-gated runner creates active `FF Москва` and inactive `FF Оренбург`,
+catches up `2026-08-01..watermark`, proves a next ordinary polling run and then
+enables the existing hourly timer path at minute `17` Europe/Moscow. Exact
+seller warehouse → official office IDs may map Moscow; Orenburg remains
+unrouted. SKU mappings require exact `nmId/chrtId/barcode/SKU`; all uncertain
+rows remain isolated. Aggregate FF quantity/capital, writer epoch,
+opening/cutover, documents, reservations, debit, movements, returns and WB
+writes remain invariant, so the six-stage active warehouse truth is unchanged.

@@ -53,6 +53,7 @@ FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
 )
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
+FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
 FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
@@ -197,6 +198,8 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_FEEDBACKS_API_BASE_URL",
     "WB_PRICES_API_BASE_URL",
     "WB_PRICES_WRITE_ENABLED",
+    "WB_FBS_API_BASE_URL",
+    "WB_FBS_COLLECTOR_ENABLED",
     "WB_AUTOANSWERS_FORCE_OFF",
     "WB_SPP_TEST_ENABLED",
     "WB_BUYER_SESSION_VALIDATION_NM_ID",
@@ -6914,6 +6917,40 @@ def run_ads_historical_recovery_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ff_stage_7a_production_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_stage_7a_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("Stage 7A reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ff_stage_7a_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("Stage 7A evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"ff-stage-7a-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_vitrina_incident_rematerialization_command(
     args: argparse.Namespace,
 ) -> int:
@@ -7370,6 +7407,167 @@ def _run_remote_ads_historical_recovery(
     ):
         raise RuntimeError("ads historical readback has blockers")
     return payload
+
+
+def _run_remote_ff_stage_7a_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"ff-stage-7a-production-{action}")
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Stage 7A production action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-stage-7a-production-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("Stage 7A production action requires an exact deployed SHA")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Stage 7A production action requires the canonical active runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("Stage 7A production action requires the canonical environment file")
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError("Stage 7A production action requires the canonical HTTP service")
+
+    runner_args = [
+        "python3",
+        "apps/ff_stage_7a_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("Stage 7A production apply requires an existing --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Stage 7A reviewed plan is invalid JSON") from exc
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name") != "ff_stage_7a_production_mutation_v1"
+            or int(plan.get("contract_version") or 0) != 1
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError("Stage 7A reviewed plan does not match this exact apply")
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError("Stage 7A production apply requires approval reference and actor")
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--backup-dir",
+                "/opt/wb-core-runtime/state/backups/ff-stage-7a-production",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Stage 7A production {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Stage 7A production runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError("Stage 7A production runner returned an invalid result")
+
+    if action == "apply":
+        restart = _restart_ff_stage_7a_http_service(target)
+        readback = _run_remote_ff_stage_7a_production(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        names = {str(item.get("name") or ""): bool(item.get("active")) for item in readback.get("facilities") or []}
+        state = readback.get("collector_state") or {}
+        if (
+            names != {"FF Москва": True, "FF Оренбург": False}
+            or not (readback.get("collector_configuration") or {}).get("enabled")
+            or state.get("last_status") != "success"
+            or state.get("complete") is not True
+            or int(state.get("next_cursor") or 0) != 0
+        ):
+            raise RuntimeError("Stage 7A post-restart query-only readback is incomplete")
+        payload = {
+            **payload,
+            "http_service_restart": restart,
+            "post_restart_readback": readback,
+        }
+    return payload
+
+
+def _restart_ff_stage_7a_http_service(target: HostedRuntimeTarget) -> dict[str, Any]:
+    command = (
+        f"systemctl restart {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+        f" && systemctl is-active {shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+        f" && systemctl show --property MainPID --value "
+        f"{shlex.quote(ACTIVE_HOSTED_RUNTIME_SERVICE_NAME)}"
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300.0,
+        check=False,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    try:
+        pid = int(lines[-1])
+    except (IndexError, ValueError):
+        pid = 0
+    if result.returncode != 0 or lines[:1] != ["active"] or pid <= 0:
+        raise RuntimeError(
+            "Stage 7A HTTP service restart/readback failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    return {"service": ACTIVE_HOSTED_RUNTIME_SERVICE_NAME, "active": True, "main_pid": pid}
 
 
 def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -10047,6 +10245,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     partner_finance_diagnostic.add_argument("--output", required=True)
     partner_finance_diagnostic.set_defaults(
         handler=run_partner_finance_diagnostic_command,
+    )
+
+    ff_stage_7a_dry_run = subparsers.add_parser(
+        "ff-stage-7a-production-dry-run",
+        help="Build the exact official-ID facility/FBS shadow production plan.",
+    )
+    ff_stage_7a_dry_run.add_argument("--deployed-sha", required=True)
+    ff_stage_7a_dry_run.add_argument("--output", required=True)
+    ff_stage_7a_dry_run.set_defaults(
+        handler=run_ff_stage_7a_production_command,
+        ff_stage_7a_action="dry-run",
+    )
+
+    ff_stage_7a_apply = subparsers.add_parser(
+        "ff-stage-7a-production-apply",
+        help="Apply one exact reviewed owner-gated Stage 7A production plan.",
+    )
+    ff_stage_7a_apply.add_argument("--deployed-sha", required=True)
+    ff_stage_7a_apply.add_argument("--plan-file", required=True)
+    ff_stage_7a_apply.add_argument("--fingerprint", required=True)
+    ff_stage_7a_apply.add_argument("--approval-reference", required=True)
+    ff_stage_7a_apply.add_argument("--actor", required=True)
+    ff_stage_7a_apply.add_argument("--output", required=True)
+    ff_stage_7a_apply.set_defaults(
+        handler=run_ff_stage_7a_production_command,
+        ff_stage_7a_action="apply",
+    )
+
+    ff_stage_7a_readback = subparsers.add_parser(
+        "ff-stage-7a-production-readback",
+        help="Run query-only Stage 7A facility/FBS shadow reconciliation.",
+    )
+    ff_stage_7a_readback.add_argument("--deployed-sha", required=True)
+    ff_stage_7a_readback.add_argument("--output", required=True)
+    ff_stage_7a_readback.set_defaults(
+        handler=run_ff_stage_7a_production_command,
+        ff_stage_7a_action="readback",
     )
 
     ads_historical_dry_run = subparsers.add_parser(

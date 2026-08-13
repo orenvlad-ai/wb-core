@@ -63,4 +63,6 @@ routing, returns and every live physical trigger remain absent/default-off.
 Release Train may deploy this live/runtime code and verify its query-only UI.
 It must not create `FF Москва`/`FF Оренбург`, activate an epoch, apply opening,
 enable env/collector, execute backfill or create business documents. Those are
-future exact owner-gated production mutations.
+separate exact owner-gated production mutations. Migration 140 now owns only
+the separately authorized facility-registry and official FBS shadow activation;
+opening/cutover, writer epoch and every physical-stock effect remain outside it.

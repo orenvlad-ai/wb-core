@@ -75,6 +75,16 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - The Stage 7A FBS adapter may call `POST /api/v3/orders/status` strictly as an
   official read semantic. Observations and exact mapping evidence are
   append-only; `supplierStatus=complete` is never a debit trigger.
+- Migration 140 adds a separately owner-gated
+  `scope:production-mutation` runner for only the two facility rows and the
+  official FBS shadow. Hosted `ff-stage-7a-production-dry-run/apply/readback`
+  requires the canonical target, exact `.wb-core-runtime-sha`, a private
+  fingerprinted plan, approval reference, exact target/env before-images and
+  post-restart query-only reconciliation. It catches up from `2026-08-01`,
+  proves one next ordinary collection, then enables the existing hourly
+  `wb-core-warehouse-functional-sync.timer` path (`*:17:00 Europe/Moscow`,
+  `AccuracySec=2m`). It never creates an epoch/opening/checkpoint, chooses `T`
+  or writes stock/WB.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

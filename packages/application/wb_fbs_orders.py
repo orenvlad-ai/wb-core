@@ -7,6 +7,7 @@ inventory document, operation, reservation, movement, balance, or cutover.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -255,6 +256,76 @@ class WbFbsOrdersCollector:
 
     def collect_default_window(self) -> dict[str, Any]:
         return self.collect()
+
+    def collect_catchup(
+        self,
+        *,
+        date_from: int,
+        date_to: int | None = None,
+        page_limit: int = 1000,
+        max_pages: int = MAX_PAGES,
+    ) -> dict[str, Any]:
+        """Collect consecutive <=30-day windows through one pinned watermark."""
+
+        start = _bounded_int(date_from, "date_from", minimum=1, maximum=2**63 - 1)
+        watermark = _bounded_int(
+            int(self.unix_time_factory()) if date_to is None else date_to,
+            "date_to",
+            minimum=start,
+            maximum=2**63 - 1,
+        )
+        window_start = start
+        runs: list[dict[str, Any]] = []
+        request_count = 0
+        new_observation_count = 0
+        status_observation_count = 0
+        while window_start <= watermark:
+            window_end = min(watermark, window_start + (30 * 24 * 60 * 60))
+            cursor = 0
+            while True:
+                result = self.collect(
+                    date_from=window_start,
+                    date_to=window_end,
+                    next_cursor=cursor,
+                    page_limit=page_limit,
+                    max_pages=max_pages,
+                )
+                runs.append(result)
+                request_count += int(result.get("page_count") or 0)
+                new_observation_count += int(result.get("new_observation_count") or 0)
+                status_observation_count += int(result.get("status_observation_count") or 0)
+                cursor = int(result.get("next_cursor") or 0)
+                if bool(result.get("complete")):
+                    break
+                if cursor <= 0:
+                    raise WbFbsOrdersError(
+                        "catchup_cursor_missing",
+                        "Bounded FBS catch-up returned partial work without a resume cursor",
+                        http_status=502,
+                    )
+            if window_end >= watermark:
+                break
+            window_start = window_end + 1
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": "success",
+            "review_range_from": datetime.fromtimestamp(start, tz=timezone.utc).date().isoformat(),
+            "watermark_unix": watermark,
+            "watermark_at": datetime.fromtimestamp(watermark, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "window_count": len({
+                (int((run.get("window") or {}).get("date_from") or 0),
+                 int((run.get("window") or {}).get("date_to") or 0))
+                for run in runs
+            }),
+            "run_count": len(runs),
+            "upstream_page_count": request_count,
+            "new_observation_count": new_observation_count,
+            "status_observation_count": status_observation_count,
+            "complete": True,
+            "next_cursor": 0,
+            "mutates_wb": False,
+        }
 
     def collect(
         self,

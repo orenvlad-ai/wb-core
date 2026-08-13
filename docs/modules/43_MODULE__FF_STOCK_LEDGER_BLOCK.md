@@ -18,6 +18,7 @@ related_modules:
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
+  - "packages/application/ff_stage_7a_production.py"
   - "packages/contracts/ff_pool_documents.py"
   - "packages/application/ff_inventory_reconciliation.py"
   - "packages/application/ff_overhead_allocation.py"
@@ -102,8 +103,10 @@ related_runners:
   - "apps/ff_wb_supply_origins_browser_smoke.py"
   - "apps/wb_fbs_orders_collector_smoke.py"
   - "apps/wb_fbs_orders_http_smoke.py"
+  - "apps/ff_stage_7a_production.py"
+  - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. A default-off facility × FBS|FBO foundation, durable documents, protected Stage 3 explanatory surface, append-only Stage 4 FBW origin evidence and default-off Stage 5 official GET-only FBS observations now exist strictly below this aggregate authority; no current producer or aggregate reader uses them. Stage 5 does not assign an FBS origin or create a reservation/movement. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. The facility × FBS|FBO foundation, durable documents, protected explanatory surface, append-only FBW origin evidence and official FBS observations exist strictly below this aggregate authority. Migration 140 creates only active Moscow/inactive Orenburg facility dimensions and enables exact-ID FBS shadow collection; no aggregate reader, reservation/movement producer or debit trigger uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -571,3 +574,11 @@ service is the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior
 receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
+
+Migration 140 separately activates only the facility registry and FBS shadow:
+`FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
+remain unchanged. The repo-owned production runner does not acquire a writer
+epoch, apply an opening, post a guided acceptance, touch aggregate FF
+quantity/capital or create a ledger/reservation/movement. Exact target/env
+before-images and post-apply invariants make this activation evidence-bearing,
+but it is not permission to run the later physical opening/cutover stage.

@@ -249,3 +249,14 @@ collector enablement and backfill remain future production mutations. Guided
 posting, once separately activated, is one T1 owner covering the supplier
 factual row, exact aggregate receipt, pool document/movements and targeted
 replay; partial legacy acceptance beforehand is forbidden.
+
+Migration 140 consumes a narrower separately authorized boundary before that
+future T1 physical posting: two facility/profile rows, exact append-only FBS
+warehouse/SKU mappings, official observations/status evidence and collector
+configuration. It uses private exact target/env before-images, idempotent
+forward reconciliation and immutable observation retention; it does not call
+`runtime.backup_database(...)`, select T1/T2/T3 for physical stock or weaken
+the rule that coherent full-store backup is reserved for allowlisted
+schema/store migrations. Recovery that changes the resulting configuration
+requires a new owner authorization. The later opening/guided-posting recovery
+contract remains untouched.
