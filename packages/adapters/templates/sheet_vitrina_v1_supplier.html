@@ -223,6 +223,7 @@
     .exact-cost-blocker { color: var(--warning); font-size: 10px; font-weight: 800; }
     .supplier-registry-table { table-layout: fixed; width: 1865px; min-width: 1865px; max-width: 1865px; }
     .supplier-registry-table th, .supplier-registry-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .supplier-registry-table .badge { white-space: nowrap; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }
     .supplier-registry-table th { padding-inline: 7px; text-transform: none; }
     .supplier-registry-table [data-column-key="planned_shipment_date"],
     .supplier-registry-table [data-column-key="actual_shipment_date"] { width: 92px; }
@@ -1340,7 +1341,7 @@
         const blockers = Array.isArray(readiness.blockers)
           ? readiness.blockers.map((item) => item.reason_ru || item.code || "").filter(Boolean)
           : [];
-        const title = [readiness.status_label_ru || "Проверить оплату", ...blockers].join(" · ");
+        const title = [display, readiness.status_label_ru || "Проверить оплату", ...blockers].join(" · ");
         const tone = readiness.complete === true ? "success" : "warning";
         return '<span class="badge ' + tone + '" title="' + escapeHtml(title) + '">' + escapeHtml(display) + '</span>';
       }
@@ -1946,7 +1947,8 @@
             const tone = value === "accepted_ff" ? "success" : value === "in_transit" ? "info" : "neutral";
             const display = row.order_status_display || orderStatusLabels[value];
             const warnings = Array.isArray(row.order_status_warnings) ? row.order_status_warnings.join("; ") : "";
-            return '<td data-order-status-column><span class="badge ' + tone + '" title="' + escapeHtml(warnings || row.order_status_tooltip || "Статус вычислен из фактических дат") + '">' + escapeHtml(display) + '</span></td>';
+            const title = [display, warnings || row.order_status_tooltip || "Статус вычислен из фактических дат"].filter(Boolean).join(" · ");
+            return '<td data-order-status-column><span class="badge ' + tone + '" title="' + escapeHtml(title) + '">' + escapeHtml(display) + '</span></td>';
           }
 
           function renderActionsContent(row) {
