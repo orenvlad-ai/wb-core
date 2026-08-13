@@ -404,13 +404,17 @@ def main() -> None:
                           const style = getComputedStyle(cell);
                           return style.wordBreak === 'break-all' || style.writingMode !== 'horizontal-tb';
                         }),
+                        wrappedBadge: Array.from(table.querySelectorAll('tbody .badge')).some((badge) => {
+                          const style = getComputedStyle(badge);
+                          return style.whiteSpace !== 'nowrap' || style.overflowWrap !== 'normal';
+                        }),
                         overlap: Array.from(table.querySelectorAll('tr')).some((row) => {
                           const cells = Array.from(row.children).filter((cell) => !cell.hidden);
                           return cells.some((cell, index) => index > 0 && cell.getBoundingClientRect().left < cells[index - 1].getBoundingClientRect().right - 1);
                         })
                     })"""
                 )
-                if registry_geometry["width"] > 1950 or registry_geometry["verticalText"] or registry_geometry["overlap"]:
+                if registry_geometry["width"] > 1950 or registry_geometry["verticalText"] or registry_geometry["wrappedBadge"] or registry_geometry["overlap"]:
                     raise AssertionError(f"registry must use bounded compact columns without overlap or vertical text: {registry_geometry}")
                 expect(frame.get_by_role("columnheader", name="Столбец: Матчинг", exact=True)).to_be_visible()
                 expect(frame.get_by_role("columnheader", name="Столбец: Поставщик", exact=True)).to_be_visible()
