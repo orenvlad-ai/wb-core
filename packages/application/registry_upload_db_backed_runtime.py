@@ -5824,12 +5824,113 @@ class RegistryUploadDbBackedRuntime:
             rows = conn.execute(
                 """
                 SELECT semantic_operation_id,source_sha256,logical_fee_id,
-                       supplier_order_id,financial_document_id,assigned_at
+                       supplier_order_id,financial_document_id,assigned_at,
+                       raw_json
                 FROM sheet_vitrina_v1_supplier_bank_operation_assignments
                 ORDER BY semantic_operation_id
                 """
             ).fetchall()
+            return [
+                {
+                    **dict(row),
+                    "raw": json.loads(str(row["raw_json"] or "{}")),
+                }
+                for row in rows
+            ]
+
+    def list_supplier_payment_fee_confirmations(
+        self,
+        supplier_order_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            normalized_order_id = str(supplier_order_id or "").strip()
+            rows = conn.execute(
+                """
+                SELECT confirmation_id,supplier_order_id,payment_document_id,
+                       payment_fingerprint,confirmation_type,status,reason,
+                       actor,created_at,updated_at
+                FROM sheet_vitrina_v1_supplier_payment_fee_confirmations
+                WHERE (? = '' OR supplier_order_id = ?)
+                ORDER BY supplier_order_id,payment_document_id,confirmation_id
+                """,
+                (normalized_order_id, normalized_order_id),
+            ).fetchall()
             return [dict(row) for row in rows]
+
+    def save_supplier_payment_zero_fee_confirmation(
+        self,
+        *,
+        confirmation_id: str,
+        supplier_order_id: str,
+        payment_document_id: str,
+        payment_fingerprint: str,
+        reason: str,
+        actor: str,
+        confirmed_at: str,
+    ) -> dict[str, Any]:
+        values = {
+            "confirmation_id": str(confirmation_id or "").strip(),
+            "supplier_order_id": str(supplier_order_id or "").strip(),
+            "payment_document_id": str(payment_document_id or "").strip(),
+            "payment_fingerprint": str(payment_fingerprint or "").strip(),
+            "reason": str(reason or "").strip(),
+            "actor": str(actor or "").strip(),
+            "confirmed_at": str(confirmed_at or "").strip(),
+        }
+        missing = [key for key, value in values.items() if not value]
+        if missing:
+            raise ValueError(
+                "zero-fee confirmation fields are required: " + ",".join(missing)
+            )
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_payment_fee_confirmations(
+                    confirmation_id,supplier_order_id,payment_document_id,
+                    payment_fingerprint,confirmation_type,status,reason,actor,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(supplier_order_id,payment_document_id,confirmation_type)
+                DO UPDATE SET
+                    payment_fingerprint=excluded.payment_fingerprint,
+                    status='active',
+                    reason=excluded.reason,
+                    actor=excluded.actor,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    values["confirmation_id"],
+                    values["supplier_order_id"],
+                    values["payment_document_id"],
+                    values["payment_fingerprint"],
+                    "zero_fee",
+                    "active",
+                    values["reason"],
+                    values["actor"],
+                    values["confirmed_at"],
+                    values["confirmed_at"],
+                ),
+            )
+            conn.commit()
+        confirmation = next(
+            (
+                item
+                for item in self.list_supplier_payment_fee_confirmations(
+                    values["supplier_order_id"]
+                )
+                if str(item.get("payment_document_id") or "")
+                == values["payment_document_id"]
+                and str(item.get("confirmation_type") or "") == "zero_fee"
+            ),
+            None,
+        )
+        if confirmation is None:
+            raise ValueError("zero-fee confirmation readback failed")
+        return confirmation
 
     def load_supplier_financial_source(
         self,
@@ -11600,6 +11701,25 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_bank_assignments_by_order
         ON sheet_vitrina_v1_supplier_bank_operation_assignments(
             supplier_order_id, financial_document_id
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_payment_fee_confirmations (
+            confirmation_id TEXT PRIMARY KEY,
+            supplier_order_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            payment_document_id TEXT NOT NULL,
+            payment_fingerprint TEXT NOT NULL,
+            confirmation_type TEXT NOT NULL CHECK(confirmation_type IN ('zero_fee')),
+            status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+            reason TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(supplier_order_id,payment_document_id,confirmation_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_payment_fee_confirmations_by_order
+        ON sheet_vitrina_v1_supplier_payment_fee_confirmations(
+            supplier_order_id,status,payment_document_id
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_financial_source_migrations (

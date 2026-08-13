@@ -53,9 +53,13 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     bank_fee_statement_import_is_complete,
     build_bank_fee_statement_import_preview,
     build_financial_summary,
+    build_supplier_financial_readiness,
+    build_supplier_payment_fee_blocks,
+    build_supplier_payment_readiness,
     build_supplier_shipment_registry,
     parse_financial_document_upload,
     parse_financial_document_text,
+    supplier_payment_fee_fingerprint,
 )
 
 
@@ -705,10 +709,168 @@ def _packing_list_workbook_bytes() -> bytes:
 
 def main() -> None:
     _assert_bank_fee_checklist_completion_states()
+    _assert_per_payment_fee_blocks()
     _assert_parser_smoke()
     _assert_parser_reclassification_staging()
     _assert_http_api_smoke()
     print("supplier_financial_documents_smoke: OK")
+
+
+def _assert_per_payment_fee_blocks() -> None:
+    shipment = {"invoice_amount_total": 1000, "currency": "CNY"}
+    payments = [
+        {
+            "document_id": f"payment_{index}",
+            "document_type": "supplier_cny_payment",
+            "status": "posted",
+            "operation_date": f"2026-0{index}-10",
+            "cny_amount": amount,
+            "currency": "CNY",
+        }
+        for index, amount in ((1, 300), (2, 400), (3, 300))
+    ]
+    readiness = build_supplier_payment_readiness(shipment, payments)
+    financial_documents = [
+        {"document_id": "fees_1", "document_type": "bank_fee_statement", "parse_status": "confirmed"},
+        {"document_id": "fees_2", "document_type": "bank_fee_statement", "parse_status": "confirmed"},
+    ]
+    assignments = [
+        {
+            "semantic_operation_id": operation_id,
+            "financial_document_id": document_id,
+            "raw": {
+                "matched_anchor_document_id": payment_id,
+                "confidence": confidence,
+                "amount": amount,
+                "currency": "CNY",
+                "fee_category": category,
+            },
+        }
+        for operation_id, document_id, payment_id, confidence, amount, category in (
+            ("fee_1a", "fees_1", "payment_1", "strong", 2, "bank_transfer_fee"),
+            ("fee_1b", "fees_1", "payment_1", "probable", 1, "currency_control_vat"),
+            ("fee_2a", "fees_2", "payment_2", "strong", 4, "currency_control_fee"),
+        )
+    ]
+    projection = build_supplier_payment_fee_blocks(
+        payment_readiness=readiness,
+        payment_documents=[*payments, dict(payments[0])],
+        financial_documents=financial_documents,
+        bank_operation_assignments=assignments,
+    )
+    blocks = projection["blocks"]
+    if projection["actual_payment_count"] != 3 or len(blocks) != 3:
+        raise AssertionError(f"actual payments must be deduplicated without a future placeholder: {projection}")
+    if [item["fee_line_count"] for item in blocks[:2]] != [2, 1]:
+        raise AssertionError(f"multiple fee lines must stay grouped under their payment: {projection}")
+    if blocks[0]["fee_totals"] != {"CNY": 3.0} or blocks[0]["fee_total"] != 3.0:
+        raise AssertionError(f"fee-block total must conserve its explicit currency: {projection}")
+    if [item["status"] for item in blocks] != ["complete", "complete", "missing"]:
+        raise AssertionError(f"each actual payment must have one fail-closed fee block: {projection}")
+
+    zero_confirmation = {
+        "payment_document_id": "payment_3",
+        "payment_fingerprint": supplier_payment_fee_fingerprint(payments[2]),
+        "confirmation_type": "zero_fee",
+        "status": "active",
+        "actor": "smoke",
+    }
+    zero_projection = build_supplier_payment_fee_blocks(
+        payment_readiness=readiness,
+        payment_documents=payments,
+        financial_documents=financial_documents,
+        bank_operation_assignments=assignments,
+        zero_fee_confirmations=[zero_confirmation],
+    )
+    if (
+        zero_projection["blocks"][2]["evidence_source"] != "audited_zero_fee"
+        or zero_projection["blocks"][2]["fee_line_count"] != 0
+    ):
+        raise AssertionError(f"audited zero fee must close without a fake money line: {zero_projection}")
+
+    partial = build_supplier_payment_readiness(shipment, payments[:1])
+    partial_projection = build_supplier_payment_fee_blocks(
+        payment_readiness=partial,
+        payment_documents=payments[:1],
+    )
+    if (
+        len(partial_projection["blocks"]) != 2
+        or partial_projection["future_placeholder_count"] != 1
+        or partial_projection["blocks"][-1]["payment_document_id"]
+        or partial_projection["blocks"][-1]["can_confirm_zero_fee"]
+    ):
+        raise AssertionError(f"partial payment must show one anonymous future fee row: {partial_projection}")
+
+    legacy_document = {
+        "document_id": "legacy_fee",
+        "document_type": "bank_fee_statement",
+        "parse_status": "confirmed",
+        "warnings": [],
+        "errors": [],
+    }
+    legacy_lines = [
+        {
+            "financial_document_id": "legacy_fee",
+            "category": "bank_transfer_fee",
+            "status": "confirmed",
+            "amount": 5,
+            "currency": "CNY",
+        }
+    ]
+    single_paid = build_supplier_payment_readiness(
+        {"invoice_amount_total": 300, "currency": "CNY"}, payments[:1]
+    )
+    legacy = build_supplier_payment_fee_blocks(
+        payment_readiness=single_paid,
+        payment_documents=payments[:1],
+        financial_documents=[legacy_document],
+        expense_lines=legacy_lines,
+    )
+    if legacy["blocks"][0]["evidence_source"] != "legacy_deterministic_single_payment":
+        raise AssertionError(f"unique legacy evidence must derive without mutation: {legacy}")
+    ambiguous = build_supplier_payment_fee_blocks(
+        payment_readiness=readiness,
+        payment_documents=payments,
+        financial_documents=[legacy_document],
+        expense_lines=legacy_lines,
+    )
+    if any(item["status"] == "complete" for item in ambiguous["blocks"]):
+        raise AssertionError(f"multi-payment legacy fees must remain ambiguous: {ambiguous}")
+    stored_ambiguous = build_supplier_payment_fee_blocks(
+        payment_readiness=single_paid,
+        payment_documents=payments[:1],
+        financial_documents=[
+            {
+                **legacy_document,
+                "normalized_parse_json": json.dumps(
+                    {"order_match_status": "ambiguous"}, ensure_ascii=False
+                ),
+            }
+        ],
+        expense_lines=legacy_lines,
+    )
+    if (
+        stored_ambiguous["blocks"][0]["status"] != "needs_review"
+        or stored_ambiguous["blocks"][0]["can_confirm_zero_fee"]
+    ):
+        raise AssertionError(
+            "stored ambiguous legacy evidence must require linkage and cannot be bypassed by zero-fee: "
+            f"{stored_ambiguous}"
+        )
+
+    financial_readiness = build_supplier_financial_readiness(
+        payment_readiness=readiness,
+        financial_documents=[
+            {"document_type": "logistics_invoice", "parse_status": "confirmed"},
+            {"document_type": "customs_declaration", "parse_status": "confirmed"},
+            {"document_type": "packing_list", "parse_status": "needs_review"},
+            {"document_type": "bank_control_statement", "parse_status": "needs_review"},
+        ],
+        document_controls=[{"cost_affecting": True, "conserved": True}],
+        payment_fee_blocks=zero_projection["blocks"],
+    )
+    if not financial_readiness["ready"]:
+        raise AssertionError(f"informational documents must not hold exact-cost readiness: {financial_readiness}")
 
 
 def _assert_bank_fee_checklist_completion_states() -> None:
@@ -3282,8 +3444,18 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"canonical supplier payment missing row must be shown once: {order_documents}")
             if sum(1 for item in required_rows if item.get("document_type") == "supplier_cny_payment") != 1:
                 raise AssertionError(f"supplier payment checklist must not duplicate the missing row: {order_documents}")
-            if _required_document_status(required_rows, "bank_fee_statement") != "Не загружен":
-                raise AssertionError(f"missing bank fees must be shown: {order_documents}")
+            if _required_document_status(required_rows, "bank_fee_statement"):
+                raise AssertionError(f"global bank-fee row must not replace per-payment blocks: {order_documents}")
+            if _required_document_status(required_rows, "payment_fee_block") != "Не загружены":
+                raise AssertionError(f"future payment fee placeholder must be shown: {order_documents}")
+            future_fee_rows = [
+                item
+                for item in required_rows
+                if item.get("document_type") == "payment_fee_block"
+                and (item.get("payment_fee_block") or {}).get("future")
+            ]
+            if len(future_fee_rows) != 1 or future_fee_rows[0].get("payment_document_id"):
+                raise AssertionError(f"future fee placeholder must be unique and anonymous: {order_documents}")
             if _required_document_status(required_rows, "packing_list") != "Загружен":
                 raise AssertionError(f"uploaded packing list must be shown: {order_documents}")
             archive_status, archive_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
@@ -3321,8 +3493,8 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"legacy bank transfer must not return to required checklist: {bank_order_documents}")
             if _required_document_status(bank_rows, "supplier_cny_payment") != "Не оплачено полностью":
                 raise AssertionError(f"ambiguous legacy evidence must leave canonical payment missing: {bank_order_documents}")
-            if _required_document_status(bank_rows, "bank_fee_statement") != "Не загружен":
-                raise AssertionError(f"missing bank fee import must still be shown: {bank_order_documents}")
+            if _required_document_status(bank_rows, "payment_fee_block") != "Не загружены":
+                raise AssertionError(f"missing future payment fee must still be shown: {bank_order_documents}")
             if _required_document_status(bank_rows, "packing_list") != "Загружен":
                 raise AssertionError(f"packing list checklist status changed: {bank_order_documents}")
             document_rows = bank_order_documents.get("documents", [])
@@ -3332,6 +3504,9 @@ def _assert_http_api_smoke() -> None:
             def _unexpected_package_parse_refresh(*_args, **_kwargs):  # type: ignore[no-untyped-def]
                 raise AssertionError("package assembly must not refresh or persist parser state")
 
+            original_refresh_saved_document_parses = (
+                entrypoint.supplier_financial_documents_block._refresh_saved_document_parses
+            )
             entrypoint.supplier_financial_documents_block._refresh_saved_document_parses = (  # type: ignore[method-assign]
                 _unexpected_package_parse_refresh
             )
@@ -3394,6 +3569,50 @@ def _assert_http_api_smoke() -> None:
             for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "packing_list"):
                 if expected_type not in all_types:
                     raise AssertionError(f"all-documents archive missing {expected_type}: {all_manifest}")
+            entrypoint.supplier_financial_documents_block._refresh_saved_document_parses = (  # type: ignore[method-assign]
+                original_refresh_saved_document_parses
+            )
+            payment_document_id = _seed_http_zero_fee_payment(runtime)
+            before_zero_status, before_zero = _get_json(documents_url)
+            before_zero_block = next(
+                (
+                    item
+                    for item in before_zero.get("payment_fee_blocks") or []
+                    if item.get("payment_document_id") == payment_document_id
+                ),
+                {},
+            )
+            if (
+                before_zero_status != 200
+                or before_zero_block.get("status") != "missing"
+                or before_zero_block.get("can_confirm_zero_fee") is not True
+            ):
+                raise AssertionError(
+                    f"existing payment without fee evidence must offer audited zero-fee: {before_zero_status} {before_zero}"
+                )
+            future_zero_status, _ = _post_json(
+                f"{documents_url}/payments/future-payment/zero-fee",
+                {"reason": "Комиссия банком не взималась"},
+            )
+            if future_zero_status != 409:
+                raise AssertionError("zero-fee confirmation must reject a nonexistent future payment")
+            zero_status, zero_payload = _post_json(
+                f"{documents_url}/payments/{payment_document_id}/zero-fee",
+                {"reason": "Комиссия банком не взималась"},
+            )
+            zero_block = zero_payload.get("payment_fee_block") or {}
+            confirmation = zero_payload.get("confirmation") or {}
+            if (
+                zero_status != 200
+                or zero_payload.get("readback_confirmed") is not True
+                or zero_block.get("evidence_source") != "audited_zero_fee"
+                or zero_block.get("fee_line_count") != 0
+                or confirmation.get("reason") != "Комиссия банком не взималась"
+                or not confirmation.get("actor")
+            ):
+                raise AssertionError(
+                    f"zero-fee HTTP confirmation must be audited and create no money line: {zero_status} {zero_payload}"
+                )
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -3501,6 +3720,48 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
         },
         lines=[],
     )
+
+
+def _seed_http_zero_fee_payment(runtime: RegistryUploadDbBackedRuntime) -> str:
+    payment_document_id = "cnydoc_sup_financial_zero_fee"
+    runtime.save_cny_document(
+        {
+            "document_id": payment_document_id,
+            "document_type": "supplier_cny_payment",
+            "source": "supplier_order",
+            "source_order_id": "sup_financial",
+            "context_order_id": "sup_financial",
+            "linked_financial_document_id": "",
+            "original_filename": "zero-fee-payment.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "zero-fee-payment-sha",
+            "natural_key": "supplier_cny_payment:zero-fee:smoke",
+            "uploaded_at": "2026-06-19T08:00:00Z",
+            "created_at": "2026-06-19T08:00:00Z",
+            "updated_at": "2026-06-19T08:00:00Z",
+            "operation_date": "2026-06-18",
+            "operation_datetime": "2026-06-18T08:00:00Z",
+            "status": "posted",
+            "document_number": "PAY-ZERO-FEE",
+            "currency": "CNY",
+            "rub_amount": "130000",
+            "cny_amount": "10000",
+            "bank_rate": "13",
+            "parsed_payload": {
+                "document_type": "supplier_cny_payment",
+                "document_number": "PAY-ZERO-FEE",
+                "operation_date": "2026-06-18",
+                "currency": "CNY",
+                "cny_amount": "10000",
+            },
+            "raw_parse": {},
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        }
+    )
+    return payment_document_id
 
 
 def _make_http_accounting_fixture_ready(runtime: RegistryUploadDbBackedRuntime) -> None:

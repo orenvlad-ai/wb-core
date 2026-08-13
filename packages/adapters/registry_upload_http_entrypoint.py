@@ -2136,6 +2136,31 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus(response_status), payload)
                 return
 
+            if _is_supplier_payment_zero_fee_confirmation_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, payment_document_id = (
+                        _resolve_supplier_payment_zero_fee_confirmation_ids(
+                            parsed.path
+                        )
+                    )
+                    payload = entrypoint.handle_supplier_payment_zero_fee_confirmation_request(
+                        shipment_id,
+                        payment_document_id,
+                        _load_request_payload(self),
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.CONFLICT,
+                        {"error": str(exc)},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_financial_document_delete_preview_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -6461,6 +6486,18 @@ def _is_supplier_order_documents_archive_path(path: str) -> bool:
     )
 
 
+def _is_supplier_payment_zero_fee_confirmation_path(path: str) -> bool:
+    parts = _supplier_order_documents_path_parts(path)
+    return (
+        len(parts) == 5
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT
+        and parts[2] == "payments"
+        and bool(parts[3])
+        and parts[4] == "zero-fee"
+    )
+
+
 def _supplier_financial_path_parts(path: str) -> list[str]:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return []
@@ -6752,6 +6789,15 @@ def _resolve_supplier_order_documents_archive_ids(path: str) -> tuple[str, str]:
         raise ValueError(f"unsupported supplier order documents archive path: {path}")
     parts = _supplier_order_documents_path_parts(path)
     return parts[0], parts[2]
+
+
+def _resolve_supplier_payment_zero_fee_confirmation_ids(
+    path: str,
+) -> tuple[str, str]:
+    if not _is_supplier_payment_zero_fee_confirmation_path(path):
+        raise ValueError(f"unsupported supplier payment zero-fee path: {path}")
+    parts = _supplier_order_documents_path_parts(path)
+    return urllib_parse.unquote(parts[0]), urllib_parse.unquote(parts[3])
 
 
 def _resolve_supplier_financial_document_ids(path: str) -> tuple[str, str]:

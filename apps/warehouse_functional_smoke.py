@@ -1087,6 +1087,46 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
             },
         ]
     )
+    archived_sources["bank_operation_assignments"] = [
+        {
+            "semantic_operation_id": operation_id,
+            "supplier_order_id": shipment_id,
+            "financial_document_id": document_id,
+            "raw": {
+                "matched_anchor_document_id": "payment-doc",
+                "confidence": confidence,
+                "amount": amount,
+                "currency": currency,
+                "fee_category": category,
+            },
+        }
+        for operation_id, document_id, confidence, amount, currency, category in (
+            (
+                "fee-cny-linked",
+                "fee-financial",
+                "strong",
+                "11446.4",
+                "CNY",
+                "bank_transfer_fee",
+            ),
+            (
+                "fee-rub-a-linked",
+                "bank-fee-rub-a",
+                "probable",
+                "100",
+                "RUB",
+                "bank_transfer_fee",
+            ),
+            (
+                "fee-rub-b-linked",
+                "bank-fee-rub-b",
+                "strong",
+                "200",
+                "RUB",
+                "currency_control_fee",
+            ),
+        )
+    ]
     active_only = _supplier_cost_allocations(archived_sources)[shipment_id]
     active_component_count = sum(
         int(item["eligible_component_count"])
@@ -1100,6 +1140,12 @@ def _test_26gn390_supplier_line_cost_proof() -> None:
         )
         and active_only["controls"]["document_allocation_conserved"] is True,
         "excluded duplicate invoice 136 is absent from the active 9-of-9 allocation",
+    )
+    _assert(
+        active_only["payment_fee_blocks"][0]["status"] == "complete"
+        and active_only["payment_fee_blocks"][0]["fee_line_count"] == 3
+        and len(active_only["compatible_source_fingerprints"]) >= 6,
+        "one actual payment groups all strong/probable fee rows and keeps bool/integer legacy fingerprints",
     )
     stale_sources = copy.deepcopy(archived_sources)
     next(

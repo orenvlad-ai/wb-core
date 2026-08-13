@@ -275,7 +275,7 @@ def main() -> int:
             conn.commit()
         source_changed = load_supplier_line_cost_breakdown(runtime=runtime, shipment_id="26GN390")
         _assert(not source_changed["certification"]["certified"], "source mutation remains yellow")
-        _assert(source_changed["average_unit_cost_rub"] == "110", "current canonical cost recalculates without zero")
+        _assert(source_changed["average_unit_cost_rub"] == "112", "current canonical cost recalculates without zero")
         try:
             build_supplier_cost_state_replay_plan(runtime, shipment_ids=["26GN390"])
         except WarehouseSupplierCostStateReplayError as exc:
@@ -288,7 +288,7 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='-100'
+                   SET rub_value_delta='-98'
                    WHERE operation_id='payment-390'""",
             )
             conn.commit()
@@ -366,7 +366,7 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 """UPDATE sheet_vitrina_v1_cny_ledger_operations
-                   SET rub_value_delta='-100',updated_at=?
+                   SET rub_value_delta='-98',updated_at=?
                    WHERE operation_id='payment-390'""",
                 (NOW,),
             )
@@ -478,19 +478,147 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
         )
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_cny_ledger_operations(
-                   operation_id,operation_type,source_order_id,operation_date,operation_datetime,
+                   operation_id,operation_type,source_document_id,source_order_id,operation_date,operation_datetime,
                    sequence_key,cny_delta,rub_value_delta,status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 "payment-390",
                 "supplier_payment_out",
+                "payment-document-390",
                 "26GN390",
                 "2026-06-20",
                 "2026-06-20T10:00:00Z",
                 "2026-06-20T10:00:00Z:payment-390",
                 "-10",
-                "-100",
+                "-98",
                 "posted",
+                NOW,
+                NOW,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_cny_documents(
+                   document_id,document_type,source,source_order_id,context_order_id,
+                   linked_financial_document_id,original_filename,stored_file_path,
+                   file_content_type,file_sha256,natural_key,uploaded_at,created_at,
+                   updated_at,operation_date,operation_datetime,status,document_number,
+                   currency,rub_amount,cny_amount,bank_rate,parsed_payload_json,
+                   raw_parse_json,parser_version,warnings_json,errors_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "payment-document-390",
+                "supplier_cny_payment",
+                "supplier_order",
+                "26GN390",
+                "26GN390",
+                "",
+                "payment-390.pdf",
+                "",
+                "application/pdf",
+                "sha256:payment-390",
+                "supplier_cny_payment:replay:390",
+                NOW,
+                NOW,
+                NOW,
+                "2026-06-20",
+                "2026-06-20T10:00:00Z",
+                "posted",
+                "PAY-390",
+                "CNY",
+                "98",
+                "10",
+                "10",
+                '{"document_number":"PAY-390"}',
+                "{}",
+                "fixture",
+                "[]",
+                "[]",
+            ),
+        )
+        for document_id, document_type in (
+            ("logistics-document-390", "logistics_invoice"),
+            ("customs-document-390", "customs_declaration"),
+        ):
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_financial_documents(
+                       document_id,supplier_order_id,document_type,original_filename,
+                       stored_file_path,file_content_type,file_sha256,uploaded_at,
+                       updated_at,parse_status,raw_parse_json,normalized_parse_json,
+                       warnings_json,errors_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    document_id,
+                    "26GN390",
+                    document_type,
+                    f"{document_id}.pdf",
+                    "",
+                    "application/pdf",
+                    f"sha256:{document_id}",
+                    NOW,
+                    NOW,
+                    "confirmed",
+                    "{}",
+                    "{}",
+                    "[]",
+                    "[]",
+                ),
+            )
+        for index, document_id, category in (
+            (1, "logistics-document-390", "logistics"),
+            (2, "customs-document-390", "customs_fee_1010"),
+        ):
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_financial_expense_lines(
+                       line_id,financial_document_id,supplier_order_id,sort_order,
+                       category,stage,description,amount,currency,amount_rub,
+                       included_in_logistics_efficiency,included_in_customs_total,
+                       status,confidence,raw_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"expense-line-{index}-390",
+                    document_id,
+                    "26GN390",
+                    index,
+                    category,
+                    "china_to_ff",
+                    "Fixture confirmed cost component",
+                    1,
+                    "RUB",
+                    1,
+                    0,
+                    0,
+                    "confirmed",
+                    1,
+                    "{}",
+                ),
+            )
+        from packages.application.supplier_financial_documents import (
+            supplier_payment_fee_fingerprint,
+        )
+
+        payment_fingerprint = supplier_payment_fee_fingerprint(
+            {
+                "document_id": "payment-document-390",
+                "operation_date": "2026-06-20",
+                "cny_amount": "10",
+                "currency": "CNY",
+            }
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_supplier_payment_fee_confirmations(
+                   confirmation_id,supplier_order_id,payment_document_id,
+                   payment_fingerprint,confirmation_type,status,reason,actor,
+                   created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "zero-fee-payment-document-390",
+                "26GN390",
+                "payment-document-390",
+                payment_fingerprint,
+                "zero_fee",
+                "active",
+                "Fixture: банк подтвердил отсутствие комиссии",
+                "warehouse-smoke",
                 NOW,
                 NOW,
             ),
@@ -530,7 +658,10 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
             "payment_operation_ids": ["payment-390"],
             "cny_fee_operation_ids": [],
             "direct_rub_bank_fees": "0",
-            "china_expense_sources": [],
+            "china_expense_sources": [
+                "logistics-document-390:expense-line-1-390",
+                "customs-document-390:expense-line-2-390",
+            ],
             "allocation": (
                 "supplier/payment/bank fee by invoice value; logistics/1010 by quantity; "
                 "2010/5010 by invoice value"

@@ -409,8 +409,9 @@ td, th { overflow-wrap: anywhere; }
   word-break: break-word;
 }
 .supplier-registry-table {
-  width: 100%;
-  min-width: 2280px;
+  width: 1865px;
+  min-width: 1865px;
+  max-width: 1865px;
   table-layout: fixed;
 }
 .supplier-safe-registry-table {
@@ -418,7 +419,11 @@ td, th { overflow-wrap: anywhere; }
   min-width: 1500px;
   table-layout: fixed;
 }
-.supplier-registry-table th, .supplier-registry-table td,
+.supplier-registry-table th, .supplier-registry-table td {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
 .supplier-safe-registry-table th, .supplier-safe-registry-table td {
   white-space: normal;
   overflow-wrap: anywhere;
