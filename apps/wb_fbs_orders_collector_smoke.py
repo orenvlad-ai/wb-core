@@ -101,7 +101,7 @@ class _Response:
     status = 200
     headers = {"Content-Type": "application/json"}
 
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(self, payload: object) -> None:
         self._body = json.dumps(payload).encode("utf-8")
 
     def __enter__(self) -> "_Response":
@@ -176,8 +176,30 @@ def _adapter_contract() -> None:
 
     def opener(request: object, *, timeout: float) -> _Response:
         calls.append((request, timeout))
+        path = urllib_parse.urlparse(request.full_url).path
         if request.get_method() == "POST":
             return _Response({"orders": [{"id": 42, "supplierStatus": "complete", "wbStatus": "waiting"}]})
+        if path == "/api/v3/warehouses":
+            return _Response([
+                {
+                    "id": 507,
+                    "officeId": 123,
+                    "name": "Exact seller warehouse",
+                    "cargoType": 1,
+                    "deliveryType": 1,
+                    "isDeleting": False,
+                    "isProcessing": False,
+                }
+            ])
+        if path == "/api/v3/offices":
+            return _Response([
+                {
+                    "id": 123,
+                    "name": "Москва (Софьино)",
+                    "city": "Москва_Восток",
+                    "federalDistrict": "Центральный федеральный округ",
+                }
+            ])
         return _Response({"next": 42, "orders": [_order(42)]})
 
     prior_token = os.environ.get("WB_API_TOKEN")
@@ -210,12 +232,24 @@ def _adapter_contract() -> None:
         assert status_request.get_method() == "POST"
         assert urllib_parse.urlparse(status_request.full_url).path == "/api/v3/orders/status"
         assert json.loads(status_request.data) == {"orders": [42]}
+        warehouses = source.list_seller_warehouses()
+        assert len(warehouses) == 1
+        assert warehouses[0].warehouse_id == 507 and warehouses[0].office_id == 123
+        warehouse_request, _timeout = calls[2]
+        assert warehouse_request.get_method() == "GET"
+        assert urllib_parse.urlparse(warehouse_request.full_url).path == "/api/v3/warehouses"
+        offices = source.list_offices()
+        assert len(offices) == 1
+        assert offices[0].office_id == 123 and offices[0].city == "Москва_Восток"
+        office_request, _timeout = calls[3]
+        assert office_request.get_method() == "GET"
+        assert urllib_parse.urlparse(office_request.full_url).path == "/api/v3/offices"
         try:
             source.list_orders(date_from=1, date_to=31 * 24 * 60 * 60 + 2)
             raise AssertionError("wide FBS window must fail")
         except ValueError as exc:
             assert "30 calendar days" in str(exc)
-        assert len(calls) == 2
+        assert len(calls) == 4
     finally:
         _restore_env("WB_API_TOKEN", prior_token)
         _restore_env("WB_FBS_API_BASE_URL", prior_base)

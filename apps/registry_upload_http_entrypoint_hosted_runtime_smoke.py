@@ -2320,6 +2320,99 @@ def main() -> None:
             or ads_args.ads_historical_action != "dry-run"
         ):
             raise AssertionError("hosted runner must expose ads historical commands")
+
+        stage_sha = "a" * 40
+        stage_plan_path = Path(partner_temp_dir) / "ff-stage-7a-plan.json"
+        stage_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": "ff_stage_7a_production_mutation_v1",
+                    "contract_version": 1,
+                    "mode": "dry_run",
+                    "apply_allowed": True,
+                    "deployed_sha": stage_sha,
+                    "fingerprint": "sha256:stage-7a-reviewed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_apply = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"status":"complete"}', stderr=""
+        )
+        stage_restart = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n4321\n", stderr=""
+        )
+        stage_readback_payload = {
+            "status": "ready",
+            "facilities": [
+                {"name": "FF Москва", "active": True},
+                {"name": "FF Оренбург", "active": False},
+            ],
+            "collector_configuration": {"enabled": True},
+            "collector_state": {
+                "last_status": "success",
+                "complete": True,
+                "next_cursor": 0,
+            },
+        }
+        stage_readback = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(stage_readback_payload),
+            stderr="",
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[stage_apply, stage_restart, stage_readback],
+        ) as run_mock:
+            stage_result = hosted_runtime._run_remote_ff_stage_7a_production(
+                active_target,
+                action="apply",
+                deployed_sha=stage_sha,
+                plan_path=stage_plan_path,
+                fingerprint="sha256:stage-7a-reviewed",
+                approval_reference="github-pr-123#issuecomment-456",
+                actor="owner",
+            )
+        first_command = " ".join(run_mock.call_args_list[0].args[0])
+        if not all(
+            token in first_command
+            for token in (
+                "ff_stage_7a_production.py",
+                ".wb-core-runtime-sha",
+                stage_sha,
+                "--reviewed-plan-stdin",
+                "sha256:stage-7a-reviewed",
+                "github-pr-123#issuecomment-456",
+                "/opt/wb-core-runtime/state/backups/ff-stage-7a-production",
+            )
+        ):
+            raise AssertionError("Stage 7A hosted apply lost exact SHA, plan, backup, or gate")
+        if run_mock.call_args_list[0].kwargs.get("input") != stage_plan_path.read_text(encoding="utf-8"):
+            raise AssertionError("Stage 7A hosted apply lost the exact reviewed plan")
+        if run_mock.call_args_list[0].kwargs.get("timeout") != hosted_runtime.FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS:
+            raise AssertionError("Stage 7A hosted apply lost its bounded timeout")
+        if (
+            not stage_result.get("http_service_restart", {}).get("active")
+            or stage_result.get("post_restart_readback") != stage_readback_payload
+        ):
+            raise AssertionError("Stage 7A hosted apply lacks restart/readback evidence")
+
+        stage_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-stage-7a-production-dry-run",
+                "--deployed-sha",
+                stage_sha,
+                "--output",
+                str(Path(partner_temp_dir) / "ff-stage-7a-dry-run.json"),
+            ]
+        )
+        if (
+            stage_args.handler is not hosted_runtime.run_ff_stage_7a_production_command
+            or stage_args.ff_stage_7a_action != "dry-run"
+        ):
+            raise AssertionError("hosted runner must expose Stage 7A production commands")
     for maintenance_action, expected_timeout in (
         ("status", 300.0),
         ("hold", 1500.0),

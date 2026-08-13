@@ -53,6 +53,29 @@ class WbFbsOrderStatus:
     wb_status: str
 
 
+@dataclass(frozen=True)
+class WbFbsSellerWarehouse:
+    """Privacy-safe exact identity from the official seller warehouse list."""
+
+    warehouse_id: int
+    office_id: int
+    name: str
+    cargo_type: int | None
+    delivery_type: int | None
+    is_deleting: bool
+    is_processing: bool
+
+
+@dataclass(frozen=True)
+class WbFbsOffice:
+    """Exact official WB office identity used only for facility evidence."""
+
+    office_id: int
+    name: str
+    city: str
+    federal_district: str
+
+
 class HttpBackedWbFbsOrdersSource:
     """Uses GET orders plus POST status strictly as official read semantics."""
 
@@ -156,6 +179,130 @@ class HttpBackedWbFbsOrdersSource:
             date_to=normalized_to,
         )
 
+    def list_seller_warehouses(self) -> list[WbFbsSellerWarehouse]:
+        """Read the official seller warehouse registry without changing WB."""
+
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        request = urllib_request.Request(
+            url=f"{runtime.base_url}/api/v3/warehouses",
+            data=None,
+            headers={"Authorization": runtime.token, "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=runtime.timeout_seconds) as response:
+                status_code = _response_status(response)
+                content_type = _response_content_type(response)
+                raw_body = response.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
+            raise WbFbsOrdersHttpStatusError(
+                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
+            ) from exc
+        except (error.URLError, OSError) as exc:
+            raise WbFbsOrdersTransportError(
+                f"WB FBS seller warehouse API transport failed: {exc}"
+            ) from exc
+        if status_code is not None and not 200 <= status_code < 300:
+            raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise WbFbsOrdersTransportError(
+                "WB FBS seller warehouse API returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, list):
+            raise WbFbsOrdersTransportError(
+                "WB FBS seller warehouse API returned an invalid warehouse list"
+            )
+        result: list[WbFbsSellerWarehouse] = []
+        seen: set[int] = set()
+        for item in payload:
+            if not isinstance(item, Mapping):
+                continue
+            warehouse_id = _bounded_int(
+                item.get("id"), "seller warehouse_id", minimum=1, maximum=2**63 - 1
+            )
+            office_id = _bounded_int(
+                item.get("officeId"), "seller warehouse office_id", minimum=1, maximum=2**63 - 1
+            )
+            if warehouse_id in seen:
+                raise WbFbsOrdersTransportError(
+                    "WB FBS seller warehouse API returned a duplicate warehouse ID"
+                )
+            seen.add(warehouse_id)
+            result.append(
+                WbFbsSellerWarehouse(
+                    warehouse_id=warehouse_id,
+                    office_id=office_id,
+                    name=str(item.get("name") or "")[:200],
+                    cargo_type=_optional_int(item.get("cargoType")),
+                    delivery_type=_optional_int(item.get("deliveryType")),
+                    is_deleting=item.get("isDeleting") is True,
+                    is_processing=item.get("isProcessing") is True,
+                )
+            )
+        return sorted(result, key=lambda item: item.warehouse_id)
+
+    def list_offices(self) -> list[WbFbsOffice]:
+        """Read official offices so warehouse→city evidence remains ID-bound."""
+
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        request = urllib_request.Request(
+            url=f"{runtime.base_url}/api/v3/offices",
+            data=None,
+            headers={"Authorization": runtime.token, "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=runtime.timeout_seconds) as response:
+                status_code = _response_status(response)
+                content_type = _response_content_type(response)
+                raw_body = response.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
+            raise WbFbsOrdersHttpStatusError(
+                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
+            ) from exc
+        except (error.URLError, OSError) as exc:
+            raise WbFbsOrdersTransportError(f"WB FBS offices API transport failed: {exc}") from exc
+        if status_code is not None and not 200 <= status_code < 300:
+            raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise WbFbsOrdersTransportError("WB FBS offices API returned invalid JSON") from exc
+        if not isinstance(payload, list):
+            raise WbFbsOrdersTransportError("WB FBS offices API returned an invalid office list")
+        result: list[WbFbsOffice] = []
+        seen: set[int] = set()
+        for item in payload:
+            if not isinstance(item, Mapping):
+                continue
+            office_id = _bounded_int(item.get("id"), "office_id", minimum=1, maximum=2**63 - 1)
+            if office_id in seen:
+                raise WbFbsOrdersTransportError("WB FBS offices API returned a duplicate office ID")
+            seen.add(office_id)
+            result.append(
+                WbFbsOffice(
+                    office_id=office_id,
+                    name=str(item.get("name") or "")[:200],
+                    city=str(item.get("city") or "")[:200],
+                    federal_district=str(item.get("federalDistrict") or "")[:200],
+                )
+            )
+        return sorted(result, key=lambda item: item.office_id)
+
     def list_statuses(self, order_ids: list[int]) -> list[WbFbsOrderStatus]:
         normalized = sorted({_bounded_int(item, "order_id", minimum=1, maximum=2**63 - 1) for item in order_ids})
         if not normalized:
@@ -226,6 +373,15 @@ def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if result < minimum or result > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return result
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise WbFbsOrdersTransportError("WB FBS seller warehouse API returned invalid metadata") from exc
 
 
 def _optional_unix_timestamp(value: Any, name: str) -> int | None:
