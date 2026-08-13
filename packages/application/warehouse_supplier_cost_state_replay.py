@@ -938,6 +938,24 @@ def _supplier_sources(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]
             if "sheet_vitrina_v1_cny_documents" in tables
             else []
         ),
+        "bank_operation_assignments": (
+            _rows(
+                conn,
+                """SELECT * FROM sheet_vitrina_v1_supplier_bank_operation_assignments
+                   ORDER BY supplier_order_id,semantic_operation_id""",
+            )
+            if "sheet_vitrina_v1_supplier_bank_operation_assignments" in tables
+            else []
+        ),
+        "payment_fee_confirmations": (
+            _rows(
+                conn,
+                """SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations
+                   ORDER BY supplier_order_id,payment_document_id,confirmation_id""",
+            )
+            if "sheet_vitrina_v1_supplier_payment_fee_confirmations" in tables
+            else []
+        ),
     }
 
 

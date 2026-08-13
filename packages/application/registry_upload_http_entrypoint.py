@@ -384,6 +384,7 @@ SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Оплата поставщику",
     FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT: "Комиссии банка",
+    "payment_fee_block": "Комиссии к оплате",
     FINANCIAL_DOCUMENT_TYPE_PACKING_LIST: "Packing list / Упаковочный лист",
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: "Документ конвертации RUB -> CNY",
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику",
@@ -3908,6 +3909,7 @@ class RegistryUploadHttpEntrypoint:
         ]
         from packages.application.supplier_financial_documents import (
             build_supplier_payment_readiness,
+            build_supplier_payment_fee_blocks,
         )
 
         payment_readiness = dict(shipment.get("payment_readiness") or {}) or build_supplier_payment_readiness(
@@ -3919,6 +3921,20 @@ class RegistryUploadHttpEntrypoint:
             for item in shipment_cny_documents
             if str(item.get("document_type") or "") == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
         ]
+        payment_fee_projection = build_supplier_payment_fee_blocks(
+            payment_readiness=payment_readiness,
+            payment_documents=shipment_cny_documents,
+            financial_documents=financial_documents,
+            expense_lines=financial_payload.get("expense_lines") or [],
+            bank_operation_assignments=[
+                item
+                for item in self.runtime.list_supplier_bank_operation_assignments()
+                if str(item.get("supplier_order_id") or "") == str(shipment_id or "")
+            ],
+            zero_fee_confirmations=self.runtime.list_supplier_payment_fee_confirmations(
+                shipment_id
+            ),
+        )
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
             financial_documents=financial_documents,
@@ -3927,6 +3943,7 @@ class RegistryUploadHttpEntrypoint:
             _build_supplier_payment_checklist(
                 payment_readiness=payment_readiness,
                 payment_documents=payment_documents,
+                payment_fee_blocks=payment_fee_projection["blocks"],
             )
         )
         operator_document_ids = {
@@ -3955,7 +3972,7 @@ class RegistryUploadHttpEntrypoint:
                     in operator_document_ids
                     else "system"
                 ),
-                "document_action": {
+                "document_action": item.get("document_action") or {
                     "enabled": (
                         str(item.get("document_id") or "")
                         in actionable_document_ids
@@ -4000,6 +4017,7 @@ class RegistryUploadHttpEntrypoint:
             "shipment": shipment,
             "expense_allocation": project_supplier_order_expense_allocation(canonical_breakdown),
             "payment_readiness": payment_readiness,
+            "payment_fee_blocks": payment_fee_projection["blocks"],
             "financial_readiness": dict(shipment.get("financial_readiness") or {}),
             "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
             "required_documents": [
@@ -4080,6 +4098,95 @@ class RegistryUploadHttpEntrypoint:
         invoice_no = str((documents_payload.get("shipment") or {}).get("invoice_no") or shipment_id or "supplier-order").strip()
         filename = _safe_archive_filename(f"{invoice_no}-{package_type}-documents.zip")
         return archive_bytes, filename, receipt
+
+    def handle_supplier_payment_zero_fee_confirmation_request(
+        self,
+        shipment_id: str,
+        payment_document_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Record audited zero-fee evidence for one existing canonical payment."""
+
+        normalized_shipment_id = str(shipment_id or "").strip()
+        normalized_payment_id = str(payment_document_id or "").strip()
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            raise ValueError("Причина подтверждения отсутствия комиссий обязательна.")
+        if not str(actor or "").strip():
+            raise ValueError("actor is required for zero-fee confirmation")
+        self.supplier_shipments_block.get_shipment(normalized_shipment_id)
+        payment = self.runtime.load_cny_document(normalized_payment_id)
+        if (
+            payment is None
+            or str(payment.get("source_order_id") or "") != normalized_shipment_id
+            or str(payment.get("document_type") or "")
+            != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+            or str(payment.get("status") or payment.get("parse_status") or "")
+            not in {
+                CNY_DOCUMENT_STATUS_POSTED,
+                FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+                FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+            }
+        ):
+            raise ValueError(
+                "Подтвердить отсутствие комиссий можно только для существующего подтверждённого платежа."
+            )
+        from packages.application.supplier_financial_documents import (
+            supplier_payment_fee_fingerprint,
+        )
+
+        payment_fingerprint = supplier_payment_fee_fingerprint(payment)
+        confirmation_id = "spfc_" + hashlib.sha256(
+            f"{normalized_shipment_id}|{normalized_payment_id}|zero_fee".encode("utf-8")
+        ).hexdigest()
+        confirmation = self.runtime.save_supplier_payment_zero_fee_confirmation(
+            confirmation_id=confirmation_id,
+            supplier_order_id=normalized_shipment_id,
+            payment_document_id=normalized_payment_id,
+            payment_fingerprint=payment_fingerprint,
+            reason=reason,
+            actor=str(actor or "").strip(),
+            confirmed_at=self.activated_at_factory(),
+        )
+        recalculation = (
+            self.supplier_financial_documents_block._enqueue_functional_recalculation(
+                normalized_shipment_id,
+                source_id=confirmation_id,
+                source_payload={
+                    "document_date": str(payment.get("operation_date") or "")[:10],
+                    "payment_document_id": normalized_payment_id,
+                    "payment_fingerprint": payment_fingerprint,
+                    "zero_fee_confirmation": confirmation,
+                },
+            )
+        )
+        readback = self.handle_supplier_order_documents_list_request(
+            normalized_shipment_id,
+            refresh_saved_parses=False,
+        )
+        block = next(
+            (
+                item
+                for item in readback.get("payment_fee_blocks") or []
+                if str(item.get("payment_document_id") or "")
+                == normalized_payment_id
+            ),
+            {},
+        )
+        if str(block.get("evidence_source") or "") != "audited_zero_fee":
+            raise ValueError("zero-fee confirmation readback did not close the payment fee block")
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_payment_zero_fee_confirmation",
+            "status": "confirmed",
+            "supplier_order_id": normalized_shipment_id,
+            "payment_document_id": normalized_payment_id,
+            "confirmation": confirmation,
+            "payment_fee_block": block,
+            "warehouse_targeted_recalculation": recalculation,
+            "readback_confirmed": True,
+        }
 
     def _load_supplier_order_document_file(self, shipment_id: str, item: Mapping[str, Any]) -> tuple[bytes, str, str]:
         document_type = str(item.get("document_type") or "")
@@ -9483,6 +9590,7 @@ def _build_supplier_order_documents_checklist(
             TRADE_DOCUMENT_TYPE_INVOICE,
             TRADE_DOCUMENT_TYPE_CONTRACT,
             CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+            FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
         }:
             continue
         documents = financial_by_type.get(document_type) or []
@@ -9490,6 +9598,13 @@ def _build_supplier_order_documents_checklist(
             rows.extend(_supplier_order_financial_document_row(item) for item in documents)
         else:
             rows.append(_supplier_order_missing_document_row(document_type))
+    rows.extend(
+        _supplier_order_financial_document_row(item, required=False)
+        for item in financial_by_type.get(
+            FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
+            [],
+        )
+    )
     known_types = {
         *SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES,
         FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
@@ -9505,11 +9620,21 @@ def _build_supplier_payment_checklist(
     *,
     payment_readiness: Mapping[str, Any],
     payment_documents: Iterable[Mapping[str, Any]],
+    payment_fee_blocks: Iterable[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
-    """Render canonical posted payments plus at most one derived missing row."""
+    """Render actual payment/fee pairs and one future pair without duplicates."""
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    fee_blocks_by_payment = {
+        str(item.get("payment_document_id") or ""): dict(item)
+        for item in payment_fee_blocks
+        if str(item.get("payment_document_id") or "")
+    }
+    future_fee_block = next(
+        (dict(item) for item in payment_fee_blocks if bool(item.get("future"))),
+        None,
+    )
     for raw in payment_documents:
         row = dict(raw)
         source_status = str(row.get("parse_status") or row.get("status") or "")
@@ -9535,6 +9660,9 @@ def _build_supplier_payment_checklist(
             }
         )
         rows.append(row)
+        fee_block = fee_blocks_by_payment.get(document_id)
+        if fee_block is not None:
+            rows.append(_supplier_payment_fee_checklist_row(fee_block))
     if bool(payment_readiness.get("complete")):
         if not rows:
             aggregate = _supplier_order_base_document_row(
@@ -9577,7 +9705,89 @@ def _build_supplier_payment_checklist(
         }
     )
     rows.append(missing)
+    if future_fee_block is not None:
+        rows.append(_supplier_payment_fee_checklist_row(future_fee_block))
     return rows
+
+
+def _supplier_payment_fee_checklist_row(
+    block: Mapping[str, Any],
+) -> dict[str, Any]:
+    future = bool(block.get("future"))
+    status = str(block.get("status") or "missing")
+    payment_number = str(block.get("payment_number") or "").strip()
+    payment_date = str(block.get("payment_date") or "")[:10]
+    identity = ""
+    if not future:
+        identity = (
+            (" №" + payment_number if payment_number else "")
+            + (" от " + payment_date if payment_date else "")
+        )
+    name = (
+        "Комиссии к следующей оплате"
+        if future
+        else "Комиссии к оплате" + identity
+    )
+    fee_line_count = int(block.get("fee_line_count") or 0)
+    fee_total = block.get("fee_total")
+    fee_currency = str(block.get("fee_currency") or "")
+    fee_totals = {
+        str(currency): value
+        for currency, value in dict(block.get("fee_totals") or {}).items()
+        if isinstance(value, (int, float))
+    }
+    evidence_source = str(block.get("evidence_source") or "")
+    if status == "complete":
+        if evidence_source == "audited_zero_fee":
+            status_label = "Комиссии отсутствуют · подтверждено"
+        else:
+            total_label = " + ".join(
+                f"{value:g} {currency}"
+                for currency, value in sorted(fee_totals.items())
+            )
+            status_label = (
+                f"{fee_line_count} стр. · {total_label}"
+                if total_label
+                else f"{fee_line_count} стр."
+            )
+    elif status == "needs_review":
+        status_label = "Требует привязки/проверки"
+    else:
+        status_label = "Не загружены"
+    return {
+        **_supplier_order_base_document_row(
+            "payment_fee_block",
+            required=True,
+            is_uploaded=status == "complete",
+            parse_status=(
+                FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+                if status == "needs_review"
+                else ""
+            ),
+        ),
+        "document_name": name,
+        "source": "canonical_payment_fee_block",
+        "payment_document_id": str(block.get("payment_document_id") or ""),
+        "document_number": payment_number,
+        "document_date": payment_date,
+        "amount": fee_total,
+        "currency": fee_currency,
+        "fee_totals": fee_totals,
+        "status": "uploaded" if status == "complete" else status,
+        "status_label": status_label,
+        "warnings": [str(block.get("blocker") or "")] if block.get("blocker") else [],
+        "payment_fee_block": dict(block),
+        "document_action": {
+            "enabled": bool(block.get("can_confirm_zero_fee")) and not future,
+            "kind": "confirm_zero_fee" if not future else "none",
+            "label": "Комиссии отсутствуют" if not future else "",
+            "reason": (
+                ""
+                if bool(block.get("can_confirm_zero_fee")) and not future
+                else "Подтверждение доступно только для существующего платежа без завершённого блока комиссий."
+            ),
+        },
+    }
 
 
 def _supplier_order_invoice_document_row(shipment: Mapping[str, Any]) -> dict[str, Any]:

@@ -947,6 +947,24 @@ def load_supplier_line_cost_breakdown(
                 if "sheet_vitrina_v1_cny_documents" in tables
                 else []
             ),
+            "bank_operation_assignments": (
+                [dict(row) for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_supplier_bank_operation_assignments
+                       WHERE supplier_order_id=? ORDER BY semantic_operation_id""",
+                    (selected_id,),
+                ).fetchall()]
+                if "sheet_vitrina_v1_supplier_bank_operation_assignments" in tables
+                else []
+            ),
+            "payment_fee_confirmations": (
+                [dict(row) for row in conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations
+                       WHERE supplier_order_id=? ORDER BY payment_document_id,confirmation_id""",
+                    (selected_id,),
+                ).fetchall()]
+                if "sheet_vitrina_v1_supplier_payment_fee_confirmations" in tables
+                else []
+            ),
         }
         if actual_shipment_date_override is not None and sources["shipments"]:
             # Targeted factual-date preview must remain query-only.  Apply the
@@ -1085,6 +1103,30 @@ def load_supplier_cost_summary_fields(
                     if str(row["source_order_id"] or "") in selected
                 ]
                 if "sheet_vitrina_v1_cny_documents" in tables
+                else []
+            ),
+            "bank_operation_assignments": (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """SELECT * FROM sheet_vitrina_v1_supplier_bank_operation_assignments
+                           ORDER BY supplier_order_id,semantic_operation_id"""
+                    ).fetchall()
+                    if str(row["supplier_order_id"] or "") in selected
+                ]
+                if "sheet_vitrina_v1_supplier_bank_operation_assignments" in tables
+                else []
+            ),
+            "payment_fee_confirmations": (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations
+                           ORDER BY supplier_order_id,payment_document_id,confirmation_id"""
+                    ).fetchall()
+                    if str(row["supplier_order_id"] or "") in selected
+                ]
+                if "sheet_vitrina_v1_supplier_payment_fee_confirmations" in tables
                 else []
             ),
         }
@@ -1694,6 +1736,12 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
     financial_documents_by_shipment: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for document in financial_documents.values():
         financial_documents_by_shipment[str(document.get("supplier_order_id") or "")].append(document)
+    bank_assignments_by_shipment: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for assignment in sources.get("bank_operation_assignments") or []:
+        bank_assignments_by_shipment[str(assignment.get("supplier_order_id") or "")].append(dict(assignment))
+    fee_confirmations_by_shipment: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for confirmation in sources.get("payment_fee_confirmations") or []:
+        fee_confirmations_by_shipment[str(confirmation.get("supplier_order_id") or "")].append(dict(confirmation))
     expenses: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in sources.get("financial_expense_lines") or []:
         if str(raw.get("financial_document_id") or "") in financial_documents:
@@ -2285,6 +2333,30 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
                         )
                     },
                 )
+        from packages.application.supplier_financial_documents import (
+            build_supplier_financial_readiness,
+            build_supplier_payment_fee_blocks,
+            build_supplier_payment_readiness,
+        )
+
+        payment_readiness = build_supplier_payment_readiness(
+            shipment,
+            cny_documents_by_shipment.get(shipment_id, []),
+        )
+        payment_fee_projection = build_supplier_payment_fee_blocks(
+            payment_readiness=payment_readiness,
+            payment_documents=cny_documents_by_shipment.get(shipment_id, []),
+            financial_documents=financial_documents_by_shipment.get(shipment_id, []),
+            expense_lines=expenses.get(shipment_id, []),
+            bank_operation_assignments=bank_assignments_by_shipment.get(shipment_id, []),
+            zero_fee_confirmations=fee_confirmations_by_shipment.get(shipment_id, []),
+        )
+        financial_readiness = build_supplier_financial_readiness(
+            payment_readiness=payment_readiness,
+            financial_documents=financial_documents_by_shipment.get(shipment_id, []),
+            document_controls=document_controls,
+            payment_fee_blocks=payment_fee_projection["blocks"],
+        )
         source_payload = {
             "shipment": {
                 key: shipment.get(key)
@@ -2317,33 +2389,41 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "recognized_components": [
                 source_components[key] for key in sorted(source_components)
             ],
+            "payment_fee_blocks": [
+                {
+                    key: block.get(key)
+                    for key in (
+                        "payment_document_id",
+                        "payment_fingerprint",
+                        "status",
+                        "evidence_source",
+                        "fee_line_count",
+                        "fee_total",
+                        "fee_currency",
+                        "fee_totals",
+                    )
+                }
+                for block in payment_fee_projection["blocks"]
+                if not bool(block.get("future"))
+            ],
             "stage": stage,
         }
         source_fingerprint = "sha256:" + _hash(source_payload)
         compatible_source_fingerprints = [source_fingerprint]
-        for legacy_expenses_complete in (False, True):
-            legacy_source_payload = json.loads(_json(source_payload))
-            legacy_source_payload["shipment"]["expenses_complete"] = (
+        legacy_source_payload = json.loads(_json(source_payload))
+        legacy_source_payload.pop("payment_fee_blocks", None)
+        compatible_source_fingerprints.append(
+            "sha256:" + _hash(legacy_source_payload)
+        )
+        for legacy_expenses_complete in (False, True, 0, 1):
+            legacy_expenses_payload = json.loads(_json(legacy_source_payload))
+            legacy_expenses_payload["shipment"]["expenses_complete"] = (
                 legacy_expenses_complete
             )
             compatible_source_fingerprints.append(
-                "sha256:" + _hash(legacy_source_payload)
+                "sha256:" + _hash(legacy_expenses_payload)
             )
         calculation_fingerprint = "sha256:" + _hash(calculation_payload)
-        from packages.application.supplier_financial_documents import (
-            build_supplier_financial_readiness,
-            build_supplier_payment_readiness,
-        )
-
-        payment_readiness = build_supplier_payment_readiness(
-            shipment,
-            cny_documents_by_shipment.get(shipment_id, []),
-        )
-        financial_readiness = build_supplier_financial_readiness(
-            payment_readiness=payment_readiness,
-            financial_documents=financial_documents_by_shipment.get(shipment_id, []),
-            document_controls=document_controls,
-        )
         result[shipment_id] = {
             "shipment_id": shipment_id,
             "invoice_no": str(shipment.get("invoice_no") or ""),
@@ -2382,6 +2462,7 @@ def _supplier_cost_allocations(sources: Mapping[str, Any]) -> dict[str, dict[str
             "document_controls": document_controls,
             "payment_readiness": payment_readiness,
             "financial_readiness": financial_readiness,
+            "payment_fee_blocks": payment_fee_projection["blocks"],
             "controls": {
                 "document_allocation_conserved": all(item["conserved"] for item in component_controls),
                 "document_counted_once": len(seen_source_components) == len(component_controls),
@@ -7681,6 +7762,16 @@ def _source_rows(
         queries["cny_documents"] = (
             "SELECT * FROM sheet_vitrina_v1_cny_documents "
             "ORDER BY operation_date,operation_datetime,document_id"
+        )
+    if "sheet_vitrina_v1_supplier_bank_operation_assignments" in tables:
+        queries["bank_operation_assignments"] = (
+            "SELECT * FROM sheet_vitrina_v1_supplier_bank_operation_assignments "
+            "ORDER BY supplier_order_id,semantic_operation_id"
+        )
+    if "sheet_vitrina_v1_supplier_payment_fee_confirmations" in tables:
+        queries["payment_fee_confirmations"] = (
+            "SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations "
+            "ORDER BY supplier_order_id,payment_document_id,confirmation_id"
         )
     result = {
         key: [dict(row) for row in conn.execute(sql).fetchall()]

@@ -181,7 +181,6 @@ COST_AFFECTING_DOCUMENT_TYPES = {
 FINANCIAL_READINESS_REQUIRED_DOCUMENT_TYPES = {
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
-    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
 }
 _CNY_INVOICE_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
 
@@ -288,11 +287,324 @@ def build_supplier_payment_readiness(
     }
 
 
+def build_supplier_payment_fee_blocks(
+    *,
+    payment_readiness: Mapping[str, Any],
+    payment_documents: Iterable[Mapping[str, Any]],
+    financial_documents: Iterable[Mapping[str, Any]] = (),
+    expense_lines: Iterable[Mapping[str, Any]] = (),
+    bank_operation_assignments: Iterable[Mapping[str, Any]] = (),
+    zero_fee_confirmations: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Project one fee block for every canonical actual supplier payment.
+
+    Explicit bank-statement assignments remain the primary linkage.  A
+    server-owned zero-fee confirmation may close only an existing payment,
+    while old single-payment statements are accepted read-only only when the
+    evidence is unique and unambiguous.
+    """
+
+    actual_payments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in payment_documents:
+        payment = dict(raw)
+        if str(payment.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
+            continue
+        if str(payment.get("status") or payment.get("parse_status") or "") not in {
+            CNY_DOCUMENT_STATUS_POSTED,
+            FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+            FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
+        }:
+            continue
+        payment_id = str(payment.get("document_id") or "").strip()
+        identity = payment_id or str(payment.get("natural_key") or payment.get("file_sha256") or "").strip()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        actual_payments.append(payment)
+    actual_payments.sort(
+        key=lambda item: (
+            str(item.get("operation_date") or item.get("document_date") or ""),
+            str(item.get("operation_datetime") or ""),
+            str(item.get("document_id") or ""),
+        )
+    )
+
+    active_financial_documents = {
+        str(item.get("document_id") or ""): dict(item)
+        for item in financial_documents
+        if str(item.get("document_id") or "")
+        and str(item.get("parse_status") or "") != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+    }
+    confirmed_financial_ids = {
+        document_id
+        for document_id, document in active_financial_documents.items()
+        if str(document.get("parse_status") or "")
+        in {FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+    }
+    lines_by_document: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw in expense_lines:
+        line = dict(raw)
+        document_id = str(line.get("financial_document_id") or "")
+        if document_id in active_financial_documents:
+            lines_by_document[document_id].append(line)
+
+    confirmation_by_payment: dict[str, dict[str, Any]] = {}
+    for raw in zero_fee_confirmations:
+        confirmation = dict(raw)
+        if str(confirmation.get("confirmation_type") or "zero_fee") != "zero_fee":
+            continue
+        if str(confirmation.get("status") or "active") != "active":
+            continue
+        payment_id = str(confirmation.get("payment_document_id") or "").strip()
+        if payment_id:
+            confirmation_by_payment[payment_id] = confirmation
+
+    assignments_by_anchor: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    unanchored_assignments: list[dict[str, Any]] = []
+    explicitly_assigned_financial_ids: set[str] = set()
+    for raw in bank_operation_assignments:
+        assignment = dict(raw)
+        assignment_raw = _mapping_or_json(
+            assignment.get("raw") or assignment.get("raw_json")
+        )
+        anchor_id = str(
+            assignment.get("matched_anchor_document_id")
+            or assignment_raw.get("matched_anchor_document_id")
+            or ""
+        ).strip()
+        payload = {**assignment, **assignment_raw}
+        if anchor_id:
+            assignments_by_anchor[anchor_id].append(payload)
+            explicitly_assigned_financial_ids.add(
+                str(assignment.get("financial_document_id") or "")
+            )
+        else:
+            unanchored_assignments.append(payload)
+
+    legacy_documents = [
+        document
+        for document in active_financial_documents.values()
+        if str(document.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+        and str(document.get("document_id") or "") not in explicitly_assigned_financial_ids
+        and str(document.get("parse_status") or "")
+        in {FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+    ]
+    legacy_document: dict[str, Any] | None = None
+    legacy_lines: list[dict[str, Any]] = []
+    if len(actual_payments) == 1 and len(legacy_documents) == 1:
+        candidate = legacy_documents[0]
+        normalized = _mapping_or_json(
+            candidate.get("normalized_parse") or candidate.get("normalized_parse_json")
+        )
+        candidate_warnings = _string_list(candidate.get("warnings")) or _list_or_json(
+            candidate.get("warnings_json")
+        )
+        candidate_errors = _string_list(candidate.get("errors")) or _list_or_json(
+            candidate.get("errors_json")
+        )
+        match_status = str(
+            candidate.get("order_match_status")
+            or normalized.get("order_match_status")
+            or ""
+        )
+        eligible_lines = [
+            line
+            for line in lines_by_document.get(str(candidate.get("document_id") or ""), [])
+            if str(line.get("category") or "") in BANK_FEE_CATEGORIES
+            and str(line.get("status") or "") not in {"excluded", "needs_review"}
+        ]
+        if (
+            eligible_lines
+            and not candidate_warnings
+            and not candidate_errors
+            and match_status not in {"ambiguous", "mismatch", "needs_review", "unmatched"}
+        ):
+            legacy_document = candidate
+            legacy_lines = eligible_lines
+
+    blocks: list[dict[str, Any]] = []
+    for index, payment in enumerate(actual_payments, start=1):
+        payment_id = str(payment.get("document_id") or "")
+        linked_financial_id = str(payment.get("linked_financial_document_id") or "")
+        aliases = {payment_id, linked_financial_id} - {""}
+        assignments = [
+            item
+            for alias in aliases
+            for item in assignments_by_anchor.get(alias, [])
+        ]
+        assignments = list(
+            {
+                str(item.get("semantic_operation_id") or json.dumps(item, sort_keys=True, default=str)): item
+                for item in assignments
+            }.values()
+        )
+        explicit_confirmed = [
+            item
+            for item in assignments
+            if str(item.get("financial_document_id") or "") in confirmed_financial_ids
+            and str(item.get("confidence") or "")
+            in {BANK_FEE_CONFIDENCE_STRONG, BANK_FEE_CONFIDENCE_PROBABLE}
+        ]
+        explicit_review = [item for item in assignments if item not in explicit_confirmed]
+        confirmation = confirmation_by_payment.get(payment_id)
+        payment_fingerprint = supplier_payment_fee_fingerprint(payment)
+        confirmation_is_current = bool(
+            confirmation
+            and str(confirmation.get("payment_fingerprint") or "") == payment_fingerprint
+        )
+        evidence_source = ""
+        fee_rows: list[dict[str, Any]] = []
+        if explicit_confirmed and not explicit_review:
+            status = "complete"
+            evidence_source = "explicit_assignment"
+            fee_rows = explicit_confirmed
+        elif explicit_review:
+            status = "needs_review"
+            evidence_source = "ambiguous_assignment"
+            fee_rows = assignments
+        elif confirmation_is_current:
+            status = "complete"
+            evidence_source = "audited_zero_fee"
+        elif legacy_document is not None:
+            status = "complete"
+            evidence_source = "legacy_deterministic_single_payment"
+            fee_rows = legacy_lines
+        elif legacy_documents or unanchored_assignments:
+            status = "needs_review"
+            evidence_source = "legacy_ambiguous"
+        else:
+            status = "missing"
+            evidence_source = "missing"
+        fee_totals_decimal: dict[str, Decimal] = {}
+        for item in fee_rows:
+            currency = str(item.get("currency") or "").upper()
+            amount_value = _parse_decimal(item.get("amount"))
+            if amount_value is None and item.get("debit_cny") not in (None, ""):
+                amount_value = _parse_decimal(item.get("debit_cny"))
+                currency = "CNY"
+            if amount_value is None and item.get("debit_rub") not in (None, ""):
+                amount_value = _parse_decimal(item.get("debit_rub"))
+                currency = "RUB"
+            if amount_value is None and item.get("amount_rub") not in (None, ""):
+                amount_value = _parse_decimal(item.get("amount_rub"))
+                currency = "RUB"
+            if amount_value is None or not currency:
+                continue
+            fee_totals_decimal[currency] = fee_totals_decimal.get(
+                currency, Decimal("0")
+            ) + abs(amount_value)
+        fee_totals = {
+            currency: _decimal_to_float(value)
+            for currency, value in sorted(fee_totals_decimal.items())
+        }
+        currencies = sorted(fee_totals)
+        categories = sorted(
+            {
+                str(item.get("fee_category") or item.get("category") or "")
+                for item in fee_rows
+                if str(item.get("fee_category") or item.get("category") or "")
+            }
+        )
+        payment_number = str(
+            payment.get("document_number")
+            or _mapping_or_json(payment.get("parsed_payload")).get("document_number")
+            or index
+        )
+        payment_date = str(payment.get("operation_date") or payment.get("document_date") or "")[:10]
+        blocks.append(
+            {
+                "payment_document_id": payment_id,
+                "payment_linked_financial_document_id": linked_financial_id,
+                "payment_fingerprint": payment_fingerprint,
+                "payment_number": payment_number,
+                "payment_date": payment_date,
+                "payment_amount": _decimal_to_float(
+                    _parse_decimal(payment.get("cny_amount") or payment.get("amount"))
+                ),
+                "payment_currency": str(payment.get("currency") or "CNY").upper(),
+                "future": False,
+                "status": status,
+                "complete": status == "complete",
+                "status_label_ru": {
+                    "complete": "Комиссии подтверждены",
+                    "missing": "Комиссии не загружены",
+                    "needs_review": "Требует привязки/проверки",
+                }[status],
+                "evidence_source": evidence_source,
+                "fee_line_count": len(fee_rows),
+                "fee_total": fee_totals.get(currencies[0]) if len(currencies) == 1 else None,
+                "fee_currency": currencies[0] if len(currencies) == 1 else "",
+                "fee_totals": fee_totals,
+                "fee_categories": categories,
+                "zero_fee_confirmation": dict(confirmation or {}) if confirmation_is_current else {},
+                # Zero-fee is affirmative evidence that no charge exists.  It
+                # must not be offered as a shortcut around ambiguous imported
+                # fee evidence, which still needs an operator linkage decision.
+                "can_confirm_zero_fee": status == "missing",
+                "blocker": (
+                    "Для этого платежа не загружены банковские комиссии и не подтверждено их отсутствие."
+                    if status == "missing"
+                    else "Комиссии требуют однозначной привязки к этому платежу."
+                    if status == "needs_review"
+                    else ""
+                ),
+            }
+        )
+    if not bool(payment_readiness.get("complete")):
+        blocks.append(
+            {
+                "payment_document_id": "",
+                "payment_fingerprint": "",
+                "payment_number": "",
+                "payment_date": "",
+                "future": True,
+                "status": "missing",
+                "complete": False,
+                "status_label_ru": "Комиссии к следующей оплате не загружены",
+                "evidence_source": "future_payment",
+                "fee_line_count": 0,
+                "fee_total": None,
+                "fee_currency": "",
+                "fee_totals": {},
+                "fee_categories": [],
+                "zero_fee_confirmation": {},
+                "can_confirm_zero_fee": False,
+                "blocker": "Следующий платёж ещё не существует.",
+            }
+        )
+    return {
+        "status": (
+            "complete"
+            if actual_payments
+            and all(item.get("complete") for item in blocks if not item.get("future"))
+            else "pending"
+        ),
+        "actual_payment_count": len(actual_payments),
+        "future_placeholder_count": sum(1 for item in blocks if item.get("future")),
+        "blocks": blocks,
+    }
+
+
+def supplier_payment_fee_fingerprint(payment: Mapping[str, Any]) -> str:
+    payload = {
+        "document_id": str(payment.get("document_id") or ""),
+        "linked_financial_document_id": str(payment.get("linked_financial_document_id") or ""),
+        "operation_date": str(payment.get("operation_date") or payment.get("document_date") or "")[:10],
+        "amount": str(payment.get("cny_amount") or payment.get("amount") or ""),
+        "currency": str(payment.get("currency") or "CNY").upper(),
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def build_supplier_financial_readiness(
     *,
     payment_readiness: Mapping[str, Any],
     financial_documents: Iterable[Mapping[str, Any]],
     document_controls: Iterable[Mapping[str, Any]] = (),
+    payment_fee_blocks: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Combine payment and only money-affecting evidence into exact-cost readiness."""
 
@@ -328,6 +640,54 @@ def build_supplier_financial_readiness(
                     "reason_ru": "Финансово влияющий документ требует проверки.",
                 }
             )
+    actual_fee_blocks = [
+        dict(item)
+        for item in (payment_fee_blocks or [])
+        if not bool(item.get("future"))
+    ]
+    if payment_fee_blocks is None:
+        legacy_fee_documents = active_by_type.get(FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT) or []
+        if legacy_fee_documents:
+            actual_fee_blocks = [
+                {
+                    "status": "complete"
+                    if any(
+                        str(item.get("parse_status") or "")
+                        in {FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+                        for item in legacy_fee_documents
+                    )
+                    else "needs_review",
+                    "future": False,
+                }
+            ]
+    if bool(payment_readiness.get("confirmed_document_count")) and not actual_fee_blocks:
+        blockers.append(
+            {
+                "code": "payment_fee_block_missing",
+                "reason_ru": "Для подтверждённого платежа не загружены комиссии и не подтверждено их отсутствие.",
+            }
+        )
+    for block in actual_fee_blocks:
+        status = str(block.get("status") or "missing")
+        if status == "complete":
+            continue
+        blockers.append(
+            {
+                "code": (
+                    "payment_fee_block_needs_review"
+                    if status == "needs_review"
+                    else "payment_fee_block_missing"
+                ),
+                "reason_ru": str(
+                    block.get("blocker")
+                    or (
+                        "Комиссии требуют однозначной привязки к платежу."
+                        if status == "needs_review"
+                        else "Для платежа не загружены комиссии и не подтверждено их отсутствие."
+                    )
+                ),
+            }
+        )
     for control in document_controls:
         if bool(control.get("cost_affecting")) and not bool(control.get("conserved")):
             blockers.append(
@@ -343,12 +703,38 @@ def build_supplier_financial_readiness(
         "ready": not blockers,
         "status_label_ru": "Финансовая готовность подтверждена" if not blockers else "Не все финансовые данные подтверждены",
         "payment": dict(payment_readiness),
+        "payment_fee_blocks": actual_fee_blocks,
         "blockers": blockers,
         "excluded_informational_types": [
             FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
             FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
         ],
     }
+
+
+def _mapping_or_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _list_or_json(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item or "").strip()]
+    return []
 
 
 def _dedupe_supplier_readiness_reasons(

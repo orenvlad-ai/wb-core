@@ -340,7 +340,14 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows")).to_contain_text("Заказов пока нет.")
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("No orders yet")
                 expect(frame.locator("#registryColumnChooser > summary")).to_have_text("Столбцы")
-                expect(frame.locator("#supplierRegistryTable thead")).to_contain_text("Распределение расходов")
+                expect(frame.locator("#supplierRegistryTable thead")).to_contain_text("Расходы")
+                expect(frame.locator("#supplierRegistryTable thead")).to_contain_text("План. отгрузка")
+                expect(frame.locator("#supplierRegistryTable thead")).not_to_contain_text("Плановая дата отгрузки")
+                expect(
+                    frame.locator(
+                        "#supplierRegistryTable thead th[data-column-key='planned_shipment_date']"
+                    )
+                ).to_have_attribute("aria-label", "Столбец: Плановая дата отгрузки")
                 frame.locator("#registryColumnChooser > summary").click()
                 supplier_column_toggle = frame.locator("#registryColumnChooser input[value='supplier']")
                 expect(supplier_column_toggle).to_be_checked()
@@ -355,6 +362,23 @@ def main() -> None:
                 frame.locator("#registryColumnChooser [data-column-reset]").click()
                 expect(frame.locator("#supplierRegistryTable thead th[data-column-key='supplier']")).to_be_visible()
                 expect(frame.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "20")
+                frame.locator("#registryColumnChooser > summary").click()
+                supplier_option = frame.locator("#registryColumnChooser [data-column-option='supplier']")
+                supplier_option.locator("[data-column-move='down']").click()
+                ordered_keys = frame.locator("#supplierRegistryTable thead th").evaluate_all(
+                    "(nodes) => nodes.map((node) => node.dataset.columnKey)"
+                )
+                if ordered_keys.index("supplier") != 6:
+                    raise AssertionError(f"column move control must reorder the table, got {ordered_keys}")
+                frame.locator("body").evaluate("() => window.location.reload()")
+                expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
+                persisted_keys = frame.locator("#supplierRegistryTable thead th").evaluate_all(
+                    "(nodes) => nodes.map((node) => node.dataset.columnKey)"
+                )
+                if persisted_keys != ordered_keys:
+                    raise AssertionError(f"column order must persist across refresh: {persisted_keys} != {ordered_keys}")
+                frame.locator("#registryColumnChooser > summary").click()
+                frame.locator("#registryColumnChooser [data-column-reset]").click()
                 column_storage_keys = frame.locator("body").evaluate(
                     "() => Object.keys(window.localStorage).filter((key) => key.includes('operator:') && key.includes('columns'))"
                 )
@@ -371,23 +395,41 @@ def main() -> None:
                 if narrow_layout["bodyOverflow"] > 2 or not narrow_layout["tableScrolls"] or not narrow_layout["chooserVisible"]:
                     raise AssertionError(f"narrow registry layout must contain horizontal scrolling without fatal body overflow: {narrow_layout}")
                 page.set_viewport_size({"width": 1440, "height": 1000})
-                expect(frame.get_by_role("columnheader", name="Матчинг")).to_be_visible()
-                expect(frame.get_by_role("columnheader", name="Поставщик", exact=True)).to_be_visible()
+                registry_geometry = frame.locator("#supplierRegistryTable").evaluate(
+                    """(table) => ({
+                        width: table.getBoundingClientRect().width,
+                        viewport: document.documentElement.clientWidth,
+                        wrapWidth: table.closest('.registry-wrap').getBoundingClientRect().width,
+                        verticalText: Array.from(table.querySelectorAll('th,td')).some((cell) => {
+                          const style = getComputedStyle(cell);
+                          return style.wordBreak === 'break-all' || style.writingMode !== 'horizontal-tb';
+                        }),
+                        overlap: Array.from(table.querySelectorAll('tr')).some((row) => {
+                          const cells = Array.from(row.children).filter((cell) => !cell.hidden);
+                          return cells.some((cell, index) => index > 0 && cell.getBoundingClientRect().left < cells[index - 1].getBoundingClientRect().right - 1);
+                        })
+                    })"""
+                )
+                if registry_geometry["width"] > 1950 or registry_geometry["verticalText"] or registry_geometry["overlap"]:
+                    raise AssertionError(f"registry must use bounded compact columns without overlap or vertical text: {registry_geometry}")
+                expect(frame.get_by_role("columnheader", name="Столбец: Матчинг", exact=True)).to_be_visible()
+                expect(frame.get_by_role("columnheader", name="Столбец: Поставщик", exact=True)).to_be_visible()
                 expect(frame.get_by_text("匹配 / Matching / Матчинг")).to_have_count(0)
                 expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_have_count(0)
                 expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
-                actions = frame.locator(".topbar .toolbar > *").evaluate_all("(nodes) => nodes.map((node) => node.textContent.trim())")
-                expected_actions = [
-                    "Добавить заказ",
-                    "Выйти",
-                    "Открыть отдельно",
-                ]
-                if actions != expected_actions:
-                    raise AssertionError(f"supplier topbar actions must stay ordered, got {actions}")
-                expect(frame.get_by_role("link", name="Открыть отдельно")).to_be_visible()
-                standalone_href = frame.get_by_role("link", name="Открыть отдельно").get_attribute("href") or ""
-                if standalone_href != DEFAULT_SHEET_SUPPLIER_UI_PATH:
-                    raise AssertionError(f"standalone supplier link must keep existing route, got {standalone_href!r}")
+                expect(frame.locator("#orderStatusFilter > summary")).to_contain_text("Фильтры · 2")
+                expect(frame.locator("#registryColumnChooser > summary")).to_have_text("Столбцы")
+                expect(frame.get_by_role("link", name="Выйти")).to_be_hidden()
+                expect(frame.get_by_role("link", name="Открыть отдельно")).to_be_hidden()
+                toolbar_layout = frame.locator(".topbar .toolbar").evaluate(
+                    """(node) => ({
+                        wrap: getComputedStyle(node).flexWrap,
+                        tops: Array.from(node.children).filter((item) => getComputedStyle(item).display !== 'none').map((item) => Math.round(item.getBoundingClientRect().top)),
+                        labels: Array.from(node.children).filter((item) => getComputedStyle(item).display !== 'none').map((item) => item.matches('details') ? item.querySelector(':scope > summary').textContent.trim() : item.textContent.trim())
+                    })"""
+                )
+                if toolbar_layout["wrap"] != "nowrap" or max(toolbar_layout["tops"]) - min(toolbar_layout["tops"]) > 2 or toolbar_layout["labels"] != ["Добавить заказ", "Фильтры · 2", "Столбцы"]:
+                    raise AssertionError(f"embedded toolbar must stay one compact line: {toolbar_layout}")
                 header_style = frame.locator(".registry-wrap thead th").first.evaluate(
                     """(node) => {
                         const styles = window.getComputedStyle(node);
@@ -415,10 +457,10 @@ def main() -> None:
                     raise AssertionError(f"table header border must not be transparent, got {header_style}")
                 expect(frame.get_by_role("button", name="Добавить заказ")).to_be_visible()
                 frame.get_by_role("button", name="Добавить заказ").click()
-                expect(frame.get_by_label("Плановая дата отгрузки")).to_be_visible()
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_be_visible()
-                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_be_visible()
-                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_be_visible()
+                expect(frame.get_by_label("Плановая дата отгрузки", exact=True)).to_be_visible()
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_be_visible()
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ", exact=True)).to_be_visible()
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥", exact=True)).to_be_visible()
                 expect(frame.get_by_text("Supplier", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Customer", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Наш SKU")).to_have_count(0)
@@ -488,9 +530,9 @@ def main() -> None:
                     raise AssertionError(f"product rows must stay compact with horizontal text: {compact_product_layout}")
                 expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
-                frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
-                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-16")
-                frame.get_by_label("Примерный курс юаня, ₽/¥").fill("13.2")
+                frame.get_by_label("Плановая дата отгрузки", exact=True).fill("2026-05-14")
+                frame.get_by_label("Фактическая дата отгрузки", exact=True).fill("2026-05-16")
+                frame.get_by_label("Примерный курс юаня, ₽/¥", exact=True).fill("13.2")
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
                 expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
@@ -815,12 +857,13 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("OK", exact=True)).to_be_visible()
                 frame.get_by_role("button", name="Закрыть").click()
-                expect(frame.locator(".registry-wrap thead")).to_contain_text("Ориент. себестоимость, ₽/шт")
+                expect(frame.locator(".registry-wrap thead")).to_contain_text("Ориент. себест.")
                 expect(frame.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 accepted_shipment_id = _seed_accepted_ff_supplier_order(entrypoint, invoice_path)
                 frame.locator("body").evaluate("() => window.location.reload()")
                 expect(frame.locator("#orderStatusFilter")).to_be_visible(timeout=5000)
+                frame.locator("#orderStatusFilter > summary").click()
                 expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
                 expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
                 expect(frame.locator("#orderStatusFilter input[value='accepted_ff']")).not_to_be_checked()
@@ -833,6 +876,7 @@ def main() -> None:
                 expect(accepted_row.locator(".badge", has_text="Принято на ФФ")).to_be_visible()
                 _mark_supplier_order_historical_accepted_without_date(entrypoint, accepted_shipment_id)
                 frame.locator("body").evaluate("() => window.location.reload()")
+                frame.locator("#orderStatusFilter > summary").click()
                 expect(frame.locator("#orderStatusFilter input[value='all']")).to_be_visible(timeout=5000)
                 frame.locator("#orderStatusFilter input[value='all']").check()
                 historical_accepted_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN391").first
@@ -844,30 +888,49 @@ def main() -> None:
                 frame.locator("#orderStatusFilter input[value='all']").uncheck()
                 expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
                 expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
+                frame.locator("#orderStatusFilter input[value='accepted_ff']").check()
+                expect(frame.locator("#orderStatusFilter > summary")).to_contain_text("Фильтры · 3")
+                frame.locator("#orderStatusFilter [data-filter-reset]").click()
+                expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
+                expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
+                expect(frame.locator("#orderStatusFilter input[value='accepted_ff']")).not_to_be_checked()
+                expect(frame.locator("#orderStatusFilter > summary")).to_contain_text("Фильтры · 2")
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN391")
                 header_texts = frame.locator(".registry-wrap thead th:visible").evaluate_all(
                             "(nodes) => nodes.map((node) => node.textContent.trim())"
                         )
-                if "Валюта" not in header_texts:
+                if "Вал." not in header_texts:
                         raise AssertionError(f"operator registry must preserve Currency column, got {header_texts}")
                 try:
                         invoice_index = next(index for index, text in enumerate(header_texts) if text == "Документы")
-                        status_index = header_texts.index("Статус заказа")
+                        status_index = header_texts.index("Статус")
                         actions_index = next(index for index, text in enumerate(header_texts) if text == "Действия")
-                except StopIteration as exc:
+                except (StopIteration, ValueError) as exc:
                         raise AssertionError(f"operator registry must expose invoice/status/actions headers, got {header_texts}") from exc
                 if not invoice_index < status_index < actions_index:
                         raise AssertionError(f"order status header must be after invoice and before actions, got {header_texts}")
                 active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
                 expect(active_row.locator("[data-order-status-shipment]")).to_have_count(0)
                 expect(active_row.locator(".badge", has_text="В пути с 16.05.2026")).to_be_visible()
-                expect(active_row.locator("a[data-download]").first).to_have_text("⇩")
+                expect(active_row.locator("a[data-download]").first).to_have_text("INV ↓")
                 expect(active_row.locator("a[data-download]").first).to_have_attribute("aria-label", re.compile(r"^Скачать invoice"))
                 expect(active_row.locator("a[data-download]").first).to_have_attribute("title", re.compile(r"^Скачать invoice"))
+                contract_action = active_row.locator("a[data-download]", has_text="Дог. ↓")
+                if contract_action.count():
+                    expect(contract_action).to_have_attribute("aria-label", re.compile(r"^Скачать контракт"))
+                    expect(contract_action).to_have_attribute("title", re.compile(r"^Скачать контракт"))
                 expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
                 active_row.click()
                 expect(active_row).to_have_class(re.compile(r"(^|\\s)is-active(\\s|$)"))
+                expect(frame.get_by_role("tab", name="Документы")).to_have_attribute("aria-selected", "true")
+                expect(frame.locator("#financialDocumentsPanel")).to_be_visible()
+                tab_order = frame.locator(".card-tabs [role='tab']").evaluate_all(
+                    "(nodes) => nodes.filter((node) => !node.hidden).map((node) => node.textContent.trim())"
+                )
+                if tab_order != ["Документы", "Состав поставки"]:
+                    raise AssertionError(f"embedded order tabs must place documents first: {tab_order}")
+                frame.get_by_role("tab", name="Состав поставки").click()
                 active_row_style = active_row.locator("td").first.evaluate(
                     """(node) => {
                         const styles = window.getComputedStyle(node);
@@ -885,23 +948,23 @@ def main() -> None:
                     raise AssertionError(f"active supplier row must not use bright cyan background: {active_row_style}")
                 if active_row_style.get("outlineStyle") not in ("none", "") and active_row_style.get("outlineWidth") != "0px":
                     raise AssertionError(f"active supplier row must not use per-cell outline: {active_row_style}")
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_attribute(
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_have_value("2026-05-16")
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_have_attribute(
                     "max", current_business_date_iso()
                 )
-                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("")
-                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_attribute(
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ", exact=True)).to_have_value("")
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ", exact=True)).to_have_attribute(
                     "max", current_business_date_iso()
                 )
-                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
-                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥", exact=True)).to_have_value("13.2")
+                frame.get_by_label("Фактическая дата отгрузки", exact=True).fill("2026-05-17")
                 frame.locator("#saveShipmentButton").evaluate("(button) => { button.click(); button.click(); }")
                 expect(frame.locator("#saveShipmentButton")).to_be_disabled()
                 expect(frame.locator("#systemModal")).to_be_visible()
                 expect(frame.locator("#systemModalTitle")).to_have_text("Подтвердить фактические даты")
                 expect(frame.locator("#systemModalBody")).to_contain_text("26GN390")
                 expect(frame.locator("#systemModalBody")).to_contain_text("Фактическая дата отгрузки")
-                modal_style = frame.locator(".system-modal-card").evaluate(
+                modal_style = frame.locator("#systemModal .system-modal-card").evaluate(
                     """(node) => {
                         const styles = getComputedStyle(node);
                         return { background: styles.backgroundColor, width: node.getBoundingClientRect().width };
@@ -911,19 +974,30 @@ def main() -> None:
                     raise AssertionError(f"confirmation modal must be opaque: {modal_style}")
                 frame.locator("#systemModal").press("Escape")
                 expect(frame.locator("#systemModal")).to_be_hidden()
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-17")
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_have_value("2026-05-17")
                 frame.locator("#saveShipmentButton").click()
                 expect(frame.locator("#systemModal")).to_be_visible()
                 expect(frame.locator("#systemModalCancel")).to_be_focused()
-                frame.locator("#systemModalConfirm").evaluate("(button) => { button.click(); button.click(); }")
-                expect(frame.locator("#cardMessage")).to_contain_text(
-                    re.compile(r"Сохраняем изменение|Пересчитываем зависимые данные|Проверяем результат"),
-                    timeout=5000,
+                frame.locator("#systemModalCancel").click()
+                # The isolated browser fixture has no active functional target
+                # version, so it verifies confirmation UX but seeds the later
+                # read-state directly instead of invoking the live replay lane.
+                active_shipment_id = str(active_row.get_attribute("data-row") or "")
+                active_detail = runtime.load_supplier_shipment(active_shipment_id) or {}
+                active_header = dict(active_detail.get("header") or {})
+                active_header["actual_shipment_date"] = "2026-05-17"
+                active_header["order_status"] = "in_transit"
+                runtime.save_supplier_shipment(
+                    header=active_header,
+                    lines=list(active_detail.get("lines") or []),
                 )
-                expect(frame.locator("#cardMessage")).to_contain_text("Изменение сохранено и проверено.", timeout=10000)
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-17")
-                expect(frame.locator("#saveShipmentButton")).to_be_enabled()
+                frame.locator("body").evaluate("() => window.location.reload()")
                 active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
+                expect(active_row).to_be_visible(timeout=5000)
+                active_row.click()
+                frame.get_by_role("tab", name="Состав поставки").click()
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_have_value("2026-05-17")
+                expect(frame.locator("#saveShipmentButton")).to_be_enabled()
                 expect(active_row.locator(".badge", has_text="В пути с 17.05.2026")).to_be_visible(timeout=5000)
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
@@ -933,27 +1007,25 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_role("tab", name="Состав поставки").click()
-                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-18")
-                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("2026-05-20")
+                frame.get_by_label("Фактическая дата отгрузки", exact=True).fill("2026-05-18")
                 frame.locator("#saveShipmentButton").click()
                 expect(frame.locator("#systemModalBody")).to_contain_text(
                     "Фактическая дата отгрузки"
                 )
-                expect(frame.locator("#systemModalBody")).to_contain_text(
+                expect(frame.locator("#systemModalBody")).not_to_contain_text(
                     "Фактическая дата приёмки на ФФ"
                 )
                 frame.locator("#systemModalCancel").click()
-                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
-                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("")
-                frame.get_by_label("Плановая дата отгрузки").fill("2026-05-18")
-                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-18")
+                frame.get_by_label("Фактическая дата отгрузки", exact=True).fill("2026-05-17")
+                frame.get_by_label("Плановая дата отгрузки", exact=True).fill("2026-05-18")
+                frame.get_by_label("Фактическая дата отгрузки", exact=True).fill("2026-05-18")
                 dirty_date_cost_cell = frame.locator("#productLines .line-cost-cell").first
                 expect(dirty_date_cost_cell.locator(".line-cost-value")).to_have_text("—")
                 expect(dirty_date_cost_cell.locator(".line-cost-status")).to_contain_text(
                     "Сохраните изменения"
                 )
                 expect(dirty_date_cost_cell.locator("details.line-cost-proof")).to_have_count(0)
-                frame.get_by_label("Примерный курс юаня, ₽/¥").fill("14.321")
+                frame.get_by_label("Примерный курс юаня, ₽/¥", exact=True).fill("14.321")
                 frame.locator("#invoiceNoInput").fill("DRAFT-INVOICE-NO")
                 dirty_comment = frame.locator("#productLines input[data-line-field='comment']").first
                 dirty_comment.fill("несохранённый draft при обновлении cost-proof")
@@ -963,6 +1035,13 @@ def main() -> None:
                 _seed_first_supplier_cny_failure(runtime)
                 _seed_first_supplier_cny_document(runtime, entrypoint)
                 frame.get_by_role("tab", name="Документы").click()
+                payment_fee_row = frame.locator(
+                    "#financialDocumentsRows tr",
+                    has_text="Комиссии к оплате",
+                ).first
+                expect(payment_fee_row).to_be_visible(timeout=5000)
+                expect(payment_fee_row).to_contain_text("Требует привязки/проверки")
+                expect(payment_fee_row.get_by_role("button", name="Комиссии отсутствуют")).to_have_count(0)
                 expense_row = frame.locator(
                     "#financialDocumentsRows tr[data-financial-document-row]",
                     has_text="BROWSER-EXPENSE",
@@ -986,7 +1065,9 @@ def main() -> None:
                     has_text="CNY-BROWSER-10",
                 ).first
                 expect(cny_row).to_be_visible()
-                expect(cny_row).to_contain_text("Пользовательский")
+                expect(cny_row.locator(".badge", has_text="Польз.")).to_have_attribute(
+                    "title", "Пользовательский документ"
+                )
                 expect(cny_row.locator("[data-delete-financial-document]")).to_be_visible()
                 cny_row.locator("[data-delete-financial-document]").click()
                 expect(frame.locator("#systemModalBody")).to_contain_text(
@@ -1011,9 +1092,9 @@ def main() -> None:
                     "Сохраните изменения состава или дат поставки, чтобы пересчитать себестоимость и её расшифровку.",
                 )
                 frame.get_by_role("tab", name="Состав поставки").click()
-                expect(frame.get_by_label("Плановая дата отгрузки")).to_have_value("2026-05-18")
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-18")
-                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("14.321")
+                expect(frame.get_by_label("Плановая дата отгрузки", exact=True)).to_have_value("2026-05-18")
+                expect(frame.get_by_label("Фактическая дата отгрузки", exact=True)).to_have_value("2026-05-18")
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥", exact=True)).to_have_value("14.321")
                 expect(frame.locator("#invoiceNoInput")).to_have_value("DRAFT-INVOICE-NO")
                 expect(frame.locator("#cnyCalculationStatus")).to_contain_text("Нет оплаты CNY")
                 expect(frame.locator("#productLines input[data-line-field='comment']").first).to_have_value(
@@ -1116,6 +1197,8 @@ def main() -> None:
                 detail_frame = operator_frame.frame_locator("iframe[title='Детализация поставки']")
                 expect(detail_frame.get_by_role("tab", name="Состав поставки")).to_be_visible(timeout=10000)
                 expect(detail_frame.get_by_role("tab", name="Документы")).to_be_visible(timeout=10000)
+                expect(detail_frame.get_by_role("tab", name="Состав поставки")).to_have_attribute("aria-selected", "true")
+                expect(detail_frame.locator("#supplyCompositionPanel")).to_be_visible()
                 operator_frame.locator("#shipmentRegistryCompareButton").click()
                 try:
                     expect(operator_frame.locator("#shipmentRegistryComparisonBlock")).to_be_visible(timeout=10000)
@@ -2028,13 +2111,16 @@ def _seed_accepted_ff_supplier_order(
         "upload_id": parsed.get("upload_id"),
         "shipment_date": "2026-05-14",
         "actual_shipment_date": "2026-05-16",
-        "actual_ff_acceptance_date": "2026-05-28",
         "payload": edited_payload,
     }
     created = entrypoint.handle_supplier_shipments_create_request(payload)
     shipment_id = str(created.get("shipment_id") or "")
     if not shipment_id:
         raise AssertionError(f"accepted_ff seed shipment was not created: {created}")
+    # Ordinary create intentionally forbids a historical FF acceptance.  This
+    # browser-only fixture seeds the already-accepted read state directly so
+    # the status filter can be verified without exercising a business write.
+    _restore_supplier_order_accepted_with_date(entrypoint, shipment_id)
     return shipment_id
 
 
