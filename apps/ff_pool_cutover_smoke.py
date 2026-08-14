@@ -55,8 +55,16 @@ def _db() -> sqlite3.Connection:
         CREATE TABLE sheet_vitrina_v1_wb_supplies(
             supply_id TEXT PRIMARY KEY,cache_key TEXT,wb_supply_id TEXT,status_id INTEGER,
             raw_list_hash TEXT,raw_detail_hash TEXT,raw_goods_hash TEXT,raw_package_hash TEXT);
-        CREATE TABLE sheet_vitrina_v1_ff_stock_operations(operation_id TEXT PRIMARY KEY);
-        CREATE TABLE sheet_vitrina_v1_supplier_shipments(shipment_id TEXT PRIMARY KEY);
+        CREATE TABLE sheet_vitrina_v1_ff_stock_operations(
+            operation_id TEXT PRIMARY KEY,source_key TEXT UNIQUE);
+        CREATE TABLE sheet_vitrina_v1_supplier_shipments(
+            shipment_id TEXT PRIMARY KEY,invoice_no TEXT,actual_shipment_date TEXT,
+            actual_ff_acceptance_date TEXT,product_qty_total REAL,archived_at TEXT,
+            order_status TEXT,updated_at TEXT);
+        CREATE TABLE sheet_vitrina_v1_supplier_shipment_lines(
+            line_id TEXT PRIMARY KEY,shipment_id TEXT,line_type TEXT,qty REAL);
+        CREATE TABLE sheet_vitrina_v1_supplier_ff_cost_layers(
+            layer_id TEXT PRIMARY KEY,supplier_shipment_id TEXT);
         """
     )
     ensure_ff_pool_cutover_schema(conn)
@@ -70,6 +78,17 @@ def _db() -> sqlite3.Connection:
     conn.execute(
         "INSERT INTO sheet_vitrina_v1_warehouse_functional_balances VALUES(?,?,?,?,?,?)",
         ("wf_test", "ff", 101, "10", "10", "100"),
+    )
+    conn.execute(
+        "INSERT INTO sheet_vitrina_v1_supplier_shipments VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "china_shipment_0001", "26GN527", "2026-08-01", "", 66,
+            "", "in_transit", T,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO sheet_vitrina_v1_supplier_shipment_lines VALUES(?,?,?,?)",
+        ("supplier_line_0001", "china_shipment_0001", "product", 66),
     )
     conn.execute(
         """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
@@ -96,6 +115,16 @@ def _db() -> sqlite3.Connection:
         ) VALUES(7001,'source_revision_0001',?,'active_pre_handoff',1,?)""",
         (DIGEST, T),
     )
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_status_observations(
+            observation_id,order_id,order_revision,status_digest,supplier_status,
+            wb_status,positive_quantity,observed_at
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            "status_observation_0001", 7001, "source_revision_0001", DIGEST,
+            "complete", "waiting", 1, "2026-08-12T04:02:00Z",
+        ),
+    )
     install_warehouse_domain_table_guards(conn)
     conn.commit()
     return conn
@@ -104,7 +133,13 @@ def _db() -> sqlite3.Connection:
 def _proposal(conn: sqlite3.Connection) -> dict:
     warehouses = [{"warehouse_id": 501, "facility_id": "facility_test", "evidence_digest": DIGEST}]
     sku_identity = _fingerprint({"nm_id": 101, "chrt_id": 201, "skus": ["sku-101"]})
-    skus = [{"nm_id": 101, "chrt_id": 201, "identity_digest": sku_identity}]
+    skus = [{
+        "nm_id": 101,
+        "source_nm_id": 101,
+        "target_nm_id": 101,
+        "chrt_id": 201,
+        "identity_digest": sku_identity,
+    }]
     mapping_digest = _fingerprint({"warehouses": warehouses, "skus": skus})
     classification = {
         "order_id": 7001,
@@ -118,10 +153,32 @@ def _proposal(conn: sqlite3.Connection) -> dict:
         "nm_id": 101,
         "quantity": 1,
         "status_fingerprint": DIGEST,
+        "status_evidence": {
+            "source_revision": "source_revision_0001",
+            "status_digest": DIGEST,
+            "supplier_status": "complete",
+            "wb_status": "waiting",
+            "quantity": 1,
+            "observed_at": "2026-08-12T04:02:00Z",
+        },
+        "post_handoff_reconciliation": None,
         "mapping_digest": mapping_digest,
     }
     observation_digest = _fingerprint({"watermark": 1, "classifications": [classification]})
     preflight = ff_pool_cutover_preflight_snapshot(conn)
+    shipment_evidence = _fingerprint(
+        {
+            "shipment_id": "china_shipment_0001",
+            "invoice_no": "26GN527",
+            "actual_shipment_date": "2026-08-01",
+            "actual_ff_acceptance_date": "",
+            "shipment_quantity": 66,
+            "product_line_count": 1,
+            "product_line_quantity": 66,
+            "receipt_operation_count": 0,
+            "cost_layer_count": 0,
+        }
+    )
     return {
         "contract_name": "ff_facility_pool_cutover_proposal_v1",
         "cutover_id": "cutover_test_0001",
@@ -136,6 +193,13 @@ def _proposal(conn: sqlite3.Connection) -> dict:
             "warehouse_lock_held": False,
             "evidence_digest": DIGEST,
         },
+        "handoff_policy": {
+            "decision": "approved",
+            "supplier_status": "complete",
+            "wb_status": "sorted",
+            "approval_reference": "owner_gate_smoke_0001",
+            "observed_complete_waiting_to_complete_sorted_distinct_orders": 75,
+        },
         "allocations": [
             {"facility_id": "facility_test", "pool": "FBS", "nm_id": 101, "quantity": 6, "capital_rub": "60.00"},
             {"facility_id": "facility_test", "pool": "FBO", "nm_id": 101, "quantity": 4, "capital_rub": "40.00"},
@@ -143,14 +207,18 @@ def _proposal(conn: sqlite3.Connection) -> dict:
         "order_classifications": [{
             "order_id": 7001, "classification": "pre_t_absorbed_reservation",
             "facility_id": "facility_test", "quantity": 1,
-            "status_fingerprint": DIGEST, "mapping_digest": mapping_digest,
+            "status_fingerprint": DIGEST,
+            "status_evidence": classification["status_evidence"],
+            "post_handoff_reconciliation": None,
+            "mapping_digest": mapping_digest,
         }],
         "seller_warehouse_mappings": warehouses,
         "sku_mappings": skus,
         "fbw_origin_assignments": [],
         "china_shipments": [{
             "shipment_id": "china_shipment_0001", "facility_id": "facility_test",
-            "pools": ["FBS", "FBO"], "evidence_digest": DIGEST,
+            "classification": "excluded_pending_receipt",
+            "pools": ["FBS", "FBO"], "evidence_digest": shipment_evidence,
         }],
         "collector_checkpoint": {
             "observation_watermark_sequence": 1,
@@ -198,12 +266,15 @@ def main() -> int:
     plan = build_ff_pool_cutover_plan(conn, proposal=proposal, deployed_sha=SHA, cutover_at=T)
     assert plan["status"] == "ready", plan["blockers"]
     assert plan["manifest"]["invariants"]["supplier_status_complete_never_debits"] is True
+    assert plan["manifest"]["china_shipments"][0]["classification"] == "excluded_pending_receipt"
     wrong = copy.deepcopy(proposal)
     wrong["allocations"][0]["quantity"] = 5
     blocked = build_ff_pool_cutover_plan(conn, proposal=wrong, deployed_sha=SHA, cutover_at=T)
     assert blocked["status"] == "blocked"
     try:
-        conn.execute("INSERT INTO sheet_vitrina_v1_ff_stock_operations VALUES('forbidden')")
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_ff_stock_operations(operation_id) VALUES('forbidden')"
+        )
         raise AssertionError("canonical FF writer bypassed barrier")
     except sqlite3.IntegrityError as exc:
         assert "warehouse domain write barrier active" in str(exc)
@@ -291,7 +362,10 @@ def main() -> int:
             "VALUES(?,?,?,?,?,?,?)",
             (ambiguous_proposal["write_epoch_id"], phase, ambiguous_proposal["control_manifest_digest"], SHA, T, "smoke", "{}"),
         )
-    ambiguous.execute("INSERT INTO sheet_vitrina_v1_ff_stock_operations VALUES('unexpected_recovery_write')")
+    ambiguous.execute(
+        "INSERT INTO sheet_vitrina_v1_ff_stock_operations(operation_id) "
+        "VALUES('unexpected_recovery_write')"
+    )
     ambiguous.execute(
         f"INSERT INTO {EVENTS_TABLE}(epoch_id,phase,manifest_digest,deployed_sha,event_at,actor,details_json) "
         "VALUES(?,?,?,?,?,?,?)",
@@ -347,15 +421,15 @@ def main() -> int:
     _hold(signed, signed_proposal)
     signed_plan = build_ff_pool_cutover_plan(signed, proposal=signed_proposal, deployed_sha=SHA, cutover_at=T)
     assert signed_plan["status"] == "ready", signed_plan["blockers"]
-    assert signed_plan["apply_allowed"] is False
-    assert signed_plan["production_apply_contract_ready"] is False
+    assert signed_plan["apply_allowed"] is True
+    assert signed_plan["production_apply_contract_ready"] is True
     zero_capital = copy.deepcopy(proposal)
     zero_capital["allocations"][0]["capital_rub"] = "0"
     zero_capital["allocations"][1]["capital_rub"] = "100"
     zero_capital_plan = build_ff_pool_cutover_plan(
         conn, proposal=zero_capital, deployed_sha=SHA, cutover_at=T
     )
-    assert zero_capital_plan["status"] == "ready" and zero_capital_plan["apply_allowed"] is False
+    assert zero_capital_plan["status"] == "ready" and zero_capital_plan["apply_allowed"] is True
     zero = copy.deepcopy(signed_proposal)
     zero["allocations"].append(
         {"facility_id": "facility_test", "pool": "FBO", "nm_id": 999, "quantity": 0, "capital_rub": "0"}

@@ -48,6 +48,17 @@ Stage 5 order identity alone is insufficient. Opening reservations must fit the
 exact facility/FBS/SKU allocation. Until a later shadow status collector writes
 that evidence, a production manifest deliberately remains blocked.
 
+## Superseded production boundary
+
+Migration 142 now supplies the previously absent signed-`INTEGER`/exact-Decimal
+opening writer, immutable historical FBS checkpoint, post-T lifecycle and
+owner-gated production runner. This migration remains the schema/planning
+foundation. Its older pending-receipt boundary is refined as follows: a
+shipment explicitly pinned as `excluded_pending_receipt` is non-blocking only
+when exact revalidation proves empty factual acceptance, no receipt source key,
+no cost layer and no partial posting. Ambiguous or partially posted supply state
+still blocks.
+
 ## Invariants and recovery
 
 - aggregate `ff` quantity/capital is unchanged and equals the sum of detail per

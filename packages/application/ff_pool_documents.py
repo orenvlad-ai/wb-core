@@ -27,7 +27,9 @@ from packages.application.ff_pool_foundation import (
     OPERATIONS_TABLE,
     RELATIONS_TABLE,
     canonical_decimal_text,
+    evaluate_ff_pool_aggregate_parity,
     ensure_ff_pool_foundation_schema,
+    record_ff_pool_parity_diagnostic,
 )
 from packages.application.warehouse_recovery_policy import (
     RecoveryPolicyError,
@@ -1045,20 +1047,26 @@ class FfPoolDocumentService:
                         "concurrent_pool_balance_drift",
                         "Pool balances changed after the posting plan was prepared",
                     )
-                if _is_guided_china_request(current_request):
+                guided_acceptance = _is_guided_china_request(current_request)
+                posted_at = self._now()
+                if guided_acceptance:
                     _apply_guided_acceptance_legacy(
                         conn,
                         request=current_request,
                         manifest=_json_object(_loads(current_request["preview_manifest_json"], {})),
-                        posted_at=self._now(),
+                        posted_at=posted_at,
                     )
                 _apply_plan(
                     conn,
                     request=current_request,
                     plan=plan,
                     epoch=epoch,
-                    posted_at=self._now(),
+                    posted_at=posted_at,
                 )
+                if guided_acceptance:
+                    _apply_guided_aggregate_projection(
+                        conn, plan=plan, request=current_request, posted_at=posted_at
+                    )
                 root_document_id = str(plan["primary_document_id"])
                 manifest_sha = _fingerprint(plan["posted_manifest"])
                 now = self._now()
@@ -1452,6 +1460,95 @@ def _apply_guided_acceptance_legacy(
     ).rowcount
     if changed != 1:
         raise FfPoolDocumentError("supplier_acceptance_concurrent_drift", "Shipment acceptance changed concurrently")
+
+
+def _apply_guided_aggregate_projection(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+    request: Mapping[str, Any],
+    posted_at: str,
+) -> None:
+    """Keep the existing aggregate FF projection exact with the pool receipt."""
+
+    deltas: dict[int, tuple[int, Decimal]] = {}
+    for document in plan.get("documents") or []:
+        for movement in document.get("movements") or []:
+            nm_id = int(movement["nm_id"])
+            quantity, capital = deltas.get(nm_id, (0, Decimal("0")))
+            deltas[nm_id] = (
+                quantity + int(movement["quantity_delta"]),
+                capital
+                + Decimal(int(movement["capital_delta_cents"])) / Decimal(100),
+            )
+    active = conn.execute(
+        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone()
+    if active is None:
+        raise FfPoolDocumentError(
+            "aggregate_active_missing", "Guided acceptance requires the active aggregate FF version"
+        )
+    version_id = str(active[0])
+    for nm_id, (quantity_delta, capital_delta) in sorted(deltas.items()):
+        row = conn.execute(
+            """SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances
+               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+            (version_id, nm_id),
+        ).fetchone()
+        if row is None:
+            raise FfPoolDocumentError(
+                "aggregate_sku_missing",
+                "Guided acceptance aggregate SKU is missing",
+                details={"nm_id": nm_id},
+            )
+        quantity = _signed_int(row[0], field="aggregate quantity") + quantity_delta
+        capital = Decimal(str(row[1])) + capital_delta
+        wac = None if quantity == 0 else canonical_decimal_text(capital / Decimal(quantity))
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+               SET quantity=?,capital_rub=?,wac_rub=?
+               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+            (
+                canonical_decimal_text(Decimal(quantity)),
+                canonical_decimal_text(capital),
+                wac,
+                version_id,
+                nm_id,
+            ),
+        )
+    aggregate_rows = [
+        {
+            "nm_id": int(row[0]),
+            "quantity": _signed_int(row[1], field="aggregate quantity"),
+            "capital_rub": canonical_decimal_text(row[2]),
+        }
+        for row in conn.execute(
+            """SELECT nm_id,quantity,capital_rub
+               FROM sheet_vitrina_v1_warehouse_functional_balances
+               WHERE version_id=? AND warehouse_key='ff' ORDER BY nm_id""",
+            (version_id,),
+        ).fetchall()
+    ]
+    parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
+    if parity.status != "pass":
+        raise FfPoolDocumentError(
+            "guided_acceptance_parity_failed",
+            "Guided acceptance diverged from aggregate FF",
+            details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
+        )
+    record_ff_pool_parity_diagnostic(
+        conn,
+        diagnostic_id="ffpar_guided_" + _fingerprint(
+            {"request_id": str(request["request_id"]), "posted_at": posted_at}
+        ).removeprefix("sha256:")[:22],
+        aggregate_revision=version_id,
+        checked_at=posted_at,
+        result=parity,
+        details={
+            "source": "guided_china_acceptance",
+            "shipment_id": str(request["source_id"]),
+        },
+    )
 
 
 def _plan_opening(

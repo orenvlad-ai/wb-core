@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import fcntl
 import hashlib
 import json
@@ -31,6 +32,11 @@ from packages.application.wb_fbs_orders import (
     WbFbsOrdersCollector,
     ensure_wb_fbs_orders_schema,
 )
+from packages.application.ff_pool_fbs_lifecycle import (
+    ensure_ff_pool_fbs_lifecycle_schema,
+    process_post_t_fbs_lifecycle,
+)
+from packages.application.warehouse_domain_write_guard import warehouse_domain_write_status
 
 
 CONTRACT_NAME = "wb_fbs_shadow_polling_v1"
@@ -206,6 +212,8 @@ class WbFbsShadowPollingService:
             aggregate.update(self._telemetry())
             result = aggregate
             self._persist_poll_run(result)
+            if aggregate["status"] == "success":
+                aggregate["lifecycle_processor"] = self._process_lifecycle_after_poll()
         except Exception as exc:
             aggregate["status"] = "failed"
             aggregate["completed_at"] = str(self.timestamp_factory())
@@ -220,6 +228,39 @@ class WbFbsShadowPollingService:
         finally:
             lock.__exit__(None, None, None)
         return self._public_result(result)
+
+    def _process_lifecycle_after_poll(self) -> dict[str, Any]:
+        """Keep collection independent while folding an activated epoch exactly."""
+
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            ensure_ff_pool_fbs_lifecycle_schema(conn)
+            conn.commit()
+            barrier = warehouse_domain_write_status(conn)
+            if barrier.get("active") is True:
+                return {
+                    "status": "held",
+                    "reason": "warehouse_domain_write_barrier_active",
+                    "mutates_wb": False,
+                }
+            conn.execute("BEGIN IMMEDIATE")
+            result = process_post_t_fbs_lifecycle(
+                conn,
+                occurred_at=str(self.timestamp_factory()),
+                schema_ready=True,
+            )
+            conn.commit()
+            return result
+        except Exception as exc:
+            conn.rollback()
+            return {
+                "status": "failed",
+                "error": _safe_error(exc),
+                "mutates_wb": False,
+            }
+        finally:
+            conn.close()
 
     def _resume_window(self) -> tuple[int, int, int]:
         now = int(self.unix_time_factory())
@@ -477,8 +518,10 @@ def build_readiness_report(
             )
         if not aggregate_pool["pool_zero"]:
             blockers.append("facility-pool ledger is not in the expected unopened zero state")
-        if pending_acceptance["count"]:
-            blockers.append("one or more China shipments still await factual FF acceptance")
+        if pending_acceptance["ambiguous_or_partially_posted_count"]:
+            blockers.append(
+                "one or more pending China shipments have ambiguous or partial FF postings"
+            )
 
         candidate_ready = handoff_order_count >= REPEATABLE_HANDOFF_ORDER_THRESHOLD
         report = {
@@ -525,6 +568,7 @@ def build_readiness_report(
                 "wb_status_sorted_candidate_only": True,
                 "automatic_trigger_selected": False,
                 "official_semantics_review_still_required": True,
+                "clean_pending_receipt_may_be_manifest_excluded": True,
             },
             "go_no_go": "GO_FOR_OWNER_GATED_DESIGN_REVIEW" if not blockers else "NO_GO",
             "blockers": blockers,
@@ -627,8 +671,14 @@ def _facility_state(conn: sqlite3.Connection, tables: set[str]) -> list[dict[str
 def _pending_acceptance(conn: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
     table = "sheet_vitrina_v1_supplier_shipments"
     if table not in tables:
-        return {"count": 0, "rows": [], "source_table_available": False}
-    rows = [
+        return {
+            "count": 0,
+            "excluded_pending_receipt_eligible_count": 0,
+            "ambiguous_or_partially_posted_count": 0,
+            "rows": [],
+            "source_table_available": False,
+        }
+    source_rows = [
         dict(row)
         for row in conn.execute(
             f"""SELECT shipment_id,COALESCE(invoice_no,'') AS invoice_no,
@@ -642,7 +692,102 @@ def _pending_acceptance(conn: sqlite3.Connection, tables: set[str]) -> dict[str,
                 ORDER BY actual_shipment_date,shipment_id"""
         )
     ]
-    return {"count": len(rows), "rows": rows, "source_table_available": True}
+    rows: list[dict[str, Any]] = []
+    clean_count = 0
+    ambiguous_count = 0
+    for source in source_rows:
+        shipment_id = str(source["shipment_id"])
+        receipt_table_available = "sheet_vitrina_v1_ff_stock_operations" in tables
+        receipt_count = (
+            int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations "
+                    "WHERE source_key=?",
+                    (f"supplier_shipment_acceptance:{shipment_id}",),
+                ).fetchone()[0]
+            )
+            if receipt_table_available
+            else None
+        )
+        cost_table_available = "sheet_vitrina_v1_supplier_ff_cost_layers" in tables
+        cost_layer_count = (
+            int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers "
+                    "WHERE supplier_shipment_id=?",
+                    (shipment_id,),
+                ).fetchone()[0]
+            )
+            if cost_table_available
+            else None
+        )
+        lines_table_available = "sheet_vitrina_v1_supplier_shipment_lines" in tables
+        line_quantities = (
+            [
+                _exact_positive_int_or_none(row[0])
+                for row in conn.execute(
+                    "SELECT qty FROM sheet_vitrina_v1_supplier_shipment_lines "
+                    "WHERE shipment_id=? AND line_type='product' ORDER BY sort_order,line_id",
+                    (shipment_id,),
+                ).fetchall()
+            ]
+            if lines_table_available
+            else []
+        )
+        shipment_quantity = _exact_positive_int_or_none(source.get("product_qty_total"))
+        line_quantity = (
+            sum(int(value) for value in line_quantities)
+            if line_quantities and all(value is not None for value in line_quantities)
+            else None
+        )
+        exclusion_eligible = (
+            not str(source.get("actual_ff_acceptance_date") or "")
+            and receipt_count == 0
+            and cost_layer_count == 0
+            and shipment_quantity is not None
+            and line_quantity == shipment_quantity
+        )
+        if exclusion_eligible:
+            clean_count += 1
+        else:
+            ambiguous_count += 1
+        rows.append(
+            {
+                **source,
+                "receipt_operation_count": receipt_count,
+                "cost_layer_count": cost_layer_count,
+                "shipment_quantity_exact": shipment_quantity,
+                "product_line_count": len(line_quantities),
+                "product_line_quantity_exact": line_quantity,
+                "classification": (
+                    "excluded_pending_receipt_eligible"
+                    if exclusion_eligible
+                    else "ambiguous_or_partially_posted"
+                ),
+                "requires_exact_cutover_manifest_pin": exclusion_eligible,
+            }
+        )
+    return {
+        "count": len(rows),
+        "excluded_pending_receipt_eligible_count": clean_count,
+        "ambiguous_or_partially_posted_count": ambiguous_count,
+        "rows": rows,
+        "source_table_available": True,
+    }
+
+
+def _exact_positive_int_or_none(value: Any) -> int | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if (
+        not number.is_finite()
+        or number <= 0
+        or number != number.to_integral_value()
+    ):
+        return None
+    return int(number)
 
 
 def _portal_lane_diagnostics(conn: sqlite3.Connection) -> dict[str, Any]:

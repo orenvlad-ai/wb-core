@@ -2413,6 +2413,74 @@ def main() -> None:
             or stage_args.ff_stage_7a_action != "dry-run"
         ):
             raise AssertionError("hosted runner must expose Stage 7A production commands")
+
+        cutover_sha = "b" * 40
+        cutover_gate = {
+            "contract_name": "ff_pool_cutover_production_v1",
+            "contract_version": 1,
+            "mode": "dry_run_owner_gate",
+            "deployed_sha": cutover_sha,
+            "apply_allowed": True,
+            "blockers": [],
+            "fingerprint": "sha256:" + "c" * 64,
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(cutover_gate), stderr=""
+            ),
+        ) as cutover_run:
+            cutover_result = hosted_runtime._run_remote_ff_pool_cutover_runner(
+                active_target,
+                action="dry-run",
+                deployed_sha=cutover_sha,
+                excluded_shipment_ids=("sup_adc29a3cba934403bca4842c2add8b7d",),
+                opening_facility_id="fac_moscow",
+                proposed_window_minutes=15,
+                reviewed_envelope=None,
+                fingerprint="",
+                approval_reference="",
+                actor="",
+            )
+        cutover_command = " ".join(cutover_run.call_args.args[0])
+        if not all(
+            token in cutover_command
+            for token in (
+                "ff_pool_cutover_production.py",
+                ".wb-core-runtime-sha",
+                cutover_sha,
+                "--excluded-shipment-id",
+                "sup_adc29a3cba934403bca4842c2add8b7d",
+                "--opening-facility-id",
+                "fac_moscow",
+            )
+        ):
+            raise AssertionError("Stage 7C hosted dry-run lost exact target/source binding")
+        if (
+            cutover_result != cutover_gate
+            or cutover_run.call_args.kwargs.get("timeout")
+            != hosted_runtime.FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS
+        ):
+            raise AssertionError("Stage 7C hosted runner lost its contract or bounded timeout")
+
+        cutover_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-pool-cutover-production-dry-run",
+                "--deployed-sha",
+                cutover_sha,
+                "--excluded-shipment-id",
+                "sup_adc29a3cba934403bca4842c2add8b7d",
+                "--output",
+                str(Path(partner_temp_dir) / "ff-pool-cutover-dry-run.json"),
+            ]
+        )
+        if (
+            cutover_args.handler
+            is not hosted_runtime.run_ff_pool_cutover_production_command
+            or cutover_args.ff_pool_cutover_action != "dry-run"
+        ):
+            raise AssertionError("hosted runner must expose Stage 7C production commands")
     for maintenance_action, expected_timeout in (
         ("status", 300.0),
         ("hold", 1500.0),

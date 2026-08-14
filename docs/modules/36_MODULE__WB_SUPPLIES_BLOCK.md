@@ -105,7 +105,7 @@ related_docs:
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Official FBW supplies sync remains read-only and independent from Seller Portal success, and keeps the bounded process-owned transit-cost collector. Migration 141 removes the separate official FBS shadow from ordinary FBW/hourly sync: a dedicated five-minute single-flight timer owns bounded official order/status polling, shared rate budget, crash-safe cursor, immutable transitions and query-only readiness. No FBS observation selects a physical trigger. Durable canonical transit amount + append-only attempt evidence preserve last success across errors; stale active runs reconcile, identical work is single-flight, failures use taxonomy/backoff, successful amounts enqueue canonical targeted recalculation. List/status UI exposes separate Seller auth, exact supply-cost route, collector, freshness and coverage truth; local `Проверить` is route-specific and `Повторить сбор` is global. Login/recovery live only in central settings."
+update_note: "Official FBW supplies sync remains read-only and independent from Seller Portal success, and keeps the bounded process-owned transit-cost collector. A dedicated five-minute single-flight FBS timer owns bounded official order/status polling, shared rate budget, crash-safe cursor and immutable transitions. Migration 142 consumes those local observations only after an owner-gated opening: complete+sorted reserves/fulfills with exact-once local accounting, while supplier complete alone remains forbidden and no code writes WB. Durable canonical transit amount + append-only attempt evidence preserve last success across errors; stale active runs reconcile, identical work is single-flight, failures use taxonomy/backoff, successful amounts enqueue canonical targeted recalculation. List/status UI exposes separate Seller auth, exact supply-cost route, collector, freshness and coverage truth; local `Проверить` is route-specific and `Повторить сбор` is global. Login/recovery live only in central settings."
 ---
 
 > Functional boundary: bounded reconciliation `31 500 / 31 477` ниже сохраняется как immutable incident evidence. Она не задаёт текущий `FF → WB`: active quantity после functional cutover всегда `max(fresh packed − fresh accepted, 0)`, final difference идёт только в pooled positive discrepancy, а WB quantity приходит только из complete official stocks snapshot.
@@ -713,6 +713,18 @@ or customer data are retained.  Portal-lane comparisons remain explicit
 inference.  `supplierStatus=complete` never debits, and `wbStatus=sorted`
 remains a candidate pending repeatable evidence and separate official semantic
 review.
+
+Migration 142 records that review in an owner-gated manifest. The only approved
+handoff proposal is the official conjunction `supplierStatus=complete AND
+wbStatus=sorted`; observed transition counts are evidence and never automatic
+approval. After exact opening, the same collector persists observations first
+and invokes an epoch-gated local lifecycle consumer: eligible orders reserve,
+pre-handoff cancellation releases, approved handoff debits frozen-WAC physical
+stock exactly once, and later terminal status creates no second debit. A later
+cancellation/return uses a separate reconciliation lane. Late pre-T evidence is
+isolated and no code writes WB. A clean manifest-pinned pending China receipt is
+not readiness-blocking and contributes zero opening/debit; ambiguous or partly
+posted receipt state still blocks.
 
 # 12. Own capital movement consumer
 
