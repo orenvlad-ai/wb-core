@@ -113,7 +113,17 @@ The reviewed source fingerprint covers only frozen rows at/below compound `W`;
 new order/status/transition rows above `W` are a post-checkpoint suffix, not
 aggregate or manifest drift. Aggregate, facilities/mappings, policy, deployed
 SHA, non-target evidence and pending-receipt proof remain exact apply-time
-gates. The suffix drain preserves the same aggregate=sum(detail invariant.
+gates. The suffix drain preserves the same aggregate = sum(detail) invariant.
+
+Migration 144 does not alter that opening or the active facility/pool ledger.
+It may mark one earlier failed Stage 7C Recovery Policy operation
+`superseded` only after exact append-only proof of a distinct later reconciled
+cutover. The remediation writes no functional/business projection itself.
+Once the blocker is terminal, the ordinary warehouse publisher takes physical
+FF quantity/capital and reservations from one current facility × pool model,
+publishes `ff = SUM(facility × pool)` exactly once, and derives available from
+physical minus reservations. A prior business projection remains last-good
+until that publication succeeds; it is never patched directly.
 
 # 2. Physical and cost rules
 

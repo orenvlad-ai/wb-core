@@ -46,7 +46,9 @@ Operations advance by compare-and-set:
 `planned → reserved → writing → verified → mutation_running → retained`
 
 Recovery alternatives are `failed_recoverable`, `rolled_back`, `quarantined`
-and retention-driven `released`. Every transition persists state version,
+and retention-driven `released`. The terminal `superseded` state is available
+only for the exact Stage 7C stale-failure contract described below; it is not a
+generic operator escape hatch. Every transition persists state version,
 heartbeat and next action. An exact retry resumes its deterministic operation
 identity or creates a later deterministic generation only after a terminal
 rollback; it never silently duplicates the business mutation.
@@ -73,6 +75,9 @@ evidence; retention removes only lifecycle-authorized exact artifacts. Expired
 `retained` evidence advances to `released`; expired `rolled_back` evidence
 keeps its terminal audit state while its files and undo rows are released.
 Failed and quarantined evidence is never removed by ordinary retention.
+Superseded evidence is also never an ordinary retention candidate: its verified
+checkpoint/manifest bytes, original failure, transition chain and rollback
+metadata remain intact beside the immutable replacement relation.
 Retention planning has a stable exact fingerprint and apply owns a durable
 registry audit. It runs before and after hourly/manual publication under the
 same writer lock, and can also be invoked through deployed-SHA-pinned hosted
@@ -302,3 +307,42 @@ cannot age an owner gate. They are drained in the same transaction as opening
 when already persisted; drain progress and accounting effects roll back or
 commit together. A post-commit retry resumes readback, while later collector
 suffixes use forward idempotent processing rather than restoration or replay.
+
+## Stage 7C stale-recovery supersession
+
+Migration 144 defines the sole bounded way to terminalize a failed Stage 7C T2
+operation after a different, later owner-gated Stage 7C attempt has already
+completed. The query-only planner accepts one exact recovery operation id and
+requires all of the following at once:
+
+- the target is still `failed_recoverable` with
+  `exact_ff_pool_cutover_readback_or_retry`, verified checkpoint and manifest
+  artifacts whose current bytes/size/SHA still match the registry, an exact
+  `mutation_running → failed_recoverable` transition and
+  only `held → aborted` domain epochs;
+- the failed cutover has no manifest or recovery event;
+- exactly one later canonical cutover manifest exists, its readback passes with
+  aggregate/detail parity and reader enabled, and its epoch reaches
+  `held → applying → readback_required → reconciled → released`;
+- the later cutover's `readback_passed` event names one later retained/released
+  `warehouse_opening_publication` recovery whose after/non-target digests match
+  the canonical manifest and the failed attempt.
+
+The dry-run is a machine-readable manifest with exact deployed runner SHA,
+pre-change row/transition/artifact digests, proof fingerprint, expected three
+Recovery Policy record effects and explicit zero warehouse/WB/shipment effects.
+Apply requires that exact plan, fingerprint, actor and owner authorization
+reference; it re-derives the proof under the shared warehouse writer lock and
+atomically appends one immutable supersession relation plus one lifecycle
+transition. It never replays opening, historical debit, receipt, collector
+logic or WB calls. The original error and artifact registry remain unchanged,
+and triggers prohibit relation update/delete. A missing, ambiguous or drifted
+proof remains `failed_recoverable` and continues to block future T2
+publication.
+
+Canonical hosted commands are
+`ff-pool-recovery-supersession-dry-run|apply|readback`. All pin the active
+runtime and exact `.wb-core-runtime-sha`; only apply is a production mutation.
+After successful readback, ordinary hourly/manual warehouse sync may publish a
+fresh functional/business projection. Supersession itself never edits a
+projection row.

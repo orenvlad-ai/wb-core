@@ -94,3 +94,8 @@ Verification is owned by:
 - `python3 apps/ff_pool_fbs_lifecycle_smoke.py`;
 - `python3 apps/wb_fbs_shadow_polling_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
+
+If an earlier pre-commit failure remains protected after a distinct later
+cutover has reconciled, it is not ignored by this migration. Only Migration 144
+may append the exact supersession proof; it never changes or replays this
+cutover's opening/lifecycle effects.

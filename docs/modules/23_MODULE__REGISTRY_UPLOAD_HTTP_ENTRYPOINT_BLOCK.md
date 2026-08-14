@@ -1001,12 +1001,23 @@ readback for `warehouse_recovery_policy_v1`. It exposes only server-owned
 registry metadata: tier/scope, planned/actual/read bytes, lifecycle/heartbeat,
 next action, capacity reservations/watermarks, writer/timer state,
 orphan/quarantine evidence, artifacts and rollback expiry. The warehouse update
-tab renders the same payload and keeps failures visible. Orphan readback
+tab renders the same payload and keeps failures visible. A terminal
+`superseded` Stage 7C row exposes the exact immutable replacement operation,
+proof fingerprint, authorization reference and preserved-artifact marker; it is
+not counted as an active failure. The original failure remains visible. Orphan readback
 separates active policy-era findings from the visible read-only pre-policy
 backup baseline fixed by the first durable recovery operation; a new or
 subsequently touched unregistered recovery-family file remains actionable.
 No browser control can select a tier, migration identifier, cleanup target or
 rollback action.
+
+Warehouse last-error presentation recognizes the exact unresolved protected T2
+Recovery Policy blocker before generic timeout/storage tokens. Therefore a
+diagnostic suffix such as `sqlite_busy_timeout_ms=120000` cannot relabel the
+actual blocker as an upstream timeout. The UI says that publication stopped on
+protected recovery evidence and keeps the last successful projection until a
+canonical publication succeeds; it never claims that the source failed to
+answer.
 
 ## Warehouse business projection status
 

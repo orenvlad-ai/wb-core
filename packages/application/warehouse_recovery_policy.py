@@ -30,7 +30,7 @@ from packages.application.sqlite_contention import connect_sqlite
 
 
 CONTRACT_NAME = "warehouse_recovery_policy_v1"
-REGISTRY_SCHEMA_VERSION = 2
+REGISTRY_SCHEMA_VERSION = 3
 DEFAULT_OPERATIONAL_RESERVE_BYTES = 512 * 1024 * 1024
 DEFAULT_RESERVATION_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_ROLLBACK_RETENTION_DAYS = 14
@@ -70,6 +70,7 @@ class RecoveryState(str, Enum):
     ROLLED_BACK = "rolled_back"
     FAILED_RECOVERABLE = "failed_recoverable"
     QUARANTINED = "quarantined"
+    SUPERSEDED = "superseded"
 
 
 TERMINAL_STATES = frozenset(
@@ -77,6 +78,7 @@ TERMINAL_STATES = frozenset(
         RecoveryState.RELEASED.value,
         RecoveryState.ROLLED_BACK.value,
         RecoveryState.QUARANTINED.value,
+        RecoveryState.SUPERSEDED.value,
     }
 )
 
@@ -137,11 +139,13 @@ ALLOWED_TRANSITIONS: Mapping[str, frozenset[str]] = {
             RecoveryState.RELEASED.value,
             RecoveryState.ROLLED_BACK.value,
             RecoveryState.QUARANTINED.value,
+            RecoveryState.SUPERSEDED.value,
         }
     ),
     RecoveryState.RELEASED.value: frozenset(),
     RecoveryState.ROLLED_BACK.value: frozenset(),
     RecoveryState.QUARANTINED.value: frozenset(),
+    RecoveryState.SUPERSEDED.value: frozenset(),
 }
 
 
@@ -552,6 +556,7 @@ class WarehouseRecoveryRegistry:
                 RecoveryState.RELEASED.value,
                 RecoveryState.ROLLED_BACK.value,
                 RecoveryState.QUARANTINED.value,
+                RecoveryState.SUPERSEDED.value,
             }:
                 return existing
             if start_state == RecoveryState.FAILED_RECOVERABLE.value:
@@ -809,6 +814,7 @@ class WarehouseRecoveryRegistry:
                 RecoveryState.RELEASED.value,
                 RecoveryState.ROLLED_BACK.value,
                 RecoveryState.QUARANTINED.value,
+                RecoveryState.SUPERSEDED.value,
             }:
                 return existing
             if current == RecoveryState.FAILED_RECOVERABLE.value:
@@ -1399,6 +1405,275 @@ class WarehouseRecoveryRegistry:
                 writer_state="failed",
             )
         return self.get_operation(operation_id)
+
+    def supersede_failed_operation(
+        self,
+        operation_id: str,
+        *,
+        superseding_operation_id: str,
+        proof_contract: str,
+        proof_fingerprint: str,
+        proof: Mapping[str, Any],
+        actor: str,
+        authorization_reference: str,
+    ) -> dict[str, Any]:
+        """Terminalize one failed Stage 7C checkpoint by exact later proof.
+
+        The failed operation, its transitions and every checkpoint artifact stay
+        intact.  This method appends one immutable relation and one ordinary CAS
+        lifecycle transition; it never releases recovery bytes or rewrites the
+        earlier failure evidence.
+        """
+
+        target_id = str(operation_id or "").strip()
+        replacement_id = str(superseding_operation_id or "").strip()
+        contract = str(proof_contract or "").strip()
+        fingerprint = str(proof_fingerprint or "").strip().lower()
+        operator = str(actor or "").strip()
+        authorization = str(authorization_reference or "").strip()
+        if not target_id or not replacement_id or target_id == replacement_id:
+            raise RecoveryPolicyError(
+                "distinct target and superseding recovery operations are required"
+            )
+        if not contract or not operator or not authorization:
+            raise RecoveryPolicyError(
+                "supersession proof contract, actor and authorization reference are required"
+            )
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+            raise RecoveryPolicyError("supersession proof fingerprint must be exact sha256")
+        normalized_proof = _clone(proof)
+        expected_fingerprint = "sha256:" + hashlib.sha256(
+            _json_bytes(normalized_proof)
+        ).hexdigest()
+        if fingerprint != expected_fingerprint:
+            raise RecoveryPolicyError("supersession proof fingerprint mismatch")
+        if str(normalized_proof.get("contract_name") or "") != contract:
+            raise RecoveryPolicyError("supersession proof contract mismatch")
+        if str(normalized_proof.get("target_operation_id") or "") != target_id:
+            raise RecoveryPolicyError("supersession proof target mismatch")
+        if (
+            str(normalized_proof.get("superseding_operation_id") or "")
+            != replacement_id
+        ):
+            raise RecoveryPolicyError("supersession proof replacement mismatch")
+
+        supersession_id = (
+            "recovery_supersession_" + fingerprint.removeprefix("sha256:")[:32]
+        )
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                target = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_operations "
+                    "WHERE operation_id=?",
+                    (target_id,),
+                ).fetchone()
+                replacement = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_operations "
+                    "WHERE operation_id=?",
+                    (replacement_id,),
+                ).fetchone()
+                if target is None or replacement is None:
+                    raise RecoveryPolicyError(
+                        "target and superseding recovery operations must exist"
+                    )
+                target_row = dict(target)
+                replacement_row = dict(replacement)
+                existing_relation = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_supersessions "
+                    "WHERE target_operation_id=?",
+                    (target_id,),
+                ).fetchone()
+                if str(target_row["lifecycle_state"]) == RecoveryState.SUPERSEDED.value:
+                    if (
+                        existing_relation is None
+                        or str(existing_relation["superseding_operation_id"])
+                        != replacement_id
+                        or str(existing_relation["proof_fingerprint"])
+                        != fingerprint
+                    ):
+                        raise RecoveryPolicyError(
+                            "superseded recovery owns another immutable proof"
+                        )
+                    conn.rollback()
+                    result = self.get_operation(target_id)
+                    if result is None:
+                        raise RecoveryPolicyError(
+                            "superseded recovery operation disappeared"
+                        )
+                    return result
+                if existing_relation is not None:
+                    raise RecoveryPolicyError(
+                        "failed recovery already owns an immutable supersession relation"
+                    )
+                if (
+                    str(target_row["operation_kind"])
+                    != "warehouse_opening_publication"
+                    or str(target_row["closure_kind"]) != "warehouse_domain"
+                    or str(target_row["tier"]) != RecoveryTier.T2.value
+                    or str(target_row["lifecycle_state"])
+                    != RecoveryState.FAILED_RECOVERABLE.value
+                    or str(target_row["next_action"])
+                    != "exact_ff_pool_cutover_readback_or_retry"
+                ):
+                    raise RecoveryPolicyError(
+                        "only the exact failed Stage 7C T2 recovery is supersedable"
+                    )
+                if (
+                    str(replacement_row["operation_kind"])
+                    != str(target_row["operation_kind"])
+                    or str(replacement_row["closure_kind"])
+                    != str(target_row["closure_kind"])
+                    or str(replacement_row["tier"]) != RecoveryTier.T2.value
+                    or str(replacement_row["lifecycle_state"])
+                    not in {
+                        RecoveryState.RETAINED.value,
+                        RecoveryState.RELEASED.value,
+                    }
+                    or not str(replacement_row["after_digest"] or "")
+                    or str(replacement_row["created_at"])
+                    <= str(target_row["updated_at"])
+                ):
+                    raise RecoveryPolicyError(
+                        "superseding recovery is not a later successful Stage 7C T2 operation"
+                    )
+                target_proof = dict(normalized_proof.get("target_operation") or {})
+                replacement_proof = dict(
+                    normalized_proof.get("superseding_operation") or {}
+                )
+                expected_target = {
+                    "operation_id": target_id,
+                    "plan_fingerprint": str(target_row["plan_fingerprint"]),
+                    "state_version": int(target_row["state_version"]),
+                    "checkpoint_digest": str(target_row["checkpoint_digest"]),
+                }
+                expected_replacement = {
+                    "operation_id": replacement_id,
+                    "plan_fingerprint": str(replacement_row["plan_fingerprint"]),
+                    "state_version": int(replacement_row["state_version"]),
+                    "after_digest": str(replacement_row["after_digest"]),
+                }
+                if target_proof != expected_target:
+                    raise RecoveryPolicyError("target recovery proof drifted before apply")
+                if replacement_proof != expected_replacement:
+                    raise RecoveryPolicyError(
+                        "superseding recovery proof drifted before apply"
+                    )
+                pre_change = dict(normalized_proof.get("pre_change") or {})
+                current_target_row_digest = "sha256:" + hashlib.sha256(
+                    _json_bytes(
+                        {
+                            "operation_id": target_id,
+                            "lifecycle": str(target_row["lifecycle_state"]),
+                            "state_version": int(target_row["state_version"]),
+                            "next_action": str(target_row["next_action"]),
+                            "writer_state": str(target_row["writer_state"]),
+                            "rollback_available": int(
+                                target_row["rollback_available"]
+                            ),
+                            "checkpoint_digest": str(
+                                target_row["checkpoint_digest"]
+                            ),
+                        }
+                    )
+                ).hexdigest()
+                target_failure = dict(
+                    normalized_proof.get("target_failure") or {}
+                )
+                if (
+                    str(pre_change.get("target_row_digest") or "")
+                    != current_target_row_digest
+                    or pre_change.get("supersession_relation_absent") is not True
+                    or str(target_failure.get("last_error") or "")
+                    != str(target_row["last_error"])
+                    or dict(normalized_proof.get("target_scope") or {})
+                    != _json_object(target_row["target_scope_json"])
+                ):
+                    raise RecoveryPolicyError(
+                        "target recovery row or scope drifted before supersession"
+                    )
+
+                next_version = int(target_row["state_version"]) + 1
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_recovery_supersessions(
+                        supersession_id,target_operation_id,
+                        superseding_operation_id,proof_contract,
+                        proof_fingerprint,proof_json,actor,
+                        authorization_reference,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        supersession_id,
+                        target_id,
+                        replacement_id,
+                        contract,
+                        fingerprint,
+                        _json(normalized_proof),
+                        operator,
+                        authorization,
+                        now,
+                    ),
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_recovery_operations
+                    SET lifecycle_state=?,state_version=?,next_action='none',
+                        writer_state='idle',
+                        updated_at=?,last_heartbeat_at=?
+                    WHERE operation_id=? AND lifecycle_state=? AND state_version=?
+                    """,
+                    (
+                        RecoveryState.SUPERSEDED.value,
+                        next_version,
+                        now,
+                        now,
+                        target_id,
+                        RecoveryState.FAILED_RECOVERABLE.value,
+                        int(target_row["state_version"]),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RecoveryPolicyError(
+                        "supersession lifecycle CAS update lost"
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_recovery_transitions(
+                        operation_id,from_state,to_state,state_version,
+                        transitioned_at,detail_json
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        target_id,
+                        RecoveryState.FAILED_RECOVERABLE.value,
+                        RecoveryState.SUPERSEDED.value,
+                        next_version,
+                        now,
+                        _json(
+                            {
+                                "next_action": "none",
+                                "supersession_id": supersession_id,
+                                "superseding_operation_id": replacement_id,
+                                "proof_contract": contract,
+                                "proof_fingerprint": fingerprint,
+                                "artifacts_preserved": True,
+                            }
+                        ),
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self._fsync_registry()
+        self._inject(target_id, f"after_transition:{RecoveryState.SUPERSEDED.value}")
+        result = self.get_operation(target_id)
+        if result is None:
+            raise RecoveryPolicyError("superseded recovery operation disappeared")
+        return result
 
     def quarantine(self, operation_id: str, reason: str) -> dict[str, Any]:
         operation = self.get_operation(operation_id)
@@ -2661,10 +2936,31 @@ class WarehouseRecoveryRegistry:
                 artifacts_by_operation.setdefault(
                     str(item["operation_id"]), []
                 ).append(item)
+            supersessions_by_operation: dict[str, dict[str, Any]] = {}
+            if _table_exists(
+                conn, "sheet_vitrina_v1_recovery_supersessions"
+            ):
+                for relation in conn.execute(
+                    """
+                    SELECT supersession_id,target_operation_id,
+                           superseding_operation_id,proof_contract,
+                           proof_fingerprint,actor,
+                           authorization_reference,created_at
+                    FROM sheet_vitrina_v1_recovery_supersessions
+                    ORDER BY created_at,target_operation_id
+                    """
+                ):
+                    item = dict(relation)
+                    supersessions_by_operation[
+                        str(item["target_operation_id"])
+                    ] = item
         return [
             _public_operation(
                 row,
                 artifacts=artifacts_by_operation.get(str(row["operation_id"]), []),
+                supersession=supersessions_by_operation.get(
+                    str(row["operation_id"])
+                ),
             )
             for row in rows
         ]
@@ -2697,9 +2993,28 @@ class WarehouseRecoveryRegistry:
                     (str(operation_id),),
                 )
             ]
+            supersession = None
+            if _table_exists(
+                conn, "sheet_vitrina_v1_recovery_supersessions"
+            ):
+                relation = conn.execute(
+                    """
+                    SELECT supersession_id,target_operation_id,
+                           superseding_operation_id,proof_contract,
+                           proof_fingerprint,actor,
+                           authorization_reference,created_at
+                    FROM sheet_vitrina_v1_recovery_supersessions
+                    WHERE target_operation_id=?
+                    """,
+                    (str(operation_id),),
+                ).fetchone()
+                if relation is not None:
+                    supersession = dict(relation)
         for artifact in artifacts:
             artifact.pop("metadata_json", None)
-        return _public_operation(dict(row), artifacts=artifacts)
+        return _public_operation(
+            dict(row), artifacts=artifacts, supersession=supersession
+        )
 
     def _create_operation(
         self,
@@ -3432,6 +3747,38 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
               REFERENCES sheet_vitrina_v1_recovery_operations(operation_id)
               ON DELETE RESTRICT
         );
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_recovery_supersessions(
+            supersession_id TEXT PRIMARY KEY,
+            target_operation_id TEXT NOT NULL UNIQUE,
+            superseding_operation_id TEXT NOT NULL,
+            proof_contract TEXT NOT NULL,
+            proof_fingerprint TEXT NOT NULL UNIQUE,
+            proof_json TEXT NOT NULL CHECK(json_valid(proof_json)),
+            actor TEXT NOT NULL,
+            authorization_reference TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK(target_operation_id<>superseding_operation_id),
+            FOREIGN KEY(target_operation_id)
+              REFERENCES sheet_vitrina_v1_recovery_operations(operation_id)
+              ON DELETE RESTRICT,
+            FOREIGN KEY(superseding_operation_id)
+              REFERENCES sheet_vitrina_v1_recovery_operations(operation_id)
+              ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_recovery_supersessions_by_replacement
+          ON sheet_vitrina_v1_recovery_supersessions(
+            superseding_operation_id,created_at,target_operation_id
+          );
+        CREATE TRIGGER IF NOT EXISTS recovery_supersession_immutable
+        BEFORE UPDATE ON sheet_vitrina_v1_recovery_supersessions
+        BEGIN
+          SELECT RAISE(ABORT,'recovery supersession proof is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS recovery_supersession_append_only
+        BEFORE DELETE ON sheet_vitrina_v1_recovery_supersessions
+        BEGIN
+          SELECT RAISE(ABORT,'recovery supersession proof is append-only');
+        END;
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_recovery_capacity_reservations(
             reservation_id TEXT PRIMARY KEY,
             operation_id TEXT NOT NULL UNIQUE,
@@ -3584,6 +3931,7 @@ def _public_operation(
     row: Mapping[str, Any],
     *,
     artifacts: Sequence[Mapping[str, Any]],
+    supersession: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     scope = _json_object(row.get("target_scope_json") or "{}")
     lifecycle = str(row.get("lifecycle_state") or "")
@@ -3618,6 +3966,33 @@ def _public_operation(
             "expires_at": row.get("rollback_expires_at"),
         },
         "artifacts": [_clone(item) for item in artifacts],
+        "supersession": (
+            {
+                "supersession_id": str(
+                    supersession.get("supersession_id") or ""
+                ),
+                "target_operation_id": str(
+                    supersession.get("target_operation_id") or ""
+                ),
+                "superseding_operation_id": str(
+                    supersession.get("superseding_operation_id") or ""
+                ),
+                "proof_contract": str(
+                    supersession.get("proof_contract") or ""
+                ),
+                "proof_fingerprint": str(
+                    supersession.get("proof_fingerprint") or ""
+                ),
+                "actor": str(supersession.get("actor") or ""),
+                "authorization_reference": str(
+                    supersession.get("authorization_reference") or ""
+                ),
+                "created_at": str(supersession.get("created_at") or ""),
+                "artifacts_preserved": True,
+            }
+            if supersession is not None
+            else None
+        ),
     }
 
 

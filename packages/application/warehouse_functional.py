@@ -9109,6 +9109,14 @@ def _warehouse_sync_error_reason(value: Any) -> str:
         return "коллизия идентификатора строки аудита доприёмки"
     if not text:
         return "причина не записана"
+    if (
+        "warehouse recovery contains unresolved protected t2 evidence" in text
+        or "another domain checkpoint is blocked" in text
+    ):
+        return (
+            "публикация остановлена: Recovery Policy обнаружила незавершённое "
+            "защищённое T2-восстановление склада; сохранена последняя успешная версия"
+        )
     if any(token in text for token in ("401", "403", "unauthorized", "forbidden", "authentication", "authorization")):
         return "источник отклонил авторизацию; требуется проверка служебной сессии"
     if "429" in text or "rate limit" in text or "too many requests" in text:

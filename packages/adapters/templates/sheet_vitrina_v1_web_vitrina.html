@@ -10097,11 +10097,18 @@
               const artifacts = Array.isArray(item.artifacts) ? item.artifacts : [];
               const scope = JSON.stringify(item.scope || {});
               const rollback = item.rollback || {};
+              const supersession = item.supersession || {};
+              const lifecycle = String(item.lifecycle || "—") === "superseded"
+                ? "superseded · заменено " + String(supersession.superseding_operation_id || "точным последующим recovery")
+                : String(item.lifecycle || "—");
+              const supersessionProof = supersession.proof_fingerprint
+                ? "<br><small>proof: " + escapeHtml(supersession.proof_fingerprint) + "</small>"
+                : "";
               return "<tr>" +
                 "<td><strong>" + escapeHtml(item.tier || "—") + "</strong><br>" + escapeHtml(item.operation_kind || "—") + "<br><small>" + escapeHtml(item.operation_id || "") + "</small></td>" +
                 "<td><code>" + escapeHtml(scope) + "</code></td>" +
                 "<td>" + escapeHtml(warehouseRecoveryBytes(item.planned_bytes)) + " / " + escapeHtml(warehouseRecoveryBytes(item.actual_bytes)) + " / " + escapeHtml(warehouseRecoveryBytes(item.read_bytes)) + "</td>" +
-                "<td>" + escapeHtml(item.lifecycle || "—") + "<br><small>writer: " + escapeHtml(item.writer_state || "—") + "</small></td>" +
+                "<td>" + escapeHtml(lifecycle) + "<br><small>writer: " + escapeHtml(item.writer_state || "—") + "</small>" + supersessionProof + "</td>" +
                 "<td>" + escapeHtml(item.next_action || "none") + "</td>" +
                 "<td>" + (rollback.available ? "до " + escapeHtml(warehouseDate(rollback.expires_at)) : "недоступен") + "</td>" +
                 "<td>" + escapeHtml(String(artifacts.length)) + (item.quarantine_reason ? "<br>" + escapeHtml(item.quarantine_reason) : "") + (item.last_error ? "<br>" + escapeHtml(item.last_error) : "") + "</td>" +
