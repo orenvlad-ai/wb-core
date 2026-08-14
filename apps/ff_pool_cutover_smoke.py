@@ -18,7 +18,10 @@ from packages.application.ff_pool_cutover import (
     FfPoolCutoverAmbiguousCommit,
     FfPoolCutoverError,
     FIXTURE_MARKER_TABLE,
+    OPENING_RESERVATIONS_TABLE,
+    ORDERS_TABLE,
     _apply_ff_pool_cutover_fixture,
+    _ensure_order_classification_schema,
     _fingerprint,
     build_ff_pool_cutover_plan,
     classify_late_pre_t_observations,
@@ -39,6 +42,75 @@ from packages.application.warehouse_domain_write_guard import (
 SHA = "a" * 40
 T = "2026-08-12T05:00:00Z"
 DIGEST = "sha256:" + "b" * 64
+
+
+def _legacy_order_schema_db(*, ambiguous: bool = False) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    classifications = (
+        "'pre_t_absorbed_closed','pre_t_absorbed_reservation',"
+        "'post_t_deferred','unmatched'"
+    )
+    if ambiguous:
+        classifications += ",'unexpected_class'"
+    conn.executescript(
+        f"""
+        CREATE TABLE sheet_vitrina_v1_ff_pool_cutover_manifests(
+            cutover_id TEXT PRIMARY KEY
+        );
+        CREATE TABLE sheet_vitrina_v1_ff_facilities(
+            facility_id TEXT PRIMARY KEY
+        );
+        CREATE TABLE {ORDERS_TABLE}(
+            cutover_id TEXT NOT NULL
+                REFERENCES sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            observation_id TEXT NOT NULL,
+            source_revision TEXT NOT NULL,
+            source_created_at TEXT NOT NULL,
+            observed_at TEXT NOT NULL
+                CHECK(substr(observed_at,-1,1)='Z' AND julianday(observed_at) IS NOT NULL),
+            classification TEXT NOT NULL CHECK(classification IN ({classifications})),
+            facility_id TEXT REFERENCES sheet_vitrina_v1_ff_facilities(facility_id),
+            pool TEXT CHECK(pool IS NULL OR pool='FBS'),
+            nm_id INTEGER NOT NULL CHECK(typeof(nm_id)='integer' AND nm_id>0),
+            quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>=0),
+            status_fingerprint TEXT NOT NULL,
+            mapping_digest TEXT NOT NULL,
+            observation_sequence INTEGER NOT NULL DEFAULT 0,
+            status_observation_sequence INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(cutover_id,order_id)
+        );
+        CREATE INDEX ff_pool_cutover_orders_by_class
+        ON {ORDERS_TABLE}(cutover_id,classification,order_id);
+        CREATE TABLE {OPENING_RESERVATIONS_TABLE}(
+            cutover_id TEXT NOT NULL
+                REFERENCES sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            order_id INTEGER NOT NULL,
+            nm_id INTEGER NOT NULL,
+            PRIMARY KEY(cutover_id,order_id,nm_id),
+            FOREIGN KEY(cutover_id,order_id)
+                REFERENCES {ORDERS_TABLE}(cutover_id,order_id)
+        );
+        INSERT INTO sheet_vitrina_v1_ff_pool_cutover_manifests VALUES('cutover_legacy');
+        INSERT INTO sheet_vitrina_v1_ff_facilities VALUES('facility_legacy');
+        INSERT INTO {ORDERS_TABLE}(
+            cutover_id,order_id,observation_id,source_revision,source_created_at,
+            observed_at,classification,facility_id,pool,nm_id,quantity,
+            status_fingerprint,mapping_digest,observation_sequence,
+            status_observation_sequence
+        ) VALUES(
+            'cutover_legacy',7001,'observation_legacy','revision_legacy',
+            '2026-08-12T04:00:00Z','2026-08-12T04:01:00Z',
+            'pre_t_absorbed_reservation','facility_legacy','FBS',101,1,
+            '{DIGEST}','{DIGEST}',11,12
+        );
+        INSERT INTO {OPENING_RESERVATIONS_TABLE} VALUES('cutover_legacy',7001,101);
+        """
+    )
+    conn.commit()
+    return conn
 
 
 def _db() -> sqlite3.Connection:
@@ -250,6 +322,58 @@ def _hold(conn: sqlite3.Connection, proposal: dict) -> None:
 
 
 def main() -> int:
+    legacy_schema = _legacy_order_schema_db()
+    before_order = dict(legacy_schema.execute(f"SELECT * FROM {ORDERS_TABLE}").fetchone())
+    before_reservation = dict(
+        legacy_schema.execute(f"SELECT * FROM {OPENING_RESERVATIONS_TABLE}").fetchone()
+    )
+    before_fk = tuple(
+        tuple(row)
+        for row in legacy_schema.execute(
+            f"PRAGMA foreign_key_list({OPENING_RESERVATIONS_TABLE})"
+        ).fetchall()
+    )
+    _ensure_order_classification_schema(legacy_schema)
+    assert dict(legacy_schema.execute(f"SELECT * FROM {ORDERS_TABLE}").fetchone()) == before_order
+    assert (
+        dict(legacy_schema.execute(f"SELECT * FROM {OPENING_RESERVATIONS_TABLE}").fetchone())
+        == before_reservation
+    )
+    assert tuple(
+        tuple(row)
+        for row in legacy_schema.execute(
+            f"PRAGMA foreign_key_list({OPENING_RESERVATIONS_TABLE})"
+        ).fetchall()
+    ) == before_fk
+    widened_sql = str(
+        legacy_schema.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (ORDERS_TABLE,)
+        ).fetchone()[0]
+    )
+    assert "pre_t_handoff_debit" in widened_sql and "pre_t_cancelled_noop" in widened_sql
+    assert legacy_schema.execute("PRAGMA foreign_key_check").fetchall() == []
+    legacy_schema.execute(
+        f"""INSERT INTO {ORDERS_TABLE}(
+                cutover_id,order_id,observation_sequence,status_observation_sequence,
+                observation_id,source_revision,source_created_at,observed_at,
+                classification,facility_id,pool,nm_id,quantity,status_fingerprint,mapping_digest
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "cutover_legacy", 7002, 13, 14, "observation_handoff", "revision_handoff",
+            "2026-08-12T04:02:00Z", "2026-08-12T04:03:00Z", "pre_t_handoff_debit",
+            "facility_legacy", "FBS", 101, 1, DIGEST, DIGEST,
+        ),
+    )
+    legacy_schema.commit()
+    _ensure_order_classification_schema(legacy_schema)
+    assert legacy_schema.execute(f"SELECT COUNT(*) FROM {ORDERS_TABLE}").fetchone()[0] == 2
+    ambiguous_schema = _legacy_order_schema_db(ambiguous=True)
+    try:
+        _ensure_order_classification_schema(ambiguous_schema)
+        raise AssertionError("ambiguous legacy order-classification CHECK accepted")
+    except FfPoolCutoverError as exc:
+        assert exc.code == "order_classification_schema_ambiguous"
+
     conn = _db()
     proposal = _proposal(conn)
     allocation_sql = str(

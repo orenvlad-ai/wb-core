@@ -112,7 +112,7 @@ related_runners:
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. Migration 142 opens facility × FBS|FBO detail beneath that aggregate with signed INTEGER/exact Decimal conservation, exact historical FBS checkpoint and epoch-gated post-T reserve/release/complete+sorted fulfillment; no code writes WB. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. Migration 142 opens facility × FBS|FBO detail beneath that aggregate with signed INTEGER/exact Decimal conservation, exact historical FBS checkpoint and epoch-gated post-T reserve/release/complete+sorted fulfillment; no code writes WB. Migration 143 also atomically upgrades the exact known legacy order-classification CHECK before apply, preserving rows and reservation FKs while ambiguous schemas fail closed. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -622,4 +622,11 @@ independent append-only watermarks and their complete frozen-row digests.
 Status rows above those watermarks are processed in exact status-sequence order;
 drain progress commits atomically with reservations/debits/reconciliation. A
 retry cannot repeat a physical delta, and rows appended after the opening lock
-are caught by the ordinary collector lifecycle pass.
+are caught by the ordinary collector lifecycle pass. Runtime initialization
+also recognizes only the exact four-value legacy order-classification CHECK and
+atomically widens it to the canonical six values under an immediate SQLite
+transaction. The rebuild copies named columns exactly, preserves the
+opening-reservation FK definition and fails closed on unknown schema objects,
+pre-existing target FK violations or copy drift; deployment itself still posts
+no business rows and invalidates earlier owner gates through the changed
+deployed SHA.
