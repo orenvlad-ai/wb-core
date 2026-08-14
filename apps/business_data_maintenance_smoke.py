@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.business_data_maintenance as maintenance
+import packages.application.business_data_write_barrier as write_barrier
 
 
 class FakeSystemd:
@@ -34,6 +35,17 @@ class FakeSystemd:
             }
             for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
         }
+        self.timer_states.update(
+            {
+                unit: {
+                    "unit": unit,
+                    "is_enabled": "enabled",
+                    "is_active": "active",
+                    "properties": {},
+                }
+                for unit in maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
+            }
+        )
         self.service_states = {
             unit: {
                 "unit": unit,
@@ -70,7 +82,7 @@ class FakeSystemd:
         self.timer_states[unit]["is_active"] = "active"
 
     def discovered_timers(self) -> list[str]:
-        rows = list(maintenance.ALL_BUSINESS_TIMER_UNITS)
+        rows = list(maintenance.CLASSIFIED_WB_CORE_TIMER_UNITS)
         if self.unknown_timer:
             rows.append(self.unknown_timer)
         return sorted(rows)
@@ -326,6 +338,11 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
             _restore_local_boundaries(old)
         assert result["status"] == "held"
         assert result["quiet"] is True
+        observer = result["continuous_observer_timers"][
+            "wb-core-fbs-shadow-collector.timer"
+        ]
+        assert observer["is_enabled"] == "enabled"
+        assert observer["is_active"] == "active"
         assert systemd.mutations == [
             "wb-core-autoanswers-worker.timer",
             "wb-core-autoanswers-readonly-sync.timer",
@@ -836,6 +853,177 @@ def _assert_unknown_timer_fails_before_mutation() -> None:
         assert schedules.disable_calls == 0
 
 
+def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
+    def current_status() -> dict[str, Any]:
+        return {
+            "schema_version": maintenance.SCHEMA_VERSION,
+            "status": "not_quiet",
+            "quiet": False,
+            "captured_at": maintenance._utc_now(),
+            "timers": {},
+            "continuous_observer_timers": {
+                "wb-core-fbs-shadow-collector.timer": {
+                    "unit": "wb-core-fbs-shadow-collector.timer",
+                    "is_enabled": "enabled",
+                    "is_active": "active",
+                    "properties": {},
+                }
+            },
+            "services": {},
+            "discovered_wb_core_timers": [
+                "wb-core-fbs-shadow-collector.timer"
+            ],
+            "unknown_wb_core_timers": [],
+            "runtime_schedules": {},
+            "writer_processes": [{"pid": 101, "marker": "ordinary"}],
+            "writer_locks": {},
+            "cron_entries": [],
+            "auto_updates": {
+                "master_desired": True,
+                "revision": 54,
+                "processes": [],
+                "unknown_processes": [],
+                "drift_processes": [],
+            },
+        }
+
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        maintenance._save_json_0600(
+            runtime_dir / maintenance.STATE_FILENAME,
+            {
+                "schema_version": maintenance.SCHEMA_VERSION,
+                "phase": "restored",
+                "restored_at": "2026-08-14T00:00:00Z",
+                "exact_prior_state_restored": True,
+            },
+        )
+        maintenance._append_audit_0600(
+            runtime_dir / maintenance.AUDIT_FILENAME,
+            {
+                "event": "hold_restored",
+                "captured_at": "2026-08-14T00:00:00Z",
+            },
+        )
+        plan = "sha256:" + "7" * 64
+        window = "unstarted-hold-abort-smoke"
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id=window,
+            window_kind="final_cutover",
+            plan_fingerprint=plan,
+            approval_reference="approval-comment-971",
+            actor="smoke",
+            reason="prove pre-prepare recovery",
+        )
+        original_status = maintenance.maintenance_status
+        maintenance.maintenance_status = lambda *args, **kwargs: current_status()
+        try:
+            readback = maintenance.maintenance_barrier_abort_readback(
+                runtime_dir,
+                systemd=FakeSystemd(),
+                schedules=FakeSchedules(),
+                proc_root=runtime_dir / "proc",
+            )
+        finally:
+            maintenance.maintenance_status = original_status
+        assert readback["status"] == "restored"
+        assert readback["exact_prior_state_restored"] is True
+        assert readback["restore_boundary_kind"] == (
+            "no_maintenance_hold_started"
+        )
+        assert readback["no_hold_proof"]["last_maintenance_event"] == (
+            "hold_restored"
+        )
+        aborted = maintenance.abort_barrier_acquire(
+            runtime_dir,
+            window_id=window,
+            plan_fingerprint=plan,
+            actor="smoke",
+            reason="no maintenance hold started",
+            restore_readback=readback,
+        )
+        assert aborted["active"] is False
+        barrier_state = json.loads(
+            (
+                runtime_dir
+                / write_barrier.STATE_FILENAME
+            ).read_text()
+        )
+        assert barrier_state["restore"]["restore_boundary_kind"] == (
+            "no_maintenance_hold_started"
+        )
+        assert barrier_state["restore"]["no_hold_proof_fingerprint"] == (
+            readback["no_hold_proof_fingerprint"]
+        )
+        assert barrier_state["restore"]["no_hold_proof"] == readback[
+            "no_hold_proof"
+        ]
+        repeated_readback = maintenance.maintenance_barrier_abort_readback(
+            runtime_dir,
+            systemd=FakeSystemd(),
+            schedules=FakeSchedules(),
+            proc_root=runtime_dir / "proc",
+        )
+        assert maintenance.abort_barrier_acquire(
+            runtime_dir,
+            window_id=window,
+            plan_fingerprint=plan,
+            actor="smoke",
+            reason="idempotent unstarted-hold abort",
+            restore_readback=repeated_readback,
+        )["idempotent"] is True
+
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        maintenance._save_json_0600(
+            runtime_dir / maintenance.STATE_FILENAME,
+            {
+                "schema_version": maintenance.SCHEMA_VERSION,
+                "phase": "restored",
+                "restored_at": "2026-08-14T00:00:00Z",
+                "exact_prior_state_restored": True,
+            },
+        )
+        maintenance._append_audit_0600(
+            runtime_dir / maintenance.AUDIT_FILENAME,
+            {
+                "event": "hold_restored",
+                "captured_at": "2026-08-14T00:00:00Z",
+            },
+        )
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id="unstarted-hold-drift-smoke",
+            window_kind="final_cutover",
+            plan_fingerprint="sha256:" + "8" * 64,
+            approval_reference="approval-comment-971",
+            actor="smoke",
+            reason="prove drift rejection",
+        )
+        maintenance._append_audit_0600(
+            runtime_dir / maintenance.AUDIT_FILENAME,
+            {
+                "event": "hold_started",
+                "captured_at": maintenance._utc_now(),
+            },
+        )
+        try:
+            maintenance.maintenance_barrier_abort_readback(
+                runtime_dir,
+                systemd=FakeSystemd(),
+                schedules=FakeSchedules(),
+                proc_root=runtime_dir / "proc",
+            )
+        except RuntimeError as exc:
+            assert "neither an unstarted-hold proof" in str(exc)
+        else:
+            raise AssertionError(
+                "post-barrier maintenance audit drift was accepted"
+            )
+        assert maintenance.barrier_status(runtime_dir)["active"] is True
+
+
 def _assert_status_does_not_initialize_owner_policy() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -1319,6 +1507,7 @@ def main() -> int:
     _assert_persisted_service_continuity_accepts_exact_completion()
     _assert_quiet_confirmed_hold_continuity_is_exact()
     _assert_unknown_timer_fails_before_mutation()
+    _assert_unstarted_hold_abort_is_exact_and_drift_safe()
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()
     _assert_exact_policy_restore_and_revision_guards()

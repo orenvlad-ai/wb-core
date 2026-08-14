@@ -281,9 +281,15 @@ second full-store backup or alternate recovery control plane.
 
 The canonical hosted runner first acquires/confirms the durable HTTP barrier,
 drains business writers, holds the warehouse timer and proves the five-minute
-FBS collector remains enabled/active. Before-commit failure rolls back business
-rows and marks the T2 operation recoverable. Ambiguous post-commit failure keeps
-external/domain barriers for exact readback. A passing manifest and
+FBS collector remains enabled/active. The collector is an explicitly classified
+continuous observer: the business-data hold inventories it but never stops or
+restores it, while every other unclassified timer still fails closed. An
+unconfirmed HTTP acquire may be aborted without replaying stale prior
+maintenance state only when private maintenance state/audit both prove that no
+`hold_started` mutation occurred after the exact barrier timestamp; the proof
+is repeated around current control readback and fingerprinted. Before-commit
+failure rolls back business rows and marks the T2 operation recoverable.
+Ambiguous post-commit failure keeps external/domain barriers for exact readback. A passing manifest and
 aggregate↔pool reconciliation retains the T2 operation, restores exact prior
 controls and releases the external barrier. Blind deletion or replay is never a
 recovery action; after live events only forward reconciliation or compensating

@@ -4854,6 +4854,35 @@ def _abort_finance_storage_window_acquire(
         action="status",
     )
     evidence["pre_abort_status"] = status
+    try:
+        evidence["barrier_abort"] = (
+            _run_remote_business_data_maintenance_runner(
+                target,
+                action="barrier-abort",
+                actor="finance_storage_window_runner",
+                reason=(
+                    "unconfirmed Finance window aborted before any "
+                    "maintenance hold started"
+                ),
+                window_id=window_id,
+                plan_fingerprint=fingerprint,
+            )
+        )
+    except Exception as unstarted_abort_error:
+        evidence["unstarted_hold_abort"] = {
+            "status": "not_applicable",
+            "error": str(unstarted_abort_error),
+        }
+    else:
+        evidence["business_restore"] = {
+            "status": "not_required",
+            "boundary_kind": "no_maintenance_hold_started",
+        }
+        evidence["warehouse_restore"] = {
+            "status": "not_required",
+            "boundary_kind": "core_prepare_preceded_warehouse_hold",
+        }
+        return evidence
     paused_revision = int(
         ((status.get("auto_updates") or {}).get("revision") or 0)
     )

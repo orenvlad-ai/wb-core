@@ -131,8 +131,57 @@ def _assert_deploy_status_readback_retry() -> None:
         raise AssertionError("persistent service failure must remain fail-closed")
 
 
+def _assert_pre_prepare_abort_skips_stale_restore() -> None:
+    calls: list[str] = []
+
+    def business_runner(_target: object, *, action: str, **_kwargs: object) -> dict[str, object]:
+        calls.append(action)
+        if action == "status":
+            return {
+                "status": "not_quiet",
+                "auto_updates": {"revision": 54},
+            }
+        if action == "barrier-abort":
+            return {
+                "status": "inactive",
+                "active": False,
+                "phase": "released",
+            }
+        raise AssertionError(
+            "an unstarted hold must not replay stale maintenance restore"
+        )
+
+    with mock.patch.object(
+        hosted_runtime,
+        "_run_remote_business_data_maintenance_runner",
+        side_effect=business_runner,
+    ), mock.patch.object(
+        hosted_runtime,
+        "_run_remote_warehouse_functional_maintenance_action",
+        side_effect=AssertionError(
+            "warehouse hold cannot exist before core prepare succeeds"
+        ),
+    ):
+        evidence = hosted_runtime._abort_finance_storage_window_acquire(
+            object(),
+            window_id="unstarted-hold-abort-smoke",
+            fingerprint="sha256:" + "7" * 64,
+            reason="synthetic core preflight failure",
+        )
+    if calls != ["status", "barrier-abort"]:
+        raise AssertionError(f"unexpected unstarted abort sequence: {calls}")
+    if evidence["business_restore"] != {
+        "status": "not_required",
+        "boundary_kind": "no_maintenance_hold_started",
+    }:
+        raise AssertionError("unstarted abort must not claim a stale restore")
+    if evidence["warehouse_restore"]["status"] != "not_required":
+        raise AssertionError("unstarted abort must preserve the warehouse boundary")
+
+
 def main() -> None:
     _assert_deploy_status_readback_retry()
+    _assert_pre_prepare_abort_skips_stale_restore()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"
     ) as bindings_temp_dir:

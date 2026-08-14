@@ -95,6 +95,17 @@ central Recovery Policy T2 warehouse-domain checkpoint plus a mode-`0600`
 exact-target before-image, and only then selects `T` and revalidates all source
 evidence under `BEGIN IMMEDIATE`.
 
+The generic business-data inventory explicitly classifies
+`wb-core-fbs-shadow-collector.timer` as a continuous observation-only timer. It
+is inventoried but never disabled, waited or restored by the quiet window; an
+unclassified timer still fails before the first maintenance mutation. If a
+failure occurs after HTTP barrier acquisition but before `hold_started`, the
+only automatic abort path requires mode-`0600` maintenance state and audit to
+both predate the exact barrier timestamp, repeats that filesystem proof around
+a fresh control readback, and records its fingerprint. Any state/audit change,
+unknown timer, cron or owner-policy drift keeps the barrier fail closed and
+requires the ordinary exact-restore path.
+
 The opening, historical events, checkpoint, manifest and feature epoch commit
 atomically. Crash before commit rolls back; the same exact gate resumes its T2
 checkpoint and uses a new auditable write-epoch attempt without overwriting the
