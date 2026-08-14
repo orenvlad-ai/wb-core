@@ -143,37 +143,42 @@ PR/head/merge/target. Ручное снятие label или повтор busine
 ## Production-Mutation Terminalization
 
 Human merge/deploy/apply не выполняется queue worker и не возникает из
-`release:ready`. После отдельного exact human gate, exact-head merge, canonical
-deploy/apply и bounded reconciliation
+`release:ready`. После отдельного pre-merge release gate, exact-head merge,
+отдельного post-merge exact apply gate, canonical apply и bounded reconciliation
 `task:standard + scope:production-mutation` закрывается только comment:
 
 ```text
-/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>
+/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> release-gate <RELEASE_GATE_COMMENT_ID> release-gate-digest sha256:<RELEASE_GATE_COMMENT_HASH> apply-gate <APPLY_GATE_COMMENT_ID> apply-gate-digest sha256:<APPLY_GATE_COMMENT_HASH> manifest sha256:<MANIFEST_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>
 ```
 
-Two-stage workflow разделяет authority:
+Two-gate workflow разделяет authority:
 
 1. Trusted-main preflight без production environment требует actor
    `OWNER`/`MEMBER`, current merged PR, exact retained pre-merge head,
    `task:standard + scope:production-mutation`, successful `baseline` exact
-   head, exact merge SHA и fail-closed state. Human-gate comment обязан быть на
-   том же PR, предшествовать merge, содержать exact head и authorization
-   semantics; command фиксирует exact UTF-8 body digest.
-2. Reconciliation comment обязан отличаться от gate, следовать после merge,
-   иметь authorized owner/member identity, exact deployed SHA, completion
-   semantics, evidence fingerprint и exact body digest. GitHub compare
-   доказывает merge/descendant relation deployed SHA.
-3. Только successful immutable-evidence preflight открывает production
+   head, exact merge SHA и fail-closed state. Release-gate comment обязан быть
+   на том же PR, предшествовать merge, содержать exact head и явно разрешать
+   merge/deploy; command фиксирует exact UTF-8 body digest.
+2. Apply-gate comment обязан отличаться от release gate, следовать после merge,
+   иметь `OWNER`/`MEMBER` identity и явно разрешать production apply для exact
+   PR, deployed SHA и manifest fingerprint. Command отдельно фиксирует его
+   exact UTF-8 digest и manifest fingerprint.
+3. Reconciliation comment обязан отличаться от обоих gates, следовать после
+   apply gate, иметь authorized owner/member identity, exact deployed SHA,
+   completion semantics, evidence fingerprint и exact body digest. GitHub
+   compare доказывает merge/descendant relation deployed SHA.
+4. Только successful immutable-evidence preflight открывает production
    environment. Hosted reconciler запускается `--read-only` и сверяет canonical
    target, metadata/runtime SHA, `deployment_complete`, auth binding, service
    MainPID и probes. Он не выполняет deploy, restart, repair или business apply.
-4. Только GitHub Actions создаёт completion proof, заменяет stale active/failure
+5. Только GitHub Actions создаёт completion proof, заменяет stale active/failure
    state на `release:production` и dispatch-ит queue observation.
 
-Повтор exact proven command идемпотентен. Stale SHA/comment digest, missing
-gate/deploy/reconciliation/evidence, unauthorized actor, wrong task/scope,
-non-ancestor deployed SHA, local invocation или ручной terminal label fail
-closed.
+Повтор exact proven command идемпотентен. Legacy one-gate command, stale
+SHA/comment digest, missing release/apply gate, manifest, deploy,
+reconciliation/evidence, нарушенный temporal order, unauthorized actor, wrong
+task/scope, non-ancestor deployed SHA, local invocation или ручной terminal
+label fail closed.
 
 ## Global Finance Migration Deploy Lease
 

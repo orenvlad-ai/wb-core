@@ -144,6 +144,7 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
 EVIDENCE = "sha256:" + "d" * 64
+MANIFEST = "sha256:" + "e" * 64
 
 
 class FakeApi:
@@ -1176,13 +1177,13 @@ def _production_mutation_terminal_fixture(
     else:
         raise AssertionError("production mutation fixture auto-released unexpectedly")
     set_release_state(api, number, BLOCKED_LABEL)
-    gate_body = (
-        f"Exact human gate for PR #{number}: user authorizes exact head `{SHA_A}`; "
-        "the approval becomes stale on any head or semantic change."
+    release_gate_body = (
+        f"OWNER AUTHORIZATION — exact release gate for PR #{number} head `{SHA_A}`; "
+        "the owner authorizes merge and deploy only, stale on any head or semantic change."
     )
-    gate_id = api.add_external_comment(
+    release_gate_id = api.add_external_comment(
         number,
-        gate_body,
+        release_gate_body,
         created_at="2026-07-21T01:30:00Z",
     )
     pull.update(
@@ -1190,6 +1191,15 @@ def _production_mutation_terminal_fixture(
         merged=True,
         merge_commit_sha=SHA_B,
         merged_at="2026-07-21T02:00:00Z",
+    )
+    apply_gate_body = (
+        f"OWNER AUTHORIZATION — production apply for PR #{number} on deployed SHA "
+        f"`{SHA_C}` and exact manifest `{MANIFEST}`."
+    )
+    apply_gate_id = api.add_external_comment(
+        number,
+        apply_gate_body,
+        created_at="2026-07-21T02:30:00Z",
     )
     reconciliation_body = (
         f"Bounded production reconciliation is complete at deployed SHA `{SHA_C}`. "
@@ -1203,7 +1213,11 @@ def _production_mutation_terminal_fixture(
     command = (
         f"/wb-core production-mutation complete {number} "
         f"head {SHA_A} merge {SHA_B} deployed {SHA_C} "
-        f"gate {gate_id} gate-digest {_body_fingerprint(gate_body)} "
+        f"release-gate {release_gate_id} "
+        f"release-gate-digest {_body_fingerprint(release_gate_body)} "
+        f"apply-gate {apply_gate_id} "
+        f"apply-gate-digest {_body_fingerprint(apply_gate_body)} "
+        f"manifest {MANIFEST} "
         f"reconciliation {reconciliation_id} "
         f"reconciliation-digest {_body_fingerprint(reconciliation_body)} "
         f"evidence {EVIDENCE}"
@@ -1362,7 +1376,7 @@ def _assert_production_mutation_terminalization() -> None:
         number=125
     )
     missing_command = parse_production_mutation_terminalization_command(missing_text)
-    missing_api.comment_metadata[missing_command.gate_comment_id][
+    missing_api.comment_metadata[missing_command.release_gate_comment_id][
         "author_association"
     ] = "CONTRIBUTOR"
     try:
@@ -1374,9 +1388,83 @@ def _assert_production_mutation_terminalization() -> None:
             association="OWNER",
         )
     except ReleaseBlocked as exc:
-        assert "human gate" in str(exc)
+        assert "release gate" in str(exc)
     else:
-        raise AssertionError("missing admissible human gate must fail closed")
+        raise AssertionError("missing admissible release gate must fail closed")
+
+    apply_api, apply_text, _ = _production_mutation_terminal_fixture(number=133)
+    apply_command = parse_production_mutation_terminalization_command(apply_text)
+    apply_api.comment_metadata[apply_command.apply_gate_comment_id][
+        "author_association"
+    ] = "CONTRIBUTOR"
+    try:
+        production_mutation_terminalization_preflight(
+            apply_api,
+            133,
+            apply_command,
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "apply gate" in str(exc)
+    else:
+        raise AssertionError("missing admissible apply gate must fail closed")
+
+    manifest_api, manifest_text, _ = _production_mutation_terminal_fixture(
+        number=134
+    )
+    wrong_manifest = "sha256:" + "f" * 64
+    try:
+        production_mutation_terminalization_preflight(
+            manifest_api,
+            134,
+            parse_production_mutation_terminalization_command(
+                manifest_text.replace(
+                    f"manifest {MANIFEST}",
+                    f"manifest {wrong_manifest}",
+                )
+            ),
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "apply gate" in str(exc)
+    else:
+        raise AssertionError("apply gate with wrong manifest must fail closed")
+
+    ordered_api, ordered_text, _ = _production_mutation_terminal_fixture(number=135)
+    ordered_command = parse_production_mutation_terminalization_command(ordered_text)
+    ordered_api.comment_metadata[ordered_command.apply_gate_comment_id][
+        "created_at"
+    ] = "2026-07-21T04:00:00Z"
+    try:
+        production_mutation_terminalization_preflight(
+            ordered_api,
+            135,
+            ordered_command,
+            actor="orenvlad-ai",
+            association="OWNER",
+        )
+    except ReleaseBlocked as exc:
+        assert "follow the apply gate" in str(exc)
+    else:
+        raise AssertionError("reconciliation before apply gate must fail closed")
+
+    try:
+        parse_production_mutation_terminalization_command(
+            "/wb-core production-mutation complete 136 "
+            f"head {SHA_A} merge {SHA_B} deployed {SHA_C} "
+            "gate 1 gate-digest sha256:"
+            + "a" * 64
+            + " reconciliation 2 reconciliation-digest sha256:"
+            + "b" * 64
+            + f" evidence {EVIDENCE}"
+        )
+    except ReleaseBlocked as exc:
+        assert "post-merge apply gate" in str(exc)
+    else:
+        raise AssertionError("legacy one-gate completion command must fail closed")
+
     missing_api, missing_text, missing_evidence = _production_mutation_terminal_fixture(
         number=126
     )
@@ -1414,7 +1502,7 @@ def _assert_production_mutation_terminalization() -> None:
     else:
         raise AssertionError("missing exact-head baseline must fail closed")
     completed.append(
-        "06_missing_baseline_gate_or_reconciliation_fails_closed"
+        "06_missing_or_stale_two_gate_evidence_fails_closed"
     )
 
     deploy_api, deploy_text, deploy_evidence = _production_mutation_terminal_fixture(

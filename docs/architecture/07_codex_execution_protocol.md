@@ -362,13 +362,16 @@ backup, writer или rollback ambiguity оставляет mutation fail closed
 
 Human-gated terminalization использует exact command:
 
-`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
+`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> release-gate <RELEASE_GATE_COMMENT_ID> release-gate-digest sha256:<RELEASE_GATE_COMMENT_HASH> apply-gate <APPLY_GATE_COMMENT_ID> apply-gate-digest sha256:<APPLY_GATE_COMMENT_HASH> manifest sha256:<MANIFEST_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
 
-Trusted-main Actions проверяет owner/member gate, exact head/baseline/merge,
-deployed ancestry, reconciliation identities/digests и canonical read-only
-deploy evidence. Только Actions-owned proof ставит `release:production`.
-Ручной label, local token, stale SHA/comment/digest или missing evidence fail
-closed.
+Trusted-main Actions отдельно проверяет pre-merge OWNER/MEMBER release gate на
+exact head и merge/deploy semantics, затем post-merge OWNER/MEMBER apply gate
+на exact PR, deployed SHA, manifest fingerprint и production-apply semantics.
+Reconciliation обязана следовать после apply gate. Exact baseline/merge,
+deployed ancestry, все identities/digests и canonical read-only deploy evidence
+также обязательны. Только Actions-owned proof ставит `release:production`.
+Ручной label, local token, одно-gate command, stale SHA/comment/digest, нарушенный
+порядок или missing evidence fail closed.
 
 Finance/storage mutations дополнительно подчиняются active lease, snapshot,
 capacity, backup/restore, writer/timer, SHA and reconciliation contracts из

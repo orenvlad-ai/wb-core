@@ -292,9 +292,17 @@ reconciliation. Ad-hoc SQL, случайные local/server-only scripts и muta
 через архивный read-only MCP запрещены.
 
 Human-gated `scope:production-mutation` закрывается только trusted-main exact
-command после merge, canonical deploy/apply и reconciliation:
+command после pre-merge release gate, merge, separately authorized exact
+post-merge apply и reconciliation:
 
-`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> gate <GATE_COMMENT_ID> gate-digest sha256:<GATE_COMMENT_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
+`/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> release-gate <RELEASE_GATE_COMMENT_ID> release-gate-digest sha256:<RELEASE_GATE_COMMENT_HASH> apply-gate <APPLY_GATE_COMMENT_ID> apply-gate-digest sha256:<APPLY_GATE_COMMENT_HASH> manifest sha256:<MANIFEST_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
+
+Release gate и apply gate — разные immutable OWNER/MEMBER comments. Первый
+предшествует merge, содержит exact head и разрешает merge/deploy. Второй
+следует после merge, содержит exact PR, deployed SHA, manifest fingerprint и
+production-apply authorization. Reconciliation следует после apply gate.
+Append-only source suffix либо сама reconciliation не могут подменить apply
+gate; редактирование любого из трёх comments инвалидирует exact digest.
 
 Finance/storage migrations дополнительно сохраняют все lease, snapshot,
 backup, restore, writer/timer, exact-SHA и non-target contracts из

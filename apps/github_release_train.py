@@ -270,8 +270,11 @@ class ProductionMutationTerminalizationCommand:
     head_sha: str
     merge_sha: str
     deployed_sha: str
-    gate_comment_id: int
-    gate_digest: str
+    release_gate_comment_id: int
+    release_gate_digest: str
+    apply_gate_comment_id: int
+    apply_gate_digest: str
+    manifest_fingerprint: str
     reconciliation_comment_id: int
     reconciliation_digest: str
     evidence_fingerprint: str
@@ -709,49 +712,70 @@ def parse_production_mutation_terminalization_command(
 ) -> ProductionMutationTerminalizationCommand:
     parts = command.strip().split()
     if (
-        len(parts) != 20
+        len(parts) != 26
         or parts[:3] != ["/wb-core", "production-mutation", "complete"]
         or parts[4] != "head"
         or parts[6] != "merge"
         or parts[8] != "deployed"
-        or parts[10] != "gate"
-        or parts[12] != "gate-digest"
-        or parts[14] != "reconciliation"
-        or parts[16] != "reconciliation-digest"
-        or parts[18] != "evidence"
+        or parts[10] != "release-gate"
+        or parts[12] != "release-gate-digest"
+        or parts[14] != "apply-gate"
+        or parts[16] != "apply-gate-digest"
+        or parts[18] != "manifest"
+        or parts[20] != "reconciliation"
+        or parts[22] != "reconciliation-digest"
+        or parts[24] != "evidence"
     ):
         raise ReleaseBlocked(
             "production-mutation completion must bind PR, head, merge, deployed SHA, "
-            "gate comment/digest, reconciliation comment/digest and evidence fingerprint"
+            "pre-merge release gate, post-merge apply gate, manifest, reconciliation "
+            "and evidence fingerprints"
         )
     try:
         number = int(parts[3])
-        gate_comment_id = int(parts[11])
-        reconciliation_comment_id = int(parts[15])
+        release_gate_comment_id = int(parts[11])
+        apply_gate_comment_id = int(parts[15])
+        reconciliation_comment_id = int(parts[21])
     except ValueError as exc:
         raise ReleaseBlocked(
             "production-mutation completion contains an invalid PR or comment identity"
         ) from exc
-    if number <= 0 or gate_comment_id <= 0 or reconciliation_comment_id <= 0:
+    if (
+        number <= 0
+        or release_gate_comment_id <= 0
+        or apply_gate_comment_id <= 0
+        or reconciliation_comment_id <= 0
+    ):
         raise ReleaseBlocked(
             "production-mutation completion requires positive PR and comment identities"
         )
-    if gate_comment_id == reconciliation_comment_id:
+    if len(
+        {
+            release_gate_comment_id,
+            apply_gate_comment_id,
+            reconciliation_comment_id,
+        }
+    ) != 3:
         raise ReleaseBlocked(
-            "human gate and reconciliation must be different evidence comments"
+            "release gate, apply gate and reconciliation must be different evidence comments"
         )
     return ProductionMutationTerminalizationCommand(
         pr=number,
         head_sha=_exact_sha(parts[5], "head"),
         merge_sha=_exact_sha(parts[7], "merge"),
         deployed_sha=_exact_sha(parts[9], "deployed"),
-        gate_comment_id=gate_comment_id,
-        gate_digest=_sha256_fingerprint(parts[13], "gate-digest"),
+        release_gate_comment_id=release_gate_comment_id,
+        release_gate_digest=_sha256_fingerprint(
+            parts[13], "release-gate-digest"
+        ),
+        apply_gate_comment_id=apply_gate_comment_id,
+        apply_gate_digest=_sha256_fingerprint(parts[17], "apply-gate-digest"),
+        manifest_fingerprint=_sha256_fingerprint(parts[19], "manifest"),
         reconciliation_comment_id=reconciliation_comment_id,
         reconciliation_digest=_sha256_fingerprint(
-            parts[17], "reconciliation-digest"
+            parts[23], "reconciliation-digest"
         ),
-        evidence_fingerprint=_sha256_fingerprint(parts[19], "evidence"),
+        evidence_fingerprint=_sha256_fingerprint(parts[25], "evidence"),
     )
 
 
@@ -4366,32 +4390,76 @@ def production_mutation_terminalization_preflight(
             "production-mutation terminalization requires the exact GitHub merge timestamp"
         )
 
-    gate_comment = _comment_by_id(
+    release_gate_comment = _comment_by_id(
         api,
         number,
-        command.gate_comment_id,
-        "human gate",
+        command.release_gate_comment_id,
+        "release gate",
     )
-    gate_actor, gate_association = _comment_identity(
-        gate_comment,
-        field="human gate",
+    release_gate_actor, release_gate_association = _comment_identity(
+        release_gate_comment,
+        field="release gate",
     )
-    if _comment_body_digest(gate_comment) != command.gate_digest:
-        raise ReleaseBlocked("human gate comment digest is stale")
-    gate_time = _github_timestamp(gate_comment.get("created_at"))
-    gate_body = str(gate_comment.get("body") or "")
-    gate_folded = gate_body.casefold()
+    if _comment_body_digest(release_gate_comment) != command.release_gate_digest:
+        raise ReleaseBlocked("release gate comment digest is stale")
+    release_gate_time = _github_timestamp(release_gate_comment.get("created_at"))
+    release_gate_body = str(release_gate_comment.get("body") or "")
+    release_gate_folded = release_gate_body.casefold()
     if (
-        gate_time is None
-        or gate_time > merged_at
-        or command.head_sha not in gate_body.lower()
+        release_gate_time is None
+        or release_gate_time >= merged_at
+        or command.head_sha not in release_gate_body.lower()
         or not any(
-            phrase in gate_folded
-            for phrase in ("human gate", "human authorization", "user authorizes")
+            phrase in release_gate_folded
+            for phrase in (
+                "human gate",
+                "human authorization",
+                "owner authorization",
+                "user authorizes",
+            )
+        )
+        or "merge" not in release_gate_folded
+        or "deploy" not in release_gate_folded
+    ):
+        raise ReleaseBlocked(
+            "release gate must be a pre-merge OWNER/MEMBER authorization bound to "
+            "exact head merge and deploy"
+        )
+
+    apply_gate_comment = _comment_by_id(
+        api,
+        number,
+        command.apply_gate_comment_id,
+        "apply gate",
+    )
+    apply_gate_actor, apply_gate_association = _comment_identity(
+        apply_gate_comment,
+        field="apply gate",
+    )
+    if _comment_body_digest(apply_gate_comment) != command.apply_gate_digest:
+        raise ReleaseBlocked("apply gate comment digest is stale")
+    apply_gate_time = _github_timestamp(apply_gate_comment.get("created_at"))
+    apply_gate_body = str(apply_gate_comment.get("body") or "")
+    apply_gate_folded = apply_gate_body.casefold()
+    if (
+        apply_gate_time is None
+        or apply_gate_time <= merged_at
+        or f"pr #{number}" not in apply_gate_folded
+        or command.deployed_sha not in apply_gate_body.lower()
+        or command.manifest_fingerprint not in apply_gate_body.lower()
+        or "production apply" not in apply_gate_folded
+        or not any(
+            phrase in apply_gate_folded
+            for phrase in (
+                "human authorization",
+                "owner authorization",
+                "user authorizes",
+            )
         )
     ):
         raise ReleaseBlocked(
-            "human gate must be a pre-merge OWNER/MEMBER authorization bound to exact head"
+            "apply gate must be a post-merge OWNER/MEMBER production-apply "
+            "authorization bound to exact PR, deployed SHA and manifest"
         )
 
     reconciliation_comment = _comment_by_id(
@@ -4411,15 +4479,15 @@ def production_mutation_terminalization_preflight(
     reconciliation_folded = reconciliation_body.casefold()
     if (
         reconciliation_time is None
-        or reconciliation_time < merged_at
+        or reconciliation_time <= apply_gate_time
         or command.deployed_sha not in reconciliation_body.lower()
         or command.evidence_fingerprint[7:] not in reconciliation_body.lower()
         or "reconciliation" not in reconciliation_folded
         or "complete" not in reconciliation_folded
     ):
         raise ReleaseBlocked(
-            "reconciliation must be post-merge, bind deployed SHA and contain the exact "
-            "evidence fingerprint"
+            "reconciliation must follow the apply gate, bind deployed SHA and contain "
+            "the exact evidence fingerprint"
         )
 
     comparison = api.compare(command.merge_sha, command.deployed_sha)
@@ -4434,19 +4502,24 @@ def production_mutation_terminalization_preflight(
     proof_values: dict[str, object] = {
         "actor": actor,
         "association": normalized_association,
+        "apply_gate_actor": apply_gate_actor,
+        "apply_gate_association": apply_gate_association,
+        "apply_gate_digest": command.apply_gate_digest,
+        "apply_gate_id": command.apply_gate_comment_id,
         "deployed": command.deployed_sha,
         "evidence": command.evidence_fingerprint,
-        "gate_actor": gate_actor,
-        "gate_association": gate_association,
-        "gate_digest": command.gate_digest,
-        "gate_id": command.gate_comment_id,
         "head": command.head_sha,
+        "manifest": command.manifest_fingerprint,
         "merge": command.merge_sha,
         "pr": number,
         "reconciliation_actor": reconciliation_actor,
         "reconciliation_association": reconciliation_association,
         "reconciliation_digest": command.reconciliation_digest,
         "reconciliation_id": command.reconciliation_comment_id,
+        "release_gate_actor": release_gate_actor,
+        "release_gate_association": release_gate_association,
+        "release_gate_digest": command.release_gate_digest,
+        "release_gate_id": command.release_gate_comment_id,
     }
     already_completed = (
         PRODUCTION_LABEL in labels
@@ -4536,9 +4609,10 @@ def complete_production_mutation_release(
     ):
         api.add_comment(
             number,
-            "Release Train verified human-gated production-mutation completion for "
+            "Release Train verified two-gate production-mutation completion for "
             f"head `{command.head_sha}`, merge `{command.merge_sha}` and deployed SHA "
-            f"`{command.deployed_sha}` with reconciliation evidence "
+            f"`{command.deployed_sha}`, manifest `{command.manifest_fingerprint}` and "
+            "reconciliation evidence "
             f"`{command.evidence_fingerprint}`.\n\n{proof}",
         )
     labels = label_names(api.get_pull(number))
@@ -4669,10 +4743,19 @@ def production_mutation_terminal_state_proven(
                     str(fields.get("deployed") or ""),
                     "deployed",
                 ),
-                gate_comment_id=int(fields.get("gate_id") or 0),
-                gate_digest=_sha256_fingerprint(
-                    str(fields.get("gate_digest") or ""),
-                    "gate_digest",
+                release_gate_comment_id=int(fields.get("release_gate_id") or 0),
+                release_gate_digest=_sha256_fingerprint(
+                    str(fields.get("release_gate_digest") or ""),
+                    "release_gate_digest",
+                ),
+                apply_gate_comment_id=int(fields.get("apply_gate_id") or 0),
+                apply_gate_digest=_sha256_fingerprint(
+                    str(fields.get("apply_gate_digest") or ""),
+                    "apply_gate_digest",
+                ),
+                manifest_fingerprint=_sha256_fingerprint(
+                    str(fields.get("manifest") or ""),
+                    "manifest",
                 ),
                 reconciliation_comment_id=int(
                     fields.get("reconciliation_id") or 0
