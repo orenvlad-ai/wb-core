@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core five-minute official FBS read-only shadow scheduler
+
+[Timer]
+OnCalendar=*-*-* *:03,08,13,18,23,28,33,38,43,48,53,58:00 Europe/Moscow
+AccuracySec=15s
+RandomizedDelaySec=10s
+Persistent=true
+Unit=wb-core-fbs-shadow-collector.service
+
+[Install]
+WantedBy=timers.target

@@ -17,6 +17,7 @@ import re
 import sqlite3
 from typing import Any, Mapping
 
+from packages.adapters.official_api_rate_budget import FileBackedOfficialApiRateBudget
 from packages.adapters.wb_fbs_orders import HttpBackedWbFbsOrdersSource
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
@@ -54,8 +55,8 @@ ORENBURG_CITY = "Оренбург"
 DISPLAY_TIMEZONE = "Asia/Yekaterinburg"
 ENV_KEY = "WB_FBS_COLLECTOR_ENABLED"
 ENV_VALUE = "true"
-SCHEDULE_UNIT = "wb-core-warehouse-functional-sync.timer"
-SCHEDULE_CALENDAR = "*-*-* *:17:00 Europe/Moscow"
+SCHEDULE_UNIT = "wb-core-fbs-shadow-collector.timer"
+SCHEDULE_CALENDAR = "*-*-* *:03,08,13,18,23,28,33,38,43,48,53,58:00 Europe/Moscow"
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
 ALLOWED_FACILITY_NAMES = (MOSCOW_NAME, ORENBURG_NAME)
 MOSCOW_OFFICIAL_CITIES = frozenset({"Москва", "Москва_Восток"})
@@ -87,7 +88,13 @@ class FfStage7AProductionMutation:
             raise Stage7AProductionError("deployed_sha must be an exact 40-hex SHA")
         self.timestamp_factory = timestamp_factory or _utc_now
         self.unix_time_factory = unix_time_factory or _unix_now
-        self.source = source or HttpBackedWbFbsOrdersSource()
+        self.source = source or HttpBackedWbFbsOrdersSource(
+            rate_budget=FileBackedOfficialApiRateBudget(
+                runtime_dir=self.runtime.runtime_dir,
+                family="wb_fbs_orders",
+                min_interval_seconds=0.22,
+            )
+        )
 
     def build_plan(self, *, watermark_unix: int | None = None) -> dict[str, Any]:
         now = str(self.timestamp_factory())
@@ -690,8 +697,8 @@ def _readback(conn: sqlite3.Connection, *, env_file: Path, now_unix: int) -> dic
             "enabled": _env_value(env_file, ENV_KEY).casefold() in {"1", "true", "yes", "on"},
             "environment_key": ENV_KEY,
             "polling_schedule": SCHEDULE_CALENDAR,
-            "period_seconds": 3600,
-            "slo": "next successful hourly warehouse sync",
+            "period_seconds": 300,
+            "slo": "no worse than 10 minutes in normal state",
             "real_time": False,
         },
         "collector_state": {

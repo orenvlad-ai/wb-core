@@ -28,7 +28,7 @@ from packages.adapters.wb_fbs_orders import (
 
 
 CONTRACT_NAME = "wb_fbs_orders_readonly_shadow_v1"
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 COLLECTOR_ENABLED_ENV = "WB_FBS_COLLECTOR_ENABLED"
 OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
 STATE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
@@ -36,6 +36,9 @@ STATUS_OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_observation
 WAREHOUSE_MAPPINGS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
 IDENTITY_MAPPINGS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings"
 IDENTITY_EVIDENCE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence"
+STATUS_CURRENT_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+STATUS_TRANSITIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
+POLL_RUNS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
 BACKFILL_REVIEW_FROM = "2026-08-01"
 DEFAULT_LOOKBACK_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_PAGES = 10
@@ -44,9 +47,22 @@ MAX_PAGE_SIZE = 100
 MAX_HISTORY_SIZE = 50
 SAFE_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+KNOWN_SUPPLIER_STATUSES = frozenset({"new", "confirm", "complete", "cancel"})
+KNOWN_WB_STATUSES = frozenset({
+    "waiting",
+    "sorted",
+    "sold",
+    "canceled",
+    "canceled_by_client",
+    "declined_by_client",
+    "ready_for_pickup",
+    "accepted_by_client",
+    "defect",
+})
 REQUIRED_TABLES = frozenset({
     OBSERVATIONS_TABLE, STATE_TABLE, STATUS_OBSERVATIONS_TABLE,
     WAREHOUSE_MAPPINGS_TABLE, IDENTITY_MAPPINGS_TABLE, IDENTITY_EVIDENCE_TABLE,
+    STATUS_CURRENT_TABLE, STATUS_TRANSITIONS_TABLE, POLL_RUNS_TABLE,
 })
 
 
@@ -146,6 +162,106 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
         BEGIN SELECT RAISE(ABORT,'WB FBS status observation is immutable'); END;
         CREATE TRIGGER IF NOT EXISTS wb_fbs_status_no_delete BEFORE DELETE ON {STATUS_OBSERVATIONS_TABLE}
         BEGIN SELECT RAISE(ABORT,'WB FBS status observations are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS {STATUS_CURRENT_TABLE}(
+            order_id INTEGER PRIMARY KEY CHECK(order_id > 0),
+            order_revision TEXT NOT NULL,
+            status_digest TEXT NOT NULL,
+            supplier_status TEXT NOT NULL DEFAULT '',
+            wb_status TEXT NOT NULL DEFAULT '',
+            source_observed_at TEXT NOT NULL DEFAULT '',
+            local_first_seen_at TEXT NOT NULL,
+            local_last_seen_at TEXT NOT NULL,
+            observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+            episode_sequence INTEGER NOT NULL CHECK(episode_sequence > 0),
+            CHECK(source_observed_at='' OR (substr(source_observed_at,-1,1)='Z' AND julianday(source_observed_at) IS NOT NULL)),
+            CHECK(substr(local_first_seen_at,-1,1)='Z' AND julianday(local_first_seen_at) IS NOT NULL),
+            CHECK(substr(local_last_seen_at,-1,1)='Z' AND julianday(local_last_seen_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {STATUS_TRANSITIONS_TABLE}(
+            transition_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            transition_id TEXT NOT NULL UNIQUE,
+            transition_digest TEXT NOT NULL UNIQUE,
+            order_id INTEGER NOT NULL CHECK(order_id > 0),
+            previous_episode_sequence INTEGER NOT NULL CHECK(previous_episode_sequence > 0),
+            current_episode_sequence INTEGER NOT NULL CHECK(current_episode_sequence = previous_episode_sequence + 1),
+            previous_order_revision TEXT NOT NULL,
+            previous_status_digest TEXT NOT NULL,
+            previous_supplier_status TEXT NOT NULL DEFAULT '',
+            previous_wb_status TEXT NOT NULL DEFAULT '',
+            previous_source_observed_at TEXT NOT NULL DEFAULT '',
+            previous_local_first_seen_at TEXT NOT NULL,
+            previous_local_last_seen_at TEXT NOT NULL,
+            current_order_revision TEXT NOT NULL,
+            current_status_digest TEXT NOT NULL,
+            current_supplier_status TEXT NOT NULL DEFAULT '',
+            current_wb_status TEXT NOT NULL DEFAULT '',
+            current_source_observed_at TEXT NOT NULL DEFAULT '',
+            current_local_first_seen_at TEXT NOT NULL,
+            current_local_last_seen_at TEXT NOT NULL,
+            detected_at TEXT NOT NULL,
+            reappeared_pair INTEGER NOT NULL DEFAULT 0 CHECK(reappeared_pair IN (0,1)),
+            source_timestamp_available INTEGER NOT NULL DEFAULT 0 CHECK(source_timestamp_available IN (0,1)),
+            CHECK(source_timestamp_available=0),
+            CHECK(previous_source_observed_at=''),
+            CHECK(current_source_observed_at=''),
+            CHECK(substr(previous_local_first_seen_at,-1,1)='Z' AND julianday(previous_local_first_seen_at) IS NOT NULL),
+            CHECK(substr(previous_local_last_seen_at,-1,1)='Z' AND julianday(previous_local_last_seen_at) IS NOT NULL),
+            CHECK(substr(current_local_first_seen_at,-1,1)='Z' AND julianday(current_local_first_seen_at) IS NOT NULL),
+            CHECK(substr(current_local_last_seen_at,-1,1)='Z' AND julianday(current_local_last_seen_at) IS NOT NULL),
+            CHECK(substr(detected_at,-1,1)='Z' AND julianday(detected_at) IS NOT NULL)
+        );
+        CREATE INDEX IF NOT EXISTS wb_fbs_transitions_by_order
+        ON {STATUS_TRANSITIONS_TABLE}(order_id,transition_sequence DESC);
+        CREATE INDEX IF NOT EXISTS wb_fbs_transitions_by_pair
+        ON {STATUS_TRANSITIONS_TABLE}(
+            previous_supplier_status,previous_wb_status,
+            current_supplier_status,current_wb_status,transition_sequence DESC
+        );
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_transition_no_update BEFORE UPDATE ON {STATUS_TRANSITIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS transition evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_transition_no_delete BEFORE DELETE ON {STATUS_TRANSITIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS transition evidence is append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS {POLL_RUNS_TABLE}(
+            run_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(status IN ('success','bounded_partial','failed','single_flight_skipped','disabled')),
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+            window_date_from INTEGER NOT NULL DEFAULT 0 CHECK(window_date_from >= 0),
+            window_date_to INTEGER NOT NULL DEFAULT 0 CHECK(window_date_to >= window_date_from),
+            start_cursor INTEGER NOT NULL DEFAULT 0 CHECK(start_cursor >= 0),
+            next_cursor INTEGER NOT NULL DEFAULT 0 CHECK(next_cursor >= 0),
+            page_count INTEGER NOT NULL DEFAULT 0 CHECK(page_count >= 0),
+            accepted_order_count INTEGER NOT NULL DEFAULT 0 CHECK(accepted_order_count >= 0),
+            new_order_observation_count INTEGER NOT NULL DEFAULT 0 CHECK(new_order_observation_count >= 0),
+            status_response_count INTEGER NOT NULL DEFAULT 0 CHECK(status_response_count >= 0),
+            new_status_observation_count INTEGER NOT NULL DEFAULT 0 CHECK(new_status_observation_count >= 0),
+            transition_count INTEGER NOT NULL DEFAULT 0 CHECK(transition_count >= 0),
+            missing_status_count INTEGER NOT NULL DEFAULT 0 CHECK(missing_status_count >= 0),
+            duplicate_status_count INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_status_count >= 0),
+            reappeared_pair_count INTEGER NOT NULL DEFAULT 0 CHECK(reappeared_pair_count >= 0),
+            schema_drift_count INTEGER NOT NULL DEFAULT 0 CHECK(schema_drift_count >= 0),
+            request_count INTEGER NOT NULL DEFAULT 0 CHECK(request_count >= 0),
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+            rate_limited_count INTEGER NOT NULL DEFAULT 0 CHECK(rate_limited_count >= 0),
+            server_error_count INTEGER NOT NULL DEFAULT 0 CHECK(server_error_count >= 0),
+            transport_error_count INTEGER NOT NULL DEFAULT 0 CHECK(transport_error_count >= 0),
+            rate_budget_wait_ms INTEGER NOT NULL DEFAULT 0 CHECK(rate_budget_wait_ms >= 0),
+            retry_wait_ms INTEGER NOT NULL DEFAULT 0 CHECK(retry_wait_ms >= 0),
+            error TEXT NOT NULL DEFAULT '' CHECK(length(error) <= 1000),
+            CHECK(substr(started_at,-1,1)='Z' AND julianday(started_at) IS NOT NULL),
+            CHECK(substr(completed_at,-1,1)='Z' AND julianday(completed_at) IS NOT NULL)
+        );
+        CREATE INDEX IF NOT EXISTS wb_fbs_poll_runs_recent
+        ON {POLL_RUNS_TABLE}(run_sequence DESC);
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_poll_run_no_update BEFORE UPDATE ON {POLL_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS poll-run evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wb_fbs_poll_run_no_delete BEFORE DELETE ON {POLL_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'WB FBS poll-run evidence is append-only'); END;
 
         CREATE TABLE IF NOT EXISTS {WAREHOUSE_MAPPINGS_TABLE}(
             mapping_id TEXT PRIMARY KEY,
@@ -413,12 +529,38 @@ class WbFbsOrdersCollector:
                     seen_observations.add(identity)
                     normalized.append(row)
             status_observations: list[dict[str, Any]] = []
+            missing_status_count = 0
+            duplicate_status_count = 0
+            schema_drift_count = 0
             status_reader = getattr(self.source, "list_statuses", None)
             if callable(status_reader) and normalized:
                 by_order = {int(item["order_id"]): item for item in normalized}
                 for offset in range(0, len(by_order), 1000):
                     batch_ids = sorted(by_order)[offset : offset + 1000]
+                    returned: dict[int, WbFbsOrderStatus] = {}
                     for status in status_reader(batch_ids):
+                        status_order_id = int(status.order_id)
+                        if status_order_id not in by_order:
+                            raise WbFbsOrdersError(
+                                "status_scope_drift",
+                                "Official FBS status response escaped the requested order batch",
+                                http_status=502,
+                            )
+                        previous = returned.get(status_order_id)
+                        if previous is not None:
+                            duplicate_status_count += 1
+                            if previous != status:
+                                raise WbFbsOrdersError(
+                                    "conflicting_status_duplicate",
+                                    "Official FBS status response duplicated an order with conflicting values",
+                                    http_status=502,
+                                )
+                            continue
+                        returned[status_order_id] = status
+                    missing_status_count += len(set(batch_ids) - set(returned))
+                    for status in returned.values():
+                        if _status_schema_drifted(status):
+                            schema_drift_count += 1
                         status_observations.append(
                             _normalize_status(
                                 status,
@@ -426,7 +568,7 @@ class WbFbsOrdersCollector:
                                 observed_at=attempted_at,
                             )
                         )
-            new_count = self._persist_success(
+            persisted = self._persist_success(
                 run_id=run_id,
                 attempted_at=attempted_at,
                 window_from=window_from,
@@ -440,6 +582,7 @@ class WbFbsOrdersCollector:
                 observations=normalized,
                 status_observations=status_observations,
             )
+            new_count = int(persisted["new_order_observation_count"])
         except Exception as exc:
             self._persist_failure(
                 run_id=run_id,
@@ -474,6 +617,12 @@ class WbFbsOrdersCollector:
             "upstream_methods": ["GET /api/v3/orders"]
             + (["POST /api/v3/orders/status (read semantic)"] if status_observations else []),
             "status_observation_count": len(status_observations),
+            "new_status_observation_count": int(persisted["new_status_observation_count"]),
+            "transition_count": int(persisted["transition_count"]),
+            "reappeared_pair_count": int(persisted["reappeared_pair_count"]),
+            "missing_status_count": missing_status_count,
+            "duplicate_status_count": duplicate_status_count,
+            "schema_drift_count": schema_drift_count,
             "mutates_wb": False,
             "creates_inventory_movement": False,
         }
@@ -554,6 +703,11 @@ class WbFbsOrdersCollector:
                 "ORDER BY evidence_sequence DESC LIMIT ?",
                 (order_value, limit),
             ).fetchall()
+            transition_rows = conn.execute(
+                f"SELECT * FROM {STATUS_TRANSITIONS_TABLE} WHERE order_id=? "
+                "ORDER BY transition_sequence DESC LIMIT ?",
+                (order_value, limit),
+            ).fetchall()
         if not rows:
             raise WbFbsOrdersError(
                 "fbs_order_not_found", "Official FBS order was not found in the cache", http_status=404
@@ -568,6 +722,7 @@ class WbFbsOrdersCollector:
                 "current": _public_order(rows[0]),
                 "history": [_public_order(row) for row in rows],
                 "status_history": [dict(row) for row in status_rows],
+                "transition_history": [dict(row) for row in transition_rows],
                 "mapping_evidence": [dict(row) for row in evidence_rows],
             }
         )
@@ -587,8 +742,9 @@ class WbFbsOrdersCollector:
         complete: bool,
         observations: list[Mapping[str, Any]],
         status_observations: list[Mapping[str, Any]],
-    ) -> int:
+    ) -> dict[str, int]:
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+            conn.row_factory = sqlite3.Row
             ensure_wb_fbs_orders_schema(conn)
             before = conn.total_changes
             conn.executemany(
@@ -611,6 +767,8 @@ class WbFbsOrdersCollector:
                 ],
             )
             new_count = conn.total_changes - before
+            transition_metrics = _persist_status_transitions(conn, status_observations)
+            before_status = conn.total_changes
             conn.executemany(
                 f"""INSERT OR IGNORE INTO {STATUS_OBSERVATIONS_TABLE}(
                        observation_id,order_id,order_revision,status_digest,supplier_status,
@@ -625,6 +783,7 @@ class WbFbsOrdersCollector:
                     for row in status_observations
                 ],
             )
+            new_status_count = conn.total_changes - before_status
             self._persist_identity_evidence(conn, observations)
             _upsert_state(
                 conn,
@@ -644,7 +803,12 @@ class WbFbsOrdersCollector:
                 complete=complete,
             )
             conn.commit()
-        return int(new_count)
+        return {
+            "new_order_observation_count": int(new_count),
+            "new_status_observation_count": int(new_status_count),
+            "transition_count": int(transition_metrics["transition_count"]),
+            "reappeared_pair_count": int(transition_metrics["reappeared_pair_count"]),
+        }
 
     def _persist_identity_evidence(
         self, conn: sqlite3.Connection, observations: list[Mapping[str, Any]]
@@ -831,7 +995,216 @@ def _normalize_status(
         "observation_id": "fbs_status_" + hashlib.sha256(
             f"{safe['order_id']}:{safe['order_revision']}:{digest}".encode("utf-8")
         ).hexdigest()[:32],
+        "source_observed_at": "",
         "observed_at": observed_at,
+    }
+
+
+def _status_schema_drifted(status: WbFbsOrderStatus) -> bool:
+    supplier = _safe_text(status.supplier_status, maximum=80).casefold()
+    wb = _safe_text(status.wb_status, maximum=80).casefold()
+    return supplier not in KNOWN_SUPPLIER_STATUSES or wb not in KNOWN_WB_STATUSES
+
+
+def _persist_status_transitions(
+    conn: sqlite3.Connection,
+    status_observations: list[Mapping[str, Any]],
+) -> dict[str, int]:
+    """Advance mutable episode state and append only exact pair transitions.
+
+    The official status response has no source observation timestamp.  The
+    append-only evidence therefore keeps that field explicitly empty and
+    records only truthful local first/last-seen timestamps.
+    """
+
+    transition_count = 0
+    reappeared_pair_count = 0
+    for current in status_observations:
+        order_id = int(current["order_id"])
+        observed_at = str(current["observed_at"])
+        prior = conn.execute(
+            f"SELECT * FROM {STATUS_CURRENT_TABLE} WHERE order_id=?",
+            (order_id,),
+        ).fetchone()
+        if prior is None:
+            legacy = conn.execute(
+                f"""SELECT order_revision,status_digest,supplier_status,wb_status,observed_at
+                    FROM {STATUS_OBSERVATIONS_TABLE}
+                    WHERE order_id=? ORDER BY observation_sequence DESC LIMIT 1""",
+                (order_id,),
+            ).fetchone()
+            if legacy is None:
+                conn.execute(
+                    f"""INSERT INTO {STATUS_CURRENT_TABLE}(
+                           order_id,order_revision,status_digest,supplier_status,wb_status,
+                           source_observed_at,local_first_seen_at,local_last_seen_at,
+                           observation_count,episode_sequence
+                       ) VALUES(?,?,?,?,?,'',?,?,1,1)""",
+                    (
+                        order_id,
+                        current["order_revision"],
+                        current["status_digest"],
+                        current["supplier_status"],
+                        current["wb_status"],
+                        observed_at,
+                        observed_at,
+                    ),
+                )
+                continue
+            prior = {
+                "order_id": order_id,
+                "order_revision": str(legacy[0]),
+                "status_digest": str(legacy[1]),
+                "supplier_status": str(legacy[2]),
+                "wb_status": str(legacy[3]),
+                "source_observed_at": "",
+                "local_first_seen_at": str(legacy[4]),
+                "local_last_seen_at": str(legacy[4]),
+                "observation_count": 1,
+                "episode_sequence": 1,
+            }
+
+        previous_pair = (
+            str(prior["supplier_status"]),
+            str(prior["wb_status"]),
+        )
+        current_pair = (
+            str(current["supplier_status"]),
+            str(current["wb_status"]),
+        )
+        if previous_pair == current_pair:
+            conn.execute(
+                f"""INSERT INTO {STATUS_CURRENT_TABLE}(
+                       order_id,order_revision,status_digest,supplier_status,wb_status,
+                       source_observed_at,local_first_seen_at,local_last_seen_at,
+                       observation_count,episode_sequence
+                   ) VALUES(?,?,?,?,?,'',?,?,?,?)
+                   ON CONFLICT(order_id) DO UPDATE SET
+                       order_revision=excluded.order_revision,
+                       status_digest=excluded.status_digest,
+                       supplier_status=excluded.supplier_status,
+                       wb_status=excluded.wb_status,
+                       source_observed_at=excluded.source_observed_at,
+                       local_last_seen_at=excluded.local_last_seen_at,
+                       observation_count={STATUS_CURRENT_TABLE}.observation_count+1""",
+                (
+                    order_id,
+                    current["order_revision"],
+                    current["status_digest"],
+                    current["supplier_status"],
+                    current["wb_status"],
+                    str(prior["local_first_seen_at"]),
+                    observed_at,
+                    int(prior["observation_count"]) + 1,
+                    int(prior["episode_sequence"]),
+                ),
+            )
+            continue
+
+        previous_episode = int(prior["episode_sequence"])
+        current_episode = previous_episode + 1
+        reappeared = conn.execute(
+            f"""SELECT 1 FROM {STATUS_TRANSITIONS_TABLE}
+                WHERE order_id=? AND (
+                    (previous_supplier_status=? AND previous_wb_status=?) OR
+                    (current_supplier_status=? AND current_wb_status=?)
+                ) LIMIT 1""",
+            (order_id, current_pair[0], current_pair[1], current_pair[0], current_pair[1]),
+        ).fetchone() is not None
+        evidence = {
+            "order_id": order_id,
+            "previous_episode_sequence": previous_episode,
+            "current_episode_sequence": current_episode,
+            "previous_order_revision": str(prior["order_revision"]),
+            "previous_status_digest": str(prior["status_digest"]),
+            "previous_supplier_status": previous_pair[0],
+            "previous_wb_status": previous_pair[1],
+            "previous_source_observed_at": "",
+            "previous_local_first_seen_at": str(prior["local_first_seen_at"]),
+            "previous_local_last_seen_at": str(prior["local_last_seen_at"]),
+            "current_order_revision": str(current["order_revision"]),
+            "current_status_digest": str(current["status_digest"]),
+            "current_supplier_status": current_pair[0],
+            "current_wb_status": current_pair[1],
+            "current_source_observed_at": "",
+            "current_local_first_seen_at": observed_at,
+            "current_local_last_seen_at": observed_at,
+            "detected_at": observed_at,
+            "reappeared_pair": bool(reappeared),
+            "source_timestamp_available": False,
+        }
+        digest = _fingerprint(evidence)
+        before = conn.total_changes
+        conn.execute(
+            f"""INSERT OR IGNORE INTO {STATUS_TRANSITIONS_TABLE}(
+                   transition_id,transition_digest,order_id,
+                   previous_episode_sequence,current_episode_sequence,
+                   previous_order_revision,previous_status_digest,
+                   previous_supplier_status,previous_wb_status,
+                   previous_source_observed_at,previous_local_first_seen_at,
+                   previous_local_last_seen_at,current_order_revision,current_status_digest,
+                   current_supplier_status,current_wb_status,current_source_observed_at,
+                   current_local_first_seen_at,current_local_last_seen_at,detected_at,
+                   reappeared_pair,source_timestamp_available
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "fbs_transition_" + digest.removeprefix("sha256:")[:32],
+                digest,
+                order_id,
+                previous_episode,
+                current_episode,
+                evidence["previous_order_revision"],
+                evidence["previous_status_digest"],
+                previous_pair[0],
+                previous_pair[1],
+                "",
+                evidence["previous_local_first_seen_at"],
+                evidence["previous_local_last_seen_at"],
+                evidence["current_order_revision"],
+                evidence["current_status_digest"],
+                current_pair[0],
+                current_pair[1],
+                "",
+                observed_at,
+                observed_at,
+                observed_at,
+                int(reappeared),
+                0,
+            ),
+        )
+        inserted = conn.total_changes - before
+        transition_count += int(inserted)
+        reappeared_pair_count += int(bool(inserted and reappeared))
+        conn.execute(
+            f"""INSERT INTO {STATUS_CURRENT_TABLE}(
+                   order_id,order_revision,status_digest,supplier_status,wb_status,
+                   source_observed_at,local_first_seen_at,local_last_seen_at,
+                   observation_count,episode_sequence
+               ) VALUES(?,?,?,?,?,'',?,?,1,?)
+               ON CONFLICT(order_id) DO UPDATE SET
+                   order_revision=excluded.order_revision,
+                   status_digest=excluded.status_digest,
+                   supplier_status=excluded.supplier_status,
+                   wb_status=excluded.wb_status,
+                   source_observed_at=excluded.source_observed_at,
+                   local_first_seen_at=excluded.local_first_seen_at,
+                   local_last_seen_at=excluded.local_last_seen_at,
+                   observation_count=1,
+                   episode_sequence=excluded.episode_sequence""",
+            (
+                order_id,
+                current["order_revision"],
+                current["status_digest"],
+                current_pair[0],
+                current_pair[1],
+                observed_at,
+                observed_at,
+                current_episode,
+            ),
+        )
+    return {
+        "transition_count": transition_count,
+        "reappeared_pair_count": reappeared_pair_count,
     }
 
 
@@ -962,6 +1335,15 @@ def _shadow_state(conn: sqlite3.Connection, state: Mapping[str, Any]) -> dict[st
         f"SELECT MIN(source_created_at) FROM {OBSERVATIONS_TABLE} WHERE source_created_at<>''"
     ).fetchone()[0]
     status_count = int(conn.execute(f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE}").fetchone()[0])
+    transition_count = int(conn.execute(f"SELECT COUNT(*) FROM {STATUS_TRANSITIONS_TABLE}").fetchone()[0])
+    poll_run_count = int(conn.execute(f"SELECT COUNT(*) FROM {POLL_RUNS_TABLE}").fetchone()[0])
+    handoff_transition_count = int(
+        conn.execute(
+            f"""SELECT COUNT(*) FROM {STATUS_TRANSITIONS_TABLE}
+                WHERE previous_supplier_status='complete' AND previous_wb_status='waiting'
+                  AND current_supplier_status='complete' AND current_wb_status='sorted'"""
+        ).fetchone()[0]
+    )
     evidence_counts = {
         str(row["outcome"]): int(row["count"])
         for row in conn.execute(
@@ -987,6 +1369,9 @@ def _shadow_state(conn: sqlite3.Connection, state: Mapping[str, Any]) -> dict[st
             "last_error": str(state.get("error") or ""),
         },
         "status_observation_count": status_count,
+        "transition_count": transition_count,
+        "complete_waiting_to_complete_sorted_transition_count": handoff_transition_count,
+        "poll_run_count": poll_run_count,
         "warehouse_mapping_count": warehouse_mappings,
         "identity_mapping_count": identity_mappings,
         "mapping_outcomes": evidence_counts,

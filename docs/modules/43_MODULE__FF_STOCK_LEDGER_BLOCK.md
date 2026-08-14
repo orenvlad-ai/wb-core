@@ -18,6 +18,7 @@ related_modules:
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
+  - "packages/application/wb_fbs_shadow_polling.py"
   - "packages/application/ff_stage_7a_production.py"
   - "packages/contracts/ff_pool_documents.py"
   - "packages/application/ff_inventory_reconciliation.py"
@@ -62,6 +63,9 @@ related_tables:
   - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
   - "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
   - "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
+  - "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+  - "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
+  - "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -103,10 +107,12 @@ related_runners:
   - "apps/ff_wb_supply_origins_browser_smoke.py"
   - "apps/wb_fbs_orders_collector_smoke.py"
   - "apps/wb_fbs_orders_http_smoke.py"
+  - "apps/wb_fbs_shadow.py"
+  - "apps/wb_fbs_shadow_polling_smoke.py"
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. The facility × FBS|FBO foundation, durable documents, protected explanatory surface, append-only FBW origin evidence and official FBS observations exist strictly below this aggregate authority. Migration 140 creates only active Moscow/inactive Orenburg facility dimensions and enables exact-ID FBS shadow collection; no aggregate reader, reservation/movement producer or debit trigger uses them. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. The facility × FBS|FBO foundation, durable documents, protected explanatory surface, append-only FBW origin evidence and official FBS observations exist strictly below this aggregate authority. Migration 141 gives that shadow a dedicated five-minute poller and immutable same-order transition evidence, but no aggregate reader, reservation/movement producer or debit trigger uses it. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -491,6 +497,12 @@ quantity and exact Decimal capital, including fractional kopecks, are preserved.
 The shipped CLI is read-only and has no apply action. The transactional path is
 fixture-only and requires a marker absent from operational schema. Production
 opening remains a separate exact-SHA/human-gated mutation.
+
+Migration 141 adds only a faster official FBS observation contour below this
+ledger.  Immutable same-order transition evidence and query-only readiness may
+inform a later owner-gated design, but create no reservation, debit, movement,
+opening or pool balance.  `supplierStatus=complete` remains prohibited and no
+`wbStatus` value is selected as a live trigger by this module.
 
 Migration 133 adds an empty dimensional subledger contract below the existing
 aggregate FF ledger. `sheet_vitrina_v1_ff_facilities` is a stable registry with

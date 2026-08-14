@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import random
 import re
+import threading
+import time
 from typing import Any, Mapping
 from urllib import error, parse as urllib_parse, request as urllib_request
 
@@ -21,9 +24,19 @@ MAX_WINDOW_SECONDS = 30 * 24 * 60 * 60
 
 
 class WbFbsOrdersHttpStatusError(RuntimeError):
-    def __init__(self, status_code: int, body: str, *, content_type: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        body: str,
+        *,
+        content_type: str = "",
+        headers: Mapping[str, Any] | None = None,
+    ) -> None:
         self.status_code = int(status_code)
         self.content_type = str(content_type or "")
+        self.headers = {
+            str(key): str(value) for key, value in dict(headers or {}).items()
+        }
         self.body_prefix = _sanitize_body_prefix(body)
         message = f"WB FBS orders API returned status {self.status_code}"
         if self.content_type:
@@ -87,12 +100,52 @@ class HttpBackedWbFbsOrdersSource:
         base_url_env_var: str = DEFAULT_WB_FBS_API_BASE_URL_ENV,
         timeout_seconds: float = 30.0,
         opener: Any | None = None,
+        rate_budget: Any | None = None,
+        max_retries: int = 3,
+        retry_base_seconds: float = 0.5,
+        retry_max_seconds: float = 30.0,
+        sleep_fn: Any | None = None,
+        random_fn: Any | None = None,
     ) -> None:
         self._default_base_url = str(base_url).rstrip("/")
         self._token_env_var = token_env_var
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = float(timeout_seconds)
         self._opener = opener or urllib_request.urlopen
+        self._rate_budget = rate_budget
+        self._max_retries = max(0, min(int(max_retries), 5))
+        self._retry_base_seconds = max(0.01, min(float(retry_base_seconds), 30.0))
+        self._retry_max_seconds = max(
+            self._retry_base_seconds, min(float(retry_max_seconds), 15 * 60.0)
+        )
+        self._sleep = sleep_fn or time.sleep
+        self._random = random_fn or random.random
+        self._telemetry_lock = threading.Lock()
+        self._telemetry = self._empty_telemetry()
+
+    @staticmethod
+    def _empty_telemetry() -> dict[str, float | int]:
+        return {
+            "request_count": 0,
+            "retry_count": 0,
+            "rate_limited_count": 0,
+            "server_error_count": 0,
+            "transport_error_count": 0,
+            "rate_budget_wait_ms": 0.0,
+            "retry_wait_ms": 0.0,
+        }
+
+    def reset_telemetry(self) -> None:
+        with self._telemetry_lock:
+            self._telemetry = self._empty_telemetry()
+
+    def telemetry_snapshot(self) -> dict[str, float | int]:
+        with self._telemetry_lock:
+            return dict(self._telemetry)
+
+    def _increment_telemetry(self, key: str, value: float | int = 1) -> None:
+        with self._telemetry_lock:
+            self._telemetry[key] = self._telemetry.get(key, 0) + value
 
     def list_orders(
         self,
@@ -133,20 +186,11 @@ class HttpBackedWbFbsOrdersSource:
             headers={"Authorization": runtime.token, "Accept": "application/json"},
             method="GET",
         )
-        try:
-            with self._opener(request, timeout=runtime.timeout_seconds) as response:
-                status_code = _response_status(response)
-                content_type = _response_content_type(response)
-                raw_body = response.read().decode("utf-8", errors="replace")
-        except error.HTTPError as exc:
-            raw_body = exc.read().decode("utf-8", errors="replace")
-            raise WbFbsOrdersHttpStatusError(
-                exc.code,
-                raw_body,
-                content_type=_headers_content_type(exc.headers),
-            ) from exc
-        except (error.URLError, OSError) as exc:
-            raise WbFbsOrdersTransportError(f"WB FBS orders API transport failed: {exc}") from exc
+        status_code, content_type, raw_body = self._open_with_retry(
+            request,
+            timeout_seconds=runtime.timeout_seconds,
+            transport_label="WB FBS orders API transport failed",
+        )
 
         if status_code is not None and not 200 <= status_code < 300:
             raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
@@ -194,20 +238,11 @@ class HttpBackedWbFbsOrdersSource:
             headers={"Authorization": runtime.token, "Accept": "application/json"},
             method="GET",
         )
-        try:
-            with self._opener(request, timeout=runtime.timeout_seconds) as response:
-                status_code = _response_status(response)
-                content_type = _response_content_type(response)
-                raw_body = response.read().decode("utf-8", errors="replace")
-        except error.HTTPError as exc:
-            raw_body = exc.read().decode("utf-8", errors="replace")
-            raise WbFbsOrdersHttpStatusError(
-                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
-            ) from exc
-        except (error.URLError, OSError) as exc:
-            raise WbFbsOrdersTransportError(
-                f"WB FBS seller warehouse API transport failed: {exc}"
-            ) from exc
+        status_code, content_type, raw_body = self._open_with_retry(
+            request,
+            timeout_seconds=runtime.timeout_seconds,
+            transport_label="WB FBS seller warehouse API transport failed",
+        )
         if status_code is not None and not 200 <= status_code < 300:
             raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
         try:
@@ -264,18 +299,11 @@ class HttpBackedWbFbsOrdersSource:
             headers={"Authorization": runtime.token, "Accept": "application/json"},
             method="GET",
         )
-        try:
-            with self._opener(request, timeout=runtime.timeout_seconds) as response:
-                status_code = _response_status(response)
-                content_type = _response_content_type(response)
-                raw_body = response.read().decode("utf-8", errors="replace")
-        except error.HTTPError as exc:
-            raw_body = exc.read().decode("utf-8", errors="replace")
-            raise WbFbsOrdersHttpStatusError(
-                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
-            ) from exc
-        except (error.URLError, OSError) as exc:
-            raise WbFbsOrdersTransportError(f"WB FBS offices API transport failed: {exc}") from exc
+        status_code, content_type, raw_body = self._open_with_retry(
+            request,
+            timeout_seconds=runtime.timeout_seconds,
+            transport_label="WB FBS offices API transport failed",
+        )
         if status_code is not None and not 200 <= status_code < 300:
             raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
         try:
@@ -326,18 +354,11 @@ class HttpBackedWbFbsOrdersSource:
             },
             method="POST",
         )
-        try:
-            with self._opener(request, timeout=runtime.timeout_seconds) as response:
-                status_code = _response_status(response)
-                content_type = _response_content_type(response)
-                raw_body = response.read().decode("utf-8", errors="replace")
-        except error.HTTPError as exc:
-            raw_body = exc.read().decode("utf-8", errors="replace")
-            raise WbFbsOrdersHttpStatusError(
-                exc.code, raw_body, content_type=_headers_content_type(exc.headers)
-            ) from exc
-        except (error.URLError, OSError) as exc:
-            raise WbFbsOrdersTransportError(f"WB FBS status API transport failed: {exc}") from exc
+        status_code, content_type, raw_body = self._open_with_retry(
+            request,
+            timeout_seconds=runtime.timeout_seconds,
+            transport_label="WB FBS status API transport failed",
+        )
         if status_code is not None and not 200 <= status_code < 300:
             raise WbFbsOrdersHttpStatusError(status_code, raw_body, content_type=content_type)
         try:
@@ -349,12 +370,18 @@ class HttpBackedWbFbsOrdersSource:
             raise WbFbsOrdersTransportError("WB FBS status API returned an invalid status page")
         result: list[WbFbsOrderStatus] = []
         requested = set(normalized)
+        seen: set[int] = set()
         for item in rows:
             if not isinstance(item, Mapping):
                 continue
             order_id = _bounded_int(item.get("id"), "status order_id", minimum=1, maximum=2**63 - 1)
             if order_id not in requested:
                 raise WbFbsOrdersTransportError("WB FBS status response escaped requested order scope")
+            if order_id in seen:
+                raise WbFbsOrdersTransportError(
+                    "WB FBS status response duplicated an order ID"
+                )
+            seen.add(order_id)
             result.append(
                 WbFbsOrderStatus(
                     order_id=order_id,
@@ -363,6 +390,86 @@ class HttpBackedWbFbsOrdersSource:
                 )
             )
         return result
+
+    def _open_with_retry(
+        self,
+        request: urllib_request.Request,
+        *,
+        timeout_seconds: float,
+        transport_label: str,
+    ) -> tuple[int | None, str, str]:
+        attempt = 0
+        while True:
+            if self._rate_budget is not None:
+                reservation = self._rate_budget.acquire()
+                self._increment_telemetry(
+                    "rate_budget_wait_ms",
+                    float(reservation.get("wait_seconds") or 0.0) * 1000.0,
+                )
+            self._increment_telemetry("request_count")
+            try:
+                with self._opener(request, timeout=timeout_seconds) as response:
+                    status_code = _response_status(response)
+                    content_type = _response_content_type(response)
+                    raw_body = response.read().decode("utf-8", errors="replace")
+                    headers = _headers_mapping(getattr(response, "headers", None))
+            except error.HTTPError as exc:
+                raw_body = exc.read().decode("utf-8", errors="replace")
+                status_code = int(exc.code)
+                content_type = _headers_content_type(exc.headers)
+                headers = _headers_mapping(exc.headers)
+            except (error.URLError, OSError) as exc:
+                self._increment_telemetry("transport_error_count")
+                if attempt < self._max_retries:
+                    delay = self._retry_delay(attempt=attempt, headers={})
+                    attempt += 1
+                    self._increment_telemetry("retry_count")
+                    self._defer_retry(delay)
+                    continue
+                raise WbFbsOrdersTransportError(f"{transport_label}: {exc}") from exc
+
+            if status_code is None or 200 <= status_code < 300:
+                return status_code, content_type, raw_body
+            if status_code == 429:
+                self._increment_telemetry("rate_limited_count")
+            elif status_code >= 500:
+                self._increment_telemetry("server_error_count")
+            retryable = status_code == 429 or status_code >= 500
+            if retryable and attempt < self._max_retries:
+                delay = self._retry_delay(attempt=attempt, headers=headers)
+                attempt += 1
+                self._increment_telemetry("retry_count")
+                self._defer_retry(delay)
+                continue
+            if status_code == 409 and self._rate_budget is not None:
+                # WB counts one 409 as ten FBS-family requests.
+                self._rate_budget.defer(9 * 0.22)
+            raise WbFbsOrdersHttpStatusError(
+                status_code,
+                raw_body,
+                content_type=content_type,
+                headers=headers,
+            )
+
+    def _retry_delay(self, *, attempt: int, headers: Mapping[str, Any]) -> float:
+        exponential = min(
+            self._retry_max_seconds,
+            self._retry_base_seconds * (2**max(int(attempt), 0)),
+        )
+        server_hint = max(
+            _positive_float(_header_value(headers, "Retry-After")),
+            _positive_float(_header_value(headers, "X-Ratelimit-Retry")),
+        )
+        jitter = min(exponential * 0.25, 1.0) * max(0.0, min(float(self._random()), 1.0))
+        return min(self._retry_max_seconds, max(exponential, server_hint) + jitter)
+
+    def _defer_retry(self, delay: float) -> None:
+        bounded = max(0.0, min(float(delay), self._retry_max_seconds))
+        self._increment_telemetry("retry_wait_ms", bounded * 1000.0)
+        if self._rate_budget is not None:
+            self._rate_budget.defer(bounded)
+        else:
+            self._sleep(bounded)
 
 
 def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
@@ -407,6 +514,34 @@ def _response_content_type(response: Any) -> str:
 def _headers_content_type(headers: Any) -> str:
     get = getattr(headers, "get", None)
     return str(get("Content-Type") or get("content-type") or "").strip() if callable(get) else ""
+
+
+def _headers_mapping(headers: Any) -> dict[str, str]:
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return {}
+    allowlist = {"content-type", "retry-after", "x-ratelimit-retry"}
+    return {
+        str(key): str(value)
+        for key, value in items()
+        if str(key).casefold() in allowlist
+    }
+
+
+def _header_value(headers: Mapping[str, Any], name: str) -> Any:
+    lowered = name.casefold()
+    for key, value in headers.items():
+        if str(key).casefold() == lowered:
+            return value
+    return None
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if result > 0 else 0.0
 
 
 def _sanitize_body_prefix(body: str, *, limit: int = 420) -> str:

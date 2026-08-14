@@ -260,3 +260,11 @@ the rule that coherent full-store backup is reserved for allowlisted
 schema/store migrations. Recovery that changes the resulting configuration
 requires a new owner authorization. The later opening/guided-posting recovery
 contract remains untouched.
+
+Migration 141 is a cache/shadow live-runtime change, not T1/T2/T3 business
+recovery.  Its dedicated lock, durable request budget, per-page cursor,
+immutable transitions and poll-run journal make repeats/crash resume T0 for
+business data.  The mutable current-status episode is only a derived index;
+authoritative transition evidence is append-only.  No full-store backup or
+warehouse writer lock is needed because facility/epoch/opening/reservation/
+movement/acceptance and WB-write tables are hard non-targets.

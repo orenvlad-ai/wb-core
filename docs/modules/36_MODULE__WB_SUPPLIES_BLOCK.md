@@ -20,6 +20,7 @@ related_modules:
   - "packages/application/warehouse_stocks.py"
   - "packages/application/wb_supplies.py"
   - "packages/application/wb_fbs_orders.py"
+  - "packages/application/wb_fbs_shadow_polling.py"
   - "packages/application/ff_stage_7a_production.py"
   - "packages/adapters/wb_fbs_orders.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -45,6 +46,9 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
   - "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings"
   - "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence"
+  - "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+  - "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
+  - "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
@@ -73,6 +77,8 @@ related_runners:
   - "apps/wb_supply_overlay_smoke.py"
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
+  - "apps/wb_fbs_shadow.py"
+  - "apps/wb_fbs_shadow_polling_smoke.py"
   - "apps/wb_supplies_api_adapter_smoke.py"
   - "apps/wb_supplies_backfill_live.py"
   - "apps/wb_supplies_backfill_smoke.py"
@@ -99,7 +105,7 @@ related_docs:
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Official FBW supplies sync remains read-only and independent from Seller Portal success, but every ordinary official sync and every hourly/manual warehouse sync now runs a bounded process-owned global transit-cost collector. Candidate scope is all due eligible supplies, never the visible UI page. Migration 137 additionally installs a separate default-off official GET-only FBS order observation hook and protected cache reads; no FBS collection runs on deploy or page open, and no status POST, order-origin assignment or movement consumer exists. Durable canonical amount + append-only attempt evidence preserve last success across errors; stale active runs reconcile, identical work is single-flight, failures use taxonomy/backoff, successful amounts enqueue canonical targeted recalculation. List/status UI exposes separate Seller auth, exact supply-cost route, collector, freshness and coverage truth; local `Проверить` is route-specific and `Повторить сбор` is global. Login/recovery live only in central settings."
+update_note: "Official FBW supplies sync remains read-only and independent from Seller Portal success, and keeps the bounded process-owned transit-cost collector. Migration 141 removes the separate official FBS shadow from ordinary FBW/hourly sync: a dedicated five-minute single-flight timer owns bounded official order/status polling, shared rate budget, crash-safe cursor, immutable transitions and query-only readiness. No FBS observation selects a physical trigger. Durable canonical transit amount + append-only attempt evidence preserve last success across errors; stale active runs reconcile, identical work is single-flight, failures use taxonomy/backoff, successful amounts enqueue canonical targeted recalculation. List/status UI exposes separate Seller auth, exact supply-cost route, collector, freshness and coverage truth; local `Проверить` is route-specific and `Повторить сбор` is global. Login/recovery live only in central settings."
 ---
 
 > Functional boundary: bounded reconciliation `31 500 / 31 477` ниже сохраняется как immutable incident evidence. Она не задаёт текущий `FF → WB`: active quantity после functional cutover всегда `max(fresh packed − fresh accepted, 0)`, final difference идёт только в pooled positive discrepancy, а WB quantity приходит только из complete official stocks snapshot.
@@ -117,7 +123,7 @@ update_note: "Official FBW supplies sync remains read-only and independent from 
   - lead: `Read-only список поставок WB API / FBW Supplies`.
 - The UI is read-only. It does not create, update, delete or draft WB supplies.
 - Official WB API remains canonical for supply list/status/route/quantity evidence.
-- Seller Portal remains a supplemental read-only source and never changes whether official WB sync succeeded. After a successful ordinary official sync and inside hourly/manual warehouse sync, the backend runs the process-owned autonomous transit collector; it does not run merely because the page opened and it does not use FBS APIs. The separate Stage 5 FBS hook is default-off and, if later authorized, calls only official `GET /api/v3/orders`; its failure remains supplemental to the completed FBW sync.
+- Seller Portal remains a supplemental read-only source and never changes whether official WB sync succeeded. After a successful ordinary official sync and inside hourly/manual warehouse sync, the backend runs the process-owned autonomous transit collector; it does not run merely because the page opened and it does not use FBS APIs. Official FBS order/status polling is now a separate timer-owned process and is never invoked by this FBW sync.
 - Fulfillment uploads are not official WB evidence. They are operator-uploaded runtime truth for service expenses and PDF payment validation only; failed uploads, unmatched rows, duplicate rows and deleted uploads must not affect the WB supplies list overlay.
 - Management proxy WB cost layers are not official WB evidence and not strict accounting FIFO. They classify supply transit as `direct_zero_confirmed`, `transit_confirmed`, `transit_missing` or `unknown_route`, then combine SKU-level ФФ cost, WB transit, accepted Fulfillment services and allocated storage into `our_wb_unit_cost_rub`. Direct supplies with no transit marker and official/detail zero acceptance cost are confirmed zero transit, not missing transit; this explicitly covers supply patterns like `40431461`.
 - ФФ stock ledger writeoffs are internal runtime movements only. They do not mutate WB, do not promote WB supplies cache into ЕБД metric truth, and use goods composition quantity because ФФ sent the planned composition regardless of later WB accepted quantity.
@@ -164,8 +170,9 @@ update_note: "Official FBW supplies sync remains read-only and independent from 
   city maps to `FF Москва`; `FF Оренбург` remains unrouted. SKU mapping requires
   one active nomenclature owner for exact `nmId/chrtId/one barcode/article`.
   Ambiguous, unmatched and incomplete identities are counted and isolated.
-  Catch-up begins at `2026-08-01`, then the existing hourly warehouse timer
-  polls at minute `17` Europe/Moscow; it is not a real-time stream.
+  Catch-up begins at `2026-08-01`; Migration 141 now polls through the
+  dedicated five-minute FBS shadow timer with bounded jitter and a 10-minute
+  normal-state SLO. It is not a real-time stream.
 - FBW/FBS supply creation, transit create/update methods and all WB mutations stay outside scope of this module and of the regional planning assistant.
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
@@ -653,6 +660,7 @@ Targeted smokes:
 - `python3 apps/ff_wb_supply_origins_browser_smoke.py`;
 - `python3 apps/wb_fbs_orders_collector_smoke.py`;
 - `python3 apps/wb_fbs_orders_http_smoke.py`;
+- `python3 apps/wb_fbs_shadow_polling_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_fulfillment_services_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_fulfillment_services_browser_smoke.py`.
 
@@ -688,6 +696,23 @@ This module does not implement:
 - ЕБД metric truth changes;
 - global cost truth switch;
 - AI logic.
+
+## Stage 7B dedicated official FBS shadow
+
+Migration 141 removes FBS polling from ordinary WB-supplies refresh and from
+the long hourly warehouse/cost writer.  Those responses now report
+`dedicated_collector` without making an upstream FBS call.  The separate
+`wb-core-fbs-shadow-collector.timer` invokes a single-flight five-minute
+poller with a trailing seven-day window, bounded pages/status batches,
+crash-safe per-page cursor and the shared official FBS request budget.
+
+Its POST to `/api/v3/orders/status` is read-only.  Append-only transition and
+poll-run evidence contains only official order/revision/status identities,
+local observation times and safe counters; no portal credentials, raw payload
+or customer data are retained.  Portal-lane comparisons remain explicit
+inference.  `supplierStatus=complete` never debits, and `wbStatus=sorted`
+remains a candidate pending repeatable evidence and separate official semantic
+review.
 
 # 12. Own capital movement consumer
 

@@ -107,6 +107,16 @@
       "restart": false
     },
     {
+      "name": "wb-core-fbs-shadow-collector.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-fbs-shadow-collector.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-storage-recovery-sanitation@.service",
       "enable": false,
       "restart": false

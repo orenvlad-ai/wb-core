@@ -15,6 +15,11 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 
 
+class _ForbiddenFbsCollector:
+    def collect_default_window(self):
+        raise AssertionError("ordinary FBW sync must not invoke the dedicated FBS collector")
+
+
 class IncrementalSource:
     def __init__(self) -> None:
         self.detail_calls: list[str] = []
@@ -189,7 +194,12 @@ def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-incremental-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         source = IncrementalSource()
-        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+        block = WbSuppliesBlock(
+            runtime=runtime,
+            source=source,
+            fbs_orders_collector=_ForbiddenFbsCollector(),
+            timestamp_factory=_timestamp_factory(),
+        )
 
         first = block.sync_supplies({"limit": 1000})
         first_sync = first.get("sync", {})
@@ -202,6 +212,9 @@ def main() -> None:
             raise AssertionError(f"first incremental must enrich new rows, got {first_sync}")
         if source.detail_calls != ["7001", "7002"] or source.goods_calls != ["7001", "7002"]:
             raise AssertionError(f"first incremental must call detail/goods once per new row, got {source.detail_calls} {source.goods_calls}")
+        fbs = first_sync.get("fbs_orders_collection") or {}
+        if fbs.get("status") != "dedicated_collector" or fbs.get("invoked_by_this_sync") is not False:
+            raise AssertionError(f"ordinary FBW sync must report the independent FBS timer, got {fbs}")
 
         source.detail_calls.clear()
         source.goods_calls.clear()
