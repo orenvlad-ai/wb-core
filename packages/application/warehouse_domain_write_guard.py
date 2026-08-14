@@ -91,6 +91,10 @@ WAREHOUSE_DOMAIN_TABLES = (
     "sheet_vitrina_v1_ff_pool_cutover_checkpoints",
     "sheet_vitrina_v1_ff_pool_cutover_opening_reservations",
     "sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases",
+    "sheet_vitrina_v1_ff_pool_cutover_pending_shipments",
+    "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events",
+    "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current",
+    "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane",
 )
 
 

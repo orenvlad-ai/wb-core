@@ -66,3 +66,11 @@ enable env/collector, execute backfill or create business documents. Those are
 separate exact owner-gated production mutations. Migration 140 now owns only
 the separately authorized facility-registry and official FBS shadow activation;
 opening/cutover, writer epoch and every physical-stock effect remain outside it.
+
+Migration 142 activates this guided path only after an exact opening. A
+manifest-pinned pending shipment remains in transit through cutover and is then
+accepted exactly once through `Принять на FF`; the same transaction owns the
+legacy receipt identity/factual date and exact facility/pool movements. The
+aggregate FF projection receives the identical quantity/capital/expense delta,
+and aggregate↔pool parity is rechecked before commit. Later cost materialization
+uses actual accepted quantities. Legacy factual-date flow remains blocked.

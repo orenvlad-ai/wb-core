@@ -44,7 +44,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Facility × pool dimensions, immutable documents and protected bounded API/operator detail remain beneath `ff`; Migration 141 moves exact official FBS shadow polling into a dedicated read-only timer and records immutable status transitions. It does not add a warehouse stage, replace an active balance, publish a second total, select a debit trigger or activate opening/cutover."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migration 142 activates facility × pool detail beneath `ff` through one owner-gated signed-INTEGER/exact-Decimal opening, exact historical FBS checkpoint and post-T lifecycle while preserving aggregate=sum(detail), the same six stages and zero WB writes. Reservations affect available only; any source/parity drift fails closed."
 ---
 
 # 1. Active warehouse contract
@@ -97,6 +97,16 @@ integer quantity and Decimal capital for every `nmId`. Facility identity,
 Moscow/Orenburg allocation and `T` are external reviewed decisions, never
 deploy-time defaults. Detail remains unpublished and is never added a second
 time to total stock.
+
+Migration 142 activates that detail only through an exact owner-gated Stage 7C
+manifest. The live aggregate remains the public six-stage `ff` truth and must
+equal the sum of facility × `FBS|FBO` after opening, historical FBS debit and
+every later lifecycle/guided document. Opening accepts signed INTEGER quantity
+and exact Decimal text capital, including fractional kopecks. FBS reservations
+change `available`, not physical aggregate quantity; negative available is a
+valid explicit state. Any aggregate/detail, source, mapping, pending-receipt or
+checkpoint drift disables/rejects the cutover instead of publishing a second
+total.
 
 # 2. Physical and cost rules
 

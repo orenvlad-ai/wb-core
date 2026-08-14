@@ -112,7 +112,7 @@ related_runners:
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. The facility × FBS|FBO foundation, durable documents, protected explanatory surface, append-only FBW origin evidence and official FBS observations exist strictly below this aggregate authority. Migration 141 gives that shadow a dedicated five-minute poller and immutable same-order transition evidence, but no aggregate reader, reservation/movement producer or debit trigger uses it. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. Migration 142 opens facility × FBS|FBO detail beneath that aggregate with signed INTEGER/exact Decimal conservation, exact historical FBS checkpoint and epoch-gated post-T reserve/release/complete+sorted fulfillment; no code writes WB. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -594,3 +594,24 @@ epoch, apply an opening, post a guided acceptance, touch aggregate FF
 quantity/capital or create a ledger/reservation/movement. Exact target/env
 before-images and post-apply invariants make this activation evidence-bearing,
 but it is not permission to run the later physical opening/cutover stage.
+
+### Stage 7C exact opening and FBS lifecycle
+
+Migration 142 supplies the trusted production writer that Stage 6 intentionally
+lacked. It allocates the exact current aggregate `ff` rows into active
+facility/pool detail with signed SQLite `INTEGER` quantities and exact Decimal
+text capital/WAC, posts immutable opening evidence, then applies the pre-T FBS
+checkpoint. Complete/sorted historical handoff orders debit physical stock once;
+active orders reserve only; pre-handoff cancellation is a no-op. Available may
+be negative while physical/capital remain exact. Post-T fulfillment uses the
+same frozen opening WAC and idempotent order/event identity; later sold/closed
+cannot debit again, and post-handoff cancellation/return is reconciliation
+evidence rather than an implicit receipt.
+
+The processor is hard-off without an applied manifest, approved complete/sorted
+policy and writer epoch. It consumes only local immutable official observations
+after the five-minute collector commits them and performs no WB mutation. An
+explicit clean `excluded_pending_receipt` stays outside opening/backfill and can
+later enter both aggregate and pools exactly once through guided acceptance.
+Aggregate/detail parity is recomputed after every physical lifecycle or guided
+document movement.

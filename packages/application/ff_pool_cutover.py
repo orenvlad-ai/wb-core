@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from packages.application.ff_pool_documents import (
+    DOCUMENTS_TABLE,
     REQUESTS_TABLE,
     _apply_plan,
     _build_posting_plan,
@@ -29,8 +30,17 @@ from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
     FEATURE_EPOCHS_TABLE,
+    LINES_TABLE,
+    OPERATIONS_TABLE,
+    PARITY_TABLE,
     canonical_decimal_text,
+    evaluate_ff_pool_aggregate_parity,
     ensure_ff_pool_foundation_schema,
+    record_ff_pool_parity_diagnostic,
+)
+from packages.application.ff_pool_fbs_lifecycle import (
+    apply_opening_fbs_backfill,
+    ensure_ff_pool_fbs_lifecycle_schema,
 )
 from packages.application.ff_wb_supply_origins import (
     ASSIGNMENTS_TABLE,
@@ -45,6 +55,8 @@ from packages.application.warehouse_domain_write_guard import (
 from packages.application.wb_fbs_orders import (
     OBSERVATIONS_TABLE,
     STATE_TABLE as FBS_COLLECTOR_STATE_TABLE,
+    STATUS_CURRENT_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
     ensure_wb_fbs_orders_schema,
 )
 
@@ -61,6 +73,7 @@ CHECKPOINTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_checkpoints"
 OPENING_RESERVATIONS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_opening_reservations"
 LATE_PRE_T_TABLE = "sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases"
 RECOVERY_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_recovery_events"
+PENDING_SHIPMENTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_pending_shipments"
 FIXTURE_MARKER_TABLE = "ff_pool_cutover_test_fixture_marker"
 
 FUNCTIONAL_ACTIVE_TABLE = "sheet_vitrina_v1_warehouse_functional_active"
@@ -69,8 +82,10 @@ WB_SUPPLIES_TABLE = "sheet_vitrina_v1_wb_supplies"
 FF_STAGE = "ff"
 POOLS = ("FBS", "FBO")
 ORDER_CLASSES = (
+    "pre_t_handoff_debit",
     "pre_t_absorbed_closed",
     "pre_t_absorbed_reservation",
+    "pre_t_cancelled_noop",
     "post_t_deferred",
     "unmatched",
 )
@@ -80,7 +95,13 @@ STATUS_EVIDENCE_CLASSES = (
     "unmatched",
 )
 PRE_T_CLASSES = frozenset(
-    {"pre_t_absorbed_closed", "pre_t_absorbed_reservation", "unmatched"}
+    {
+        "pre_t_handoff_debit",
+        "pre_t_absorbed_closed",
+        "pre_t_absorbed_reservation",
+        "pre_t_cancelled_noop",
+        "unmatched",
+    }
 )
 ACTIVE_FBW_STATUS_IDS = (1, 2, 3, 4)
 MAX_ALLOCATIONS = 100_000
@@ -106,10 +127,6 @@ FORBIDDEN_PROPOSAL_KEYS = frozenset(
         "raw",
         "raw_json",
         "raw_payload",
-        "supplier_status",
-        "supplierstatus",
-        "wb_status",
-        "wbstatus",
         "debit_trigger",
         "physical_debit_trigger",
     }
@@ -132,6 +149,7 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
 
     ensure_ff_pool_foundation_schema(conn)
     ensure_ff_pool_document_schema(conn)
+    ensure_ff_pool_fbs_lifecycle_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
     conn.executescript(
@@ -301,6 +319,27 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ff_pool_cutover_recovery_by_cutover
         ON {RECOVERY_EVENTS_TABLE}(cutover_id,recovery_sequence,event_type);
+
+        CREATE TABLE IF NOT EXISTS {PENDING_SHIPMENTS_TABLE}(
+            cutover_id TEXT NOT NULL REFERENCES {MANIFESTS_TABLE}(cutover_id),
+            shipment_id TEXT NOT NULL,
+            invoice_no TEXT NOT NULL,
+            classification TEXT NOT NULL CHECK(classification='excluded_pending_receipt'),
+            facility_id TEXT NOT NULL REFERENCES {FACILITIES_TABLE}(facility_id),
+            pools_json TEXT NOT NULL CHECK(json_valid(pools_json)),
+            expected_quantity INTEGER NOT NULL
+                CHECK(typeof(expected_quantity)='integer' AND expected_quantity>0),
+            actual_ff_acceptance_date TEXT NOT NULL DEFAULT '',
+            receipt_operation_count INTEGER NOT NULL CHECK(receipt_operation_count=0),
+            cost_layer_count INTEGER NOT NULL CHECK(cost_layer_count=0),
+            evidence_digest TEXT NOT NULL,
+            post_cutover_state TEXT NOT NULL CHECK(post_cutover_state='in_transit'),
+            guided_acceptance_required INTEGER NOT NULL
+                CHECK(guided_acceptance_required=1),
+            PRIMARY KEY(cutover_id,shipment_id)
+        );
+        CREATE INDEX IF NOT EXISTS ff_pool_cutover_pending_shipments_by_invoice
+        ON {PENDING_SHIPMENTS_TABLE}(cutover_id,invoice_no,shipment_id);
         """
     )
     for table in (
@@ -313,6 +352,7 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         OPENING_RESERVATIONS_TABLE,
         LATE_PRE_T_TABLE,
         RECOVERY_EVENTS_TABLE,
+        PENDING_SHIPMENTS_TABLE,
     ):
         suffix = table.removeprefix("sheet_vitrina_v1_")
         conn.execute(
@@ -436,7 +476,10 @@ def build_ff_pool_cutover_plan(
         blockers=blockers,
     )
     china_shipments = _china_shipment_snapshot(
-        normalized["china_shipments"], facilities=facilities, blockers=blockers
+        conn,
+        normalized["china_shipments"],
+        facilities=facilities,
+        blockers=blockers,
     )
     collector = _collector_checkpoint_snapshot(
         conn,
@@ -475,6 +518,12 @@ def build_ff_pool_cutover_plan(
     opening_document_id = "ffpd_" + _fingerprint(
         {"cutover_id": normalized["cutover_id"], "source": source_snapshot_digest}
     ).removeprefix("sha256:")[:28]
+    projected_aggregate = _project_post_backfill_aggregate(
+        aggregate_rows=aggregate["rows"],
+        allocations=allocation["rows"],
+        classifications=observations["classifications"],
+        blockers=blockers,
+    )
     manifest = {
         "contract_name": CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
@@ -487,6 +536,9 @@ def build_ff_pool_cutover_plan(
         "aggregate_revision": aggregate["revision"],
         "aggregate_digest": aggregate["digest"],
         "aggregate_rows": aggregate["rows"],
+        "post_backfill_aggregate_rows": projected_aggregate["rows"],
+        "post_backfill_allocations": projected_aggregate["detail_rows"],
+        "historical_fbs_backfill": projected_aggregate["summary"],
         "allocations": allocation["rows"],
         "detail_digest": allocation["digest"],
         "order_classifications": observations["classifications"],
@@ -499,6 +551,18 @@ def build_ff_pool_cutover_plan(
         "fbw_origins_digest": fbw_origins["digest"],
         "china_shipments": china_shipments["rows"],
         "china_shipments_digest": china_shipments["digest"],
+        "handoff_policy": {
+            **normalized["handoff_policy"],
+            "official_semantics": (
+                "WB-controlled warehouse handoff is supplierStatus=complete "
+                "and wbStatus=sorted; supplierStatus=complete alone is forbidden"
+            ),
+            "official_sources": [
+                "https://dev.wildberries.ru/openapi/orders-fbs/",
+                "https://dev.wildberries.ru/openapi-other/sandbox-environment",
+            ],
+            "supplier_status_complete_alone_forbidden": True,
+        },
         "collector_checkpoint": collector,
         "control_evidence_digest": _fingerprint(controls),
         "non_target_digest": non_target["digest"],
@@ -506,15 +570,21 @@ def build_ff_pool_cutover_plan(
         "source_snapshot_digest": source_snapshot_digest,
         "opening_document_id": opening_document_id,
         "invariants": {
-            "aggregate_ff_unchanged": True,
-            "aggregate_detail_quantity_parity": allocation["quantity_matches"],
-            "aggregate_detail_capital_parity": allocation["capital_matches"],
+            "opening_source_aggregate_conserved": True,
+            "opening_aggregate_detail_quantity_parity": allocation["quantity_matches"],
+            "opening_aggregate_detail_capital_parity": allocation["capital_matches"],
+            "post_backfill_aggregate_detail_parity": True,
             "no_new_warehouse_stage": True,
             "opening_absorption_once": True,
             "late_pre_t_isolated": True,
             "fbw_origin_explicit_not_destination_inferred": True,
             "supplier_status_complete_never_debits": True,
-            "physical_debit_trigger_selected": False,
+            "physical_debit_trigger_selected": bool(normalized["handoff_policy"]["approved"]),
+            "physical_debit_trigger": (
+                "supplierStatus=complete AND wbStatus=sorted"
+                if normalized["handoff_policy"]["approved"]
+                else "proposed_only"
+            ),
             "wb_mutation": False,
             "journal_mode_change": False,
             "legacy_relation_backfill": False,
@@ -523,20 +593,15 @@ def build_ff_pool_cutover_plan(
     manifest_digest = _fingerprint(manifest)
     counts = _classification_counts(observations["classifications"])
     ready = not blockers
-    stage2_opening_compatible = all(
-        int(item["quantity"]) > 0
-        and Decimal(str(item["capital_rub"])) > ZERO
-        and Decimal(str(item["capital_rub"])).quantize(RUB_QUANTUM) == Decimal(str(item["capital_rub"]))
-        for item in list(aggregate["rows"]) + list(allocation["rows"])
-    )
+    owner_policy_approved = bool(normalized["handoff_policy"]["approved"])
     return {
         "contract_name": CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
         "status": "ready" if ready else "blocked",
         "dry_run": True,
-        "apply_surface_available": False,
-        "apply_allowed": ready and stage2_opening_compatible,
-        "production_apply_contract_ready": stage2_opening_compatible,
+        "apply_surface_available": True,
+        "apply_allowed": ready and owner_policy_approved,
+        "production_apply_contract_ready": True,
         "requires_exact_human_gate": True,
         "manifest_digest": manifest_digest if ready else "",
         "manifest": manifest,
@@ -555,9 +620,9 @@ def build_ff_pool_cutover_plan(
             "post_t_deferred_count": counts["post_t_deferred"],
             "barrier": _safe_barrier(barrier),
             "next_action": (
-                "review_exact_manifest_and_open_separate_production_mutation_gate"
-                if ready and stage2_opening_compatible
-                else "implement_signed_exact_decimal_opening_contract"
+                "apply_exact_fingerprint_under_confirmed_barrier"
+                if ready and owner_policy_approved
+                else "obtain_exact_owner_gate_for_proposed_complete_sorted_rule"
                 if ready
                 else "resolve_local_manifest_blockers"
             ),
@@ -578,7 +643,7 @@ def read_ff_pool_cutover_status(conn: sqlite3.Connection) -> dict[str, Any]:
         return {
             "contract_name": CONTRACT_NAME,
             "status": "schema_absent",
-            "apply_surface_available": False,
+            "apply_surface_available": True,
             "missing_tables": schema["missing_tables"],
         }
     manifest = conn.execute(
@@ -610,6 +675,7 @@ def read_ff_pool_cutover_status(conn: sqlite3.Connection) -> dict[str, Any]:
                 "opening_reservations": 0,
                 "late_pre_t": 0,
                 "recovery_events": 0,
+                "excluded_pending_receipts": 0,
             },
             "next_action": "prepare_exact_manifest_under_later_human_gate",
         }
@@ -624,6 +690,7 @@ def read_ff_pool_cutover_status(conn: sqlite3.Connection) -> dict[str, Any]:
         "opening_reservations": _count(conn, OPENING_RESERVATIONS_TABLE, cutover_id),
         "late_pre_t": _count(conn, LATE_PRE_T_TABLE, cutover_id),
         "recovery_events": _count(conn, RECOVERY_EVENTS_TABLE, cutover_id),
+        "excluded_pending_receipts": _count(conn, PENDING_SHIPMENTS_TABLE, cutover_id),
         "unmatched": int(
             conn.execute(
                 f"SELECT COUNT(*) FROM {ORDERS_TABLE} "
@@ -645,7 +712,7 @@ def read_ff_pool_cutover_status(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "contract_name": CONTRACT_NAME,
         "status": "applied_unreleased" if barrier.get("active") else "applied",
-        "apply_surface_available": False,
+        "apply_surface_available": True,
         "manifest": _manifest_row(manifest),
         "checkpoint": _row_dict(checkpoint),
         "feature_epoch": _feature_row(feature),
@@ -701,22 +768,74 @@ def read_ff_pool_cutover_readback(
     }
     expected_detail = {
         (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"])): (
-            int(item["quantity"]), str(item["capital_rub"])
+            int(item["quantity"]), Decimal(str(item["capital_rub"]))
         )
-        for item in manifest.get("allocations") or []
+        for item in manifest.get("post_backfill_allocations") or manifest.get("allocations") or []
     }
-    if detail != expected_detail:
+    lifecycle_table = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+    if _table_exists(conn, lifecycle_table):
+        for event in conn.execute(
+            f"""SELECT facility_id,pool,nm_id,physical_quantity_delta,capital_delta_rub
+                FROM {lifecycle_table}
+                WHERE cutover_id=? AND event_type='handoff_debit'
+                ORDER BY event_sequence""",
+            (identity,),
+        ).fetchall():
+            key = (str(event[0]), str(event[1]), int(event[2]))
+            quantity, capital = expected_detail.get(key, (0, ZERO))
+            expected_detail[key] = (
+                quantity + int(event[3]), capital + Decimal(str(event[4]))
+            )
+    document_movements = conn.execute(
+        f"""SELECT line.facility_id,line.pool,line.nm_id,line.quantity_delta,
+                   line.capital_delta_rub
+            FROM {LINES_TABLE} AS line
+            JOIN {OPERATIONS_TABLE} AS operation USING(operation_id)
+            WHERE operation.idempotency_epoch=?
+              AND operation.source_type LIKE 'ff_pool_document:%'
+            ORDER BY operation.posted_at,operation.operation_id,line.line_no""",
+        (int(row[2]),),
+    ).fetchall()
+    for movement in document_movements:
+        key = (str(movement[0]), str(movement[1]), int(movement[2]))
+        quantity, capital = expected_detail.get(key, (0, ZERO))
+        expected_detail[key] = (
+            quantity + int(movement[3]), capital + Decimal(str(movement[4]))
+        )
+    normalized_detail = {
+        key: (quantity, canonical_decimal_text(capital))
+        for key, (quantity, capital) in expected_detail.items()
+    }
+    if detail != normalized_detail:
         mismatches.append("detail_projection")
     aggregate_by_nm = {
         int(item["nm_id"]): (int(item["quantity"]), Decimal(str(item["capital_rub"])))
-        for item in manifest.get("aggregate_rows") or []
+        for item in manifest.get("post_backfill_aggregate_rows") or manifest.get("aggregate_rows") or []
     }
+    if _table_exists(conn, lifecycle_table):
+        for event in conn.execute(
+            f"""SELECT nm_id,physical_quantity_delta,capital_delta_rub
+                FROM {lifecycle_table}
+                WHERE cutover_id=? AND event_type='handoff_debit'
+                ORDER BY event_sequence""",
+            (identity,),
+        ).fetchall():
+            nm_id = int(event[0])
+            quantity, capital = aggregate_by_nm.get(nm_id, (0, ZERO))
+            aggregate_by_nm[nm_id] = (
+                quantity + int(event[1]), capital + Decimal(str(event[2]))
+            )
+    for movement in document_movements:
+        nm_id = int(movement[2])
+        quantity, capital = aggregate_by_nm.get(nm_id, (0, ZERO))
+        aggregate_by_nm[nm_id] = (
+            quantity + int(movement[3]), capital + Decimal(str(movement[4]))
+        )
     summed: dict[int, tuple[int, Decimal]] = {}
-    for item in manifest.get("allocations") or []:
-        nm_id = int(item["nm_id"])
+    for (_facility_id, _pool, nm_id), (item_quantity, item_capital) in expected_detail.items():
         quantity, capital = summed.get(nm_id, (0, ZERO))
         summed[nm_id] = (
-            quantity + int(item["quantity"]), capital + Decimal(str(item["capital_rub"]))
+            quantity + int(item_quantity), capital + Decimal(str(item_capital))
         )
     if summed != aggregate_by_nm:
         mismatches.append("aggregate_detail_parity")
@@ -724,7 +843,7 @@ def read_ff_pool_cutover_readback(
         f"SELECT writer_enabled,reader_enabled,source_revision FROM {FEATURE_EPOCHS_TABLE} WHERE epoch=?",
         (int(row[2]),),
     ).fetchone()
-    if feature is None or (int(feature[0]), int(feature[1]), str(feature[2])) != (1, 0, str(row[0])):
+    if feature is None or (int(feature[0]), int(feature[1]), str(feature[2])) != (1, 1, str(row[0])):
         mismatches.append("feature_epoch")
     checkpoint = conn.execute(
         f"""SELECT cutover_at,feature_epoch,observation_watermark_sequence,
@@ -768,8 +887,46 @@ def read_ff_pool_cutover_readback(
             (identity,),
         ).fetchall()
     ]
-    if persisted_orders != list(manifest.get("order_classifications") or []):
+    manifest_orders = list(manifest.get("order_classifications") or [])
+    persisted_projection_keys = (
+        "order_id",
+        "observation_id",
+        "source_revision",
+        "source_created_at",
+        "observed_at",
+        "classification",
+        "facility_id",
+        "pool",
+        "nm_id",
+        "quantity",
+        "status_fingerprint",
+        "mapping_digest",
+    )
+    manifest_order_projection = [
+        {key: item.get(key) for key in persisted_projection_keys}
+        for item in manifest_orders
+    ]
+    if persisted_orders != manifest_order_projection:
         mismatches.append("order_classifications")
+    for item in manifest_orders:
+        primary = _official_order_status_evidence(
+            conn,
+            order_id=int(item["order_id"]),
+            cutover_at=str(manifest["cutover_at"]),
+            classification=str(item["classification"]),
+        )
+        reconciliation = _official_post_handoff_reconciliation_evidence(
+            conn,
+            order_id=int(item["order_id"]),
+            cutover_at=str(manifest["cutover_at"]),
+            classification=str(item["classification"]),
+        )
+        if primary != item.get("status_evidence"):
+            mismatches.append(f"order_status_evidence:{int(item['order_id'])}")
+        if reconciliation != item.get("post_handoff_reconciliation"):
+            mismatches.append(
+                f"order_reconciliation_evidence:{int(item['order_id'])}"
+            )
     persisted_fbw = [
         {
             "wb_supply_cache_key": str(item[0]), "wb_supply_id": str(item[1]),
@@ -798,7 +955,7 @@ def read_ff_pool_cutover_readback(
         expected_aggregate = {
             str(item["nm_id"]): {
                 "quantity": int(item["quantity"]),
-                "capital_rub": f"{Decimal(str(item['capital_rub'])):.2f}",
+                "capital_rub": canonical_decimal_text(item["capital_rub"]),
             }
             for item in manifest.get("aggregate_rows") or []
         }
@@ -813,17 +970,64 @@ def read_ff_pool_cutover_readback(
             mismatches.append("opening_document")
     aggregate_blockers: list[dict[str, Any]] = []
     current_aggregate = _aggregate_snapshot(conn, blockers=aggregate_blockers)
-    aggregate_unchanged = (
-        not aggregate_blockers
-        and str(current_aggregate["revision"]) == str(manifest["aggregate_revision"])
-        and str(current_aggregate["digest"]) == str(manifest["aggregate_digest"])
+    expected_current_aggregate = [
+        {
+            "nm_id": nm_id,
+            "quantity": quantity,
+            "capital_rub": canonical_decimal_text(capital),
+            "wac_rub": (
+                None
+                if quantity == 0
+                else canonical_decimal_text(capital / Decimal(quantity))
+            ),
+        }
+        for nm_id, (quantity, capital) in sorted(aggregate_by_nm.items())
+    ]
+    actual_aggregate_rows = list(current_aggregate["rows"])
+    aggregate_unchanged = not aggregate_blockers and _exact_accounting_rows_equal(
+        actual_aggregate_rows, expected_current_aggregate
     )
     if not aggregate_unchanged:
-        mismatches.append("aggregate_source_drift")
+        mismatches.append("aggregate_post_backfill_drift")
+    persisted_shipments = [
+        {
+            "shipment_id": str(item[0]),
+            "invoice_no": str(item[1]),
+            "classification": str(item[2]),
+            "facility_id": str(item[3]),
+            "pools": json.loads(str(item[4])),
+            "expected_quantity": int(item[5]),
+            "actual_ff_acceptance_date": str(item[6]),
+            "receipt_operation_count": int(item[7]),
+            "cost_layer_count": int(item[8]),
+            "evidence_digest": str(item[9]),
+            "post_cutover_state": str(item[10]),
+            "guided_acceptance_required": bool(item[11]),
+            "opening_quantity": 0,
+            "opening_capital_rub": "0",
+            "historical_fbs_debit_quantity": 0,
+        }
+        for item in conn.execute(
+            f"""SELECT shipment_id,invoice_no,classification,facility_id,pools_json,
+                       expected_quantity,actual_ff_acceptance_date,
+                       receipt_operation_count,cost_layer_count,evidence_digest,
+                       post_cutover_state,guided_acceptance_required
+                FROM {PENDING_SHIPMENTS_TABLE}
+                WHERE cutover_id=? ORDER BY shipment_id""",
+            (identity,),
+        ).fetchall()
+    ]
+    if persisted_shipments != list(manifest.get("china_shipments") or []):
+        mismatches.append("excluded_pending_receipt_evidence")
     current_non_target = _bounded_non_target_snapshot(conn)
     if (
         current_non_target != dict(manifest.get("non_target") or {})
         or str(current_non_target["digest"]) != str(manifest["non_target_digest"])
+    ) and not _known_post_cutover_non_target_growth(
+        conn,
+        cutover_id=identity,
+        before=dict(manifest.get("non_target") or {}),
+        current=current_non_target,
     ):
         mismatches.append("non_target_drift")
     return {
@@ -833,8 +1037,36 @@ def read_ff_pool_cutover_readback(
         "feature_epoch": int(row[2]),
         "mismatches": mismatches,
         "aggregate_unchanged": aggregate_unchanged,
-        "reader_enabled": False,
+        "aggregate_expected": expected_current_aggregate,
+        "aggregate_actual": actual_aggregate_rows,
+        "reader_enabled": True,
     }
+
+
+def _exact_accounting_rows_equal(
+    actual: list[dict[str, Any]], expected: list[dict[str, Any]]
+) -> bool:
+    """Compare exact accounting values without treating Decimal scale as drift."""
+
+    if len(actual) != len(expected):
+        return False
+    for actual_row, expected_row in zip(actual, expected, strict=True):
+        if int(actual_row["nm_id"]) != int(expected_row["nm_id"]):
+            return False
+        if int(actual_row["quantity"]) != int(expected_row["quantity"]):
+            return False
+        if Decimal(str(actual_row["capital_rub"])) != Decimal(
+            str(expected_row["capital_rub"])
+        ):
+            return False
+        actual_wac = actual_row.get("wac_rub")
+        expected_wac = expected_row.get("wac_rub")
+        if actual_wac is None or expected_wac is None:
+            if actual_wac is not None or expected_wac is not None:
+                return False
+        elif Decimal(str(actual_wac)) != Decimal(str(expected_wac)):
+            return False
+    return True
 
 
 def classify_late_pre_t_observations(
@@ -942,6 +1174,372 @@ def ff_pool_cutover_preflight_snapshot(conn: sqlite3.Connection) -> dict[str, An
     }
 
 
+def apply_ff_pool_cutover(
+    conn: sqlite3.Connection,
+    *,
+    proposal: Mapping[str, Any],
+    deployed_sha: str,
+    cutover_at: str,
+    expected_manifest_digest: str,
+    approval_reference: str,
+    actor: str,
+    crash: str = "",
+) -> dict[str, Any]:
+    """Apply one exact owner-gated cutover under an already-held T barrier.
+
+    The caller owns the external HTTP/maintenance barrier.  This transaction
+    owns the SQLite-local write epoch, signed opening, immutable checkpoint,
+    exact historical backfill and parity evidence.  No WB endpoint is called.
+    """
+
+    _require_commit_sha(deployed_sha)
+    expected = _sha256(expected_manifest_digest, "expected_manifest_digest")
+    normalized = _normalize_proposal(proposal)
+    if not normalized["handoff_policy"]["approved"]:
+        raise FfPoolCutoverError(
+            "owner_gate_required", "Production apply requires the approved complete/sorted policy"
+        )
+    if str(normalized["handoff_policy"]["approval_reference"]) != str(
+        approval_reference or ""
+    ).strip():
+        raise FfPoolCutoverError(
+            "approval_reference_mismatch", "The exact owner gate reference does not match"
+        )
+    existing = conn.execute(
+        f"SELECT manifest_digest,deployed_sha,cutover_at,manifest_json FROM {MANIFESTS_TABLE} WHERE cutover_id=?",
+        (normalized["cutover_id"],),
+    ).fetchone()
+    if existing is not None:
+        stored_manifest = json.loads(str(existing[3]))
+        if (
+            str(existing[0]) != expected
+            or str(existing[1]) != deployed_sha
+            or str(existing[2]) != _utc_timestamp(cutover_at, field="cutover_at")
+            or str(stored_manifest.get("proposal_digest") or "") != _fingerprint(normalized)
+        ):
+            raise FfPoolCutoverError(
+                "manifest_conflict", "cutover_id already owns another exact manifest"
+            )
+        return {
+            "contract_name": CONTRACT_NAME,
+            "status": "already_applied",
+            "manifest_digest": str(existing[0]),
+            "idempotent": True,
+            "mutates_wb": False,
+        }
+    now = _utc_timestamp(cutover_at, field="cutover_at")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        plan = build_ff_pool_cutover_plan(
+            conn,
+            proposal=proposal,
+            deployed_sha=deployed_sha,
+            cutover_at=cutover_at,
+        )
+        if plan["status"] != "ready" or not plan["apply_allowed"]:
+            raise FfPoolCutoverError(
+                "plan_not_ready", "Exact production plan is not applyable", details=plan["blockers"]
+            )
+        if str(plan["manifest_digest"]) != expected:
+            raise FfPoolCutoverError(
+                "manifest_fingerprint_mismatch",
+                "Live T revalidation changed the exact manifest fingerprint",
+                details={"expected": expected, "actual": plan["manifest_digest"]},
+            )
+        manifest = plan["manifest"]
+        epoch_id = normalized["write_epoch_id"]
+        epoch_digest = normalized["control_manifest_digest"]
+        conn.execute(
+            f"""INSERT INTO {WRITE_EPOCH_EVENTS_TABLE}(
+                    epoch_id,phase,manifest_digest,deployed_sha,event_at,actor,details_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                epoch_id,
+                "applying",
+                epoch_digest,
+                deployed_sha,
+                now,
+                str(actor),
+                json.dumps(
+                    {
+                        "cutover_manifest_digest": expected,
+                        "approval_reference": approval_reference,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+        conn.execute(
+            f"""INSERT INTO {FEATURE_EPOCHS_TABLE}(
+                    epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json
+                ) VALUES(?,?,?,?,?,?)""",
+            (
+                int(manifest["feature_epoch"]),
+                1,
+                1,
+                expected,
+                now,
+                json.dumps(
+                    {
+                        "cutover_id": manifest["cutover_id"],
+                        "handoff_policy": manifest["handoff_policy"],
+                        "default_off_before_cutover": True,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+        _apply_exact_opening(conn, plan=plan, actor=str(actor), now=now)
+        _insert_cutover_manifest(conn, plan=plan, now=now)
+        backfill = apply_opening_fbs_backfill(conn, manifest=manifest, occurred_at=now)
+        if crash == "before_commit":
+            raise RuntimeError("production-shaped crash before commit")
+        aggregate_after = _aggregate_snapshot(conn, blockers=[])
+        if aggregate_after["rows"] != list(manifest["post_backfill_aggregate_rows"]):
+            raise FfPoolCutoverError(
+                "post_backfill_aggregate_mismatch",
+                "Exact aggregate projection does not match the manifest",
+            )
+        parity = evaluate_ff_pool_aggregate_parity(
+            conn, manifest["post_backfill_aggregate_rows"]
+        )
+        if parity.status != "pass":
+            raise FfPoolCutoverError(
+                "post_backfill_parity_failed",
+                "Facility/pool and aggregate FF diverged after exact backfill",
+                details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
+            )
+        record_ff_pool_parity_diagnostic(
+            conn,
+            diagnostic_id="ffpar_" + expected.removeprefix("sha256:")[:28],
+            aggregate_revision=str(manifest["aggregate_revision"]),
+            checked_at=now,
+            result=parity,
+            details={
+                "cutover_id": manifest["cutover_id"],
+                "opening_source_conserved": True,
+                "historical_backfill": backfill,
+            },
+        )
+        conn.execute(
+            f"""INSERT INTO {RECOVERY_EVENTS_TABLE}(
+                    cutover_id,event_type,event_at,evidence_digest,details_json
+                ) VALUES(?,?,?,?,?)""",
+            (
+                manifest["cutover_id"],
+                "applied",
+                now,
+                expected,
+                json.dumps(backfill, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        conn.execute(
+            f"""INSERT INTO {WRITE_EPOCH_EVENTS_TABLE}(
+                    epoch_id,phase,manifest_digest,deployed_sha,event_at,actor,details_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                epoch_id,
+                "readback_required",
+                epoch_digest,
+                deployed_sha,
+                now,
+                str(actor),
+                json.dumps({"cutover_manifest_digest": expected}, separators=(",", ":")),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if crash == "after_commit":
+        raise FfPoolCutoverAmbiguousCommit("commit succeeded; exact readback is mandatory")
+    readback = read_ff_pool_cutover_readback(
+        conn, cutover_id=str(normalized["cutover_id"])
+    )
+    if readback["status"] != "pass":
+        raise FfPoolCutoverAmbiguousCommit(
+            "commit completed but exact readback requires forward recovery"
+        )
+    return {
+        "contract_name": CONTRACT_NAME,
+        "status": "applied_readback_required",
+        "manifest_digest": expected,
+        "cutover_at": now,
+        "backfill": backfill,
+        "readback": readback,
+        "idempotent": False,
+        "mutates_wb": False,
+    }
+
+
+def _apply_exact_opening(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+    actor: str,
+    now: str,
+) -> None:
+    manifest = dict(plan["manifest"])
+    digest = str(plan["manifest_digest"])
+    epoch = int(manifest["feature_epoch"])
+    request_id = str(manifest["opening_document_id"])
+    operation_id = "ffbo_open_" + digest.removeprefix("sha256:")[:28]
+    posted_manifest = {
+        "contract_name": "ff_pool_exact_opening_v1",
+        "feature_epoch": epoch,
+        "allocations": manifest["allocations"],
+        "domain": {
+            "aggregate_unchanged": True,
+            "detail_parity": True,
+            "aggregate_by_nm": {
+                str(item["nm_id"]): {
+                    "quantity": int(item["quantity"]),
+                    "capital_rub": canonical_decimal_text(item["capital_rub"]),
+                }
+                for item in manifest["aggregate_rows"]
+            },
+            "signed_integer_quantity": True,
+            "exact_decimal_text_capital": True,
+        },
+    }
+    posted_json = json.dumps(
+        posted_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    posted_digest = _fingerprint(posted_manifest)
+    conn.execute(
+        f"""INSERT INTO {REQUESTS_TABLE}(
+                request_id,request_identity,client_request_id,document_kind,state,
+                source_system,source_type,source_id,source_revision,idempotency_epoch,
+                actor,business_date,source_filename,source_content_type,source_sha256,
+                source_file_blob,template_fingerprint,request_payload_json,
+                preview_manifest_json,posted_manifest_sha256,posted_document_id,
+                accepted_at,started_at,ready_at,posted_at,completed_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            request_id,
+            digest,
+            request_id,
+            "facility_pool_opening",
+            "complete",
+            "ff_pool_cutover",
+            "cutover_manifest",
+            str(manifest["cutover_id"]),
+            digest,
+            epoch,
+            actor,
+            str(manifest["business_date"]),
+            "",
+            "application/json",
+            "",
+            None,
+            digest,
+            posted_json,
+            posted_json,
+            posted_digest,
+            request_id,
+            now,
+            now,
+            now,
+            now,
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        f"""INSERT INTO {OPERATIONS_TABLE}(
+                operation_id,operation_type,source_system,source_type,source_id,
+                source_revision,idempotency_epoch,business_date,posted_at,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            operation_id,
+            "facility_pool_opening",
+            "ff_pool_cutover",
+            "cutover_manifest",
+            str(manifest["cutover_id"]),
+            digest,
+            epoch,
+            str(manifest["business_date"]),
+            now,
+            json.dumps(
+                {"signed_integer_quantity": True, "exact_decimal_text_capital": True},
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    for line in manifest["allocations"]:
+        conn.execute(
+            f"""INSERT INTO {LINES_TABLE}(
+                    operation_id,line_no,facility_id,pool,nm_id,quantity_delta,
+                    capital_delta_rub,wac_snapshot_rub,metadata_json
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                operation_id,
+                int(line["line_no"]),
+                str(line["facility_id"]),
+                str(line["pool"]),
+                int(line["nm_id"]),
+                int(line["quantity"]),
+                canonical_decimal_text(line["capital_rub"]),
+                None if line["wac_rub"] is None else canonical_decimal_text(line["wac_rub"]),
+                json.dumps(
+                    {"allocation_digest": line["allocation_digest"]}, separators=(",", ":")
+                ),
+            ),
+        )
+        conn.execute(
+            f"""INSERT INTO {BALANCES_TABLE}(
+                    facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                    wac_rub,source_watermark,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                str(line["facility_id"]),
+                str(line["pool"]),
+                int(line["nm_id"]),
+                epoch,
+                int(line["quantity"]),
+                canonical_decimal_text(line["capital_rub"]),
+                None if line["wac_rub"] is None else canonical_decimal_text(line["wac_rub"]),
+                digest,
+                now,
+            ),
+        )
+    conn.execute(
+        f"""INSERT INTO {DOCUMENTS_TABLE}(
+                document_id,request_id,document_role,document_kind,root_document_id,
+                operation_id,source_system,source_type,source_id,source_revision,
+                idempotency_epoch,actor,business_date,source_filename,
+                source_content_type,source_sha256,template_fingerprint,
+                posted_manifest_sha256,posted_manifest_json,posted_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            request_id,
+            request_id,
+            "root",
+            "facility_pool_opening",
+            request_id,
+            operation_id,
+            "ff_pool_cutover",
+            "cutover_manifest",
+            str(manifest["cutover_id"]),
+            digest,
+            epoch,
+            actor,
+            str(manifest["business_date"]),
+            "",
+            "application/json",
+            "",
+            digest,
+            posted_digest,
+            posted_json,
+            now,
+        ),
+    )
+
+
 def _apply_ff_pool_cutover_fixture(
     conn: sqlite3.Connection,
     *,
@@ -950,145 +1548,58 @@ def _apply_ff_pool_cutover_fixture(
     cutover_at: str,
     crash: str = "",
 ) -> dict[str, Any]:
-    """Exercise the exact transaction only in explicitly marked test databases.
-
-    This function is intentionally private, is not imported by the query-only
-    CLI, and refuses every normal operational store because the fixture marker
-    table is never part of production schema ensure.
-    """
+    """Exercise the production-shaped transaction only in marked test DBs."""
 
     marker = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (FIXTURE_MARKER_TABLE,)
     ).fetchone()
     if marker is None:
-        raise FfPoolCutoverError("fixture_marker_required", "production apply surface is not shipped")
+        raise FfPoolCutoverError(
+            "fixture_marker_required", "The fixture wrapper requires its explicit marker"
+        )
     normalized = _normalize_proposal(proposal)
     existing = conn.execute(
-        f"SELECT manifest_digest,deployed_sha,cutover_at,manifest_json FROM {MANIFESTS_TABLE} WHERE cutover_id=?",
+        f"SELECT manifest_digest FROM {MANIFESTS_TABLE} WHERE cutover_id=?",
         (normalized["cutover_id"],),
     ).fetchone()
     if existing is not None:
-        stored = json.loads(str(existing[3]))
-        if (
-            str(existing[1]) != deployed_sha
-            or str(existing[2]) != _utc_timestamp(cutover_at, field="cutover_at")
-            or str(stored.get("proposal_digest") or "") != _fingerprint(normalized)
-        ):
-            raise FfPoolCutoverError("manifest_conflict", "cutover_id already has another digest")
-        return {"status": "already_applied", "manifest_digest": str(existing[0]), "idempotent": True}
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        plan = build_ff_pool_cutover_plan(
-            conn, proposal=proposal, deployed_sha=deployed_sha, cutover_at=cutover_at
-        )
-        if plan["status"] != "ready":
-            raise FfPoolCutoverError("plan_not_ready", "fixture apply requires exact ready plan", details=plan["blockers"])
-        manifest = plan["manifest"]
-        if any(
-            int(item["quantity"]) < 0
-            or Decimal(str(item["capital_rub"])).quantize(RUB_QUANTUM) != Decimal(str(item["capital_rub"]))
-            or Decimal(str(item["capital_rub"])) < ZERO
-            for item in list(manifest["aggregate_rows"]) + list(manifest["allocations"])
-        ):
-            raise FfPoolCutoverError(
-                "fixture_stage2_opening_precision_limit",
-                "fixture-only Stage 2 posting covers nonnegative RUB-cent openings; "
-                "the later production runner must preserve signed exact Decimal manifest values",
-            )
-        now = _utc_timestamp(cutover_at, field="cutover_at")
-        epoch_id = normalized["write_epoch_id"]
-        epoch_digest = normalized["control_manifest_digest"]
-        conn.execute(
-            f"""INSERT INTO {WRITE_EPOCH_EVENTS_TABLE}(
-                    epoch_id,phase,manifest_digest,deployed_sha,event_at,actor,details_json
-                ) VALUES(?,?,?,?,?,?,?)""",
-            (epoch_id, "applying", epoch_digest, deployed_sha, now, "stage6_fixture", "{}"),
-        )
-        conn.execute(
-            f"""INSERT INTO {FEATURE_EPOCHS_TABLE}(
-                    epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json
-                ) VALUES(?,?,?,?,?,?)""",
-            (
-                int(manifest["feature_epoch"]), 1, 0, str(plan["manifest_digest"]), now,
-                json.dumps({"cutover_id": manifest["cutover_id"], "reader_default_off": True}, separators=(",", ":")),
-            ),
-        )
-        request_id = str(manifest["opening_document_id"])
-        request_identity = "sha256:" + request_id.removeprefix("ffpd_")
-        request = {
-            "request_id": request_id,
-            "request_identity": request_identity,
-            "document_kind": "facility_pool_opening",
-            "source_system": "ff_pool_cutover",
-            "source_type": "cutover_manifest",
-            "source_id": str(manifest["cutover_id"]),
-            "source_revision": str(plan["manifest_digest"]),
-            "idempotency_epoch": int(manifest["feature_epoch"]),
-            "business_date": str(manifest["business_date"]),
-            "actor": "stage6_fixture",
-            "source_filename": "",
-            "source_content_type": "application/json",
-            "source_sha256": "",
-            "template_fingerprint": str(plan["manifest_digest"]),
-        }
-        opening_input = {
-            "aggregate_rows": manifest["aggregate_rows"],
-            "allocations": manifest["allocations"],
-        }
-        conn.execute(
-            f"""INSERT INTO {REQUESTS_TABLE}(
-                request_id,request_identity,client_request_id,document_kind,state,
-                source_system,source_type,source_id,source_revision,idempotency_epoch,
-                actor,business_date,source_filename,source_content_type,source_sha256,
-                source_file_blob,template_fingerprint,request_payload_json,preview_manifest_json,
-                accepted_at,ready_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                request_id, request_identity, request_id, "facility_pool_opening", "ready",
-                request["source_system"], request["source_type"], request["source_id"],
-                request["source_revision"], request["idempotency_epoch"], request["actor"],
-                request["business_date"], "", "application/json", "", None,
-                request["template_fingerprint"], json.dumps(opening_input, separators=(",", ":")),
-                json.dumps(opening_input, separators=(",", ":")), now, now, now,
-            ),
-        )
-        posting = _build_posting_plan(
+        result = apply_ff_pool_cutover(
             conn,
-            request=request,
-            manifest=opening_input,
-            epoch=int(manifest["feature_epoch"]),
+            proposal=proposal,
+            deployed_sha=deployed_sha,
+            cutover_at=cutover_at,
+            expected_manifest_digest=str(existing[0]),
+            approval_reference=str(normalized["handoff_policy"]["approval_reference"]),
+            actor="stage7c_fixture",
+            crash=crash,
         )
-        _apply_plan(
-            conn,
-            request=request,
-            plan=posting,
-            epoch=int(manifest["feature_epoch"]),
-            posted_at=now,
+        return {**result, "status": "already_applied"}
+    plan = build_ff_pool_cutover_plan(
+        conn, proposal=proposal, deployed_sha=deployed_sha, cutover_at=cutover_at
+    )
+    if plan["status"] != "ready":
+        raise FfPoolCutoverError(
+            "plan_not_ready", "Fixture apply requires an exact ready plan", details=plan["blockers"]
         )
-        conn.execute(
-            f"UPDATE {REQUESTS_TABLE} SET state='complete',posted_document_id=?,"
-            "posted_manifest_sha256=?,posted_at=?,completed_at=?,updated_at=? WHERE request_id=?",
-            (request_id, _fingerprint(posting["posted_manifest"]), now, now, now, request_id),
-        )
-        _insert_fixture_manifest(conn, plan=plan, now=now)
-        if crash == "before_commit":
-            raise RuntimeError("fixture crash before commit")
-        conn.execute(
-            f"""INSERT INTO {WRITE_EPOCH_EVENTS_TABLE}(
-                    epoch_id,phase,manifest_digest,deployed_sha,event_at,actor,details_json
-                ) VALUES(?,?,?,?,?,?,?)""",
-            (epoch_id, "readback_required", epoch_digest, deployed_sha, now, "stage6_fixture", "{}"),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    if crash == "after_commit":
-        raise FfPoolCutoverAmbiguousCommit("commit succeeded; exact readback is mandatory")
-    return {"status": "applied_fixture", "manifest_digest": plan["manifest_digest"], "idempotent": False}
+    result = apply_ff_pool_cutover(
+        conn,
+        proposal=proposal,
+        deployed_sha=deployed_sha,
+        cutover_at=cutover_at,
+        expected_manifest_digest=str(plan["manifest_digest"]),
+        approval_reference=str(
+            normalized["handoff_policy"]["approval_reference"]
+        ),
+        actor="stage7c_fixture",
+        crash=crash,
+    )
+    return {
+        **result,
+        "status": "applied_fixture" if not result["idempotent"] else "already_applied",
+    }
 
 
-def _insert_fixture_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any], now: str) -> None:
+def _insert_cutover_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any], now: str) -> None:
     manifest = plan["manifest"]
     collector = manifest["collector_checkpoint"]
     conn.execute(
@@ -1138,6 +1649,31 @@ def _insert_fixture_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any
                     row["quantity"], wac, capital, row["source_revision"], "opening_absorbed",
                 ),
             )
+        lifecycle_class = (
+            "active_pre_handoff"
+            if row["classification"] == "pre_t_absorbed_reservation"
+            else "closed_pre_handoff"
+        )
+        for status_evidence in (
+            row.get("status_evidence"),
+            row.get("post_handoff_reconciliation"),
+        ):
+            if not status_evidence:
+                continue
+            conn.execute(
+                f"""INSERT OR IGNORE INTO {STATUS_EVIDENCE_TABLE}(
+                        order_id,source_revision,evidence_digest,lifecycle_class,
+                        quantity,observed_at,evidence_source
+                    ) VALUES(?,?,?,?,?,?,'official_wb_status_shadow')""",
+                (
+                    int(row["order_id"]),
+                    str(status_evidence["source_revision"]),
+                    str(status_evidence["status_digest"]),
+                    lifecycle_class,
+                    int(status_evidence["quantity"]),
+                    str(status_evidence["observed_at"]),
+                ),
+            )
     for index, row in enumerate(manifest["fbw_origin_assignments"], 1):
         conn.execute(
             f"INSERT INTO {FBW_ORIGINS_TABLE} VALUES(?,?,?,?,?,?,?)",
@@ -1154,7 +1690,24 @@ def _insert_fixture_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any
             (
                 f"cutover_origin_{index}_{manifest['cutover_id']}", f"cutover_origin_request_{index}_{manifest['cutover_id']}",
                 row["evidence_digest"], row["wb_supply_cache_key"], row["wb_supply_id"], row["source_revision"],
-                manifest["feature_epoch"], row["facility_id"], "FBO", None, "stage6_fixture", "opening manifest", now,
+                manifest["feature_epoch"], row["facility_id"], "FBO", None, "stage7c_cutover", "opening manifest", now,
+            ),
+        )
+    for row in manifest["china_shipments"]:
+        conn.execute(
+            f"""INSERT INTO {PENDING_SHIPMENTS_TABLE}(
+                    cutover_id,shipment_id,invoice_no,classification,facility_id,
+                    pools_json,expected_quantity,actual_ff_acceptance_date,
+                    receipt_operation_count,cost_layer_count,evidence_digest,
+                    post_cutover_state,guided_acceptance_required
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                manifest["cutover_id"], row["shipment_id"], row["invoice_no"],
+                "excluded_pending_receipt", row["facility_id"],
+                json.dumps(row["pools"], separators=(",", ":")),
+                row["expected_quantity"], row["actual_ff_acceptance_date"],
+                row["receipt_operation_count"], row["cost_layer_count"],
+                row["evidence_digest"], "in_transit", 1,
             ),
         )
     conn.execute(
@@ -1196,6 +1749,41 @@ def _normalize_proposal(proposal: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "evidence_digest": _sha256(controls.get("evidence_digest"), "control_evidence.evidence_digest"),
     }
+    raw_policy = _mapping(proposal.get("handoff_policy"), "handoff_policy")
+    if str(raw_policy.get("supplier_status") or "") != "complete":
+        raise FfPoolCutoverError(
+            "invalid_handoff_supplier_status",
+            "The reviewed handoff policy requires supplierStatus=complete",
+        )
+    if str(raw_policy.get("wb_status") or "") != "sorted":
+        raise FfPoolCutoverError(
+            "invalid_handoff_wb_status",
+            "The reviewed WB-controlled handoff policy requires wbStatus=sorted",
+        )
+    decision = str(raw_policy.get("decision") or "")
+    if decision not in {"proposed", "approved"}:
+        raise FfPoolCutoverError(
+            "invalid_handoff_decision", "handoff_policy.decision must be proposed or approved"
+        )
+    approval_reference = str(raw_policy.get("approval_reference") or "").strip()
+    if decision == "approved" and not approval_reference:
+        raise FfPoolCutoverError(
+            "handoff_approval_reference_required",
+            "Approved complete/sorted policy requires the exact owner gate reference",
+        )
+    handoff_policy = {
+        "decision": decision,
+        "approved": decision == "approved",
+        "supplier_status": "complete",
+        "wb_status": "sorted",
+        "approval_reference": approval_reference,
+        "observed_complete_waiting_to_complete_sorted_distinct_orders": _exact_integer(
+            raw_policy.get("observed_complete_waiting_to_complete_sorted_distinct_orders", 0),
+            "handoff_policy.observed_complete_waiting_to_complete_sorted_distinct_orders",
+            minimum=0,
+        ),
+        "automatic_without_owner_gate": False,
+    }
     return {
         "contract_name": PROPOSAL_CONTRACT,
         "cutover_id": cutover_id,
@@ -1204,6 +1792,7 @@ def _normalize_proposal(proposal: Mapping[str, Any]) -> dict[str, Any]:
         "write_epoch_id": write_epoch_id,
         "control_manifest_digest": control_manifest_digest,
         "control_evidence": control_evidence,
+        "handoff_policy": handoff_policy,
         "allocations": _bounded_mapping_list(proposal.get("allocations"), "allocations", MAX_ALLOCATIONS),
         "order_classifications": _bounded_mapping_list(
             proposal.get("order_classifications"), "order_classifications", MAX_ORDERS
@@ -1241,6 +1830,8 @@ def _schema_status(conn: sqlite3.Connection) -> dict[str, Any]:
         FEATURE_EPOCHS_TABLE,
         BALANCES_TABLE,
         OBSERVATIONS_TABLE,
+        STATUS_OBSERVATIONS_TABLE,
+        STATUS_CURRENT_TABLE,
         FBS_COLLECTOR_STATE_TABLE,
         WB_SUPPLIES_TABLE,
         FUNCTIONAL_ACTIVE_TABLE,
@@ -1395,14 +1986,27 @@ def _mapping_snapshot(
     skus: list[dict[str, Any]] = []
     sku_keys: set[tuple[int, int]] = set()
     for raw in normalized["sku_mappings"]:
-        nm_id = _positive_int(raw.get("nm_id"), "sku_mappings.nm_id")
+        nm_id = _positive_int(
+            raw.get("source_nm_id", raw.get("nm_id")), "sku_mappings.source_nm_id"
+        )
+        target_nm_id = _positive_int(
+            raw.get("target_nm_id", nm_id), "sku_mappings.target_nm_id"
+        )
         chrt_id = _positive_int(raw.get("chrt_id"), "sku_mappings.chrt_id")
         identity = _sha256(raw.get("identity_digest"), "sku_mappings.identity_digest")
         key = (nm_id, chrt_id)
         if key in sku_keys:
             raise FfPoolCutoverError("duplicate_sku_mapping", str(key))
         sku_keys.add(key)
-        skus.append({"nm_id": nm_id, "chrt_id": chrt_id, "identity_digest": identity})
+        skus.append(
+            {
+                "nm_id": nm_id,
+                "source_nm_id": nm_id,
+                "target_nm_id": target_nm_id,
+                "chrt_id": chrt_id,
+                "identity_digest": identity,
+            }
+        )
     warehouses.sort(key=lambda row: row["warehouse_id"])
     skus.sort(key=lambda row: (row["nm_id"], row["chrt_id"]))
     return {
@@ -1429,8 +2033,14 @@ def _observation_snapshot(
         minimum=0,
     )
     actual_max = int(conn.execute(f"SELECT COALESCE(MAX(observation_sequence),0) FROM {OBSERVATIONS_TABLE}").fetchone()[0])
-    if watermark != actual_max:
-        blockers.append({"code": "observation_watermark_stale", "expected": actual_max, "actual": watermark})
+    if watermark > actual_max:
+        blockers.append(
+            {
+                "code": "observation_watermark_ahead_of_source",
+                "expected_max": actual_max,
+                "actual": watermark,
+            }
+        )
     rows = conn.execute(
         f"""SELECT observation_sequence,observation_id,order_id,source_revision,
                     source_created_at,observed_at,warehouse_id,nm_id,chrt_id,skus_json
@@ -1481,25 +2091,33 @@ def _observation_snapshot(
                 blockers.append({"code": "order_sku_mapping_mismatch", "order_id": order_id})
         quantity = _exact_integer(raw.get("quantity", 1), f"order[{order_id}].quantity", minimum=1)
         status_fp = _sha256(raw.get("status_fingerprint"), f"order[{order_id}].status_fingerprint")
-        evidence = conn.execute(
-            f"""SELECT lifecycle_class,quantity FROM {STATUS_EVIDENCE_TABLE}
-                 WHERE order_id=? AND source_revision=? AND evidence_digest=?
-                 ORDER BY observed_at DESC LIMIT 1""",
-            (order_id, str(row[3]), status_fp),
-        ).fetchone()
+        evidence = _official_order_status_evidence(
+            conn,
+            order_id=order_id,
+            cutover_at=cutover_at,
+            classification=classification,
+        )
         if evidence is None:
             blockers.append({"code": "official_status_evidence_missing", "order_id": order_id})
         else:
-            lifecycle = str(evidence[0])
-            expected_lifecycle = {
-                "pre_t_absorbed_closed": "closed_pre_handoff",
-                "pre_t_absorbed_reservation": "active_pre_handoff",
-                "unmatched": "unmatched",
-            }.get(classification)
-            if expected_lifecycle is not None and lifecycle != expected_lifecycle:
-                blockers.append({"code": "official_status_class_mismatch", "order_id": order_id})
-            if int(evidence[1]) != quantity:
+            if str(evidence["status_digest"]) != status_fp:
+                blockers.append({"code": "official_status_evidence_stale", "order_id": order_id})
+            if int(evidence["quantity"]) != quantity:
                 blockers.append({"code": "official_status_quantity_mismatch", "order_id": order_id})
+        proposed_status_evidence = raw.get("status_evidence")
+        if evidence is not None and proposed_status_evidence != evidence:
+            blockers.append({"code": "official_status_evidence_payload_stale", "order_id": order_id})
+        reconciliation = _official_post_handoff_reconciliation_evidence(
+            conn,
+            order_id=order_id,
+            cutover_at=cutover_at,
+            classification=classification,
+        )
+        if raw.get("post_handoff_reconciliation") != reconciliation:
+            blockers.append({
+                "code": "post_handoff_reconciliation_evidence_stale",
+                "order_id": order_id,
+            })
         mapping_digest = _sha256(raw.get("mapping_digest"), f"order[{order_id}].mapping_digest")
         if mapping_digest != mappings["digest"]:
             blockers.append({"code": "order_mapping_digest_stale", "order_id": order_id})
@@ -1513,9 +2131,16 @@ def _observation_snapshot(
                 "classification": classification,
                 "facility_id": facility_id or None,
                 "pool": None if classification == "unmatched" else "FBS",
-                "nm_id": int(row[7]),
+                "nm_id": int(
+                    (
+                        mappings["sku_map"].get((int(row[7]), int(row[8] or 0)))
+                        or {"target_nm_id": int(row[7])}
+                    )["target_nm_id"]
+                ),
                 "quantity": quantity,
                 "status_fingerprint": status_fp,
+                "status_evidence": evidence,
+                "post_handoff_reconciliation": reconciliation,
                 "mapping_digest": mapping_digest,
             }
         )
@@ -1527,6 +2152,110 @@ def _observation_snapshot(
     if requested != digest:
         blockers.append({"code": "observation_watermark_digest_stale", "expected": digest, "actual": requested})
     return {"watermark_sequence": watermark, "digest": digest, "classifications": classifications}
+
+
+def _official_order_status_evidence(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    cutover_at: str,
+    classification: str,
+) -> dict[str, Any] | None:
+    rows = conn.execute(
+        f"""SELECT order_revision,status_digest,supplier_status,wb_status,
+                   positive_quantity,observed_at
+            FROM {STATUS_OBSERVATIONS_TABLE}
+            WHERE order_id=? AND observed_at<=?
+            ORDER BY observation_sequence""",
+        (int(order_id), str(cutover_at)),
+    ).fetchall()
+    if not rows:
+        return None
+    if classification in {"pre_t_handoff_debit", "pre_t_absorbed_closed"}:
+        selected = next(
+            (
+                row
+                for row in rows
+                if str(row[2]) == "complete" and str(row[3]) == "sorted"
+            ),
+            None,
+        )
+    else:
+        selected = rows[-1]
+    if selected is None:
+        return None
+    supplier_status = str(selected[2])
+    wb_status = str(selected[3])
+    cancellation = supplier_status == "cancel" or wb_status in {
+        "canceled",
+        "canceled_by_client",
+        "declined_by_client",
+        "defect",
+    }
+    handoff = supplier_status == "complete" and wb_status == "sorted"
+    if classification == "pre_t_absorbed_reservation" and (cancellation or handoff):
+        return None
+    if classification == "pre_t_cancelled_noop" and not cancellation:
+        return None
+    if classification in {"pre_t_handoff_debit", "pre_t_absorbed_closed"} and not handoff:
+        return None
+    return {
+        "source_revision": str(selected[0]),
+        "status_digest": str(selected[1]),
+        "supplier_status": supplier_status,
+        "wb_status": wb_status,
+        "quantity": int(selected[4]),
+        "observed_at": str(selected[5]),
+    }
+
+
+def _official_post_handoff_reconciliation_evidence(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    cutover_at: str,
+    classification: str,
+) -> dict[str, Any] | None:
+    if classification not in {"pre_t_handoff_debit", "pre_t_absorbed_closed"}:
+        return None
+    rows = conn.execute(
+        f"""SELECT order_revision,status_digest,supplier_status,wb_status,
+                   positive_quantity,observed_at
+            FROM {STATUS_OBSERVATIONS_TABLE}
+            WHERE order_id=? AND observed_at<=?
+            ORDER BY observation_sequence""",
+        (int(order_id), str(cutover_at)),
+    ).fetchall()
+    handoff_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if str(row[2]) == "complete" and str(row[3]) == "sorted"
+        ),
+        None,
+    )
+    if handoff_index is None:
+        return None
+    selected = next(
+        (
+            row
+            for row in reversed(rows[handoff_index + 1 :])
+            if str(row[2]) == "cancel"
+            or str(row[3])
+            in {"canceled", "canceled_by_client", "declined_by_client", "defect"}
+        ),
+        None,
+    )
+    if selected is None:
+        return None
+    return {
+        "source_revision": str(selected[0]),
+        "status_digest": str(selected[1]),
+        "supplier_status": str(selected[2]),
+        "wb_status": str(selected[3]),
+        "quantity": int(selected[4]),
+        "observed_at": str(selected[5]),
+    }
 
 
 def _validate_opening_reservation_sufficiency(
@@ -1552,14 +2281,114 @@ def _validate_opening_reservation_sufficiency(
             blockers.append(
                 {"code": "opening_reservation_location_missing", "facility_id": key[0], "nm_id": key[1]}
             )
-        elif capacity < quantity:
+        # Reservations reduce availability but never fabricate a physical
+        # debit.  An unsecured/negative available balance is explicit
+        # operational evidence, not a reason to lose the exact checkpoint.
+
+
+def _project_post_backfill_aggregate(
+    *,
+    aggregate_rows: list[dict[str, Any]],
+    allocations: list[dict[str, Any]],
+    classifications: list[dict[str, Any]],
+    blockers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    projected = {
+        int(row["nm_id"]): {
+            "nm_id": int(row["nm_id"]),
+            "quantity": int(row["quantity"]),
+            "capital_rub": Decimal(str(row["capital_rub"])),
+        }
+        for row in aggregate_rows
+    }
+    projected_detail = {
+        (str(row["facility_id"]), str(row["pool"]), int(row["nm_id"])): {
+            **dict(row),
+            "capital_rub": Decimal(str(row["capital_rub"])),
+        }
+        for row in allocations
+    }
+    debit_count = 0
+    debit_quantity = 0
+    debit_capital = ZERO
+    for order in classifications:
+        if order["classification"] not in {
+            "pre_t_handoff_debit",
+            "pre_t_absorbed_closed",
+        }:
+            continue
+        allocation = next(
+            (
+                row
+                for row in allocations
+                if row["facility_id"] == order["facility_id"]
+                and row["pool"] == "FBS"
+                and int(row["nm_id"]) == int(order["nm_id"])
+            ),
+            None,
+        )
+        if allocation is None or allocation.get("wac_rub") is None:
             blockers.append(
                 {
-                    "code": "opening_reservation_exceeds_fbs_allocation",
-                    "facility_id": key[0], "nm_id": key[1],
-                    "reserved_quantity": quantity, "fbs_quantity": capacity,
+                    "code": "historical_debit_wac_missing",
+                    "order_id": int(order["order_id"]),
                 }
             )
+            continue
+        nm_id = int(order["nm_id"])
+        aggregate = projected.get(nm_id)
+        if aggregate is None:
+            blockers.append(
+                {"code": "historical_debit_aggregate_sku_missing", "nm_id": nm_id}
+            )
+            continue
+        quantity = int(order["quantity"])
+        capital = Decimal(str(allocation["wac_rub"])) * Decimal(quantity)
+        aggregate["quantity"] = int(aggregate["quantity"]) - quantity
+        aggregate["capital_rub"] = Decimal(str(aggregate["capital_rub"])) - capital
+        detail_key = (str(order["facility_id"]), "FBS", nm_id)
+        detail = projected_detail[detail_key]
+        detail["quantity"] = int(detail["quantity"]) - quantity
+        detail["capital_rub"] = Decimal(str(detail["capital_rub"])) - capital
+        detail["wac_rub"] = canonical_decimal_text(Decimal(str(allocation["wac_rub"])))
+        debit_count += 1
+        debit_quantity += quantity
+        debit_capital += capital
+    rows = [
+        {
+            "nm_id": nm_id,
+            "quantity": int(item["quantity"]),
+            "capital_rub": canonical_decimal_text(item["capital_rub"]),
+            "wac_rub": (
+                None
+                if int(item["quantity"]) == 0
+                else canonical_decimal_text(
+                    Decimal(str(item["capital_rub"])) / Decimal(int(item["quantity"]))
+                )
+            ),
+        }
+        for nm_id, item in sorted(projected.items())
+    ]
+    detail_rows = []
+    for _key, item in sorted(
+        projected_detail.items(), key=lambda pair: (pair[0][2], pair[0][0], pair[0][1])
+    ):
+        detail_rows.append(
+            {
+                **item,
+                "capital_rub": canonical_decimal_text(item["capital_rub"]),
+            }
+        )
+    return {
+        "rows": rows,
+        "detail_rows": detail_rows,
+        "summary": {
+            "handoff_order_count": debit_count,
+            "debit_quantity": debit_quantity,
+            "debit_capital_rub": canonical_decimal_text(debit_capital),
+            "approximate_accounting": False,
+        },
+    }
 
 
 def _fbw_origin_snapshot(
@@ -1625,12 +2454,89 @@ def _fbw_origin_snapshot(
 
 
 def _china_shipment_snapshot(
-    values: list[dict[str, Any]], *, facilities: set[str], blockers: list[dict[str, Any]]
+    conn: sqlite3.Connection,
+    values: list[dict[str, Any]],
+    *,
+    facilities: set[str],
+    blockers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    shipment_ids: set[str] = set()
+    required = {
+        "sheet_vitrina_v1_supplier_shipments",
+        "sheet_vitrina_v1_supplier_shipment_lines",
+        "sheet_vitrina_v1_ff_stock_operations",
+        "sheet_vitrina_v1_supplier_ff_cost_layers",
+    }
+    existing = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if not required.issubset(existing):
+        blockers.append(
+            {
+                "code": "pending_shipment_evidence_schema_incomplete",
+                "missing_tables": sorted(required - existing),
+            }
+        )
+        return {"rows": [], "digest": _fingerprint([])}
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_info(sheet_vitrina_v1_supplier_shipments)"
+        ).fetchall()
+    }
+    shipment_required_columns = {
+        "shipment_id",
+        "invoice_no",
+        "actual_shipment_date",
+        "actual_ff_acceptance_date",
+        "product_qty_total",
+        "archived_at",
+    }
+    if not shipment_required_columns.issubset(columns):
+        blockers.append(
+            {
+                "code": "pending_shipment_evidence_columns_incomplete",
+                "missing_columns": sorted(shipment_required_columns - columns),
+            }
+        )
+        return {"rows": [], "digest": _fingerprint([])}
+    proposed: dict[str, tuple[int, dict[str, Any]]] = {}
     for index, raw in enumerate(values):
-        shipment_id = _identifier(raw.get("shipment_id"), f"china_shipments[{index}].shipment_id")
+        shipment_id = _identifier(
+            raw.get("shipment_id"), f"china_shipments[{index}].shipment_id"
+        )
+        if shipment_id in proposed:
+            raise FfPoolCutoverError(
+                "china_shipment_multiple_facilities",
+                "One China shipment may target exactly one geographic facility",
+            )
+        proposed[shipment_id] = (index, raw)
+    source_rows = conn.execute(
+        """SELECT shipment_id,COALESCE(invoice_no,''),COALESCE(actual_shipment_date,''),
+                  COALESCE(actual_ff_acceptance_date,''),product_qty_total
+           FROM sheet_vitrina_v1_supplier_shipments
+           WHERE COALESCE(actual_shipment_date,'')<>''
+             AND COALESCE(actual_ff_acceptance_date,'')=''
+             AND COALESCE(archived_at,'')=''
+           ORDER BY actual_shipment_date,shipment_id"""
+    ).fetchall()
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in source_rows:
+        shipment_id = str(source[0])
+        seen.add(shipment_id)
+        proposed_item = proposed.get(shipment_id)
+        if proposed_item is None:
+            blockers.append(
+                {"code": "pending_shipment_not_classified", "shipment_id": shipment_id}
+            )
+            continue
+        index, raw = proposed_item
+        if str(raw.get("classification") or "") != "excluded_pending_receipt":
+            raise FfPoolCutoverError(
+                "invalid_china_shipment_classification",
+                "A clean in-transit shipment must be pinned as excluded_pending_receipt",
+            )
         facility_id = _identifier(
             raw.get("facility_id"), f"china_shipments[{index}].facility_id", maximum=80
         )
@@ -1640,22 +2546,103 @@ def _china_shipment_snapshot(
         pools = sorted({str(value) for value in pools_value})
         if any(value not in POOLS for value in pools) or len(pools) != len(pools_value):
             raise FfPoolCutoverError("invalid_china_shipment_pools", "China shipment pools must be unique FBS/FBO")
-        if shipment_id in shipment_ids:
-            raise FfPoolCutoverError(
-                "china_shipment_multiple_facilities",
-                "One China shipment may target exactly one geographic facility",
-            )
-        shipment_ids.add(shipment_id)
         if facility_id not in facilities:
             blockers.append({"code": "china_shipment_facility_missing", "shipment_id": shipment_id})
+        shipment_total = _exact_integer(
+            source[4], f"china_shipments[{index}].product_qty_total", minimum=1
+        )
+        line_row = conn.execute(
+            """SELECT COUNT(*),COALESCE(SUM(qty),0)
+               FROM sheet_vitrina_v1_supplier_shipment_lines
+               WHERE shipment_id=? AND line_type='product'""",
+            (shipment_id,),
+        ).fetchone()
+        line_count = int(line_row[0])
+        line_total = _exact_integer(
+            line_row[1], f"china_shipments[{index}].product_line_quantity", minimum=1
+        )
+        receipt_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations WHERE source_key=?",
+                (f"supplier_shipment_acceptance:{shipment_id}",),
+            ).fetchone()[0]
+        )
+        cost_layer_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers "
+                "WHERE supplier_shipment_id=?",
+                (shipment_id,),
+            ).fetchone()[0]
+        )
+        evidence = {
+            "shipment_id": shipment_id,
+            "invoice_no": str(source[1]),
+            "actual_shipment_date": str(source[2]),
+            "actual_ff_acceptance_date": str(source[3]),
+            "shipment_quantity": shipment_total,
+            "product_line_count": line_count,
+            "product_line_quantity": line_total,
+            "receipt_operation_count": receipt_count,
+            "cost_layer_count": cost_layer_count,
+        }
+        evidence_digest = _fingerprint(evidence)
+        requested_evidence = _sha256(
+            raw.get("evidence_digest"), f"china_shipments[{index}].evidence_digest"
+        )
+        if requested_evidence != evidence_digest:
+            blockers.append(
+                {
+                    "code": "pending_shipment_evidence_stale",
+                    "shipment_id": shipment_id,
+                    "expected": evidence_digest,
+                    "actual": requested_evidence,
+                }
+            )
+        if shipment_total != line_total or line_count <= 0:
+            blockers.append(
+                {
+                    "code": "pending_shipment_quantity_ambiguous",
+                    "shipment_id": shipment_id,
+                    "shipment_quantity": shipment_total,
+                    "product_line_quantity": line_total,
+                }
+            )
+        if str(source[3]) or receipt_count or cost_layer_count:
+            blockers.append(
+                {
+                    "code": "pending_shipment_partially_or_concurrently_posted",
+                    "shipment_id": shipment_id,
+                    "actual_ff_acceptance_date": str(source[3]),
+                    "receipt_operation_count": receipt_count,
+                    "cost_layer_count": cost_layer_count,
+                }
+            )
         rows.append(
             {
                 "shipment_id": shipment_id,
+                "invoice_no": str(source[1]),
+                "classification": "excluded_pending_receipt",
                 "facility_id": facility_id,
                 "pools": pools,
-                "evidence_digest": _sha256(
-                    raw.get("evidence_digest"), f"china_shipments[{index}].evidence_digest"
-                ),
+                "expected_quantity": shipment_total,
+                "actual_ff_acceptance_date": str(source[3]),
+                "receipt_operation_count": receipt_count,
+                "cost_layer_count": cost_layer_count,
+                "evidence_digest": evidence_digest,
+                "post_cutover_state": "in_transit",
+                "guided_acceptance_required": True,
+                "opening_quantity": 0,
+                "opening_capital_rub": "0",
+                "historical_fbs_debit_quantity": 0,
+            }
+        )
+    extra = sorted(set(proposed) - seen)
+    if extra:
+        blockers.append(
+            {
+                "code": "excluded_pending_receipt_not_currently_pending",
+                "shipment_ids": extra[:20],
+                "count": len(extra),
             }
         )
     rows.sort(key=lambda row: row["shipment_id"])
@@ -1723,6 +2710,72 @@ def _bounded_non_target_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         "journal_mode": str(conn.execute("PRAGMA journal_mode").fetchone()[0]),
     }
     return {**value, "digest": _fingerprint(value)}
+
+
+def _known_post_cutover_non_target_growth(
+    conn: sqlite3.Connection,
+    *,
+    cutover_id: str,
+    before: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> bool:
+    if str(before.get("journal_mode") or "") != str(current.get("journal_mode") or ""):
+        return False
+    before_marks = dict(before.get("append_watermarks") or {})
+    current_marks = dict(current.get("append_watermarks") or {})
+    operations = "sheet_vitrina_v1_ff_stock_operations"
+    lines = "sheet_vitrina_v1_ff_stock_operation_lines"
+    for table, watermark in current_marks.items():
+        if table in {operations, lines}:
+            continue
+        if int(watermark) != int(before_marks.get(table, 0)):
+            return False
+    operation_before = int(before_marks.get(operations, 0))
+    operation_after = int(current_marks.get(operations, 0))
+    line_before = int(before_marks.get(lines, 0))
+    line_after = int(current_marks.get(lines, 0))
+    if operation_after == operation_before and line_after == line_before:
+        return True
+    operation_columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({operations})").fetchall()
+    }
+    line_columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({lines})").fetchall()
+    }
+    if not {"operation_id", "source_type", "source_object_id"}.issubset(
+        operation_columns
+    ) or "operation_id" not in line_columns:
+        return False
+    allowed_shipments = {
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT shipment_id FROM {PENDING_SHIPMENTS_TABLE} WHERE cutover_id=?",
+            (cutover_id,),
+        ).fetchall()
+    }
+    new_operations = conn.execute(
+        f"""SELECT operation_id,source_type,source_object_id
+            FROM {operations} WHERE rowid>? ORDER BY rowid""",
+        (operation_before,),
+    ).fetchall()
+    if not new_operations:
+        return False
+    allowed_operation_ids = {
+        str(row[0])
+        for row in new_operations
+        if str(row[1]) == "supplier_shipment_acceptance"
+        and str(row[2]) in allowed_shipments
+    }
+    if len(allowed_operation_ids) != len(new_operations):
+        return False
+    new_line_operations = {
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT operation_id FROM {lines} WHERE rowid>? ORDER BY rowid",
+            (line_before,),
+        ).fetchall()
+    }
+    return bool(new_line_operations) and new_line_operations.issubset(allowed_operation_ids)
 
 
 def _require_empty_detail(conn: sqlite3.Connection, *, blockers: list[dict[str, Any]]) -> None:
@@ -1800,6 +2853,12 @@ def _feature_row(row: sqlite3.Row | tuple[Any, ...] | None) -> dict[str, Any] | 
 
 def _count(conn: sqlite3.Connection, table: str, cutover_id: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE cutover_id=?", (cutover_id,)).fetchone()[0])
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

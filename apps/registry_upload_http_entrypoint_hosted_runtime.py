@@ -54,6 +54,7 @@ FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
+FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
 FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
@@ -6951,6 +6952,51 @@ def run_ff_stage_7a_production_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ff_pool_cutover_production_command(args: argparse.Namespace) -> int:
+    """Run the canonical dry-run/readback or owner-gated Stage 7C apply."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_pool_cutover_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("Stage 7C reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ff_pool_cutover_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        excluded_shipment_ids=tuple(
+            str(item).strip() for item in getattr(args, "excluded_shipment_id", [])
+        ),
+        opening_facility_id=str(getattr(args, "opening_facility_id", "") or ""),
+        proposed_window_minutes=int(
+            getattr(args, "proposed_window_minutes", 15) or 15
+        ),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(
+            getattr(args, "approval_reference", "") or ""
+        ),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output_path = Path(str(args.output)).resolve()
+    if output_path == ROOT or ROOT in output_path.parents:
+        raise ValueError("Stage 7C evidence output must stay outside the Git checkout")
+    _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-pool-cutover-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_vitrina_incident_rematerialization_command(
     args: argparse.Namespace,
 ) -> int:
@@ -7540,6 +7586,379 @@ def _run_remote_ff_stage_7a_production(
             "post_restart_readback": readback,
         }
     return payload
+
+
+def _run_remote_ff_pool_cutover_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    excluded_shipment_ids: tuple[str, ...],
+    opening_facility_id: str,
+    proposed_window_minutes: int,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Own the exact-SHA Stage 7C runner and its canonical write barriers."""
+
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-pool-cutover-production-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Stage 7C production action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target, action="ff-pool-cutover-production-apply", dry_run=False
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("Stage 7C production action requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Stage 7C production action requires the canonical runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("Stage 7C production action requires the canonical environment file")
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError("Stage 7C production action requires the canonical HTTP service")
+
+    reviewed_plan: dict[str, Any] | None = None
+    if action == "dry-run":
+        if not excluded_shipment_ids:
+            raise ValueError("Stage 7C dry-run requires an excluded pending shipment")
+    elif action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("Stage 7C apply requires an existing reviewed plan")
+        try:
+            reviewed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("Stage 7C reviewed plan is invalid JSON") from exc
+        if (
+            not isinstance(reviewed_plan, dict)
+            or reviewed_plan.get("contract_name") != "ff_pool_cutover_production_v1"
+            or int(reviewed_plan.get("contract_version") or 0) != 1
+            or reviewed_plan.get("mode") != "dry_run_owner_gate"
+            or reviewed_plan.get("apply_allowed") is not True
+            or bool(reviewed_plan.get("blockers"))
+            or str(reviewed_plan.get("deployed_sha") or "") != deployed_sha
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError("Stage 7C reviewed plan does not match this exact apply")
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError("Stage 7C apply requires approval reference and actor")
+
+    if action != "apply":
+        return _run_remote_ff_pool_cutover_runner(
+            target,
+            action=action,
+            deployed_sha=deployed_sha,
+            excluded_shipment_ids=excluded_shipment_ids,
+            opening_facility_id=opening_facility_id,
+            proposed_window_minutes=proposed_window_minutes,
+            reviewed_envelope=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+
+    window_id = "ff-pool-cutover-" + fingerprint.removeprefix("sha256:")[:24]
+    transition_evidence: dict[str, Any] = {}
+    fbs_before = _read_remote_fbs_collector_timer(target)
+    if fbs_before.get("active") is not True or fbs_before.get("enabled") is not True:
+        raise RuntimeError(
+            "Stage 7C requires the five-minute FBS collector to remain active"
+        )
+    hold = _acquire_and_confirm_finance_storage_window(
+        target,
+        transition_evidence=transition_evidence,
+        actor="ff_pool_cutover_runner",
+        reason="owner-gated exact facility/pool opening and FBS cutover",
+        window_id=window_id,
+        window_kind="final_cutover",
+        fingerprint=fingerprint,
+        approval_reference=approval_reference,
+    )
+    fbs_during = _read_remote_fbs_collector_timer(target)
+    barrier_confirm = dict(transition_evidence.get("barrier_confirm") or {})
+    warehouse_hold = dict(transition_evidence.get("warehouse_hold") or {})
+    warehouse_lock = dict(warehouse_hold.get("warehouse_lock") or {})
+    external_barrier = {
+        "maintenance_quiet": hold.get("quiet") is True,
+        "http_write_barrier_active": (
+            barrier_confirm.get("active") is True
+            and barrier_confirm.get("hold_confirmed") is True
+            and str(barrier_confirm.get("phase") or "") == "held"
+        ),
+        "warehouse_timer_held": str(warehouse_hold.get("status") or "") == "held",
+        "warehouse_lock_held": bool(warehouse_lock.get("held")),
+        "supplier_acceptance_writer_held": (
+            hold.get("quiet") is True
+            and barrier_confirm.get("hold_confirmed") is True
+        ),
+        "fbs_collector_continues": (
+            fbs_before.get("active") is True
+            and fbs_before.get("enabled") is True
+            and fbs_during.get("active") is True
+            and fbs_during.get("enabled") is True
+        ),
+        "canonical_target": True,
+        "evidence": {
+            "window_id": window_id,
+            "business_hold_fingerprint": _ff_pool_evidence_fingerprint(hold),
+            "barrier_fingerprint": _ff_pool_evidence_fingerprint(barrier_confirm),
+            "warehouse_hold_fingerprint": _ff_pool_evidence_fingerprint(warehouse_hold),
+            "fbs_timer_before": fbs_before,
+            "fbs_timer_under_barrier": fbs_during,
+        },
+    }
+    if not all(
+        external_barrier[key] is True
+        for key in (
+            "maintenance_quiet",
+            "http_write_barrier_active",
+            "warehouse_timer_held",
+            "supplier_acceptance_writer_held",
+            "fbs_collector_continues",
+        )
+    ) or external_barrier["warehouse_lock_held"] is not False:
+        raise RuntimeError(
+            "Stage 7C exact external barrier evidence is incomplete; barriers remain held"
+        )
+    reviewed_envelope = {
+        "reviewed_plan": reviewed_plan,
+        "external_barrier": external_barrier,
+    }
+    try:
+        applied = _run_remote_ff_pool_cutover_runner(
+            target,
+            action="apply",
+            deployed_sha=deployed_sha,
+            excluded_shipment_ids=(),
+            opening_facility_id="",
+            proposed_window_minutes=15,
+            reviewed_envelope=reviewed_envelope,
+            fingerprint=fingerprint,
+            approval_reference=approval_reference,
+            actor=actor,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Stage 7C apply failed or became ambiguous; canonical barriers remain held "
+            f"for exact readback/recovery: {exc}"
+        ) from exc
+    if str(applied.get("status") or "") not in {
+        "applied_reconciled",
+        "already_applied_reconciled",
+    }:
+        raise RuntimeError("Stage 7C apply did not reach reconciled state; barriers remain held")
+    restore = _restore_ff_pool_cutover_window(
+        target,
+        hold=hold,
+        window_id=window_id,
+        fingerprint=fingerprint,
+    )
+    fbs_after = _read_remote_fbs_collector_timer(target)
+    if fbs_after.get("active") is not True or fbs_after.get("enabled") is not True:
+        raise RuntimeError("Stage 7C restored controls but the five-minute FBS collector is not active")
+    readback = _run_remote_ff_pool_cutover_runner(
+        target,
+        action="readback",
+        deployed_sha=deployed_sha,
+        excluded_shipment_ids=(),
+        opening_facility_id="",
+        proposed_window_minutes=15,
+        reviewed_envelope=None,
+        fingerprint="",
+        approval_reference="",
+        actor="",
+    )
+    cutover = dict(readback.get("cutover") or {})
+    if (
+        str(readback.get("status") or "") != "applied"
+        or str((cutover.get("readback") or {}).get("status") or "") != "pass"
+    ):
+        raise RuntimeError("Stage 7C post-restore exact readback failed")
+    return {
+        **applied,
+        "canonical_barrier_acquire": transition_evidence,
+        "canonical_barrier_restore": restore,
+        "fbs_collector_before": fbs_before,
+        "fbs_collector_under_barrier": fbs_during,
+        "fbs_collector_after": fbs_after,
+        "post_restore_readback": readback,
+    }
+
+
+def _run_remote_ff_pool_cutover_runner(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    excluded_shipment_ids: tuple[str, ...],
+    opening_facility_id: str,
+    proposed_window_minutes: int,
+    reviewed_envelope: Mapping[str, Any] | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    runner_args = [
+        "python3",
+        "apps/ff_pool_cutover_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    runner_input: str | None = None
+    if action == "dry-run":
+        for shipment_id in excluded_shipment_ids:
+            runner_args.extend(["--excluded-shipment-id", shipment_id])
+        if opening_facility_id:
+            runner_args.extend(["--opening-facility-id", opening_facility_id])
+        runner_args.extend(
+            ["--proposed-window-minutes", str(max(5, min(proposed_window_minutes, 60)))]
+        )
+    elif action == "apply":
+        if reviewed_envelope is None:
+            raise ValueError("Stage 7C apply requires the reviewed envelope")
+        runner_args.extend(
+            [
+                "--reviewed-envelope-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+                "--actor",
+                actor,
+                "--backup-dir",
+                "/opt/wb-core-runtime/state/backups/ff-pool-cutover-production",
+            ]
+        )
+        runner_input = json.dumps(reviewed_envelope, ensure_ascii=False, sort_keys=True)
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=runner_input,
+        cwd=ROOT,
+        timeout=FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Stage 7C production {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Stage 7C production runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError("Stage 7C production runner returned an invalid result")
+    if action == "dry-run" and (
+        payload.get("contract_name") != "ff_pool_cutover_production_v1"
+        or payload.get("mode") != "dry_run_owner_gate"
+    ):
+        raise RuntimeError("Stage 7C dry-run contract mismatch")
+    return payload
+
+
+def _read_remote_fbs_collector_timer(target: HostedRuntimeTarget) -> dict[str, Any]:
+    unit = "wb-core-fbs-shadow-collector.timer"
+    result = subprocess.run(
+        _remote_shell_command(
+            target,
+            f"systemctl show {shlex.quote(unit)} --property=ActiveState,UnitFileState --no-pager",
+        ),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300.0,
+        check=False,
+    )
+    properties = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            properties[key.strip()] = value.strip()
+    if result.returncode != 0 or not properties:
+        raise RuntimeError(
+            "FBS collector timer readback failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    return {
+        "unit": unit,
+        "active": properties.get("ActiveState") == "active",
+        "enabled": properties.get("UnitFileState") == "enabled",
+        "properties": properties,
+    }
+
+
+def _ff_pool_evidence_fingerprint(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _restore_ff_pool_cutover_window(
+    target: HostedRuntimeTarget,
+    *,
+    hold: Mapping[str, Any],
+    window_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    evidence["barrier_restoring"] = _run_remote_business_data_maintenance_runner(
+        target,
+        action="barrier-restoring",
+        window_id=window_id,
+        plan_fingerprint=fingerprint,
+    )
+    paused_revision = int(((hold.get("auto_updates") or {}).get("revision") or 0))
+    if paused_revision <= 0:
+        raise RuntimeError("Stage 7C hold lacks the exact paused policy revision")
+    restore = _run_remote_business_data_maintenance_runner(
+        target,
+        action="restore",
+        expected_revision=paused_revision,
+        actor="ff_pool_cutover_runner",
+        reason="Stage 7C exact readback passed",
+    )
+    evidence["business_restore"] = restore
+    if (
+        str(restore.get("status") or "") != "restored"
+        or restore.get("exact_prior_state_restored") is not True
+    ):
+        raise RuntimeError("Stage 7C exact writer/timer restore is incomplete")
+    evidence["warehouse_restore"] = _run_remote_warehouse_functional_maintenance_action(
+        target, action="restore"
+    )
+    evidence["barrier_release"] = _run_remote_business_data_maintenance_runner(
+        target,
+        action="barrier-release",
+        actor="ff_pool_cutover_runner",
+        reason="Stage 7C exact prior controls restored",
+        window_id=window_id,
+        plan_fingerprint=fingerprint,
+    )
+    return evidence
 
 
 def _restart_ff_stage_7a_http_service(target: HostedRuntimeTarget) -> dict[str, Any]:
@@ -10282,6 +10701,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ff_stage_7a_readback.set_defaults(
         handler=run_ff_stage_7a_production_command,
         ff_stage_7a_action="readback",
+    )
+
+    ff_pool_cutover_dry_run = subparsers.add_parser(
+        "ff-pool-cutover-production-dry-run",
+        help=(
+            "Build the query-only exact Stage 7C owner-gate manifest without "
+            "choosing T."
+        ),
+    )
+    ff_pool_cutover_dry_run.add_argument("--deployed-sha", required=True)
+    ff_pool_cutover_dry_run.add_argument(
+        "--excluded-shipment-id", action="append", required=True
+    )
+    ff_pool_cutover_dry_run.add_argument("--opening-facility-id", default="")
+    ff_pool_cutover_dry_run.add_argument(
+        "--proposed-window-minutes", type=int, default=15
+    )
+    ff_pool_cutover_dry_run.add_argument("--output", required=True)
+    ff_pool_cutover_dry_run.set_defaults(
+        handler=run_ff_pool_cutover_production_command,
+        ff_pool_cutover_action="dry-run",
+    )
+
+    ff_pool_cutover_apply = subparsers.add_parser(
+        "ff-pool-cutover-production-apply",
+        help=(
+            "Acquire canonical barriers and apply one exact owner-approved "
+            "Stage 7C manifest."
+        ),
+    )
+    ff_pool_cutover_apply.add_argument("--deployed-sha", required=True)
+    ff_pool_cutover_apply.add_argument("--plan-file", required=True)
+    ff_pool_cutover_apply.add_argument("--fingerprint", required=True)
+    ff_pool_cutover_apply.add_argument("--approval-reference", required=True)
+    ff_pool_cutover_apply.add_argument("--actor", required=True)
+    ff_pool_cutover_apply.add_argument("--output", required=True)
+    ff_pool_cutover_apply.set_defaults(
+        handler=run_ff_pool_cutover_production_command,
+        ff_pool_cutover_action="apply",
+    )
+
+    ff_pool_cutover_readback = subparsers.add_parser(
+        "ff-pool-cutover-production-readback",
+        help="Run query-only exact Stage 7C opening/lifecycle reconciliation.",
+    )
+    ff_pool_cutover_readback.add_argument("--deployed-sha", required=True)
+    ff_pool_cutover_readback.add_argument("--output", required=True)
+    ff_pool_cutover_readback.set_defaults(
+        handler=run_ff_pool_cutover_production_command,
+        ff_pool_cutover_action="readback",
     )
 
     ads_historical_dry_run = subparsers.add_parser(

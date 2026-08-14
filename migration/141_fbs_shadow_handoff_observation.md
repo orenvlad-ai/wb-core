@@ -67,6 +67,25 @@ for an owner-gated design review; they do not select or activate a trigger.
 Until that repeatable evidence and official semantics exist, readiness is
 `NO_GO` and the safe next action is to keep this read-only collector running.
 
+Migration 142 completes that separate review. Official Orders FBS semantics
+and the sandbox jointly support only the owner-gated conjunction
+`supplierStatus=complete AND wbStatus=sorted`; `complete` alone remains
+forbidden and observed transitions never auto-approve it. The decision and
+observed distinct-order count are pinned in the cutover manifest.
+
+Readiness now distinguishes a clean pending China receipt from ambiguous
+acceptance state. An exact manifest may classify the former as
+`excluded_pending_receipt` when factual acceptance, aggregate receipt and cost
+layer are all absent and shipment/product quantities agree. It then contributes
+zero opening and historical debit and is not a readiness blocker. Any partial,
+conflicting or unclassified evidence remains `NO_GO`.
+
+After an applied Stage 7C epoch, the same five-minute poll persists official
+observations first and invokes a default-off lifecycle consumer. It reserves,
+releases or fulfills exact orders once, isolates late pre-T observations and
+never writes WB. While the warehouse-domain epoch is held, lifecycle writes are
+skipped but observation polling continues.
+
 ## Verification
 
 - `python3 apps/wb_fbs_orders_collector_smoke.py`;

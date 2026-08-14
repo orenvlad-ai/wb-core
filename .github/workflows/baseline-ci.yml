@@ -81,6 +81,8 @@ jobs:
           python3 apps/wb_supplies_incremental_sync_smoke.py
           python3 apps/ff_stage_7a_production_smoke.py
           python3 apps/ff_pool_cutover_smoke.py
+          python3 apps/ff_pool_cutover_production_smoke.py
+          python3 apps/ff_pool_fbs_lifecycle_smoke.py
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
           python3 apps/warehouse_functional_smoke.py

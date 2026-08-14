@@ -85,6 +85,19 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   polling path with `wb-core-fbs-shadow-collector.timer`, every five minutes
   with bounded jitter and a 10-minute normal-state SLO. It never creates an
   epoch/opening/checkpoint, chooses `T` or writes stock/WB.
+- Migration 142 adds canonical hosted
+  `ff-pool-cutover-production-dry-run/apply/readback`. Every action pins the
+  active target, environment file and exact `.wb-core-runtime-sha`. Dry-run is
+  query-only and leaves `T` unchosen. Apply accepts only the reviewed owner-gate
+  fingerprint, acquires/confirms the durable HTTP barrier, drains business
+  writers, holds the warehouse timer, proves the supplier acceptance writer is
+  held and `wb-core-fbs-shadow-collector.timer` remains enabled/active, then
+  creates the central T2 warehouse-domain checkpoint and a private exact-target
+  before-image. `T` is selected only inside that live barrier. A passing exact
+  aggregate/detail/checkpoint/non-target readback restores prior controls and
+  releases the barrier; failure or transport ambiguity retains it for recovery.
+  The runner never writes WB, and deployment of the default-off runner alone
+  never applies opening or chooses the complete/sorted policy.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

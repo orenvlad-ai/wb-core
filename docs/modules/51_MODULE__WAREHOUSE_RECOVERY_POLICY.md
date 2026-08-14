@@ -268,3 +268,23 @@ business data.  The mutable current-status episode is only a derived index;
 authoritative transition evidence is append-only.  No full-store backup or
 warehouse writer lock is needed because facility/epoch/opening/reservation/
 movement/acceptance and WB-write tables are hard non-targets.
+
+## Stage 7C opening recovery
+
+Migration 142 classifies the opening/checkpoint as
+`warehouse_opening_publication` with `warehouse_domain` closure and therefore
+uses the central T2 checkpoint before entering `mutation_running`. The owner-gate
+fingerprint, exact deployed SHA, collector watermark, target feature epoch,
+excluded shipment identities and non-target digest bind the recovery operation.
+A separate mode-`0600` exact-target before-image is mutation evidence, not a
+second full-store backup or alternate recovery control plane.
+
+The canonical hosted runner first acquires/confirms the durable HTTP barrier,
+drains business writers, holds the warehouse timer and proves the five-minute
+FBS collector remains enabled/active. Before-commit failure rolls back business
+rows and marks the T2 operation recoverable. Ambiguous post-commit failure keeps
+external/domain barriers for exact readback. A passing manifest and
+aggregate↔pool reconciliation retains the T2 operation, restores exact prior
+controls and releases the external barrier. Blind deletion or replay is never a
+recovery action; after live events only forward reconciliation or compensating
+documents are permitted.
