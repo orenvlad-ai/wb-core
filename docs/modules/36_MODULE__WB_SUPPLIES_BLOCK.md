@@ -726,6 +726,14 @@ isolated and no code writes WB. A clean manifest-pinned pending China receipt is
 not readiness-blocking and contributes zero opening/debit; ambiguous or partly
 posted receipt state still blocks.
 
+Migration 143 freezes that manifest at truthful local UTC `T` and a compound
+order/status/transition sequence watermark `W`. Since the official status
+response has no source timestamp, no earlier event time is invented. Rows above
+`W` remain durable collector suffix evidence and never stale the owner gate by
+themselves. A transition for an opening order above `W` is processed as a
+post-checkpoint event; the exact suffix is drained by sequence and revision
+without pausing the five-minute collector.
+
 # 12. Own capital movement consumer
 
 The warehouse opening consumer is separate from the cost-engine movement consumer. `warehouse_stocks_block` reads persisted `raw_goods` only for the current material FF→WB source: ordinary status `3` (`Отгрузка разрешена`) and its later proven non-final physical stages `4/6` form `В пути: FF → WB`; planned `2`, final `5` and `Допринято` are excluded. The separate acceptance-discrepancy opening is a management boundary fixed at zero with no SKU lines. Historical final/doprinato rows are not read, validated or fingerprinted by opening and remain available only to an optional bounded read-only diagnostic. The consumer stores a one-time immutable quantity snapshot with source row/hash/timestamps and never updates this module's cache, triggers WB sync, or creates FF/cost/capital operations.

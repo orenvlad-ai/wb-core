@@ -615,3 +615,11 @@ explicit clean `excluded_pending_receipt` stays outside opening/backfill and can
 later enter both aggregate and pools exactly once through guided acceptance.
 Aggregate/detail parity is recomputed after every physical lifecycle or guided
 document movement.
+
+Migration 143 makes the opening checkpoint replayable without a moving owner
+gate. The immutable manifest owns local observation boundary `T`, three
+independent append-only watermarks and their complete frozen-row digests.
+Status rows above those watermarks are processed in exact status-sequence order;
+drain progress commits atomically with reservations/debits/reconciliation. A
+retry cannot repeat a physical delta, and rows appended after the opening lock
+are caught by the ordinary collector lifecycle pass.

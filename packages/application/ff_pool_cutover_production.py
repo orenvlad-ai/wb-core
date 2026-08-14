@@ -1,15 +1,16 @@
-"""Owner-gated production runner for Stage 7C facility/pool opening.
+"""Owner-gated production runner for checkpoint-frozen Stage 7C opening.
 
-Dry-run is the default contract and never chooses T.  Apply accepts the exact
-reviewed gate fingerprint, requires external maintenance evidence, chooses T
-only after that barrier is quiet, revalidates every source, and delegates the
-single SQLite transaction to :mod:`ff_pool_cutover`.
+Dry-run fixes local accounting boundary ``T`` and compound sequence vector
+``W`` in a query-only transaction.  Apply accepts that exact reviewed gate,
+selects only the operational apply time under canonical barriers, revalidates
+the frozen/business-critical source under the SQLite write lock, and delegates
+the atomic opening plus post-``W`` drain to :mod:`ff_pool_cutover`.
 """
 
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -28,12 +29,15 @@ from packages.application.ff_pool_cutover import (
     RECOVERY_EVENTS_TABLE,
     _fingerprint,
     apply_ff_pool_cutover,
+    ff_pool_fbs_accounting_boundary_snapshot,
     ff_pool_cutover_preflight_snapshot,
     read_ff_pool_cutover_status,
 )
 from packages.application.ff_pool_fbs_lifecycle import (
     CURRENT_TABLE as FBS_CURRENT_TABLE,
+    DRAIN_STATE_TABLE as FBS_DRAIN_STATE_TABLE,
     EVENTS_TABLE as FBS_EVENTS_TABLE,
+    LATE_EVIDENCE_TABLE as FBS_LATE_EVIDENCE_TABLE,
     RECONCILIATION_TABLE as FBS_RECONCILIATION_TABLE,
     classify_pre_t_status,
 )
@@ -50,13 +54,14 @@ from packages.application.wb_fbs_orders import (
     IDENTITY_MAPPINGS_TABLE,
     OBSERVATIONS_TABLE,
     STATE_TABLE as COLLECTOR_STATE_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
     STATUS_TRANSITIONS_TABLE,
     WAREHOUSE_MAPPINGS_TABLE,
 )
 
 
 CONTRACT_NAME = "ff_pool_cutover_production_v1"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}")
 ZERO = Decimal("0")
@@ -97,17 +102,22 @@ class FfPoolCutoverProductionMutation:
         now = str(self.timestamp_factory())
         _require_utc(now)
         shipment_ids = _shipment_ids(excluded_shipment_ids)
+        advisory_minutes = max(5, min(int(proposed_window_minutes), 60))
         with _open_query_only(self.runtime.db_path) as conn:
+            conn.execute("BEGIN")
+            accounting_boundary = ff_pool_fbs_accounting_boundary_snapshot(
+                conn, boundary_at=now
+            )
             source = _build_source_snapshot(
                 conn,
                 deployed_sha=self.deployed_sha,
                 as_of=now,
                 excluded_shipment_ids=shipment_ids,
                 opening_facility_id=opening_facility_id,
+                accounting_boundary=accounting_boundary,
+                validate_collector_current=True,
             )
-        minutes = max(5, min(int(proposed_window_minutes), 60))
-        window_start = _parse_utc(now)
-        window_end = window_start + timedelta(minutes=minutes)
+            conn.rollback()
         plan: dict[str, Any] = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -115,11 +125,20 @@ class FfPoolCutoverProductionMutation:
             "deployed_sha": self.deployed_sha,
             "generated_at": now,
             "cutover_boundary": {
-                "chosen": False,
-                "proposed_window_from": _format_utc(window_start),
-                "proposed_window_to": _format_utc(window_end),
+                "chosen": True,
+                "local_boundary_at": now,
                 "timezone": "UTC",
-                "rule": "T is chosen only after the canonical external and SQLite write barriers are held",
+                "kind": "durable_local_observation_sequence_and_observed_at",
+                "rule": (
+                    "T and compound W are frozen by the query-only manifest; "
+                    "apply time is selected only after canonical barriers are held"
+                ),
+                "post_watermark_growth_invalidates_gate": False,
+            },
+            "operator_timing_advisory": {
+                "minutes": advisory_minutes,
+                "expires_gate": False,
+                "note": "Operational scheduling only; frozen W/T remains immutable",
             },
             "source": source,
             "source_fingerprint": _fingerprint(source),
@@ -155,6 +174,7 @@ class FfPoolCutoverProductionMutation:
                 "wb_writes": 0,
                 "supplier_acceptance_writes": 0,
                 "collector_remains_enabled": True,
+                "post_watermark_delta": "atomic_bounded_drain_then_idempotent_collector_drain",
             },
             "apply_allowed": not source["blockers"],
             "requires_exact_owner_gate": True,
@@ -210,18 +230,24 @@ class FfPoolCutoverProductionMutation:
         epoch_id = _next_epoch_attempt_id(self.runtime.db_path, base_epoch_id)
         source = dict(reviewed["source"])
         with _open_query_only(self.runtime.db_path) as query:
+            query.execute("BEGIN")
             live_source = _build_source_snapshot(
                 query,
                 deployed_sha=self.deployed_sha,
-                as_of=str(reviewed["generated_at"]),
+                as_of=str(source["accounting_boundary"]["local_boundary_at"]),
                 excluded_shipment_ids=tuple(source["excluded_shipment_ids"]),
                 opening_facility_id=str(source["opening_facility_id"]),
+                accounting_boundary=dict(source["accounting_boundary"]),
+                validate_collector_current=False,
             )
+            query.rollback()
         if _fingerprint(live_source) != str(reviewed["source_fingerprint"]):
             raise FfPoolCutoverProductionError(
                 "gate_source_drift",
                 "Current source changed after owner review; rebuild and reapprove the dry-run",
             )
+        with _open_query_only(self.runtime.db_path) as query:
+            _require_collector_current_ready(query)
         recovery_registry = WarehouseRecoveryRegistry(
             runtime_dir=self.runtime.runtime_dir,
             db_path=self.runtime.db_path,
@@ -324,6 +350,11 @@ class FfPoolCutoverProductionMutation:
                 approval_reference=approval,
                 actor=operator,
                 crash=crash,
+                frozen_source_revalidator=lambda locked_conn: self._revalidate_locked_source(
+                    locked_conn,
+                    reviewed_source=source,
+                    expected_fingerprint=str(reviewed["source_fingerprint"]),
+                ),
             )
             apply_committed = True
             if result["readback"]["status"] != "pass":
@@ -440,6 +471,30 @@ class FfPoolCutoverProductionMutation:
         finally:
             conn.close()
 
+    def _revalidate_locked_source(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        reviewed_source: Mapping[str, Any],
+        expected_fingerprint: str,
+    ) -> None:
+        """Re-hash frozen and business-critical evidence under BEGIN IMMEDIATE."""
+
+        live = _build_source_snapshot(
+            conn,
+            deployed_sha=self.deployed_sha,
+            as_of=str(reviewed_source["accounting_boundary"]["local_boundary_at"]),
+            excluded_shipment_ids=tuple(reviewed_source["excluded_shipment_ids"]),
+            opening_facility_id=str(reviewed_source["opening_facility_id"]),
+            accounting_boundary=dict(reviewed_source["accounting_boundary"]),
+            validate_collector_current=False,
+        )
+        if _fingerprint(live) != str(expected_fingerprint):
+            raise FfPoolCutoverProductionError(
+                "gate_source_drift",
+                "Frozen or business-critical source drifted under the held write boundary",
+            )
+
     def readback(self) -> dict[str, Any]:
         with closing(sqlite3.connect(self.runtime.db_path, timeout=30.0)) as conn:
             conn.row_factory = sqlite3.Row
@@ -453,6 +508,8 @@ class FfPoolCutoverProductionMutation:
                 ("fbs_events", FBS_EVENTS_TABLE),
                 ("fbs_current", FBS_CURRENT_TABLE),
                 ("fbs_reconciliation", FBS_RECONCILIATION_TABLE),
+                ("fbs_drain_state", FBS_DRAIN_STATE_TABLE),
+                ("fbs_late_evidence", FBS_LATE_EVIDENCE_TABLE),
                 ("excluded_pending_receipts", PENDING_SHIPMENTS_TABLE),
             ):
                 counts[name] = (
@@ -465,6 +522,7 @@ class FfPoolCutoverProductionMutation:
                 "status": status.get("status"),
                 "cutover": status,
                 "counts": counts,
+                "fbs_drain": (status.get("readback") or {}).get("fbs_drain"),
                 "wb_writes": 0,
             }
 
@@ -587,6 +645,8 @@ def _build_source_snapshot(
     as_of: str,
     excluded_shipment_ids: tuple[str, ...],
     opening_facility_id: str,
+    accounting_boundary: Mapping[str, Any],
+    validate_collector_current: bool,
 ) -> dict[str, Any]:
     preflight = ff_pool_cutover_preflight_snapshot(conn)
     blockers: list[dict[str, Any]] = list(preflight.get("blockers") or [])
@@ -608,16 +668,50 @@ def _build_source_snapshot(
         if int(row["quantity"]) != 0
     ]
     warehouse_mappings, warehouse_map = _warehouse_mappings(conn, blockers=blockers)
+    requested_boundary = dict(accounting_boundary)
+    boundary = ff_pool_fbs_accounting_boundary_snapshot(
+        conn,
+        boundary_at=str(requested_boundary["local_boundary_at"]),
+        watermarks=requested_boundary,
+    )
+    if (
+        str(requested_boundary.get("frozen_evidence_digest") or "")
+        and str(requested_boundary["frozen_evidence_digest"])
+        != str(boundary["frozen_evidence_digest"])
+    ):
+        blockers.append(
+            {
+                "code": "fbs_frozen_evidence_digest_stale",
+                "expected": requested_boundary["frozen_evidence_digest"],
+                "actual": boundary["frozen_evidence_digest"],
+            }
+        )
+    blockers.extend(list(boundary.get("blockers") or []))
+    order_watermark = _exact_integer(
+        boundary.get("order_observation_watermark_sequence", 0),
+        "accounting_boundary.order_observation_watermark_sequence",
+    )
+    status_watermark = _exact_integer(
+        boundary.get("status_observation_watermark_sequence", 0),
+        "accounting_boundary.status_observation_watermark_sequence",
+    )
+    transition_watermark = _exact_integer(
+        boundary.get("status_transition_watermark_sequence", 0),
+        "accounting_boundary.status_transition_watermark_sequence",
+    )
     latest_orders = conn.execute(
         f"""SELECT observation_sequence,observation_id,order_id,source_revision,
                    source_created_at,observed_at,warehouse_id,nm_id,chrt_id,
                    seller_sku,skus_json
             FROM {OBSERVATIONS_TABLE} AS source
-            WHERE observation_sequence=(
+            WHERE observation_sequence<=?
+              AND observation_sequence=(
                 SELECT MAX(latest.observation_sequence) FROM {OBSERVATIONS_TABLE} AS latest
                 WHERE latest.order_id=source.order_id
+                  AND latest.observation_sequence<=?
             )
-            ORDER BY order_id"""
+            ORDER BY order_id""",
+        (order_watermark, order_watermark),
     ).fetchall()
     sku_mappings, sku_map = _sku_mappings(
         conn, latest_orders=latest_orders, blockers=blockers
@@ -639,7 +733,12 @@ def _build_source_snapshot(
             target_nm_id = int(row[7])
             order_quantity = 1
         else:
-            status = classify_pre_t_status(conn, order_id=order_id, cutover_at=as_of)
+            status = classify_pre_t_status(
+                conn,
+                order_id=order_id,
+                cutover_at=str(boundary["local_boundary_at"]),
+                max_observation_sequence=status_watermark,
+            )
             classification = str(status["classification"])
             evidence = status.get("evidence")
             if evidence is None:
@@ -655,6 +754,12 @@ def _build_source_snapshot(
         classifications.append(
             {
                 "order_id": order_id,
+                "observation_sequence": int(row[0]),
+                "status_observation_sequence": (
+                    0
+                    if evidence is None
+                    else int(evidence["observation_sequence"])
+                ),
                 "observation_id": str(row[1]),
                 "source_revision": str(row[3]),
                 "source_created_at": str(row[4]),
@@ -674,11 +779,17 @@ def _build_source_snapshot(
                 "mapping_digest": mapping_digest,
             }
         )
-    watermark = max((int(row[0]) for row in latest_orders), default=0)
+    watermark = order_watermark
     observation_digest = _fingerprint(
         {"watermark": watermark, "classifications": classifications}
     )
-    collector = _collector_checkpoint(conn, watermark, observation_digest, blockers=blockers)
+    collector = _collector_checkpoint(
+        conn,
+        accounting_boundary=boundary,
+        observation_digest=observation_digest,
+        blockers=blockers,
+        validate_current=validate_collector_current,
+    )
     fbw = _fbw_origin_assignments(
         conn,
         active_supplies=list(preflight.get("active_fbw_supplies") or []),
@@ -697,7 +808,9 @@ def _build_source_snapshot(
         conn.execute(
             f"""SELECT COUNT(DISTINCT order_id) FROM {STATUS_TRANSITIONS_TABLE}
                 WHERE previous_supplier_status='complete' AND previous_wb_status='waiting'
-                  AND current_supplier_status='complete' AND current_wb_status='sorted'"""
+                  AND current_supplier_status='complete' AND current_wb_status='sorted'
+                  AND transition_sequence<=?""",
+            (transition_watermark,),
         ).fetchone()[0]
     )
     if any(item["classification"] == "unmatched" for item in classifications):
@@ -710,6 +823,9 @@ def _build_source_snapshot(
     return {
         "deployed_sha": deployed_sha,
         "as_of": as_of,
+        "accounting_boundary": {
+            key: value for key, value in boundary.items() if key != "blockers"
+        },
         "opening_facility_id": facility_id,
         "excluded_shipment_ids": list(excluded_shipment_ids),
         "target_feature_epoch": int(preflight.get("target_feature_epoch") or 0),
@@ -911,30 +1027,54 @@ def _sku_mappings(
 
 def _collector_checkpoint(
     conn: sqlite3.Connection,
-    watermark: int,
-    observation_digest: str,
     *,
+    accounting_boundary: Mapping[str, Any],
+    observation_digest: str,
     blockers: list[dict[str, Any]],
+    validate_current: bool,
 ) -> dict[str, Any]:
+    if validate_current:
+        try:
+            _require_collector_current_ready(conn)
+        except FfPoolCutoverProductionError as exc:
+            blockers.append({"code": exc.code, "message": str(exc)})
+    boundary = {
+        key: value
+        for key, value in dict(accounting_boundary).items()
+        if key != "blockers"
+    }
+    return {
+        "accounting_boundary_at": str(boundary["local_boundary_at"]),
+        "observation_watermark_sequence": int(
+            boundary["order_observation_watermark_sequence"]
+        ),
+        "observation_watermark_digest": observation_digest,
+        "status_observation_watermark_sequence": int(
+            boundary["status_observation_watermark_sequence"]
+        ),
+        "status_transition_watermark_sequence": int(
+            boundary["status_transition_watermark_sequence"]
+        ),
+        "frozen_evidence_digest": str(boundary["frozen_evidence_digest"]),
+        "frozen_streams": dict(boundary["frozen_streams"]),
+        "post_watermark_growth_invalidates_gate": False,
+    }
+
+
+def _require_collector_current_ready(conn: sqlite3.Connection) -> None:
     row = conn.execute(
-        f"""SELECT window_date_from,window_date_to,next_cursor,complete,last_status,last_success_at
+        f"""SELECT last_status,last_success_at
             FROM {COLLECTOR_STATE_TABLE} WHERE state_id=1"""
     ).fetchone()
     if row is None:
-        blockers.append({"code": "collector_checkpoint_missing"})
-        values = (0, 0, 0, 0)
-    else:
-        values = (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
-        if str(row[4]) != "success" or not str(row[5]):
-            blockers.append({"code": "collector_checkpoint_not_success"})
-    return {
-        "observation_watermark_sequence": watermark,
-        "observation_watermark_digest": observation_digest,
-        "window_date_from": values[0],
-        "window_date_to": values[1],
-        "next_cursor": values[2],
-        "complete": bool(values[3]),
-    }
+        raise FfPoolCutoverProductionError(
+            "collector_checkpoint_missing", "FBS collector checkpoint is missing"
+        )
+    if str(row[0]) != "success" or not str(row[1]):
+        raise FfPoolCutoverProductionError(
+            "collector_checkpoint_not_success",
+            "FBS collector must have a current successful checkpoint",
+        )
 
 
 def _fbw_origin_assignments(
@@ -1237,6 +1377,8 @@ def _write_backup(
             FBS_EVENTS_TABLE,
             FBS_CURRENT_TABLE,
             FBS_RECONCILIATION_TABLE,
+            FBS_DRAIN_STATE_TABLE,
+            FBS_LATE_EVIDENCE_TABLE,
         ):
             target_counts[table] = (
                 int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

@@ -1,11 +1,19 @@
 # Migration 142 — exact FF pool opening and FBS lifecycle cutover
 
+> Migration 143 supersedes only this migration's moving-source gate: the
+> accounting manifest now freezes local UTC `T` plus the independent
+> order/status/transition sequence vector `W`. Append-only rows above `W` do
+> not stale owner approval and are drained idempotently after the frozen
+> opening. All accounting, barrier, pending-receipt and recovery invariants
+> below remain in force.
+
 ## Goal and owner gate
 
 Stage 7C adds the production-shaped, dry-run-default path that opens the
 existing aggregate `ff` state inside one exact facility × `FBS|FBO` epoch and
 starts the FBS order lifecycle. Repository deployment is inert: it does not
-choose `T`, enable the epoch or change a business row. Production apply remains
+enable the epoch or change a business row. The query-only Migration 143 dry-run
+freezes accounting `T/W`; production apply remains
 `scope:production-mutation` and requires the exact dry-run fingerprint plus an
 owner approval reference.
 
@@ -38,8 +46,8 @@ cost layer. The legacy factual-date editor remains prohibited.
 
 ## Exact pre-T checkpoint
 
-The cutover pins immutable official order and status observations at one
-collector watermark. For each exact mapped order:
+The cutover pins immutable official order and status observations at the
+compound local sequence vector `W`. For each exact mapped order:
 
 - pre-T `supplierStatus=complete AND wbStatus=sorted` creates one historical
   physical debit at the frozen opening WAC;
@@ -87,13 +95,15 @@ ff-pool-cutover-production-readback
 ```
 
 Every command requires the canonical target and exact deployed SHA. Dry-run is
-query-only and proposes a window without choosing `T`. Apply validates the
+query-only and freezes accounting `T/W`; the proposed operating window is only
+an advisory and never expires the gate. Apply validates the
 reviewed fingerprint/approval, acquires and confirms the durable HTTP barrier,
 holds/drains business writers and the warehouse timer, proves the supplier
 acceptance writer is held and the FBS timer is still enabled/active, writes a
 central Recovery Policy T2 warehouse-domain checkpoint plus a mode-`0600`
-exact-target before-image, and only then selects `T` and revalidates all source
-evidence under `BEGIN IMMEDIATE`.
+exact-target before-image, and only then selects the operational apply time and
+revalidates frozen/business-critical evidence under `BEGIN IMMEDIATE`. Rows
+appended above `W` are drained, not treated as owner-gate drift.
 
 The generic business-data inventory explicitly classifies
 `wb-core-fbs-shadow-collector.timer` as a continuous observation-only timer. It

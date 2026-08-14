@@ -23,6 +23,7 @@ from packages.application.ff_pool_cutover import (
     build_ff_pool_cutover_plan,
     classify_late_pre_t_observations,
     ensure_ff_pool_cutover_schema,
+    ff_pool_fbs_accounting_boundary_snapshot,
     ff_pool_cutover_preflight_snapshot,
     read_ff_pool_cutover_status,
     read_ff_pool_cutover_readback,
@@ -131,6 +132,9 @@ def _db() -> sqlite3.Connection:
 
 
 def _proposal(conn: sqlite3.Connection) -> dict:
+    accounting_boundary = ff_pool_fbs_accounting_boundary_snapshot(
+        conn, boundary_at=T
+    )
     warehouses = [{"warehouse_id": 501, "facility_id": "facility_test", "evidence_digest": DIGEST}]
     sku_identity = _fingerprint({"nm_id": 101, "chrt_id": 201, "skus": ["sku-101"]})
     skus = [{
@@ -143,6 +147,8 @@ def _proposal(conn: sqlite3.Connection) -> dict:
     mapping_digest = _fingerprint({"warehouses": warehouses, "skus": skus})
     classification = {
         "order_id": 7001,
+        "observation_sequence": 1,
+        "status_observation_sequence": 1,
         "observation_id": "observation_0001",
         "source_revision": "source_revision_0001",
         "source_created_at": "2026-08-12T04:00:00Z",
@@ -154,6 +160,7 @@ def _proposal(conn: sqlite3.Connection) -> dict:
         "quantity": 1,
         "status_fingerprint": DIGEST,
         "status_evidence": {
+            "observation_sequence": 1,
             "source_revision": "source_revision_0001",
             "status_digest": DIGEST,
             "supplier_status": "complete",
@@ -206,6 +213,7 @@ def _proposal(conn: sqlite3.Connection) -> dict:
         ],
         "order_classifications": [{
             "order_id": 7001, "classification": "pre_t_absorbed_reservation",
+            "observation_sequence": 1, "status_observation_sequence": 1,
             "facility_id": "facility_test", "quantity": 1,
             "status_fingerprint": DIGEST,
             "status_evidence": classification["status_evidence"],
@@ -221,9 +229,12 @@ def _proposal(conn: sqlite3.Connection) -> dict:
             "pools": ["FBS", "FBO"], "evidence_digest": shipment_evidence,
         }],
         "collector_checkpoint": {
+            "accounting_boundary_at": T,
             "observation_watermark_sequence": 1,
             "observation_watermark_digest": observation_digest,
-            "window_date_from": 1, "window_date_to": 2, "next_cursor": 0, "complete": True,
+            "status_observation_watermark_sequence": 1,
+            "status_transition_watermark_sequence": 0,
+            "frozen_evidence_digest": accounting_boundary["frozen_evidence_digest"],
         },
         "non_target_evidence_digest": preflight["non_target"]["digest"],
     }
@@ -321,7 +332,7 @@ def main() -> int:
             observation_id,order_id,source_revision,delivery_type,source_created_at,
             nm_id,observed_at,collector_date_from,collector_date_to,collector_cursor
         ) VALUES('observation_late',7003,'source_revision_late','fbs',?,101,?,1,2,0)""",
-        ("2026-08-12T04:30:00Z", "2026-08-12T06:00:00Z"),
+        ("2026-08-12T04:30:00Z", T),
     )
     atomic.execute(
         """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
@@ -332,7 +343,8 @@ def main() -> int:
     )
     atomic.commit()
     late = classify_late_pre_t_observations(atomic, cutover_id="cutover_test_0001")
-    assert late["count"] == 2 and all(item["creates_debit"] is False for item in late["cases"])
+    assert late["count"] == 1 and all(item["creates_debit"] is False for item in late["cases"])
+    assert late["cases"][0]["order_id"] == 7003
     repeated = _apply_ff_pool_cutover_fixture(atomic, proposal=atomic_proposal, deployed_sha=SHA, cutover_at=T)
     assert repeated["idempotent"] is True
     conflict = copy.deepcopy(atomic_proposal)

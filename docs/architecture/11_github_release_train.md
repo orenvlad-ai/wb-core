@@ -105,16 +105,20 @@ waiting и не разрешает manual intervention.
 `release:ready`. Worker оставляет его `release:blocked` до separate human-gated
 contract.
 
-For Migration 142/Stage 7C, deploy of the trusted default-off runner may precede
-the business gate, but is not the production mutation. The pre-terminal gate
-evidence must come from canonical query-only
+For Migration 142/143 Stage 7C, deploy of the trusted default-off runner may
+precede the business gate, but is not the production mutation. The pre-terminal
+gate evidence must come from canonical query-only
 `ff-pool-cutover-production-dry-run` on the exact deployed SHA and include the
-proposed (not selected) T window, exact opening/historical
-debit/reservation/capital totals, approved/proposed complete+sorted rule,
-manifest-pinned pending-receipt evidence, T2/target-before-image recovery and
-the exact fingerprint. Only a later explicit owner confirmation authorizes
-`...-apply`; successful apply/readback and exact prior-control restore supply
-the reconciliation/evidence digests for the ordinary production-mutation
+frozen local UTC `T`, compound order/status/transition sequence vector `W` and
+frozen-row digests; exact opening/historical debit/reservation/capital totals;
+approved/proposed complete+sorted rule; manifest-pinned pending-receipt
+evidence; T2/target-before-image recovery; and the exact fingerprint. The
+operating window is advisory only. Append-only FBS observations above `W` do
+not stale that gate; a new gate is required only for deployed SHA or
+frozen/business-critical source, rule, or pending-receipt treatment drift. Only
+a later explicit owner confirmation authorizes `...-apply`; successful
+apply/readback and exact prior-control restore supply the
+reconciliation/evidence digests for the ordinary production-mutation
 terminalization command below.
 
 ## Exact-SHA Deploy И Reconciliation
