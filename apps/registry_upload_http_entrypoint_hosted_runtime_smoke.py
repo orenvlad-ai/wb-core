@@ -2465,8 +2465,8 @@ def main() -> None:
 
         cutover_sha = "b" * 40
         cutover_gate = {
-            "contract_name": "ff_pool_cutover_production_v1",
-            "contract_version": 1,
+            "contract_name": hosted_runtime.FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
+            "contract_version": hosted_runtime.FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION,
             "mode": "dry_run_owner_gate",
             "deployed_sha": cutover_sha,
             "apply_allowed": True,
@@ -2530,6 +2530,57 @@ def main() -> None:
             or cutover_args.ff_pool_cutover_action != "dry-run"
         ):
             raise AssertionError("hosted runner must expose Stage 7C production commands")
+
+        cutover_gate_path = Path(partner_temp_dir) / "ff-pool-cutover-gate.json"
+        cutover_gate_path.write_text(
+            json.dumps(cutover_gate, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            hosted_runtime,
+            "_read_remote_fbs_collector_timer",
+            return_value={"active": False, "enabled": False},
+        ):
+            try:
+                hosted_runtime._run_remote_ff_pool_cutover_production(
+                    active_target,
+                    action="apply",
+                    deployed_sha=cutover_sha,
+                    excluded_shipment_ids=(),
+                    opening_facility_id="",
+                    proposed_window_minutes=15,
+                    plan_path=cutover_gate_path,
+                    fingerprint=cutover_gate["fingerprint"],
+                    approval_reference="github-pr-973#issuecomment-owner-gate",
+                    actor="owner",
+                )
+            except RuntimeError as exc:
+                if "five-minute FBS collector" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("Stage 7C apply must require the active collector")
+
+        stale_cutover_gate = {**cutover_gate, "contract_version": 1}
+        cutover_gate_path.write_text(
+            json.dumps(stale_cutover_gate, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        try:
+            hosted_runtime._run_remote_ff_pool_cutover_production(
+                active_target,
+                action="apply",
+                deployed_sha=cutover_sha,
+                excluded_shipment_ids=(),
+                opening_facility_id="",
+                proposed_window_minutes=15,
+                plan_path=cutover_gate_path,
+                fingerprint=cutover_gate["fingerprint"],
+                approval_reference="github-pr-973#issuecomment-owner-gate",
+                actor="owner",
+            )
+        except ValueError as exc:
+            if "reviewed plan does not match" not in str(exc):
+                raise
+        else:
+            raise AssertionError("Stage 7C apply accepted a stale manifest version")
     for maintenance_action, expected_timeout in (
         ("status", 300.0),
         ("hold", 1500.0),
