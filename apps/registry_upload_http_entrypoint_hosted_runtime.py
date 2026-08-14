@@ -55,6 +55,7 @@ PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
+FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
 FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
@@ -135,6 +136,10 @@ from packages.application.finance_storage_recovery_contract import (
 from packages.application.ff_pool_cutover_production import (
     CONTRACT_NAME as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
     CONTRACT_VERSION as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION,
+)
+from packages.application.ff_pool_cutover_recovery_supersession import (
+    CONTRACT_NAME as FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_VERSION,
 )
 
 
@@ -7030,6 +7035,49 @@ def run_ff_pool_cutover_production_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ff_pool_recovery_supersession_command(args: argparse.Namespace) -> int:
+    """Run query-only proof/readback or one exact owner-gated supersession."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_pool_recovery_supersession_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError(
+            "Stage 7C recovery supersession plan must stay outside the Git checkout"
+        )
+    payload = _run_remote_ff_pool_recovery_supersession(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        operation_id=str(getattr(args, "operation_id", "") or ""),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(
+            getattr(args, "approval_reference", "") or ""
+        ),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output_path = Path(str(args.output)).resolve()
+    if output_path == ROOT or ROOT in output_path.parents:
+        raise ValueError(
+            "Stage 7C recovery supersession evidence must stay outside the Git checkout"
+        )
+    _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-pool-recovery-supersession-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_vitrina_incident_rematerialization_command(
     args: argparse.Namespace,
 ) -> int:
@@ -7913,6 +7961,161 @@ def _run_remote_ff_pool_cutover_runner(
         or payload.get("mode") != "dry_run_owner_gate"
     ):
         raise RuntimeError("Stage 7C dry-run contract mismatch")
+    return payload
+
+
+def _run_remote_ff_pool_recovery_supersession(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    operation_id: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Bind supersession proof/apply to the canonical runtime and exact code SHA."""
+
+    action_name = f"ff-pool-recovery-supersession-{action}"
+    _ensure_active_hosted_runtime_target(target, action=action_name)
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported Stage 7C recovery supersession action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action=action_name, dry_run=False)
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError(
+            "Stage 7C recovery supersession requires an exact deployed SHA"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "Stage 7C recovery supersession requires the canonical runtime dir"
+        )
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError(
+            "Stage 7C recovery supersession requires the canonical HTTP service"
+        )
+
+    runner_input: str | None = None
+    runner_args = [
+        "python3",
+        "apps/ff_pool_cutover_recovery_supersession.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    if action in {"dry-run", "readback"}:
+        if not re.fullmatch(r"recovery_[0-9a-f]{32}(?:_g[0-9]+)?", operation_id):
+            raise ValueError(
+                "Stage 7C recovery supersession requires an exact recovery operation id"
+            )
+        runner_args.extend(["--operation-id", operation_id])
+    else:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "Stage 7C recovery supersession apply requires an existing reviewed plan"
+            )
+        try:
+            reviewed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Stage 7C recovery supersession reviewed plan is invalid JSON"
+            ) from exc
+        if (
+            not isinstance(reviewed_plan, dict)
+            or reviewed_plan.get("contract_name")
+            != FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME
+            or int(reviewed_plan.get("contract_version") or 0)
+            != FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_VERSION
+            or reviewed_plan.get("mode") != "dry_run_exact_supersession"
+            or reviewed_plan.get("status") != "ready"
+            or reviewed_plan.get("apply_allowed") is not True
+            or reviewed_plan.get("would_change") is not True
+            or bool(reviewed_plan.get("blockers"))
+            or str(reviewed_plan.get("deployed_sha") or "") != deployed_sha
+            or str(reviewed_plan.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError(
+                "Stage 7C recovery supersession plan does not match this exact apply"
+            )
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError(
+                "Stage 7C recovery supersession apply requires approval reference and actor"
+            )
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+                "--actor",
+                actor,
+            ]
+        )
+        runner_input = json.dumps(reviewed_plan, ensure_ascii=False, sort_keys=True)
+
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=runner_input,
+        cwd=ROOT,
+        timeout=FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Stage 7C recovery supersession {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Stage 7C recovery supersession runner returned invalid JSON"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract_name")
+        != FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME
+        or int(payload.get("contract_version") or 0)
+        != FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_VERSION
+        or payload.get("status") in {"blocked", "error", "not_superseded", "missing"}
+    ):
+        raise RuntimeError(
+            "Stage 7C recovery supersession runner returned an invalid result"
+        )
+    if action == "dry-run" and (
+        payload.get("mode") != "dry_run_exact_supersession"
+        or payload.get("status") not in {"ready", "already_applied"}
+        or str(payload.get("deployed_sha") or "") != deployed_sha
+    ):
+        raise RuntimeError(
+            "Stage 7C recovery supersession dry-run contract mismatch"
+        )
+    if action == "readback" and payload.get("status") != "superseded_verified":
+        raise RuntimeError(
+            "Stage 7C recovery supersession readback did not verify terminal state"
+        )
     return payload
 
 
@@ -10788,6 +10991,65 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ff_pool_cutover_readback.set_defaults(
         handler=run_ff_pool_cutover_production_command,
         ff_pool_cutover_action="readback",
+    )
+
+    ff_pool_recovery_supersession_dry_run = subparsers.add_parser(
+        "ff-pool-recovery-supersession-dry-run",
+        help=(
+            "Build query-only exact proof that a later reconciled Stage 7C "
+            "cutover supersedes one stale failed recovery."
+        ),
+    )
+    ff_pool_recovery_supersession_dry_run.add_argument(
+        "--deployed-sha", required=True
+    )
+    ff_pool_recovery_supersession_dry_run.add_argument(
+        "--operation-id", required=True
+    )
+    ff_pool_recovery_supersession_dry_run.add_argument("--output", required=True)
+    ff_pool_recovery_supersession_dry_run.set_defaults(
+        handler=run_ff_pool_recovery_supersession_command,
+        ff_pool_recovery_supersession_action="dry-run",
+    )
+
+    ff_pool_recovery_supersession_apply = subparsers.add_parser(
+        "ff-pool-recovery-supersession-apply",
+        help=(
+            "Append one exact owner-approved recovery supersession relation "
+            "without replaying warehouse business effects."
+        ),
+    )
+    ff_pool_recovery_supersession_apply.add_argument(
+        "--deployed-sha", required=True
+    )
+    ff_pool_recovery_supersession_apply.add_argument("--plan-file", required=True)
+    ff_pool_recovery_supersession_apply.add_argument(
+        "--fingerprint", required=True
+    )
+    ff_pool_recovery_supersession_apply.add_argument(
+        "--approval-reference", required=True
+    )
+    ff_pool_recovery_supersession_apply.add_argument("--actor", required=True)
+    ff_pool_recovery_supersession_apply.add_argument("--output", required=True)
+    ff_pool_recovery_supersession_apply.set_defaults(
+        handler=run_ff_pool_recovery_supersession_command,
+        ff_pool_recovery_supersession_action="apply",
+    )
+
+    ff_pool_recovery_supersession_readback = subparsers.add_parser(
+        "ff-pool-recovery-supersession-readback",
+        help="Read back the immutable relation and preserved recovery artifacts.",
+    )
+    ff_pool_recovery_supersession_readback.add_argument(
+        "--deployed-sha", required=True
+    )
+    ff_pool_recovery_supersession_readback.add_argument(
+        "--operation-id", required=True
+    )
+    ff_pool_recovery_supersession_readback.add_argument("--output", required=True)
+    ff_pool_recovery_supersession_readback.set_defaults(
+        handler=run_ff_pool_recovery_supersession_command,
+        ff_pool_recovery_supersession_action="readback",
     )
 
     ads_historical_dry_run = subparsers.add_parser(
