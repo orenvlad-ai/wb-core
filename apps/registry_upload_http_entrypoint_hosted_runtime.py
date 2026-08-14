@@ -132,6 +132,10 @@ from packages.application.finance_migration_deploy_lease import (
 from packages.application.finance_storage_recovery_contract import (
     MUTATION_ACTIONS as FINANCE_STORAGE_MUTATION_ACTIONS,
 )
+from packages.application.ff_pool_cutover_production import (
+    CONTRACT_NAME as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION,
+)
 
 
 DEFAULT_TARGET_FILE = (
@@ -7666,8 +7670,10 @@ def _run_remote_ff_pool_cutover_production(
             raise ValueError("Stage 7C reviewed plan is invalid JSON") from exc
         if (
             not isinstance(reviewed_plan, dict)
-            or reviewed_plan.get("contract_name") != "ff_pool_cutover_production_v1"
-            or int(reviewed_plan.get("contract_version") or 0) != 1
+            or reviewed_plan.get("contract_name")
+            != FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME
+            or int(reviewed_plan.get("contract_version") or 0)
+            != FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION
             or reviewed_plan.get("mode") != "dry_run_owner_gate"
             or reviewed_plan.get("apply_allowed") is not True
             or bool(reviewed_plan.get("blockers"))
@@ -7901,7 +7907,9 @@ def _run_remote_ff_pool_cutover_runner(
     if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
         raise RuntimeError("Stage 7C production runner returned an invalid result")
     if action == "dry-run" and (
-        payload.get("contract_name") != "ff_pool_cutover_production_v1"
+        payload.get("contract_name") != FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME
+        or int(payload.get("contract_version") or 0)
+        != FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION
         or payload.get("mode") != "dry_run_owner_gate"
     ):
         raise RuntimeError("Stage 7C dry-run contract mismatch")
