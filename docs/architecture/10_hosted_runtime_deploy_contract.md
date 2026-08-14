@@ -98,6 +98,18 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   releases the barrier; failure or transport ambiguity retains it for recovery.
   The runner never writes WB, and deployment of the default-off runner alone
   never applies opening or chooses the complete/sorted policy.
+- `wb-core-fbs-shadow-collector.timer` is a classified continuous observer,
+  not a quiet-window-owned writer timer. `business-data-maintenance` inventories
+  and reports it but never disables, waits or restores it; any other
+  unclassified `wb-core-*.timer` still blocks before `hold_started`. When an
+  HTTP barrier exists but core prepare failed before private maintenance
+  state/audit changed, `barrier-abort` may use only the bounded
+  `no_maintenance_hold_started` proof: both files and their last event predate
+  the exact barrier timestamp, fresh controls have no unknown timer, cron or
+  owner-policy drift, and the file evidence repeats unchanged under the
+  maintenance transition lock. The audited abort fingerprints that proof and
+  skips stale prior-state restore plus the not-yet-reached warehouse hold;
+  changed or partial boundaries remain on the ordinary exact-restore path.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

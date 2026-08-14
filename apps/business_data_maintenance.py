@@ -76,6 +76,12 @@ FORCE_OFF_TIMER_UNITS = (
 )
 ALL_BUSINESS_TIMER_UNITS = CORE_TIMER_UNITS + FORCE_OFF_TIMER_UNITS
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
+CONTINUOUS_OBSERVER_TIMER_UNITS = (
+    "wb-core-fbs-shadow-collector.timer",
+)
+CLASSIFIED_WB_CORE_TIMER_UNITS = (
+    ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS
+)
 
 
 class _ExclusiveRestoreLock:
@@ -1707,12 +1713,16 @@ def maintenance_status(
 ) -> dict[str, Any]:
     captured_at = _utc_now()
     timer_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_TIMER_UNITS}
+    continuous_observer_timer_states = {
+        unit: systemd.unit_state(unit)
+        for unit in CONTINUOUS_OBSERVER_TIMER_UNITS
+    }
     service_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_SERVICE_UNITS}
     discovered = systemd.discovered_timers()
     unknown_timers = [
         unit
         for unit in discovered
-        if unit not in ALL_BUSINESS_TIMER_UNITS
+        if unit not in CLASSIFIED_WB_CORE_TIMER_UNITS
     ]
     runtime = _runtime_summary(schedules.read_all())
     processes = _writer_processes(proc_root)
@@ -1752,6 +1762,7 @@ def maintenance_status(
         "quiet": quiet,
         "captured_at": captured_at,
         "timers": timer_states,
+        "continuous_observer_timers": continuous_observer_timer_states,
         "services": service_states,
         "discovered_wb_core_timers": discovered,
         "unknown_wb_core_timers": unknown_timers,
@@ -2994,6 +3005,248 @@ def maintenance_prepare(
     return {**current, "status": "prepared", "idempotent": already_quiet}
 
 
+def _last_private_audit_event(path: Path) -> dict[str, Any]:
+    """Read one bounded final audit row for an unstarted-hold proof."""
+
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("business maintenance audit is unavailable")
+    if path.stat().st_mode & 0o077:
+        raise RuntimeError("business maintenance audit must be private mode 0600")
+    maximum_tail_bytes = 8 * 1024 * 1024
+    with path.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        offset = max(0, size - maximum_tail_bytes)
+        handle.seek(offset)
+        payload = handle.read(maximum_tail_bytes)
+    lines = [line for line in payload.splitlines() if line.strip()]
+    if offset and len(lines) < 2:
+        raise RuntimeError("business maintenance audit tail is not bounded")
+    if not lines:
+        raise RuntimeError("business maintenance audit is empty")
+    try:
+        event = json.loads(lines[-1].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("business maintenance audit tail is invalid") from exc
+    if not isinstance(event, dict):
+        raise RuntimeError("business maintenance audit tail is not an object")
+    return event
+
+
+def _parse_utc_instant(value: Any, *, label: str) -> datetime:
+    normalized = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is not an exact UTC timestamp") from exc
+    if parsed.tzinfo is None:
+        raise RuntimeError(f"{label} must include timezone evidence")
+    return parsed.astimezone(timezone.utc)
+
+
+def maintenance_unstarted_hold_abort_readback(
+    runtime_dir: Path,
+    *,
+    systemd: SystemdClient,
+    schedules: RuntimeScheduleClient,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Prove that an acquiring HTTP barrier preceded no maintenance hold."""
+
+    runtime_dir = Path(runtime_dir).resolve()
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+    ):
+        raise RuntimeError(
+            "unstarted-hold abort requires an exact unconfirmed acquiring barrier"
+        )
+    barrier_started = _parse_utc_instant(
+        barrier.get("started_at"),
+        label="barrier started_at",
+    )
+    barrier_started_ns = int(barrier_started.timestamp() * 1_000_000_000)
+    state_path = runtime_dir / STATE_FILENAME
+    audit_path = runtime_dir / AUDIT_FILENAME
+    maintenance_state = _load_json_object(state_path) or {}
+    if (
+        str(maintenance_state.get("phase") or "") != "restored"
+        or maintenance_state.get("exact_prior_state_restored") is not True
+    ):
+        raise RuntimeError(
+            "maintenance state does not prove a completed boundary predating "
+            "this barrier"
+        )
+
+    def filesystem_evidence() -> dict[str, Any]:
+        if state_path.is_symlink() or not state_path.is_file():
+            raise RuntimeError("business maintenance state is unavailable")
+        if state_path.stat().st_mode & 0o077:
+            raise RuntimeError(
+                "business maintenance state must be private mode 0600"
+            )
+        state_stat = state_path.stat()
+        audit_stat = audit_path.stat()
+        last_event = _last_private_audit_event(audit_path)
+        last_event_at = _parse_utc_instant(
+            last_event.get("captured_at"),
+            label="last maintenance audit event",
+        )
+        if (
+            state_stat.st_mtime_ns >= barrier_started_ns
+            or audit_stat.st_mtime_ns >= barrier_started_ns
+            or last_event_at >= barrier_started
+        ):
+            raise RuntimeError(
+                "maintenance state or audit changed after barrier acquisition; "
+                "an unstarted hold cannot be proven"
+            )
+        return {
+            "maintenance_state_mtime_ns": int(state_stat.st_mtime_ns),
+            "maintenance_audit_mtime_ns": int(audit_stat.st_mtime_ns),
+            "last_maintenance_event": str(last_event.get("event") or ""),
+            "last_maintenance_event_at": str(
+                last_event.get("captured_at") or ""
+            ),
+        }
+
+    before = filesystem_evidence()
+    current = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    if current.get("unknown_wb_core_timers"):
+        raise RuntimeError(
+            "unstarted-hold abort is blocked by unclassified wb-core timers"
+        )
+    if current.get("cron_entries"):
+        raise RuntimeError(
+            "unstarted-hold abort is blocked by repo-owned cron drift"
+        )
+    auto_updates = dict(current.get("auto_updates") or {})
+    if auto_updates.get("unknown_processes") or auto_updates.get(
+        "drift_processes"
+    ):
+        raise RuntimeError(
+            "unstarted-hold abort is blocked by owner-policy drift"
+        )
+    after = filesystem_evidence()
+    if before != after:
+        raise RuntimeError(
+            "maintenance evidence changed while proving an unstarted hold"
+        )
+    control = maintenance_control_signature(current, runtime_dir=runtime_dir)
+    proof = {
+        "boundary_kind": "no_maintenance_hold_started",
+        "barrier_window_id": str(barrier.get("window_id") or ""),
+        "barrier_plan_fingerprint": str(
+            barrier.get("plan_fingerprint") or ""
+        ),
+        "barrier_started_at": str(barrier.get("started_at") or ""),
+        **after,
+        "current_control_signature": control["fingerprint"],
+    }
+    return {
+        **current,
+        "status": "restored",
+        "exact_prior_state_restored": True,
+        "control_signature": control["fingerprint"],
+        "restore_boundary_kind": "no_maintenance_hold_started",
+        "no_hold_proof": proof,
+        "no_hold_proof_fingerprint": _stable_fingerprint(proof),
+    }
+
+
+def maintenance_barrier_abort_readback(
+    runtime_dir: Path,
+    *,
+    systemd: SystemdClient,
+    schedules: RuntimeScheduleClient,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Select only a current-window restore or an exact unstarted proof."""
+
+    runtime_dir = Path(runtime_dir).resolve()
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is False
+        and str(barrier.get("phase") or "") == "released"
+    ):
+        # abort_barrier_acquire itself still proves the exact window,
+        # fingerprint and acquire_aborted release kind before returning its
+        # idempotent no-op.
+        return {
+            "status": "restored",
+            "exact_prior_state_restored": True,
+            "restore_boundary_kind": "released_idempotency_probe",
+        }
+    maintenance_state = _load_json_object(runtime_dir / STATE_FILENAME) or {}
+    restore_readback = dict(maintenance_state.get("restore_readback") or {})
+    restore_readback.update(
+        {
+            "status": str(maintenance_state.get("phase") or ""),
+            "exact_prior_state_restored": bool(
+                maintenance_state.get("exact_prior_state_restored")
+            ),
+            "control_signature": str(
+                (
+                    maintenance_state.get("restore_control_signature")
+                    or {}
+                ).get("fingerprint")
+                or ""
+            ),
+        }
+    )
+    try:
+        return maintenance_unstarted_hold_abort_readback(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+        )
+    except RuntimeError as unstarted_hold_error:
+        # A real prepare/hold generation must use its persisted exact restore.
+        # Stale restore evidence from an older maintenance window never falls
+        # through merely because it also says phase=restored.
+        try:
+            barrier_started = _parse_utc_instant(
+                barrier.get("started_at"),
+                label="barrier started_at",
+            )
+            hold_started = _parse_utc_instant(
+                maintenance_state.get("hold_started_at"),
+                label="maintenance hold_started_at",
+            )
+            restored_at = _parse_utc_instant(
+                maintenance_state.get("restored_at"),
+                label="maintenance restored_at",
+            )
+            restore_captured_at = _parse_utc_instant(
+                restore_readback.get("captured_at"),
+                label="maintenance restore readback captured_at",
+            )
+        except RuntimeError as restore_identity_error:
+            raise RuntimeError(
+                "barrier abort has neither an unstarted-hold proof nor an "
+                "exact restore belonging to this barrier"
+            ) from restore_identity_error
+        if (
+            hold_started < barrier_started
+            or restored_at < barrier_started
+            or restore_captured_at < barrier_started
+            or str(restore_readback.get("status") or "") != "restored"
+            or restore_readback.get("exact_prior_state_restored") is not True
+        ):
+            raise RuntimeError(
+                "barrier abort has neither an unstarted-hold proof nor an "
+                "exact restore belonging to this barrier"
+            ) from unstarted_hold_error
+        return restore_readback
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -3089,7 +3342,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
-    if args.action in {"barrier-release", "barrier-abort"}:
+    if args.action == "barrier-release":
         maintenance_state = _load_json_object(runtime_dir / STATE_FILENAME) or {}
         restore_readback = dict(maintenance_state.get("restore_readback") or {})
         restore_readback.update(
@@ -3107,24 +3360,14 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             }
         )
-        if args.action == "barrier-abort":
-            result = abort_barrier_acquire(
-                runtime_dir,
-                window_id=args.window_id,
-                plan_fingerprint=args.plan_fingerprint,
-                actor=args.actor,
-                reason=args.reason,
-                restore_readback=restore_readback,
-            )
-        else:
-            result = release_barrier(
-                runtime_dir,
-                window_id=args.window_id,
-                plan_fingerprint=args.plan_fingerprint,
-                actor=args.actor,
-                reason=args.reason,
-                restore_readback=restore_readback,
-            )
+        result = release_barrier(
+            runtime_dir,
+            window_id=args.window_id,
+            plan_fingerprint=args.plan_fingerprint,
+            actor=args.actor,
+            reason=args.reason,
+            restore_readback=restore_readback,
+        )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
 
@@ -3136,7 +3379,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     schedules = RuntimeScheduleClient(base_url=base_url, cookie=_build_web_auth_cookie(env))
     systemd = SystemdClient()
-    if args.action == "restore-continuity-status":
+    if args.action == "barrier-abort":
+        with _ExclusiveRestoreLock(runtime_dir):
+            restore_readback = maintenance_barrier_abort_readback(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+            )
+            result = abort_barrier_acquire(
+                runtime_dir,
+                window_id=args.window_id,
+                plan_fingerprint=args.plan_fingerprint,
+                actor=args.actor,
+                reason=args.reason,
+                restore_readback=restore_readback,
+            )
+    elif args.action == "restore-continuity-status":
         status = maintenance_status(
             runtime_dir,
             systemd=systemd,
@@ -3157,25 +3415,27 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "status":
         result = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
     elif args.action == "prepare":
-        result = maintenance_prepare(
-            runtime_dir,
-            systemd=systemd,
-            schedules=schedules,
-            actor=args.actor,
-            reason=args.reason or "canonical cross-writer hold",
-            expected_revision=args.expected_revision,
-        )
+        with _ExclusiveRestoreLock(runtime_dir):
+            result = maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                actor=args.actor,
+                reason=args.reason or "canonical cross-writer hold",
+                expected_revision=args.expected_revision,
+            )
     elif args.action == "hold":
-        result = maintenance_hold(
-            runtime_dir,
-            systemd=systemd,
-            schedules=schedules,
-            wait_timeout_seconds=args.wait_timeout_seconds,
-            poll_interval_seconds=args.poll_interval_seconds,
-            actor=args.actor,
-            reason=args.reason or "canonical cross-writer hold",
-            expected_revision=args.expected_revision,
-        )
+        with _ExclusiveRestoreLock(runtime_dir):
+            result = maintenance_hold(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                wait_timeout_seconds=args.wait_timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds,
+                actor=args.actor,
+                reason=args.reason or "canonical cross-writer hold",
+                expected_revision=args.expected_revision,
+            )
     elif args.action == "restore":
         continuity_evidence: dict[str, Any] | None = None
         if args.pre_hold_service_continuity_file:

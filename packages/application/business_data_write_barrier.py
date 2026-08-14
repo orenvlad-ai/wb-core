@@ -574,6 +574,19 @@ def abort_barrier_acquire(
                 80,
             ),
             "readback_fingerprint": _fingerprint(restore_readback),
+            "restore_boundary_kind": _bounded(
+                restore_readback.get("restore_boundary_kind"),
+                80,
+            ),
+            "no_hold_proof_fingerprint": _bounded(
+                restore_readback.get("no_hold_proof_fingerprint"),
+                80,
+            ),
+            "no_hold_proof": (
+                dict(restore_readback.get("no_hold_proof") or {})
+                if isinstance(restore_readback.get("no_hold_proof"), Mapping)
+                else {}
+            ),
         }
         state.update(
             {
