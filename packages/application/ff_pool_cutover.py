@@ -89,6 +89,12 @@ ORDER_CLASSES = (
     "post_t_deferred",
     "unmatched",
 )
+LEGACY_ORDER_CLASSES = (
+    "pre_t_absorbed_closed",
+    "pre_t_absorbed_reservation",
+    "post_t_deferred",
+    "unmatched",
+)
 STATUS_EVIDENCE_CLASSES = (
     "active_pre_handoff",
     "closed_pre_handoff",
@@ -144,6 +150,36 @@ class FfPoolCutoverError(ValueError):
 
 class FfPoolCutoverAmbiguousCommit(RuntimeError):
     """Fixture-only signal: commit succeeded, exact readback is required."""
+
+
+def _order_classifications_table_sql(
+    *,
+    table: str = ORDERS_TABLE,
+    if_not_exists: bool = False,
+) -> str:
+    qualifier = "IF NOT EXISTS " if if_not_exists else ""
+    return f"""
+        CREATE TABLE {qualifier}{table}(
+            cutover_id TEXT NOT NULL REFERENCES {MANIFESTS_TABLE}(cutover_id),
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            observation_sequence INTEGER NOT NULL DEFAULT 0,
+            status_observation_sequence INTEGER NOT NULL DEFAULT 0,
+            observation_id TEXT NOT NULL,
+            source_revision TEXT NOT NULL,
+            source_created_at TEXT NOT NULL,
+            observed_at TEXT NOT NULL
+                CHECK(substr(observed_at,-1,1)='Z' AND julianday(observed_at) IS NOT NULL),
+            classification TEXT NOT NULL CHECK(classification IN ({_sql_values(ORDER_CLASSES)})),
+            facility_id TEXT REFERENCES {FACILITIES_TABLE}(facility_id),
+            pool TEXT CHECK(pool IS NULL OR pool='FBS'),
+            nm_id INTEGER NOT NULL CHECK(typeof(nm_id)='integer' AND nm_id>0),
+            quantity INTEGER NOT NULL
+                CHECK(typeof(quantity)='integer' AND quantity>=0),
+            status_fingerprint TEXT NOT NULL,
+            mapping_digest TEXT NOT NULL,
+            PRIMARY KEY(cutover_id,order_id)
+        );
+    """
 
 
 def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
@@ -206,26 +242,7 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS ff_pool_cutover_allocations_by_nm
         ON {ALLOCATIONS_TABLE}(cutover_id,nm_id,facility_id,pool);
 
-        CREATE TABLE IF NOT EXISTS {ORDERS_TABLE}(
-            cutover_id TEXT NOT NULL REFERENCES {MANIFESTS_TABLE}(cutover_id),
-            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
-            observation_sequence INTEGER NOT NULL DEFAULT 0,
-            status_observation_sequence INTEGER NOT NULL DEFAULT 0,
-            observation_id TEXT NOT NULL,
-            source_revision TEXT NOT NULL,
-            source_created_at TEXT NOT NULL,
-            observed_at TEXT NOT NULL
-                CHECK(substr(observed_at,-1,1)='Z' AND julianday(observed_at) IS NOT NULL),
-            classification TEXT NOT NULL CHECK(classification IN ({_sql_values(ORDER_CLASSES)})),
-            facility_id TEXT REFERENCES {FACILITIES_TABLE}(facility_id),
-            pool TEXT CHECK(pool IS NULL OR pool='FBS'),
-            nm_id INTEGER NOT NULL CHECK(typeof(nm_id)='integer' AND nm_id>0),
-            quantity INTEGER NOT NULL
-                CHECK(typeof(quantity)='integer' AND quantity>=0),
-            status_fingerprint TEXT NOT NULL,
-            mapping_digest TEXT NOT NULL,
-            PRIMARY KEY(cutover_id,order_id)
-        );
+        {_order_classifications_table_sql(if_not_exists=True)}
         CREATE INDEX IF NOT EXISTS ff_pool_cutover_orders_by_class
         ON {ORDERS_TABLE}(cutover_id,classification,order_id);
 
@@ -371,6 +388,7 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         (CHECKPOINTS_TABLE, "frozen_evidence_digest", "TEXT NOT NULL DEFAULT ''"),
     ):
         _ensure_column(conn, table=table, column=column, declaration=declaration)
+    _ensure_order_classification_schema(conn)
     for table in (
         MANIFESTS_TABLE,
         ALLOCATIONS_TABLE,
@@ -3450,6 +3468,237 @@ def _ensure_column(
     }
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _ensure_order_classification_schema(conn: sqlite3.Connection) -> None:
+    """Atomically widen the exact legacy classification CHECK constraint."""
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (ORDERS_TABLE,),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise FfPoolCutoverError(
+            "order_classification_schema_missing",
+            "FF pool cutover order-classification table is absent",
+        )
+    actual_classes = _classification_check_values(str(row[0]))
+    if actual_classes == ORDER_CLASSES:
+        return
+    if actual_classes != LEGACY_ORDER_CLASSES:
+        raise FfPoolCutoverError(
+            "order_classification_schema_ambiguous",
+            "FF pool cutover order-classification CHECK constraint is not a known version",
+            details={"classification_values": list(actual_classes)},
+        )
+
+    expected_columns = {
+        "cutover_id": ("TEXT", 1, None, 1),
+        "order_id": ("INTEGER", 1, None, 2),
+        "observation_sequence": ("INTEGER", 1, "0", 0),
+        "status_observation_sequence": ("INTEGER", 1, "0", 0),
+        "observation_id": ("TEXT", 1, None, 0),
+        "source_revision": ("TEXT", 1, None, 0),
+        "source_created_at": ("TEXT", 1, None, 0),
+        "observed_at": ("TEXT", 1, None, 0),
+        "classification": ("TEXT", 1, None, 0),
+        "facility_id": ("TEXT", 0, None, 0),
+        "pool": ("TEXT", 0, None, 0),
+        "nm_id": ("INTEGER", 1, None, 0),
+        "quantity": ("INTEGER", 1, None, 0),
+        "status_fingerprint": ("TEXT", 1, None, 0),
+        "mapping_digest": ("TEXT", 1, None, 0),
+    }
+    allowed_objects = {
+        "ff_pool_cutover_orders_by_class",
+        "ff_pool_cutover_order_classifications_no_update",
+        "ff_pool_cutover_order_classifications_no_delete",
+        "warehouse_domain_guard_ff_pool_cutover_order_classifications_insert",
+        "warehouse_domain_guard_ff_pool_cutover_order_classifications_update",
+        "warehouse_domain_guard_ff_pool_cutover_order_classifications_delete",
+    }
+    if conn.in_transaction:
+        raise FfPoolCutoverError(
+            "order_classification_schema_transaction_active",
+            "Legacy schema upgrade requires an isolated schema transaction",
+        )
+    if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+        raise FfPoolCutoverError(
+            "order_classification_foreign_keys_disabled",
+            "Legacy schema upgrade requires foreign_keys=ON before it starts",
+        )
+    legacy_table = ORDERS_TABLE + "__legacy_classification_check"
+    legacy_alter_table = int(conn.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        locked_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (ORDERS_TABLE,),
+        ).fetchone()
+        locked_classes = _classification_check_values(str(locked_row[0] if locked_row else ""))
+        if locked_classes not in (ORDER_CLASSES, LEGACY_ORDER_CLASSES):
+            raise FfPoolCutoverError(
+                "order_classification_schema_ambiguous",
+                "Locked order-classification CHECK is not a known version",
+                details={"classification_values": list(locked_classes)},
+            )
+        if locked_classes == LEGACY_ORDER_CLASSES:
+            columns = conn.execute(f"PRAGMA table_info({ORDERS_TABLE})").fetchall()
+            actual_columns = {
+                str(item[1]): (
+                    str(item[2]).upper(),
+                    int(item[3]),
+                    None if item[4] is None else str(item[4]).strip("()"),
+                    int(item[5]),
+                )
+                for item in columns
+            }
+            if actual_columns != expected_columns:
+                raise FfPoolCutoverError(
+                    "order_classification_schema_ambiguous",
+                    "FF pool cutover order-classification columns are not the exact legacy shape",
+                    details={"columns": sorted(actual_columns)},
+                )
+            objects = conn.execute(
+                "SELECT type,name FROM sqlite_master "
+                "WHERE tbl_name=? AND type IN ('index','trigger')",
+                (ORDERS_TABLE,),
+            ).fetchall()
+            unexpected_objects = sorted(
+                str(item[1])
+                for item in objects
+                if not str(item[1]).startswith("sqlite_autoindex_")
+                and str(item[1]) not in allowed_objects
+            )
+            if unexpected_objects:
+                raise FfPoolCutoverError(
+                    "order_classification_schema_ambiguous",
+                    "FF pool cutover order-classification table has unknown dependent objects",
+                    details={"objects": unexpected_objects},
+                )
+            external_dependencies = conn.execute(
+                "SELECT type,name FROM sqlite_master "
+                "WHERE type IN ('view','trigger') AND tbl_name<>? AND instr(sql,?)>0",
+                (ORDERS_TABLE, ORDERS_TABLE),
+            ).fetchall()
+            if external_dependencies:
+                raise FfPoolCutoverError(
+                    "order_classification_schema_ambiguous",
+                    "FF pool cutover order-classification table has unknown external dependencies",
+                    details={
+                        "objects": sorted(
+                            f"{str(item[0])}:{str(item[1])}" for item in external_dependencies
+                        )
+                    },
+                )
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (legacy_table,)
+            ).fetchone() is not None:
+                raise FfPoolCutoverError(
+                    "order_classification_legacy_table_present",
+                    "A prior legacy order-classification schema migration is incomplete",
+                )
+            before_fk = _foreign_key_rows(conn, OPENING_RESERVATIONS_TABLE)
+            preexisting_violations = (
+                conn.execute(f"PRAGMA foreign_key_check({ORDERS_TABLE})").fetchmany(1)
+                or conn.execute(
+                    f"PRAGMA foreign_key_check({OPENING_RESERVATIONS_TABLE})"
+                ).fetchmany(1)
+            )
+            if preexisting_violations:
+                raise FfPoolCutoverError(
+                    "order_classification_foreign_key_violation",
+                    "Legacy order-classification foreign keys are already inconsistent",
+                )
+            column_names = [str(item[1]) for item in columns]
+            quoted_columns = ",".join(
+                '"' + value.replace('"', '""') + '"' for value in column_names
+            )
+            conn.execute(f"ALTER TABLE {ORDERS_TABLE} RENAME TO {legacy_table}")
+            conn.execute(_order_classifications_table_sql())
+            conn.execute(
+                f"INSERT INTO {ORDERS_TABLE}({quoted_columns}) "
+                f"SELECT {quoted_columns} FROM {legacy_table}"
+            )
+            mismatch = conn.execute(
+                f"SELECT 1 FROM ("
+                f"SELECT {quoted_columns} FROM {ORDERS_TABLE} "
+                f"EXCEPT SELECT {quoted_columns} FROM {legacy_table}"
+                f") UNION ALL SELECT 1 FROM ("
+                f"SELECT {quoted_columns} FROM {legacy_table} "
+                f"EXCEPT SELECT {quoted_columns} FROM {ORDERS_TABLE}"
+                f") LIMIT 1"
+            ).fetchone()
+            if mismatch is not None:
+                raise FfPoolCutoverError(
+                    "order_classification_copy_mismatch",
+                    "Legacy order-classification rows did not copy exactly",
+                )
+            conn.execute(f"DROP TABLE {legacy_table}")
+            conn.execute(
+                f"CREATE INDEX ff_pool_cutover_orders_by_class "
+                f"ON {ORDERS_TABLE}(cutover_id,classification,order_id)"
+            )
+            after_fk = _foreign_key_rows(conn, OPENING_RESERVATIONS_TABLE)
+            if after_fk != before_fk:
+                raise FfPoolCutoverError(
+                    "order_classification_foreign_key_drift",
+                    "Opening-reservation foreign key changed during legacy schema upgrade",
+                )
+            violations = (
+                conn.execute(f"PRAGMA foreign_key_check({ORDERS_TABLE})").fetchmany(1)
+                or conn.execute(
+                    f"PRAGMA foreign_key_check({OPENING_RESERVATIONS_TABLE})"
+                ).fetchmany(1)
+            )
+            if violations:
+                raise FfPoolCutoverError(
+                    "order_classification_foreign_key_violation",
+                    "Legacy order-classification schema upgrade would violate a foreign key",
+                )
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        try:
+            conn.execute(f"PRAGMA legacy_alter_table={legacy_alter_table}")
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+        raise FfPoolCutoverError(
+            "order_classification_foreign_keys_not_restored",
+            "Legacy schema upgrade did not restore foreign key enforcement",
+        )
+
+
+def _classification_check_values(table_sql: str) -> tuple[str, ...]:
+    match = re.search(
+        r"CHECK\s*\(\s*classification\s+IN\s*\(([^)]*)\)\s*\)",
+        table_sql,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return ()
+    body = str(match.group(1))
+    values = tuple(
+        value.replace("''", "'")
+        for value in re.findall(r"'((?:''|[^'])*)'", body)
+    )
+    remainder = re.sub(r"'(?:''|[^'])*'", "", body)
+    if re.sub(r"[\s,]", "", remainder):
+        return ()
+    return values
+
+
+def _foreign_key_rows(
+    conn: sqlite3.Connection,
+    table: str,
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(tuple(row) for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall())
 
 
 def _sql_values(values: Iterable[str]) -> str:

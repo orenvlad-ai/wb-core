@@ -31,6 +31,27 @@ frozen/business-critical fingerprint, handoff rule or pending-receipt
 treatment.  Operational timing guidance is advisory and does not age the
 frozen boundary.
 
+## Legacy classification schema upgrade
+
+The deployed schema upgrade widens only the exact known pre-Migration-142
+`order_classifications.classification` CHECK constraint.  It accepts the four
+legacy values and replaces that table atomically with the canonical six-value
+shape so `pre_t_handoff_debit` and `pre_t_cancelled_noop` can be persisted.
+Before rebuilding, runtime initialization requires the exact legacy columns,
+no unknown index/trigger/view dependency, enabled foreign-key enforcement, no
+pre-existing order/reservation FK violation and no incomplete legacy table.
+Unknown or partially changed schemas fail closed.
+
+The rebuild runs under one `BEGIN IMMEDIATE`, copies every column by name,
+proves bidirectional row equality, preserves the opening-reservation foreign
+key definition, runs bounded parent/child FK checks and restores connection
+pragmas.  Existing evidence and reservations are preserved; a crash rolls the
+DDL and copy back together.  Normal initialization remains idempotent once the
+canonical CHECK is present.  This release performs no opening, checkpoint,
+epoch activation, lifecycle debit/reservation or WB/supplier mutation.  Since
+the deployed SHA changes, any earlier owner gate is invalid and a fresh
+query-only frozen-W manifest is required before production apply.
+
 ## Atomic suffix drain
 
 The five-minute collector remains enabled.  The opening transaction writes the
