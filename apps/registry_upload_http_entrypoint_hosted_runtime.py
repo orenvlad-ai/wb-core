@@ -10735,8 +10735,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ff_pool_cutover_dry_run = subparsers.add_parser(
         "ff-pool-cutover-production-dry-run",
         help=(
-            "Build the query-only exact Stage 7C owner-gate manifest without "
-            "choosing T."
+            "Build the query-only exact Stage 7C owner-gate manifest with "
+            "frozen local T and compound observation W."
         ),
     )
     ff_pool_cutover_dry_run.add_argument("--deployed-sha", required=True)
