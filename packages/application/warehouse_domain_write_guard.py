@@ -95,6 +95,8 @@ WAREHOUSE_DOMAIN_TABLES = (
     "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events",
     "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current",
     "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane",
+    "sheet_vitrina_v1_ff_pool_fbs_drain_state",
+    "sheet_vitrina_v1_ff_pool_fbs_late_evidence",
 )
 
 

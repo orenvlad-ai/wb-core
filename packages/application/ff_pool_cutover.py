@@ -1,11 +1,8 @@
-"""Safe planning contract for a later human-gated FF facility/pool cutover.
+"""Exact human-gated FF facility/pool opening and frozen FBS checkpoint.
 
-Stage 6 deliberately ships no production apply surface.  Normal deployment
-creates empty additive tables and a query-only planner/readback.  The private
-transactional implementation below is executable only against a database that
-contains an explicit test-fixture marker; it exists to prove atomicity,
-idempotency and recovery semantics before a later production-mutation PR owns
-the canonical apply command.
+Normal deployment creates only additive schema and keeps the writer epoch off.
+The production runner owns the canonical barriers, reviewed fingerprint and
+backup; this module owns the one exact SQLite transaction and its readback.
 """
 
 from __future__ import annotations
@@ -39,7 +36,9 @@ from packages.application.ff_pool_foundation import (
     record_ff_pool_parity_diagnostic,
 )
 from packages.application.ff_pool_fbs_lifecycle import (
+    DRAIN_STATE_TABLE as FBS_DRAIN_STATE_TABLE,
     apply_opening_fbs_backfill,
+    drain_post_checkpoint_fbs_lifecycle,
     ensure_ff_pool_fbs_lifecycle_schema,
 )
 from packages.application.ff_wb_supply_origins import (
@@ -57,13 +56,14 @@ from packages.application.wb_fbs_orders import (
     STATE_TABLE as FBS_COLLECTOR_STATE_TABLE,
     STATUS_CURRENT_TABLE,
     STATUS_OBSERVATIONS_TABLE,
+    STATUS_TRANSITIONS_TABLE,
     ensure_wb_fbs_orders_schema,
 )
 
 
 CONTRACT_NAME = "ff_facility_pool_cutover_v1"
 PROPOSAL_CONTRACT = "ff_facility_pool_cutover_proposal_v1"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
 ALLOCATIONS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_allocation_lines"
 ORDERS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_order_classifications"
@@ -109,6 +109,8 @@ MAX_ORDERS = 100_000
 MAX_FBW_ORIGINS = 10_000
 MAX_CHINA_SHIPMENTS = 10_000
 MAX_MAPPINGS = 100_000
+POST_CHECKPOINT_DRAIN_BATCH_SIZE = 100_000
+MAX_POST_CHECKPOINT_DRAIN_BATCHES = 100
 RUB_QUANTUM = Decimal("0.01")
 ZERO = Decimal("0")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -207,6 +209,8 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS {ORDERS_TABLE}(
             cutover_id TEXT NOT NULL REFERENCES {MANIFESTS_TABLE}(cutover_id),
             order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            observation_sequence INTEGER NOT NULL DEFAULT 0,
+            status_observation_sequence INTEGER NOT NULL DEFAULT 0,
             observation_id TEXT NOT NULL,
             source_revision TEXT NOT NULL,
             source_created_at TEXT NOT NULL,
@@ -256,9 +260,13 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS {CHECKPOINTS_TABLE}(
             cutover_id TEXT PRIMARY KEY REFERENCES {MANIFESTS_TABLE}(cutover_id),
             cutover_at TEXT NOT NULL,
+            accounting_boundary_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
             feature_epoch INTEGER NOT NULL,
             observation_watermark_sequence INTEGER NOT NULL,
+            status_observation_watermark_sequence INTEGER NOT NULL DEFAULT 0,
+            status_transition_watermark_sequence INTEGER NOT NULL DEFAULT 0,
             observation_watermark_digest TEXT NOT NULL,
+            frozen_evidence_digest TEXT NOT NULL DEFAULT '',
             collector_window_from INTEGER NOT NULL,
             collector_window_to INTEGER NOT NULL,
             collector_next_cursor INTEGER NOT NULL,
@@ -342,6 +350,27 @@ def ensure_ff_pool_cutover_schema(conn: sqlite3.Connection) -> None:
         ON {PENDING_SHIPMENTS_TABLE}(cutover_id,invoice_no,shipment_id);
         """
     )
+    for table, column, declaration in (
+        (ORDERS_TABLE, "observation_sequence", "INTEGER NOT NULL DEFAULT 0"),
+        (ORDERS_TABLE, "status_observation_sequence", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            CHECKPOINTS_TABLE,
+            "accounting_boundary_at",
+            "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'",
+        ),
+        (
+            CHECKPOINTS_TABLE,
+            "status_observation_watermark_sequence",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            CHECKPOINTS_TABLE,
+            "status_transition_watermark_sequence",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (CHECKPOINTS_TABLE, "frozen_evidence_digest", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        _ensure_column(conn, table=table, column=column, declaration=declaration)
     for table in (
         MANIFESTS_TABLE,
         ALLOCATIONS_TABLE,
@@ -461,7 +490,10 @@ def build_ff_pool_cutover_plan(
     observations = _observation_snapshot(
         conn,
         normalized=normalized,
-        cutover_at=boundary,
+        accounting_boundary_at=str(
+            normalized["collector_checkpoint"].get("accounting_boundary_at")
+            or boundary
+        ),
         mappings=mappings,
         blockers=blockers,
     )
@@ -486,6 +518,7 @@ def build_ff_pool_cutover_plan(
         normalized=normalized,
         observations=observations,
         blockers=blockers,
+        fallback_boundary_at=boundary,
     )
     non_target = _bounded_non_target_snapshot(conn)
     requested_non_target = normalized["non_target_evidence_digest"]
@@ -533,6 +566,8 @@ def build_ff_pool_cutover_plan(
         "cutover_at": boundary,
         "business_date": business_date,
         "feature_epoch": target_epoch,
+        "write_epoch_id": normalized["write_epoch_id"],
+        "control_manifest_digest": normalized["control_manifest_digest"],
         "aggregate_revision": aggregate["revision"],
         "aggregate_digest": aggregate["digest"],
         "aggregate_rows": aggregate["rows"],
@@ -542,7 +577,14 @@ def build_ff_pool_cutover_plan(
         "allocations": allocation["rows"],
         "detail_digest": allocation["digest"],
         "order_classifications": observations["classifications"],
+        "accounting_boundary": collector["accounting_boundary"],
         "observation_watermark_sequence": observations["watermark_sequence"],
+        "status_observation_watermark_sequence": collector[
+            "accounting_boundary"
+        ]["status_observation_watermark_sequence"],
+        "status_transition_watermark_sequence": collector[
+            "accounting_boundary"
+        ]["status_transition_watermark_sequence"],
         "observation_watermark_digest": observations["digest"],
         "seller_warehouse_mappings": mappings["seller_warehouse_mappings"],
         "sku_mappings": mappings["sku_mappings"],
@@ -846,10 +888,13 @@ def read_ff_pool_cutover_readback(
     if feature is None or (int(feature[0]), int(feature[1]), str(feature[2])) != (1, 1, str(row[0])):
         mismatches.append("feature_epoch")
     checkpoint = conn.execute(
-        f"""SELECT cutover_at,feature_epoch,observation_watermark_sequence,
-                    observation_watermark_digest,collector_window_from,
-                    collector_window_to,collector_next_cursor,collector_complete,
-                    checkpoint_digest
+        f"""SELECT cutover_at,accounting_boundary_at,feature_epoch,
+                    observation_watermark_sequence,
+                    status_observation_watermark_sequence,
+                    status_transition_watermark_sequence,
+                    observation_watermark_digest,frozen_evidence_digest,
+                    collector_window_from,collector_window_to,
+                    collector_next_cursor,collector_complete,checkpoint_digest
              FROM {CHECKPOINTS_TABLE} WHERE cutover_id=?""",
         (identity,),
     ).fetchone()
@@ -857,32 +902,73 @@ def read_ff_pool_cutover_readback(
     if checkpoint is None:
         mismatches.append("checkpoint")
     else:
-        checkpoint_value = {
-            "window_date_from": int(checkpoint[4]),
-            "window_date_to": int(checkpoint[5]),
-            "next_cursor": int(checkpoint[6]),
-            "complete": int(checkpoint[7]),
-            "observation_watermark_sequence": int(checkpoint[2]),
-            "observation_watermark_digest": str(checkpoint[3]),
-        }
         if (
             str(checkpoint[0]) != str(manifest["cutover_at"])
-            or int(checkpoint[1]) != int(manifest["feature_epoch"])
-            or _fingerprint(checkpoint_value) != str(checkpoint[8])
-            or str(checkpoint[8]) != str(expected_checkpoint.get("checkpoint_digest") or "")
+            or str(checkpoint[1])
+            != str(manifest["accounting_boundary"]["local_boundary_at"])
+            or int(checkpoint[2]) != int(manifest["feature_epoch"])
+            or int(checkpoint[3])
+            != int(manifest["observation_watermark_sequence"])
+            or int(checkpoint[4])
+            != int(manifest["status_observation_watermark_sequence"])
+            or int(checkpoint[5])
+            != int(manifest["status_transition_watermark_sequence"])
+            or str(checkpoint[6]) != str(manifest["observation_watermark_digest"])
+            or str(checkpoint[7])
+            != str(manifest["accounting_boundary"]["frozen_evidence_digest"])
+            or str(checkpoint[12])
+            != str(expected_checkpoint.get("checkpoint_digest") or "")
         ):
             mismatches.append("checkpoint")
+    drain_state = conn.execute(
+        f"""SELECT frozen_order_observation_sequence,
+                   frozen_status_observation_sequence,
+                   frozen_status_transition_sequence,
+                   last_status_observation_sequence,drain_run_count,
+                   last_result_digest,updated_at
+            FROM {FBS_DRAIN_STATE_TABLE} WHERE cutover_id=?""",
+        (identity,),
+    ).fetchone()
+    expected_boundary = dict(manifest.get("accounting_boundary") or {})
+    if drain_state is None:
+        mismatches.append("fbs_drain_checkpoint")
+        drain = None
+    else:
+        drain = {
+            "frozen_order_observation_sequence": int(drain_state[0]),
+            "frozen_status_observation_sequence": int(drain_state[1]),
+            "frozen_status_transition_sequence": int(drain_state[2]),
+            "last_status_observation_sequence": int(drain_state[3]),
+            "drain_run_count": int(drain_state[4]),
+            "last_result_digest": str(drain_state[5]),
+            "updated_at": str(drain_state[6]),
+        }
+        if (
+            drain["frozen_order_observation_sequence"]
+            != int(expected_boundary["order_observation_watermark_sequence"])
+            or drain["frozen_status_observation_sequence"]
+            != int(expected_boundary["status_observation_watermark_sequence"])
+            or drain["frozen_status_transition_sequence"]
+            != int(expected_boundary["status_transition_watermark_sequence"])
+        ):
+            mismatches.append("fbs_drain_checkpoint")
     persisted_orders = [
         {
-            "order_id": int(item[0]), "observation_id": str(item[1]), "source_revision": str(item[2]),
-            "source_created_at": str(item[3]), "observed_at": str(item[4]), "classification": str(item[5]),
-            "facility_id": None if item[6] is None else str(item[6]),
-            "pool": None if item[7] is None else str(item[7]), "nm_id": int(item[8]),
-            "quantity": int(item[9]), "status_fingerprint": str(item[10]), "mapping_digest": str(item[11]),
+            "order_id": int(item[0]), "observation_sequence": int(item[1]),
+            "status_observation_sequence": int(item[2]),
+            "observation_id": str(item[3]), "source_revision": str(item[4]),
+            "source_created_at": str(item[5]), "observed_at": str(item[6]),
+            "classification": str(item[7]),
+            "facility_id": None if item[8] is None else str(item[8]),
+            "pool": None if item[9] is None else str(item[9]), "nm_id": int(item[10]),
+            "quantity": int(item[11]), "status_fingerprint": str(item[12]),
+            "mapping_digest": str(item[13]),
         }
         for item in conn.execute(
-            f"""SELECT order_id,observation_id,source_revision,source_created_at,observed_at,
-                        classification,facility_id,pool,nm_id,quantity,status_fingerprint,mapping_digest
+            f"""SELECT order_id,observation_sequence,status_observation_sequence,
+                        observation_id,source_revision,source_created_at,observed_at,
+                        classification,facility_id,pool,nm_id,quantity,
+                        status_fingerprint,mapping_digest
                  FROM {ORDERS_TABLE} WHERE cutover_id=? ORDER BY order_id""",
             (identity,),
         ).fetchall()
@@ -890,6 +976,8 @@ def read_ff_pool_cutover_readback(
     manifest_orders = list(manifest.get("order_classifications") or [])
     persisted_projection_keys = (
         "order_id",
+        "observation_sequence",
+        "status_observation_sequence",
         "observation_id",
         "source_revision",
         "source_created_at",
@@ -912,14 +1000,20 @@ def read_ff_pool_cutover_readback(
         primary = _official_order_status_evidence(
             conn,
             order_id=int(item["order_id"]),
-            cutover_at=str(manifest["cutover_at"]),
+            cutover_at=str(manifest["accounting_boundary"]["local_boundary_at"]),
             classification=str(item["classification"]),
+            max_observation_sequence=int(
+                manifest["status_observation_watermark_sequence"]
+            ),
         )
         reconciliation = _official_post_handoff_reconciliation_evidence(
             conn,
             order_id=int(item["order_id"]),
-            cutover_at=str(manifest["cutover_at"]),
+            cutover_at=str(manifest["accounting_boundary"]["local_boundary_at"]),
             classification=str(item["classification"]),
+            max_observation_sequence=int(
+                manifest["status_observation_watermark_sequence"]
+            ),
         )
         if primary != item.get("status_evidence"):
             mismatches.append(f"order_status_evidence:{int(item['order_id'])}")
@@ -1039,6 +1133,7 @@ def read_ff_pool_cutover_readback(
         "aggregate_unchanged": aggregate_unchanged,
         "aggregate_expected": expected_current_aggregate,
         "aggregate_actual": actual_aggregate_rows,
+        "fbs_drain": drain,
         "reader_enabled": True,
     }
 
@@ -1079,12 +1174,21 @@ def classify_late_pre_t_observations(
     if bound > 500:
         raise FfPoolCutoverError("limit_too_large", "late_pre_t limit cannot exceed 500")
     manifest = conn.execute(
-        f"SELECT cutover_at,observation_watermark_sequence FROM {MANIFESTS_TABLE} WHERE cutover_id=?",
+        f"SELECT manifest_json,observation_watermark_sequence FROM {MANIFESTS_TABLE} WHERE cutover_id=?",
         (identity,),
     ).fetchone()
     if manifest is None:
         raise FfPoolCutoverError("cutover_not_found", "cutover manifest was not found")
-    boundary = _parse_timestamp(str(manifest[0]), "cutover_at")
+    manifest_json = json.loads(str(manifest[0]))
+    boundary = _parse_timestamp(
+        str(
+            (manifest_json.get("accounting_boundary") or {}).get(
+                "local_boundary_at"
+            )
+            or manifest_json["cutover_at"]
+        ),
+        "accounting_boundary_at",
+    )
     rows = conn.execute(
         f"""SELECT observation_id,order_id,source_revision,source_created_at,observed_at
              FROM {OBSERVATIONS_TABLE} AS observation
@@ -1092,15 +1196,14 @@ def classify_late_pre_t_observations(
                AND NOT EXISTS(
                  SELECT 1 FROM {ORDERS_TABLE} AS known
                  WHERE known.cutover_id=? AND known.order_id=observation.order_id
-                   AND known.source_revision=observation.source_revision
                )
              ORDER BY observation_sequence LIMIT ?""",
         (int(manifest[1]), identity, bound),
     ).fetchall()
     cases = []
     for row in rows:
-        created = _parse_source_timestamp(str(row[3] or ""), "source_created_at")
-        if created <= boundary:
+        locally_observed = _parse_timestamp(str(row[4]), "observed_at")
+        if locally_observed <= boundary:
             evidence = {
                 "cutover_id": identity,
                 "order_id": int(row[1]),
@@ -1127,6 +1230,138 @@ def classify_late_pre_t_observations(
         "cases": cases,
         "next_action": "exact_manual_reconciliation",
     }
+
+
+def ff_pool_fbs_accounting_boundary_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    boundary_at: str,
+    watermarks: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze or re-read the three independent append-only FBS streams.
+
+    Order observations, status observations and status transitions each own an
+    independent SQLite sequence.  ``W`` is therefore an exact vector, never a
+    guessed scalar.  Rows appended above any component are deliberately outside
+    the digest and cannot stale an already reviewed accounting boundary.
+    """
+
+    boundary = _utc_timestamp(boundary_at, field="accounting_boundary_at")
+    requested = dict(watermarks or {})
+    specs = (
+        (
+            "order_observation_watermark_sequence",
+            OBSERVATIONS_TABLE,
+            "observation_sequence",
+            "observed_at",
+        ),
+        (
+            "status_observation_watermark_sequence",
+            STATUS_OBSERVATIONS_TABLE,
+            "observation_sequence",
+            "observed_at",
+        ),
+        (
+            "status_transition_watermark_sequence",
+            STATUS_TRANSITIONS_TABLE,
+            "transition_sequence",
+            "detected_at",
+        ),
+    )
+    blockers: list[dict[str, Any]] = []
+    vector: dict[str, int] = {}
+    evidence: dict[str, Any] = {}
+    for key, table, sequence_column, timestamp_column in specs:
+        maximum = int(
+            conn.execute(
+                f"SELECT COALESCE(MAX({sequence_column}),0) FROM {table}"
+            ).fetchone()[0]
+        )
+        watermark = (
+            maximum
+            if watermarks is None
+            else _exact_integer(requested.get(key, 0), key, minimum=0)
+        )
+        vector[key] = watermark
+        if watermark > maximum:
+            blockers.append(
+                {
+                    "code": "fbs_frozen_watermark_ahead_of_source",
+                    "stream": key,
+                    "watermark": watermark,
+                    "current_max": maximum,
+                }
+            )
+        digest, count = _bounded_stream_digest(
+            conn,
+            table=table,
+            sequence_column=sequence_column,
+            watermark=watermark,
+        )
+        after_boundary = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {table} "
+                f"WHERE {sequence_column}<=? AND {timestamp_column}>?",
+                (watermark, boundary),
+            ).fetchone()[0]
+        )
+        if after_boundary:
+            blockers.append(
+                {
+                    "code": "fbs_frozen_row_after_local_boundary",
+                    "stream": key,
+                    "count": after_boundary,
+                }
+            )
+        evidence[key.removesuffix("_watermark_sequence")] = {
+            "watermark_sequence": watermark,
+            "row_count": count,
+            "rows_digest": digest,
+        }
+    material = {
+        "boundary_kind": "durable_local_observation_sequence_and_observed_at",
+        "local_boundary_at": boundary,
+        **vector,
+        "frozen_streams": evidence,
+    }
+    return {
+        **material,
+        "frozen_evidence_digest": _fingerprint(material),
+        "post_watermark_growth_invalidates_gate": False,
+        "source_status_timestamp_available": False,
+        "blockers": blockers,
+    }
+
+
+def _bounded_stream_digest(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    sequence_column: str,
+    watermark: int,
+) -> tuple[str, int]:
+    """Hash complete frozen rows without embedding the full stream in a plan."""
+
+    columns = [
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    ]
+    digest = hashlib.sha256()
+    count = 0
+    for row in conn.execute(
+        f"SELECT * FROM {table} WHERE {sequence_column}<=? ORDER BY {sequence_column}",
+        (int(watermark),),
+    ):
+        payload = json.dumps(
+            dict(zip(columns, tuple(row), strict=True)),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+        count += 1
+    return "sha256:" + digest.hexdigest(), count
 
 
 def ff_pool_cutover_preflight_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1184,6 +1419,7 @@ def apply_ff_pool_cutover(
     approval_reference: str,
     actor: str,
     crash: str = "",
+    frozen_source_revalidator: Any | None = None,
 ) -> dict[str, Any]:
     """Apply one exact owner-gated cutover under an already-held T barrier.
 
@@ -1230,6 +1466,8 @@ def apply_ff_pool_cutover(
     now = _utc_timestamp(cutover_at, field="cutover_at")
     conn.execute("BEGIN IMMEDIATE")
     try:
+        if frozen_source_revalidator is not None:
+            frozen_source_revalidator(conn)
         plan = build_ff_pool_cutover_plan(
             conn,
             proposal=proposal,
@@ -1296,16 +1534,23 @@ def apply_ff_pool_cutover(
         _apply_exact_opening(conn, plan=plan, actor=str(actor), now=now)
         _insert_cutover_manifest(conn, plan=plan, now=now)
         backfill = apply_opening_fbs_backfill(conn, manifest=manifest, occurred_at=now)
+        post_checkpoint_delta = _drain_atomic_post_checkpoint_suffix(
+            conn, manifest=manifest, occurred_at=now
+        )
         if crash == "before_commit":
             raise RuntimeError("production-shaped crash before commit")
-        aggregate_after = _aggregate_snapshot(conn, blockers=[])
-        if aggregate_after["rows"] != list(manifest["post_backfill_aggregate_rows"]):
+        transaction_readback = read_ff_pool_cutover_readback(
+            conn, cutover_id=str(manifest["cutover_id"])
+        )
+        if transaction_readback["status"] != "pass":
             raise FfPoolCutoverError(
-                "post_backfill_aggregate_mismatch",
-                "Exact aggregate projection does not match the manifest",
+                "post_checkpoint_transaction_readback_failed",
+                "Opening plus post-W delta did not pass exact transaction readback",
+                details=transaction_readback,
             )
+        aggregate_after = _aggregate_snapshot(conn, blockers=[])
         parity = evaluate_ff_pool_aggregate_parity(
-            conn, manifest["post_backfill_aggregate_rows"]
+            conn, aggregate_after["rows"]
         )
         if parity.status != "pass":
             raise FfPoolCutoverError(
@@ -1370,10 +1615,66 @@ def apply_ff_pool_cutover(
         "manifest_digest": expected,
         "cutover_at": now,
         "backfill": backfill,
+        "post_checkpoint_delta": post_checkpoint_delta,
         "readback": readback,
         "idempotent": False,
         "mutates_wb": False,
     }
+
+
+def _drain_atomic_post_checkpoint_suffix(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    occurred_at: str,
+) -> dict[str, Any]:
+    """Consume the finite suffix visible under the opening write lock."""
+
+    aggregate_summary: dict[str, int] = {}
+    first_sequence: int | None = None
+    processed = 0
+    result: dict[str, Any] | None = None
+    for batch_no in range(1, MAX_POST_CHECKPOINT_DRAIN_BATCHES + 1):
+        result = drain_post_checkpoint_fbs_lifecycle(
+            conn,
+            manifest=manifest,
+            occurred_at=occurred_at,
+            limit=POST_CHECKPOINT_DRAIN_BATCH_SIZE,
+        )
+        if first_sequence is None:
+            first_sequence = int(result["from_status_observation_sequence"])
+        processed += int(result["processed_count"])
+        for key, value in dict(result["summary"]).items():
+            aggregate_summary[str(key)] = aggregate_summary.get(str(key), 0) + int(value)
+        if result["status"] == "caught_up":
+            material = {
+                "cutover_id": str(manifest["cutover_id"]),
+                "from_status_observation_sequence": int(first_sequence),
+                "last_status_observation_sequence": int(
+                    result["last_status_observation_sequence"]
+                ),
+                "processed_count": processed,
+                "pending_count": 0,
+                "batch_count": batch_no,
+                "summary": aggregate_summary,
+            }
+            return {
+                "contract_name": str(result["contract_name"]),
+                "status": "caught_up",
+                **material,
+                "result_digest": _fingerprint(material),
+                "mutates_wb": False,
+            }
+    raise FfPoolCutoverError(
+        "post_checkpoint_delta_not_drained",
+        "Post-W FBS delta exceeded the bounded atomic drain",
+        details={
+            "batch_size": POST_CHECKPOINT_DRAIN_BATCH_SIZE,
+            "batch_count": MAX_POST_CHECKPOINT_DRAIN_BATCHES,
+            "processed_count": processed,
+            "last_result": result,
+        },
+    )
 
 
 def _apply_exact_opening(
@@ -1628,9 +1929,15 @@ def _insert_cutover_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any
         )
     for row in manifest["order_classifications"]:
         conn.execute(
-            f"INSERT INTO {ORDERS_TABLE} VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"""INSERT INTO {ORDERS_TABLE}(
+                    cutover_id,order_id,observation_sequence,
+                    status_observation_sequence,observation_id,source_revision,
+                    source_created_at,observed_at,classification,facility_id,pool,
+                    nm_id,quantity,status_fingerprint,mapping_digest
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                manifest["cutover_id"], row["order_id"], row["observation_id"], row["source_revision"],
+                manifest["cutover_id"], row["order_id"], row["observation_sequence"],
+                row["status_observation_sequence"], row["observation_id"], row["source_revision"],
                 row["source_created_at"], row["observed_at"], row["classification"], row["facility_id"],
                 row["pool"], row["nm_id"], row["quantity"], row["status_fingerprint"], row["mapping_digest"],
             ),
@@ -1711,12 +2018,28 @@ def _insert_cutover_manifest(conn: sqlite3.Connection, *, plan: Mapping[str, Any
             ),
         )
     conn.execute(
-        f"INSERT INTO {CHECKPOINTS_TABLE} VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        f"""INSERT INTO {CHECKPOINTS_TABLE}(
+                cutover_id,cutover_at,accounting_boundary_at,feature_epoch,
+                observation_watermark_sequence,
+                status_observation_watermark_sequence,
+                status_transition_watermark_sequence,
+                observation_watermark_digest,frozen_evidence_digest,
+                collector_window_from,collector_window_to,collector_next_cursor,
+                collector_complete,checkpoint_digest,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            manifest["cutover_id"], manifest["cutover_at"], manifest["feature_epoch"],
-            manifest["observation_watermark_sequence"], manifest["observation_watermark_digest"],
-            collector["window_date_from"], collector["window_date_to"], collector["next_cursor"],
-            collector["complete"], collector["checkpoint_digest"], now,
+            manifest["cutover_id"], manifest["cutover_at"],
+            manifest["accounting_boundary"]["local_boundary_at"],
+            manifest["feature_epoch"], manifest["observation_watermark_sequence"],
+            manifest["status_observation_watermark_sequence"],
+            manifest["status_transition_watermark_sequence"],
+            manifest["observation_watermark_digest"],
+            manifest["accounting_boundary"]["frozen_evidence_digest"],
+            0,
+            0,
+            0,
+            0,
+            collector["checkpoint_digest"], now,
         ),
     )
 
@@ -2022,7 +2345,7 @@ def _observation_snapshot(
     conn: sqlite3.Connection,
     *,
     normalized: Mapping[str, Any],
-    cutover_at: str,
+    accounting_boundary_at: str,
     mappings: Mapping[str, Any],
     blockers: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -2030,6 +2353,16 @@ def _observation_snapshot(
     watermark = _exact_integer(
         checkpoint.get("observation_watermark_sequence", 0),
         "collector_checkpoint.observation_watermark_sequence",
+        minimum=0,
+    )
+    status_watermark = _exact_integer(
+        checkpoint.get(
+            "status_observation_watermark_sequence",
+            conn.execute(
+                f"SELECT COALESCE(MAX(observation_sequence),0) FROM {STATUS_OBSERVATIONS_TABLE}"
+            ).fetchone()[0],
+        ),
+        "collector_checkpoint.status_observation_watermark_sequence",
         minimum=0,
     )
     actual_max = int(conn.execute(f"SELECT COALESCE(MAX(observation_sequence),0) FROM {OBSERVATIONS_TABLE}").fetchone()[0])
@@ -2058,7 +2391,9 @@ def _observation_snapshot(
         raise FfPoolCutoverError("duplicate_order_classification", "order_id must be unique")
     classifications: list[dict[str, Any]] = []
     seen: set[int] = set()
-    boundary_dt = _parse_timestamp(cutover_at, "cutover_at")
+    boundary_dt = _parse_timestamp(
+        accounting_boundary_at, "accounting_boundary_at"
+    )
     for row in rows:
         order_id = int(row[2])
         seen.add(order_id)
@@ -2069,8 +2404,10 @@ def _observation_snapshot(
         classification = str(raw.get("classification") or "")
         if classification not in ORDER_CLASSES:
             raise FfPoolCutoverError("invalid_order_classification", str(order_id))
-        created = _parse_source_timestamp(str(row[4] or ""), f"order[{order_id}].source_created_at")
-        is_pre_t = created <= boundary_dt
+        observed = _parse_timestamp(
+            str(row[5] or ""), f"order[{order_id}].observed_at"
+        )
+        is_pre_t = observed <= boundary_dt
         if is_pre_t and classification not in PRE_T_CLASSES:
             blockers.append({"code": "pre_t_order_not_absorbed", "order_id": order_id})
         if not is_pre_t and classification != "post_t_deferred":
@@ -2094,8 +2431,9 @@ def _observation_snapshot(
         evidence = _official_order_status_evidence(
             conn,
             order_id=order_id,
-            cutover_at=cutover_at,
+            cutover_at=accounting_boundary_at,
             classification=classification,
+            max_observation_sequence=status_watermark,
         )
         if evidence is None:
             blockers.append({"code": "official_status_evidence_missing", "order_id": order_id})
@@ -2110,8 +2448,9 @@ def _observation_snapshot(
         reconciliation = _official_post_handoff_reconciliation_evidence(
             conn,
             order_id=order_id,
-            cutover_at=cutover_at,
+            cutover_at=accounting_boundary_at,
             classification=classification,
+            max_observation_sequence=status_watermark,
         )
         if raw.get("post_handoff_reconciliation") != reconciliation:
             blockers.append({
@@ -2124,6 +2463,10 @@ def _observation_snapshot(
         classifications.append(
             {
                 "order_id": order_id,
+                "observation_sequence": int(row[0]),
+                "status_observation_sequence": (
+                    0 if evidence is None else int(evidence["observation_sequence"])
+                ),
                 "observation_id": str(row[1]),
                 "source_revision": str(row[3]),
                 "source_created_at": str(row[4]),
@@ -2160,14 +2503,21 @@ def _official_order_status_evidence(
     order_id: int,
     cutover_at: str,
     classification: str,
+    max_observation_sequence: int | None = None,
 ) -> dict[str, Any] | None:
     rows = conn.execute(
-        f"""SELECT order_revision,status_digest,supplier_status,wb_status,
-                   positive_quantity,observed_at
+        f"""SELECT observation_sequence,order_revision,status_digest,
+                   supplier_status,wb_status,positive_quantity,observed_at
             FROM {STATUS_OBSERVATIONS_TABLE}
             WHERE order_id=? AND observed_at<=?
+              AND (? IS NULL OR observation_sequence<=?)
             ORDER BY observation_sequence""",
-        (int(order_id), str(cutover_at)),
+        (
+            int(order_id),
+            str(cutover_at),
+            max_observation_sequence,
+            max_observation_sequence,
+        ),
     ).fetchall()
     if not rows:
         return None
@@ -2176,7 +2526,7 @@ def _official_order_status_evidence(
             (
                 row
                 for row in rows
-                if str(row[2]) == "complete" and str(row[3]) == "sorted"
+                if str(row[3]) == "complete" and str(row[4]) == "sorted"
             ),
             None,
         )
@@ -2184,8 +2534,8 @@ def _official_order_status_evidence(
         selected = rows[-1]
     if selected is None:
         return None
-    supplier_status = str(selected[2])
-    wb_status = str(selected[3])
+    supplier_status = str(selected[3])
+    wb_status = str(selected[4])
     cancellation = supplier_status == "cancel" or wb_status in {
         "canceled",
         "canceled_by_client",
@@ -2200,12 +2550,13 @@ def _official_order_status_evidence(
     if classification in {"pre_t_handoff_debit", "pre_t_absorbed_closed"} and not handoff:
         return None
     return {
-        "source_revision": str(selected[0]),
-        "status_digest": str(selected[1]),
+        "observation_sequence": int(selected[0]),
+        "source_revision": str(selected[1]),
+        "status_digest": str(selected[2]),
         "supplier_status": supplier_status,
         "wb_status": wb_status,
-        "quantity": int(selected[4]),
-        "observed_at": str(selected[5]),
+        "quantity": int(selected[5]),
+        "observed_at": str(selected[6]),
     }
 
 
@@ -2215,22 +2566,29 @@ def _official_post_handoff_reconciliation_evidence(
     order_id: int,
     cutover_at: str,
     classification: str,
+    max_observation_sequence: int | None = None,
 ) -> dict[str, Any] | None:
     if classification not in {"pre_t_handoff_debit", "pre_t_absorbed_closed"}:
         return None
     rows = conn.execute(
-        f"""SELECT order_revision,status_digest,supplier_status,wb_status,
-                   positive_quantity,observed_at
+        f"""SELECT observation_sequence,order_revision,status_digest,
+                   supplier_status,wb_status,positive_quantity,observed_at
             FROM {STATUS_OBSERVATIONS_TABLE}
             WHERE order_id=? AND observed_at<=?
+              AND (? IS NULL OR observation_sequence<=?)
             ORDER BY observation_sequence""",
-        (int(order_id), str(cutover_at)),
+        (
+            int(order_id),
+            str(cutover_at),
+            max_observation_sequence,
+            max_observation_sequence,
+        ),
     ).fetchall()
     handoff_index = next(
         (
             index
             for index, row in enumerate(rows)
-            if str(row[2]) == "complete" and str(row[3]) == "sorted"
+            if str(row[3]) == "complete" and str(row[4]) == "sorted"
         ),
         None,
     )
@@ -2240,8 +2598,8 @@ def _official_post_handoff_reconciliation_evidence(
         (
             row
             for row in reversed(rows[handoff_index + 1 :])
-            if str(row[2]) == "cancel"
-            or str(row[3])
+            if str(row[3]) == "cancel"
+            or str(row[4])
             in {"canceled", "canceled_by_client", "declined_by_client", "defect"}
         ),
         None,
@@ -2249,12 +2607,13 @@ def _official_post_handoff_reconciliation_evidence(
     if selected is None:
         return None
     return {
-        "source_revision": str(selected[0]),
-        "status_digest": str(selected[1]),
-        "supplier_status": str(selected[2]),
-        "wb_status": str(selected[3]),
-        "quantity": int(selected[4]),
-        "observed_at": str(selected[5]),
+        "observation_sequence": int(selected[0]),
+        "source_revision": str(selected[1]),
+        "status_digest": str(selected[2]),
+        "supplier_status": str(selected[3]),
+        "wb_status": str(selected[4]),
+        "quantity": int(selected[5]),
+        "observed_at": str(selected[6]),
     }
 
 
@@ -2655,35 +3014,102 @@ def _collector_checkpoint_snapshot(
     normalized: Mapping[str, Any],
     observations: Mapping[str, Any],
     blockers: list[dict[str, Any]],
+    fallback_boundary_at: str,
 ) -> dict[str, Any]:
     raw = normalized["collector_checkpoint"]
+    accounting_boundary_at = _utc_timestamp(
+        str(raw.get("accounting_boundary_at") or fallback_boundary_at),
+        field="collector_checkpoint.accounting_boundary_at",
+    )
+    watermarks = {
+        "order_observation_watermark_sequence": _exact_integer(
+            raw.get("observation_watermark_sequence", 0),
+            "collector_checkpoint.observation_watermark_sequence",
+            minimum=0,
+        ),
+        "status_observation_watermark_sequence": _exact_integer(
+            raw.get(
+                "status_observation_watermark_sequence",
+                conn.execute(
+                    f"SELECT COALESCE(MAX(observation_sequence),0) FROM {STATUS_OBSERVATIONS_TABLE}"
+                ).fetchone()[0],
+            ),
+            "collector_checkpoint.status_observation_watermark_sequence",
+            minimum=0,
+        ),
+        "status_transition_watermark_sequence": _exact_integer(
+            raw.get(
+                "status_transition_watermark_sequence",
+                conn.execute(
+                    f"SELECT COALESCE(MAX(transition_sequence),0) FROM {STATUS_TRANSITIONS_TABLE}"
+                ).fetchone()[0],
+            ),
+            "collector_checkpoint.status_transition_watermark_sequence",
+            minimum=0,
+        ),
+    }
+    accounting_boundary = ff_pool_fbs_accounting_boundary_snapshot(
+        conn,
+        boundary_at=accounting_boundary_at,
+        watermarks=watermarks,
+    )
+    blockers.extend(list(accounting_boundary.get("blockers") or []))
+    requested_frozen_digest = str(
+        raw.get("frozen_evidence_digest")
+        or accounting_boundary["frozen_evidence_digest"]
+    )
+    _sha256(requested_frozen_digest, "collector_checkpoint.frozen_evidence_digest")
+    if requested_frozen_digest != accounting_boundary["frozen_evidence_digest"]:
+        blockers.append(
+            {
+                "code": "fbs_frozen_evidence_digest_stale",
+                "expected": accounting_boundary["frozen_evidence_digest"],
+                "actual": requested_frozen_digest,
+            }
+        )
     state = conn.execute(
         f"""SELECT window_date_from,window_date_to,next_cursor,complete,last_status,last_success_at
              FROM {FBS_COLLECTOR_STATE_TABLE} WHERE state_id=1"""
     ).fetchone()
     if state is None:
-        expected = {"window_date_from": 0, "window_date_to": 0, "next_cursor": 0, "complete": 0}
+        blockers.append({"code": "collector_checkpoint_missing"})
+        current = {
+            "window_date_from": 0,
+            "window_date_to": 0,
+            "next_cursor": 0,
+            "complete": 0,
+            "last_status": "",
+            "last_success_at": "",
+        }
     else:
-        expected = {
+        current = {
             "window_date_from": int(state[0]),
             "window_date_to": int(state[1]),
             "next_cursor": int(state[2]),
             "complete": int(state[3]),
+            "last_status": str(state[4]),
+            "last_success_at": str(state[5]),
         }
         if str(state[4]) != "success" or not str(state[5]):
             blockers.append({"code": "collector_not_fresh_success"})
-    actual = {
-        "window_date_from": _exact_integer(raw.get("window_date_from", 0), "collector_checkpoint.window_date_from", minimum=0),
-        "window_date_to": _exact_integer(raw.get("window_date_to", 0), "collector_checkpoint.window_date_to", minimum=0),
-        "next_cursor": _exact_integer(raw.get("next_cursor", 0), "collector_checkpoint.next_cursor", minimum=0),
-        "complete": 1 if _boolean(raw.get("complete", False), "collector_checkpoint.complete") else 0,
-    }
-    if actual != expected:
-        blockers.append({"code": "collector_checkpoint_stale", "expected": expected, "actual": actual})
     result = {
-        **actual,
+        "accounting_boundary_at": accounting_boundary_at,
         "observation_watermark_sequence": int(observations["watermark_sequence"]),
         "observation_watermark_digest": str(observations["digest"]),
+        "status_observation_watermark_sequence": watermarks[
+            "status_observation_watermark_sequence"
+        ],
+        "status_transition_watermark_sequence": watermarks[
+            "status_transition_watermark_sequence"
+        ],
+        "frozen_evidence_digest": accounting_boundary["frozen_evidence_digest"],
+        "accounting_boundary": {
+            key: value
+            for key, value in accounting_boundary.items()
+            if key != "blockers"
+        },
+        "collector_operational_readiness_checked": True,
+        "post_watermark_growth_invalidates_gate": False,
     }
     result["checkpoint_digest"] = _fingerprint(result)
     return result
@@ -3010,6 +3436,20 @@ def _decimal_check(column: str) -> str:
         f"AND length({column})-length(replace({column},'.',''))<=1 "
         f"AND {column} NOT IN ('','-','.','-.') AND substr({column},-1,1)<>'.'"
     )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _sql_values(values: Iterable[str]) -> str:

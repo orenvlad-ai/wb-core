@@ -108,6 +108,13 @@ valid explicit state. Any aggregate/detail, source, mapping, pending-receipt or
 checkpoint drift disables/rejects the cutover instead of publishing a second
 total.
 
+Migration 143 separates immutable opening truth from continuous FBS ingestion.
+The reviewed source fingerprint covers only frozen rows at/below compound `W`;
+new order/status/transition rows above `W` are a post-checkpoint suffix, not
+aggregate or manifest drift. Aggregate, facilities/mappings, policy, deployed
+SHA, non-target evidence and pending-receipt proof remain exact apply-time
+gates. The suffix drain preserves the same aggregate=sum(detail invariant.
+
 # 2. Physical and cost rules
 
 ## 2.1 Production and China → FF

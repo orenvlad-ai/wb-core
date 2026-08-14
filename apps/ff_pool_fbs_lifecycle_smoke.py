@@ -254,7 +254,40 @@ def main() -> int:
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()[0] == 8
 
-        # A late-arriving order whose source time is at/before T is isolated;
+        # Reordered waiting→sorted evidence after fulfillment is consumed by
+        # exact status sequence but never creates a second physical debit.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _append_status(
+                conn,
+                order_id=9201,
+                revision="post_revision_9201_v5",
+                supplier_status="complete",
+                wb_status="waiting",
+                episode=5,
+                observed_at="2026-08-14T06:18:30Z",
+                insert_current=True,
+            )
+            _append_status(
+                conn,
+                order_id=9201,
+                revision="post_revision_9201_v6",
+                supplier_status="complete",
+                wb_status="sorted",
+                episode=6,
+                observed_at="2026-08-14T06:18:40Z",
+                insert_current=True,
+            )
+            conn.commit()
+        reordered = _process(runtime.db_path, "2026-08-14T06:19:00Z")
+        assert reordered["summary"]["status_noop"] == 2
+        duplicate_retry = _process(runtime.db_path, "2026-08-14T06:19:30Z")
+        assert duplicate_retry["processed_count"] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_business_operations"
+            ).fetchone()[0] == operation_count
+
+        # A late-arriving order locally observed at/before T is isolated;
         # it neither double-debits nor globally blocks post-T processing.
         with sqlite3.connect(runtime.db_path) as conn:
             _insert_post_t_order(
@@ -263,6 +296,7 @@ def main() -> int:
                 supplier="complete",
                 wb="sorted",
                 source_created_at="2026-08-14T05:04:00Z",
+                observed_at=GATE_AT,
             )
             conn.commit()
         late = _process(runtime.db_path, "2026-08-14T06:20:00Z")
@@ -430,10 +464,10 @@ def _insert_post_t_order(
     supplier: str,
     wb: str,
     source_created_at: str = "2026-08-14T06:00:00Z",
+    observed_at: str = "2026-08-14T06:01:00Z",
     quantity: int = 1,
 ) -> None:
     revision = f"post_revision_{order_id}_v1"
-    observed_at = "2026-08-14T06:01:00Z"
     conn.execute(
         """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
                observation_id,order_id,source_revision,supply_id,delivery_type,
@@ -495,6 +529,51 @@ def _append_status(
     insert_current: bool,
     quantity: int = 1,
 ) -> None:
+    existing_order = conn.execute(
+        """SELECT 1 FROM sheet_vitrina_v1_wb_supplies_fbs_order_observations
+           WHERE order_id=? AND source_revision=?""",
+        (order_id, revision),
+    ).fetchone()
+    if existing_order is None:
+        prior = conn.execute(
+            """SELECT supply_id,delivery_type,source_created_at,warehouse_id,office_id,
+                      nm_id,chrt_id,seller_sku,skus_json,collector_date_from,
+                      collector_date_to,collector_cursor
+               FROM sheet_vitrina_v1_wb_supplies_fbs_order_observations
+               WHERE order_id=? ORDER BY observation_sequence DESC LIMIT 1""",
+            (order_id,),
+        ).fetchone()
+        if prior is None:
+            raise AssertionError(f"missing order source for status revision {order_id}/{revision}")
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
+                   observation_id,order_id,source_revision,supply_id,delivery_type,
+                   source_created_at,warehouse_id,office_id,nm_id,chrt_id,seller_sku,
+                   skus_json,observed_at,collector_date_from,collector_date_to,
+                   collector_cursor
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"status_order_{order_id}_{episode}", order_id, revision,
+                *tuple(prior[:9]), observed_at, *tuple(prior[9:]),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
+                   evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+                   barcode,seller_sku,outcome,warehouse_mapping_id,
+                   identity_mapping_id,evidence_digest,observed_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"status_identity_{order_id}_{episode}", order_id, revision,
+                int(prior[3]), int(prior[5]), int(prior[6]), "sku-101",
+                str(prior[7]), "matched", "warehouse_mapping_1",
+                "identity_mapping_1",
+                "sha256:" + hashlib.sha256(
+                    f"status-identity:{order_id}:{revision}".encode()
+                ).hexdigest(),
+                observed_at,
+            ),
+        )
     digest = "sha256:" + hashlib.sha256(
         f"{order_id}:{revision}:{supplier_status}:{wb_status}:{quantity}".encode("utf-8")
     ).hexdigest()

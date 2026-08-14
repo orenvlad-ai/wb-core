@@ -294,3 +294,11 @@ aggregate↔pool reconciliation retains the T2 operation, restores exact prior
 controls and releases the external barrier. Blind deletion or replay is never a
 recovery action; after live events only forward reconciliation or compensating
 documents are permitted.
+
+Migration 143 binds the checkpoint to compound `W` (order observations, status
+observations and transitions) plus local UTC `T` and full frozen-stream digests.
+Append-only rows above `W` are excluded from the T2 source digest and therefore
+cannot age an owner gate. They are drained in the same transaction as opening
+when already persisted; drain progress and accounting effects roll back or
+commit together. A post-commit retry resumes readback, while later collector
+suffixes use forward idempotent processing rather than restoration or replay.

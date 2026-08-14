@@ -88,12 +88,20 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - Migration 142 adds canonical hosted
   `ff-pool-cutover-production-dry-run/apply/readback`. Every action pins the
   active target, environment file and exact `.wb-core-runtime-sha`. Dry-run is
-  query-only and leaves `T` unchosen. Apply accepts only the reviewed owner-gate
+  query-only. Migration 143 makes its reviewed accounting boundary immutable:
+  local UTC `T` plus a compound `W` for the independent order observation,
+  status observation and status transition sequences, with complete bounded
+  frozen-row digests. Apply accepts only the reviewed owner-gate
   fingerprint, acquires/confirms the durable HTTP barrier, drains business
   writers, holds the warehouse timer, proves the supplier acceptance writer is
   held and `wb-core-fbs-shadow-collector.timer` remains enabled/active, then
   creates the central T2 warehouse-domain checkpoint and a private exact-target
-  before-image. `T` is selected only inside that live barrier. A passing exact
+  before-image. Apply time is selected only inside that live barrier and is not
+  an invented upstream status timestamp. Frozen/business-critical drift fails
+  closed, while append-only FBS rows above `W` are a normal suffix and do not
+  invalidate the gate. The opening transaction drains the already persisted
+  suffix atomically; later suffix rows are consumed idempotently by the active
+  collector processor. A passing exact
   aggregate/detail/checkpoint/non-target readback restores prior controls and
   releases the barrier; failure or transport ambiguity retains it for recovery.
   The runner never writes WB, and deployment of the default-off runner alone

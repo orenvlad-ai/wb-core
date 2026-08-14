@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -18,6 +19,7 @@ from packages.application.ff_pool_cutover_production import (  # noqa: E402
     FfPoolCutoverProductionError,
     FfPoolCutoverProductionMutation,
 )
+from packages.application.ff_pool_cutover import FfPoolCutoverAmbiguousCommit  # noqa: E402
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     process_post_t_fbs_lifecycle,
 )
@@ -63,15 +65,17 @@ def main() -> int:
             conn.commit()
         env_file = root / "runtime.env"
         env_file.write_text("WB_FBS_COLLECTOR_ENABLED=true\n", encoding="utf-8")
+        initial_clock = _Clock()
         runner = FfPoolCutoverProductionMutation(
             runtime_dir=runtime_dir,
             env_file=env_file,
             deployed_sha=SHA,
-            timestamp_factory=_Clock(),
+            timestamp_factory=initial_clock,
         )
         gate = runner.build_gate_plan(excluded_shipment_ids=[SHIPMENT_ID])
         assert gate["apply_allowed"] is True, gate["blockers"]
-        assert gate["cutover_boundary"]["chosen"] is False
+        assert gate["cutover_boundary"]["chosen"] is True
+        assert gate["cutover_boundary"]["post_watermark_growth_invalidates_gate"] is False
         assert gate["source"]["opening_summary"] == {
             "quantity": 8,
             "capital_rub": "79.995",
@@ -86,13 +90,16 @@ def main() -> int:
         assert gate["handoff_policy"]["supplier_status_complete_alone_forbidden"] is True
 
         before_status = _status_digest(runtime.db_path)
-        with sqlite3.connect(runtime.db_path) as conn:
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_supplier_shipments "
-                "SET actual_ff_acceptance_date='2026-08-14' WHERE shipment_id=?",
-                (SHIPMENT_ID,),
-            )
-            conn.commit()
+        def _accept_during_held_boundary() -> None:
+            with sqlite3.connect(runtime.db_path) as accepting:
+                accepting.execute(
+                    "UPDATE sheet_vitrina_v1_supplier_shipments "
+                    "SET actual_ff_acceptance_date='2026-08-14' WHERE shipment_id=?",
+                    (SHIPMENT_ID,),
+                )
+                accepting.commit()
+
+        initial_clock.at_cutover = _accept_during_held_boundary
         try:
             runner.apply(
                 gate,
@@ -104,7 +111,11 @@ def main() -> int:
             )
             raise AssertionError("concurrent supplier acceptance was not detected")
         except FfPoolCutoverProductionError as exc:
-            assert exc.code == "gate_source_drift"
+            assert exc.code == "live_t_revalidation_failed"
+            assert any(
+                item.get("code") == "excluded_pending_receipt_not_currently_pending"
+                for item in (exc.details or [])
+            )
         assert _pool_operation_count(runtime.db_path) == 0
         assert _status_digest(runtime.db_path) == before_status
         with sqlite3.connect(runtime.db_path) as conn:
@@ -115,20 +126,28 @@ def main() -> int:
             )
             conn.commit()
 
-        # Rebuild after the deliberately injected drift; the exact gate owns
-        # the current source and T is still unbound.
+        # Rebuild after the deliberately injected held-boundary drift; the
+        # exact new gate owns the current frozen T/W source.
         live_clock = _Clock()
         runner.timestamp_factory = live_clock
         gate = runner.build_gate_plan(excluded_shipment_ids=[SHIPMENT_ID])
+        frozen_source_fingerprint = gate["source_fingerprint"]
+        frozen_watermark = dict(gate["source"]["accounting_boundary"])
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_known_order_handoff_after_w(conn)
+            _insert_during_apply_order(
+                conn, order_id=9002, observed_at="2026-08-14T05:02:00Z"
+            )
+            conn.commit()
         arrived_status: dict[str, str] = {}
 
-        def _arrival_during_t() -> None:
+        def _arrival_during_apply() -> None:
             with sqlite3.connect(runtime.db_path) as arriving:
-                _insert_during_t_order(arriving)
+                _insert_during_apply_order(arriving, order_id=9003)
                 arriving.commit()
             arrived_status["digest"] = _status_digest(runtime.db_path)
 
-        live_clock.at_cutover = _arrival_during_t
+        live_clock.at_cutover = _arrival_during_apply
         result = runner.apply(
             gate,
             fingerprint=gate["fingerprint"],
@@ -138,6 +157,13 @@ def main() -> int:
             external_barrier_evidence=_barrier(),
         )
         assert result["status"] == "applied_reconciled"
+        assert gate["source_fingerprint"] == frozen_source_fingerprint
+        assert result["apply"]["post_checkpoint_delta"]["summary"]["reserved"] == 2
+        assert result["apply"]["post_checkpoint_delta"]["summary"]["fulfilled"] == 1
+        assert result["apply"]["post_checkpoint_delta"]["pending_count"] == 0
+        assert result["apply"]["post_checkpoint_delta"][
+            "from_status_observation_sequence"
+        ] == frozen_watermark["status_observation_watermark_sequence"]
         assert result["readback"]["readback"]["status"] == "pass"
         assert result["apply"]["readback"]["reader_enabled"] is True
         with sqlite3.connect(runtime.db_path) as conn:
@@ -149,7 +175,7 @@ def main() -> int:
                        ORDER BY nm_id"""
                 )
             ]
-            assert detail == [(101, 10, "100"), (102, -2, "-20.005")]
+            assert detail == [(101, 9, "90"), (102, -2, "-20.005")]
             pending = conn.execute(
                 """SELECT classification,expected_quantity,post_cutover_state
                    FROM sheet_vitrina_v1_ff_pool_cutover_pending_shipments
@@ -177,12 +203,23 @@ def main() -> int:
                 conn, occurred_at="2026-08-14T05:06:30Z", schema_ready=True
             )
             conn.commit()
-        assert late["summary"]["late_pre_t"] == 1
+        assert late["summary"]["late_pre_t"] == 0
         with sqlite3.connect(runtime.db_path) as conn:
             assert conn.execute(
-                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases "
-                "WHERE order_id=9002"
-            ).fetchone()[0] == 1
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_current "
+                "WHERE order_id IN (9002,9003) AND state='reserved'"
+            ).fetchone()[0] == 2
+            manifest_epoch = json.loads(
+                conn.execute(
+                    "SELECT manifest_json FROM sheet_vitrina_v1_ff_pool_cutover_manifests"
+                ).fetchone()[0]
+            )["write_epoch_id"]
+            epoch_phases = conn.execute(
+                "SELECT phase FROM sheet_vitrina_v1_warehouse_domain_write_epoch_events "
+                "WHERE epoch_id=? ORDER BY event_sequence",
+                (manifest_epoch,),
+            ).fetchall()
+            assert epoch_phases[-1][0] == "released", (manifest_epoch, epoch_phases)
 
         repeated = runner.apply(
             gate,
@@ -194,8 +231,9 @@ def main() -> int:
         )
         assert repeated["status"] == "already_applied_reconciled"
         assert repeated["idempotent"] is True
-        assert _pool_operation_count(runtime.db_path) == 1
+        assert _pool_operation_count(runtime.db_path) == 2
         _assert_precommit_crash_recovery(root / "crash-recovery")
+        _assert_postcommit_crash_recovery(root / "postcommit-recovery")
     print("ff_pool_cutover_production_smoke: OK")
     return 0
 
@@ -219,6 +257,9 @@ def _assert_precommit_crash_recovery(root: Path) -> None:
         timestamp_factory=_Clock(),
     )
     gate = runner.build_gate_plan(excluded_shipment_ids=[SHIPMENT_ID])
+    with sqlite3.connect(runtime.db_path) as conn:
+        _insert_known_order_handoff_after_w(conn)
+        conn.commit()
     try:
         runner.apply(
             gate,
@@ -239,6 +280,9 @@ def _assert_precommit_crash_recovery(root: Path) -> None:
         ).fetchone()[0] == 0
         assert _pool_operation_count(runtime.db_path) == 0
         assert conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_fbs_drain_state"
+        ).fetchone()[0] == 0
+        assert conn.execute(
             "SELECT phase FROM sheet_vitrina_v1_warehouse_domain_write_epoch_events "
             "ORDER BY event_sequence DESC LIMIT 1"
         ).fetchone()[0] == "aborted"
@@ -256,7 +300,12 @@ def _assert_precommit_crash_recovery(root: Path) -> None:
     )
     assert recovered["status"] == "applied_reconciled"
     assert recovered["readback"]["readback"]["status"] == "pass"
-    assert _pool_operation_count(runtime.db_path) == 1
+    assert _pool_operation_count(runtime.db_path) == 2
+    with sqlite3.connect(runtime.db_path) as conn:
+        assert conn.execute(
+            "SELECT quantity FROM sheet_vitrina_v1_ff_pool_balances "
+            "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+        ).fetchone()[0] == 9
     with sqlite3.connect(runtime.db_path) as conn:
         phases = conn.execute(
             "SELECT epoch_id,phase FROM sheet_vitrina_v1_warehouse_domain_write_epoch_events "
@@ -269,6 +318,60 @@ def _assert_precommit_crash_recovery(root: Path) -> None:
             "SELECT lifecycle_state FROM sheet_vitrina_v1_recovery_operations "
             "WHERE operation_kind='warehouse_opening_publication'"
         ).fetchone()[0] == "retained"
+
+
+def _assert_postcommit_crash_recovery(root: Path) -> None:
+    runtime_dir = root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_warehouse_functional_schema(conn)
+        _ensure_schema(conn)
+        _seed(conn)
+        conn.commit()
+    env_file = root / "runtime.env"
+    env_file.write_text("WB_FBS_COLLECTOR_ENABLED=true\n", encoding="utf-8")
+    runner = FfPoolCutoverProductionMutation(
+        runtime_dir=runtime_dir,
+        env_file=env_file,
+        deployed_sha=SHA,
+        timestamp_factory=_Clock(),
+    )
+    gate = runner.build_gate_plan(excluded_shipment_ids=[SHIPMENT_ID])
+    try:
+        runner.apply(
+            gate,
+            fingerprint=gate["fingerprint"],
+            approval_reference="owner-gate-postcommit",
+            actor="smoke",
+            backup_dir=root / "backups",
+            external_barrier_evidence=_barrier(),
+            crash="after_commit",
+        )
+    except FfPoolCutoverAmbiguousCommit:
+        pass
+    else:
+        raise AssertionError("post-commit crash injection did not surface ambiguity")
+    with sqlite3.connect(runtime.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_cutover_manifests"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT phase FROM sheet_vitrina_v1_warehouse_domain_write_epoch_events "
+            "ORDER BY event_sequence DESC LIMIT 1"
+        ).fetchone()[0] == "readback_required"
+    recovered = runner.apply(
+        gate,
+        fingerprint=gate["fingerprint"],
+        approval_reference="owner-gate-postcommit",
+        actor="smoke",
+        backup_dir=root / "backups",
+        external_barrier_evidence=_barrier(),
+    )
+    assert recovered["status"] == "already_applied_reconciled"
+    assert recovered["readback"]["readback"]["status"] == "pass"
+    assert _pool_operation_count(runtime.db_path) == 1
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -400,9 +503,16 @@ def _barrier() -> dict[str, object]:
     }
 
 
-def _insert_during_t_order(conn: sqlite3.Connection) -> None:
-    revision = "order_revision_9002"
-    status_digest = "sha256:" + "8" * 64
+def _insert_during_apply_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int = 9002,
+    observed_at: str = CUTOVER_AT,
+) -> None:
+    revision = f"order_revision_{order_id}"
+    status_digest = "sha256:" + hashlib.sha256(
+        f"during:{order_id}".encode()
+    ).hexdigest()
     conn.execute(
         """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
                observation_id,order_id,source_revision,supply_id,delivery_type,
@@ -410,9 +520,9 @@ def _insert_during_t_order(conn: sqlite3.Connection) -> None:
                skus_json,observed_at,collector_date_from,collector_date_to,collector_cursor
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            "order_observation_9002", 9002, revision, "supply-fbs", "fbs",
+            f"order_observation_{order_id}", order_id, revision, "supply-fbs", "fbs",
             "2026-08-14T05:04:59Z", 501, 601, 101, 201, "seller-101",
-            '["sku-101"]', CUTOVER_AT, 1, 2, 0,
+            '["sku-101"]', observed_at, 1, 2, 0,
         ),
     )
     conn.execute(
@@ -421,8 +531,8 @@ def _insert_during_t_order(conn: sqlite3.Connection) -> None:
                wb_status,positive_quantity,observed_at
            ) VALUES(?,?,?,?,?,?,?,?)""",
         (
-            "status_observation_9002", 9002, revision, status_digest,
-            "new", "waiting", 1, CUTOVER_AT,
+            f"status_observation_{order_id}", order_id, revision, status_digest,
+            "new", "waiting", 1, observed_at,
         ),
     )
     conn.execute(
@@ -431,7 +541,7 @@ def _insert_during_t_order(conn: sqlite3.Connection) -> None:
                source_observed_at,local_first_seen_at,local_last_seen_at,
                observation_count,episode_sequence
            ) VALUES(?,?,?,?,?,'',?,?,1,1)""",
-        (9002, revision, status_digest, "new", "waiting", CUTOVER_AT, CUTOVER_AT),
+        (order_id, revision, status_digest, "new", "waiting", observed_at, observed_at),
     )
     conn.execute(
         """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
@@ -440,9 +550,72 @@ def _insert_during_t_order(conn: sqlite3.Connection) -> None:
                evidence_digest,observed_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            "identity_evidence_9002", 9002, revision, 501, 101, 201,
+            f"identity_evidence_{order_id}", order_id, revision, 501, 101, 201,
             "sku-101", "seller-101", "matched", "warehouse_mapping_1",
-            "identity_mapping_1", "sha256:" + "9" * 64, CUTOVER_AT,
+            "identity_mapping_1",
+            "sha256:" + hashlib.sha256(f"identity:{order_id}".encode()).hexdigest(),
+            observed_at,
+        ),
+    )
+
+
+def _insert_known_order_handoff_after_w(conn: sqlite3.Connection) -> None:
+    order_id = 9001
+    revision = "order_revision_9001_after_w"
+    observed_at = "2026-08-14T05:01:00Z"
+    status_digest = "sha256:" + hashlib.sha256(
+        b"9001:complete:sorted:after-w"
+    ).hexdigest()
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
+               observation_id,order_id,source_revision,supply_id,delivery_type,
+               source_created_at,warehouse_id,office_id,nm_id,chrt_id,seller_sku,
+               skus_json,observed_at,collector_date_from,collector_date_to,
+               collector_cursor
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "order_observation_9001_after_w", order_id, revision, "supply-fbs",
+            "fbs", "2026-08-14T04:00:00Z", 501, 601, 101, 201,
+            "seller-101", '["sku-101"]', observed_at, 1, 2, 0,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_status_observations(
+               observation_id,order_id,order_revision,status_digest,supplier_status,
+               wb_status,positive_quantity,observed_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            "status_observation_9001_after_w", order_id, revision, status_digest,
+            "complete", "sorted", 1, observed_at,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_status_current(
+               order_id,order_revision,status_digest,supplier_status,wb_status,
+               source_observed_at,local_first_seen_at,local_last_seen_at,
+               observation_count,episode_sequence
+           ) VALUES(?,?,?,?,?,'',?,?,2,2)
+           ON CONFLICT(order_id) DO UPDATE SET
+               order_revision=excluded.order_revision,
+               status_digest=excluded.status_digest,
+               supplier_status=excluded.supplier_status,
+               wb_status=excluded.wb_status,
+               local_last_seen_at=excluded.local_last_seen_at,
+               observation_count=excluded.observation_count,
+               episode_sequence=excluded.episode_sequence""",
+        (order_id, revision, status_digest, "complete", "sorted", observed_at, observed_at),
+    )
+    conn.execute(
+        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
+               evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+               barcode,seller_sku,outcome,warehouse_mapping_id,identity_mapping_id,
+               evidence_digest,observed_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "identity_evidence_9001_after_w", order_id, revision, 501, 101, 201,
+            "sku-101", "seller-101", "matched", "warehouse_mapping_1",
+            "identity_mapping_1", "sha256:" + hashlib.sha256(b"identity:9001:after-w").hexdigest(),
+            observed_at,
         ),
     )
 

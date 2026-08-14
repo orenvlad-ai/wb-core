@@ -38,6 +38,8 @@ CONTRACT_NAME = "ff_pool_fbs_lifecycle_v1"
 EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
 CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
 RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
+DRAIN_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_drain_state"
+LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
 
 HANDOFF_SUPPLIER_STATUS = "complete"
 HANDOFF_WB_STATUS = "sorted"
@@ -55,6 +57,7 @@ EVENT_TYPES = (
     "release",
     "handoff_debit",
     "terminal_noop",
+    "status_noop",
     "post_handoff_reconciliation",
     "late_pre_t_isolated",
 )
@@ -89,6 +92,12 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             episode_sequence INTEGER NOT NULL
                 CHECK(typeof(episode_sequence)='integer' AND episode_sequence>0),
             event_type TEXT NOT NULL CHECK(event_type IN ({_sql_values(EVENT_TYPES)})),
+            source_order_observation_sequence INTEGER NOT NULL DEFAULT 0
+                CHECK(typeof(source_order_observation_sequence)='integer'
+                      AND source_order_observation_sequence>=0),
+            source_status_observation_sequence INTEGER NOT NULL DEFAULT 0
+                CHECK(typeof(source_status_observation_sequence)='integer'
+                      AND source_status_observation_sequence>=0),
             source_revision TEXT NOT NULL,
             status_digest TEXT NOT NULL,
             supplier_status TEXT NOT NULL,
@@ -146,6 +155,52 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(cutover_id,order_id,evidence_digest)
         );
 
+        CREATE TABLE IF NOT EXISTS {DRAIN_STATE_TABLE}(
+            cutover_id TEXT PRIMARY KEY REFERENCES
+                sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            frozen_order_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(frozen_order_observation_sequence)='integer'
+                      AND frozen_order_observation_sequence>=0),
+            frozen_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(frozen_status_observation_sequence)='integer'
+                      AND frozen_status_observation_sequence>=0),
+            frozen_status_transition_sequence INTEGER NOT NULL
+                CHECK(typeof(frozen_status_transition_sequence)='integer'
+                      AND frozen_status_transition_sequence>=0),
+            last_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(last_status_observation_sequence)='integer'
+                      AND last_status_observation_sequence>=0),
+            drain_run_count INTEGER NOT NULL DEFAULT 0
+                CHECK(typeof(drain_run_count)='integer' AND drain_run_count>=0),
+            last_result_digest TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+                CHECK(substr(updated_at,-1,1)='Z' AND julianday(updated_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {LATE_EVIDENCE_TABLE}(
+            evidence_id TEXT PRIMARY KEY,
+            cutover_id TEXT NOT NULL REFERENCES
+                sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            source_order_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(source_order_observation_sequence)='integer'
+                      AND source_order_observation_sequence>0),
+            source_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(source_status_observation_sequence)='integer'
+                      AND source_status_observation_sequence>0),
+            source_revision TEXT NOT NULL,
+            status_digest TEXT NOT NULL,
+            supplier_status TEXT NOT NULL,
+            wb_status TEXT NOT NULL,
+            observed_at TEXT NOT NULL
+                CHECK(substr(observed_at,-1,1)='Z' AND julianday(observed_at) IS NOT NULL),
+            reason_code TEXT NOT NULL DEFAULT 'late_pre_t',
+            evidence_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
+            UNIQUE(cutover_id,order_id,source_status_observation_sequence)
+        );
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_events_no_update
         BEFORE UPDATE ON {EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS lifecycle evidence is immutable'); END;
@@ -158,7 +213,31 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_reconciliation_no_delete
         BEFORE DELETE ON {RECONCILIATION_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS reconciliation evidence is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_late_evidence_no_update
+        BEFORE UPDATE ON {LATE_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS late evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_late_evidence_no_delete
+        BEFORE DELETE ON {LATE_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS late evidence is append-only'); END;
         """
+    )
+    _ensure_column(
+        conn,
+        table=EVENTS_TABLE,
+        column="source_order_observation_sequence",
+        declaration="INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        table=EVENTS_TABLE,
+        column="source_status_observation_sequence",
+        declaration="INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.execute(
+        f"""CREATE UNIQUE INDEX IF NOT EXISTS ff_pool_fbs_event_by_status_sequence
+            ON {EVENTS_TABLE}(
+                cutover_id,order_id,source_status_observation_sequence,event_type
+            ) WHERE source_status_observation_sequence>0"""
     )
 
 
@@ -167,16 +246,23 @@ def classify_pre_t_status(
     *,
     order_id: int,
     cutover_at: str,
+    max_observation_sequence: int | None = None,
 ) -> dict[str, Any]:
     """Classify one order from immutable status observations visible by T."""
 
     rows = conn.execute(
-        f"""SELECT order_revision,status_digest,supplier_status,wb_status,
-                   positive_quantity,observed_at
+        f"""SELECT observation_sequence,order_revision,status_digest,
+                   supplier_status,wb_status,positive_quantity,observed_at
             FROM {STATUS_OBSERVATIONS_TABLE}
             WHERE order_id=? AND observed_at<=?
+              AND (? IS NULL OR observation_sequence<=?)
             ORDER BY observation_sequence""",
-        (int(order_id), str(cutover_at)),
+        (
+            int(order_id),
+            str(cutover_at),
+            max_observation_sequence,
+            max_observation_sequence,
+        ),
     ).fetchall()
     if not rows:
         return {"classification": "unmatched", "evidence": None}
@@ -184,8 +270,8 @@ def classify_pre_t_status(
         (
             index
             for index, row in enumerate(rows)
-            if str(row[2]) == HANDOFF_SUPPLIER_STATUS
-            and str(row[3]) == HANDOFF_WB_STATUS
+            if str(row[3]) == HANDOFF_SUPPLIER_STATUS
+            and str(row[4]) == HANDOFF_WB_STATUS
         ),
         None,
     )
@@ -198,13 +284,13 @@ def classify_pre_t_status(
             (
                 row
                 for row in reversed(rows[handoff_index + 1 :])
-                if _is_cancellation(str(row[2]), str(row[3]))
+                if _is_cancellation(str(row[3]), str(row[4]))
             ),
             None,
         )
     else:
         latest = rows[-1]
-        if _is_cancellation(str(latest[2]), str(latest[3])):
+        if _is_cancellation(str(latest[3]), str(latest[4])):
             classification = "pre_t_cancelled_noop"
         else:
             classification = "pre_t_absorbed_reservation"
@@ -212,22 +298,24 @@ def classify_pre_t_status(
     result = {
         "classification": classification,
         "evidence": {
-            "source_revision": str(evidence[0]),
-            "status_digest": str(evidence[1]),
-            "supplier_status": str(evidence[2]),
-            "wb_status": str(evidence[3]),
-            "quantity": int(evidence[4]),
-            "observed_at": str(evidence[5]),
+            "observation_sequence": int(evidence[0]),
+            "source_revision": str(evidence[1]),
+            "status_digest": str(evidence[2]),
+            "supplier_status": str(evidence[3]),
+            "wb_status": str(evidence[4]),
+            "quantity": int(evidence[5]),
+            "observed_at": str(evidence[6]),
         },
     }
     if reconciliation is not None:
         result["post_handoff_reconciliation"] = {
-            "source_revision": str(reconciliation[0]),
-            "status_digest": str(reconciliation[1]),
-            "supplier_status": str(reconciliation[2]),
-            "wb_status": str(reconciliation[3]),
-            "quantity": int(reconciliation[4]),
-            "observed_at": str(reconciliation[5]),
+            "observation_sequence": int(reconciliation[0]),
+            "source_revision": str(reconciliation[1]),
+            "status_digest": str(reconciliation[2]),
+            "supplier_status": str(reconciliation[3]),
+            "wb_status": str(reconciliation[4]),
+            "quantity": int(reconciliation[5]),
+            "observed_at": str(reconciliation[6]),
         }
     return result
 
@@ -272,6 +360,10 @@ def apply_opening_fbs_backfill(
         status_observed_at = str(
             status_evidence.get("observed_at") or order["observed_at"]
         )
+        order_observation_sequence = int(order.get("observation_sequence") or 0)
+        status_observation_sequence = int(
+            status_evidence.get("observation_sequence") or 0
+        )
         if classification in {"pre_t_handoff_debit", "pre_t_absorbed_closed"}:
             event = _append_event(
                 conn,
@@ -289,6 +381,8 @@ def apply_opening_fbs_backfill(
                 physical_delta=-int(order["quantity"]),
                 occurred_at=occurred_at,
                 evidence=evidence,
+                source_order_observation_sequence=order_observation_sequence,
+                source_status_observation_sequence=status_observation_sequence,
             )
             if not event["idempotent"]:
                 _apply_exact_physical_delta(
@@ -333,6 +427,10 @@ def apply_opening_fbs_backfill(
                         "lane": "post_handoff_cancellation_or_return",
                         "reconciliation_status": reconciliation_evidence,
                     },
+                    source_order_observation_sequence=order_observation_sequence,
+                    source_status_observation_sequence=int(
+                        reconciliation_evidence.get("observation_sequence") or 0
+                    ),
                 )
                 _persist_reconciliation(
                     conn,
@@ -359,6 +457,8 @@ def apply_opening_fbs_backfill(
                 physical_delta=0,
                 occurred_at=occurred_at,
                 evidence=evidence,
+                source_order_observation_sequence=order_observation_sequence,
+                source_status_observation_sequence=status_observation_sequence,
             )
             counts["reservation"] += 1
             quantity["reservation"] += int(order["quantity"])
@@ -379,6 +479,8 @@ def apply_opening_fbs_backfill(
                 physical_delta=0,
                 occurred_at=occurred_at,
                 evidence=evidence,
+                source_order_observation_sequence=order_observation_sequence,
+                source_status_observation_sequence=status_observation_sequence,
             )
             counts["cancel_noop"] += 1
         else:
@@ -400,7 +502,7 @@ def process_post_t_fbs_lifecycle(
     limit: int = 500,
     schema_ready: bool = False,
 ) -> dict[str, Any]:
-    """Process bounded post-T evidence; default hard-off before cutover apply."""
+    """Process a bounded exact suffix of the frozen checkpoint stream."""
 
     if not schema_ready:
         ensure_ff_pool_fbs_lifecycle_schema(conn)
@@ -418,8 +520,7 @@ def process_post_t_fbs_lifecycle(
     manifest = json.loads(str(manifest_row[0]))
     _require_approved_policy(manifest)
     feature = conn.execute(
-        f"SELECT writer_enabled,reader_enabled,source_revision FROM {FEATURE_EPOCHS_TABLE} "
-        "WHERE epoch=?",
+        f"SELECT writer_enabled FROM {FEATURE_EPOCHS_TABLE} WHERE epoch=?",
         (int(manifest["feature_epoch"]),),
     ).fetchone()
     if feature is None or int(feature[0]) != 1:
@@ -429,34 +530,91 @@ def process_post_t_fbs_lifecycle(
             "reason": "writer_epoch_not_active",
             "mutates_wb": False,
         }
-    now = _utc_now() if occurred_at is None else str(occurred_at)
+    return drain_post_checkpoint_fbs_lifecycle(
+        conn,
+        manifest=manifest,
+        occurred_at=_utc_now() if occurred_at is None else str(occurred_at),
+        limit=limit,
+    )
+
+
+def drain_post_checkpoint_fbs_lifecycle(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    occurred_at: str,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Drain immutable status observations above frozen ``W`` exactly once.
+
+    The caller owns the transaction.  Progress advances atomically with every
+    reservation/debit/reconciliation effect, so a crash replays no physical
+    movement and a retry resumes from the same status sequence.
+    """
+
+    _require_approved_policy(manifest)
+    now = str(occurred_at)
     _require_utc(now)
-    bound = max(1, min(int(limit), 500))
+    bound = max(1, min(int(limit), 100_000))
     cutover_id = str(manifest["cutover_id"])
-    latest_orders = conn.execute(
-        f"""SELECT observation_id,order_id,source_revision,source_created_at,
-                   observed_at,warehouse_id,nm_id,chrt_id,skus_json
-            FROM {OBSERVATIONS_TABLE} AS source
-            WHERE observation_sequence=(
-                SELECT MAX(latest.observation_sequence) FROM {OBSERVATIONS_TABLE} AS latest
-                WHERE latest.order_id=source.order_id
-            )
-              AND NOT EXISTS(
-                  SELECT 1
-                  FROM sheet_vitrina_v1_ff_pool_cutover_order_classifications AS opening_order
-                  WHERE opening_order.cutover_id=? AND opening_order.order_id=source.order_id
-              )
-              AND EXISTS(
-                  SELECT 1 FROM {STATUS_CURRENT_TABLE} AS status
-                  LEFT JOIN {CURRENT_TABLE} AS lifecycle
-                    ON lifecycle.cutover_id=? AND lifecycle.order_id=status.order_id
-                  WHERE status.order_id=source.order_id
-                    AND (lifecycle.order_id IS NULL
-                         OR lifecycle.status_digest<>status.status_digest
-                         OR lifecycle.episode_sequence<>status.episode_sequence)
-              )
-            ORDER BY order_id LIMIT ?""",
-        (cutover_id, cutover_id, bound),
+    boundary = dict(manifest.get("accounting_boundary") or {})
+    order_w = _exact_int(
+        boundary.get(
+            "order_observation_watermark_sequence",
+            manifest.get("observation_watermark_sequence", 0),
+        ),
+        "accounting_boundary.order_observation_watermark_sequence",
+    )
+    status_w = _exact_int(
+        boundary.get("status_observation_watermark_sequence", 0),
+        "accounting_boundary.status_observation_watermark_sequence",
+    )
+    transition_w = _exact_int(
+        boundary.get("status_transition_watermark_sequence", 0),
+        "accounting_boundary.status_transition_watermark_sequence",
+    )
+    boundary_at = str(boundary.get("local_boundary_at") or manifest["cutover_at"])
+    _require_utc(boundary_at)
+    conn.execute(
+        f"""INSERT OR IGNORE INTO {DRAIN_STATE_TABLE}(
+                cutover_id,frozen_order_observation_sequence,
+                frozen_status_observation_sequence,
+                frozen_status_transition_sequence,last_status_observation_sequence,
+                drain_run_count,last_result_digest,updated_at
+            ) VALUES(?,?,?,?,?,0,'',?)""",
+        (cutover_id, order_w, status_w, transition_w, status_w, now),
+    )
+    state = conn.execute(
+        f"""SELECT frozen_order_observation_sequence,
+                   frozen_status_observation_sequence,
+                   frozen_status_transition_sequence,last_status_observation_sequence
+            FROM {DRAIN_STATE_TABLE} WHERE cutover_id=?""",
+        (cutover_id,),
+    ).fetchone()
+    if state is None or tuple(map(int, state[:3])) != (order_w, status_w, transition_w):
+        raise FfPoolFbsLifecycleError(
+            "drain_checkpoint_conflict",
+            "Persisted FBS drain checkpoint differs from the immutable manifest",
+        )
+    last_sequence = int(state[3])
+    starting_sequence = last_sequence
+    rows = conn.execute(
+        f"""SELECT status.observation_sequence,status.order_id,
+                   status.order_revision,status.status_digest,
+                   status.supplier_status,status.wb_status,
+                   status.positive_quantity,status.observed_at,
+                   source.observation_sequence,source.observation_id,
+                   source.source_revision,source.source_created_at,
+                   source.observed_at,source.warehouse_id,source.nm_id,
+                   source.chrt_id,source.skus_json
+            FROM {STATUS_OBSERVATIONS_TABLE} AS status
+            LEFT JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            WHERE status.observation_sequence>?
+            ORDER BY status.observation_sequence
+            LIMIT ?""",
+        (last_sequence, bound),
     ).fetchall()
     summary = {
         "reserved": 0,
@@ -464,101 +622,109 @@ def process_post_t_fbs_lifecycle(
         "released": 0,
         "fulfilled": 0,
         "terminal_noop": 0,
+        "status_noop": 0,
+        "cancel_noop": 0,
         "reconciliation": 0,
         "late_pre_t": 0,
     }
-    for raw in latest_orders:
-        order_id = int(raw[1])
-        source_created_at = str(raw[3] or "")
-        if not source_created_at:
+    for row in rows:
+        status_sequence = int(row[0])
+        order_id = int(row[1])
+        if row[8] is None:
             raise FfPoolFbsLifecycleError(
-                "source_created_at_missing",
-                f"Order {order_id} cannot cross the lifecycle boundary without source time",
+                "status_order_revision_missing",
+                f"Status sequence {status_sequence} has no exact order revision",
             )
-        mapped = _map_order(conn, manifest, raw)
-        current_status = conn.execute(
-            f"""SELECT current.order_revision,current.status_digest,
-                       current.supplier_status,current.wb_status,
-                       current.local_last_seen_at,current.episode_sequence,
-                       evidence.positive_quantity
-                FROM {STATUS_CURRENT_TABLE} AS current
-                JOIN {STATUS_OBSERVATIONS_TABLE} AS evidence
-                  ON evidence.order_id=current.order_id
-                 AND evidence.order_revision=current.order_revision
-                 AND evidence.status_digest=current.status_digest
-                WHERE current.order_id=?""",
-            (order_id,),
-        ).fetchone()
-        if current_status is None:
-            continue
-        if _parse_utc(source_created_at) <= _parse_utc(str(manifest["cutover_at"])):
-            order = _order_payload(raw, mapped, quantity=int(current_status[6]))
-            event = _append_event(
+        order_sequence = int(row[8])
+        known_at_boundary = conn.execute(
+            """SELECT 1 FROM sheet_vitrina_v1_ff_pool_cutover_order_classifications
+               WHERE cutover_id=? AND order_id=?""",
+            (cutover_id, order_id),
+        ).fetchone() is not None
+        already_late = conn.execute(
+            f"SELECT 1 FROM {LATE_EVIDENCE_TABLE} WHERE cutover_id=? AND order_id=? LIMIT 1",
+            (cutover_id, order_id),
+        ).fetchone() is not None
+        locally_pre_boundary = (
+            _parse_utc(str(row[7])) <= _parse_utc(boundary_at)
+            or _parse_utc(str(row[12])) <= _parse_utc(boundary_at)
+        )
+        if not known_at_boundary and (already_late or locally_pre_boundary):
+            if _persist_late_checkpoint_evidence(
                 conn,
                 manifest=manifest,
-                order=order,
-                episode_sequence=int(current_status[5]),
-                event_type="late_pre_t_isolated",
-                state="late_pre_t_isolated",
-                supplier_status=str(current_status[2]),
-                wb_status=str(current_status[3]),
-                status_digest=str(current_status[1]),
-                source_revision=str(current_status[0]),
-                source_observed_at=str(current_status[4]),
-                wac=_frozen_wac(manifest, order),
-                physical_delta=0,
-                occurred_at=now,
-                evidence={"late_pre_t": True, "order_revision": str(current_status[0])},
-            )
-            if not event["idempotent"]:
-                _persist_late_pre_t(conn, manifest=manifest, order=order, event=event, detected_at=now)
+                row=row,
+                detected_at=now,
+            ):
                 summary["late_pre_t"] += 1
+            last_sequence = status_sequence
             continue
-        order = _order_payload(raw, mapped, quantity=int(current_status[6]))
+
+        raw_order = (
+            str(row[9]),
+            order_id,
+            str(row[10]),
+            str(row[11]),
+            str(row[12]),
+            row[13],
+            int(row[14]),
+            row[15],
+            str(row[16]),
+        )
+        mapped = _map_order(conn, manifest, raw_order)
+        order = _order_payload(raw_order, mapped, quantity=int(row[6]))
         state_row = conn.execute(
             f"SELECT state,debit_event_id FROM {CURRENT_TABLE} WHERE cutover_id=? AND order_id=?",
             (cutover_id, order_id),
         ).fetchone()
-        supplier_status = str(current_status[2])
-        wb_status = str(current_status[3])
-        episode = int(current_status[5])
+        supplier_status = str(row[4])
+        wb_status = str(row[5])
         wac = _frozen_wac(manifest, order)
+        evidence = {
+            "order_id": order_id,
+            "order_revision": str(row[2]),
+            "status_digest": str(row[3]),
+            "source_order_observation_sequence": order_sequence,
+            "source_status_observation_sequence": status_sequence,
+            "supplier_status": supplier_status,
+            "wb_status": wb_status,
+        }
         common = dict(
             conn=conn,
             manifest=manifest,
             order=order,
-            episode_sequence=episode,
+            episode_sequence=status_sequence,
             supplier_status=supplier_status,
             wb_status=wb_status,
-            status_digest=str(current_status[1]),
-            source_revision=str(current_status[0]),
-            source_observed_at=str(current_status[4]),
+            status_digest=str(row[3]),
+            source_revision=str(row[2]),
+            source_observed_at=str(row[7]),
             wac=wac,
             occurred_at=now,
-            evidence={
-                "order_revision": str(current_status[0]),
-                "status_digest": str(current_status[1]),
-                "supplier_status": supplier_status,
-                "wb_status": wb_status,
-            },
+            evidence=evidence,
+            source_order_observation_sequence=order_sequence,
+            source_status_observation_sequence=status_sequence,
         )
-        if state_row is None:
+        state = "" if state_row is None else str(state_row[0])
+        if not state:
             if _is_cancellation(supplier_status, wb_status):
-                _append_event(
+                event = _append_event(
                     **common,
                     event_type="cancel_noop",
                     state="cancelled_noop",
                     physical_delta=0,
                 )
+                if not event["idempotent"]:
+                    summary["cancel_noop"] += 1
+                last_sequence = status_sequence
                 continue
             reserve = _append_event(
                 **common, event_type="reserve", state="reserved", physical_delta=0
             )
             if not reserve["idempotent"]:
                 summary["reserved"] += 1
-            state_row = ("reserved", "")
-        state = str(state_row[0])
-        if state in {"released", "cancelled_noop"} and not _is_cancellation(
+            state = "reserved"
+        elif state in {"released", "cancelled_noop"} and not _is_cancellation(
             supplier_status, wb_status
         ):
             reserve = _append_event(
@@ -567,6 +733,7 @@ def process_post_t_fbs_lifecycle(
             if not reserve["idempotent"]:
                 summary["reserved"] += 1
             state = "reserved"
+
         if state == "reserved" and _is_cancellation(supplier_status, wb_status):
             event = _append_event(
                 **common, event_type="release", state="released", physical_delta=0
@@ -593,10 +760,7 @@ def process_post_t_fbs_lifecycle(
                 summary["fulfilled"] += 1
         elif state == "reserved":
             refresh = _append_event(
-                **common,
-                event_type="reserve",
-                state="reserved",
-                physical_delta=0,
+                **common, event_type="reserve", state="reserved", physical_delta=0
             )
             if not refresh["idempotent"]:
                 summary["reservation_refreshed"] += 1
@@ -610,21 +774,59 @@ def process_post_t_fbs_lifecycle(
                 physical_delta=0,
             )
             if not event["idempotent"]:
-                _persist_reconciliation(conn, manifest=manifest, order=order, event=event, created_at=now)
+                _persist_reconciliation(
+                    conn, manifest=manifest, order=order, event=event, created_at=now
+                )
                 summary["reconciliation"] += 1
-        elif state in {"fulfilled", "fulfilled_reconciliation"} and wb_status in LATER_TERMINAL_WB_STATUSES:
+        elif state in {"fulfilled", "fulfilled_reconciliation"}:
+            event_type = (
+                "terminal_noop" if wb_status in LATER_TERMINAL_WB_STATUSES else "status_noop"
+            )
             event = _append_event(
-                **common, event_type="terminal_noop", state=state, physical_delta=0
+                **common, event_type=event_type, state=state, physical_delta=0
             )
             if not event["idempotent"]:
-                summary["terminal_noop"] += 1
+                summary[event_type] += 1
+        elif state in {"released", "cancelled_noop"}:
+            event = _append_event(
+                **common,
+                event_type="cancel_noop",
+                state=state,
+                physical_delta=0,
+            )
+            if not event["idempotent"]:
+                summary["cancel_noop"] += 1
+        last_sequence = status_sequence
+
+    pending = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE} WHERE observation_sequence>?",
+            (last_sequence,),
+        ).fetchone()[0]
+    )
+    result_material = {
+        "cutover_id": cutover_id,
+        "from_status_observation_sequence": starting_sequence,
+        "last_status_observation_sequence": last_sequence,
+        "processed_count": len(rows),
+        "pending_count": pending,
+        "summary": summary,
+    }
+    result_digest = _fingerprint(result_material)
+    conn.execute(
+        f"""UPDATE {DRAIN_STATE_TABLE}
+            SET last_status_observation_sequence=?,drain_run_count=drain_run_count+1,
+                last_result_digest=?,updated_at=?
+            WHERE cutover_id=?""",
+        (last_sequence, result_digest, now, cutover_id),
+    )
     if summary["fulfilled"]:
         _record_current_parity(conn, manifest=manifest, checked_at=now)
     return {
         "contract_name": CONTRACT_NAME,
-        "status": "processed",
-        "cutover_id": cutover_id,
-        "summary": summary,
+        "status": "caught_up" if pending == 0 else "processed_partial",
+        **result_material,
+        "result_digest": result_digest,
         "mutates_wb": False,
     }
 
@@ -669,6 +871,8 @@ def _append_event(
     physical_delta: int,
     occurred_at: str,
     evidence: Mapping[str, Any],
+    source_order_observation_sequence: int = 0,
+    source_status_observation_sequence: int = 0,
 ) -> dict[str, Any]:
     cutover_id = str(manifest["cutover_id"])
     quantity = int(order["quantity"])
@@ -679,23 +883,33 @@ def _append_event(
         "order_id": int(order["order_id"]),
         "episode_sequence": int(episode_sequence),
         "event_type": event_type,
+        "source_order_observation_sequence": int(
+            source_order_observation_sequence
+        ),
+        "source_status_observation_sequence": int(
+            source_status_observation_sequence
+        ),
         "evidence_digest": evidence_digest,
     }
     event_id = "ffbf_" + _fingerprint(identity).removeprefix("sha256:")[:28]
     inserted = conn.execute(
         f"""INSERT OR IGNORE INTO {EVENTS_TABLE}(
                 event_id,cutover_id,order_id,episode_sequence,event_type,
+                source_order_observation_sequence,
+                source_status_observation_sequence,
                 source_revision,status_digest,supplier_status,wb_status,
                 source_observed_at,facility_id,pool,nm_id,quantity,
                 physical_quantity_delta,capital_delta_rub,frozen_wac_rub,
                 evidence_digest,occurred_at,details_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             event_id,
             cutover_id,
             int(order["order_id"]),
             int(episode_sequence),
             event_type,
+            int(source_order_observation_sequence),
+            int(source_status_observation_sequence),
             source_revision,
             status_digest,
             supplier_status,
@@ -1021,6 +1235,72 @@ def _frozen_wac(manifest: Mapping[str, Any], order: Mapping[str, Any]) -> Decima
     return Decimal(str(match["wac_rub"]))
 
 
+def _persist_late_checkpoint_evidence(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    row: sqlite3.Row | tuple[Any, ...],
+    detected_at: str,
+) -> bool:
+    evidence = {
+        "cutover_id": str(manifest["cutover_id"]),
+        "order_id": int(row[1]),
+        "source_order_observation_sequence": int(row[8]),
+        "source_status_observation_sequence": int(row[0]),
+        "source_revision": str(row[2]),
+        "status_digest": str(row[3]),
+        "supplier_status": str(row[4]),
+        "wb_status": str(row[5]),
+        "observed_at": str(row[7]),
+        "reason_code": "late_pre_t",
+    }
+    digest = _fingerprint(evidence)
+    evidence_id = "fflatev_" + digest.removeprefix("sha256:")[:28]
+    inserted = conn.execute(
+        f"""INSERT OR IGNORE INTO {LATE_EVIDENCE_TABLE}(
+                evidence_id,cutover_id,order_id,
+                source_order_observation_sequence,
+                source_status_observation_sequence,source_revision,status_digest,
+                supplier_status,wb_status,observed_at,reason_code,evidence_digest,
+                created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,'late_pre_t',?,?)""",
+        (
+            evidence_id,
+            str(manifest["cutover_id"]),
+            int(row[1]),
+            int(row[8]),
+            int(row[0]),
+            str(row[2]),
+            str(row[3]),
+            str(row[4]),
+            str(row[5]),
+            str(row[7]),
+            digest,
+            detected_at,
+        ),
+    ).rowcount
+    conn.execute(
+        """INSERT OR IGNORE INTO sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases(
+                case_id,cutover_id,order_id,observation_id,source_revision,
+                source_created_at,observed_at,detected_at,state,reason_code,
+                display_reason,evidence_digest
+            ) VALUES(?,?,?,?,?,?,?,?,'isolated','late_pre_t',
+                     'Поздний заказ до границы',?)""",
+        (
+            "fflate_" + digest.removeprefix("sha256:")[:28],
+            str(manifest["cutover_id"]),
+            int(row[1]),
+            str(row[9]),
+            str(row[2]),
+            str(row[11]),
+            str(row[7]),
+            detected_at,
+            digest,
+        ),
+    )
+    return bool(inserted)
+
+
 def _persist_late_pre_t(
     conn: sqlite3.Connection,
     *,
@@ -1154,6 +1434,20 @@ def _decimal_check(column: str) -> str:
         f"AND length({column})-length(replace({column},'.',''))<=1 "
         f"AND {column} NOT IN ('','-','.','-.') AND substr({column},-1,1)<>'.'"
     )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _sql_values(values: tuple[str, ...]) -> str:
