@@ -77,6 +77,8 @@ jobs:
           python3 apps/ff_wb_supply_origins_http_smoke.py
           python3 apps/wb_fbs_orders_collector_smoke.py
           python3 apps/wb_fbs_orders_http_smoke.py
+          python3 apps/wb_fbs_shadow_polling_smoke.py
+          python3 apps/wb_supplies_incremental_sync_smoke.py
           python3 apps/ff_stage_7a_production_smoke.py
           python3 apps/ff_pool_cutover_smoke.py
           python3 apps/warehouse_business_projection_smoke.py

@@ -73,15 +73,20 @@ ordinary 24-hour collection probe, and only after both reads succeed sets
 `WB_FBS_COLLECTOR_ENABLED=true`. The hosted wrapper then restarts the canonical
 HTTP service and performs a fresh query-only readback.
 
-## Polling and evidence
+## Original activation polling and current supersession
 
-Continued collection is polling, not real time. It is part of the existing
+The original activation used polling, not real time, as part of the existing
 warehouse functional timer with:
 
 - unit `wb-core-warehouse-functional-sync.timer`;
 - `OnCalendar=*-*-* *:17:00 Europe/Moscow`;
 - `AccuracySec=2m`;
 - operational SLO: the next successful hourly warehouse sync.
+
+Migration 141 supersedes this original hourly polling wiring with a dedicated
+five-minute read-only collector.  The historical Stage 7A apply/reconciliation
+still proves its original activation boundary, while current live cadence and
+handoff evidence are owned by Migration 141.
 
 Reconciliation proves exact facility rows/states, collector configuration,
 successful complete cursor state, earliest official order date, latest

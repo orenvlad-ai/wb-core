@@ -28,7 +28,6 @@ from packages.adapters.seller_portal_transit_costs import (
 )
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.application.wb_fbs_orders import WbFbsOrdersCollector, WbFbsOrdersError
 from packages.application.wb_supply_overlay import (
     ELIGIBLE_WB_SUPPLY_STATUS_IDS,
     augment_supply_row_with_district,
@@ -174,17 +173,17 @@ class WbSuppliesBlock:
         runtime: RegistryUploadDbBackedRuntime,
         source: WbSuppliesSource | None = None,
         transit_cost_source: WbTransitCostEnrichmentSource | None = None,
-        fbs_orders_collector: WbFbsOrdersCollector | None = None,
+        fbs_orders_collector: Any | None = None,
         timestamp_factory: Any | None = None,
     ) -> None:
         self.runtime = runtime
         self.source = source or HttpBackedWbSuppliesSource()
         self.transit_cost_source = transit_cost_source or SellerPortalTransitCostNetworkJsonSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
-        self.fbs_orders_collector = fbs_orders_collector or WbFbsOrdersCollector(
-            db_path=self.runtime.db_path,
-            timestamp_factory=self.timestamp_factory,
-        )
+        # Retained only as a source-compatible constructor slot.  Stage 7B
+        # deliberately moved official FBS polling out of every FBW/warehouse
+        # sync path into its dedicated single-flight systemd service.
+        self.fbs_orders_collector = fbs_orders_collector
         self.fulfillment_overlay_provider: Callable[[], Mapping[str, Mapping[str, Any]]] | None = None
         self.transit_cost_reconciliation_callback: (
             Callable[[list[str]], Mapping[str, Any]] | None
@@ -613,26 +612,14 @@ class WbSuppliesBlock:
             "ff_auto_writeoff_checkpoint": ff_auto_writeoff_checkpoint,
             "warnings": warnings,
         }
-        try:
-            fbs_collection = self.fbs_orders_collector.collect_default_window()
-        except WbFbsOrdersError as exc:
-            fbs_collection = {
-                "contract_name": "wb_fbs_orders_readonly_shadow_v1",
-                "status": "failed",
-                "code": exc.code,
-                "error": str(exc),
-                "official_fbw_sync_independent": True,
-                "mutates_wb": False,
-            }
-        except Exception as exc:  # Supplemental Stage 5 evidence cannot fail FBW sync.
-            fbs_collection = {
-                "contract_name": "wb_fbs_orders_readonly_shadow_v1",
-                "status": "failed",
-                "code": "fbs_collector_failed",
-                "error": _safe_error_message(exc),
-                "official_fbw_sync_independent": True,
-                "mutates_wb": False,
-            }
+        fbs_collection = {
+            "contract_name": "wb_fbs_orders_readonly_shadow_v1",
+            "status": "dedicated_collector",
+            "schedule_unit": "wb-core-fbs-shadow-collector.timer",
+            "official_fbw_sync_independent": True,
+            "invoked_by_this_sync": False,
+            "mutates_wb": False,
+        }
         response["sync"]["fbs_orders_collection"] = fbs_collection
         return response
 

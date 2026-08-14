@@ -81,10 +81,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   requires the canonical target, exact `.wb-core-runtime-sha`, a private
   fingerprinted plan, approval reference, exact target/env before-images and
   post-restart query-only reconciliation. It catches up from `2026-08-01`,
-  proves one next ordinary collection, then enables the existing hourly
-  `wb-core-warehouse-functional-sync.timer` path (`*:17:00 Europe/Moscow`,
-  `AccuracySec=2m`). It never creates an epoch/opening/checkpoint, chooses `T`
-  or writes stock/WB.
+  proves one next ordinary collection. Migration 141 supersedes the continued
+  polling path with `wb-core-fbs-shadow-collector.timer`, every five minutes
+  with bounded jitter and a 10-minute normal-state SLO. It never creates an
+  epoch/opening/checkpoint, chooses `T` or writes stock/WB.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only
@@ -323,6 +323,8 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-finance-backup-rotation.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-finance-backup-rotation.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-shadow-collector.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-shadow-collector.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-business-data-maintenance-restore@.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is retained as an archived read-only compatibility boundary, not a normal Codex/ChatGPT data path. The current deploy implementation still manages the loopback-only `127.0.0.1:8766` unit for backward compatibility; its historical OAuth, concurrency, deadline, result-size, audit and redaction constraints remain fail-closed when that compatibility surface is explicitly maintained.
 
@@ -437,7 +439,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
-- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/Autoanswers service+timer units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`, but only infrastructure services are deploy-enabled/restarted. Business timers and the detached restore template have `enable=false,restart=false`.
+- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/FBS-shadow/Autoanswers service+timer units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`. The dedicated read-only FBS-shadow timer is deploy-enabled/restarted; unrelated business timers and the detached restore template retain their explicit target flags.
 - `retired_systemd_units = wb-core-spp-tester-schedule-tick.timer + wb-core-spp-tester-schedule-tick.service`; immediately after auth preflight and before runtime sync/dependency work, deploy idempotently disables/stops both obsolete schedule units, removes their unit files and performs `daemon-reload`. This is the deployment proof that the removed SPP Autocheck cannot start inside a long rollout window or keep running from a previous release.
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
