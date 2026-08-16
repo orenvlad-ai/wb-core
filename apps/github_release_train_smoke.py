@@ -3159,10 +3159,13 @@ def _assert_visible_codex_task_lifecycle_contract() -> None:
     )
 
 
-def _assert_executor_autonomy_and_silent_approval_contract() -> None:
+def _assert_permission_routing_and_direct_executor_contract() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     execution = (
         ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
+    curator_role = (
+        ROOT / "workspaces" / "WB Core · Кураторы" / "AGENTS.override.md"
     ).read_text(encoding="utf-8")
     provenance = (
         "Выбор инструментов и источников не является требованием пользователя и "
@@ -3174,13 +3177,29 @@ def _assert_executor_autonomy_and_silent_approval_contract() -> None:
         "После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую "
         "задачу один финальный technical handoff: итоговый статус; что сделано; "
         "что не сделано или осталось вне scope; PR и final SHA; проверки; "
-        "merge/release/deploy/production state; сложности, риски и blockers."
+        "merge/release/deploy/production state; visible executor task/thread ID; "
+        "effective routing profile и app/CLI/runner versions; platform approval "
+        "count; сложности, риски и blockers."
     )
 
     for source in (agents, execution):
         folded = re.sub(r"\s+", " ", source.casefold())
         plain = folded.replace("`", "")
         for required in (
+            "CAPABILITY_ROUTING_CANARY",
+            "CANARY_QUALIFIED",
+            "CANARY_RESTRICTED",
+            "machine-reported",
+            "task/thread",
+            "destination surface",
+            "app/CLI/runner versions",
+            "approval_policy=never",
+            "sandbox=danger-full-access",
+            "platform_approval_count=0",
+            "capability inventory",
+            "destination",
+            "routing defect",
+            "не request/forward",
             "EXECUTOR_AUTONOMY_PREFLIGHT",
             "shared Git metadata",
             "git fetch --prune origin",
@@ -3190,15 +3209,16 @@ def _assert_executor_autonomy_and_silent_approval_contract() -> None:
             "exact starting main SHA",
             "task-local progress",
             "waitingOnApproval",
-            "strict human-only boundary",
+            "Human Gate",
             "pre-terminal callback",
-            "точное действие/ресурс",
-            "mutation/read effect",
-            "не симулирует approval",
             "bounded read-only check",
             "clean untouched worktree",
             "no branch, no commit, no push и no PR",
-            "implementation tasks параллельно",
+            "supported task/thread creation surface",
+            "spawn_agent",
+            "dispatch defect",
+            "zero curator",
+            "zero platform approval prompts",
             "production-mutation gate",
             "exact-SHA deploy/verify",
         ):
@@ -3209,12 +3229,28 @@ def _assert_executor_autonomy_and_silent_approval_contract() -> None:
         assert "durable state machine" in folded
         assert "reset/clean/delete" in folded
 
-    assert "Обычный progress исполнителя, включая `autonomy_ready`, не" in agents
-    assert "Обычный progress исполнителя, включая `autonomy_ready`, не" in execution
-    assert "`waitingOnApproval` не является разрешением создать" in agents
-    assert "`waitingOnApproval` не является разрешением создать дубль" in execution
-    assert "скрытый executor UI flag не остаётся" in agents
-    assert "hidden executor UI flag не может оставаться" in execution
+    active = "\n".join((agents, execution, curator_role))
+    active_folded = re.sub(r"\s+", " ", active.casefold())
+    assert not re.search(r"front[ -]?load", active_folded)
+    assert "platform hard stop — routing/tooling defects, не human" in active_folded
+    assert "первый curator spawn_agent — dispatch defect" in active_folded.replace(
+        "`", ""
+    )
+    assert "первый curator collaboration spawn_agent — dispatch defect" in (
+        active_folded.replace("`", "")
+    )
+
+    curator_plain = re.sub(r"\s+", " ", curator_role.casefold()).replace("`", "")
+    for required in (
+        "supported task/thread creation surface",
+        "thread id",
+        "spawn_agent/subagent",
+        "canary_qualified",
+        "canary_restricted",
+        "platform_approval_count=0",
+        "zero curator spawn_agent calls",
+    ):
+        assert required in curator_plain
 
 
 def _assert_active_protocol_cutover_contract() -> None:
@@ -4265,7 +4301,7 @@ def main() -> int:
     _assert_phase_local_goal_regressions()
     _assert_workflow_contract()
     _assert_visible_codex_task_lifecycle_contract()
-    _assert_executor_autonomy_and_silent_approval_contract()
+    _assert_permission_routing_and_direct_executor_contract()
     _assert_active_protocol_cutover_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()

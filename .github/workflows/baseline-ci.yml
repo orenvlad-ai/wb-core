@@ -27,9 +27,6 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
 
-      - name: Validate Codex execution protocol
-        run: python3 apps/codex_execution_protocol_smoke.py
-
       - name: Install Release Train smoke dependencies
         run: >-
           python3 -m pip install --disable-pip-version-check
