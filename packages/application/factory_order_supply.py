@@ -255,7 +255,10 @@ class FactoryOrderSupplyBlock:
                 getattr(stock_response, "snapshot_date", "") or snapshot_date
             ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
-            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            pagination_complete=bool(
+                getattr(stock_response, "pagination_complete", False)
+                and getattr(stock_response, "warehouse_granularity_complete", True)
+            ),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
             require_complete=True,
         )
@@ -458,6 +461,13 @@ class FactoryOrderSupplyBlock:
                 "authoritative stock_total coverage incomplete for requested nmIds: "
                 + ", ".join(str(item) for item in missing)
             )
+        if not bool(
+            getattr(stock_response, "warehouse_granularity_complete", True)
+        ):
+            raise ValueError(
+                "authoritative warehouse-level stock allocation is unavailable; "
+                "aggregate WB stock cannot drive a factory order"
+            )
         wb_warehouse_exclusion = build_incident_stock_projection(
             self.runtime,
             items=list(getattr(stock_response, "items", []) or []),
@@ -466,7 +476,10 @@ class FactoryOrderSupplyBlock:
                 getattr(stock_response, "snapshot_date", "") or stock_snapshot_date
             ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
-            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            pagination_complete=bool(
+                getattr(stock_response, "pagination_complete", False)
+                and getattr(stock_response, "warehouse_granularity_complete", True)
+            ),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
         )
         stock_total_by_nm = {

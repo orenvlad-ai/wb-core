@@ -309,6 +309,9 @@ def _rematerialize_snapshot(
             raw_rows_digest=str(
                 getattr(payload, "raw_rows_digest", "") or ""
             ),
+            warehouse_granularity_complete=bool(
+                getattr(payload, "warehouse_granularity_complete", True)
+            ),
             seller_id=seller_id,
             cache_enabled=False,
         )

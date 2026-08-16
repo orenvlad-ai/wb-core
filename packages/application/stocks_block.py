@@ -218,13 +218,26 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
         )
         for nm_id in covered_nm_ids
     ]
+    warehouse_granularity_complete = bool(
+        data.get("warehouse_granularity_complete", True)
+    )
+    detail = _build_unmapped_detail(unmapped_region_totals)
+    if not warehouse_granularity_complete:
+        detail = "; ".join(
+            part
+            for part in (
+                "warehouse_granularity=aggregate_only; regional_metrics=blank_without_exact_evidence",
+                detail,
+            )
+            if part
+        )
     return StocksEnvelope(
         result=StocksSuccess(
             kind="success",
             snapshot_date=snapshot_date,
             count=len(items),
             items=items,
-            detail=_build_unmapped_detail(unmapped_region_totals),
+            detail=detail,
             warehouse_rows=[
                 row
                 for nm_id in covered_nm_ids
@@ -243,6 +256,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             fetched_at=str(data.get("fetched_at") or ""),
             pagination_complete=bool(data.get("pagination_complete")),
             raw_rows_digest=str(data.get("raw_rows_digest") or ""),
+            warehouse_granularity_complete=warehouse_granularity_complete,
         )
     )
 

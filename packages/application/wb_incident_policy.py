@@ -16,6 +16,9 @@ from packages.application.stocks_block import (
 )
 from packages.business_time import current_business_date_iso
 from packages.contracts.stocks_block import StocksItem, StocksWarehouseRow
+from packages.contracts.wb_supply_planning_zones import (
+    SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD,
+)
 
 
 POLICY_CONTRACT_NAME = "wb_warehouse_incident_policy"
@@ -919,6 +922,37 @@ def _apply_provisional_evidence_blanks(
     return projection
 
 
+def _blank_aggregate_only_incident_regions(
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    reason = (
+        "WB вернул агрегированный остаток без полного складского распределения; "
+        "региональное значение не доказано и оставлено пустым."
+    )
+    regional_fields = sorted(
+        {
+            *REGION_TO_FIELD.values(),
+            *SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD.values(),
+        }
+    )
+    blank_reasons = dict(projection.get("blank_reasons_by_nm_id") or {})
+    for nm_id, raw_row in dict(projection.get("by_nm_id") or {}).items():
+        row = dict(raw_row or {})
+        row_reasons = dict(row.get("blank_reasons_by_field") or {})
+        for field_name in regional_fields:
+            for prefix in ("actual", "excluded", "effective"):
+                row[f"{prefix}_{field_name}"] = None
+            row_reasons[field_name] = reason
+        row["blank_reasons_by_field"] = row_reasons
+        blank_reasons[str(nm_id)] = {
+            **dict(blank_reasons.get(str(nm_id)) or {}),
+            **{field_name: reason for field_name in regional_fields},
+        }
+        projection["by_nm_id"][str(nm_id)] = row
+    projection["blank_reasons_by_nm_id"] = blank_reasons
+    return projection
+
+
 def build_incident_stock_projection(
     runtime: Any,
     *,
@@ -1010,6 +1044,7 @@ def build_vitrina_incident_stock_projection(
     fetched_at: str,
     pagination_complete: bool,
     raw_rows_digest: str,
+    warehouse_granularity_complete: bool = True,
     seller_id: str | None = None,
     cache_enabled: bool = True,
 ) -> dict[str, Any]:
@@ -1030,7 +1065,11 @@ def build_vitrina_incident_stock_projection(
         else ()
     )
     source_digest = str(raw_rows_digest or "").strip()
-    completeness_confirmed = bool(pagination_complete and source_digest)
+    completeness_confirmed = bool(
+        pagination_complete
+        and source_digest
+        and warehouse_granularity_complete
+    )
     if not selected or completeness_confirmed:
         projection = build_incident_stock_projection(
             runtime,
@@ -1038,24 +1077,51 @@ def build_vitrina_incident_stock_projection(
             warehouse_rows=warehouse_rows,
             snapshot_date=target_date,
             fetched_at=fetched_at,
-            pagination_complete=bool(pagination_complete),
+            pagination_complete=bool(
+                pagination_complete and warehouse_granularity_complete
+            ),
             raw_rows_digest=source_digest,
             seller_id=owner,
             cache_enabled=cache_enabled,
         )
         projection["projection_mode"] = "vitrina_information"
+        if not warehouse_granularity_complete:
+            projection = _blank_aggregate_only_incident_regions(projection)
         projection["quality"] = {
-            "state": "confirmed" if completeness_confirmed else "received_rows",
-            "label_ru": "Полнота WB подтверждена" if completeness_confirmed else "Полученный снимок",
+            "state": (
+                "confirmed"
+                if completeness_confirmed
+                else (
+                    "aggregate_only"
+                    if not warehouse_granularity_complete
+                    else "received_rows"
+                )
+            ),
+            "label_ru": (
+                "Полнота WB подтверждена"
+                if completeness_confirmed
+                else (
+                    "Только агрегированный остаток WB"
+                    if not warehouse_granularity_complete
+                    else "Полученный снимок"
+                )
+            ),
             "message_ru": (
                 "Полнота WB подтверждена"
                 if completeness_confirmed
-                else "Политика не требует исключения складов; показаны фактически полученные строки"
+                else (
+                    "WB не привязал остаток к конкретным складам; региональные и incident-распределения не публикуются"
+                    if not warehouse_granularity_complete
+                    else "Политика не требует исключения складов; показаны фактически полученные строки"
+                )
             ),
             "completeness_confirmed": completeness_confirmed,
             "pagination_complete": bool(pagination_complete),
             "raw_rows_digest_present": bool(source_digest),
             "raw_rows_digest": source_digest,
+            "warehouse_granularity_complete": bool(
+                warehouse_granularity_complete
+            ),
             "accepted_payload_digest": _accepted_payload_digest(
                 items=items,
                 warehouse_rows=warehouse_rows,
@@ -1066,6 +1132,9 @@ def build_vitrina_incident_stock_projection(
             "policy_effective_date": str(policy.get("effective_from") or ""),
             "snapshot_date": target_date,
         }
+        projection["warehouse_granularity_complete"] = bool(
+            warehouse_granularity_complete
+        )
         projection["invariants"] = _validate_projection_invariants(projection)
         return projection
 
@@ -1073,7 +1142,11 @@ def build_vitrina_incident_stock_projection(
         items=items,
         warehouse_rows=warehouse_rows,
     )
-    cache_digest = f"vitrina-accepted-payload:{accepted_payload_digest}"
+    cache_digest = (
+        "vitrina-accepted-payload:"
+        if warehouse_granularity_complete
+        else "vitrina-aggregate-only-accepted-payload:"
+    ) + accepted_payload_digest
     policy_revision = int(policy.get("revision") or 0)
     cache_policy_revision = _projection_cache_policy_revision(policy)
     cache_key = _projection_cache_key(
@@ -1082,7 +1155,11 @@ def build_vitrina_incident_stock_projection(
         cache_digest=cache_digest,
         cache_policy_revision=cache_policy_revision,
         selected=selected,
-        mode="vitrina_provisional_received_rows_v1",
+        mode=(
+            "vitrina_provisional_received_rows_v1"
+            if warehouse_granularity_complete
+            else "vitrina_aggregate_only_received_rows_v1"
+        ),
     )
     if cache_enabled:
         cached = runtime.load_wb_incident_projection_cache(
@@ -1116,6 +1193,8 @@ def build_vitrina_incident_stock_projection(
         warehouse_rows=exact_rows,
         selected=selected,
     )
+    if not warehouse_granularity_complete:
+        projection = _blank_aggregate_only_incident_regions(projection)
     affected_ids = [
         int(nm_id)
         for nm_id, row in projection.get("by_nm_id", {}).items()
@@ -1123,13 +1202,31 @@ def build_vitrina_incident_stock_projection(
         and float(row.get("excluded_stock_total_mp") or 0.0) > 0
     ]
     quality = {
-        "state": "provisional_received_rows",
-        "label_ru": "Полнота WB не подтверждена",
-        "message_ru": VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU,
+        "state": (
+            "provisional_received_rows"
+            if warehouse_granularity_complete
+            else "aggregate_only"
+        ),
+        "label_ru": (
+            "Полнота WB не подтверждена"
+            if warehouse_granularity_complete
+            else "Только агрегированный остаток WB"
+        ),
+        "message_ru": (
+            VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU
+            if warehouse_granularity_complete
+            else (
+                "WB не привязал остаток к конкретным складам; точный stock_total сохранён, "
+                "а региональные и incident-распределения оставлены пустыми"
+            )
+        ),
         "completeness_confirmed": False,
         "pagination_complete": bool(pagination_complete),
         "raw_rows_digest_present": bool(source_digest),
         "raw_rows_digest": source_digest,
+        "warehouse_granularity_complete": bool(
+            warehouse_granularity_complete
+        ),
         "accepted_payload_digest": accepted_payload_digest,
         "accepted_item_count": len(items),
         "accepted_warehouse_row_count": len(warehouse_rows),
@@ -1151,7 +1248,11 @@ def build_vitrina_incident_stock_projection(
         {
             "contract_name": "wb_incident_stock_projection",
             "contract_version": 2,
-            "projection_mode": "vitrina_provisional_received_rows",
+            "projection_mode": (
+                "vitrina_provisional_received_rows"
+                if warehouse_granularity_complete
+                else "vitrina_aggregate_only_received_rows"
+            ),
             "seller_id": owner,
             "policy": policy,
             "policy_revision": policy_revision,
@@ -1162,6 +1263,9 @@ def build_vitrina_incident_stock_projection(
             "snapshot_digest": source_digest,
             "cache_identity_digest": cache_digest,
             "quality": quality,
+            "warehouse_granularity_complete": bool(
+                warehouse_granularity_complete
+            ),
             "cache": {
                 "status": "miss" if cache_enabled else "bypassed",
                 "key": cache_key,
