@@ -13,16 +13,22 @@
    `WBC · <короткая тема> · К<n>` и закрепляет задачу.
 2. Пользователь обсуждает с куратором цель, bounded scope, acceptance и closure.
 3. После согласования куратор создаёт ровно одного прямого user-owned
-   исполнителя, задаёт ему связанное имя
+   исполнителя как отдельную видимую Codex-задачу через supported task/thread
+   creation surface, фиксирует её thread ID, destination repo/worktree/host,
+   задаёт ей связанное имя
    `WBC · <та же короткая тема> · И<n>` и закрепляет задачу. Куратор не
-   реализует change сам и не заменяет исполнителя subagent-ом. Executor prompt
-   завершается обязательным указанием самостоятельно дойти до применимого
-   terminal state и вернуть в исходную кураторскую задачу один финальный
-   technical handoff после `COMPLETE` либо доказанного `BLOCKED`.
-4. Исполнитель немедленно проходит executor autonomy preflight в отдельной
-   branch/worktree от актуального `origin/main` и фиксирует task-local
-   `autonomy_ready`; только затем начинает длительный domain
-   analysis/implementation.
+   реализует change сам и не вызывает collaboration `spawn_agent`/subagent для
+   delegation, анализа, implementation, review, monitoring, recovery,
+   takeover или executor-роли. Executor prompt завершается обязательным
+   указанием самостоятельно дойти до применимого terminal state и вернуть в
+   исходную кураторскую задачу один финальный technical handoff после
+   `COMPLETE` либо доказанного `BLOCKED`.
+4. До fetch/branch/write и substantive work исполнитель выполняет bounded
+   non-mutating `CAPABILITY_ROUTING_CANARY`. Только `CANARY_QUALIFIED`
+   продолжает тот же visible executor в `EXECUTOR_AUTONOMY_PREFLIGHT`,
+   отдельной branch/worktree от актуального `origin/main` и task-local
+   `autonomy_ready`. `CANARY_RESTRICTED` не начинает работу и не просит
+   покомандный platform approval.
 5. Исполнитель обновляет только необходимые code/docs/tests и выполняет
    targeted checks и semantic self-review.
 6. Исполнитель открывает один open non-draft PR в `main` из same-repository
@@ -53,7 +59,7 @@
 Каждый executor task prompt заканчивается обязательным указанием со следующей
 не сокращаемой семантикой:
 
-`Исполнитель самостоятельно доводит задачу до применимого terminal state. После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую задачу один финальный technical handoff: итоговый статус; что сделано; что не сделано или осталось вне scope; PR и final SHA; проверки; merge/release/deploy/production state; сложности, риски и blockers.`
+`Исполнитель самостоятельно доводит задачу до применимого terminal state. После COMPLETE либо доказанного BLOCKED отправь в исходную кураторскую задачу один финальный technical handoff: итоговый статус; что сделано; что не сделано или осталось вне scope; PR и final SHA; проверки; merge/release/deploy/production state; visible executor task/thread ID; effective routing profile и app/CLI/runner versions; platform approval count; сложности, риски и blockers.`
 
 После успешного dispatch куратор немедленно завершает свой текущий turn.
 `Ждёт` означает quiet wait: отсутствие активных model/tool calls, а не
@@ -62,60 +68,106 @@
 prompts, промежуточные сводки, параллельную реализацию, независимую перепроверку
 handoff, heartbeat, automation или любой другой мониторинговый контур.
 
-Куратора пробуждает только один из трёх сигналов: финальный handoff исполнителя,
-прямой strict human-only pre-terminal callback исполнителя либо новое явное
-указание владельца. Обычный progress исполнителя, включая `autonomy_ready`, не
-является сигналом. Вся техническая проверка, evidence и terminal closure до
-handoff принадлежат исполнителю. После финального handoff куратор только тезисно
-сообщает владельцу статус, сделанное, не сделанное или исключённое, выполненные
-проверки и достигнутый production/terminal state, а также сложности, риски или
-blocker; второй технический audit он не выполняет.
+Куратора пробуждает только финальный handoff исполнителя, direct
+`CANARY_RESTRICTED`/routing-defect callback, прямой strict human-only
+pre-terminal callback либо новое явное указание владельца. Обычный progress,
+включая `CANARY_QUALIFIED` и `autonomy_ready`, не является сигналом. Вся
+техническая проверка, evidence и terminal closure до handoff принадлежат
+исполнителю. После финального handoff куратор только тезисно сообщает владельцу
+статус, сделанное, не сделанное или исключённое, выполненные проверки и
+достигнутый production/terminal state, а также сложности, риски или blocker;
+второй технический audit он не выполняет.
 
-## Executor autonomy preflight и silent approval prevention
+## Permanent permission routing и executor autonomy preflight
 
-Каждый новый repo-backed executor немедленно после dispatch, до длительного
-domain analysis/implementation, выполняет `EXECUTOR_AUTONOMY_PREFLIGHT`:
+Capability truth — effective machine-reported context текущего turn/runner.
+Saved config, prior turn, prompt, broad owner authorization и версия app сами
+по себе не доказывают и не расширяют approval policy, sandbox, network,
+writable roots или destination access. Owner authority ограничивает scope и
+risk, но не меняет machine-enforced profile.
 
-- проверяет доступ к собственному worktree и shared Git metadata, status,
-  remotes, GitHub auth, обязательный `git fetch --prune origin` и возможность
-  создать собственную branch от current `origin/main`;
-- проверяет GitHub connector и доступный fallback, необходимые local
-  dependencies/runtime paths и отсутствие ожидаемого permission/credential
-  gate;
-- front-load-ит все предсказуемые approval/permission запросы, пока владелец
-  ещё онлайн.
+Каждый новый repo-backed executor до fetch/branch/write, длительного анализа и
+implementation выполняет bounded non-mutating `CAPABILITY_ROUTING_CANARY` и
+фиксирует:
 
-После успешного preflight исполнитель кратко пишет в своей видимой задаче
-`autonomy_ready` с exact starting main SHA, branch и подтверждением отсутствия
-ожидающего approval. Это task-local progress, не callback куратору и не новая
-durable state machine; периодический monitoring из него не возникает.
+- current task/turn либо immutable runner identity и destination surface;
+- machine-read app/CLI/runner versions;
+- effective approval policy, sandbox, network и writable roots;
+- exact capability inventory и destination identities: repo, shared Git
+  metadata, GitHub/network и применимые host/service/runtime/data targets;
+- `platform_approval_count=0`.
 
-`waitingOnApproval`, missing permission/credential, interactive
-login/2FA/captcha и platform hard stop являются strict human-only boundary.
-Если такой gate предсказуем, исполнитель до approval-gated call отправляет один
-короткий pre-terminal callback в исходную кураторскую задачу. Если gate возник
-только после platform/tool call, callback отправляется сразу после получения
-возможности продолжить model turn; скрытый executor UI flag не остаётся
-единственным сигналом. Callback содержит тип gate, точное действие/ресурс,
-почему безопасного non-gated path нет, ожидаемый mutation/read effect и одно
-минимальное действие владельца. Он не содержит обычный progress или
-технический audit. После callback исполнитель остаётся на безопасной точке и
-не симулирует approval.
+Canary не выполняет fetch, branch, test write, GitHub mutation, service/data
+action или production gate. Для unattended workspace/network/host работы
+обычный local lane обязан доказать `approval_policy=never`,
+`sandbox=danger-full-access`, требуемую сеть и owner-bounded destinations;
+допустим также эквивалентный pinned managed runner с immutable capability
+receipt. Более узкий профиль допустим только когда он полностью покрывает
+read-only или workspace-contained задачу без interactive platform prompt.
+
+Если task-create не умеет pin и report требуемый профиль, через него создаётся
+только capability-only отдельная видимая user-owned задача. После
+`CANARY_QUALIFIED` эта же задача продолжает как единственный substantive
+executor. `CANARY_RESTRICTED` не делает repo/host mutations и не просит owner
+подтверждать команды: куратор после direct routing-defect callback ровно один
+раз направляет работу в уже qualified turn/pinned runner либо фиксирует tooling
+blocker. Цепочка restricted executors запрещена.
+
+Первый unexpected platform permission prompt — routing defect, а не Human
+Gate. Исполнитель останавливается на последней safe point, записывает exact
+missing capability/destination, не request/forward-ит command approval, не
+повторяет команду другой формой и отправляет куратору один direct
+routing-defect callback. Platform approval acceptance от canary до terminal
+handoff равен нулю.
+
+После `CANARY_QUALIFIED` исполнитель выполняет
+`EXECUTOR_AUTONOMY_PREFLIGHT`: проверяет доступ к собственному worktree и shared
+Git metadata, status, remotes, GitHub auth, обязательный
+`git fetch --prune origin`, отдельную branch от current `origin/main`, GitHub
+connector/fallback и необходимые local dependencies/runtime paths. После
+успеха он кратко пишет в своей видимой задаче `autonomy_ready` с exact starting
+main SHA, branch и подтверждением `platform_approval_count=0`. Это task-local
+progress, не callback куратору и не новая durable state machine.
+
+Re-canary обязателен при смене app/CLI/runner, turn/task-create или execution
+surface, effective profile/network/writable roots, host/session/destination
+либо required capability inventory. Предыдущее qualification через такую
+границу не наследуется.
+
+Истинный strict Human Gate остаётся только для owner business/risk decision,
+exact production-mutation gate, credentials/login/2FA/captcha, которые нельзя
+предоставить разрешённым non-interactive контуром, proven irreversible risk,
+security change, new external destination или material scope/risk change.
+Такой gate получает один direct pre-terminal callback с exact resource/effect
+и одним минимальным owner action; hidden UI state не заменяет callback.
 
 ## Duplicate-executor guard
 
-Только после допустимого wake signal и перед решением «перезапустить в новом
-executor» куратор выполняет один bounded read-only check: terminal/unavailable
-state исходной задачи, worktree status, branch, uncommitted diff,
-commits/push и open PR. `waitingOnApproval` не является разрешением создать
-дубль. Если существует branch/diff/commit/push/PR либо исходный executor можно
-resume, продолжается тот же executor или фиксируется human-only blocker.
+Только после допустимого wake signal, `CANARY_RESTRICTED`/routing-defect
+callback либо обнаруженного curator dispatch defect и перед решением
+«перезапустить в новом executor» куратор выполняет один bounded read-only
+check: terminal/unavailable state исходной задачи, worktree status, branch,
+uncommitted diff, commits/push и open PR. Restricted profile,
+`waitingOnApproval` и platform prompt не являются разрешением создать дубль.
+Если существует branch/diff/commit/push/PR либо исходный executor можно resume
+в qualified lane, продолжается тот же visible executor или фиксируется exact
+blocker.
 
 Новый executor допустим только когда исходный доказанно terminal/unrecoverable
 и незавершённого implementation state нет. Для этого должны быть явно доказаны
 clean untouched worktree, no branch, no commit, no push и no PR. Куратор не
 выполняет automatic reset/clean/delete чужого state и не запускает takeover,
 параллельного исполнителя или новый monitoring contour.
+
+Куратор не использует collaboration `spawn_agent`/subagent для delegation,
+анализа, implementation, review, monitoring, recovery, takeover или
+executor-роли. Fork, nested curator, hidden agent, monitor/reporter/reviewer
+subagent и implementation внутри discussion-task не заменяют отдельную
+видимую user-owned executor task. Первый curator `spawn_agent` — dispatch
+defect: скрытый агент останавливается на safe point до дальнейших mutations,
+после чего guard выше сохраняет ровно одну visible task без потери или
+дублирования state. Acceptance требует zero curator `spawn_agent` calls,
+видимый executor task/thread ID и zero platform approval prompts.
 
 ## Выключенная legacy-оркестрация
 
@@ -199,15 +251,25 @@ dirty state.
 
 `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.`
 
+Curator dispatch prompt создаётся только для одной отдельной видимой user-owned
+Codex-задачи через supported task/thread creation surface; он фиксирует thread
+ID, linked title/pin и destination repo/worktree/host. Куратор не использует
+collaboration `spawn_agent`/subagent, fork, nested curator или hidden
+monitor/reviewer/recovery agent как замену executor.
+
 Каждый новый repo-backed executor prompt до обязательной финальной
-terminal-handoff фразы явно требует: немедленный
-`EXECUTOR_AUTONOMY_PREFLIGHT` и task-local `autonomy_ready`; front-loaded
-approval/permission requests; direct strict human-only callback по описанному
-выше контракту; безопасную остановку без симуляции approval; запрет считать
-`waitingOnApproval` разрешением на duplicate executor; bounded read-only
-duplicate guard после wake signal. `autonomy_ready` не превращается в обычный
-callback, heartbeat или периодический monitor. Обязательная terminal-handoff
-фраза остаётся последней директивой prompt.
+terminal-handoff фразы явно требует: немедленный non-mutating
+`CAPABILITY_ROUTING_CANARY`; routing record и
+`platform_approval_count=0`; продолжение этой же visible task только после
+`CANARY_QUALIFIED`; `EXECUTOR_AUTONOMY_PREFLIGHT` и task-local
+`autonomy_ready`; direct routing-defect либо strict human-only callback по
+описанному выше контракту; safe stop без request/forward command approval;
+запрет считать restricted profile или `waitingOnApproval` разрешением на
+duplicate executor; bounded read-only duplicate guard после wake signal.
+Если task-create не pin/report-ит profile, prompt capability-only до результата
+canary. `autonomy_ready` не превращается в обычный callback, heartbeat или
+периодический monitor. Обязательная terminal-handoff фраза остаётся последней
+директивой prompt.
 
 Если нужны production evidence/data, используй canonical server-side path:
 сначала определи current target/runtime и конкретный source по code/docs, затем
@@ -254,18 +316,20 @@ dependency-free ZIP/XML `OOXML`; новые зависимости из сети
 
 ## Unattended execution boundary
 
-Широкое предварительное разрешение пользователя позволяет последовательно
-запускать заранее согласованные ordinary repo/live stages и устранять
-non-material технические blockers внутри scope. Оно не заменяет exact
-production-mutation gate, credentials/permission, login/2FA/captcha, approval
-при доказанном irreversible risk, security change, new external destination
-или material product/risk choice.
+Unattended выполнение начинается только в `CANARY_QUALIFIED` lane с полным
+capability match и `platform_approval_count=0`. Широкое предварительное
+разрешение пользователя позволяет последовательно запускать заранее
+согласованные ordinary repo/live stages и устранять non-material технические
+blockers внутри scope, но не расширяет machine profile. Оно не заменяет exact
+production-mutation gate, credentials/login/2FA/captcha без разрешённого
+non-interactive path, owner decision при proven irreversible risk, security
+change, new external destination или material product/risk choice.
 
 Отсутствие владельца не разрешает обходить `baseline`, GitHub Release Train,
 exact-SHA deploy/verify или production-mutation evidence. Для новой unattended
-цепочки curator/executor заранее пытаются довести ближайшего исполнителя до
-`autonomy_ready`, но не создают зависимые implementation tasks параллельно
-только ради предварительного permission prompt.
+цепочки куратор создаёт одну visible executor task, а она проходит routing
+canary и `autonomy_ready`; restricted task не начинает implementation, не
+просит platform approval и не порождает параллельные/вложенные executors.
 
 ## Phase-local production safety
 
@@ -319,6 +383,8 @@ backup, restore, writer/timer, exact-SHA и non-target contracts из
 - findings исправлены, checks и semantic review повторены;
 - authoritative docs синхронизированы;
 - нет secrets, production data, generated dumps и unrelated edits;
+- visible executor task/thread ID зафиксирован, curator `spawn_agent` calls=0
+  и platform approval prompts=0;
 - PR open, non-draft, same-repository, направлен в `main`, current exact head
   имеет successful `baseline`, выставлены `task:standard` и одна `scope:*`.
 
@@ -341,12 +407,14 @@ semantic diff, checks/reviews, unresolved threads, docs и, если приме�
 canonical deploy/live/data evidence. Эта обязанность не поручает куратору
 повторный audit после handoff.
 
-Пользователь нужен только для strict human-only действия: `waitingOnApproval`,
-отсутствующий credential/permission/approval, interactive login/2FA/captcha,
-доказанный необратимый data risk, security change, новая внешняя data
-destination, material scope/risk change или platform hard stop. До terminal
-handoff такой gate сообщает direct pre-terminal callback, а не только скрытый
-executor UI flag.
+Пользователь нужен только для strict human-only действия: owner business/risk
+decision, exact production-mutation gate, credential/login/2FA/captcha без
+разрешённого non-interactive path, доказанный необратимый data risk, security
+change, новая внешняя data destination или material scope/risk change. До
+terminal handoff такой gate сообщает direct pre-terminal callback с одним
+минимальным owner action. `waitingOnApproval`, missing platform capability,
+permission prompt и platform hard stop являются routing/tooling defects, не
+Human Gates и не основаниями просить покомандное подтверждение.
 
 ## Итоговый ответ
 
