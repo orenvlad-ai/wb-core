@@ -98,6 +98,7 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
 - high-confidence campaign manifest ended/non-downloadable cards may avoid drawer opening when the visible timeline card matches manifest title+period, the manifest lifecycle is high-confidence `ended`, and manifest downloadability/materializability is high-confidence `not_available`; this is path control only, not metric/data truth;
 - high-confidence drawer-level `ended` + absent/disabled download campaigns may still avoid the deep workbook generate/download path after opening the card/drawer;
 - active/downloadable, future/pending archive-policy, missing/no manifest, low-confidence manifest match, unknown manifest status, UI-not-loaded, identity-mismatch and unclear download states retain conservative drawer/full-flow behavior;
+- drawer-open exceptions surface a truthful `blocked_before_card` partial result with `drawer_opened=false` and one canonical `drawer_open_duration_ms`; the error path must not fail while constructing diagnostics or mask the original collector blocker;
 - эти diagnostics не являются data truth, не меняют source fetch policy, acceptance/fallback semantics, temporal policy, retry behavior, Google Sheets/GAS archive boundary или browser/localStorage truth;
 - browser collector now emits aggregate preflight/deep-flow timing, but selector-level browser timings stay an explicit observability gap until a separate adapter refactor.
 

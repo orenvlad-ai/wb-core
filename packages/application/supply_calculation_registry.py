@@ -193,6 +193,9 @@ def _current_stock_evidence(stock_response: Any) -> dict[str, Any]:
         "snapshot_date": str(getattr(stock_response, "snapshot_date", "") or ""),
         "fetched_at": str(getattr(stock_response, "fetched_at", "") or ""),
         "pagination_complete": bool(getattr(stock_response, "pagination_complete", False)),
+        "warehouse_granularity_complete": bool(
+            getattr(stock_response, "warehouse_granularity_complete", True)
+        ),
         "raw_rows_digest": str(getattr(stock_response, "raw_rows_digest", "") or ""),
         "item_count": len(items),
         "items_fingerprint": canonical_fingerprint(items),

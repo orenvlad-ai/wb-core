@@ -65,6 +65,7 @@ class StocksSuccess:
     fetched_at: str = ""
     pagination_complete: bool = False
     raw_rows_digest: str = ""
+    warehouse_granularity_complete: bool = True
 
 
 @dataclass(frozen=True)

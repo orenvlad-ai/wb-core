@@ -1001,7 +1001,13 @@ class SheetVitrinaV1LivePlanBlock:
         self.spp_block = spp_block or SppBlock(HttpBackedSppSource())
         self.spp_proxy_block = spp_proxy_block or SppProxyBlock(HttpBackedPublicWbCardBuyerPriceSource())
         self.ads_bids_block = ads_bids_block or AdsBidsBlock(HttpBackedAdsBidsSource())
-        self.stocks_block = stocks_block or StocksBlock(HistoricalCsvBackedStocksSource())
+        self.stocks_block = stocks_block or StocksBlock(
+            HistoricalCsvBackedStocksSource(
+                warehouse_region_resolver=lambda _nm_ids: (
+                    _persisted_stocks_warehouse_region_map(runtime)
+                )
+            )
+        )
         self.onec_stocks_block = onec_stocks_block or OnecStocksBlock(
             HttpBackedOnecStocksSource(),
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
@@ -1705,7 +1711,15 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "ads_bids":
                     current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "stocks":
-                    current_lookups.stocks_lookup = _index_items_by_nm_id(payload)
+                    warehouse_granularity_complete = bool(
+                        getattr(payload, "warehouse_granularity_complete", True)
+                    )
+                    current_lookups.stocks_lookup = _stocks_vitrina_lookup(
+                        payload,
+                        warehouse_granularity_complete=(
+                            warehouse_granularity_complete
+                        ),
+                    )
                     stock_items = list(getattr(payload, "items", []) or [])
                     if all(hasattr(item, "stock_total") for item in stock_items):
                         projection = build_vitrina_incident_stock_projection(
@@ -1716,6 +1730,9 @@ class SheetVitrinaV1LivePlanBlock:
                             fetched_at=str(getattr(payload, "fetched_at", "") or ""),
                             pagination_complete=bool(getattr(payload, "pagination_complete", False)),
                             raw_rows_digest=str(getattr(payload, "raw_rows_digest", "") or ""),
+                            warehouse_granularity_complete=(
+                                warehouse_granularity_complete
+                            ),
                         )
                         current_lookups.incident_stocks_lookup = {
                             int(nm_id): dict(row)
@@ -3793,7 +3810,11 @@ def _lookup_attr(slot_lookups: SlotLookups, lookup_name: str, nm_id: int, attrib
     item = lookup.get(nm_id)
     if item is None:
         return None
-    value = getattr(item, attribute, None)
+    value = (
+        item.get(attribute)
+        if isinstance(item, Mapping)
+        else getattr(item, attribute, None)
+    )
     if value is None:
         return None
     return float(value) * scale
@@ -4792,6 +4813,89 @@ def _default_now_factory() -> datetime:
     if override:
         return business_datetime_for_override(override)
     return _utc_now()
+
+
+def _persisted_stocks_warehouse_region_map(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> dict[str, str]:
+    """Reuse only accepted concrete warehouse identities as metadata."""
+
+    mapping: dict[str, str] = {}
+    snapshot_dates = runtime.list_temporal_source_snapshot_dates(source_key="stocks")
+    for snapshot_date in reversed(snapshot_dates[-31:]):
+        payload, _captured_at = runtime.load_temporal_source_snapshot(
+            source_key="stocks",
+            snapshot_date=snapshot_date,
+        )
+        if str(getattr(payload, "kind", "") or "") != "success":
+            continue
+        for row in list(getattr(payload, "warehouse_rows", []) or []):
+            warehouse_name = str(
+                getattr(row, "warehouse_name", "") or ""
+            ).strip()
+            region_name = str(
+                getattr(row, "region_name", "") or ""
+            ).strip()
+            warehouse_id = getattr(row, "warehouse_id", None)
+            if (
+                not warehouse_name
+                or not region_name
+                or warehouse_name.casefold() in {"склад wb", "остальные"}
+                or region_name.casefold() == "склад wb"
+                or warehouse_id == 0
+            ):
+                continue
+            if warehouse_id is not None and (
+                not isinstance(warehouse_id, int)
+                or isinstance(warehouse_id, bool)
+                or warehouse_id <= 0
+            ):
+                continue
+            mapping.setdefault(warehouse_name, region_name)
+    return mapping
+
+
+def _stocks_vitrina_lookup(
+    payload: Any | None,
+    *,
+    warehouse_granularity_complete: bool,
+) -> dict[int, Any]:
+    lookup = _index_items_by_nm_id(payload)
+    if warehouse_granularity_complete:
+        return lookup
+    regional_fields = {
+        "stock_ru_central",
+        "stock_ru_northwest",
+        "stock_ru_volga",
+        "stock_ru_south_caucasus",
+        "stock_ru_ural",
+        "stock_ru_far_siberia",
+        "stock_ru_central_north",
+        "stock_ru_central_east",
+        "stock_ru_central_south",
+    }
+    safe_lookup: dict[int, Any] = {}
+    for nm_id, item in lookup.items():
+        if isinstance(item, Mapping):
+            row = dict(item)
+        elif hasattr(item, "__dict__"):
+            row = dict(vars(item))
+        else:
+            row = {
+                field_name: getattr(item, field_name, None)
+                for field_name in (
+                    "nm_id",
+                    "stock_total",
+                    "in_way_to_client",
+                    "in_way_from_client",
+                    "wb_contour_total",
+                    *sorted(regional_fields),
+                )
+            }
+        for field_name in regional_fields:
+            row[field_name] = None
+        safe_lookup[int(nm_id)] = row
+    return safe_lookup
 
 
 def _resolve_as_of_date(value: str | None, *, now: datetime | None = None) -> str:

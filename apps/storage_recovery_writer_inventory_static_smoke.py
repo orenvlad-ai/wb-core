@@ -182,6 +182,15 @@ WRITERS = [
         "lifecycle": "private evidence retained through reconciliation",
     },
     {
+        "owner": "sheet_vitrina_exact_date_recovery",
+        "source": "apps/sheet_vitrina_v1_temporal_closure_retry_live.py",
+        "cadence": "human_gated_one_shot",
+        "artifact": "coherent pre-mutation SQLite copy",
+        "full_monolith": True,
+        "guard": "query-only manifest + exact deployed SHA + immutable human gate; no explicit-date schedule",
+        "lifecycle": "private evidence retained through reconciliation or reviewed restore",
+    },
+    {
         "owner": "promo_metric_eligibility_recompute",
         "source": "apps/promo_metric_eligibility_recompute.py",
         "cadence": "human_gated_one_shot",

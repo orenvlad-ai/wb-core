@@ -649,7 +649,10 @@ class SkuManagementBlock:
             excluded_warehouse_ids=(),
             snapshot_date=str(getattr(stock_result, "snapshot_date", "") or snapshot_date),
             fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
-            pagination_complete=bool(getattr(stock_result, "pagination_complete", False)),
+            pagination_complete=bool(
+                getattr(stock_result, "pagination_complete", False)
+                and getattr(stock_result, "warehouse_granularity_complete", True)
+            ),
             raw_rows_digest=str(getattr(stock_result, "raw_rows_digest", "") or ""),
             require_complete=True,
         )
@@ -1998,6 +2001,12 @@ class SkuManagementBlock:
                 ).result
                 if getattr(stock_result, "kind", "") != "success":
                     raise ValueError("official WB stock snapshot is incomplete")
+                if not bool(
+                    getattr(stock_result, "warehouse_granularity_complete", True)
+                ):
+                    raise ValueError(
+                        "official WB stock snapshot contains only aggregate warehouse evidence"
+                    )
                 exclusion = build_incident_stock_projection(
                     self.runtime,
                     items=list(getattr(stock_result, "items", []) or []),
@@ -2010,6 +2019,11 @@ class SkuManagementBlock:
                     fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
                     pagination_complete=bool(
                         getattr(stock_result, "pagination_complete", False)
+                        and getattr(
+                            stock_result,
+                            "warehouse_granularity_complete",
+                            True,
+                        )
                     ),
                     raw_rows_digest=str(
                         getattr(stock_result, "raw_rows_digest", "") or ""

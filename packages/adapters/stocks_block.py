@@ -22,6 +22,8 @@ from packages.contracts.stocks_block import StocksRequest
 
 
 WB_OTHER_WAREHOUSE_NAME = "остальные"
+WB_AGGREGATE_WAREHOUSE_ID = -999999
+WB_AGGREGATE_WAREHOUSE_NAME = "склад wb"
 
 
 class StocksSource(Protocol):
@@ -193,6 +195,15 @@ class HttpBackedStocksSource:
         )
         mapping: dict[str, str] = {}
         for item in items:
+            warehouse_id = item.get("warehouseId")
+            if (
+                not isinstance(warehouse_id, int)
+                or isinstance(warehouse_id, bool)
+                or warehouse_id <= 0
+            ):
+                # Historical metadata fallback may reuse only concrete warehouse
+                # identities. Service/aggregate buckets never prove a region.
+                continue
             warehouse_name = str(item.get("warehouseName") or "").strip()
             region_name = str(item.get("regionName") or "").strip()
             if not warehouse_name or not region_name:
@@ -209,17 +220,24 @@ class HttpBackedStocksSource:
         requested_nm_ids: list[int],
         timeout_seconds: float,
     ) -> Mapping[str, Any]:
-        items, pagination = self._fetch_current_inventory_capture(
+        raw_items, pagination = self._fetch_current_inventory_capture(
             base_url=base_url,
             token=token,
             requested_nm_ids=requested_nm_ids,
             timeout_seconds=timeout_seconds,
         )
+        normalized_items = [
+            self._canonicalize_official_item(item)
+            for item in raw_items
+        ]
+        aggregate_sentinel_row_count = sum(
+            1 for item in raw_items if _is_exact_wb_aggregate_sentinel(item)
+        )
         snapshot_dt = self._now_factory().astimezone(timezone.utc).replace(microsecond=0)
         snapshot_date = business_date_iso(snapshot_dt)
         snapshot_ts = snapshot_dt.strftime("%Y-%m-%d %H:%M:%S")
         rows = self._parse_items_to_rows(
-            items=items,
+            items=normalized_items,
             snapshot_date=snapshot_date,
             snapshot_ts=snapshot_ts,
             requested_nm_ids=set(requested_nm_ids),
@@ -229,7 +247,10 @@ class HttpBackedStocksSource:
             "requested_nm_ids": requested_nm_ids,
             "data": {
                 "rows": rows,
-                "raw_rows": items,
+                # Source evidence remains byte-semantic WB truth. Canonicalized
+                # service rows live only in data.rows and the explicit
+                # normalization envelope below.
+                "raw_rows": raw_items,
                 "requested_snapshot_date": requested_snapshot_date,
                 "fetched_at": snapshot_dt.isoformat().replace("+00:00", "Z"),
                 "pagination_complete": True,
@@ -238,12 +259,12 @@ class HttpBackedStocksSource:
                 "page_offsets": pagination["page_offsets"],
                 "batch_count": pagination["batch_count"],
                 "batch_requested_nm_ids": pagination["batch_requested_nm_ids"],
-                "raw_row_count": len(items),
+                "raw_row_count": len(raw_items),
                 "raw_rows_digest": "sha256:"
                 + hashlib.sha256(
                     json.dumps(
                         sorted(
-                            items,
+                            raw_items,
                             key=lambda item: json.dumps(
                                 item,
                                 ensure_ascii=False,
@@ -256,6 +277,25 @@ class HttpBackedStocksSource:
                         separators=(",", ":"),
                     ).encode("utf-8")
                 ).hexdigest(),
+                "warehouse_granularity_complete": aggregate_sentinel_row_count == 0,
+                "normalization": {
+                    "contract_name": "wb_stocks_source_normalization",
+                    "contract_version": 1,
+                    "aggregate_sentinel_row_count": aggregate_sentinel_row_count,
+                    "aggregate_sentinel_normalized_to_service_bucket": (
+                        aggregate_sentinel_row_count > 0
+                    ),
+                    "normalized_row_count": len(normalized_items),
+                    "normalized_rows_digest": "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            rows,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                },
             },
         }
 
@@ -362,6 +402,25 @@ class HttpBackedStocksSource:
         return items, {"page_count": len(page_offsets), "page_offsets": page_offsets}
 
     @staticmethod
+    def _canonicalize_official_item(item: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Normalize only WB's exact aggregate sentinel for calculations."""
+
+        if not _is_exact_wb_aggregate_sentinel(item):
+            return item
+        warehouse_name = str(item.get("warehouseName") or "").strip()
+        region_name = str(item.get("regionName") or "").strip()
+        return {
+            **dict(item),
+            "warehouseId": 0,
+            "warehouseName": "Остальные",
+            "regionName": region_name,
+            "sourceWarehouseId": WB_AGGREGATE_WAREHOUSE_ID,
+            "sourceWarehouseName": warehouse_name,
+            "sourceRegionName": region_name,
+            "normalizationReason": "exact_wb_aggregate_sentinel",
+        }
+
+    @staticmethod
     def _validate_official_item(
         item: Mapping[str, Any],
         *,
@@ -385,7 +444,12 @@ class HttpBackedStocksSource:
             and warehouse_name.casefold() == WB_OTHER_WAREHOUSE_NAME
             and bool(region_name)
         )
-        if not warehouse_id_is_integer or warehouse_id < 0 or (warehouse_id == 0 and not is_other_bucket):
+        is_aggregate_sentinel = _is_exact_wb_aggregate_sentinel(item)
+        if (
+            not warehouse_id_is_integer
+            or (warehouse_id < 0 and not is_aggregate_sentinel)
+            or (warehouse_id == 0 and not is_other_bucket)
+        ):
             row_digest = hashlib.sha256(
                 json.dumps(
                     item,
@@ -432,7 +496,7 @@ class HttpBackedStocksSource:
                 raise RuntimeError(
                     f"official stocks request returned invalid {field} for nmId {nm_id}"
                 )
-        if is_other_bucket:
+        if is_other_bucket or is_aggregate_sentinel:
             return nm_id, chrt_id, warehouse_id, warehouse_name.casefold(), region_name.casefold()
         return nm_id, chrt_id, warehouse_id, "", ""
 
@@ -543,6 +607,22 @@ class HttpBackedStocksSource:
                     "stockCount": float(quantity),
                     "inWayToClient": float(in_way_to_client),
                     "inWayFromClient": float(in_way_from_client),
+                    **(
+                        {
+                            "sourceWarehouseId": item.get("sourceWarehouseId"),
+                            "sourceWarehouseName": str(
+                                item.get("sourceWarehouseName") or ""
+                            ),
+                            "sourceRegionName": str(
+                                item.get("sourceRegionName") or ""
+                            ),
+                            "normalizationReason": str(
+                                item.get("normalizationReason") or ""
+                            ),
+                        }
+                        if item.get("normalizationReason")
+                        else {}
+                    ),
                 }
             )
         return rows
@@ -738,9 +818,22 @@ class HistoricalCsvBackedStocksSource:
         )
 
     def _resolve_warehouse_region_map(self, requested_nm_ids: list[int]) -> Mapping[str, str]:
-        if self._warehouse_region_resolver is not None:
-            return dict(self._warehouse_region_resolver(requested_nm_ids))
-        return self._current_inventory_source.fetch_warehouse_region_map(requested_nm_ids)
+        persisted = (
+            dict(self._warehouse_region_resolver(requested_nm_ids))
+            if self._warehouse_region_resolver is not None
+            else {}
+        )
+        try:
+            current = dict(
+                self._current_inventory_source.fetch_warehouse_region_map(
+                    requested_nm_ids
+                )
+            )
+        except Exception:
+            if persisted:
+                return persisted
+            raise
+        return {**persisted, **current}
 
     def _fetch_window_batch(
         self,
@@ -802,6 +895,14 @@ class HistoricalCsvBackedStocksSource:
             snapshot_date: 0
             for snapshot_date in requested_dates
         }
+        aggregate_warehouse_names_by_date: dict[str, set[str]] = {
+            snapshot_date: set()
+            for snapshot_date in requested_dates
+        }
+        concrete_warehouse_names_by_date: dict[str, set[str]] = {
+            snapshot_date: set()
+            for snapshot_date in requested_dates
+        }
         unique_nm_ids: set[int] = set()
         for csv_row in csv_rows:
             nm_id = _parse_csv_nm_id(csv_row.get("NmID"))
@@ -809,12 +910,23 @@ class HistoricalCsvBackedStocksSource:
                 continue
             unique_nm_ids.add(nm_id)
             office_name = str(csv_row.get("OfficeName") or "").strip()
-            region_name = str(warehouse_region_map.get(office_name) or office_name)
+            is_aggregate_office = (
+                office_name.casefold() == WB_AGGREGATE_WAREHOUSE_NAME
+            )
+            region_name = (
+                office_name
+                if is_aggregate_office
+                else str(warehouse_region_map.get(office_name) or office_name)
+            )
             for header, raw_value in csv_row.items():
                 snapshot_date = _parse_csv_snapshot_date(header)
                 if snapshot_date is None or snapshot_date not in requested_dates:
                     continue
                 stock_count = _parse_csv_quantity(raw_value)
+                if is_aggregate_office:
+                    aggregate_warehouse_names_by_date[snapshot_date].add(office_name)
+                elif office_name:
+                    concrete_warehouse_names_by_date[snapshot_date].add(office_name)
                 if abs(stock_count) > 0:
                     nonzero_rows_by_date[snapshot_date] += 1
                 rows_by_date[snapshot_date].append(
@@ -845,6 +957,23 @@ class HistoricalCsvBackedStocksSource:
                 "data": {
                     "rows": rows_by_date[snapshot_date],
                     "requested_snapshot_date": snapshot_date,
+                    "warehouse_granularity_complete": not bool(
+                        aggregate_warehouse_names_by_date[snapshot_date]
+                    ),
+                    "warehouse_granularity": {
+                        "contract_name": "historical_stocks_warehouse_granularity",
+                        "contract_version": 1,
+                        "aggregate_office_names": sorted(
+                            aggregate_warehouse_names_by_date[snapshot_date]
+                        ),
+                        "concrete_office_name_count": len(
+                            concrete_warehouse_names_by_date[snapshot_date]
+                        ),
+                        "mixed_aggregate_and_concrete": bool(
+                            aggregate_warehouse_names_by_date[snapshot_date]
+                            and concrete_warehouse_names_by_date[snapshot_date]
+                        ),
+                    },
                 },
             }
             for snapshot_date in sorted(requested_dates)
@@ -866,6 +995,22 @@ class HistoricalCsvBackedStocksSource:
 def _seller_cache_key(*, base_url: str, token: str) -> str:
     digest = hashlib.sha256(f"{base_url}|{token}".encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+def _is_exact_wb_aggregate_sentinel(item: Mapping[str, Any]) -> bool:
+    warehouse_id = item.get("warehouseId")
+    if (
+        not isinstance(warehouse_id, int)
+        or isinstance(warehouse_id, bool)
+        or warehouse_id != WB_AGGREGATE_WAREHOUSE_ID
+    ):
+        return False
+    warehouse_name = str(item.get("warehouseName") or "").strip().casefold()
+    region_name = str(item.get("regionName") or "").strip().casefold()
+    return (
+        warehouse_name == WB_AGGREGATE_WAREHOUSE_NAME
+        and region_name == WB_AGGREGATE_WAREHOUSE_NAME
+    )
 
 
 def _parse_positive_float(raw_value: Any) -> float:

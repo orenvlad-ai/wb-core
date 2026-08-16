@@ -121,6 +121,7 @@ related_runners:
   - "apps/wb_regional_demand_diagnostics.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
+  - "apps/sheet_vitrina_v1_temporal_recovery_guard_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
@@ -471,7 +472,7 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
   - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`
   - `prices_snapshot` и `ads_bids` остаются current-snapshot-only, но accepted snapshot предыдущего business day обязан truthfully materialize-иться в `yesterday_closed`, а later invalid/blank/zero attempt не может затереть ни accepted yesterday truth, ни already accepted same-day current truth;
-  - `stocks` больше не current-only: `yesterday_closed` и `today_current` читают authoritative exact-date historical payload/runtime cache.
+  - `stocks` больше не current-only source family: required `yesterday_closed` читает authoritative exact-date historical payload/runtime cache, а non-required `today_current` остаётся truthful `not_available`/blank.
 - Current-snapshot-only rollover contract is non-destructive:
   - day D valid snapshot is accepted only as current snapshot for D;
   - on D+1 the already accepted snapshot for D materializes into `yesterday_closed=D` via persisted accepted-current seam, without destructive historical refetch;
@@ -487,6 +488,8 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - surface-ить `stocks[today_current]` как truthful `not_available`/blank non-required slot instead of inventing same-day stocks;
   - сохранять exact-date success payload server-side в `temporal_source_snapshots[source_key=stocks]`;
   - использовать current `wb-warehouses` endpoint только как bounded metadata bridge `OfficeName -> regionName`, а не как active current stocks truth внутри витрины;
+  - metadata bridge сначала использует accepted persisted concrete warehouse mappings and may merge a fresh current mapping, but it must ignore service/aggregate identities. `OfficeName=Склад WB` never becomes a region through that fallback, including a mixed concrete + aggregate historical payload;
+  - preserve exact aggregate SKU/TOTAL `stock_total`, `inWayToClient` and `inWayFromClient`, while all unprovable `stock_ru_*` and incident regional actual/excluded/effective values remain explicit blanks. `warehouse_granularity_complete=false` survives temporal persistence and keeps strict Supply/SKU/warehouse action contours fail-closed;
   - не терять quantity вне configured district map молча: она остаётся внутри `stock_total` и surface-ится в `STATUS.stocks[yesterday_closed].note`;
   - later invalid attempt не может destructively очистить already accepted exact-date snapshot for the required closed slot.
 - Execution modes теперь разделены явно:
@@ -574,6 +577,7 @@ Saved metric-presentation state is compatible by intersection with the current s
   - live install path = `/etc/systemd/system/wb-core-sheet-vitrina-closure-retry.timer`
   - service runs repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`
   - actual retry cadence remains runtime-owned via `next_retry_at`; timer may poll more frequently without turning into a tight loop.
+  - timer-owned invocation without `--date` remains the ordinary automatic persisted-retry cycle. Any explicit `--date` is a separate production recovery boundary and is query-only by default; `--apply` additionally requires the fresh manifest fingerprint, exact deployed SHA, immutable human-gate reference/digest and a coherent integrity-checked SQLite backup. The manifest binds exact target/current scope digests and all non-target rows in temporal/ready tables; apply performs post-readback reconciliation, rejects stale plans and retains the backup for reviewed forward recovery or exact restore on failure. Blind repeat is forbidden.
 - Canonical hosted deploy runner `apps/registry_upload_http_entrypoint_hosted_runtime.py` now owns the bounded install path for these unit artifacts:
   - rsync current clean worktree to `/opt/wb-core-runtime/app`
   - install checked-in unit files into `/etc/systemd/system`
@@ -676,7 +680,7 @@ Bounded допущение:
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy`
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py loopback-probe`
   - `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py public-probe`
-- Этот runner применим и к current branch/PR without merge-before-verify, потому что деплоит current checked-out worktree, а не требует сначала merge в `main`.
+- Production deploy выполняет только GitHub Release Train после merge и exact-SHA gates; прямой checkout/deploy из незамёрженной branch запрещён. Перечисленные команды остаются canonical implementation seam внутри release path, а не разрешением на branch-side production deploy.
 - Promo current correctness checklist: additionally run `python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` after changes touching `promo_by_price`, promo archive/artifact validation, promo collector diagnostics/status handling, expected `ended_without_download` campaign handling, refresh orchestration, promo temporal acceptance/fallback, promo source-status reduction, or web-vitrina read/page-composition paths that can affect promo metric row visibility. If local CA verification blocks the public read, use `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1 python3 apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py` only as the accepted local diagnostic fallback; route timeout or bad payload remains a blocker.
 - This guard verifies public `status` / `web-vitrina` / `plan`, `promo_by_price[today_current]` diagnostics, coherent `requested_count / covered_count`, zero fatal/true artifact loss counters when exposed, diagnostic-only ended/no-download artifacts and non-blank current promo rows. It does not use `/load`, Google Sheets/GAS, Sheets or browser/localStorage truth.
 - Feedbacks MVP checklist: after changes touching the `Отзывы` tab, `GET /v1/sheet-vitrina-v1/feedbacks`, official feedbacks adapter/token path or unified-shell feedbacks date/filter/table UI, run `python3 apps/sheet_vitrina_v1_feedbacks_http_smoke.py` and `python3 apps/sheet_vitrina_v1_feedbacks_browser_smoke.py`. Live/public closure additionally verifies `/sheet-vitrina-v1/vitrina` and one bounded feedbacks GET against the hosted runtime; no `/load`, Google Sheets/GAS, Seller Portal bot or feedback persistence step is involved.
@@ -720,7 +724,9 @@ Bounded допущение:
 - `apps/sheet_vitrina_v1_data_vitrina_matrix_smoke.py`
 - `apps/web_source_temporal_adapter_smoke.py`
 - `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`
+- `apps/sheet_vitrina_v1_temporal_recovery_guard_smoke.py`
 - `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`
+- `apps/stocks_adapter_contract_smoke.py`
 - `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`
 
 # 6. Какой smoke подтверждён
@@ -728,11 +734,13 @@ Bounded допущение:
 - Подтверждён локальный end-to-end smoke через `apps/sheet_vitrina_v1_mvp_end_to_end_smoke.py`.
 - Подтверждён targeted business-time smoke через `apps/sheet_vitrina_v1_business_time_smoke.py`.
 - Подтверждён targeted runtime smoke через `apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py`.
+- Подтверждён aggregate stocks temporal/live-plan regression через `apps/stocks_adapter_contract_smoke.py`: 33 active SKU + TOTAL сохраняют exact aggregate stock, regional and incident values stay blanks.
 - Подтверждён split refresh/read smoke через `apps/sheet_vitrina_v1_refresh_read_split_smoke.py`.
 - Подтверждён operator async refresh/load smoke через `apps/sheet_vitrina_v1_operator_load_smoke.py`.
 - Подтверждён targeted current-day web-source sync smoke через `apps/sheet_vitrina_v1_web_source_current_sync_smoke.py`.
 - Подтверждён targeted closed-day source freshness smoke через `apps/web_source_current_sync_closed_day_freshness_smoke.py`.
 - Подтверждён targeted temporal closure retry smoke через `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`.
+- Подтверждён explicit-date query-only/fingerprint/gate/backup/readback contract через `apps/sheet_vitrina_v1_temporal_recovery_guard_smoke.py`.
 - Подтверждён targeted current-snapshot acceptance smoke через `apps/sheet_vitrina_v1_current_snapshot_acceptance_smoke.py`.
 - Подтверждён targeted auto scheduler/status smoke через `apps/sheet_vitrina_v1_auto_update_smoke.py`.
 - Подтверждён integration smoke для retry/acceptance cycle через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.

@@ -249,6 +249,13 @@ class WbRegionalSupplyBlock:
                 "authoritative district stock coverage incomplete for requested nmIds at report_date "
                 f"{report_date}: " + ", ".join(str(item) for item in missing)
             )
+        if not bool(
+            getattr(stock_response, "warehouse_granularity_complete", True)
+        ):
+            raise ValueError(
+                "authoritative district stock allocation is unavailable: "
+                "WB returned only an aggregate warehouse bucket"
+            )
         stock_items = {int(item.nm_id): item for item in getattr(stock_response, "items", [])}
         stock_planning_reconciliation = dict(
             getattr(stock_response, "planning_reconciliation", {}) or {}
@@ -262,7 +269,10 @@ class WbRegionalSupplyBlock:
                 getattr(stock_response, "snapshot_date", "") or report_date
             ),
             fetched_at=str(getattr(stock_response, "fetched_at", "") or ""),
-            pagination_complete=bool(getattr(stock_response, "pagination_complete", False)),
+            pagination_complete=bool(
+                getattr(stock_response, "pagination_complete", False)
+                and getattr(stock_response, "warehouse_granularity_complete", True)
+            ),
             raw_rows_digest=str(getattr(stock_response, "raw_rows_digest", "") or ""),
         )
         if set(stock_items) != set(nm_ids):

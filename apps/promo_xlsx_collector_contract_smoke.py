@@ -284,6 +284,29 @@ def main() -> None:
     if unknown_promo.drawer_opened is not True:
         raise AssertionError(f"unknown timeline fallback must record drawer_opened=true, got {unknown_promo}")
 
+    drawer_failure_result = PromoXlsxCollectorBlock(_DrawerOpenFailureDriver()).execute(
+        PromoXlsxCollectorRequest(
+            output_root="/tmp/wb-core-promo-drawer-open-failure-smoke",
+            storage_state_path="/tmp/unused-storage-state.json",
+            hydration_attempt_budget=1,
+        )
+    )
+    if drawer_failure_result.status != "partial":
+        raise AssertionError(
+            "drawer-open failure must produce a partial summary, "
+            f"got {drawer_failure_result.status}"
+        )
+    drawer_failure_promo = drawer_failure_result.promos[0]
+    if drawer_failure_promo.status != "blocked_before_card":
+        raise AssertionError(
+            f"drawer-open failure status was lost: {drawer_failure_promo}"
+        )
+    if drawer_failure_promo.drawer_opened is not False:
+        raise AssertionError(
+            "drawer-open failure must record drawer_opened=false: "
+            f"{drawer_failure_promo}"
+        )
+
     manifest_result = PromoXlsxCollectorBlock(_ManifestEndedNoDrawerDriver()).execute(
         PromoXlsxCollectorRequest(
             output_root="/tmp/wb-core-promo-manifest-ended-no-drawer-smoke",
@@ -316,6 +339,7 @@ def main() -> None:
     print("manifest_parser: ok")
     print("ended_no_download_preflight: ok")
     print("timeline_unknown_full_flow: ok")
+    print("drawer_open_failure_surface: ok")
     print("manifest_ended_no_drawer: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
@@ -432,6 +456,11 @@ class _TimelineUnknownDrawerDriver(_EndedNoDownloadDriver):
             visible_tabs=["Доступные"],
             screenshot="/tmp/ended-fixture.png",
         )
+
+
+class _DrawerOpenFailureDriver(_TimelineUnknownDrawerDriver):
+    def open_timeline_candidate(self, candidate):
+        raise TimeoutError("synthetic drawer open timeout")
 
 
 class _ManifestEndedNoDrawerDriver(_EndedNoDownloadDriver):

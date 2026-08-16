@@ -11,6 +11,7 @@ source_basis:
   - "artifacts/stocks_block/evidence/initial__stocks__evidence.md"
   - "apps/stocks_block_smoke.py"
   - "apps/stocks_block_http_smoke.py"
+  - "apps/stocks_adapter_contract_smoke.py"
 related_modules:
   - "packages/contracts/stocks_block.py"
   - "packages/adapters/stocks_block.py"
@@ -29,6 +30,7 @@ related_runners:
   - "apps/stocks_block_region_mapping_smoke.py"
   - "apps/stocks_block_batching_smoke.py"
   - "apps/stocks_block_http_smoke.py"
+  - "apps/stocks_adapter_contract_smoke.py"
   - "apps/stocks_historical_csv_smoke.py"
   - "apps/sheet_vitrina_v1_stocks_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_stocks_historical_backfill.py"
@@ -41,7 +43,7 @@ related_docs:
   - "migration/44_stocks_block_legacy_sample_source.md"
   - "artifacts/stocks_block/evidence/initial__stocks__evidence.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под общий Seller Analytics CSV transport: stocks сохраняет `STOCK_HISTORY_DAILY_CSV` exact-date closed-day semantics, а create/list/download/ZIP/CSV/429 contract переиспользуется с historical funnel `DETAIL_HISTORY_REPORT` без изменения stocks payload."
+update_note: "Общий Seller Analytics CSV transport сохраняет `STOCK_HISTORY_DAILY_CSV` exact-date closed-day semantics. Exact typed aggregate sentinel WB не переписывает raw evidence/digest: exact SKU/TOTAL сохраняются, а недоказанные warehouse/region и incident значения остаются blanks."
 ---
 
 # 1. Идентификатор и статус
@@ -81,6 +83,8 @@ update_note: "Обновлён под общий Seller Analytics CSV transport:
   - publish guard не допускает success при неполном coverage requested `nmId`;
   - current `wb-warehouses` adapter по-прежнему уважает `X-Ratelimit-Retry` / `X-Ratelimit-Reset`, использует per-seller limiter и после bounded retry budget не превращается в fake-success внутри source.
   - production evidence фиксирует специальный official bucket `warehouseId=0`, `warehouseName=Остальные`: он может нести `inWayToClient`/`inWayFromClient` при нулевом physical quantity и потому сохраняется в WB contour/raw audit; для дедупликации его identity включает warehouse name + region. Любой другой zero/negative/invalid `warehouseId` остаётся fail-closed, а bounded error evidence фиксирует только allowlisted context и digest строки.
+  - official current response additionally accepts only the exact typed WB aggregate sentinel `warehouseId=-999999`, `warehouseName=Склад WB`, `regionName=Склад WB`. The original source rows and their digest remain unchanged evidence; a separate normalization envelope maps the sentinel to the service bucket only for SKU-total calculation and marks `warehouse_granularity_complete=false`. Float, bool, string, partial-name and every other negative-ID variant remain invalid.
+  - historical `OfficeName=Склад WB` has the same aggregate-only meaning. A date containing that row is incomplete even when concrete offices are mixed into the same CSV; the aggregate quantity remains in exact SKU/TOTAL `stock_total` and is never allocated through a persisted `OfficeName -> regionName` fallback. Regional stock and incident actual/excluded/effective cells stay explicit blanks, not zeros.
 
 # 3. Target contract и смысл результата
 
@@ -90,6 +94,7 @@ update_note: "Обновлён под общий Seller Analytics CSV transport:
   - `count`
   - `items[]` с `stock_total`, canonical regional `stock_*` and additive Central planning-zone stock fields
   - `warehouse_rows[]` with exact identity/classification evidence and `planning_reconciliation`
+  - `warehouse_granularity_complete`, which is false when the source proves only an aggregate WB bucket rather than warehouse-level allocation
   - `detail` для honest note по unmapped raw regions, если часть quantity не попала ни в один configured district bucket
 - Incomplete shape:
   - `kind = "incomplete"`
@@ -144,6 +149,7 @@ Policy revisions carry `active`, warehouse IDs and identities, reason, `effectiv
 - Alias normalization + unmapped-note semantics подтверждены через `apps/stocks_block_region_mapping_smoke.py`.
 - Batching + cache + `429` retry/exhaustion подтверждены через `apps/stocks_block_batching_smoke.py`.
 - Historical CSV create/poll/download/parse path подтверждён через `apps/stocks_historical_csv_smoke.py`.
+- Exact typed aggregate sentinel, raw-evidence digest, mixed historical granularity and 33-SKU/TOTAL temporal live-plan semantics подтверждены injected regression `apps/stocks_adapter_contract_smoke.py` без bind/listen.
 - Refresh/runtime path c historical runtime cache для `sheet_vitrina_v1` подтверждён через `apps/sheet_vitrina_v1_stocks_refresh_smoke.py`.
 - Authoritative server-side smoke подтверждён через `apps/stocks_block_http_smoke.py`.
 

@@ -313,7 +313,6 @@ class PromoXlsxCollectorBlock:
                 blocker=str(exc),
                 metadata=metadata,
                 timeline_shallow_duration_ms=timeline_shallow_duration_ms,
-                drawer_open_duration_ms=drawer_open_duration_ms,
                 **_timeline_outcome_fields(
                     candidate,
                     timeline_decision,
