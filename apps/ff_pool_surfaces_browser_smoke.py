@@ -105,7 +105,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime, clock: Clock) -> None:
                 "request_id": request_id,
                 "name": name,
                 "city": city,
-                "active": True,
+                "active": name != "Оренбург",
                 "display_timezone": "Asia/Yekaterinburg",
             },
             actor="browser-fixture",
@@ -119,10 +119,17 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     console_errors: list[str] = []
     server_errors: list[str] = []
     pool_http_errors: list[str] = []
+    facility_mutation_headers: list[dict[str, str]] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
     page.on("response", lambda response: server_errors.append(f"{response.status} {response.url}") if response.status >= 500 else None)
     page.on("response", lambda response: pool_http_errors.append(f"{response.status} {response.url}") if response.status >= 400 and "/facility-pools" in response.url else None)
+    page.on(
+        "request",
+        lambda request: facility_mutation_headers.append(request.all_headers())
+        if request.method == "POST" and "/facility-pools/facilities/" in request.url
+        else None,
+    )
     url = f"{base}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}?tab=warehouses&warehouse=ff"
     response = page.goto(url, wait_until="domcontentloaded")
     assert response is not None and response.status == 200
@@ -202,6 +209,14 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     assert "Адрес в MVP отсутствует" in settings_text
     assert page.locator("#warehousesGroupPanel img").count() == 0
     assert page.evaluate("window.__ffPoolXss") is None
+    orenburg = page.locator('[data-facility-id]', has_text="Оренбург")
+    assert orenburg.get_attribute("data-active") == "false"
+    orenburg.get_by_role("button", name="Активировать").click()
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-facility-id]')).some((node) => node.textContent.includes('Оренбург') && node.dataset.active === 'true')"
+    )
+    assert facility_mutation_headers
+    assert facility_mutation_headers[-1].get("x-wb-ff-pool-csrf") == "1"
     assert page.locator("#warehousesGroupPanel").evaluate("node => node.scrollWidth <= node.clientWidth + 1")
     page.screenshot(path=str(screenshot_path.with_name(screenshot_path.stem + "-settings" + screenshot_path.suffix)), full_page=False)
     assert not page_errors, page_errors
