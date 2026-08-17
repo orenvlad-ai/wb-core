@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import subprocess
 import sys
@@ -37,6 +38,9 @@ from apps.github_release_train_spec import (
     CLASSIFICATION_BLOCKER_MARKER,
     COMPLETION_PROOF_MARKER,
     DEPLOY_PROOF_MARKER,
+    DCP_RELEASE_HANDOFF_PROOF_MARKER,
+    DCP_RELEASE_HANDOFF_VERSION,
+    DCP_RELEASE_READMISSION_PROOF_MARKER,
     DONE_LABEL,
     FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
     FINANCE_DEPLOY_LEASE_RECOVERY_PROOF_MARKER,
@@ -79,6 +83,11 @@ LIVE_RUNTIME_LABEL = "scope:live-runtime"
 PRODUCTION_MUTATION_LABEL = "scope:production-mutation"
 
 CANONICAL_GITHUB_REPOSITORY = "orenvlad-ai/wb-core"
+
+# Repository compatibility marker consumed by the installed DCP target.
+# wb-core.dcp-release-handoff/v1
+if DCP_RELEASE_HANDOFF_VERSION != "wb-core.dcp-release-handoff/v1":
+    raise RuntimeError("DCP Release Train handoff version drifted")
 
 STANDARD_TASK_LABEL = "task:standard"
 LOOP_TASK_LABEL = "task:loop"
@@ -152,6 +161,9 @@ TERMINAL_CHECK_FAILURES = {
     "startup_failure",
     "timed_out",
 }
+DCP_RELEASE_BRANCH = re.compile(r"^ao/wb-core-([1-9][0-9]*)/root$")
+DCP_RELEASE_ACTOR = "orenvlad-ai"
+DCP_HEAD_TIMELINE_EVENTS = frozenset({"committed", "head_ref_force_pushed"})
 
 
 def ensure_ca_bundle() -> None:
@@ -197,6 +209,15 @@ class ReleaseReadmissionRequired(ReleaseTrainError):
         self.passport_digest = passport_digest
 
 
+class DCPReleaseReadmissionRequired(ReleaseTrainError):
+    """A DCP-admitted head lost eligibility and must return to DCP."""
+
+    def __init__(self, *, head_sha: str, reason: str) -> None:
+        super().__init__("DCP exact-head release admission must be renewed")
+        self.head_sha = head_sha
+        self.reason = reason
+
+
 class GitHubApiError(ReleaseTrainError):
     def __init__(self, status: int, message: str, payload: Any = None) -> None:
         super().__init__(f"GitHub API {status}: {message}")
@@ -210,6 +231,8 @@ class ReleaseApi(Protocol):
     def list_issues_by_label(self, label: str, *, state: str) -> list[dict[str, Any]]: ...
 
     def list_issue_events(self, number: int) -> list[dict[str, Any]]: ...
+
+    def list_timeline_items(self, number: int) -> list[dict[str, Any]]: ...
 
     def list_comments(self, number: int) -> list[dict[str, Any]]: ...
 
@@ -234,6 +257,8 @@ class ReleaseApi(Protocol):
     def add_comment(self, number: int, body: str) -> None: ...
 
     def update_comment(self, comment_id: int, body: str) -> None: ...
+
+    def update_pull_body(self, number: int, body: str) -> None: ...
 
     def delete_comment(self, comment_id: int) -> None: ...
 
@@ -414,6 +439,20 @@ class GitHubApi:
                 break
         return items
 
+    def list_timeline_items(self, number: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            query = urllib_parse.urlencode({"per_page": 100, "page": page})
+            payload, _ = self._request(
+                "GET",
+                self._repo_path(f"issues/{number}/timeline?{query}"),
+            )
+            batch = list(payload or [])
+            items.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < 100:
+                break
+        return items
+
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for page in range(1, 11):
@@ -461,14 +500,27 @@ class GitHubApi:
         )
 
     def list_check_runs(self, sha: str) -> list[dict[str, Any]]:
-        query = urllib_parse.urlencode({"per_page": 100, "filter": "latest"})
-        payload, _ = self._request(
-            "GET",
-            self._repo_path(f"commits/{urllib_parse.quote(sha, safe='')}/check-runs?{query}"),
-        )
-        if not isinstance(payload, dict):
-            return []
-        return [item for item in payload.get("check_runs") or [] if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        encoded_sha = urllib_parse.quote(sha, safe="")
+        for page in range(1, 11):
+            query = urllib_parse.urlencode(
+                {"per_page": 100, "page": page, "filter": "all"}
+            )
+            payload, _ = self._request(
+                "GET",
+                self._repo_path(f"commits/{encoded_sha}/check-runs?{query}"),
+            )
+            if not isinstance(payload, dict):
+                return []
+            batch = [
+                item
+                for item in payload.get("check_runs") or []
+                if isinstance(item, dict)
+            ]
+            items.extend(batch)
+            if len(batch) < 100:
+                break
+        return items
 
     def merge_pull(self, number: int, expected_head_sha: str) -> dict[str, Any]:
         payload, _ = self._request(
@@ -506,6 +558,13 @@ class GitHubApi:
             "PATCH",
             self._repo_path(f"issues/comments/{comment_id}"),
             {"body": body.strip()},
+        )
+
+    def update_pull_body(self, number: int, body: str) -> None:
+        self._request(
+            "PATCH",
+            self._repo_path(f"pulls/{number}"),
+            {"body": body},
         )
 
     def delete_comment(self, comment_id: int) -> None:
@@ -2237,6 +2296,432 @@ def _has_successful_check(
         and str(item.get("conclusion") or "") == "success"
         for item in api.list_check_runs(head_sha)
     )
+
+
+def _dcp_handoff_session(pull: Mapping[str, Any]) -> int | None:
+    """Return the exact DCP native-session number or reject a lookalike branch."""
+
+    head = pull.get("head") or {}
+    head_ref = str(head.get("ref") or "")
+    if not head_ref.startswith("ao/wb-core-"):
+        return None
+    match = DCP_RELEASE_BRANCH.fullmatch(head_ref)
+    head_repo = str(((head.get("repo") or {}).get("full_name")) or "")
+    base_ref = str((pull.get("base") or {}).get("ref") or "")
+    author = pull.get("user") or {}
+    author_login = str(author.get("login") or "") if isinstance(author, Mapping) else ""
+    if (
+        match is None
+        or head_repo != CANONICAL_GITHUB_REPOSITORY
+        or base_ref != "main"
+        or author_login != DCP_RELEASE_ACTOR
+    ):
+        raise ReleaseBlocked(
+            "DCP-like branch has malformed repository, base, author or native-session identity"
+        )
+    return int(match.group(1))
+
+
+def _dcp_check_timestamp(check: Mapping[str, Any], field: str) -> float:
+    timestamp = _github_timestamp(check.get("completed_at"))
+    if timestamp is None:
+        raise ReleaseBlocked(f"DCP handoff {field} check has no exact completion timestamp")
+    return timestamp
+
+
+def _dcp_ready_event_timestamp(event: Mapping[str, Any]) -> float:
+    timestamp = _github_timestamp(event.get("created_at"))
+    if timestamp is None:
+        raise ReleaseBlocked("DCP handoff release:ready event has no exact timestamp")
+    return timestamp
+
+
+def _dcp_event_actor(event: Mapping[str, Any]) -> str:
+    actor = event.get("actor") or {}
+    return str(actor.get("login") or "") if isinstance(actor, Mapping) else ""
+
+
+def _dcp_ready_event(api: ReleaseApi, pull: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the one active DCP-owned release:ready label event."""
+
+    number = int(pull.get("number") or 0)
+    labels = label_names(pull)
+    if number <= 0 or READY_LABEL not in labels or RUNNING_LABEL in labels:
+        raise ReleaseBlocked("DCP handoff requires exactly the active release:ready phase")
+    active: list[dict[str, Any]] = []
+    for event in api.list_issue_events(number):
+        label = event.get("label") or {}
+        if not isinstance(label, Mapping) or str(label.get("name") or "") != READY_LABEL:
+            continue
+        kind = str(event.get("event") or "")
+        if kind == "unlabeled":
+            active.clear()
+        elif kind == "labeled":
+            active.append(dict(event))
+    if len(active) != 1:
+        raise ReleaseBlocked(
+            "DCP handoff requires one unambiguous active release:ready label event"
+        )
+    event = active[0]
+    event_id = int(event.get("id") or 0)
+    if event_id <= 0 or _dcp_event_actor(event) != DCP_RELEASE_ACTOR:
+        raise ReleaseBlocked("DCP handoff release:ready event has the wrong immutable actor identity")
+    _dcp_ready_event_timestamp(event)
+    return event
+
+
+def _dcp_timeline_event_index(
+    api: ReleaseApi,
+    number: int,
+    ready_event_id: int,
+) -> tuple[list[dict[str, Any]], int]:
+    timeline = api.list_timeline_items(number)
+    matches = [
+        index
+        for index, item in enumerate(timeline)
+        if int(item.get("id") or 0) == ready_event_id
+        and str(item.get("event") or "") == "labeled"
+        and isinstance(item.get("label"), Mapping)
+        and str((item.get("label") or {}).get("name") or "") == READY_LABEL
+    ]
+    if len(matches) != 1:
+        raise ReleaseBlocked("DCP handoff release:ready event is absent or ambiguous in PR timeline")
+    return timeline, matches[0]
+
+
+def _dcp_require_no_head_event_after_ready(
+    api: ReleaseApi,
+    number: int,
+    ready_event_id: int,
+) -> None:
+    timeline, ready_index = _dcp_timeline_event_index(api, number, ready_event_id)
+    if any(
+        str(item.get("event") or "") in DCP_HEAD_TIMELINE_EVENTS
+        for item in timeline[ready_index + 1 :]
+    ):
+        raise DCPReleaseReadmissionRequired(
+            head_sha=str((api.get_pull(number).get("head") or {}).get("sha") or "").lower(),
+            reason="head-drift-after-admission",
+        )
+
+
+def _dcp_admission_check(
+    api: ReleaseApi,
+    head_sha: str,
+    ready_event: Mapping[str, Any],
+) -> dict[str, Any]:
+    ready_at = _dcp_ready_event_timestamp(ready_event)
+    matches: list[dict[str, Any]] = []
+    for item in api.list_check_runs(head_sha):
+        if (
+            str(item.get("name") or "") != "baseline"
+            or str(item.get("status") or "") != "completed"
+            or str(item.get("conclusion") or "") != "success"
+        ):
+            continue
+        if _dcp_check_timestamp(item, "admission") <= ready_at:
+            matches.append(dict(item))
+    if not matches:
+        raise ReleaseBlocked(
+            "DCP handoff release:ready is not preceded by successful baseline on the exact head"
+        )
+    return max(matches, key=lambda item: int(item.get("id") or 0))
+
+
+def _dcp_compare_is_current(comparison: Mapping[str, Any]) -> bool:
+    behind = comparison.get("behind_by")
+    status = str(comparison.get("status") or "")
+    if isinstance(behind, bool) or not isinstance(behind, int):
+        raise ReleaseBlocked("DCP handoff compare result is malformed")
+    if behind > 0 or status in {"behind", "diverged"}:
+        return False
+    if behind != 0 or status not in {"ahead", "identical"}:
+        raise ReleaseBlocked("DCP handoff compare result is ambiguous")
+    return True
+
+
+def _dcp_revoke_release_eligibility(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    reason: str,
+) -> None:
+    number = int(pull.get("number") or 0)
+    head_sha = _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head")
+    labels = label_names(pull)
+    after = labels - STATE_LABELS - {NEEDS_RESUME_LABEL}
+    if after != labels:
+        api.set_labels(number, sorted(after))
+    proof = _proof_marker(
+        DCP_RELEASE_READMISSION_PROOF_MARKER,
+        base="main",
+        head=head_sha,
+        pr=number,
+        reason=reason,
+        version=DCP_RELEASE_HANDOFF_VERSION,
+    )
+    if not _has_comment_proof(
+        api,
+        number,
+        DCP_RELEASE_READMISSION_PROOF_MARKER,
+        base="main",
+        head=head_sha,
+        pr=number,
+        reason=reason,
+        version=DCP_RELEASE_HANDOFF_VERSION,
+    ):
+        api.add_comment(
+            number,
+            "Release Train removed DCP release eligibility without updating or merging "
+            f"the admitted head `{head_sha}`. A fresh exact-head baseline, DCP review and "
+            f"FIFO admission are required.\n\n{proof}",
+        )
+
+
+def _dcp_raise_readmission(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    reason: str,
+) -> None:
+    _dcp_revoke_release_eligibility(api, pull, reason=reason)
+    raise DCPReleaseReadmissionRequired(
+        head_sha=str((pull.get("head") or {}).get("sha") or "").lower(),
+        reason=reason,
+    )
+
+
+DCP_HANDOFF_PROOF_FIELDS = frozenset(
+    {
+        "admission_check",
+        "base",
+        "head",
+        "head_ref",
+        "pr",
+        "ready_event",
+        "release_check",
+        "repo",
+        "session",
+        "version",
+    }
+)
+
+
+def _dcp_handoff_proof_body(values: Mapping[str, object]) -> str:
+    return (
+        "Release Train accepted the DCP exact-head handoff without synchronizing "
+        "or replacing the admitted branch.\n\n"
+        + _proof_marker(DCP_RELEASE_HANDOFF_PROOF_MARKER, **dict(values))
+    )
+
+
+def _dcp_handoff_proof_records(
+    api: ReleaseApi,
+    number: int,
+) -> list[dict[str, Any]]:
+    prefix = f"<!-- {DCP_RELEASE_HANDOFF_PROOF_MARKER} "
+    records: list[dict[str, Any]] = []
+    for comment in api.list_comments(number):
+        body = str(comment.get("body") or "")
+        if DCP_RELEASE_HANDOFF_PROOF_MARKER not in body:
+            continue
+        author = comment.get("user") or {}
+        login = str(author.get("login") or "") if isinstance(author, Mapping) else ""
+        if login not in {"github-actions", "github-actions[bot]"}:
+            raise ReleaseBlocked("DCP handoff proof has a non-Actions author")
+        created_at = _github_timestamp(comment.get("created_at"))
+        updated_at = _github_timestamp(comment.get("updated_at"))
+        if created_at is None or updated_at is None or created_at != updated_at:
+            raise ReleaseBlocked("DCP handoff proof was edited or lacks immutable timestamps")
+        marker_lines = [
+            line for line in body.splitlines() if line.startswith(prefix)
+        ]
+        if len(marker_lines) != 1 or body.count(DCP_RELEASE_HANDOFF_PROOF_MARKER) != 1:
+            raise ReleaseBlocked("DCP handoff proof is malformed or duplicated")
+        line = marker_lines[0]
+        if not line.endswith(" -->"):
+            raise ReleaseBlocked("DCP handoff proof marker is malformed")
+        fields: dict[str, str] = {}
+        for token in line[len(prefix) : -4].split():
+            key, separator, value = token.partition("=")
+            if not separator or key in fields:
+                raise ReleaseBlocked("DCP handoff proof has malformed or duplicate fields")
+            fields[key] = value
+        if frozenset(fields) != DCP_HANDOFF_PROOF_FIELDS:
+            raise ReleaseBlocked("DCP handoff proof fields are incomplete or ambiguous")
+        try:
+            normalized: dict[str, Any] = {
+                "admission_check": int(fields["admission_check"]),
+                "base": fields["base"],
+                "head": _exact_sha(fields["head"], "DCP proof head"),
+                "head_ref": fields["head_ref"],
+                "pr": int(fields["pr"]),
+                "ready_event": int(fields["ready_event"]),
+                "release_check": int(fields["release_check"]),
+                "repo": fields["repo"],
+                "session": int(fields["session"]),
+                "version": fields["version"],
+            }
+        except (TypeError, ValueError) as exc:
+            raise ReleaseBlocked("DCP handoff proof has invalid numeric fields") from exc
+        session_match = DCP_RELEASE_BRANCH.fullmatch(normalized["head_ref"])
+        comment_id = int(comment.get("id") or 0)
+        if (
+            min(
+                normalized["admission_check"],
+                comment_id,
+                normalized["pr"],
+                normalized["ready_event"],
+                normalized["release_check"],
+                normalized["session"],
+            )
+            <= 0
+            or normalized["base"] != "main"
+            or normalized["repo"] != CANONICAL_GITHUB_REPOSITORY
+            or normalized["version"] != DCP_RELEASE_HANDOFF_VERSION
+            or session_match is None
+            or int(session_match.group(1)) != normalized["session"]
+            or body != _dcp_handoff_proof_body(normalized)
+        ):
+            raise ReleaseBlocked("DCP handoff proof is stale, edited or non-canonical")
+        records.append({**normalized, "comment_id": comment_id})
+    return records
+
+
+def _dcp_validate_proof_references(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    proof: Mapping[str, Any],
+) -> None:
+    number = int(pull.get("number") or 0)
+    matching_events = [
+        item
+        for item in api.list_issue_events(number)
+        if int(item.get("id") or 0) == int(proof["ready_event"])
+        and str(item.get("event") or "") == "labeled"
+        and isinstance(item.get("label"), Mapping)
+        and str((item.get("label") or {}).get("name") or "") == READY_LABEL
+        and _dcp_event_actor(item) == DCP_RELEASE_ACTOR
+    ]
+    if len(matching_events) != 1:
+        raise ReleaseBlocked("DCP handoff proof references a missing or ambiguous admission event")
+    ready_at = _dcp_ready_event_timestamp(matching_events[0])
+    checks = {
+        int(item.get("id") or 0): item
+        for item in api.list_check_runs(str(proof["head"]))
+    }
+    admission = checks.get(int(proof["admission_check"]))
+    release = checks.get(int(proof["release_check"]))
+    if admission is None or release is None or admission is release:
+        raise ReleaseBlocked("DCP handoff proof references missing or duplicate baseline checks")
+    for field, check in (("admission", admission), ("release", release)):
+        if (
+            str(check.get("name") or "") != "baseline"
+            or str(check.get("status") or "") != "completed"
+            or str(check.get("conclusion") or "") != "success"
+        ):
+            raise ReleaseBlocked(f"DCP handoff {field} baseline proof is not successful")
+    if not (
+        _dcp_check_timestamp(admission, "admission") <= ready_at
+        < _dcp_check_timestamp(release, "release")
+    ):
+        raise ReleaseBlocked("DCP handoff baseline/admission/release ordering is stale")
+    _dcp_require_no_head_event_after_ready(api, number, int(proof["ready_event"]))
+
+
+def _dcp_current_handoff_proof(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+) -> dict[str, Any]:
+    session = _dcp_handoff_session(pull)
+    if session is None:
+        raise ReleaseBlocked("DCP handoff proof requested for an ordinary PR")
+    number = int(pull.get("number") or 0)
+    head = _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head")
+    head_ref = str((pull.get("head") or {}).get("ref") or "")
+    matches = [
+        item
+        for item in _dcp_handoff_proof_records(api, number)
+        if item["pr"] == number
+        and item["head"] == head
+        and item["head_ref"] == head_ref
+        and item["session"] == session
+        and item["repo"] == CANONICAL_GITHUB_REPOSITORY
+        and item["base"] == "main"
+        and item["version"] == DCP_RELEASE_HANDOFF_VERSION
+    ]
+    if len(matches) != 1:
+        raise ReleaseBlocked("current DCP exact head requires exactly one canonical handoff proof")
+    _dcp_validate_proof_references(api, pull, matches[0])
+    return matches[0]
+
+
+def _dcp_record_handoff_proof(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    session: int,
+    ready_event: Mapping[str, Any],
+    admission_check: Mapping[str, Any],
+    release_check: Mapping[str, Any],
+) -> dict[str, Any]:
+    number = int(pull.get("number") or 0)
+    values: dict[str, Any] = {
+        "admission_check": int(admission_check.get("id") or 0),
+        "base": "main",
+        "head": _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head"),
+        "head_ref": str((pull.get("head") or {}).get("ref") or ""),
+        "pr": number,
+        "ready_event": int(ready_event.get("id") or 0),
+        "release_check": int(release_check.get("id") or 0),
+        "repo": CANONICAL_GITHUB_REPOSITORY,
+        "session": session,
+        "version": DCP_RELEASE_HANDOFF_VERSION,
+    }
+    existing = [
+        item
+        for item in _dcp_handoff_proof_records(api, number)
+        if item["pr"] == number
+        and item["head"] == values["head"]
+        and item["head_ref"] == values["head_ref"]
+        and item["session"] == session
+    ]
+    if existing:
+        if len(existing) != 1 or any(existing[0].get(key) != value for key, value in values.items()):
+            raise ReleaseBlocked("current DCP head already has a stale or duplicate handoff proof")
+    else:
+        api.add_comment(number, _dcp_handoff_proof_body(values))
+    return _dcp_current_handoff_proof(api, api.get_pull(number))
+
+
+def _dcp_set_running_state(
+    api: ReleaseApi,
+    number: int,
+    labels: Iterable[str],
+) -> None:
+    before = set(labels)
+    after = before - STATE_LABELS - {NEEDS_RESUME_LABEL}
+    after.add(RUNNING_LABEL)
+    assert_state_invariants(after)
+    if before != after:
+        api.set_labels(number, sorted(after))
+    api.add_comment(
+        number,
+        "Release Train accepted the exact DCP admission and started a no-sync "
+        "fresh-baseline release pass.",
+    )
+
+
+def _dcp_require_actions_merge(pull: Mapping[str, Any]) -> str:
+    """Return exact merge SHA only for the repository Actions release actor."""
+
+    merged_by = pull.get("merged_by") or {}
+    merged_by_login = (
+        str(merged_by.get("login") or "") if isinstance(merged_by, Mapping) else ""
+    )
+    if merged_by_login not in {"github-actions", "github-actions[bot]"}:
+        raise ReleaseBlocked("DCP PR was merged outside the GitHub Actions Release Train")
+    return _exact_sha(str(pull.get("merge_commit_sha") or ""), "merge")
 
 
 def _require_loop_operator(association: str) -> None:
@@ -4048,18 +4533,28 @@ def prepare_candidate(
     head_repo = str((((pull.get("head") or {}).get("repo") or {}).get("full_name")) or "")
     if head_repo != repository:
         raise ReleaseBlocked("release queue accepts only same-repository branches")
+    dcp_session = _dcp_handoff_session(pull)
 
     scope = scope_from_labels(labels)
     task_class, loop_root = _validate_task_context(api, number, labels, scope)
     if scope == PRODUCTION_MUTATION_LABEL:
         raise ReleaseBlocked("production data mutation requires a separate exact human gate")
+    if dcp_session is not None and (
+        repository != CANONICAL_GITHUB_REPOSITORY
+        or scope != REPO_ONLY_LABEL
+        or task_class != STANDARD_TASK_LABEL
+        or loop_root is not None
+    ):
+        raise ReleaseBlocked("DCP handoff requires exact wb-core repo-only STANDARD identity")
 
     head_sha = str((pull.get("head") or {}).get("sha") or "")
     head_ref = str((pull.get("head") or {}).get("ref") or "")
     if not head_sha or not head_ref:
         raise ReleaseBlocked("PR head identity is missing")
-    lane = release_lane_state(api)
-    orchestration_enforced = orchestration_required or lane.get("status") == "owned"
+    lane = release_lane_state(api) if dcp_session is None else {"status": "disabled"}
+    orchestration_enforced = dcp_session is None and (
+        orchestration_required or lane.get("status") == "owned"
+    )
     admission: dict[str, Any] | None = None
     if orchestration_enforced:
         if lane.get("status") != "owned":
@@ -4069,27 +4564,44 @@ def prepare_candidate(
             raise ReleaseBlocked("exact-head orchestration admission proof is missing")
         if admission["task_id"] != lane.get("task_id"):
             raise ReleaseBlocked("orchestration admission does not match the release lane task")
-    set_release_state(
-        api,
-        number,
-        RUNNING_LABEL,
-        current_labels=labels,
-        comment="Release Train начал финальную синхронизацию, проверку и выпуск PR.",
-    )
-    comparison = api.compare("main", head_sha)
-    if int(comparison.get("behind_by") or 0) > 0:
+    ready_event: dict[str, Any] | None = None
+    admission_check: dict[str, Any] | None = None
+    if dcp_session is not None:
         try:
-            api.update_branch(number, head_sha)
-        except GitHubApiError as exc:
-            raise ReleaseBlocked(f"PR branch cannot be updated from main: {exc}") from exc
-        pull = _wait_for_branch_update(
+            ready_event = _dcp_ready_event(api, pull)
+            _dcp_require_no_head_event_after_ready(
+                api,
+                number,
+                int(ready_event.get("id") or 0),
+            )
+        except DCPReleaseReadmissionRequired as exc:
+            _dcp_raise_readmission(api, pull, reason=exc.reason)
+        admission_check = _dcp_admission_check(api, head_sha, ready_event)
+        if not _dcp_compare_is_current(api.compare("main", head_sha)):
+            _dcp_raise_readmission(api, pull, reason="base-behind-after-admission")
+        _dcp_set_running_state(api, number, labels)
+    else:
+        set_release_state(
             api,
             number,
-            head_sha,
-            timeout_seconds=min(timeout_seconds, 300),
-            poll_seconds=poll_seconds,
+            RUNNING_LABEL,
+            current_labels=labels,
+            comment="Release Train начал финальную синхронизацию, проверку и выпуск PR.",
         )
-        head_sha = str((pull.get("head") or {}).get("sha") or "")
+        comparison = api.compare("main", head_sha)
+        if int(comparison.get("behind_by") or 0) > 0:
+            try:
+                api.update_branch(number, head_sha)
+            except GitHubApiError as exc:
+                raise ReleaseBlocked(f"PR branch cannot be updated from main: {exc}") from exc
+            pull = _wait_for_branch_update(
+                api,
+                number,
+                head_sha,
+                timeout_seconds=min(timeout_seconds, 300),
+                poll_seconds=poll_seconds,
+            )
+            head_sha = str((pull.get("head") or {}).get("sha") or "")
 
     previous_check_id = max(
         (
@@ -4100,7 +4612,7 @@ def prepare_candidate(
         default=0,
     )
     api.dispatch_workflow("baseline-ci.yml", head_ref)
-    wait_for_required_check(
+    release_check = wait_for_required_check(
         api,
         head_sha,
         check_name,
@@ -4114,7 +4626,15 @@ def prepare_candidate(
     if final_head_sha != head_sha:
         raise ReleaseBlocked("PR head changed while baseline CI was running; run fresh checks")
     final_labels = label_names(pull)
-    if READY_LABEL not in final_labels or BLOCKED_LABEL in final_labels or HALTED_LABEL in final_labels:
+    if dcp_session is not None:
+        if (
+            RUNNING_LABEL not in final_labels
+            or READY_LABEL in final_labels
+            or BLOCKED_LABEL in final_labels
+            or HALTED_LABEL in final_labels
+        ):
+            raise ReleaseBlocked("DCP PR release state changed while baseline CI was running")
+    elif READY_LABEL not in final_labels or BLOCKED_LABEL in final_labels or HALTED_LABEL in final_labels:
         raise ReleaseBlocked("PR release state changed while baseline CI was running")
     if scope_from_labels(final_labels) != scope:
         raise ReleaseBlocked("PR execution scope changed while baseline CI was running")
@@ -4156,6 +4676,20 @@ def prepare_candidate(
         raise ReleaseBlocked("PR base changed while baseline CI was running")
     if pull.get("mergeable") is False:
         raise ReleaseBlocked("GitHub reports that the PR is not mergeable against current main")
+    if dcp_session is not None:
+        if not _dcp_compare_is_current(api.compare("main", final_head_sha)):
+            _dcp_raise_readmission(api, pull, reason="base-advanced-during-release-check")
+        try:
+            _dcp_record_handoff_proof(
+                api,
+                pull,
+                session=dcp_session,
+                ready_event=ready_event or {},
+                admission_check=admission_check or {},
+                release_check=release_check,
+            )
+        except DCPReleaseReadmissionRequired as exc:
+            _dcp_raise_readmission(api, pull, reason=exc.reason)
     agent_acknowledged = False
     if task_class == LOOP_TASK_LABEL:
         agent_acknowledged = (
@@ -4194,12 +4728,39 @@ def merge_candidate(
 ) -> MergeResult:
     pull = api.get_pull(candidate.number)
     labels = label_names(pull)
+    dcp_session = _dcp_handoff_session(pull)
     if bool(pull.get("merged")) and str(pull.get("merge_commit_sha") or ""):
+        if dcp_session is not None:
+            merge_sha = _dcp_require_actions_merge(pull)
+            _dcp_current_handoff_proof(api, pull)
+            if RUNNING_LABEL not in labels and not (
+                DONE_LABEL in labels
+                and _dcp_completion_body_proven(pull, merge_sha=merge_sha)
+                and _has_comment_proof(
+                    api,
+                    candidate.number,
+                    COMPLETION_PROOF_MARKER,
+                    contour="repo-only",
+                    merge=merge_sha,
+                    pr=candidate.number,
+                )
+            ):
+                raise ReleaseBlocked(
+                    "DCP merged PR lacks exact Release Train processing or terminal proof"
+                )
         return MergeResult(
             merge_sha=str(pull["merge_commit_sha"]),
             skip_release=RUNNING_LABEL not in labels,
         )
-    if READY_LABEL not in labels or BLOCKED_LABEL in labels or HALTED_LABEL in labels:
+    if dcp_session is not None:
+        if (
+            RUNNING_LABEL not in labels
+            or READY_LABEL in labels
+            or BLOCKED_LABEL in labels
+            or HALTED_LABEL in labels
+        ):
+            raise ReleaseBlocked("DCP PR is no longer in its exact release:running state")
+    elif READY_LABEL not in labels or BLOCKED_LABEL in labels or HALTED_LABEL in labels:
         raise ReleaseBlocked("PR is no longer in an eligible release state")
     if scope_from_labels(labels) != candidate.scope:
         raise ReleaseBlocked("PR execution scope changed after CI")
@@ -4215,9 +4776,11 @@ def merge_candidate(
         raise ReleaseBlocked("PR head branch changed after CI")
     current_head = str((pull.get("head") or {}).get("sha") or "")
     if current_head != candidate.head_sha:
+        if dcp_session is not None:
+            _dcp_raise_readmission(api, pull, reason="head-changed-after-release-check")
         raise ReleaseBlocked("PR head changed after CI; enqueue it again after fresh checks")
-    lane = release_lane_state(api)
-    if orchestration_required or lane.get("status") == "owned":
+    lane = release_lane_state(api) if dcp_session is None else {"status": "disabled"}
+    if dcp_session is None and (orchestration_required or lane.get("status") == "owned"):
         admission = orchestration_admission(api, pull)
         if (
             lane.get("status") != "owned"
@@ -4226,9 +4789,17 @@ def merge_candidate(
             or admission["head"] != candidate.head_sha
         ):
             raise ReleaseBlocked("merge requires current exact-head orchestration admission and lane")
-    comparison = api.compare("main", candidate.head_sha)
-    if int(comparison.get("behind_by") or 0) > 0:
-        raise ReleaseBlocked("main advanced after CI; synchronize the PR and run fresh checks")
+    if dcp_session is not None:
+        try:
+            _dcp_current_handoff_proof(api, pull)
+        except DCPReleaseReadmissionRequired as exc:
+            _dcp_raise_readmission(api, pull, reason=exc.reason)
+        if not _dcp_compare_is_current(api.compare("main", candidate.head_sha)):
+            _dcp_raise_readmission(api, pull, reason="base-advanced-after-release-check")
+    else:
+        comparison = api.compare("main", candidate.head_sha)
+        if int(comparison.get("behind_by") or 0) > 0:
+            raise ReleaseBlocked("main advanced after CI; synchronize the PR and run fresh checks")
     if candidate.task_class == LOOP_TASK_LABEL:
         acknowledgement = loop_ack_label(candidate.head_sha)
         if acknowledgement not in labels or not _has_comment_proof(
@@ -4257,6 +4828,52 @@ def cleanup_merged_branch(api: ReleaseApi, repository: str, number: int) -> None
         api.delete_branch(branch)
 
 
+def _dcp_completion_body_proven(
+    pull: Mapping[str, Any],
+    *,
+    merge_sha: str,
+) -> bool:
+    number = int(pull.get("number") or 0)
+    expected = _proof_marker(
+        COMPLETION_PROOF_MARKER,
+        contour="repo-only",
+        merge=merge_sha,
+        pr=number,
+    )
+    body = str(pull.get("body") or "")
+    prefix = f"<!-- {COMPLETION_PROOF_MARKER} "
+    return (
+        body.count(COMPLETION_PROOF_MARKER) == 1
+        and body.count(prefix) == 1
+        and body.count(expected) == 1
+    )
+
+
+def _dcp_publish_completion_body(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    merge_sha: str,
+) -> None:
+    number = int(pull.get("number") or 0)
+    proof = _proof_marker(
+        COMPLETION_PROOF_MARKER,
+        contour="repo-only",
+        merge=merge_sha,
+        pr=number,
+    )
+    body = str(pull.get("body") or "")
+    if COMPLETION_PROOF_MARKER in body:
+        if not _dcp_completion_body_proven(pull, merge_sha=merge_sha):
+            raise ReleaseBlocked("DCP terminal completion proof in PR body is stale or ambiguous")
+        return
+    updated = f"{body.rstrip()}\n\n{proof}\n" if body.strip() else f"{proof}\n"
+    api.update_pull_body(number, updated)
+    readback = api.get_pull(number)
+    if not _dcp_completion_body_proven(readback, merge_sha=merge_sha):
+        raise ReleaseBlocked("DCP terminal completion proof body readback failed")
+
+
 def complete_standard_release(
     api: ReleaseApi,
     number: int,
@@ -4268,6 +4885,7 @@ def complete_standard_release(
 
     pull = api.get_pull(number)
     labels = label_names(pull)
+    dcp_session = _dcp_handoff_session(pull)
     exact_merge = merge_sha.strip().lower()
     if not bool(pull.get("merged")) or str(pull.get("merge_commit_sha") or "").lower() != exact_merge:
         raise ReleaseBlocked("completion proof does not match the exact merged PR SHA")
@@ -4284,6 +4902,14 @@ def complete_standard_release(
         target = PRODUCTION_LABEL
     else:
         raise ReleaseBlocked("unsupported completion contour")
+    if dcp_session is not None:
+        if contour != "repo-only":
+            raise ReleaseBlocked("DCP handoff supports only repo-only completion")
+        _dcp_require_actions_merge(pull)
+        _dcp_current_handoff_proof(api, pull)
+        _dcp_publish_completion_body(api, pull, merge_sha=exact_merge)
+        pull = api.get_pull(number)
+        labels = label_names(pull)
     proof = _proof_marker(
         COMPLETION_PROOF_MARKER,
         contour=contour,
@@ -4671,6 +5297,10 @@ def retry_blocked_release(
         raise ReleaseBlocked("blocked retry requires an open non-draft PR")
     task_class = task_class_from_labels(labels)
     scope_from_labels(labels)
+    if _dcp_handoff_session(pull) is not None:
+        raise ReleaseBlocked(
+            "DCP handoff cannot use generic retry; fresh exact-head DCP review and FIFO admission are required"
+        )
     successful_check = _has_successful_check(api, actual_head, check_name)
     if task_class == LOOP_TASK_LABEL:
         try:
@@ -4844,6 +5474,15 @@ def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
             merge=merge_sha,
             pr=number,
         )
+        try:
+            dcp_session = _dcp_handoff_session(pull)
+            if dcp_session is not None:
+                _dcp_require_actions_merge(pull)
+                _dcp_current_handoff_proof(api, pull)
+                if not _dcp_completion_body_proven(pull, merge_sha=merge_sha):
+                    return False
+        except (DCPReleaseReadmissionRequired, ReleaseBlocked, TypeError, ValueError):
+            return False
         return expected in labels and (completion or reconciled)
     if task_class == LOOP_TASK_LABEL and PRODUCTION_LABEL in labels:
         root = loop_root_from_labels(labels)
@@ -5811,6 +6450,24 @@ def command_prepare(args: argparse.Namespace) -> int:
             ).strip().casefold()
             in {"1", "true", "yes", "on"},
         )
+    except DCPReleaseReadmissionRequired as exc:
+        write_github_output(
+            args.output_path,
+            {
+                "readmission_required": True,
+                "head_sha": exc.head_sha,
+                "readmission_reason": exc.reason,
+            },
+        )
+        _json_print(
+            {
+                "status": "dcp-readmission-required",
+                "pr_number": args.pr,
+                "head_sha": exc.head_sha,
+                "reason": exc.reason,
+            }
+        )
+        return 0
     except ReleaseReadmissionRequired as exc:
         write_github_output(
             args.output_path,
@@ -5916,6 +6573,25 @@ def command_merge(args: argparse.Namespace) -> int:
             ).strip().casefold()
             in {"1", "true", "yes", "on"},
         )
+    except DCPReleaseReadmissionRequired as exc:
+        write_github_output(
+            args.output_path,
+            {
+                "merge_sha": "",
+                "skip_release": True,
+                "readmission_required": True,
+                "readmission_reason": exc.reason,
+            },
+        )
+        _json_print(
+            {
+                "status": "dcp-readmission-required",
+                "pr_number": args.pr,
+                "head_sha": exc.head_sha,
+                "reason": exc.reason,
+            }
+        )
+        return 0
     except ReleaseClassificationBlocked as exc:
         mark_classification_blocked(api, args.pr, exc)
         _json_print(

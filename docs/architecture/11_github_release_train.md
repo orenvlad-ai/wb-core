@@ -101,6 +101,48 @@ Terminal state является identity boundary; новый defect после 
 drift во время checks fail closed. Другой ready/running PR — normal serialized
 waiting и не разрешает manual intervention.
 
+## DCP Repo-Only Handoff V1
+
+Repository-owned compatibility marker: `wb-core.dcp-release-handoff/v1`.
+Installed DCP target `wb-core` / `repo-only` по-прежнему владеет только своей
+локальной fresh exact-head review и FIFO admission. Его единственная GitHub
+mutation после admission — `release:ready`; direct DCP merge, fallback merge и
+второй release actor запрещены. WBC GitHub Actions Release Train остаётся
+единственным physical merge/release actor.
+
+Специальная семантика включается только для exact same-repository PR с branch
+`ao/wb-core-<positive>/root`, owner identity `orenvlad-ai`, base `main`,
+`task:standard`, ровно `scope:repo-only` и одним активным owner-created
+`release:ready` event. Event обязан следовать после successful `baseline` на
+current exact head; PR timeline после него не может содержать commit либо
+force-push. Missing, malformed, ambiguous, duplicate, edited, stale,
+wrong-repository или wrong-base evidence fail closed. Ordinary non-DCP PR не
+получает эту классификацию и сохраняет STANDARD flow выше.
+
+Для exact DCP handoff Release Train:
+
+1. сравнивает admitted head с current `main` до processing transition и никогда
+   не вызывает update-branch/auto-sync;
+2. при behind/base drift или replacement head снимает release eligibility без
+   `release:blocked`, update или merge и создаёт Actions-owned readmission
+   evidence; новый head требует fresh successful `baseline`, новый DCP review,
+   новую FIFO admission и новый DCP-owned `release:ready` event;
+3. переводит accepted handoff из единственного `release:ready` в единственный
+   `release:running`, запускает fresh exact-head baseline и создаёт один
+   canonical Actions-owned proof, связанный с PR/repository/base/head/native
+   branch, admission event, admission baseline и release baseline;
+4. перед merge повторно проверяет неизменность exact head, current-main compare,
+   immutable proof и обе baseline identities; generic `retry-blocked` не может
+   подменить DCP readmission;
+5. squash-merges exact proven head, публикует в PR body ровно один existing
+   completion proof
+   `<!-- wb-core-release-completion-proof contour=repo-only merge=<40-hex-sha> pr=<positive-number> -->`
+   и только затем заменяет processing state на `release:done`.
+
+Proof comment считается immutable только при Actions-owned author identity,
+равных created/updated timestamps, exact canonical body и единственном marker
+для current head. Edited, malformed или duplicate proof не разрешает merge.
+
 `scope:production-mutation` никогда не merge/deploy/apply автоматически из
 `release:ready`. Worker оставляет его `release:blocked` до separate human-gated
 contract.

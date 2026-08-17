@@ -42,6 +42,7 @@ from apps.github_release_train import (  # noqa: E402
     STAGED_LABEL,
     STANDARD_TASK_LABEL,
     SUPERSEDED_LABEL,
+    DCPReleaseReadmissionRequired,
     ReleaseBlocked,
     ReleaseClassificationBlocked,
     ReleaseReadmissionRequired,
@@ -109,6 +110,9 @@ from apps.github_release_train_spec import (  # noqa: E402
     ACTIVE_STATE_LABELS,
     CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
+    DCP_RELEASE_HANDOFF_PROOF_MARKER,
+    DCP_RELEASE_HANDOFF_VERSION,
+    DCP_RELEASE_READMISSION_PROOF_MARKER,
     EXPLICIT_TASK_PROMPTS,
     ExecutionContour,
     GoalDisposition,
@@ -160,8 +164,10 @@ class FakeApi:
         self.comment_ids: list[int] = []
         self.comment_metadata: dict[int, dict[str, Any]] = {}
         self.events: dict[int, list[dict[str, Any]]] = {}
+        self.timeline: dict[int, list[dict[str, Any]]] = {}
         self.merges: list[tuple[int, str]] = []
         self.deleted: list[str] = []
+        self.updated_bodies: list[tuple[int, str]] = []
 
     def ensure_label(self, name: str, color: str, description: str) -> None:
         self.ensured_labels.append(name)
@@ -175,6 +181,9 @@ class FakeApi:
 
     def list_issue_events(self, number: int) -> list[dict[str, Any]]:
         return list(self.events.get(number, []))
+
+    def list_timeline_items(self, number: int) -> list[dict[str, Any]]:
+        return list(self.timeline.get(number, []))
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         return [
@@ -203,12 +212,33 @@ class FakeApi:
         self.dispatched.append((workflow, ref))
         if workflow == "baseline-ci.yml":
             next_id = max((int(item.get("id") or 0) for item in self.checks), default=0) + 1
+            completed_at = datetime.now(timezone.utc).isoformat()
+            head_sha = next(
+                (
+                    str((pull.get("head") or {}).get("sha") or "")
+                    for pull in self.pulls.values()
+                    if str((pull.get("head") or {}).get("ref") or "") == ref
+                ),
+                "",
+            )
             self.checks.append(
-                {"id": next_id, "name": "baseline", "status": "completed", "conclusion": "success"}
+                {
+                    "id": next_id,
+                    "name": "baseline",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "completed_at": completed_at,
+                    "head_sha": head_sha,
+                }
             )
 
     def list_check_runs(self, sha: str) -> list[dict[str, Any]]:
-        return list(self.checks)
+        return [
+            item
+            for item in self.checks
+            if not str(item.get("head_sha") or "")
+            or str(item.get("head_sha") or "") == sha
+        ]
 
     def merge_pull(self, number: int, expected_head_sha: str) -> dict[str, Any]:
         self.merges.append((number, expected_head_sha))
@@ -216,6 +246,7 @@ class FakeApi:
         pull = self.pulls[number]
         pull["state"] = "closed"
         pull["merged"] = True
+        pull["merged_by"] = {"login": "github-actions[bot]"}
         pull["merge_commit_sha"] = merge_sha
         return {"merged": True, "sha": merge_sha}
 
@@ -225,32 +256,37 @@ class FakeApi:
         current.update(additions)
         _set_labels(self.pulls[number], current)
         for label in sorted(additions):
-            self.events.setdefault(number, []).append(
-                {
-                    "event": "labeled",
-                    "label": {"name": label},
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            self._append_label_event(number, "labeled", label)
 
     def set_labels(self, number: int, labels: Iterable[str]) -> None:
         before = _labels(self.pulls[number])
         after = {str(label) for label in labels}
         self.replaced_labels.append((number, set(after)))
         _set_labels(self.pulls[number], after)
+        for label in sorted(before - after):
+            self._append_label_event(number, "unlabeled", label)
         for label in sorted(after - before):
-            self.events.setdefault(number, []).append(
-                {
-                    "event": "labeled",
-                    "label": {"name": label},
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            self._append_label_event(number, "labeled", label)
 
     def remove_label(self, number: int, label: str) -> None:
         current = _labels(self.pulls[number])
+        removed = label in current
         current.discard(label)
         _set_labels(self.pulls[number], current)
+        if removed:
+            self._append_label_event(number, "unlabeled", label)
+
+    def _append_label_event(self, number: int, event: str, label: str) -> None:
+        event_id = 100_000 + sum(len(items) for items in self.events.values()) + 1
+        item = {
+            "id": event_id,
+            "event": event,
+            "label": {"name": label},
+            "actor": {"login": "github-actions[bot]"},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.events.setdefault(number, []).append(item)
+        self.timeline.setdefault(number, []).append(dict(item))
 
     def add_comment(self, number: int, body: str) -> None:
         comment_id = max(self.comment_ids, default=0) + 1
@@ -260,7 +296,11 @@ class FakeApi:
             "user": {"login": "github-actions[bot]"},
             "author_association": "CONTRIBUTOR",
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        self.comment_metadata[comment_id]["updated_at"] = self.comment_metadata[comment_id][
+            "created_at"
+        ]
 
     def add_external_comment(
         self,
@@ -278,6 +318,7 @@ class FakeApi:
             "user": {"login": actor},
             "author_association": association,
             "created_at": created_at,
+            "updated_at": created_at,
         }
         return comment_id
 
@@ -285,6 +326,13 @@ class FakeApi:
         index = self.comment_ids.index(comment_id)
         number, _ = self.comments[index]
         self.comments[index] = (number, body)
+        self.comment_metadata[comment_id]["updated_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+    def update_pull_body(self, number: int, body: str) -> None:
+        self.pulls[number]["body"] = body
+        self.updated_bodies.append((number, body))
 
     def delete_comment(self, comment_id: int) -> None:
         index = self.comment_ids.index(comment_id)
@@ -328,6 +376,7 @@ def _pull(
         "draft": False,
         "merged": False,
         "mergeable": True,
+        "body": "",
         "created_at": created_at,
         "labels": [{"name": label} for label in labels],
         "pull_request": {"url": f"https://example.invalid/{number}"},
@@ -337,6 +386,7 @@ def _pull(
             "ref": f"feature/{number}",
             "repo": {"full_name": "orenvlad-ai/wb-core"},
         },
+        "user": {"login": "orenvlad-ai"},
     }
 
 
@@ -471,6 +521,265 @@ def _assert_standard_repo_only_and_live() -> None:
     repeated = merge_candidate(api, candidate)
     assert repeated.skip_release
     assert len(api.merges) == 2
+    assert not any(
+        DCP_RELEASE_HANDOFF_PROOF_MARKER in body for _, body in api.comments
+    )
+
+
+def _dcp_release_fixture(
+    number: int,
+    *,
+    head_sha: str = SHA_A,
+    comparison: dict[str, Any] | None = None,
+) -> tuple[FakeApi, dict[str, Any]]:
+    api = FakeApi()
+    pull = _pull(
+        number,
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        created_at="2026-08-17T09:00:00Z",
+        sha=head_sha,
+    )
+    pull["head"]["ref"] = f"ao/wb-core-{number}/root"
+    api.pulls[number] = pull
+    ready_event = {
+        "id": number * 100 + 1,
+        "event": "labeled",
+        "label": {"name": READY_LABEL},
+        "actor": {"login": "orenvlad-ai"},
+        "created_at": "2026-08-17T10:01:00Z",
+    }
+    api.events[number] = [dict(ready_event)]
+    api.timeline[number] = [
+        {"event": "committed", "sha": head_sha},
+        dict(ready_event),
+    ]
+    api.checks = [
+        {
+            "id": number * 100 + 2,
+            "name": "baseline",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-08-17T10:00:00Z",
+            "head_sha": head_sha,
+        }
+    ]
+    current = comparison or {"behind_by": 0, "status": "ahead"}
+    api.comparisons = [dict(current), dict(current), dict(current)]
+    return api, pull
+
+
+def _prepare_dcp(api: FakeApi, number: int) -> Candidate:
+    return prepare_candidate(
+        api,
+        "orenvlad-ai/wb-core",
+        number,
+        check_name="baseline",
+        timeout_seconds=1,
+        poll_seconds=0,
+    )
+
+
+def _dcp_proof_comment_index(api: FakeApi, number: int) -> int:
+    return next(
+        index
+        for index, (comment_number, body) in enumerate(api.comments)
+        if comment_number == number and DCP_RELEASE_HANDOFF_PROOF_MARKER in body
+    )
+
+
+def _assert_dcp_release_handoff_v1() -> None:
+    # Exact admitted head: no update-branch, one fresh Release Train baseline,
+    # one Actions merge and one exact terminal proof in the PR body.
+    api, pull = _dcp_release_fixture(701)
+    candidate = _prepare_dcp(api, 701)
+    assert candidate.head_sha == SHA_A
+    assert api.updated == []
+    assert RUNNING_LABEL in _labels(pull) and READY_LABEL not in _labels(pull)
+    proof_bodies = [
+        body
+        for number, body in api.comments
+        if number == 701 and DCP_RELEASE_HANDOFF_PROOF_MARKER in body
+    ]
+    assert len(proof_bodies) == 1
+    assert DCP_RELEASE_HANDOFF_VERSION in proof_bodies[0]
+    merge = merge_candidate(api, candidate)
+    assert api.merges == [(701, SHA_A)]
+    complete_standard_release(api, 701, merge_sha=merge.merge_sha, contour="repo-only")
+    assert api.merges == [(701, SHA_A)]
+    assert DONE_LABEL in _labels(pull) and RUNNING_LABEL not in _labels(pull)
+    terminal = (
+        f"<!-- wb-core-release-completion-proof contour=repo-only "
+        f"merge={merge.merge_sha} pr=701 -->"
+    )
+    assert str(pull.get("body") or "").count(terminal) == 1
+    assert terminal_state_proven(api, pull)
+
+    # A behind admitted head loses eligibility without branch synchronization,
+    # blocking or merge. Generic retry cannot replace fresh DCP admission.
+    behind_api, behind_pull = _dcp_release_fixture(
+        702,
+        comparison={"behind_by": 1, "status": "behind"},
+    )
+    try:
+        _prepare_dcp(behind_api, 702)
+    except DCPReleaseReadmissionRequired as exc:
+        assert exc.reason == "base-behind-after-admission"
+    else:
+        raise AssertionError("behind DCP admission must require readmission")
+    assert behind_api.updated == [] and behind_api.merges == []
+    assert not (_labels(behind_pull) & {READY_LABEL, RUNNING_LABEL, BLOCKED_LABEL})
+    assert any(
+        DCP_RELEASE_READMISSION_PROOF_MARKER in body
+        for number, body in behind_api.comments
+        if number == 702
+    )
+
+    _set_labels(behind_pull, [BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL])
+    try:
+        retry_blocked_release(
+            behind_api,
+            702,
+            expected_head_sha=SHA_A,
+            check_name="baseline",
+        )
+    except ReleaseBlocked as exc:
+        assert "fresh exact-head DCP review" in str(exc)
+    else:
+        raise AssertionError("generic retry must not bypass DCP readmission")
+
+    # Replacement head is ineligible until a new exact-head baseline and a new
+    # DCP-owned release:ready admission event exist.
+    replacement_head = SHA_B
+    behind_pull["head"]["sha"] = replacement_head
+    _set_labels(behind_pull, [READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL])
+    replacement_event = {
+        "id": 70299,
+        "event": "labeled",
+        "label": {"name": READY_LABEL},
+        "actor": {"login": "orenvlad-ai"},
+        "created_at": "2026-08-17T11:01:00Z",
+    }
+    behind_api.events[702].append(dict(replacement_event))
+    behind_api.timeline[702].extend(
+        [
+            {"event": "committed", "sha": replacement_head},
+            dict(replacement_event),
+        ]
+    )
+    behind_api.comparisons = [
+        {"behind_by": 0, "status": "ahead"},
+        {"behind_by": 0, "status": "ahead"},
+        {"behind_by": 0, "status": "ahead"},
+    ]
+    try:
+        _prepare_dcp(behind_api, 702)
+    except ReleaseBlocked as exc:
+        assert "successful baseline" in str(exc)
+    else:
+        raise AssertionError("replacement DCP head without fresh baseline must fail closed")
+    behind_api.checks.append(
+        {
+            "id": 70298,
+            "name": "baseline",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-08-17T11:00:00Z",
+            "head_sha": replacement_head,
+        }
+    )
+    replacement = _prepare_dcp(behind_api, 702)
+    assert replacement.head_sha == replacement_head and behind_api.updated == []
+    assert f"ready_event={replacement_event['id']}" in next(
+        body
+        for number, body in behind_api.comments
+        if number == 702 and DCP_RELEASE_HANDOFF_PROOF_MARKER in body
+    )
+
+    # Current proof is mandatory, canonical, Actions-owned and immutable.
+    for offset, mode in enumerate(
+        ("missing", "edited", "duplicate", "stale", "wrong-repo", "wrong-base"),
+        start=710,
+    ):
+        proof_api, _ = _dcp_release_fixture(offset)
+        proof_candidate = _prepare_dcp(proof_api, offset)
+        proof_index = _dcp_proof_comment_index(proof_api, offset)
+        comment_id = proof_api.comment_ids[proof_index]
+        number, body = proof_api.comments[proof_index]
+        if mode == "missing":
+            proof_api.comments.pop(proof_index)
+            proof_api.comment_ids.pop(proof_index)
+            proof_api.comment_metadata.pop(comment_id, None)
+        elif mode == "edited":
+            proof_api.update_comment(comment_id, body + "\nedited")
+        elif mode == "duplicate":
+            proof_api.add_comment(number, body)
+        elif mode == "stale":
+            proof_api.comments[proof_index] = (
+                number,
+                body.replace(f"head={SHA_A}", f"head={SHA_B}"),
+            )
+        elif mode == "wrong-repo":
+            proof_api.comments[proof_index] = (
+                number,
+                body.replace(
+                    "repo=orenvlad-ai/wb-core",
+                    "repo=orenvlad-ai/wrong",
+                ),
+            )
+        else:
+            proof_api.comments[proof_index] = (
+                number,
+                body.replace("base=main", "base=release"),
+            )
+        try:
+            merge_candidate(proof_api, proof_candidate)
+        except ReleaseBlocked:
+            pass
+        else:
+            raise AssertionError(f"{mode} DCP handoff proof must fail closed")
+        assert proof_api.merges == []
+
+    # A direct/manual merge can never be laundered into Release Train terminal
+    # evidence, even if the exact-head handoff proof already exists.
+    direct_api, _ = _dcp_release_fixture(719)
+    direct_candidate = _prepare_dcp(direct_api, 719)
+    direct_pull = direct_api.pulls[719]
+    direct_pull["state"] = "closed"
+    direct_pull["merged"] = True
+    direct_pull["merged_by"] = {"login": "orenvlad-ai"}
+    direct_pull["merge_commit_sha"] = "719".zfill(40)
+    try:
+        merge_candidate(direct_api, direct_candidate)
+    except ReleaseBlocked as exc:
+        assert "outside the GitHub Actions Release Train" in str(exc)
+    else:
+        raise AssertionError("direct DCP merge must fail closed")
+    try:
+        complete_standard_release(
+            direct_api,
+            719,
+            merge_sha=str(direct_pull["merge_commit_sha"]),
+            contour="repo-only",
+        )
+    except ReleaseBlocked as exc:
+        assert "outside the GitHub Actions Release Train" in str(exc)
+    else:
+        raise AssertionError("direct DCP merge must not receive terminal proof")
+    assert direct_api.merges == []
+
+    # A head push after proof is readmission, never auto-sync or merge.
+    stale_api, stale_pull = _dcp_release_fixture(720)
+    stale_candidate = _prepare_dcp(stale_api, 720)
+    stale_pull["head"]["sha"] = SHA_B
+    stale_api.timeline[720].append({"event": "committed", "sha": SHA_B})
+    try:
+        merge_candidate(stale_api, stale_candidate)
+    except DCPReleaseReadmissionRequired as exc:
+        assert exc.reason == "head-changed-after-release-check"
+    else:
+        raise AssertionError("post-proof DCP head drift must require readmission")
+    assert stale_api.updated == [] and stale_api.merges == []
+    assert not (_labels(stale_pull) & {READY_LABEL, RUNNING_LABEL, BLOCKED_LABEL})
 
 
 def _assert_orchestration_lane_and_legacy_retirement() -> None:
@@ -3092,6 +3401,13 @@ def _assert_workflow_contract() -> None:
     assert "reconcile_halted:" in release
     assert "resume-halted" in release
     assert "Reconcile bounded exact-SHA settling state" not in release
+    assert "Continue queue after DCP exact-head readmission" in release
+    for path in (
+        ROOT / "docs" / "architecture" / "11_github_release_train.md",
+        ROOT / "apps" / "github_release_train.py",
+        ROOT / "apps" / "github_release_train_spec.py",
+    ):
+        assert DCP_RELEASE_HANDOFF_VERSION in path.read_text(encoding="utf-8")
     assert 'if stage == "metadata-complete"' in (
         ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py"
     ).read_text(encoding="utf-8")
@@ -4287,6 +4603,7 @@ def main() -> int:
     _assert_queue_status_local_auth_contract()
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
+    _assert_dcp_release_handoff_v1()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
     _assert_foreign_gate_waiting_and_queue_progress()

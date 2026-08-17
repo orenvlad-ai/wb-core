@@ -662,6 +662,9 @@ DEPLOY_PROOF_MARKER = "wb-core-loop-deploy-proof"
 CHAIN_AUDIT_MARKER = "wb-core-loop-chain-audit"
 RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
+DCP_RELEASE_HANDOFF_VERSION = "wb-core.dcp-release-handoff/v1"
+DCP_RELEASE_HANDOFF_PROOF_MARKER = "wb-core-dcp-release-handoff-proof"
+DCP_RELEASE_READMISSION_PROOF_MARKER = "wb-core-dcp-release-readmission-required"
 PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER = (
     "wb-core-production-mutation-completion-proof"
 )

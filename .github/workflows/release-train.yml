@@ -418,6 +418,10 @@ jobs:
           --check-name baseline
           --output-path "$GITHUB_OUTPUT"
 
+      - name: Continue queue after DCP exact-head readmission
+        if: steps.prepare.outputs.readmission_required == 'true'
+        run: python3 apps/github_release_train.py dispatch-next
+
       - name: Mark unexpected prepare failure
         if: steps.prepare.outcome == 'failure'
         run: >-
