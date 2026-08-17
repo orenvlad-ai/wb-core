@@ -55,6 +55,19 @@ def main() -> int:
         runtime_dir = root / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         runtime_dir.mkdir(parents=True)
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "ff-pool-lifecycle-nm-101",
+                "is_active": True,
+                "is_hidden": False,
+                "our_sku": "seller-101",
+                "nm_id": 101,
+                "barcode": "sku-101",
+                "nomenclature_name": "Lifecycle SKU 101",
+                "created_at": GATE_AT,
+                "updated_at": GATE_AT,
+            }
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_warehouse_functional_schema(conn)

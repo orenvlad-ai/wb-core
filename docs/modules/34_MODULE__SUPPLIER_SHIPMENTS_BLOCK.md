@@ -150,6 +150,7 @@ source_of_truth_level: "module_canonical"
 update_note: "Supplier shipment status is server-derived from factual shipment/FF-acceptance dates and canonical business today; persisted order_status is only a compatibility cache. Stage 7C may exclude one exact clean pending receipt from opening/backfill, then only guided `Принять на FF` owns its factual date plus aggregate and facility/pool receipt exactly once. An ordinary header-only factual shipment-date edit uses query-only target planning and one append-only affected-SKU functional publication under the shared warehouse writer lock. It never copies or integrity-scans the monolithic runtime DB, never reads Finance raw rows, keeps an exact before-image rollback manifest and leaves unrelated anomalies diagnostic-only. Operator Save polls the persisted waiting/recalculation/verification result and reloads the card; there is no manual status selector or separate recalculate button."
 current_update_note: "`Настройки` is a common-shell right-side action with `Справочники` and `Пользователи` only for `settings + manage_users`; supplier-only access remains standalone and cannot reach settings/users, while `supply_operator` maps to the `Поставки`/`supply` shell section."
 barcode_identity_update_note: "Supplier invoice parser v2 detects a confirmed barcode column by multilingual header/relative/current-template evidence, persists source-owned line barcode, and resolves every new product line only by exact ownership across active nomenclature barcode + barcodes. Client manual override, type/model/match_key aliases and compatibility cannot replace or bypass barcode identity; legacy rows without barcode remain readable and are never fuzzy-rematched."
+guided_acceptance_identity_update_note: "The guided China → FF template treats exact matched supplier nmId/quantity/cost as source composition but resolves workbook barcode identity from exactly one active, non-hidden server-owned nomenclature row. Empty legacy supplier-line barcode is allowed; a non-empty supplier barcode is corroboration only and conflicting, missing, duplicate or ambiguous canonical evidence fails closed."
 ---
 
 # 1. Contract
@@ -192,10 +193,16 @@ barcode_identity_update_note: "Supplier invoice parser v2 detects a confirmed ba
   create a second live receipt, seed facilities or mutate supplier evidence.
 - Migration 135 adds the protected China template/preview operator route, but
   it still reads only one exact persisted shipment revision and server-owned
-  matched nmId/barcode/capital evidence. The multipart boundary rejects size
-  before buffering and then reuses the Stage 2 XLSX guards. Posting remains
-  disabled without a separate facility/pool writer epoch and cannot change the
-  current factual-acceptance trigger, shipment status or supplier rows.
+  matched nmId/quantity/capital evidence. Workbook barcode identity is resolved
+  by exact nmId from exactly one active, non-hidden nomenclature row; primary
+  and additional canonical barcodes plus their identity revision are pinned in
+  the template source digest. Empty legacy supplier-line barcode is not an
+  identity blocker, while a conflicting non-empty supplier barcode and any
+  missing, duplicate or ambiguous nomenclature evidence fail closed. The
+  multipart boundary rejects size before buffering and then reuses the Stage 2
+  XLSX guards. Posting remains disabled without a separate facility/pool writer
+  epoch and cannot change the current factual-acceptance trigger, shipment
+  status or supplier rows.
 
 ## Unified cost/physical boundary (2026-07-01)
 
