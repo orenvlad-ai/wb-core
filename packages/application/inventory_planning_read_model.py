@@ -170,7 +170,11 @@ class InventoryPlanningReadModel:
                 snapshot=snapshot,
                 wb_items=wb_items,
             )
-            fbs = _fbs_facilities(conn, seller_id=seller_id)
+            fbs = _fbs_facilities(
+                conn,
+                seller_id=seller_id,
+                requested_nm_ids=[item["nm_id"] for item in wb_items],
+            )
             fbs_total = fbs["available_total"]
             wb_effective = (
                 None
@@ -232,6 +236,11 @@ class InventoryPlanningReadModel:
                     ),
                 )
             )
+            sku_rows = _sku_planning_rows(
+                wb_items=wb_items,
+                incident=incident,
+                fbs=fbs,
+            )
             epoch = fbs["formula_epoch"]
             payload = {
                 "contract_name": CONTRACT_NAME,
@@ -255,6 +264,7 @@ class InventoryPlanningReadModel:
                     "accounting_operand_added": False,
                 },
                 "metrics": metrics,
+                "skus": sku_rows,
                 "wb": {
                     "raw_total": wb_total,
                     "incident_quantity": incident["quantity"],
@@ -384,6 +394,7 @@ def _incident_deduction(
     if policy is None or not _policy_is_active(policy, snapshot_date=snapshot_date):
         return {
             "quantity": 0,
+            "quantity_by_nm_id": {item["nm_id"]: 0 for item in wb_items},
             "quality": "exact_no_active_incident",
             "reason_ru": "Активных инцидентов на дату снимка нет.",
             "policy_revision": int(policy["revision"]) if policy is not None else 0,
@@ -407,6 +418,7 @@ def _incident_deduction(
     if evidence is None or str(evidence["sku_scope_digest"]) != expected_scope_digest:
         return {
             "quantity": None,
+            "quantity_by_nm_id": {},
             "quality": "unavailable_exact_incident_evidence_missing",
             "reason_ru": (
                 "Недоступно: для активного инцидента нет exact persisted quantity "
@@ -448,6 +460,7 @@ def _incident_deduction(
     ):
         return {
             "quantity": None,
+            "quantity_by_nm_id": {},
             "quality": "unavailable_exact_incident_evidence_invalid",
             "reason_ru": (
                 "Недоступно: incident evidence не покрывает exact полный SKU-срез "
@@ -459,6 +472,9 @@ def _incident_deduction(
         }
     return {
         "quantity": sum(row["incident_quantity"] for row in persisted_lines),
+        "quantity_by_nm_id": {
+            row["nm_id"]: row["incident_quantity"] for row in persisted_lines
+        },
         "quality": "exact_persisted_incident_evidence",
         "reason_ru": "",
         "policy_revision": int(policy["revision"]),
@@ -489,7 +505,12 @@ def _policy_is_active(policy: Mapping[str, Any], *, snapshot_date: str) -> bool:
     return True
 
 
-def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, Any]:
+def _fbs_facilities(
+    conn: sqlite3.Connection,
+    *,
+    seller_id: str,
+    requested_nm_ids: list[int],
+) -> dict[str, Any]:
     manifest = conn.execute(
         f"""SELECT cutover_id,business_date,feature_epoch,cutover_at
             FROM {MANIFESTS_TABLE} ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"""
@@ -519,6 +540,7 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
         (seller_id,),
     ).fetchone()
     readback_by_facility: dict[str, int] = {}
+    readback_by_facility_nm_id: dict[tuple[str, int], int] = {}
     mapped_ids_by_facility: dict[str, list[int]] = {}
     unmatched_readback_ids: list[int] = []
     ambiguous_readback_ids: list[int] = []
@@ -551,21 +573,58 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
                     GROUP BY seller_warehouse_id
                     HAVING COUNT(DISTINCT facility_id)=1
                 )
-                SELECT mapping.facility_id,line.seller_warehouse_id,SUM(line.quantity) quantity
+                SELECT mapping.facility_id,line.seller_warehouse_id,line.nm_id,
+                       SUM(line.quantity) quantity
                 FROM {SELLER_STOCK_LINES_TABLE} line
                 JOIN exact_mapping mapping
                   ON mapping.seller_warehouse_id=line.seller_warehouse_id
                 WHERE line.readback_id=?
-                GROUP BY mapping.facility_id,line.seller_warehouse_id""",
+                GROUP BY mapping.facility_id,line.seller_warehouse_id,line.nm_id""",
             (str(readback["readback_id"]),),
         ).fetchall():
             facility_id = str(row["facility_id"])
             readback_by_facility[facility_id] = (
                 readback_by_facility.get(facility_id, 0) + int(row["quantity"])
             )
-            mapped_ids_by_facility.setdefault(facility_id, []).append(
-                int(row["seller_warehouse_id"])
+            readback_key = (facility_id, int(row["nm_id"]))
+            readback_by_facility_nm_id[readback_key] = (
+                readback_by_facility_nm_id.get(readback_key, 0) + int(row["quantity"])
             )
+            mapped_ids = mapped_ids_by_facility.setdefault(facility_id, [])
+            seller_warehouse_id = int(row["seller_warehouse_id"])
+            if seller_warehouse_id not in mapped_ids:
+                mapped_ids.append(seller_warehouse_id)
+    balance_by_facility_nm_id: dict[tuple[str, int], dict[str, Any]] = {}
+    reservation_by_facility_nm_id: dict[tuple[str, int], dict[str, Any]] = {}
+    sku_scope = {int(nm_id) for nm_id in requested_nm_ids if int(nm_id) > 0}
+    if epoch_ready:
+        for balance in conn.execute(
+            f"""SELECT facility_id,nm_id,SUM(quantity) quantity,MAX(updated_at) updated_at
+                FROM {BALANCES_TABLE}
+                WHERE pool='FBS' AND projection_epoch=?
+                GROUP BY facility_id,nm_id""",
+            (int(manifest["feature_epoch"]),),
+        ).fetchall():
+            key = (str(balance["facility_id"]), int(balance["nm_id"]))
+            balance_by_facility_nm_id[key] = {
+                "quantity": int(balance["quantity"]),
+                "updated_at": str(balance["updated_at"] or ""),
+            }
+            sku_scope.add(int(balance["nm_id"]))
+        for reservation in conn.execute(
+            f"""SELECT facility_id,nm_id,SUM(quantity) quantity,MAX(updated_at) updated_at
+                FROM {CURRENT_TABLE}
+                WHERE cutover_id=? AND pool='FBS' AND state='reserved'
+                GROUP BY facility_id,nm_id""",
+            (str(manifest["cutover_id"]),),
+        ).fetchall():
+            key = (str(reservation["facility_id"]), int(reservation["nm_id"]))
+            reservation_by_facility_nm_id[key] = {
+                "quantity": int(reservation["quantity"]),
+                "updated_at": str(reservation["updated_at"] or ""),
+            }
+            sku_scope.add(int(reservation["nm_id"]))
+
     rows: list[dict[str, Any]] = []
     physical_total = 0
     reserved_total = 0
@@ -576,26 +635,70 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
         facility_id = str(facility["facility_id"])
         physical = reserved = None
         updated_at = ""
+        sku_values: list[dict[str, Any]] = []
         if epoch_ready:
-            balance = conn.execute(
-                f"""SELECT COUNT(*) row_count,SUM(quantity) quantity,MAX(updated_at) updated_at
-                    FROM {BALANCES_TABLE}
-                    WHERE facility_id=? AND pool='FBS' AND projection_epoch=?""",
-                (facility_id, int(manifest["feature_epoch"])),
-            ).fetchone()
-            reservation = conn.execute(
-                f"""SELECT COALESCE(SUM(quantity),0) quantity,MAX(updated_at) updated_at
-                    FROM {CURRENT_TABLE}
-                    WHERE cutover_id=? AND facility_id=? AND pool='FBS' AND state='reserved'""",
-                (str(manifest["cutover_id"]), facility_id),
-            ).fetchone()
+            facility_balances = {
+                nm_id: value
+                for (row_facility_id, nm_id), value in balance_by_facility_nm_id.items()
+                if row_facility_id == facility_id
+            }
+            facility_reservations = {
+                nm_id: value
+                for (row_facility_id, nm_id), value in reservation_by_facility_nm_id.items()
+                if row_facility_id == facility_id
+            }
             physical = (
-                int(balance["quantity"])
-                if int(balance["row_count"] or 0) > 0 and balance["quantity"] is not None
+                sum(int(value["quantity"]) for value in facility_balances.values())
+                if facility_balances
                 else None
             )
-            reserved = int(reservation["quantity"] or 0)
-            updated_at = max(str(balance["updated_at"] or ""), str(reservation["updated_at"] or ""))
+            reserved = sum(
+                int(value["quantity"]) for value in facility_reservations.values()
+            )
+            updated_at = max(
+                [
+                    str(value["updated_at"] or "")
+                    for value in (*facility_balances.values(), *facility_reservations.values())
+                ],
+                default="",
+            )
+            for nm_id in sorted(sku_scope):
+                balance_value = facility_balances.get(nm_id)
+                reservation_value = facility_reservations.get(nm_id)
+                sku_physical = (
+                    int(balance_value["quantity"])
+                    if balance_value is not None
+                    else None
+                )
+                sku_reserved = int(reservation_value["quantity"]) if reservation_value else 0
+                sku_available = (
+                    None if sku_physical is None else sku_physical - sku_reserved
+                )
+                official_sku = readback_by_facility_nm_id.get((facility_id, nm_id))
+                sku_values.append(
+                    {
+                        "nm_id": nm_id,
+                        "physical": sku_physical,
+                        "reserved": sku_reserved,
+                        "available": sku_available,
+                        "available_is_signed": True,
+                        "quality": "exact_ledger" if sku_available is not None else "unavailable",
+                        "reason_ru": (
+                            ""
+                            if sku_available is not None
+                            else "Недоступно: для SKU нет exact physical FBS ledger row."
+                        ),
+                        "seller_stock": {
+                            "quantity": official_sku,
+                            "delta_to_ledger_physical": (
+                                None
+                                if official_sku is None or sku_physical is None
+                                else official_sku - sku_physical
+                            ),
+                            "role": "reconciliation_only",
+                        },
+                    }
+                )
         available = None if physical is None or reserved is None else physical - reserved
         official = readback_by_facility.get(facility_id) if readback is not None else None
         if bool(facility["active"]):
@@ -618,6 +721,7 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
                     "reserved": reserved,
                     "available": available,
                     "available_is_signed": True,
+                    "sku_values": sku_values,
                     "seller_stock": {
                         "quantity": official,
                         "captured_at": str(readback["captured_at"]) if readback is not None else "",
@@ -635,11 +739,61 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
             )
     totals_ready = epoch_ready and active_missing_physical == 0
     available_total = None if not totals_ready else physical_total - reserved_total
+    active_rows = [row for row in rows if row["active"]]
+    sku_values: list[dict[str, Any]] = []
+    for nm_id in sorted(sku_scope):
+        facility_values = [
+            next(
+                (
+                    value
+                    for value in row["sku_values"]
+                    if int(value["nm_id"]) == nm_id
+                ),
+                None,
+            )
+            for row in active_rows
+        ]
+        exact = epoch_ready and all(
+            value is not None and value["available"] is not None
+            for value in facility_values
+        )
+        sku_values.append(
+            {
+                "nm_id": nm_id,
+                "physical": (
+                    sum(int(value["physical"]) for value in facility_values if value is not None)
+                    if exact
+                    else None
+                ),
+                "reserved": (
+                    sum(int(value["reserved"]) for value in facility_values if value is not None)
+                    if exact
+                    else None
+                ),
+                "available": (
+                    sum(int(value["available"]) for value in facility_values if value is not None)
+                    if exact
+                    else None
+                ),
+                "available_is_signed": True,
+                "quality": "exact_ledger" if exact else "unavailable",
+                "reason_ru": (
+                    ""
+                    if exact
+                    else (
+                        "Недоступно: для SKU нет exact physical FBS ledger row по всем active facility."
+                        if epoch_ready
+                        else "Недоступно: active FBS reader epoch не подтверждён."
+                    )
+                ),
+            }
+        )
     return {
         "facilities": rows,
         "physical_total": None if not totals_ready else physical_total,
         "reserved_total": None if not totals_ready else reserved_total,
         "available_total": available_total,
+        "sku_values": sku_values,
         "quality": "exact_ledger" if totals_ready else (
             "unavailable_fbs_physical" if epoch_ready else "unavailable_fbs_epoch"
         ),
@@ -681,6 +835,107 @@ def _fbs_facilities(conn: sqlite3.Connection, *, seller_id: str) -> dict[str, An
             "effective_from": str(manifest["business_date"]) if manifest is not None else None,
         },
     }
+
+
+def _sku_planning_rows(
+    *,
+    wb_items: list[dict[str, int]],
+    incident: Mapping[str, Any],
+    fbs: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    wb_by_nm_id = {int(item["nm_id"]): int(item["quantity"]) for item in wb_items}
+    incident_by_nm_id = {
+        int(nm_id): int(quantity)
+        for nm_id, quantity in dict(incident.get("quantity_by_nm_id") or {}).items()
+    }
+    fbs_by_nm_id = {
+        int(item["nm_id"]): dict(item)
+        for item in list(fbs.get("sku_values") or [])
+    }
+    facility_by_nm_id: dict[int, list[dict[str, Any]]] = {}
+    for facility in list(fbs.get("facilities") or []):
+        for item in list(facility.get("sku_values") or []):
+            nm_id = int(item["nm_id"])
+            facility_by_nm_id.setdefault(nm_id, []).append(
+                {
+                    "facility_id": str(facility["facility_id"]),
+                    "name": str(facility["name"]),
+                    "physical": item.get("physical"),
+                    "reserved": item.get("reserved"),
+                    "available": item.get("available"),
+                    "available_is_signed": True,
+                    "quality": str(item.get("quality") or "unavailable"),
+                    "reason_ru": str(item.get("reason_ru") or ""),
+                    "seller_stock": dict(item.get("seller_stock") or {}),
+                }
+            )
+
+    nm_ids = sorted(set(wb_by_nm_id) | set(fbs_by_nm_id) | set(facility_by_nm_id))
+    result: list[dict[str, Any]] = []
+    for nm_id in nm_ids:
+        wb_total = wb_by_nm_id.get(nm_id)
+        incident_quantity = incident_by_nm_id.get(nm_id)
+        incident_available = incident.get("quantity") is not None
+        wb_effective = (
+            wb_total - incident_quantity
+            if wb_total is not None and incident_available and incident_quantity is not None
+            else None
+        )
+        fbs_row = fbs_by_nm_id.get(nm_id) or {}
+        fbs_available = fbs_row.get("available")
+        total = (
+            wb_total + int(fbs_available)
+            if wb_total is not None and fbs_available is not None
+            else None
+        )
+        effective_total = (
+            wb_effective + int(fbs_available)
+            if wb_effective is not None and fbs_available is not None
+            else None
+        )
+        wb_reason = (
+            ""
+            if wb_total is not None
+            else "Недоступно: официальный WB aggregate не содержит exact SKU quantity."
+        )
+        incident_reason = str(incident.get("reason_ru") or "")
+        fbs_reason = str(fbs_row.get("reason_ru") or fbs.get("reason_ru") or "")
+        result.append(
+            {
+                "nm_id": nm_id,
+                "wb_total": wb_total,
+                "wb_effective_total": wb_effective,
+                "incident_quantity": incident_quantity if incident_available else None,
+                "fbs_total": fbs_available,
+                "fbs_physical": fbs_row.get("physical"),
+                "fbs_reserved": fbs_row.get("reserved"),
+                "fbs_facilities": sorted(
+                    facility_by_nm_id.get(nm_id, []),
+                    key=lambda item: (item["name"], item["facility_id"]),
+                ),
+                "total": total,
+                "effective_total": effective_total,
+                "quality": {
+                    "wb_total": "exact" if wb_total is not None else "unavailable",
+                    "wb_total_reason_ru": wb_reason,
+                    "wb_effective_total": (
+                        str(incident.get("quality") or "unavailable")
+                        if wb_effective is not None
+                        else "unavailable"
+                    ),
+                    "wb_effective_total_reason_ru": wb_reason or incident_reason,
+                    "fbs_total": str(fbs_row.get("quality") or "unavailable"),
+                    "fbs_total_reason_ru": fbs_reason,
+                    "total": "exact" if total is not None else "unavailable",
+                    "total_reason_ru": wb_reason or fbs_reason,
+                    "effective_total": (
+                        "exact" if effective_total is not None else "unavailable"
+                    ),
+                    "effective_total_reason_ru": wb_reason or incident_reason or fbs_reason,
+                },
+            }
+        )
+    return result
 
 
 def _metric(

@@ -25,6 +25,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_view_model_integration_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"
+  - "apps/sheet_vitrina_v1_inventory_planning_smoke.py"
+  - "apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py"
 related_docs:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -170,3 +172,19 @@ The view model carries optional per-date `presentation_state`, `presentation_ton
 The same section exposes canonical six-stage quantity/capital/coverage fields. Open `packed - accepted` belongs to stage `FF → WB` until final acceptance; positive final difference belongs to the separate `Расхождения приёмки WB` warehouse. Legacy paid-equivalent/underaccepted rows are audit compatibility only and are not active quantity or capital sources.
 
 The WebCore source group is additive and adjacent to the existing 1C capital group. SKU/TOTAL values, weighted confirmed share and ratio-of-aggregates profitability are computed before the view-model boundary; the mapper only preserves and renders them.
+
+# 10. Current inventory planning rows
+
+For a window containing the exact current WB snapshot date, the upstream
+contract adds six logical `inventory_planning_v1` metric pairs: raw WB,
+incident-effective WB, signed FBS available total, dynamic active-facility FBS
+available, combined effective stock and combined raw stock. The mapper does not
+recalculate them; it preserves per-date value, formula provenance and quality
+reason. The familiar combined keys are current presentation aliases, not a
+change to persisted ready-snapshot or downstream calculator semantics.
+
+An unavailable current planning cell carries
+`quality_state=inventory_planning_unavailable`. This is a first-class N/A
+value, not numeric zero. Historical exact-date contracts are left untouched;
+new rows inside a current multi-date window expose older unmaterialized cells
+only as explicit non-rewritten history.

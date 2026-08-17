@@ -1,0 +1,515 @@
+"""Read-time inventory_planning_v1 rows for the main Web Vitrina table.
+
+The overlay is deliberately presentation-only.  It never mutates ready
+snapshots and reuses the two familiar legacy row identities only as current
+display aliases, so downstream calculation contracts keep their persisted
+semantics.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Any, Iterable, Mapping
+
+from packages.application.inventory_planning_read_model import FORMULA_VERSION
+from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item
+from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
+
+
+INVENTORY_PLANNING_SECTION_RU = "Остатки WB и FBS"
+INVENTORY_WB_TOTAL_KEY = "inventory_wb_total_qty_v1"
+INVENTORY_WB_EFFECTIVE_KEY = "inventory_wb_effective_qty_v1"
+INVENTORY_FBS_TOTAL_KEY = "inventory_fbs_total_qty_v1"
+INVENTORY_FBS_FACILITY_PREFIX = "inventory_fbs_facility_available_qty_v1:"
+COMBINED_EFFECTIVE_ALIAS_KEY = "wb_stock_effective_qty"
+COMBINED_TOTAL_ALIAS_KEY = "stock_total"
+INVENTORY_PLANNING_HISTORY_REASON_RU = (
+    "Недоступно: inventory_planning_v1 не переписывает исторические даты "
+    "без exact persisted evidence."
+)
+INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU = (
+    "Историческое значение сохранено по прежней формуле; "
+    "inventory_planning_v1 не применён задним числом."
+)
+
+
+@dataclass(frozen=True)
+class _MetricSpec:
+    sku_key: str
+    total_key: str
+    label_ru: str
+    value_field: str
+    reason_field: str
+    facility_id: str = ""
+
+
+def inventory_planning_total_metric_key(sku_key: str) -> str:
+    return f"total_{sku_key}"
+
+
+def inventory_planning_facility_metric_key(facility_id: str) -> str:
+    return f"{INVENTORY_FBS_FACILITY_PREFIX}{facility_id}"
+
+
+def is_inventory_planning_presentation_metric_key(metric_key: str) -> bool:
+    normalized = str(metric_key or "").removeprefix("total_")
+    return normalized in {
+        INVENTORY_WB_TOTAL_KEY,
+        INVENTORY_WB_EFFECTIVE_KEY,
+        INVENTORY_FBS_TOTAL_KEY,
+        COMBINED_EFFECTIVE_ALIAS_KEY,
+        COMBINED_TOTAL_ALIAS_KEY,
+    } or normalized.startswith(INVENTORY_FBS_FACILITY_PREFIX)
+
+
+def inventory_planning_sku_metric_keys(planning: Mapping[str, Any]) -> list[str]:
+    return [spec.sku_key for spec in _metric_specs(planning)]
+
+
+def extend_rows_with_inventory_planning(
+    rows: Iterable[WebVitrinaContractRow],
+    *,
+    planning: Mapping[str, Any],
+    date_columns: list[str],
+    enabled_config: list[ConfigV2Item],
+) -> list[WebVitrinaContractRow]:
+    """Materialize current planning rows while preserving exact-date history."""
+
+    source_rows = list(rows)
+    if not _planning_applies(planning, date_columns=date_columns):
+        return source_rows
+
+    current_date = str((planning.get("wb") or {}).get("snapshot_date") or "")
+    specs = _metric_specs(planning)
+    planning_keys = {
+        key
+        for spec in specs
+        for key in (spec.sku_key, spec.total_key)
+    }
+    planning_by_nm_id = {
+        int(item["nm_id"]): item
+        for item in list(planning.get("skus") or [])
+        if isinstance(item, Mapping) and str(item.get("nm_id") or "").isdigit()
+    }
+    config_by_nm_id = {
+        int(item.nm_id): item for item in enabled_config if bool(item.enabled)
+    }
+
+    scope_order: list[str] = []
+    rows_by_scope: dict[str, list[WebVitrinaContractRow]] = {}
+    for row in source_rows:
+        scope_id = _scope_id(row)
+        if scope_id not in rows_by_scope:
+            scope_order.append(scope_id)
+            rows_by_scope[scope_id] = []
+        rows_by_scope[scope_id].append(row)
+    if "TOTAL" not in rows_by_scope:
+        scope_order.insert(0, "TOTAL")
+        rows_by_scope["TOTAL"] = []
+    for item in sorted(
+        config_by_nm_id.values(),
+        key=lambda config: (int(config.display_order), int(config.nm_id)),
+    ):
+        scope_id = f"SKU:{int(item.nm_id)}"
+        if scope_id not in rows_by_scope:
+            scope_order.append(scope_id)
+            rows_by_scope[scope_id] = []
+
+    result: list[WebVitrinaContractRow] = []
+    for scope_id in scope_order:
+        cluster = rows_by_scope[scope_id]
+        if scope_id == "TOTAL":
+            result.extend(
+                _replace_planning_cluster(
+                    cluster,
+                    specs=specs,
+                    planning_keys=planning_keys,
+                    current_date=current_date,
+                    date_columns=date_columns,
+                    scope_kind="TOTAL",
+                    scope_key="TOTAL",
+                    scope_label="ИТОГО",
+                    group=None,
+                    nm_id=None,
+                    value_source=_aggregate_value_source(planning),
+                    row_updated_at=_planning_updated_at(planning),
+                )
+            )
+            continue
+        if scope_id.startswith("SKU:"):
+            try:
+                nm_id = int(scope_id.split(":", 1)[1])
+            except ValueError:
+                result.extend(cluster)
+                continue
+            config = config_by_nm_id.get(nm_id)
+            if config is None:
+                result.extend(cluster)
+                continue
+            result.extend(
+                _replace_planning_cluster(
+                    cluster,
+                    specs=specs,
+                    planning_keys=planning_keys,
+                    current_date=current_date,
+                    date_columns=date_columns,
+                    scope_kind="SKU",
+                    scope_key=scope_id,
+                    scope_label=str(config.display_name),
+                    group=str(config.group or "") or None,
+                    nm_id=nm_id,
+                    value_source=_sku_value_source(
+                        planning_by_nm_id.get(nm_id),
+                        planning=planning,
+                    ),
+                    row_updated_at=_planning_updated_at(planning),
+                )
+            )
+            continue
+        result.extend(cluster)
+
+    return [replace(row, row_order=index) for index, row in enumerate(result, start=1)]
+
+
+def _metric_specs(planning: Mapping[str, Any]) -> list[_MetricSpec]:
+    specs = [
+        _MetricSpec(
+            sku_key=INVENTORY_WB_TOTAL_KEY,
+            total_key=inventory_planning_total_metric_key(INVENTORY_WB_TOTAL_KEY),
+            label_ru="Остаток WB: всего",
+            value_field="wb_total",
+            reason_field="wb_total_reason_ru",
+        ),
+        _MetricSpec(
+            sku_key=INVENTORY_WB_EFFECTIVE_KEY,
+            total_key=inventory_planning_total_metric_key(INVENTORY_WB_EFFECTIVE_KEY),
+            label_ru="Остаток WB без инц.: всего",
+            value_field="wb_effective_total",
+            reason_field="wb_effective_total_reason_ru",
+        ),
+        _MetricSpec(
+            sku_key=INVENTORY_FBS_TOTAL_KEY,
+            total_key=inventory_planning_total_metric_key(INVENTORY_FBS_TOTAL_KEY),
+            label_ru="Остаток FBS: всего",
+            value_field="fbs_total",
+            reason_field="fbs_total_reason_ru",
+        ),
+    ]
+    active_facilities = [
+        facility
+        for facility in list((planning.get("fbs") or {}).get("facilities") or [])
+        if isinstance(facility, Mapping) and bool(facility.get("active"))
+    ]
+    facility_name_counts: dict[str, int] = {}
+    for facility in active_facilities:
+        name = str(facility.get("name") or facility.get("facility_id") or "").strip()
+        facility_name_counts[name.casefold()] = facility_name_counts.get(name.casefold(), 0) + 1
+    for facility in active_facilities:
+        facility_id = str(facility.get("facility_id") or "").strip()
+        name = str(facility.get("name") or facility_id).strip()
+        if not facility_id:
+            continue
+        display_name = (
+            f"{name} ({str(facility.get('code') or facility_id).strip()})"
+            if facility_name_counts.get(name.casefold(), 0) > 1
+            else name
+        )
+        sku_key = inventory_planning_facility_metric_key(facility_id)
+        specs.append(
+            _MetricSpec(
+                sku_key=sku_key,
+                total_key=inventory_planning_total_metric_key(sku_key),
+                label_ru=f"Остаток FBS: {display_name}",
+                value_field="facility_available",
+                reason_field="facility_available_reason_ru",
+                facility_id=facility_id,
+            )
+        )
+    specs.extend(
+        (
+            _MetricSpec(
+                sku_key=COMBINED_EFFECTIVE_ALIAS_KEY,
+                total_key=inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY),
+                label_ru="Остаток без инц.: всего",
+                value_field="effective_total",
+                reason_field="effective_total_reason_ru",
+            ),
+            _MetricSpec(
+                sku_key=COMBINED_TOTAL_ALIAS_KEY,
+                total_key=inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY),
+                label_ru="Остаток: всего",
+                value_field="total",
+                reason_field="total_reason_ru",
+            ),
+        )
+    )
+    return specs
+
+
+def _planning_applies(planning: Mapping[str, Any], *, date_columns: list[str]) -> bool:
+    if str(planning.get("status") or "") != "ready":
+        return False
+    formula = planning.get("formula") or {}
+    if str(formula.get("version") or "") != FORMULA_VERSION:
+        return False
+    snapshot_date = str((planning.get("wb") or {}).get("snapshot_date") or "")
+    effective_from = str(formula.get("effective_from") or "")
+    source_cutover_id = str(formula.get("source_cutover_id") or "")
+    feature_epoch = formula.get("feature_epoch")
+    return bool(
+        snapshot_date
+        and effective_from
+        and source_cutover_id
+        and feature_epoch is not None
+        and snapshot_date in set(date_columns)
+        and snapshot_date >= effective_from
+    )
+
+
+def _replace_planning_cluster(
+    cluster: list[WebVitrinaContractRow],
+    *,
+    specs: list[_MetricSpec],
+    planning_keys: set[str],
+    current_date: str,
+    date_columns: list[str],
+    scope_kind: str,
+    scope_key: str,
+    scope_label: str,
+    group: str | None,
+    nm_id: int | None,
+    value_source: Mapping[str, Any],
+    row_updated_at: str,
+) -> list[WebVitrinaContractRow]:
+    existing_by_key = {
+        row.metric_key: row for row in cluster if row.metric_key in planning_keys
+    }
+    insert_at = min(
+        (
+            index
+            for index, row in enumerate(cluster)
+            if row.metric_key in planning_keys
+        ),
+        default=len(cluster),
+    )
+    retained = [row for row in cluster if row.metric_key not in planning_keys]
+    insert_at = min(insert_at, len(retained))
+    materialized = [
+        _planning_row(
+            existing=existing_by_key.get(
+                spec.total_key if scope_kind == "TOTAL" else spec.sku_key
+            ),
+            metric_key=spec.total_key if scope_kind == "TOTAL" else spec.sku_key,
+            spec=spec,
+            current_date=current_date,
+            date_columns=date_columns,
+            scope_kind=scope_kind,
+            scope_key=scope_key,
+            scope_label=scope_label,
+            group=group,
+            nm_id=nm_id,
+            value_source=value_source,
+            row_updated_at=row_updated_at,
+        )
+        for spec in specs
+    ]
+    return [*retained[:insert_at], *materialized, *retained[insert_at:]]
+
+
+def _planning_row(
+    *,
+    existing: WebVitrinaContractRow | None,
+    metric_key: str,
+    spec: _MetricSpec,
+    current_date: str,
+    date_columns: list[str],
+    scope_kind: str,
+    scope_key: str,
+    scope_label: str,
+    group: str | None,
+    nm_id: int | None,
+    value_source: Mapping[str, Any],
+    row_updated_at: str,
+) -> WebVitrinaContractRow:
+    values = (
+        dict(existing.values_by_date)
+        if existing is not None
+        else {column_date: "" for column_date in date_columns}
+    )
+    presentation = (
+        {key: dict(value) for key, value in existing.presentation_by_date.items()}
+        if existing is not None
+        else {
+            column_date: _history_unavailable_presentation()
+            for column_date in date_columns
+            if column_date != current_date
+        }
+    )
+    if existing is not None:
+        for column_date in date_columns:
+            historical_value = values.get(column_date)
+            if column_date == current_date or historical_value is None or historical_value == "":
+                continue
+            historical = presentation.setdefault(column_date, {})
+            historical.setdefault("quality_state", "inventory_planning_legacy_history")
+            historical.setdefault("quality_label", "Историческая формула")
+            historical.setdefault(
+                "quality_reason",
+                INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU,
+            )
+    value, reason = _metric_value(spec, value_source)
+    values[current_date] = value if value is not None else ""
+    presentation[current_date] = _current_presentation(reason=reason if value is None else "")
+    return WebVitrinaContractRow(
+        row_id=f"{scope_key}|{metric_key}",
+        row_order=existing.row_order if existing is not None else 0,
+        scope_kind=scope_kind,
+        scope_key=scope_key,
+        scope_label=scope_label,
+        metric_key=metric_key,
+        metric_label=spec.label_ru,
+        row_last_updated_at=row_updated_at or (
+            existing.row_last_updated_at if existing is not None else ""
+        ),
+        section=INVENTORY_PLANNING_SECTION_RU,
+        group=group,
+        nm_id=nm_id,
+        format="number",
+        values_by_date=values,
+        presentation_by_date=presentation,
+    )
+
+
+def _metric_value(spec: _MetricSpec, source: Mapping[str, Any]) -> tuple[int | None, str]:
+    if spec.facility_id:
+        facility = next(
+            (
+                item
+                for item in list(source.get("fbs_facilities") or [])
+                if str(item.get("facility_id") or "") == spec.facility_id
+            ),
+            None,
+        )
+        if facility is None:
+            return None, "Недоступно: для SKU нет exact physical FBS ledger row."
+        value = facility.get("available")
+        return (
+            None if value is None else int(value),
+            str(facility.get("reason_ru") or ""),
+        )
+    value = source.get(spec.value_field)
+    return (
+        None if value is None else int(value),
+        str((source.get("quality") or {}).get(spec.reason_field) or ""),
+    )
+
+
+def _aggregate_value_source(planning: Mapping[str, Any]) -> dict[str, Any]:
+    metrics = {
+        str(item.get("metric_key") or ""): item
+        for item in list(planning.get("metrics") or [])
+        if isinstance(item, Mapping)
+    }
+    facilities = [
+        {
+            "facility_id": str(item.get("facility_id") or ""),
+            "available": item.get("available"),
+            "reason_ru": (
+                ""
+                if item.get("available") is not None
+                else "Недоступно: для active facility нет строки physical FBS ledger."
+            ),
+        }
+        for item in list((planning.get("fbs") or {}).get("facilities") or [])
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "wb_total": (metrics.get("wb_total") or {}).get("value"),
+        "wb_effective_total": (metrics.get("wb_effective_total") or {}).get("value"),
+        "fbs_total": (metrics.get("fbs_total") or {}).get("value"),
+        "effective_total": (metrics.get("effective_total") or {}).get("value"),
+        "total": (metrics.get("total") or {}).get("value"),
+        "fbs_facilities": facilities,
+        "quality": {
+            "wb_total_reason_ru": str((metrics.get("wb_total") or {}).get("reason_ru") or ""),
+            "wb_effective_total_reason_ru": str(
+                (metrics.get("wb_effective_total") or {}).get("reason_ru") or ""
+            ),
+            "fbs_total_reason_ru": str((metrics.get("fbs_total") or {}).get("reason_ru") or ""),
+            "effective_total_reason_ru": str(
+                (metrics.get("effective_total") or {}).get("reason_ru") or ""
+            ),
+            "total_reason_ru": str((metrics.get("total") or {}).get("reason_ru") or ""),
+        },
+    }
+
+
+def _sku_value_source(
+    sku: Mapping[str, Any] | None,
+    *,
+    planning: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if sku is not None:
+        return sku
+    incident_reason = str(
+        ((planning.get("wb") or {}).get("incident_evidence") or {}).get("reason_ru")
+        or ""
+    )
+    wb_reason = "Недоступно: официальный WB aggregate не содержит exact SKU quantity."
+    fbs_reason = "Недоступно: для SKU нет exact physical FBS ledger row по всем active facility."
+    return {
+        "fbs_facilities": [],
+        "quality": {
+            "wb_total_reason_ru": wb_reason,
+            "wb_effective_total_reason_ru": wb_reason or incident_reason,
+            "fbs_total_reason_ru": fbs_reason,
+            "effective_total_reason_ru": wb_reason or incident_reason or fbs_reason,
+            "total_reason_ru": wb_reason or fbs_reason,
+        },
+    }
+
+
+def _current_presentation(*, reason: str) -> dict[str, str]:
+    if reason:
+        return {
+            "state": "unavailable",
+            "tone": "warning",
+            "reason": reason,
+            "source": FORMULA_VERSION,
+            "quality_state": "inventory_planning_unavailable",
+            "quality_label": "Недоступно",
+            "quality_reason": reason,
+        }
+    return {
+        "state": "",
+        "tone": "success",
+        "reason": "",
+        "source": FORMULA_VERSION,
+        "quality_state": FORMULA_VERSION,
+        "quality_label": "Точное значение",
+        "quality_reason": "inventory_planning_v1: exact persisted operands",
+    }
+
+
+def _history_unavailable_presentation() -> dict[str, str]:
+    return {
+        "state": "unavailable",
+        "tone": "neutral",
+        "reason": INVENTORY_PLANNING_HISTORY_REASON_RU,
+        "source": FORMULA_VERSION,
+        "quality_state": "inventory_planning_history_unavailable",
+        "quality_label": "История не материализована",
+        "quality_reason": INVENTORY_PLANNING_HISTORY_REASON_RU,
+    }
+
+
+def _planning_updated_at(planning: Mapping[str, Any]) -> str:
+    freshness = planning.get("freshness") or {}
+    return max(
+        str(freshness.get("wb_fetched_at") or ""),
+        str(freshness.get("fbs_updated_at") or ""),
+    )
+
+
+def _scope_id(row: WebVitrinaContractRow) -> str:
+    return str(row.scope_key or row.scope_kind or row.row_id.split("|", 1)[0])

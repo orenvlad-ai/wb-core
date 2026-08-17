@@ -211,6 +211,11 @@ def _check_server_config_sanitizer() -> None:
                 "incident_effective_shown_v1": True,
                 "sku_presets_seeded_v1": True,
                 "unified_presentation_v1": True,
+                "inventory_planning_metric_keys_v1": [
+                    "inventory_wb_total_qty_v1",
+                    "inventory_wb_total_qty_v1",
+                    "x" * 161,
+                ],
             },
         }
     )
@@ -225,6 +230,8 @@ def _check_server_config_sanitizer() -> None:
         }
         or not unified.get("presentation", {}).get("manual")
         or not unified.get("migrations", {}).get("unified_presentation_v1")
+        or unified.get("migrations", {}).get("inventory_planning_metric_keys_v1")
+        != ["inventory_wb_total_qty_v1"]
     ):
         raise AssertionError(f"server sanitizer must preserve bounded v4 unified config, got {unified}")
 

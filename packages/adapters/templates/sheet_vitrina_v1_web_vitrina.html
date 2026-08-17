@@ -7130,6 +7130,15 @@
     const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
     const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
     const UNIFIED_PRESENTATION_MIGRATION = "unified_presentation_v1";
+    const INVENTORY_PLANNING_METRIC_KEYS_MIGRATION = "inventory_planning_metric_keys_v1";
+    const INVENTORY_PLANNING_STATIC_SKU_METRIC_KEYS = new Set([
+      "inventory_wb_total_qty_v1",
+      "inventory_wb_effective_qty_v1",
+      "inventory_fbs_total_qty_v1",
+      "wb_stock_effective_qty",
+      "stock_total"
+    ]);
+    const INVENTORY_PLANNING_FACILITY_METRIC_PREFIX = "inventory_fbs_facility_available_qty_v1:";
     const DEFAULT_SKU_METRIC_PRESET_ID = "analysis";
     const SKU_METRIC_HIGHLIGHT_PALETTE = [
       {name: "синий", color: "#3b82f6"},
@@ -7476,7 +7485,8 @@
         migrations: {
           incidentEffectiveShownV1: false,
           skuPresetsSeededV1: false,
-          unifiedPresentationV1: false
+          unifiedPresentationV1: false,
+          inventoryPlanningMetricKeysV1: []
         },
         presetEditor: {
           open: false,
@@ -11563,6 +11573,13 @@
               candidate.migrations[UNIFIED_PRESENTATION_MIGRATION]
               || candidate.migrations.unifiedPresentationV1
             )
+          ),
+          inventoryPlanningMetricKeysV1: uniqueMetricKeys(
+            candidate.migrations && (
+              candidate.migrations[INVENTORY_PLANNING_METRIC_KEYS_MIGRATION]
+              || candidate.migrations.inventoryPlanningMetricKeysV1
+            ),
+            500
           )
         }
       };
@@ -11725,6 +11742,46 @@
       );
     }
 
+    function isInventoryPlanningSkuMetricKey(metricKey) {
+      const normalized = String(metricKey || "").replace(/^total_/, "");
+      return (
+        INVENTORY_PLANNING_STATIC_SKU_METRIC_KEYS.has(normalized)
+        || normalized.indexOf(INVENTORY_PLANNING_FACILITY_METRIC_PREFIX) === 0
+      );
+    }
+
+    function currentInventoryPlanningSkuMetricKeys(model) {
+      const skuScope = (model.scopes || []).find(function(scope) {
+        return scope.scopeId === "sku";
+      }) || {metricKeys: []};
+      const metricKeys = skuScope.metricKeys || [];
+      if (!metricKeys.some(function(metricKey) {
+        const normalized = String(metricKey || "").replace(/^total_/, "");
+        return normalized.indexOf("inventory_") === 0;
+      })) {
+        return [];
+      }
+      return uniqueMetricKeys(metricKeys.filter(function(metricKey) {
+        return isInventoryPlanningSkuMetricKey(metricKey);
+      }), 500);
+    }
+
+    function migrateInventoryPlanningMetricSelections(metricKeys) {
+      const additions = uniqueMetricKeys(metricKeys, 500);
+      if (!additions.length) {
+        return;
+      }
+      state.metricPresentation.skuPresets = (state.metricPresentation.skuPresets || []).map(function(preset) {
+        return Object.assign({}, preset, {
+          metricKeys: uniqueMetricKeys((preset.metricKeys || []).concat(additions), 500)
+        });
+      });
+      const selection = state.metricPresentation.skuMetricSelection || {};
+      if (String(selection.mode || "manual") === "manual" && selection.all === false) {
+        selection.metricKeys = uniqueMetricKeys((selection.metricKeys || []).concat(additions), 500);
+      }
+    }
+
     function metricDisplayStatusForScope(scopeId, metricKey) {
       const logicalMetricId = state.metricPresentation.logicalIdByScopedKey.get(
         scopedMetricLookupKey(scopeId, metricKey)
@@ -11884,6 +11941,15 @@
           || !persisted.migrations.unifiedPresentationV1
         )
       );
+      const currentInventoryPlanningKeys = currentInventoryPlanningSkuMetricKeys(model);
+      const persistedInventoryPlanningKeys = uniqueMetricKeys(
+        persisted && persisted.migrations && persisted.migrations.inventoryPlanningMetricKeysV1,
+        500
+      );
+      const persistedInventoryPlanningKeySet = new Set(persistedInventoryPlanningKeys);
+      const newInventoryPlanningKeys = currentInventoryPlanningKeys.filter(function(metricKey) {
+        return !persistedInventoryPlanningKeySet.has(metricKey);
+      });
       const previousSelectionMode = !!state.metricPresentation.selectionMode;
       const previousSelection = state.metricPresentation.selection instanceof Set
         ? state.metricPresentation.selection
@@ -11919,6 +11985,14 @@
               : defaultMetricDisplayStatus(sourceKey);
         });
       }
+      newInventoryPlanningKeys.forEach(function(metricKey) {
+        const logicalMetricId = model.logicalIdByScopedKey.get(
+          scopedMetricLookupKey("sku", metricKey)
+        ) || "";
+        if (logicalMetricId) {
+          state.metricPresentation.unifiedDisplay[logicalMetricId] = "shown";
+        }
+      });
       state.metricPresentation.unifiedManual = !!(
         !forceDefault
         && persisted
@@ -11962,8 +12036,13 @@
           preservedSkuPresets
           || (persisted && persisted.migrations && persisted.migrations.skuPresetsSeededV1)
         ),
-        unifiedPresentationV1: true
+        unifiedPresentationV1: true,
+        inventoryPlanningMetricKeysV1: uniqueMetricKeys(
+          persistedInventoryPlanningKeys.concat(currentInventoryPlanningKeys),
+          500
+        )
       };
+      migrateInventoryPlanningMetricSelections(newInventoryPlanningKeys);
       ensureDefaultSkuMetricPreset();
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation({skipServer: true});
@@ -11972,6 +12051,7 @@
         || requiresIncidentEffectiveMigration
         || requiresSkuPresetSeedMigration
         || requiresUnifiedMigration
+        || newInventoryPlanningKeys.length
       ) {
         persistMetricPresentation({
           serverBaseRevision: persistedCandidate.source === "local_migration"
@@ -12015,7 +12095,11 @@
         migrations: {
           incident_effective_shown_v1: true,
           sku_presets_seeded_v1: true,
-          unified_presentation_v1: true
+          unified_presentation_v1: true,
+          inventory_planning_metric_keys_v1: uniqueMetricKeys(
+            (state.metricPresentation.migrations || {}).inventoryPlanningMetricKeysV1,
+            500
+          )
         }
       };
     }
@@ -15166,6 +15250,9 @@
 
     function formatCellContent(column, row, cell) {
       if (String(cell.presentation_state || "") === "unavailable") {
+        if (String(cell.quality_state || "") === "inventory_planning_unavailable") {
+          return '<span aria-label="Недоступно">Недоступно</span>';
+        }
         return '<span aria-label="Исторические данные отсутствуют">—</span>';
       }
       if (column.id === "metric_label") {

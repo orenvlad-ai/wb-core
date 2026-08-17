@@ -21,6 +21,7 @@ related_endpoints: []
 related_runners:
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_gravity_table_adapter_integration_smoke.py"
+  - "apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py"
 related_docs:
   - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -82,6 +83,13 @@ update_note: "Phase 3 web-vitrina materialize-ит первый concrete `grid_a
   - alter `view_model`
   - become the canonical UI state owner
   - require live route or page-shell changes
+
+The adapter preserves planning quality fields unchanged. The thin page renders
+current `inventory_planning_unavailable` cells as the localized word
+`Недоступно`, with the exact server reason in title/ARIA; ordinary historical
+absence retains the compact `—`. SKU and TOTAL keys remain one logical paired
+metric, so every planning row is independently hideable without duplicated
+labels in the unified metric catalog.
 
 ## 3.2 Current build/runtime boundary
 

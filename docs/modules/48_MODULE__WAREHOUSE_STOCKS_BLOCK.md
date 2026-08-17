@@ -135,6 +135,17 @@ the combined surface after canonical publication. Incident-adjusted values
 fail closed without exact snapshot-bound per-SKU evidence; aggregate-only WB
 never fabricates current district values.
 
+Migration 146 projects that same `inventory_planning_v1` truth into the main
+Web Vitrina table as paired SKU/TOTAL rows. The current read path adds raw WB,
+effective WB, signed FBS total, one row per active FBS facility and the two
+familiar combined totals. `stock_total` and `wb_stock_effective_qty` are reused
+only as current presentation aliases; their persisted ready-snapshot values and
+all calculation consumers are unchanged. A historical exact-date request is
+never overlaid from the current planning snapshot. Missing exact incident
+evidence keeps both effective rows present but marks their cells `Недоступно`
+with the canonical reason. Missing per-SKU physical FBS evidence is likewise
+unavailable and is never synthesized as zero.
+
 # 2. Physical and cost rules
 
 ## 2.1 Production and China → FF
@@ -362,6 +373,9 @@ Production UI status assertions wait for the visible warehouse label and timesta
 
 Targeted verification:
 
+- `python3 apps/inventory_planning_read_model_smoke.py`;
+- `python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py`;
+- `python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py`;
 - `python3 apps/warehouse_functional_smoke.py`;
 - `python3 apps/warehouse_cost_queue_replay_smoke.py`;
 - `python3 apps/sqlite_backup_archive_smoke.py`;
