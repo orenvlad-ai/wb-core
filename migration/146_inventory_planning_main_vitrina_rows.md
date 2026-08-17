@@ -1,5 +1,11 @@
 # Migration 146 — inventory planning rows in the main Web Vitrina
 
+> Superseded presentation note (Migration 147, 2026-08-17): the incident-aware
+> rows listed below remain part of the internal `inventory_planning_v1` read
+> model and persisted audit/history, but are hidden from ordinary Web Vitrina
+> rows/catalog/settings/picker. The active public subset is now only WB total,
+> FBS total, dynamic active FBS facility and raw combined total.
+
 ## Correction boundary
 
 Migration 145 introduced the query-only `inventory_planning_v1` endpoint and

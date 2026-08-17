@@ -1,5 +1,11 @@
 # Migration 145 — versioned planning inventory and FBS order read surfaces
 
+> Presentation status after Migration 147: the query-only read model and all
+> formulas/evidence contracts below remain authoritative internally, but the
+> ordinary Web Vitrina no longer publishes its incident-aware effective rows.
+> Only WB total, FBS total, dynamic active FBS-facility and raw combined total
+> are public planning rows. No evidence or history described here was deleted.
+
 ## Boundary
 
 This migration adds a current, query-only planning/read model. It does not add

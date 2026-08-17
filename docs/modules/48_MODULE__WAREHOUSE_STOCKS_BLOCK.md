@@ -135,16 +135,15 @@ the combined surface after canonical publication. Incident-adjusted values
 fail closed without exact snapshot-bound per-SKU evidence; aggregate-only WB
 never fabricates current district values.
 
-Migration 146 projects that same `inventory_planning_v1` truth into the main
-Web Vitrina table as paired SKU/TOTAL rows. The current read path adds raw WB,
-effective WB, signed FBS total, one row per active FBS facility and the two
-familiar combined totals. `stock_total` and `wb_stock_effective_qty` are reused
-only as current presentation aliases; their persisted ready-snapshot values and
-all calculation consumers are unchanged. A historical exact-date request is
-never overlaid from the current planning snapshot. Missing exact incident
-evidence keeps both effective rows present but marks their cells `Недоступно`
-with the canonical reason. Missing per-SKU physical FBS evidence is likewise
-unavailable and is never synthesized as zero.
+Migration 147 narrows the ordinary main Web Vitrina planning profile to raw WB,
+signed FBS total, one row per active FBS facility and raw combined total.
+Incident-aware effective WB/combined aliases and every incident metric family
+are archived from public read/catalog/settings/picker without deleting their
+definitions, evidence or persisted historical snapshot cells. `stock_total`
+remains the current raw-combined presentation alias; persisted ready history
+and all calculation consumers are unchanged. A historical exact-date request
+is never overlaid from the current planning snapshot. Missing per-SKU physical
+FBS evidence remains unavailable and is never synthesized as zero.
 
 # 2. Physical and cost rules
 
@@ -194,13 +193,19 @@ Official current response may additionally return the exact typed aggregate sent
 
 `warehouseId=0` is rendered as `Остальные — служебная группа WB` with an explanation that WB did not bind those aggregate balances to a concrete warehouse. It may participate in contour reconciliation under the rule above, but it is never a destination, acceptance-options probe, ranking candidate or recommendation.
 
-`Остатки → Склад WB` owns the seller/account-level block `Инциденты на складах WB`. Policy contract v2 stores append-only per-warehouse intervals keyed only by positive stable numeric warehouse ID. Every open entry has its own `effective_from`; an existing start date is immutable, while removal closes that interval at the revision change date and later re-selection creates a new interval. V1/global-date revisions are projected losslessly into entries, so existing selections keep `2026-07-25` while a warehouse newly selected on `2026-08-02` may start on that date or another explicitly entered business date. ID `0` remains a service bucket and is not an operational incident destination.
+`Остатки → Склад WB` retains the seller/account-level block only inside the default-collapsed `Legacy: инциденты на складах WB` disclosure. Opening the warehouse tab does not load it; its settings/options GETs run after explicit disclosure. Policy contract v2 stores append-only per-warehouse intervals keyed only by positive stable numeric warehouse ID. Every open entry has its own `effective_from`; an existing start date is immutable, while removal closes that interval at the revision change date and later re-selection creates a new interval. V1/global-date revisions are projected losslessly into entries. ID `0` remains a service bucket and is not an operational incident destination. The legacy readback includes bounded newest-first revisions plus every historical entry/identity, so exact names, IDs and dates survive an aggregate-only current snapshot.
 
-Checkbox/date changes are browser-local draft only. One `Применить` validates the complete draft and atomically appends selection, dates, common reason/status and optional overall end. Exact repeat is T0. The revision's `changed_from` is the earliest actually changed per-warehouse date and bounds one dependent replay for Supply, SKU Management and current/historical Vitrina availability. Physical WB quantity, WAC and capital are outside this write set. Turning the policy off retains configured entries. Supply and SKU Management read the same canonical policy read-only; no legacy parallel truth remains after explicit migration Apply.
+Legacy checkbox/date changes remain browser-local draft only until the existing
+explicit legacy Apply is used by a separately authorized operation. Migration
+147 never calls that Apply, adds no policy runner and leaves every production
+policy row and configured/effective value unchanged. Physical WB quantity, WAC
+and capital are outside this write set. Supply and SKU Management keep reading
+the same canonical policy for calculation compatibility, while their ordinary
+screens no longer render incident selectors/badges/warnings.
 
 The policy creates an availability projection only. The shared default projection used by Supply, SKU Management and every business-action contour excludes exact physical `quantity` from operational total/regions once upstream and requires complete pagination plus snapshot digest; incomplete evidence remains fail-closed. It never removes unattributed `inWayToClient`/`inWayFromClient`.
 
-Web Vitrina has one deliberately separate information-only provisional adapter for an already accepted historical stock payload whose rows exist while completeness/digest is unconfirmed. Internally it builds received fact/selected-warehouse physical/effective triples, marks quality explicitly and leaves unprovable SKU/region values blank rather than zero. Public fact remains the canonical `stock_total` / `stock_ru_*` projection; duplicate `wb_stock_fact_qty*` rows are audit/compatibility-only and filtered from active catalog/read/UI, while `wb_stock_incident_qty*` and `wb_stock_effective_qty*` remain public. That adapter is not imported by Supply or regional/SKU action calculations and cannot authorize a shipment, forecast, price/bid action or warehouse mutation. Its bounded ready-snapshot rematerialization changes only derived Vitrina incident cells and audit metadata. Neither mode changes this section's factual WB contour, raw snapshot, WAC, stage quantity/capital, `Всего единиц`, total capital, weighted cost or reconciliation. A product remains capital until a separate audited writeoff/compensation operation. The incident control therefore cannot create a loss, compensation or hidden capital recalculation.
+Web Vitrina retains the historical information-only incident adapter and its evidence as audit compatibility, but all `wb_stock_fact_qty*`, `wb_stock_incident_qty*` and `wb_stock_effective_qty*` rows/reasons/quality are filtered from ordinary catalog/read/UI. The migration does not rematerialize old quantities or restore missing loss evidence. The adapter is not imported by Supply or regional/SKU action calculations and cannot authorize a shipment, forecast, price/bid action or warehouse mutation. Neither mode changes this section's factual WB contour, raw snapshot, WAC, stage quantity/capital, `Всего единиц`, total capital, weighted cost or reconciliation. A product remains capital until a separate audited writeoff/compensation operation.
 
 Periodic WB WAC получает accepted inbound capital, но quantity всегда заменяется official contour snapshot. Каждый hourly apply переигрывает versioned daily WAC от functional cutover: closed days фиксируются отдельными daily rows, current day остаётся provisional, zero-stock SKU retains last valid WAC. Если точная историческая колонка объявляет более поздний SKU с нулевым остатком, которого не было в frozen opening, projection сохраняет его как нулевой капитал со статусом `zero_quantity_without_cost_basis`, а Registry/Proxy и weekly Finance consumers возвращают неизвестную, не нулевую себестоимость; положительный остаток без cost seed остаётся блокирующей ошибкой. Late expense/accepted correction публикует signed event с исходной business date и атомарно перестраивает только derived daily cost history от этой границы; positive pool и cost не могут стать negative/zero. Direct consumers сначала читают эту daily projection, поэтому `Себестоимость WB наша` не имеет независимого baseline.
 
@@ -361,7 +366,7 @@ The six warehouse detail pages are read-only and contain no duplicated update/re
 
 Sibling tab `Обновление и пересчёт` separates durable `Автоматические обновления` from `Ручные обновления`. SQLite run/phase journal survives restart and exposes last attempt, last success, start/end/duration, next scheduled run, active version/business date/freshness, item counts, last-good and concise sanitized error for phases `WB supply registry`, `transit enrichment`, `FF ledger/reservations`, `official complete WB stocks`, `cost materialization`, `functional publication`, `dependent replay/economics`. Failure retains the last-good functional version and is visibly degraded. `Пересчитать все склады и себестоимости` starts the same canonical current-source pipeline behind a background server job; a parallel start returns `Уже выполняется другой пересчёт`. Page open performs no mutation. Synchronous long apply through the proxy is forbidden; reviewed bounded recovery uses `warehouse-functional-sync-dry-run` followed by exact-fingerprint `warehouse-functional-sync-apply`, which refreshes official supplies and current downstream layers, reconciles reservations/physical movements, takes a coherent verified restore point before production source mutation, rechecks semantic source/snapshot/diff/invariants under the shared lock and publishes only the new current functional version plus actually dependent economics. Neither page open nor global vitrina refresh launches a warehouse mutation.
 
-The WB incident card remains full-width. Its warehouse list is an internal vertical disclosure with compact collapsed summary (enabled state, selection count, earliest date). The expanded grid is exactly 4 columns on desktop and 3/2/1 at narrower breakpoints; warehouse tabs/cards/tables use fixed bounded layout and may wrap, but horizontal viewport scrolling is forbidden. Options are sorted by current physical WB stock descending, then stable name/ID, with zero stock last and an explicit selected marker. Each functional publication materializes this list as a compact immutable active-version read model; the options GET reads only that local model and never calls WB or mutates/publishes on page open. Each selected new option contains one compact editable `Действует с`; persisted open-entry dates are read-only until a later explicit interval change contract exists. There is exactly one business Apply button for the card.
+The full-width WB incident card is nested inside the default-collapsed legacy disclosure. Its warehouse list remains a second internal disclosure with compact summary; the expanded grid is exactly 4 columns on desktop and 3/2/1 at narrower breakpoints. Warehouse tabs/cards/tables stay viewport-bounded. Current options sort by physical WB stock/name/ID, while identities retained only by policy history render read-only as legacy audit rows. The options GET reads the local immutable active-version model and never calls WB or mutates/publishes; it is not requested until the outer legacy disclosure opens. There is exactly one historical business Apply button inside that disclosure.
 
 Document rows persist their own immutable SKU lines; discrepancy documents distinguish final-acceptance receipt, pooled `Допринято` and non-stock transitional audit. `wb_discrepancy_writeoff` is a reserved disabled type, not an automatic/manual action. WB adds four contour quantities; discrepancy detail adds transitional unmatched registry. The `Поставки → Реестр поставок` matrix exposes production/China stage cost fields and an aggregated `Комиссии банка, ₽` row derived from the same exact fee summary used by cost allocation. Settings exposes calculation parameters and three-week WB reference.
 
@@ -376,6 +381,8 @@ Targeted verification:
 - `python3 apps/inventory_planning_read_model_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py`;
+- `python3 apps/wb_incident_policy_legacy_readback_smoke.py`;
+- `python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py`;
 - `python3 apps/warehouse_functional_smoke.py`;
 - `python3 apps/warehouse_cost_queue_replay_smoke.py`;
 - `python3 apps/sqlite_backup_archive_smoke.py`;

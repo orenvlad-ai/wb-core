@@ -1913,8 +1913,6 @@
       display: none;
     }
 
-    [data-vitrina-incident-policy-badge][hidden],
-    [data-vitrina-incident-quality-badge][hidden],
     [data-table-snapshot-summary][hidden] {
       display: none;
     }
@@ -1925,21 +1923,6 @@
       gap: 6px;
       min-width: 0;
       flex: 0 0 auto;
-      white-space: nowrap;
-    }
-
-    .table-snapshot-summary [data-vitrina-incident-quality-badge] {
-      display: inline-flex;
-      align-items: center;
-      min-height: 22px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 2px 8px;
-      background: var(--panel-subtle);
-      color: var(--muted-strong);
-      font-size: 11px;
-      font-weight: 800;
-      line-height: 1.35;
       white-space: nowrap;
     }
 
@@ -5356,6 +5339,8 @@
     .warehouse-document-filters .search { grid-column: span 2; }
     .warehouse-section-title { margin: 0 0 10px; font-size: 17px; }
     .warehouse-incident-card { border-color: color-mix(in srgb, var(--accent-border) 66%, var(--border)); }
+    .warehouse-incident-legacy > summary { cursor: pointer; font-weight: 750; color: var(--muted); }
+    .warehouse-incident-legacy[open] > summary { margin-bottom: 14px; color: var(--text); }
     .warehouse-incident-head, .warehouse-incident-footer { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
     .warehouse-incident-grid { display: grid; grid-template-columns: minmax(220px, 1.3fr) repeat(2, minmax(150px, .7fr)); gap: 12px; margin-top: 16px; }
     .warehouse-incident-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
@@ -5468,9 +5453,7 @@
           <div class="table-heading-row">
             <div class="table-heading-left">
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
-              <span class="status-pill tone-warning" data-vitrina-incident-policy-badge hidden>С инцидентами</span>
               <div class="table-snapshot-summary" data-table-snapshot-summary hidden>
-                <span data-vitrina-incident-quality-badge hidden aria-label="Качество incident-проекции">Снимок:</span>
                 <p class="table-summary-line" data-table-summary-line hidden></p>
               </div>
             </div>
@@ -5700,6 +5683,8 @@
       </section>
 
       <section class="warehouse-card warehouse-incident-card" data-wb-incident-policy-card hidden>
+        <details class="warehouse-incident-legacy" data-wb-incident-legacy>
+          <summary>Legacy: инциденты на складах WB</summary>
         <div class="warehouse-incident-head">
           <div>
             <h2 class="warehouse-section-title">Инциденты на складах WB</h2>
@@ -5735,7 +5720,14 @@
           <p data-wb-incident-audit>Revision ещё не создана.</p>
           <button class="button primary" type="button" data-wb-incident-apply>Применить</button>
         </div>
+        <details class="warehouse-incident-options">
+          <summary><span>История revisions</span><small>Append-only audit</small></summary>
+          <div class="warehouse-incident-options-body" data-wb-incident-history>
+            <p class="warehouse-empty">История загружается после раскрытия legacy-блока.</p>
+          </div>
+        </details>
         <p class="warehouse-incident-result" data-wb-incident-result hidden></p>
+        </details>
       </section>
 
       <section class="warehouse-card" data-warehouse-ff-actions hidden>
@@ -6469,7 +6461,6 @@
           <label class="research-field"><span>SKU / nmID / название</span><input class="input" type="search" data-sku-filter="search"></label>
           <details class="column-manager" data-sku-column-manager><summary class="button secondary">Колонки</summary><div class="column-manager-panel"><div class="sku-column-controls" data-sku-column-controls></div></div></details>
         </div>
-        <p class="panel-meta sku-warehouse-exclusion-summary" data-sku-warehouse-exclusion-summary>В расчёте учитываются все склады.</p>
         <p class="sku-management-status" data-sku-management-status>Раздел не загружен.</p>
         <p class="research-error" data-sku-management-error></p>
         <div class="sku-management-table-shell">
@@ -6852,6 +6843,7 @@
     const warehouseUnmatchedCard = document.querySelector("[data-warehouse-unmatched-card]");
     const warehouseUnmatchedNode = document.querySelector("[data-warehouse-unmatched]");
     const wbIncidentPolicyCard = document.querySelector("[data-wb-incident-policy-card]");
+    const wbIncidentLegacy = document.querySelector("[data-wb-incident-legacy]");
     const wbIncidentPolicyBadge = document.querySelector("[data-wb-incident-policy-badge]");
     const wbIncidentActive = document.querySelector("[data-wb-incident-active]");
     const wbIncidentReason = document.querySelector("[data-wb-incident-reason]");
@@ -6860,6 +6852,7 @@
     const wbIncidentOptions = document.querySelector("[data-wb-incident-options]");
     const wbIncidentSummary = document.querySelector("[data-wb-incident-summary]");
     const wbIncidentAudit = document.querySelector("[data-wb-incident-audit]");
+    const wbIncidentHistory = document.querySelector("[data-wb-incident-history]");
     const wbIncidentApply = document.querySelector("[data-wb-incident-apply]");
     const wbIncidentResult = document.querySelector("[data-wb-incident-result]");
     const summaryGridNode = document.querySelector("[data-summary-grid]");
@@ -8058,6 +8051,13 @@
       }, true);
     }
     if (wbIncidentApply) wbIncidentApply.addEventListener("click", applyWbIncidentPolicy);
+    if (wbIncidentLegacy) {
+      wbIncidentLegacy.addEventListener("toggle", function() {
+        if (wbIncidentLegacy.open && !state.warehouses.incidentPolicy) {
+          loadWbIncidentPolicy();
+        }
+      });
+    }
     if (wbIncidentOptions) wbIncidentOptions.addEventListener("change", handleWbIncidentDraftChange);
     [wbIncidentActive, wbIncidentReason, wbIncidentEffectiveTo, wbIncidentStatus].forEach(function(node) {
       if (!node) return;
@@ -9020,9 +9020,6 @@
       }
       stopWarehouseCurrentSyncPolling();
       ensureWarehouseLoaded(key, options);
-      if (key === "wb") {
-        loadWbIncidentPolicy();
-      }
       return key;
     }
 
@@ -9642,7 +9639,14 @@
       if (wbIncidentStatus) wbIncidentStatus.value = String(draft.status || (active ? "active" : "disabled"));
       if (wbIncidentPolicyBadge) {
         const badge = policy.badge || {};
-        wbIncidentPolicyBadge.textContent = String(active ? "С инцидентами" : "Политика инцидентов не активна");
+        const configured = Boolean(
+          Object.prototype.hasOwnProperty.call(policy, "configured_active")
+            ? policy.configured_active
+            : policy.active
+        );
+        wbIncidentPolicyBadge.textContent =
+          "Настроено: " + (configured ? "включено" : "выключено") +
+          " · Сейчас: " + (active ? "действует" : "не действует");
         wbIncidentPolicyBadge.className = "status-pill " + (active ? "tone-warning" : "tone-neutral");
         wbIncidentPolicyBadge.title = String(badge.detail || "");
       }
@@ -9654,11 +9658,38 @@
           ? (policy.legacy_conflict ? " · legacy-настройки расходятся, политика не применяется" : " · ожидает явной миграции по кнопке «Применить»")
           : "";
         wbIncidentAudit.textContent = "Revision " + String(policy.revision || 0) +
+          " · effective revision " + String(policy.effective_revision || policy.revision || 0) +
           " · actor: " + String(policy.actor || "—") +
           " · обновлено: " + warehouseDate(policy.updated_at || policy.created_at) + migration;
       }
       if (wbIncidentOptions) {
-        const sortedOptions = (state.warehouses.incidentOptions || []).slice().sort(function(left, right) {
+        const optionById = new Map();
+        (state.warehouses.incidentOptions || []).forEach(function(option) {
+          optionById.set(
+            String(Number(option.warehouse_id || 0)),
+            Object.assign({legacy_identity: false}, option)
+          );
+        });
+        const retainIdentity = function(raw) {
+          const id = String(Number(raw && raw.warehouse_id || 0));
+          if (id === "0") return;
+          const existing = optionById.get(id) || {};
+          optionById.set(id, Object.assign({
+            warehouse_id: Number(id),
+            stock_quantity: null,
+            temporarily_missing: true,
+            legacy_identity: true,
+            destination_eligible: false
+          }, existing, {
+            warehouse_name: String(existing.warehouse_name || raw.warehouse_name || ("warehouseId " + id))
+          }));
+        };
+        (policy.legacy_warehouse_entries || policy.warehouse_entries || []).forEach(retainIdentity);
+        (policy.revision_history || []).forEach(function(revision) {
+          (revision.warehouse_entries || []).forEach(retainIdentity);
+          (revision.warehouse_identities || []).forEach(retainIdentity);
+        });
+        const sortedOptions = Array.from(optionById.values()).sort(function(left, right) {
           const quantityDifference = Number(right.stock_quantity || 0) - Number(left.stock_quantity || 0);
           if (quantityDifference) return quantityDifference;
           const nameDifference = String(left.warehouse_name || "").localeCompare(String(right.warehouse_name || ""), "ru");
@@ -9674,14 +9705,50 @@
               const locked = Object.prototype.hasOwnProperty.call(draft.persistedEntries || {}, id);
               return '<label class="warehouse-incident-option" data-selected="' + String(isSelected) + '"><input type="checkbox" data-wb-incident-warehouse-id="' + escapeHtml(id) + '"' +
                 (isSelected ? " checked" : "") + (destinationEligible ? "" : " disabled") + '><span><strong>' + escapeHtml(option.warehouse_name || ("warehouseId " + id)) +
-                '</strong><small>ID ' + escapeHtml(id) + ' · физически ' + escapeHtml(warehouseNumber(option.stock_quantity)) +
-                ' шт' + (option.temporarily_missing ? " · временно отсутствует" : "") +
-                (destinationEligible ? "" : " · служебная группа, выбор недоступен") + '</small></span>' +
+                '</strong><small>ID ' + escapeHtml(id) + (option.legacy_identity
+                  ? ' · историческая identity'
+                  : ' · физически ' + escapeHtml(warehouseNumber(option.stock_quantity)) + ' шт') +
+                (option.temporarily_missing && !option.legacy_identity ? " · временно отсутствует" : "") +
+                (destinationEligible ? "" : option.legacy_identity
+                  ? " · только legacy audit"
+                  : " · служебная группа, выбор недоступен") + '</small></span>' +
                 '<span class="warehouse-incident-option-date"><span>Действует с</span><input type="date" data-wb-incident-date-id="' + escapeHtml(id) + '" value="' +
                 escapeHtml(String((draft.entries || {})[id] || (draft.retainedDates || {})[id] || draft.canonicalBusinessDate || "")) + '"' +
                 (locked ? " readonly" : "") + '></span></label>';
             }).join("") + "</div>"
           : '<p class="warehouse-empty">В полном current snapshot нет доступных складов.</p>';
+      }
+      if (wbIncidentHistory) {
+        const revisions = Array.isArray(policy.revision_history) ? policy.revision_history : [];
+        wbIncidentHistory.innerHTML = revisions.length
+          ? '<div class="warehouse-incident-options-grid">' + revisions.map(function(revision) {
+              const entries = Array.isArray(revision.warehouse_entries) && revision.warehouse_entries.length
+                ? revision.warehouse_entries
+                : (revision.warehouse_identities || []).map(function(identity) {
+                    return Object.assign({effective_from: revision.effective_from || ""}, identity);
+                  });
+              const identities = entries.length
+                ? entries.map(function(entry) {
+                    return String(entry.warehouse_name || ("warehouseId " + entry.warehouse_id)) +
+                      " (ID " + String(entry.warehouse_id || "—") +
+                      ", " + String(entry.effective_from || revision.effective_from || "—") +
+                      (entry.effective_to_exclusive ? " → " + String(entry.effective_to_exclusive) : "") + ")";
+                  }).join("; ")
+                : "склады не выбраны";
+              return '<article class="warehouse-incident-option"><span><strong>Revision ' +
+                escapeHtml(revision.revision || 0) + ' · ' +
+                escapeHtml(revision.active ? "enabled" : "disabled") + '</strong><small>' +
+                escapeHtml(identities) + '</small><small>' +
+                escapeHtml(String(revision.effective_from || "—")) +
+                (revision.effective_to ? " → " + escapeHtml(String(revision.effective_to)) : "") +
+                ' · ' + escapeHtml(String(revision.policy_status || "—")) +
+                ' · ' + escapeHtml(String(revision.source || "—")) + '</small><small>' +
+                'actor: ' + escapeHtml(String(revision.actor || "—")) +
+                ' · created: ' + escapeHtml(String(revision.created_at || "—")) +
+                ' · reason: ' + escapeHtml(String(revision.reason || "—")) +
+                '</small></span></article>';
+            }).join("") + '</div>'
+          : '<p class="warehouse-empty">Append-only revisions отсутствуют.</p>';
       }
       renderWbIncidentSummary();
     }
@@ -23746,9 +23813,6 @@
     if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
       loadPageComposition();
       initializeBusinessProjectionMonitoring();
-    }
-    if (ALLOWED_UNIFIED_TABS.has(WAREHOUSES_UNIFIED_TAB)) {
-      loadWbIncidentPolicy();
     }
   </script>
   <script>

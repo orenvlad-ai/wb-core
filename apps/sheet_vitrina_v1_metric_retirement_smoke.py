@@ -25,12 +25,15 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E4
     filter_archived_public_metrics,
 )
 from packages.application.sheet_vitrina_v1_incident_stocks import (  # noqa: E402
-    INCIDENT_STOCK_FACT_METRIC_KEYS,
     INCIDENT_STOCK_FIELDS,
+    INCIDENT_STOCK_METRIC_KEYS,
     extend_metrics_with_incident_stock_metrics,
     incident_stock_metric_key,
     incident_stock_total_metric_key,
     incident_stock_value,
+)
+from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: E402
+    INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -158,11 +161,16 @@ def _assert_public_catalog_retirement() -> None:
         if item.enabled and item.show_in_data
     }
     retired = {
-        *INCIDENT_STOCK_FACT_METRIC_KEYS,
+        *INCIDENT_STOCK_METRIC_KEYS,
+        *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
         *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
     }
     full_keys = {item.metric_key for item in full_catalog}
-    missing_audit_definitions = sorted(retired - full_keys)
+    evaluator_defined_retired = {
+        *INCIDENT_STOCK_METRIC_KEYS,
+        *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
+    }
+    missing_audit_definitions = sorted(evaluator_defined_retired - full_keys)
     if missing_audit_definitions:
         raise AssertionError(
             "retirement must preserve evaluator/catalog definitions for audit: "
@@ -177,10 +185,6 @@ def _assert_public_catalog_retirement() -> None:
         "total_stock_total",
         "stock_ru_central",
         "total_stock_ru_central",
-        incident_stock_metric_key("incident"),
-        incident_stock_total_metric_key("incident"),
-        incident_stock_metric_key("effective"),
-        incident_stock_total_metric_key("effective"),
         OUR_WB_UNIT_COST_RUB_METRIC_KEY,
         OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
         OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -191,18 +195,12 @@ def _assert_public_catalog_retirement() -> None:
         raise AssertionError(f"canonical metrics disappeared with retired families: {missing}")
 
     picker_keys = {str(item["metric_key"]) for item in _active_incident_metric_catalog()}
-    if picker_keys & retired:
-        raise AssertionError("retired fact metrics leaked into the picker-only catalog")
-    for variant in ("incident", "effective"):
-        expected = {
-            incident_stock_metric_key(variant, region)
-            for region, _source, _suffix in INCIDENT_STOCK_FIELDS
-        } | {
-            incident_stock_total_metric_key(variant, region)
-            for region, _source, _suffix in INCIDENT_STOCK_FIELDS
-        }
-        if not expected <= picker_keys:
-            raise AssertionError(f"{variant} family must remain available in the picker")
+    if picker_keys:
+        raise AssertionError(
+            f"legacy incident families leaked into the ordinary picker: {sorted(picker_keys)}"
+        )
+    if not {*INCIDENT_STOCK_METRIC_KEYS, *INVENTORY_PLANNING_LEGACY_METRIC_KEYS} <= ARCHIVED_PUBLIC_METRIC_KEYS:
+        raise AssertionError("legacy incident presentation families are only partially retired")
 
 
 def _assert_legacy_cost_source_and_dependency_closure() -> None:

@@ -45,6 +45,7 @@ jobs:
           python3 apps/sheet_vitrina_v1_metric_retirement_smoke.py
           python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
+          python3 apps/wb_incident_policy_legacy_readback_smoke.py
           python3 apps/sales_funnel_history_detail_csv_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
@@ -104,6 +105,8 @@ jobs:
           python3 apps/ff_wb_supply_origins_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
+          python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py
+          python3 apps/wb_warehouse_exclusion_browser_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py
 
       - name: Validate maintenance write-barrier browser state

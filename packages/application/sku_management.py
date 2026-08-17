@@ -601,7 +601,16 @@ class SkuManagementBlock:
     def get_warehouse_exclusion_settings(self, *, user_key: str) -> dict[str, Any]:
         del user_key  # policy ownership is seller/account-level, never per browser user
         snapshot_date = current_business_date_iso(self.now_factory())
-        policy = get_latest_policy_state(self.runtime, snapshot_date=snapshot_date)
+        seller_id = canonical_seller_id()
+        policy = get_latest_policy_state(
+            self.runtime,
+            snapshot_date=snapshot_date,
+            seller_id=seller_id,
+        )
+        revision_history = self.runtime.list_wb_incident_policy_revisions(
+            seller_id=seller_id,
+            limit=500,
+        )
         excluded = list(policy.get("warehouse_ids") or [])
         return {
             **policy,
@@ -611,6 +620,33 @@ class SkuManagementBlock:
             "updated_at": str(policy.get("created_at") or ""),
             "excluded_wb_warehouse_ids": excluded,
             "warehouse_entries": list(policy.get("configured_warehouse_entries") or policy.get("warehouse_entries") or []),
+            "legacy_warehouse_entries": list(
+                policy.get("legacy_warehouse_entries")
+                or policy.get("warehouse_entries")
+                or []
+            ),
+            "revision_history": [
+                {
+                    "revision": int(item.get("revision") or 0),
+                    "active": bool(item.get("active")),
+                    "warehouse_ids": list(item.get("warehouse_ids") or []),
+                    "warehouse_identities": list(item.get("warehouse_identities") or []),
+                    "warehouse_entries": list(item.get("warehouse_entries") or []),
+                    "reason": str(item.get("reason") or ""),
+                    "effective_from": str(item.get("effective_from") or ""),
+                    "effective_to": str(item.get("effective_to") or ""),
+                    "policy_status": str(item.get("policy_status") or ""),
+                    "actor": str(item.get("actor") or ""),
+                    "created_at": str(item.get("created_at") or ""),
+                    "source": str(item.get("source") or ""),
+                }
+                for item in revision_history
+                if item.get("status") == "ok"
+            ],
+            "revision_history_complete": bool(
+                not revision_history
+                or int(revision_history[-1].get("revision") or 0) == 1
+            ),
             "canonical_business_date": snapshot_date,
             "effective_excluded_wb_warehouse_ids": list(
                 policy.get("effective_warehouse_ids")

@@ -586,7 +586,12 @@ def _test_warehouse_incident_ui_contract() -> None:
         ROOT / "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
     ).read_text(encoding="utf-8")
     required = (
+        "data-wb-incident-legacy",
+        "Legacy: инциденты на складах WB",
         "data-wb-incident-drawer",
+        "data-wb-incident-history",
+        "policy.revision_history",
+        "policy.legacy_warehouse_entries",
         "grid-template-columns: repeat(4, minmax(0, 1fr))",
         "grid-template-columns: repeat(3, minmax(0, 1fr))",
         "grid-template-columns: repeat(2, minmax(0, 1fr))",
@@ -608,6 +613,10 @@ def _test_warehouse_incident_ui_contract() -> None:
         raise AssertionError("warehouse incident policy must expose exactly one business Apply button")
     if "data-wb-incident-effective-from" in template:
         raise AssertionError("the removed global incident effective-from field leaked back into the UI")
+    if 'data-vitrina-incident-policy-badge hidden>С инцидентами</span>' in template:
+        raise AssertionError("ordinary table header still exposes an incident badge")
+    if template.count("loadWbIncidentPolicy();") != 1:
+        raise AssertionError("incident policy may load only after the explicit legacy disclosure")
     print("web_vitrina_warehouse_incident_responsive_contract: ok")
 
 

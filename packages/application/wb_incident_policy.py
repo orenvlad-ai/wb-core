@@ -327,18 +327,35 @@ def get_latest_policy_state(
         include_legacy=False,
     )
     result = dict(latest)
+    all_entries = _policy_entries(result)
     configured_entries = [
-        item for item in _policy_entries(result)
+        item for item in all_entries
         if not str(item.get("effective_to_exclusive") or "")
     ]
     configured_active = bool(latest.get("active"))
     currently_effective = bool(current.get("active"))
+    effective_warehouse_ids = (
+        list(current.get("warehouse_ids") or [])
+        if currently_effective
+        else []
+    )
+    effective_warehouse_identities = (
+        list(current.get("warehouse_identities") or [])
+        if currently_effective
+        else []
+    )
+    effective_warehouse_entries = (
+        list(current.get("effective_warehouse_entries") or [])
+        if currently_effective
+        else []
+    )
     result.update(
         {
             "contract_name": POLICY_CONTRACT_NAME,
             "contract_version": POLICY_CONTRACT_VERSION,
             "configured_active": configured_active,
             "configured_warehouse_entries": configured_entries,
+            "legacy_warehouse_entries": all_entries,
             "warehouse_entries": configured_entries,
             "warehouse_ids": [int(item["warehouse_id"]) for item in configured_entries],
             "warehouse_identities": [
@@ -351,9 +368,9 @@ def get_latest_policy_state(
             "active": currently_effective,
             "currently_effective": currently_effective,
             "effective_revision": int(current.get("revision") or 0),
-            "effective_warehouse_ids": list(current.get("warehouse_ids") or []),
-            "effective_warehouse_identities": list(current.get("warehouse_identities") or []),
-            "effective_warehouse_entries": list(current.get("effective_warehouse_entries") or []),
+            "effective_warehouse_ids": effective_warehouse_ids,
+            "effective_warehouse_identities": effective_warehouse_identities,
+            "effective_warehouse_entries": effective_warehouse_entries,
             "effective_reason": str(current.get("reason") or ""),
             "effective_effective_from": str(current.get("effective_from") or ""),
             "effective_effective_to": str(current.get("effective_to") or ""),
