@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from io import BytesIO
+import json
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
@@ -20,7 +21,11 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     DOCUMENTS_TABLE,
     FfPoolDocumentService,
 )
-from packages.application.ff_pool_documents_xlsx import CHINA_SHEET, XLSX_CONTENT_TYPE  # noqa: E402
+from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
+    CHINA_SHEET,
+    XLSX_CONTENT_TYPE,
+    generate_china_acceptance_workbook,
+)
 from packages.application.ff_pool_foundation import (  # noqa: E402
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -30,7 +35,11 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     evaluate_ff_pool_aggregate_parity,
     record_ff_pool_parity_diagnostic,
 )
-from packages.application.ff_pool_surfaces import FfPoolSurface, FfPoolSurfaceError  # noqa: E402
+from packages.application.ff_pool_surfaces import (  # noqa: E402
+    FfPoolSurface,
+    FfPoolSurfaceError,
+    _resolve_supplier_lines_with_canonical_nomenclature,
+)
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 
 
@@ -47,6 +56,7 @@ class Clock:
 def main() -> None:
     _schema_absence_is_controlled()
     _guided_preview_is_default_off()
+    _guided_source_uses_canonical_nomenclature()
     with TemporaryDirectory(prefix="ff-pool-surfaces-") as directory:
         root = Path(directory)
         clock = Clock()
@@ -68,6 +78,138 @@ def main() -> None:
         _deactivation_with_dependencies_is_blocked(surface, facilities)
         _read_models(surface, request_id, facilities)
     print("ff_pool_surfaces_smoke: OK")
+
+
+def _guided_source_uses_canonical_nomenclature() -> None:
+    source_rows: list[dict[str, object]] = []
+    nomenclature_rows: list[dict[str, object]] = []
+    expected_barcodes: dict[int, str] = {}
+    for position in range(1, 22):
+        nm_id = 700_000_000 + position
+        primary = f"0460000000{position:03d}"
+        additional = f"1460000000{position:03d}"
+        expected_barcodes[nm_id] = primary
+        source_rows.append(
+            {
+                "line_id": f"guided-line-{position}",
+                "barcode": "",
+                "internal_sku": f"GUIDED-{position:02d}",
+                "internal_nm_id": nm_id,
+                "internal_name": f"Guided SKU {position:02d}",
+                "qty": 6_000 if position == 21 else 3_000,
+            }
+        )
+        nomenclature_rows.append(
+            {
+                "item_id": f"guided-nm-{nm_id}",
+                "nm_id": nm_id,
+                "barcode": primary,
+                "barcodes_json": json.dumps([primary, additional]),
+            }
+        )
+
+    resolved = _resolve_supplier_lines_with_canonical_nomenclature(
+        source_rows,
+        nomenclature_rows,
+    )
+    repeated = _resolve_supplier_lines_with_canonical_nomenclature(
+        source_rows,
+        nomenclature_rows,
+    )
+    assert len(resolved) == 21 and resolved == repeated
+    assert sum(int(item["quantity"]) for item in resolved) == 66_000
+    assert all(
+        item["barcode"] == expected_barcodes[int(item["nm_id"])]
+        for item in resolved
+    )
+    workbook = load_workbook(
+        BytesIO(
+            generate_china_acceptance_workbook(
+                facilities=[
+                    {
+                        "facility_id": "fac_guided",
+                        "code": "GUIDED",
+                        "name": "Guided FF",
+                        "active": True,
+                    }
+                ],
+                shipment_lines=[
+                    {**item, "capital_rub": str(item["quantity"])}
+                    for item in resolved
+                ],
+                source_revision="sha256:" + "a" * 64,
+                selected_facility_id="fac_guided",
+            )
+        ),
+        data_only=False,
+    )
+    sheet = workbook[CHINA_SHEET]
+    assert sheet.max_row == 26
+    for row_number, item in enumerate(resolved, start=6):
+        barcode_cell = sheet.cell(row_number, 2)
+        assert barcode_cell.data_type == "s"
+        assert barcode_cell.value == item["barcode"]
+
+    _assert_guided_source_error(
+        source_rows,
+        nomenclature_rows[1:],
+        "exact_identity_evidence_missing",
+    )
+    drifted_source = [dict(item) for item in source_rows]
+    drifted_source[0]["barcode"] = "9999999999999"
+    _assert_guided_source_error(
+        drifted_source,
+        nomenclature_rows,
+        "supplier_identity_drift",
+    )
+    shared_barcode = [dict(item) for item in nomenclature_rows]
+    shared_barcode[1]["barcode"] = expected_barcodes[700_000_001]
+    shared_barcode[1]["barcodes_json"] = json.dumps(
+        [expected_barcodes[700_000_001]]
+    )
+    _assert_guided_source_error(
+        source_rows,
+        shared_barcode,
+        "ambiguous_nomenclature_barcode",
+    )
+    duplicate_nm = [dict(item) for item in nomenclature_rows]
+    duplicate_nm.append(
+        {
+            "item_id": "guided-duplicate-nm",
+            "nm_id": 700_000_001,
+            "barcode": "0469999999999",
+            "barcodes_json": "[]",
+        }
+    )
+    _assert_guided_source_error(
+        source_rows,
+        duplicate_nm,
+        "ambiguous_nomenclature",
+    )
+    changed_nomenclature = [dict(item) for item in nomenclature_rows]
+    changed_nomenclature[0]["barcode"] = "0468888888888"
+    changed_nomenclature[0]["barcodes_json"] = json.dumps(["0468888888888"])
+    changed = _resolve_supplier_lines_with_canonical_nomenclature(
+        source_rows,
+        changed_nomenclature,
+    )
+    assert changed[0]["identity_revision"] != resolved[0]["identity_revision"]
+
+
+def _assert_guided_source_error(
+    source_rows: list[dict[str, object]],
+    nomenclature_rows: list[dict[str, object]],
+    expected_code: str,
+) -> None:
+    try:
+        _resolve_supplier_lines_with_canonical_nomenclature(
+            source_rows,
+            nomenclature_rows,
+        )
+    except FfPoolSurfaceError as exc:
+        assert exc.code == expected_code, (expected_code, exc.code)
+    else:
+        raise AssertionError(f"guided source must fail closed with {expected_code}")
 
 
 def _guided_preview_is_default_off() -> None:

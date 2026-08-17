@@ -26,6 +26,14 @@ quantity, actual quantity, FBS/FBO split, shortage/surplus/mis-sort evidence
 and pool-scoped/proportional common expense allocation. Preview is a durable
 reload-safe workflow.
 
+Supplier shipment lines remain the exact quantity/capital source. Template
+barcode identity is resolved separately by exact nmId from exactly one active,
+non-hidden server-owned nomenclature row and its primary/additional canonical
+barcodes. An empty legacy supplier-line barcode is allowed; a non-empty value
+is corroboration only. Missing, duplicate, ambiguous, conflicting or changed
+canonical identity fails closed, and the canonical identity revision is part
+of the deterministic source digest rechecked by preview and confirm.
+
 Legacy factual-date preview refuses an FF-acceptance change. The guided posting
 service is the sole owner of factual date, the existing aggregate FF receipt,
 facility/pool movements, exact capital/expense allocation, a related immutable

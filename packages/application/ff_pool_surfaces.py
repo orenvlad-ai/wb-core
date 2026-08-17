@@ -1347,31 +1347,28 @@ class FfPoolSurface:
                    WHERE shipment_id=? AND line_type='product' ORDER BY sort_order,line_id""",
                 (selected,),
             ).fetchall()
-        aggregated: dict[int, dict[str, Any]] = {}
-        for row in source_rows:
-            nm_id = _positive_integer(row["internal_nm_id"], field="supplier nm_id")
-            quantity = _whole_number(row["qty"], field="supplier quantity", positive=True)
-            identity = {
-                "barcode": str(row["barcode"] or ""),
-                "sku": str(row["internal_sku"] or row["internal_name"] or nm_id),
-            }
-            current = aggregated.get(nm_id)
-            if current is not None and any(current[key] != identity[key] for key in identity):
+            if not source_rows:
                 raise FfPoolSurfaceError(
-                    "ambiguous_supplier_identity",
-                    "Supplier composition contains conflicting exact identity for one nmId",
-                    details={"nm_id": nm_id},
+                    "supplier_lines_unavailable",
+                    "Supplier shipment has no exact matched product lines",
+                )
+            if "sheet_vitrina_v1_nomenclature_items" not in tables:
+                raise FfPoolSurfaceError(
+                    "exact_identity_evidence_missing",
+                    "Supplier SKU requires canonical server-owned nomenclature evidence",
+                    details={"reason": "nomenclature_unavailable"},
                     http_status=409,
                 )
-            aggregated[nm_id] = {
-                "nm_id": nm_id,
-                **identity,
-                "quantity": int((current or {}).get("quantity") or 0) + quantity,
-                "capital_rub": "0",
-            }
-        lines = [aggregated[nm_id] for nm_id in sorted(aggregated)]
-        if not lines:
-            raise FfPoolSurfaceError("supplier_lines_unavailable", "Supplier shipment has no exact matched product lines")
+            nomenclature_rows = conn.execute(
+                """SELECT item_id,nm_id,barcode,barcodes_json
+                   FROM sheet_vitrina_v1_nomenclature_items
+                   WHERE is_active=1 AND is_hidden=0
+                   ORDER BY nm_id,item_id"""
+            ).fetchall()
+        lines = _resolve_supplier_lines_with_canonical_nomenclature(
+            source_rows,
+            nomenclature_rows,
+        )
         try:
             from packages.application.our_wb_costs import OurWbCostBlock
             from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -1679,6 +1676,199 @@ class _DecimalSum:
 
     def finalize(self) -> str:
         return canonical_decimal_text(self.total)
+
+
+def _canonical_nomenclature_identities(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    target_nm_ids: set[int],
+) -> dict[int, dict[str, Any]]:
+    by_nm_id: dict[int, list[dict[str, Any]]] = {}
+    barcode_owners: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        try:
+            nm_id = int(row["nm_id"] or 0)
+        except (TypeError, ValueError):
+            nm_id = 0
+        item_id = str(row["item_id"] or "").strip()
+        target_row = nm_id in target_nm_ids
+        try:
+            primary = _canonical_barcode_text(
+                row["barcode"],
+                item_id=item_id,
+                nm_id=nm_id,
+            )
+        except FfPoolSurfaceError:
+            if target_row:
+                raise
+            primary = ""
+        raw_extra = str(row["barcodes_json"] or "[]")
+        try:
+            decoded_extra = json.loads(raw_extra)
+        except json.JSONDecodeError as exc:
+            if target_row:
+                raise FfPoolSurfaceError(
+                    "invalid_nomenclature_identity_evidence",
+                    "Canonical nomenclature barcode evidence is not valid JSON",
+                    details={"item_id": item_id, "nm_id": nm_id},
+                    http_status=409,
+                ) from exc
+            decoded_extra = []
+        if not isinstance(decoded_extra, list):
+            if target_row:
+                raise FfPoolSurfaceError(
+                    "invalid_nomenclature_identity_evidence",
+                    "Canonical nomenclature barcode evidence must be a list",
+                    details={"item_id": item_id, "nm_id": nm_id},
+                    http_status=409,
+                )
+            decoded_extra = []
+        extra: list[str] = []
+        for value in decoded_extra:
+            try:
+                extra.append(
+                    _canonical_barcode_text(value, item_id=item_id, nm_id=nm_id)
+                )
+            except FfPoolSurfaceError:
+                if target_row:
+                    raise
+        barcodes = ([primary] if primary else []) + sorted(
+            {value for value in extra if value and value != primary}
+        )
+        identity = {
+            "item_id": item_id,
+            "nm_id": nm_id,
+            "barcode": primary,
+            "barcodes": barcodes,
+        }
+        identity["identity_revision"] = _fingerprint(
+            {
+                "item_id": item_id,
+                "nm_id": nm_id,
+                "primary_barcode": primary,
+                "barcodes": barcodes,
+            }
+        )
+        if nm_id > 0:
+            by_nm_id.setdefault(nm_id, []).append(identity)
+        for barcode in barcodes:
+            barcode_owners.setdefault(barcode, []).append(identity)
+
+    result: dict[int, dict[str, Any]] = {}
+    for nm_id in sorted(target_nm_ids):
+        candidates = by_nm_id.get(nm_id) or []
+        if not candidates:
+            raise FfPoolSurfaceError(
+                "exact_identity_evidence_missing",
+                "Supplier SKU requires canonical server-owned nomenclature evidence",
+                details={"nm_id": nm_id},
+                http_status=409,
+            )
+        if len(candidates) != 1:
+            raise FfPoolSurfaceError(
+                "ambiguous_nomenclature",
+                "Nomenclature contains duplicate active non-hidden nmId evidence",
+                details={
+                    "nm_id": nm_id,
+                    "item_ids": sorted(str(item["item_id"]) for item in candidates),
+                },
+                http_status=409,
+            )
+        canonical = candidates[0]
+        if not canonical["barcode"]:
+            raise FfPoolSurfaceError(
+                "exact_identity_evidence_missing",
+                "Supplier SKU requires a canonical server-owned primary barcode",
+                details={"nm_id": nm_id, "item_id": canonical["item_id"]},
+                http_status=409,
+            )
+        for barcode in canonical["barcodes"]:
+            owners = barcode_owners.get(str(barcode)) or []
+            if len(owners) != 1:
+                raise FfPoolSurfaceError(
+                    "ambiguous_nomenclature_barcode",
+                    "Canonical barcode is owned by more than one active non-hidden nomenclature item",
+                    details={
+                        "nm_id": nm_id,
+                        "owner_nm_ids": sorted(
+                            {int(item["nm_id"]) for item in owners if int(item["nm_id"]) > 0}
+                        ),
+                        "owner_item_ids": sorted(str(item["item_id"]) for item in owners),
+                    },
+                    http_status=409,
+                )
+        result[nm_id] = canonical
+    return result
+
+
+def _resolve_supplier_lines_with_canonical_nomenclature(
+    source_rows: Iterable[Mapping[str, Any]],
+    nomenclature_rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    materialized_source = list(source_rows)
+    target_nm_ids = {
+        _positive_integer(row["internal_nm_id"], field="supplier nm_id")
+        for row in materialized_source
+    }
+    canonical_identities = _canonical_nomenclature_identities(
+        nomenclature_rows,
+        target_nm_ids=target_nm_ids,
+    )
+    aggregated: dict[int, dict[str, Any]] = {}
+    for row in materialized_source:
+        nm_id = _positive_integer(row["internal_nm_id"], field="supplier nm_id")
+        quantity = _whole_number(row["qty"], field="supplier quantity", positive=True)
+        canonical = canonical_identities[nm_id]
+        source_barcode = str(row["barcode"] or "").strip()
+        if source_barcode and source_barcode not in canonical["barcodes"]:
+            raise FfPoolSurfaceError(
+                "supplier_identity_drift",
+                "Supplier barcode conflicts with canonical server-owned nomenclature",
+                details={"nm_id": nm_id, "line_id": str(row["line_id"] or "")},
+                http_status=409,
+            )
+        identity = {
+            "barcode": canonical["barcode"],
+            "barcodes": list(canonical["barcodes"]),
+            "identity_revision": canonical["identity_revision"],
+            "sku": str(row["internal_sku"] or row["internal_name"] or nm_id),
+        }
+        current = aggregated.get(nm_id)
+        if current is not None and any(current[key] != identity[key] for key in identity):
+            raise FfPoolSurfaceError(
+                "ambiguous_supplier_identity",
+                "Supplier composition contains conflicting exact identity for one nmId",
+                details={"nm_id": nm_id},
+                http_status=409,
+            )
+        aggregated[nm_id] = {
+            "nm_id": nm_id,
+            **identity,
+            "quantity": int((current or {}).get("quantity") or 0) + quantity,
+            "capital_rub": "0",
+        }
+    return [aggregated[nm_id] for nm_id in sorted(aggregated)]
+
+
+def _canonical_barcode_text(value: Any, *, item_id: str, nm_id: int) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise FfPoolSurfaceError(
+            "invalid_nomenclature_identity_evidence",
+            "Canonical nomenclature barcode evidence must be exact text",
+            details={"item_id": item_id, "nm_id": nm_id},
+            http_status=409,
+        )
+    token = value.strip()
+    if re.search(r"[eE][+-]?[0-9]+$", token) or re.fullmatch(r"[0-9]+\.[0-9]+", token):
+        raise FfPoolSurfaceError(
+            "invalid_nomenclature_identity_evidence",
+            "Canonical nomenclature barcode evidence must be lossless exact text",
+            details={"item_id": item_id, "nm_id": nm_id},
+            http_status=409,
+        )
+    return token
 
 
 def _facility_public(row: Mapping[str, Any], *, detail_visible: bool) -> dict[str, Any]:
