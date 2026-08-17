@@ -46,6 +46,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.warehouse_functional import (  # noqa: E402
     ensure_warehouse_functional_schema,
 )
+from packages.application.wb_fbs_orders import WbFbsOrdersCollector  # noqa: E402
 
 
 def main() -> int:
@@ -143,7 +144,20 @@ def main() -> int:
             available = available_quantity(
                 conn, cutover_id=_cutover_id(conn), facility_id="fac_moscow", nm_id=101
             )
-            assert available == {"physical": 9, "reserved": 11, "available": -2}
+        assert available == {"physical": 9, "reserved": 11, "available": -2}
+        orders = WbFbsOrdersCollector(
+            db_path=runtime.db_path,
+            timestamp_factory=lambda: "2026-08-14T06:10:00Z",
+            enabled=False,
+        )
+        reserved_order = orders.orders_page(search="9202")
+        assert reserved_order["page"]["total"] == 1
+        assert reserved_order["rows"][0]["reservation"] == {
+            "state": "reserved",
+            "quantity": 1,
+            "active": True,
+            "updated_at": "2026-08-14T06:10:00Z",
+        }
 
         # A quantity correction before handoff refreshes the exact reservation
         # from immutable status evidence without changing physical stock.
@@ -202,6 +216,19 @@ def main() -> int:
             conn.commit()
         handed = _process(runtime.db_path, "2026-08-14T06:14:00Z")
         assert handed["summary"]["fulfilled"] == 1
+        handed_page = orders.orders_page(search="9201", status_category="handed_over")
+        assert handed_page["page"]["total"] == 1
+        handed_row = handed_page["rows"][0]
+        assert handed_row["reservation"]["state"] == "fulfilled"
+        assert handed_row["debit_close_evidence"]["event_type"] == "handoff_debit"
+        assert handed_row["debit_close_evidence"]["event_digest"].startswith("sha256:")
+        handed_detail = orders.order_detail(9201)
+        assert handed_detail["current"]["status_category"] == "handed_over"
+        assert handed_detail["lifecycle"]["state"] == "fulfilled"
+        assert any(
+            item["event_type"] == "handoff_debit"
+            for item in handed_detail["lifecycle_evidence"]
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             physical = conn.execute(
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
@@ -247,6 +274,13 @@ def main() -> int:
             conn.commit()
         reconciled = _process(runtime.db_path, "2026-08-14T06:18:00Z")
         assert reconciled["summary"]["reconciliation"] == 1
+        reconciliation_page = orders.orders_page(
+            search="9201", status_category="reconciliation"
+        )
+        assert reconciliation_page["page"]["total"] == 1
+        assert reconciliation_page["rows"][0]["reconciliation_evidence"]["digest"].startswith(
+            "sha256:"
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             assert conn.execute(f"SELECT COUNT(*) FROM {RECONCILIATION_TABLE}").fetchone()[0] == 2
             assert conn.execute(

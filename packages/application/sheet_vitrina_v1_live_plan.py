@@ -5213,7 +5213,7 @@ def _incident_stock_cell_presentation(
                 projected_rows.append((nm_id, fact, incident, effective))
                 reason = (
                     f"Факт: {fact:g} шт; на инцидентных складах: {incident:g} шт; "
-                    f"operational остаток: {effective:g} шт. {policy_detail}"
+                    f"остаток без инц.: {effective:g} шт. {policy_detail}"
                 )
                 for metric_key, _value in (
                     (fact_key, fact),
@@ -5263,7 +5263,7 @@ def _incident_stock_cell_presentation(
             effective_total = sum(float(item[3]) for item in projected_rows)
             total_reason = (
                 f"Факт: {fact_total:g} шт; на инцидентных складах: "
-                f"{incident_total:g} шт; operational остаток: "
+                f"{incident_total:g} шт; остаток без инц.: "
                 f"{effective_total:g} шт. {policy_detail}"
             )
             for metric_key, _value in (

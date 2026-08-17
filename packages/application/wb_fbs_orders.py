@@ -28,7 +28,7 @@ from packages.adapters.wb_fbs_orders import (
 
 
 CONTRACT_NAME = "wb_fbs_orders_readonly_shadow_v1"
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 COLLECTOR_ENABLED_ENV = "WB_FBS_COLLECTOR_ENABLED"
 OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
 STATE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
@@ -64,6 +64,24 @@ REQUIRED_TABLES = frozenset({
     WAREHOUSE_MAPPINGS_TABLE, IDENTITY_MAPPINGS_TABLE, IDENTITY_EVIDENCE_TABLE,
     STATUS_CURRENT_TABLE, STATUS_TRANSITIONS_TABLE, POLL_RUNS_TABLE,
 })
+LIFECYCLE_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+LIFECYCLE_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
+LIFECYCLE_RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
+LIFECYCLE_LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
+CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
+STATUS_CATEGORIES = frozenset(
+    {
+        "all",
+        "active",
+        "handed_over",
+        "sold_closed",
+        "canceled",
+        "reconciliation",
+        "unmatched",
+        "deferred",
+        "ambiguous",
+    }
+)
 
 
 class WbFbsOrdersError(ValueError):
@@ -635,26 +653,91 @@ class WbFbsOrdersCollector:
         search: str = "",
         nm_id: int | str | None = None,
         supply_id: str = "",
+        facility_id: str = "",
+        supplier_status: str = "",
+        wb_status: str = "",
+        status_category: str = "all",
+        date_from: str = "",
+        date_to: str = "",
     ) -> dict[str, Any]:
         page_number = _bounded_int(page, "page", minimum=1, maximum=1_000_000)
         page_size = _bounded_int(limit, "limit", minimum=1, maximum=MAX_PAGE_SIZE)
         search_value = _safe_search(search)
         nm_value = _optional_positive_int(nm_id, "nm_id")
         supply_value = _optional_identifier(supply_id, "supply_id")
+        facility_value = _optional_identifier(facility_id, "facility_id")
+        supplier_value = _optional_status(supplier_status, "supplier_status")
+        wb_value = _optional_status(wb_status, "wb_status")
+        category_value = str(status_category or "all").strip().casefold()
+        if category_value not in STATUS_CATEGORIES:
+            raise WbFbsOrdersError(
+                "invalid_status_category",
+                "status_category is not supported",
+            )
+        date_from_value = _optional_date(date_from, "date_from")
+        date_to_value = _optional_date(date_to, "date_to")
+        if date_from_value and date_to_value and date_from_value > date_to_value:
+            raise WbFbsOrdersError("invalid_date_range", "date_from must not exceed date_to")
         with _connect_readonly(self.db_path) as conn:
             schema = _schema(conn)
             if not schema["available"]:
                 return _with_etag(self._schema_absent(schema["missing_tables"]))
-            where, params = _current_filters(
-                search=search_value, nm_id=nm_value, supply_id=supply_value
+            lifecycle_available = _lifecycle_available(conn)
+            current_cte = _current_cte(lifecycle_available=lifecycle_available)
+            base_where, base_params = _current_filters(
+                search=search_value,
+                nm_id=nm_value,
+                supply_id=supply_value,
+                facility_id=facility_value,
+                supplier_status=supplier_value,
+                wb_status=wb_value,
+                date_from=date_from_value,
+                date_to=date_to_value,
             )
-            current_cte = _current_cte()
+            where = base_where
+            params = list(base_params)
+            if category_value != "all":
+                category_column = (
+                    "mapping_category"
+                    if category_value in {"unmatched", "deferred", "ambiguous"}
+                    else "status_category"
+                )
+                where += f" AND {category_column}=?"
+                params.append(category_value)
             total = int(
                 conn.execute(
                     current_cte + f" SELECT COUNT(*) FROM current_order WHERE {where}",
                     params,
                 ).fetchone()[0]
             )
+            counter_row = conn.execute(
+                current_cte
+                + f""" SELECT COUNT(*) AS total,
+                         SUM(status_category='active') AS active,
+                         SUM(status_category='handed_over') AS handed_over,
+                         SUM(status_category='sold_closed') AS sold_closed,
+                         SUM(status_category='canceled') AS canceled,
+                         SUM(status_category='reconciliation') AS reconciliation,
+                         SUM(mapping_category='unmatched') AS unmatched,
+                         SUM(mapping_category='deferred') AS deferred,
+                         SUM(mapping_category='ambiguous') AS ambiguous
+                         FROM current_order WHERE {base_where}""",
+                base_params,
+            ).fetchone()
+            counters = {
+                key: int(counter_row[key] or 0)
+                for key in (
+                    "total",
+                    "active",
+                    "handed_over",
+                    "sold_closed",
+                    "canceled",
+                    "reconciliation",
+                    "unmatched",
+                    "deferred",
+                    "ambiguous",
+                )
+            }
             offset = (page_number - 1) * page_size
             rows = conn.execute(
                 current_cte
@@ -672,9 +755,20 @@ class WbFbsOrdersCollector:
             "collector": self._collector_status(state),
             "shadow": shadow,
             "policy": _policy(),
-            "filters": {"search": search_value, "nm_id": nm_value, "supply_id": supply_value},
+            "filters": {
+                "search": search_value,
+                "nm_id": nm_value,
+                "supply_id": supply_value,
+                "facility_id": facility_value,
+                "supplier_status": supplier_value,
+                "wb_status": wb_value,
+                "status_category": category_value,
+                "date_from": date_from_value,
+                "date_to": date_to_value,
+            },
+            "counters": counters,
             "page": _page(page_number, page_size, total),
-            "rows": [_public_order(row) for row in rows],
+            "rows": [_public_order(row, enriched=lifecycle_available) for row in rows],
         }
         return _with_etag(payload)
 
@@ -708,6 +802,48 @@ class WbFbsOrdersCollector:
                 "ORDER BY transition_sequence DESC LIMIT ?",
                 (order_value, limit),
             ).fetchall()
+            lifecycle_available = _lifecycle_available(conn)
+            current_order = conn.execute(
+                _current_cte(lifecycle_available=lifecycle_available)
+                + " SELECT * FROM current_order WHERE order_id=? LIMIT 1",
+                (order_value,),
+            ).fetchone()
+            lifecycle_rows = (
+                conn.execute(
+                    f"""WITH latest_manifest AS (
+                               SELECT cutover_id FROM {CUTOVER_MANIFESTS_TABLE}
+                               ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1
+                           )
+                        SELECT event.event_id,event.event_type,event.episode_sequence,
+                               event.supplier_status,event.wb_status,event.facility_id,event.pool,
+                               event.nm_id,event.quantity,event.physical_quantity_delta,
+                               event.evidence_digest,event.occurred_at
+                        FROM {LIFECYCLE_EVENTS_TABLE} event
+                        JOIN latest_manifest manifest ON manifest.cutover_id=event.cutover_id
+                        WHERE event.order_id=?
+                        ORDER BY event.event_sequence DESC LIMIT ?""",
+                    (order_value, limit),
+                ).fetchall()
+                if lifecycle_available
+                else []
+            )
+            current_lifecycle = (
+                conn.execute(
+                    f"""WITH latest_manifest AS (
+                               SELECT cutover_id FROM {CUTOVER_MANIFESTS_TABLE}
+                               ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1
+                           )
+                        SELECT current.state,current.episode_sequence,current.supplier_status,
+                               current.wb_status,current.facility_id,current.pool,current.nm_id,
+                               current.quantity,current.debit_event_id,current.updated_at
+                        FROM {LIFECYCLE_CURRENT_TABLE} current
+                        JOIN latest_manifest manifest ON manifest.cutover_id=current.cutover_id
+                        WHERE current.order_id=? LIMIT 1""",
+                    (order_value,),
+                ).fetchone()
+                if lifecycle_available
+                else None
+            )
         if not rows:
             raise WbFbsOrdersError(
                 "fbs_order_not_found", "Official FBS order was not found in the cache", http_status=404
@@ -719,11 +855,31 @@ class WbFbsOrdersCollector:
                 "status": "ready",
                 "collector": self._collector_status(state),
                 "policy": _policy(),
-                "current": _public_order(rows[0]),
+                "current": _public_order(
+                    current_order if current_order is not None else rows[0],
+                    enriched=current_order is not None,
+                ),
                 "history": [_public_order(row) for row in rows],
-                "status_history": [dict(row) for row in status_rows],
-                "transition_history": [dict(row) for row in transition_rows],
-                "mapping_evidence": [dict(row) for row in evidence_rows],
+                "status_history": [_public_status(row) for row in status_rows],
+                "transition_history": [_public_transition(row) for row in transition_rows],
+                "mapping_evidence": [_public_mapping_evidence(row) for row in evidence_rows],
+                "lifecycle": (
+                    _public_lifecycle_current(current_lifecycle)
+                    if current_lifecycle is not None
+                    else None
+                ),
+                "lifecycle_evidence": [dict(row) for row in lifecycle_rows],
+                "privacy": {
+                    "contains_pii": False,
+                    "omitted_fields": [
+                        "address",
+                        "comment",
+                        "orderUid",
+                        "rid",
+                        "raw_payload",
+                        "token",
+                    ],
+                },
             }
         )
 
@@ -1253,18 +1409,166 @@ def _upsert_state(
     )
 
 
-def _current_cte() -> str:
+def _current_cte(*, lifecycle_available: bool) -> str:
+    lifecycle_ctes = ""
+    lifecycle_joins = ""
+    lifecycle_columns = """
+        NULL AS lifecycle_state,NULL AS lifecycle_quantity,NULL AS lifecycle_facility_id,
+        NULL AS debit_event_id,NULL AS lifecycle_updated_at,NULL AS lifecycle_event_type,
+        NULL AS lifecycle_event_digest,NULL AS lifecycle_event_at,NULL AS reconciliation_reason,
+        NULL AS reconciliation_digest,NULL AS late_reason,NULL AS late_digest,"""
+    lifecycle_reconciliation_category = ""
+    lifecycle_state_category = ""
+    lifecycle_reason = "COALESCE(evidence.outcome,'status_only')"
+    if lifecycle_available:
+        lifecycle_ctes = f""", latest_manifest AS (
+        SELECT cutover_id FROM {CUTOVER_MANIFESTS_TABLE}
+        ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1
+    ), latest_event_ranked AS (
+        SELECT event.*,
+               ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY event_sequence DESC) AS event_rank
+        FROM {LIFECYCLE_EVENTS_TABLE} event
+        JOIN latest_manifest manifest ON manifest.cutover_id=event.cutover_id
+    ), latest_event AS (
+        SELECT * FROM latest_event_ranked WHERE event_rank=1
+    ), reconciliation AS (
+        SELECT lane.order_id,lane.reason_code,lane.evidence_digest
+        FROM {LIFECYCLE_RECONCILIATION_TABLE} lane
+        JOIN latest_manifest manifest ON manifest.cutover_id=lane.cutover_id
+    ), late_evidence AS (
+        SELECT late.order_id,late.reason_code,late.evidence_digest
+        FROM {LIFECYCLE_LATE_EVIDENCE_TABLE} late
+        JOIN latest_manifest manifest ON manifest.cutover_id=late.cutover_id
+    )"""
+        lifecycle_joins = f"""
+        LEFT JOIN latest_manifest manifest ON 1=1
+        LEFT JOIN {LIFECYCLE_CURRENT_TABLE} lifecycle
+          ON lifecycle.cutover_id=manifest.cutover_id AND lifecycle.order_id=base.order_id
+        LEFT JOIN latest_event event ON event.order_id=base.order_id
+        LEFT JOIN reconciliation ON reconciliation.order_id=base.order_id
+        LEFT JOIN late_evidence ON late_evidence.order_id=base.order_id"""
+        lifecycle_columns = """
+        lifecycle.state AS lifecycle_state,lifecycle.quantity AS lifecycle_quantity,
+        lifecycle.facility_id AS lifecycle_facility_id,lifecycle.debit_event_id,
+        lifecycle.updated_at AS lifecycle_updated_at,event.event_type AS lifecycle_event_type,
+        event.evidence_digest AS lifecycle_event_digest,event.occurred_at AS lifecycle_event_at,
+        reconciliation.reason_code AS reconciliation_reason,
+        reconciliation.evidence_digest AS reconciliation_digest,
+        late_evidence.reason_code AS late_reason,late_evidence.evidence_digest AS late_digest,"""
+        lifecycle_reconciliation_category = """
+            WHEN reconciliation.order_id IS NOT NULL OR late_evidence.order_id IS NOT NULL
+                 OR lifecycle.state IN ('fulfilled_reconciliation','late_pre_t_isolated')
+              THEN 'reconciliation'"""
+        lifecycle_state_category = """
+            WHEN lifecycle.state='reserved' THEN 'active'
+            WHEN lifecycle.state='fulfilled' THEN 'handed_over'"""
+        lifecycle_reason = (
+            "COALESCE(reconciliation.reason_code,late_evidence.reason_code,"
+            "event.event_type,lifecycle.state,evidence.outcome,'status_only')"
+        )
     return f"""WITH ranked AS (
         SELECT observation.*,
                ROW_NUMBER() OVER(
                    PARTITION BY order_id ORDER BY observation_sequence DESC
                ) AS current_rank
         FROM {OBSERVATIONS_TABLE} AS observation
-    ), current_order AS (SELECT * FROM ranked WHERE current_rank=1)"""
+    ), base_order AS (SELECT * FROM ranked WHERE current_rank=1),
+    evidence_ranked AS (
+        SELECT evidence.*,
+               ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY evidence_sequence DESC) AS evidence_rank
+        FROM {IDENTITY_EVIDENCE_TABLE} evidence
+    ), evidence AS (SELECT * FROM evidence_ranked WHERE evidence_rank=1),
+    warehouse_candidates AS (
+        SELECT seller_warehouse_id,COUNT(DISTINCT facility_id) AS candidate_count,
+               MIN(mapping_id) AS mapping_id,MIN(facility_id) AS facility_id
+        FROM {WAREHOUSE_MAPPINGS_TABLE}
+        WHERE active=1
+        GROUP BY seller_warehouse_id
+    ), identity_candidates AS (
+        SELECT source_nm_id,source_chrt_id,source_barcode,source_sku,
+               COUNT(DISTINCT target_nm_id) AS candidate_count,
+               MIN(mapping_id) AS mapping_id,MIN(target_nm_id) AS target_nm_id
+        FROM {IDENTITY_MAPPINGS_TABLE}
+        WHERE active=1
+        GROUP BY source_nm_id,source_chrt_id,source_barcode,source_sku
+    ),
+    transition_ranked AS (
+        SELECT transition.*,
+               ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY transition_sequence DESC) AS transition_rank
+        FROM {STATUS_TRANSITIONS_TABLE} transition
+    ), transition AS (SELECT * FROM transition_ranked WHERE transition_rank=1)
+    {lifecycle_ctes}, current_order AS (
+      SELECT base.*,
+        COALESCE(status.supplier_status,'') AS supplier_status,
+        COALESCE(status.wb_status,'') AS wb_status,
+        COALESCE(status.status_digest,'') AS status_digest,
+        COALESCE(status.local_first_seen_at,'') AS status_first_seen_at,
+        COALESCE(status.local_last_seen_at,'') AS status_last_seen_at,
+        CASE
+            WHEN warehouse_candidates.candidate_count>1
+              OR identity_candidates.candidate_count>1 THEN 'ambiguous'
+            WHEN warehouse_candidates.candidate_count IS NULL THEN 'unmatched'
+            WHEN base.chrt_id IS NULL OR base.seller_sku=''
+              OR json_array_length(base.skus_json)<>1 THEN 'deferred'
+            WHEN identity_candidates.candidate_count IS NULL THEN 'unmatched'
+            ELSE 'matched'
+        END AS mapping_outcome,
+        CASE
+            WHEN warehouse_candidates.candidate_count>1
+              OR identity_candidates.candidate_count>1 THEN 'ambiguous'
+            WHEN warehouse_candidates.candidate_count IS NULL THEN 'unmatched'
+            WHEN base.chrt_id IS NULL OR base.seller_sku=''
+              OR json_array_length(base.skus_json)<>1 THEN 'deferred'
+            WHEN identity_candidates.candidate_count IS NULL THEN 'unmatched'
+            ELSE 'matched'
+        END AS mapping_category,
+        COALESCE(evidence.evidence_digest,'') AS mapping_evidence_digest,
+        CASE WHEN warehouse_candidates.candidate_count=1
+             THEN warehouse_candidates.facility_id ELSE '' END AS mapped_facility_id,
+        CASE WHEN identity_candidates.candidate_count=1
+             THEN identity_candidates.target_nm_id ELSE NULL END AS target_nm_id,
+        COALESCE(transition.transition_digest,'') AS transition_digest,
+        COALESCE(transition.detected_at,'') AS transition_detected_at,
+        {lifecycle_columns}
+        CASE
+            {lifecycle_reconciliation_category}
+            WHEN COALESCE(status.supplier_status,'')='cancel'
+              OR COALESCE(status.wb_status,'') IN ('canceled','canceled_by_client','declined_by_client','defect')
+              THEN 'canceled'
+            WHEN COALESCE(status.wb_status,'') IN ('sold','accepted_by_client') THEN 'sold_closed'
+            {lifecycle_state_category}
+            WHEN COALESCE(status.supplier_status,'')='complete'
+              AND COALESCE(status.wb_status,'')='sorted' THEN 'handed_over'
+            WHEN COALESCE(status.supplier_status,'') IN ('new','confirm')
+              OR COALESCE(status.wb_status,'') IN ('waiting','ready_for_pickup') THEN 'active'
+            ELSE 'reconciliation'
+        END AS status_category,
+        {lifecycle_reason} AS lifecycle_reason
+      FROM base_order base
+      LEFT JOIN {STATUS_CURRENT_TABLE} status ON status.order_id=base.order_id
+      LEFT JOIN evidence ON evidence.order_id=base.order_id
+      LEFT JOIN warehouse_candidates
+        ON warehouse_candidates.seller_warehouse_id=base.warehouse_id
+      LEFT JOIN identity_candidates
+        ON identity_candidates.source_nm_id=base.nm_id
+       AND identity_candidates.source_chrt_id=base.chrt_id
+       AND identity_candidates.source_barcode=json_extract(base.skus_json,'$[0]')
+       AND identity_candidates.source_sku=base.seller_sku
+      LEFT JOIN transition ON transition.order_id=base.order_id
+      {lifecycle_joins}
+    )"""
 
 
 def _current_filters(
-    *, search: str, nm_id: int | None, supply_id: str
+    *,
+    search: str,
+    nm_id: int | None,
+    supply_id: str,
+    facility_id: str,
+    supplier_status: str,
+    wb_status: str,
+    date_from: str,
+    date_to: str,
 ) -> tuple[str, tuple[Any, ...]]:
     clauses = ["1=1"]
     params: list[Any] = []
@@ -1273,20 +1577,35 @@ def _current_filters(
         term = f"%{search}%"
         params.extend([term, term, term])
     if nm_id is not None:
-        clauses.append("nm_id=?")
-        params.append(nm_id)
+        clauses.append("(nm_id=? OR target_nm_id=?)")
+        params.extend((nm_id, nm_id))
     if supply_id:
         clauses.append("supply_id=?")
         params.append(supply_id)
+    if facility_id:
+        clauses.append("COALESCE(lifecycle_facility_id,mapped_facility_id)=?")
+        params.append(facility_id)
+    if supplier_status:
+        clauses.append("supplier_status=?")
+        params.append(supplier_status)
+    if wb_status:
+        clauses.append("wb_status=?")
+        params.append(wb_status)
+    if date_from:
+        clauses.append("substr(source_created_at,1,10)>=?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("substr(source_created_at,1,10)<=?")
+        params.append(date_to)
     return " AND ".join(clauses), tuple(params)
 
 
-def _public_order(row: sqlite3.Row) -> dict[str, Any]:
+def _public_order(row: sqlite3.Row, *, enriched: bool = False) -> dict[str, Any]:
     try:
         skus = json.loads(str(row["skus_json"] or "[]"))
     except json.JSONDecodeError:
         skus = []
-    return {
+    payload = {
         "observation_id": str(row["observation_id"]),
         "order_id": int(row["order_id"]),
         "source_revision": str(row["source_revision"]),
@@ -1304,6 +1623,153 @@ def _public_order(row: sqlite3.Row) -> dict[str, Any]:
         "is_zero_order": bool(row["is_zero_order"]),
         "observed_at": str(row["observed_at"]),
     }
+    if not enriched:
+        return payload
+    facility_id = str(
+        _row_value(row, "lifecycle_facility_id")
+        or _row_value(row, "mapped_facility_id")
+        or ""
+    )
+    lifecycle_state = str(_row_value(row, "lifecycle_state") or "")
+    lifecycle_quantity = _row_value(row, "lifecycle_quantity")
+    payload.update(
+        {
+            "supplier_status": str(_row_value(row, "supplier_status") or ""),
+            "wb_status": str(_row_value(row, "wb_status") or ""),
+            "status_category": str(_row_value(row, "status_category") or "reconciliation"),
+            "facility_id": facility_id,
+            "mapping_outcome": str(_row_value(row, "mapping_outcome") or "deferred"),
+            "mapping_category": str(_row_value(row, "mapping_category") or "deferred"),
+            "sku_mapping": {
+                "source_nm_id": int(row["nm_id"]),
+                "target_nm_id": _row_value(row, "target_nm_id"),
+                "evidence_digest": str(_row_value(row, "mapping_evidence_digest") or ""),
+            },
+            "reservation": {
+                "state": lifecycle_state,
+                "quantity": int(lifecycle_quantity) if lifecycle_quantity is not None else None,
+                "active": lifecycle_state == "reserved",
+                "updated_at": str(_row_value(row, "lifecycle_updated_at") or ""),
+            },
+            "debit_close_evidence": {
+                "event_type": str(_row_value(row, "lifecycle_event_type") or ""),
+                "event_digest": str(_row_value(row, "lifecycle_event_digest") or ""),
+                "event_at": str(_row_value(row, "lifecycle_event_at") or ""),
+                "debit_event_id": str(_row_value(row, "debit_event_id") or ""),
+            },
+            "transition": {
+                "status_digest": str(_row_value(row, "status_digest") or ""),
+                "first_seen_at": str(_row_value(row, "status_first_seen_at") or ""),
+                "last_seen_at": str(_row_value(row, "status_last_seen_at") or ""),
+                "transition_digest": str(_row_value(row, "transition_digest") or ""),
+                "detected_at": str(_row_value(row, "transition_detected_at") or ""),
+            },
+            "lifecycle_reason": str(_row_value(row, "lifecycle_reason") or ""),
+            "reconciliation_evidence": {
+                "reason": str(
+                    _row_value(row, "reconciliation_reason")
+                    or _row_value(row, "late_reason")
+                    or ""
+                ),
+                "digest": str(
+                    _row_value(row, "reconciliation_digest")
+                    or _row_value(row, "late_digest")
+                    or ""
+                ),
+            },
+        }
+    )
+    return payload
+
+
+def _public_status(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "observation_id": str(row["observation_id"]),
+        "order_id": int(row["order_id"]),
+        "order_revision": str(row["order_revision"]),
+        "status_digest": str(row["status_digest"]),
+        "supplier_status": str(row["supplier_status"] or ""),
+        "wb_status": str(row["wb_status"] or ""),
+        "positive_quantity": int(row["positive_quantity"]),
+        "observed_at": str(row["observed_at"]),
+    }
+
+
+def _public_transition(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "transition_id": str(row["transition_id"]),
+        "transition_digest": str(row["transition_digest"]),
+        "order_id": int(row["order_id"]),
+        "previous": {
+            "episode_sequence": int(row["previous_episode_sequence"]),
+            "supplier_status": str(row["previous_supplier_status"] or ""),
+            "wb_status": str(row["previous_wb_status"] or ""),
+            "status_digest": str(row["previous_status_digest"]),
+            "first_seen_at": str(row["previous_local_first_seen_at"]),
+            "last_seen_at": str(row["previous_local_last_seen_at"]),
+        },
+        "current": {
+            "episode_sequence": int(row["current_episode_sequence"]),
+            "supplier_status": str(row["current_supplier_status"] or ""),
+            "wb_status": str(row["current_wb_status"] or ""),
+            "status_digest": str(row["current_status_digest"]),
+            "first_seen_at": str(row["current_local_first_seen_at"]),
+            "last_seen_at": str(row["current_local_last_seen_at"]),
+        },
+        "detected_at": str(row["detected_at"]),
+        "reappeared_pair": bool(row["reappeared_pair"]),
+    }
+
+
+def _public_mapping_evidence(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "evidence_id": str(row["evidence_id"]),
+        "order_id": int(row["order_id"]),
+        "order_revision": str(row["order_revision"]),
+        "seller_warehouse_id": row["warehouse_id"],
+        "source_nm_id": int(row["nm_id"]),
+        "source_chrt_id": row["chrt_id"],
+        "barcode": str(row["barcode"] or ""),
+        "seller_sku": str(row["seller_sku"] or ""),
+        "outcome": str(row["outcome"]),
+        "warehouse_mapping_id": str(row["warehouse_mapping_id"] or ""),
+        "identity_mapping_id": str(row["identity_mapping_id"] or ""),
+        "evidence_digest": str(row["evidence_digest"]),
+        "observed_at": str(row["observed_at"]),
+    }
+
+
+def _public_lifecycle_current(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "state": str(row["state"]),
+        "episode_sequence": int(row["episode_sequence"]),
+        "supplier_status": str(row["supplier_status"] or ""),
+        "wb_status": str(row["wb_status"] or ""),
+        "facility_id": str(row["facility_id"]),
+        "pool": str(row["pool"]),
+        "nm_id": int(row["nm_id"]),
+        "quantity": int(row["quantity"]),
+        "debit_event_id": str(row["debit_event_id"] or ""),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _row_value(row: sqlite3.Row, key: str) -> Any:
+    return row[key] if key in row.keys() else None
+
+
+def _lifecycle_available(conn: sqlite3.Connection) -> bool:
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    return {
+        LIFECYCLE_EVENTS_TABLE,
+        LIFECYCLE_CURRENT_TABLE,
+        LIFECYCLE_RECONCILIATION_TABLE,
+        LIFECYCLE_LATE_EVIDENCE_TABLE,
+        CUTOVER_MANIFESTS_TABLE,
+    }.issubset(tables)
 
 
 def _state(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1377,7 +1843,11 @@ def _shadow_state(conn: sqlite3.Connection, state: Mapping[str, Any]) -> dict[st
         "mapping_outcomes": evidence_counts,
         "unmatched_count": int(evidence_counts.get("unmatched_warehouse", 0))
         + int(evidence_counts.get("unmatched_identity", 0)),
-        "live_physical_trigger": None,
+        "live_physical_trigger": {
+            "supplier_status": "complete",
+            "wb_status": "sorted",
+            "both_required": True,
+        },
         "supplier_status_complete_triggers_debit": False,
     }
 
@@ -1420,7 +1890,10 @@ def _policy() -> dict[str, Any]:
         "mutates_wb": False,
         "switches_writer_or_reader": False,
         "supplier_status_complete_triggers_debit": False,
-        "live_physical_trigger_selected": False,
+        "handoff_trigger": {"supplier_status": "complete", "wb_status": "sorted"},
+        "live_physical_trigger_selected": True,
+        "query_only_ui": True,
+        "manual_accounting_mutation": False,
     }
 
 
@@ -1469,6 +1942,25 @@ def _optional_identifier(value: Any, name: str) -> str:
     if not SAFE_IDENTIFIER_RE.fullmatch(text):
         raise WbFbsOrdersError("invalid_identifier", f"{name} has invalid characters")
     return text
+
+
+def _optional_status(value: Any, name: str) -> str:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return ""
+    if not SAFE_IDENTIFIER_RE.fullmatch(text):
+        raise WbFbsOrdersError("invalid_status", f"{name} has invalid characters")
+    return text
+
+
+def _optional_date(value: Any, name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text).date().isoformat()
+    except ValueError as exc:
+        raise WbFbsOrdersError("invalid_date", f"{name} must be YYYY-MM-DD") from exc
 
 
 def _safe_search(value: Any) -> str:

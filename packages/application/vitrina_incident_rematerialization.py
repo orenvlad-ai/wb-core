@@ -121,7 +121,7 @@ def _projection_presentation(
     ]
     arithmetic_reason = (
         f"Факт: {float(fact or 0):g} шт; на инцидентных складах: "
-        f"{float(incident or 0):g} шт; operational остаток: "
+        f"{float(incident or 0):g} шт; остаток без инц.: "
         f"{float(effective or 0):g} шт. Склады: "
         f"{', '.join(names) or 'не указаны'}; начало: "
         f"{policy.get('effective_from') or 'не указано'}; "

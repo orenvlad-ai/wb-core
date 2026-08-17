@@ -597,6 +597,22 @@ but it is not permission to run the later physical opening/cutover stage.
 
 ### Stage 7C exact opening and FBS lifecycle
 
+Migration 145 exposes the applied lifecycle through query-only planning and
+order UI surfaces. For every active FBS facility the public read model shows
+`physical`, active `reserved` and signed `available = physical - reserved`;
+negative available is retained, while an active facility without physical
+ledger evidence makes current FBS total unavailable instead of synthesizing
+zero. Inactive facilities leave the current FBS
+total without rewriting history. Official seller-warehouse stock is a
+timestamped reconciliation/readback only and reaches a facility through exact
+`sellerWarehouseId` mapping; multiple active target facilities are ambiguous
+and therefore excluded rather than guessed. It is never a second physical operand.
+
+The FBS order list/detail surface is server-paginated and filterable by date,
+status, SKU and facility. It exposes safe order identity, status/lifecycle,
+mapping, reservation, debit/close and transition digest evidence, but no PII,
+raw payload, token or manual accounting/WB action.
+
 Migration 142 supplies the trusted production writer that Stage 6 intentionally
 lacked. It allocates the exact current aggregate `ff` rows into active
 facility/pool detail with signed SQLite `INTEGER` quantities and exact Decimal

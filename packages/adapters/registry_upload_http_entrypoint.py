@@ -369,6 +369,7 @@ DEFAULT_WAREHOUSES_PATH = "/v1/sheet-vitrina-v1/warehouses"
 DEFAULT_WAREHOUSES_PREFIX = f"{DEFAULT_WAREHOUSES_PATH}/"
 DEFAULT_WAREHOUSES_SYNC_PATH = f"{DEFAULT_WAREHOUSES_PATH}/sync"
 DEFAULT_WAREHOUSES_SYNC_STATUS_PATH = f"{DEFAULT_WAREHOUSES_SYNC_PATH}/status"
+DEFAULT_INVENTORY_PLANNING_PATH = f"{DEFAULT_WAREHOUSES_PATH}/planning-inventory"
 DEFAULT_WAREHOUSES_RECOVERY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/recovery"
 DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/preview"
 DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
@@ -4294,6 +4295,8 @@ def _build_handler(
                 try:
                     if parsed.path == DEFAULT_WAREHOUSES_PATH:
                         payload = entrypoint.handle_warehouses_overview_request()
+                    elif parsed.path == DEFAULT_INVENTORY_PLANNING_PATH:
+                        payload = entrypoint.handle_inventory_planning_request()
                     else:
                         relative = urllib_parse.unquote(
                             parsed.path[len(DEFAULT_WAREHOUSES_PREFIX) :]
@@ -5940,6 +5943,12 @@ def _handle_ff_pool_get(
             search=str(params.get("search") or ""),
             nm_id=params.get("nm_id"),
             supply_id=str(params.get("supply_id") or ""),
+            facility_id=str(params.get("facility_id") or ""),
+            supplier_status=str(params.get("supplier_status") or ""),
+            wb_status=str(params.get("wb_status") or ""),
+            status_category=str(params.get("status_category") or "all"),
+            date_from=str(params.get("date_from") or ""),
+            date_to=str(params.get("date_to") or ""),
         )
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]

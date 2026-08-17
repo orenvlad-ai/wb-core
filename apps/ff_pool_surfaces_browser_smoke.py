@@ -128,6 +128,14 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     assert response is not None and response.status == 200
     page.locator('[data-unified-tab-button="warehouses"]').click()
     page.locator('[data-warehouse-key="ff"]').click()
+    page.locator("[data-inventory-planning-card]").wait_for(state="visible")
+    assert "Оперостаток" not in page.locator("[data-warehouses-panel]").inner_text()
+    page.locator("[data-open-fbs-orders]").click()
+    page.locator("[data-fbs-orders-view]").wait_for(state="visible")
+    page.locator("[data-fbs-order-counters] .fbs-order-counter").first.wait_for(state="visible")
+    assert page.locator("[data-fbs-order-counters] .fbs-order-counter").count() == 9
+    assert page.locator("[data-fbs-orders-filters] input, [data-fbs-orders-filters] select").count() == 6
+    page.locator("[data-open-warehouse-costs]").click()
     launcher = page.locator("[data-ff-pool-open]")
     launcher.wait_for(state="visible")
     launcher.focus()
@@ -141,6 +149,12 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     page.locator("[data-ff-pool-facilities] .ff-pool-list-item", has_text="Москва Север").get_by_role("button", name="Открыть").click()
     page.locator("[data-ff-pool-facility-detail] h3").wait_for(state="visible")
     assert "Москва Север" in page.locator("[data-ff-pool-facility-detail]").inner_text()
+    page.get_by_role("button", name="FBS-заказы этого склада").click()
+    page.locator("[data-fbs-orders-view]").wait_for(state="visible")
+    assert page.locator("[data-fbs-orders-facility]").input_value()
+    page.locator("[data-open-warehouse-costs]").click()
+    page.locator("[data-ff-pool-open]").click()
+    dialog.wait_for(state="visible")
 
     page.locator('[data-ff-pool-tab="create"]').click()
     page.locator("[data-ff-pool-action-kind]").select_option("transfer_root")

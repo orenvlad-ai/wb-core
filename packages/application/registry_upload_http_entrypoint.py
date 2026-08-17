@@ -31,6 +31,7 @@ from packages.application.ff_document_workflow import (
 )
 from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
+from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.wb_fbs_orders import WbFbsOrdersCollector
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
@@ -1188,6 +1189,7 @@ class RegistryUploadHttpEntrypoint:
             db_path=self.runtime.db_path,
             timestamp_factory=self.activated_at_factory,
         )
+        self.inventory_planning = InventoryPlanningReadModel(db_path=self.runtime.db_path)
         self.warehouse_stocks_block = WarehouseStocksBlock(
             runtime=self.runtime,
             stocks_block=self.factory_order_supply_block.stocks_block,
@@ -5637,6 +5639,9 @@ class RegistryUploadHttpEntrypoint:
             else self.warehouse_stocks_block.warehouse_detail(warehouse_key)
         )
 
+    def handle_inventory_planning_request(self) -> dict[str, Any]:
+        return self.inventory_planning.current()
+
     def _ff_aggregate_revision(self) -> str:
         detail = self.warehouse_functional_block.compact_warehouse_detail("ff")
         return str((detail.get("active_version") or {}).get("version_id") or "")
@@ -6206,6 +6211,10 @@ class RegistryUploadHttpEntrypoint:
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
                     ),
                 )
+                planning_inventory_readback = run_phase(
+                    "planning_inventory_readback",
+                    self.inventory_planning.current,
+                )
                 def dependent_replay() -> dict[str, Any]:
                     proxy_recalculation = (
                         self.calculation_parameters_block.process_pending_targeted_recalculations(
@@ -6274,6 +6283,7 @@ class RegistryUploadHttpEntrypoint:
             "diff": plan["diff"],
             "active_version": result.get("active_version"),
             "sync": result.get("sync"),
+            "planning_inventory_readback": planning_inventory_readback,
             "proxy_targeted_recalculation": proxy_recalculation,
             "wb_finance_cost_recalculation": finance_cost_recalculation,
             "wb_transit_cost_replays": transit_cost_replays,

@@ -308,6 +308,9 @@ def _read_and_immutability_contract(db_path: Path, collector: WbFbsOrdersCollect
         "observation_id", "order_id", "source_revision", "supply_id", "delivery_type",
         "source_created_at", "warehouse_id", "office_id", "nm_id", "chrt_id", "seller_sku", "skus",
         "cargo_type", "cross_border_type", "is_zero_order", "observed_at",
+        "supplier_status", "wb_status", "status_category", "facility_id", "mapping_outcome",
+        "mapping_category", "sku_mapping", "reservation", "debit_close_evidence", "transition",
+        "lifecycle_reason", "reconciliation_evidence",
     }
     with sqlite3.connect(db_path) as conn:
         columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({OBSERVATIONS_TABLE})")}
