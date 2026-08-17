@@ -65,6 +65,8 @@ SAFE_TEXT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 VISIBLE_DOCUMENT_KINDS = tuple(
     item for item in DOCUMENT_KINDS if item != "facility_pool_opening"
 )
+FBS_LIFECYCLE_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
+FBS_CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
 DOCUMENT_LABELS_RU = {
     "china_acceptance": "Приёмка Китай → FF",
     "transfer_root": "Перемещение между складами",
@@ -317,6 +319,15 @@ class FfPoolSurface:
                     balance_count = int(row["balance_count"] or 0)
                 else:
                     quantity, capital, balance_count = 0, Decimal("0"), 0
+                reservation = (
+                    _fbs_reservations(conn, facility_id=selected)
+                    if pool == "FBS" and feature["reader_effective"]
+                    else {"quantity": 0, "by_nm_id": {}, "updated_at": ""}
+                )
+                reserved_quantity = int(reservation["quantity"])
+                available_quantity = (
+                    quantity - reserved_quantity if feature["reader_effective"] else None
+                )
                 document_count = int(
                     conn.execute(
                         f"""SELECT COUNT(DISTINCT document.root_document_id)
@@ -334,8 +345,15 @@ class FfPoolSurface:
                         "wac_rub": _wac(capital, quantity) if feature["reader_effective"] else None,
                         "balance_count": balance_count,
                         "document_count": document_count,
-                        "reservation_quantity": None,
-                        "reservation_status": "not_available_before_fbs_stage",
+                        "physical_quantity": quantity if feature["reader_effective"] else None,
+                        "reservation_quantity": (
+                            reserved_quantity if feature["reader_effective"] and pool == "FBS" else 0
+                        ),
+                        "available_quantity": available_quantity,
+                        "available_is_signed": pool == "FBS",
+                        "reservation_status": (
+                            "exact_lifecycle" if pool == "FBS" else "not_applicable"
+                        ),
                     }
                 )
             audit_rows = conn.execute(
@@ -361,6 +379,10 @@ class FfPoolSurface:
             "pools": pools,
             "audit": [dict(row) for row in audit_rows],
             "document_context": {"facility_id": selected},
+            "fbs_orders_context": {
+                "facility_id": selected,
+                "path": "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders",
+            },
             "aggregate_disclaimer_ru": (
                 "Сумма сегментов должна совпадать с агрегатом FF; сегменты не входят в TOTAL отдельно."
             ),
@@ -425,6 +447,17 @@ class FfPoolSurface:
                         WHERE {where} ORDER BY balance.nm_id LIMIT ? OFFSET ?""",
                     (*params, limit, offset),
                 ).fetchall()
+            physical_total = (
+                int(
+                    conn.execute(
+                        f"""SELECT COALESCE(SUM(quantity),0) FROM {BALANCES_TABLE}
+                            WHERE projection_epoch=? AND facility_id=? AND pool=?""",
+                        (int(feature["epoch"]), selected, selected_pool),
+                    ).fetchone()[0]
+                )
+                if feature["reader_effective"]
+                else None
+            )
             document_count = int(
                 conn.execute(
                     f"""SELECT COUNT(DISTINCT document.root_document_id)
@@ -434,6 +467,11 @@ class FfPoolSurface:
                     (selected, selected_pool),
                 ).fetchone()[0]
             )
+            reservations = (
+                _fbs_reservations(conn, facility_id=selected)
+                if selected_pool == "FBS" and feature["reader_effective"]
+                else {"quantity": 0, "by_nm_id": {}, "updated_at": ""}
+            )
         balances = [
             {
                 "nm_id": int(row["nm_id"]),
@@ -441,6 +479,13 @@ class FfPoolSurface:
                 "name": str(row["nomenclature_name"] or ""),
                 "barcode": str(row["barcode"] or ""),
                 "quantity": int(row["quantity"]),
+                "physical_quantity": int(row["quantity"]),
+                "reserved_quantity": int(
+                    reservations["by_nm_id"].get(int(row["nm_id"]), 0)
+                ),
+                "available_quantity": int(row["quantity"])
+                - int(reservations["by_nm_id"].get(int(row["nm_id"]), 0)),
+                "available_is_signed": selected_pool == "FBS",
                 "capital_rub": canonical_decimal_text(row["capital_rub"]),
                 "wac_rub": str(row["wac_rub"] or "") or _wac(_decimal(row["capital_rub"]), int(row["quantity"])),
                 "updated_at": str(row["updated_at"]),
@@ -456,9 +501,32 @@ class FfPoolSurface:
             "balances": balances,
             "page": _page_payload(page, limit, total),
             "document_count": document_count,
-            "reservation_quantity": None,
-            "reservation_status": "not_available_before_fbs_stage",
+            "physical_quantity": (
+                physical_total
+            ),
+            "reservation_quantity": (
+                int(reservations["quantity"])
+                if feature["reader_effective"] and selected_pool == "FBS"
+                else 0
+            ),
+            "available_quantity": (
+                int(physical_total) - int(reservations["quantity"])
+                if physical_total is not None
+                else None
+            ),
+            "available_is_signed": selected_pool == "FBS",
+            "reservation_status": (
+                "exact_lifecycle" if selected_pool == "FBS" else "not_applicable"
+            ),
             "document_context": {"facility_id": selected, "pool": selected_pool},
+            "fbs_orders_context": (
+                {
+                    "facility_id": selected,
+                    "path": "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders",
+                }
+                if selected_pool == "FBS"
+                else None
+            ),
         }
         return _etagged(payload)
 
@@ -1736,6 +1804,33 @@ def _date(value: Any, *, field: str, optional: bool = False) -> str:
     if parsed != token:
         raise FfPoolSurfaceError(f"invalid_{field}", f"{field} must be YYYY-MM-DD")
     return token
+
+
+def _fbs_reservations(conn: sqlite3.Connection, *, facility_id: str) -> dict[str, Any]:
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if not {FBS_LIFECYCLE_CURRENT_TABLE, FBS_CUTOVER_MANIFESTS_TABLE}.issubset(tables):
+        return {"quantity": 0, "by_nm_id": {}, "updated_at": ""}
+    rows = conn.execute(
+        f"""WITH active_cutover AS (
+                SELECT cutover_id FROM {FBS_CUTOVER_MANIFESTS_TABLE}
+                ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1
+            )
+            SELECT current.nm_id,SUM(current.quantity) AS quantity,MAX(current.updated_at) AS updated_at
+            FROM {FBS_LIFECYCLE_CURRENT_TABLE} current
+            JOIN active_cutover cutover ON cutover.cutover_id=current.cutover_id
+            WHERE current.facility_id=? AND current.pool='FBS' AND current.state='reserved'
+            GROUP BY current.nm_id""",
+        (facility_id,),
+    ).fetchall()
+    by_nm_id = {int(row["nm_id"]): int(row["quantity"] or 0) for row in rows}
+    return {
+        "quantity": sum(by_nm_id.values()),
+        "by_nm_id": by_nm_id,
+        "updated_at": max((str(row["updated_at"] or "") for row in rows), default=""),
+    }
 
 
 def _decimal(value: Any) -> Decimal:

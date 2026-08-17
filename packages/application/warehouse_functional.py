@@ -9121,16 +9121,27 @@ def _warehouse_sync_error_reason(value: Any) -> str:
         return "источник отклонил авторизацию; требуется проверка служебной сессии"
     if "429" in text or "rate limit" in text or "too many requests" in text:
         return "WB временно ограничил частоту запросов; сохранена последняя успешная версия"
-    if "timeout" in text or "timed out" in text:
-        return "источник не ответил за допустимое время; сохранена последняя успешная версия"
     if any(token in text for token in ("pagination", "coverage is incomplete", "missing_nm_ids")):
         return "WB вернул неполный снимок; публикация отклонена проверкой полноты"
+    if any(
+        token in text
+        for token in (
+            "aggregate sentinel",
+            "warehouse granularity",
+            "source contract",
+            "raw-to-canonical",
+            "official wb snapshot",
+        )
+    ):
+        return "снимок WB не прошёл проверку source-contract; последняя успешная версия сохранена"
     if any(token in text for token in ("drifted", "fingerprint mismatch", "source digest")):
         return "источники изменились после dry-run; требуется новый согласованный план"
     if any(token in text for token in ("negative", "cost gap", "invariant")):
         return "расчёт остановлен проверкой целостности складских данных"
     if any(token in text for token in ("sqlite", "database is locked", "operationalerror", "integrity_check")):
         return "временная ошибка хранилища; сохранена последняя успешная версия"
+    if "timeout" in text or "timed out" in text:
+        return "источник не ответил за допустимое время; сохранена последняя успешная версия"
     if any(token in text for token in ("status 5", "http 5", "bad gateway", "service unavailable")):
         return "внешний сервис временно недоступен; сохранена последняя успешная версия"
     return "синхронизация остановлена; техническая причина доступна в журнале аудита"

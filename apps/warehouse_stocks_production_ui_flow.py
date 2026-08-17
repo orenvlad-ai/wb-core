@@ -1637,7 +1637,7 @@ def _run_warehouse_ui_flow(
                   const value = (cell.getAttribute("title") || "").toLocaleLowerCase("ru-RU");
                   return value.includes("факт:")
                     && value.includes("на инцидентных складах:")
-                    && value.includes("operational остаток:")
+                    && value.includes("остаток без инц.:")
                     && value.includes("revision");
                 }),
                 styles: cells.slice(0, 10).map(cell => {

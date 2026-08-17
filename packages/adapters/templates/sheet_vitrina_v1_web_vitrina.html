@@ -5649,9 +5649,26 @@
     <section class="unified-tab-panel warehouse-panel" data-unified-tab-panel="warehouses" data-warehouses-panel hidden>
       <nav class="warehouse-switcher warehouse-section-switcher" aria-label="Разделы остатков">
         <button class="warehouse-switch is-active" type="button" data-open-warehouse-costs>Склады и себестоимость</button>
+        <button class="warehouse-switch" type="button" data-open-fbs-orders>FBS-заказы</button>
         <button class="warehouse-switch" type="button" data-open-stock-report>Отчёт об остатках</button>
       </nav>
       <div data-warehouse-cost-view>
+      <section class="warehouse-card inventory-planning-card" data-inventory-planning-card aria-live="polite">
+        <div class="warehouse-head">
+          <div>
+            <h2 class="warehouse-section-title">Плановые остатки WB и FBS</h2>
+            <p class="warehouse-meta" data-inventory-planning-meta>Показатели загружаются отдельно от страницы и не меняют складской учёт.</p>
+          </div>
+          <button class="button ghost" type="button" data-inventory-planning-refresh>Обновить</button>
+        </div>
+        <div class="inventory-metric-grid" data-inventory-planning-metrics>
+          <p class="warehouse-empty">Откройте «Остатки», чтобы загрузить показатели.</p>
+        </div>
+        <details class="inventory-disclosure">
+          <summary>Формула, качество и сверка FBS</summary>
+          <div data-inventory-planning-disclosure><p class="warehouse-empty">Детали появятся после загрузки.</p></div>
+        </details>
+      </section>
       <nav class="warehouse-switcher warehouse-detail-switcher" aria-label="Склады" data-warehouse-switcher>
         <button class="warehouse-switch" type="button" data-warehouse-key="production">На производстве</button>
         <button class="warehouse-switch" type="button" data-warehouse-key="china_to_ff">В пути: Китай → FF</button>
@@ -5930,6 +5947,37 @@
         </details>
       </section>
       </div>
+      <section class="warehouse-card fbs-orders-view" data-fbs-orders-view hidden aria-labelledby="fbs-orders-title">
+        <div class="warehouse-head">
+          <div>
+            <h1 class="warehouse-title" id="fbs-orders-title">FBS-заказы</h1>
+            <p class="warehouse-meta">Только чтение локального append-only кэша: статусы, reservation и lifecycle evidence без PII и без записей в WB.</p>
+          </div>
+          <span class="warehouse-status" data-tone="neutral" data-fbs-orders-status>Не загружено</span>
+        </div>
+        <form class="fbs-orders-filters" data-fbs-orders-filters>
+          <label>Дата с<input class="input" type="date" data-fbs-orders-date-from></label>
+          <label>Дата по<input class="input" type="date" data-fbs-orders-date-to></label>
+          <label>SKU / заказ<input class="input" type="search" maxlength="120" data-fbs-orders-search placeholder="nmId или order id"></label>
+          <label>Склад<select class="input" data-fbs-orders-facility><option value="">Все активные</option></select></label>
+          <label>supplierStatus<input class="input" data-fbs-orders-supplier-status placeholder="например, complete"></label>
+          <label>wbStatus<input class="input" data-fbs-orders-wb-status placeholder="например, sorted"></label>
+          <button class="button secondary" type="submit">Показать</button>
+        </form>
+        <div class="fbs-order-counters" data-fbs-order-counters aria-label="Состояния FBS-заказов"></div>
+        <div class="warehouse-table-wrap">
+          <table class="warehouse-table fbs-orders-table">
+            <thead><tr><th>Заказ</th><th>Статусы</th><th>Склад / SKU</th><th>Reservation</th><th>Lifecycle</th><th>Время</th><th></th></tr></thead>
+            <tbody data-fbs-orders-rows><tr><td colspan="7"><p class="warehouse-empty">Выберите раздел, чтобы загрузить заказы.</p></td></tr></tbody>
+          </table>
+        </div>
+        <div class="fbs-orders-pagination">
+          <button class="button ghost" type="button" data-fbs-orders-prev disabled>Назад</button>
+          <span data-fbs-orders-page>Страница 1</span>
+          <button class="button ghost" type="button" data-fbs-orders-next disabled>Далее</button>
+        </div>
+        <section class="fbs-order-detail" data-fbs-order-detail hidden aria-live="polite"></section>
+      </section>
       <iframe class="operator-embed-frame" title="Отчёт об остатках" data-operator-embed-frame="warehouse-stock-report" data-warehouse-stock-report-frame scrolling="no" hidden></iframe>
     </section>
 
@@ -6783,8 +6831,23 @@
     const warehouseRecoveryOperationsNode = document.querySelector("[data-warehouse-recovery-operations]");
     const warehouseRecoveryTechnicalNode = document.querySelector("[data-warehouse-recovery-technical]");
     const warehouseCostsButton = document.querySelector("[data-open-warehouse-costs]");
+    const warehouseFbsOrdersButton = document.querySelector("[data-open-fbs-orders]");
     const warehouseStockReportButton = document.querySelector("[data-open-stock-report]");
     const warehouseCostView = document.querySelector("[data-warehouse-cost-view]");
+    const fbsOrdersView = document.querySelector("[data-fbs-orders-view]");
+    const inventoryPlanningMetrics = document.querySelector("[data-inventory-planning-metrics]");
+    const inventoryPlanningMeta = document.querySelector("[data-inventory-planning-meta]");
+    const inventoryPlanningDisclosure = document.querySelector("[data-inventory-planning-disclosure]");
+    const inventoryPlanningRefresh = document.querySelector("[data-inventory-planning-refresh]");
+    const fbsOrdersStatus = document.querySelector("[data-fbs-orders-status]");
+    const fbsOrdersFilters = document.querySelector("[data-fbs-orders-filters]");
+    const fbsOrdersRows = document.querySelector("[data-fbs-orders-rows]");
+    const fbsOrderCounters = document.querySelector("[data-fbs-order-counters]");
+    const fbsOrdersPage = document.querySelector("[data-fbs-orders-page]");
+    const fbsOrdersPrev = document.querySelector("[data-fbs-orders-prev]");
+    const fbsOrdersNext = document.querySelector("[data-fbs-orders-next]");
+    const fbsOrderDetail = document.querySelector("[data-fbs-order-detail]");
+    const fbsOrdersFacility = document.querySelector("[data-fbs-orders-facility]");
     const warehouseStockReportFrame = document.querySelector("[data-warehouse-stock-report-frame]");
     const warehouseUnmatchedCard = document.querySelector("[data-warehouse-unmatched-card]");
     const warehouseUnmatchedNode = document.querySelector("[data-warehouse-unmatched]");
@@ -7327,7 +7390,10 @@
         incidentDraft: null,
         incidentOptions: [],
         incidentOptionsError: "",
-        incidentLoading: false
+        incidentLoading: false,
+        inventoryPlanningLoaded: false,
+        inventoryPlanningLoading: false,
+        fbsOrders: {loaded: false, loading: false, page: 1, category: "all", payload: null}
       },
       tableSnapshot: {
         displayedRequestKey: "",
@@ -7886,11 +7952,40 @@
         activateWarehouseSubsection("costs");
       });
     }
+    if (warehouseFbsOrdersButton) {
+      warehouseFbsOrdersButton.addEventListener("click", function() {
+        activateWarehouseSubsection("fbs-orders");
+      });
+    }
     if (warehouseStockReportButton) {
       warehouseStockReportButton.addEventListener("click", function() {
         activateWarehouseSubsection("stock-report");
       });
     }
+    if (inventoryPlanningRefresh) inventoryPlanningRefresh.addEventListener("click", function() { loadInventoryPlanning(true); });
+    if (inventoryPlanningMetrics) inventoryPlanningMetrics.addEventListener("change", function(event) {
+      const toggle = event.target.closest("[data-inventory-metric-toggle]");
+      if (!toggle) return;
+      const metrics = Array.from(inventoryPlanningMetrics.querySelectorAll("[data-inventory-metric-toggle]"));
+      localStorage.setItem(inventoryMetricVisibilityKey, JSON.stringify(metrics.filter(function(item) { return !item.checked; }).map(function(item) { return item.getAttribute("data-inventory-metric-toggle"); })));
+      loadInventoryPlanning(true);
+    });
+    if (fbsOrdersFilters) fbsOrdersFilters.addEventListener("submit", function(event) { event.preventDefault(); loadFbsOrders(1); });
+    if (fbsOrderCounters) fbsOrderCounters.addEventListener("click", function(event) {
+      const button = event.target.closest("[data-fbs-order-category]");
+      if (!button) return;
+      state.warehouses.fbsOrders.category = String(button.getAttribute("data-fbs-order-category") || "all");
+      loadFbsOrders(1);
+    });
+    if (fbsOrdersPrev) fbsOrdersPrev.addEventListener("click", function() { loadFbsOrders(Math.max(1, state.warehouses.fbsOrders.page - 1)); });
+    if (fbsOrdersNext) fbsOrdersNext.addEventListener("click", function() { loadFbsOrders(state.warehouses.fbsOrders.page + 1); });
+    if (fbsOrdersRows) fbsOrdersRows.addEventListener("click", function(event) {
+      const button = event.target.closest("[data-fbs-order-detail-id]");
+      if (button) loadFbsOrderDetail(button.getAttribute("data-fbs-order-detail-id"));
+    });
+    if (fbsOrderDetail) fbsOrderDetail.addEventListener("click", function(event) {
+      if (event.target.closest("[data-fbs-order-detail-close]")) fbsOrderDetail.hidden = true;
+    });
     if (warehouseUpdateStartButton) warehouseUpdateStartButton.addEventListener("click", startWarehouseCurrentSync);
     if (warehouseDocumentsNode) {
       warehouseDocumentsNode.addEventListener("click", function(event) {
@@ -8808,6 +8903,7 @@
       }
       if (activeTab === WAREHOUSES_UNIFIED_TAB) {
         activateWarehouse(state.warehouses.activeKey || warehouseInitialKey(), {persist: false});
+        loadInventoryPlanning(false);
       }
       if (activeTab === RESEARCH_UNIFIED_TAB) {
         ensureResearchOptionsLoaded();
@@ -10206,11 +10302,169 @@
       frame.setAttribute("src", url.toString());
     }
 
+    const inventoryMetricVisibilityKey = "wb-core:inventory-planning-hidden:v2";
+    const fbsOrdersBasePath = "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders";
+
+    function inventoryVisibleMetricKeys(metrics) {
+      const defaults = (metrics || []).map(function(metric) { return String(metric.metric_key || ""); });
+      try {
+        const hidden = JSON.parse(localStorage.getItem(inventoryMetricVisibilityKey) || "[]");
+        return Array.isArray(hidden) ? defaults.filter(function(key) { return hidden.indexOf(key) < 0; }) : defaults;
+      } catch (_error) { return defaults; }
+    }
+
+    function renderInventoryPlanning(payload) {
+      if (!inventoryPlanningMetrics || !inventoryPlanningDisclosure) return;
+      const metrics = Array.isArray(payload && payload.metrics) ? payload.metrics : [];
+      const visible = inventoryVisibleMetricKeys(metrics);
+      const controls = '<div class="inventory-metric-controls" aria-label="Видимые показатели">' + metrics.map(function(metric) {
+        const key = String(metric.metric_key || "");
+        return '<label><input type="checkbox" data-inventory-metric-toggle="' + escapeHtml(key) + '" ' + (visible.indexOf(key) >= 0 ? 'checked' : '') + '> ' + escapeHtml(metric.label_ru || key) + '</label>';
+      }).join("") + '</div>';
+      const cards = metrics.filter(function(metric) { return visible.indexOf(String(metric.metric_key || "")) >= 0; }).map(function(metric) {
+        const value = metric.available ? warehouseNumber(metric.value) + " шт" : "Недоступно";
+        return '<article class="inventory-metric-card" data-quality="' + escapeHtml(metric.quality || "") + '">' +
+          '<span>' + escapeHtml(metric.label_ru || metric.metric_key) + '</span><strong>' + escapeHtml(value) + '</strong>' +
+          (metric.reason_ru ? '<small>' + escapeHtml(metric.reason_ru) + '</small>' : '') + '</article>';
+      }).join("");
+      inventoryPlanningMetrics.innerHTML = controls + '<div class="inventory-metric-cards">' + (cards || '<p class="warehouse-empty">Все показатели скрыты.</p>') + '</div>';
+      const formula = payload.formula || {};
+      const wb = payload.wb || {};
+      const facilities = (payload.fbs && payload.fbs.facilities) || [];
+      const sellerReconciliation = (payload.fbs && payload.fbs.seller_stock_reconciliation) || {};
+      const facilityRows = facilities.map(function(facility) {
+        const seller = facility.seller_stock || {};
+        return '<tr><td>' + escapeHtml(facility.name || facility.code || facility.facility_id) + '</td>' +
+          '<td class="warehouse-number">' + escapeHtml(facility.physical == null ? "Недоступно" : warehouseNumber(facility.physical)) + '</td>' +
+          '<td class="warehouse-number">' + escapeHtml(facility.reserved == null ? "Недоступно" : warehouseNumber(facility.reserved)) + '</td>' +
+          '<td class="warehouse-number">' + escapeHtml(facility.available == null ? "Недоступно" : warehouseNumber(facility.available)) + '</td>' +
+          '<td class="warehouse-number">' + escapeHtml(seller.quantity == null ? "—" : warehouseNumber(seller.quantity)) + '</td>' +
+          '<td class="warehouse-number">' + escapeHtml(seller.delta_to_ledger_physical == null ? "—" : warehouseNumber(seller.delta_to_ledger_physical)) + '</td></tr>';
+      }).join("");
+      inventoryPlanningDisclosure.innerHTML =
+        '<p><strong>Версия:</strong> ' + escapeHtml(formula.version || "—") + ' · с ' + escapeHtml(formula.effective_from || "—") + '. ' + escapeHtml(formula.history_rule || "") + '</p>' +
+        '<p><strong>Формулы:</strong> ' + escapeHtml(formula.stock_total || "") + '; ' + escapeHtml(formula.effective_total || "") + '.</p>' +
+        '<p><strong>WB:</strong> ' + escapeHtml(warehouseDate(wb.fetched_at)) + '. ' + escapeHtml((wb.districts || {}).reason_ru || "Распределение по складам доступно.") + '</p>' +
+        '<div class="warehouse-table-wrap"><table class="warehouse-table"><thead><tr><th>Склад FBS</th><th>Physical</th><th>Reserved</th><th>Available</th><th>Seller readback</th><th>Δ к physical</th></tr></thead><tbody>' +
+        (facilityRows || '<tr><td colspan="6">Активные FBS facilities отсутствуют или reader epoch недоступен.</td></tr>') + '</tbody></table></div>' +
+        '<p class="warehouse-meta">Seller stock — только timestamped reconciliation (' + escapeHtml(sellerReconciliation.mapping_quality || "unavailable") + ', ' + escapeHtml(warehouseDate(sellerReconciliation.captured_at)) + '); physical берётся из facility×FBS ledger. Available сохраняет отрицательные значения.</p>';
+      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "WB: " + warehouseDate((payload.freshness || {}).wb_fetched_at) + " · FBS: " + warehouseDate((payload.freshness || {}).fbs_updated_at) + " · current planning/read, без изменения six-stage TOTAL.";
+      if (fbsOrdersFacility) {
+        const selected = fbsOrdersFacility.value;
+        fbsOrdersFacility.innerHTML = '<option value="">Все активные</option>' + facilities.map(function(facility) {
+          return '<option value="' + escapeHtml(facility.facility_id) + '">' + escapeHtml(facility.name || facility.code) + '</option>';
+        }).join("");
+        if (Array.from(fbsOrdersFacility.options).some(function(option) { return option.value === selected; })) fbsOrdersFacility.value = selected;
+      }
+    }
+
+    async function loadInventoryPlanning(force) {
+      if (state.warehouses.inventoryPlanningLoading || (state.warehouses.inventoryPlanningLoaded && !force)) return;
+      state.warehouses.inventoryPlanningLoading = true;
+      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "Загрузка current WB/FBS evidence…";
+      try {
+        const response = await fetch("/v1/sheet-vitrina-v1/warehouses/planning-inventory", {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        renderInventoryPlanning(payload);
+        state.warehouses.inventoryPlanningLoaded = true;
+      } catch (error) {
+        if (inventoryPlanningMetrics) inventoryPlanningMetrics.innerHTML = '<p class="warehouse-empty">' + escapeHtml(error.message || error) + '</p>';
+        if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "Показатели недоступны; складские данные не изменены.";
+      } finally { state.warehouses.inventoryPlanningLoading = false; }
+    }
+
+    const fbsCounterLabels = {total:"Все",active:"Reserved / до передачи",handed_over:"Переданы complete+sorted",sold_closed:"Проданы / закрыты",canceled:"Отменены",reconciliation:"Сверка / неизвестный возврат",unmatched:"Не сопоставлены",deferred:"Отложены",ambiguous:"Неоднозначны"};
+
+    function renderFbsOrderCounters(counters) {
+      if (!fbsOrderCounters) return;
+      fbsOrderCounters.innerHTML = Object.keys(fbsCounterLabels).map(function(key) {
+        const category = key === "total" ? "all" : key;
+        const active = state.warehouses.fbsOrders.category === category;
+        return '<button type="button" class="fbs-order-counter ' + (active ? 'is-active' : '') + '" aria-pressed="' + (active ? 'true' : 'false') + '" data-fbs-order-category="' + category + '"><span>' + escapeHtml(fbsCounterLabels[key]) + '</span><strong>' + escapeHtml(warehouseNumber((counters || {})[key] || 0)) + '</strong></button>';
+      }).join("");
+    }
+
+    function renderFbsOrders(payload) {
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      renderFbsOrderCounters(payload.counters || {});
+      if (fbsOrdersRows) fbsOrdersRows.innerHTML = rows.length ? rows.map(function(order) {
+        const reservation = order.reservation || {};
+        const evidence = order.debit_close_evidence || {};
+        return '<tr><td><strong>' + escapeHtml(String(order.order_id || "—")) + '</strong><br><small>' + escapeHtml(order.supply_id || "без supply") + '</small></td>' +
+          '<td>' + escapeHtml(order.supplier_status || "—") + ' / ' + escapeHtml(order.wb_status || "—") + '<br><small>' + escapeHtml(order.status_category || "—") + '</small></td>' +
+          '<td>' + escapeHtml(order.facility_id || "не сопоставлен") + '<br><small>' + escapeHtml(String((order.sku_mapping || {}).target_nm_id || order.nm_id || "—")) + '</small></td>' +
+          '<td>' + escapeHtml(reservation.active ? (warehouseNumber(reservation.quantity) + " шт") : (reservation.state || "—")) + '</td>' +
+          '<td>' + escapeHtml(order.lifecycle_reason || evidence.event_type || "—") + '</td>' +
+          '<td>' + escapeHtml(warehouseDate((order.transition || {}).last_seen_at || order.observed_at)) + '</td>' +
+          '<td><button class="button ghost" type="button" data-fbs-order-detail-id="' + escapeHtml(String(order.order_id)) + '">Подробнее</button></td></tr>';
+      }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">Заказов по фильтрам нет.</p></td></tr>';
+      const page = payload.page || {};
+      state.warehouses.fbsOrders.page = Number(page.number || 1);
+      if (fbsOrdersPage) fbsOrdersPage.textContent = "Страница " + String(page.number || 1) + " · " + String(page.total || 0) + " заказов";
+      if (fbsOrdersPrev) fbsOrdersPrev.disabled = !page.has_previous;
+      if (fbsOrdersNext) fbsOrdersNext.disabled = !page.has_next;
+      if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Актуально: " + warehouseDate((((payload.collector || {}).last_run || {}).success_at)); fbsOrdersStatus.setAttribute("data-tone", "success"); }
+    }
+
+    async function loadFbsOrders(page) {
+      if (state.warehouses.fbsOrders.loading) return;
+      state.warehouses.fbsOrders.loading = true;
+      if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Загрузка…"; fbsOrdersStatus.setAttribute("data-tone", "neutral"); }
+      const query = new URLSearchParams({page: String(page || 1), limit: "25", status_category: state.warehouses.fbsOrders.category});
+      if (fbsOrdersFilters) {
+        [["date_from","[data-fbs-orders-date-from]"],["date_to","[data-fbs-orders-date-to]"],["search","[data-fbs-orders-search]"],["facility_id","[data-fbs-orders-facility]"],["supplier_status","[data-fbs-orders-supplier-status]"],["wb_status","[data-fbs-orders-wb-status]"]].forEach(function(spec) {
+          const node = fbsOrdersFilters.querySelector(spec[1]); if (node && String(node.value || "").trim()) query.set(spec[0], String(node.value).trim());
+        });
+      }
+      try {
+        const response = await fetch(fbsOrdersBasePath + "?" + query.toString(), {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        state.warehouses.fbsOrders.payload = payload;
+        state.warehouses.fbsOrders.loaded = true;
+        renderFbsOrders(payload);
+      } catch (error) {
+        if (fbsOrdersRows) fbsOrdersRows.innerHTML = '<tr><td colspan="7"><p class="warehouse-empty">' + escapeHtml(error.message || error) + '</p></td></tr>';
+        if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Ошибка чтения"; fbsOrdersStatus.setAttribute("data-tone", "error"); }
+      } finally { state.warehouses.fbsOrders.loading = false; }
+    }
+
+    async function loadFbsOrderDetail(orderId) {
+      if (!fbsOrderDetail) return;
+      fbsOrderDetail.hidden = false;
+      fbsOrderDetail.innerHTML = '<p class="warehouse-empty">Загрузка evidence…</p>';
+      try {
+        const response = await fetch(fbsOrdersBasePath + "/" + encodeURIComponent(orderId), {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
+        const current = payload.current || {};
+        const lifecycle = payload.lifecycle || {};
+        const transitions = payload.transition_history || [];
+        const events = payload.lifecycle_evidence || [];
+        const reservation = current.reservation || {};
+        const statusText = (lifecycle.supplier_status || current.supplier_status || "—") + " / " + (lifecycle.wb_status || current.wb_status || "—");
+        const facilityText = (lifecycle.facility_id || current.facility_id || "—") + " / " + (lifecycle.nm_id || (current.sku_mapping || {}).target_nm_id || current.nm_id || "—");
+        const reservationQuantity = lifecycle.quantity == null ? reservation.quantity : lifecycle.quantity;
+        const reservationState = lifecycle.state || reservation.state || "—";
+        fbsOrderDetail.innerHTML = '<div class="warehouse-head"><div><h2 class="warehouse-section-title">Заказ ' + escapeHtml(String(current.order_id || orderId)) + '</h2><p class="warehouse-meta">' + escapeHtml(current.seller_sku || String(current.nm_id || "")) + '</p></div><button class="button ghost" type="button" data-fbs-order-detail-close>Закрыть</button></div>' +
+          '<div class="warehouse-summary"><div class="warehouse-summary-item"><span class="warehouse-summary-label">supplierStatus / wbStatus</span><span class="warehouse-summary-value">' + escapeHtml(statusText) + '</span></div><div class="warehouse-summary-item"><span class="warehouse-summary-label">Facility / SKU</span><span class="warehouse-summary-value">' + escapeHtml(facilityText) + '</span></div><div class="warehouse-summary-item"><span class="warehouse-summary-label">Reservation / state</span><span class="warehouse-summary-value">' + escapeHtml((reservationQuantity == null ? "—" : reservationQuantity + " шт") + " / " + reservationState) + '</span></div></div>' +
+          '<h3>Переходы</h3>' + (transitions.length ? transitions.map(function(item) { return '<p class="technical-line">' + escapeHtml(item.detected_at || "") + ' · ' + escapeHtml((item.previous || {}).supplier_status || "") + '/' + escapeHtml((item.previous || {}).wb_status || "") + ' → ' + escapeHtml((item.current || {}).supplier_status || "") + '/' + escapeHtml((item.current || {}).wb_status || "") + ' · ' + escapeHtml(item.transition_digest || "") + '</p>'; }).join("") : '<p class="warehouse-empty">Переходов нет.</p>') +
+          '<h3>Debit / close evidence</h3>' + (events.length ? events.map(function(item) { return '<p class="technical-line">' + escapeHtml(item.occurred_at || "") + ' · ' + escapeHtml(item.event_type || "") + ' · ' + escapeHtml(item.evidence_digest || "") + '</p>'; }).join("") : '<p class="warehouse-empty">Lifecycle evidence отсутствует.</p>');
+      } catch (error) { fbsOrderDetail.innerHTML = '<p class="warehouse-empty">' + escapeHtml(error.message || error) + '</p>'; }
+    }
+
     function activateWarehouseSubsection(sectionName) {
-      const stockReport = String(sectionName || "") === "stock-report";
-      if (warehouseCostsButton) warehouseCostsButton.classList.toggle("is-active", !stockReport);
+      const selected = String(sectionName || "");
+      const stockReport = selected === "stock-report";
+      const fbsOrders = selected === "fbs-orders";
+      if (warehouseCostsButton) warehouseCostsButton.classList.toggle("is-active", !stockReport && !fbsOrders);
+      if (warehouseFbsOrdersButton) warehouseFbsOrdersButton.classList.toggle("is-active", fbsOrders);
       if (warehouseStockReportButton) warehouseStockReportButton.classList.toggle("is-active", stockReport);
-      if (warehouseCostView) warehouseCostView.hidden = stockReport;
+      if (warehouseCostView) warehouseCostView.hidden = stockReport || fbsOrders;
+      if (fbsOrdersView) fbsOrdersView.hidden = !fbsOrders;
+      if (!stockReport && !fbsOrders) loadInventoryPlanning(false);
+      if (fbsOrders) { loadInventoryPlanning(false); loadFbsOrders(state.warehouses.fbsOrders.page || 1); }
       if (warehouseStockReportFrame) {
         warehouseStockReportFrame.hidden = !stockReport;
         if (stockReport && !warehouseStockReportFrame.getAttribute("src")) {
@@ -23010,7 +23264,7 @@
         const names=(policy.names||[]);
         skuManagementWarehouseExclusionSummaryNode.textContent=policy.active&&names.length
           ? "С инцидентами · Не участвуют: "+names.join(", ")
-          : "Политика инцидентов не активна · operational остаток равен факту.";
+          : "Политика инцидентов не активна · остаток без инцидентов равен факту.";
       }
       renderSkuManagementColumns();
       const columns=skuManagementOrderedColumns();
@@ -23610,7 +23864,7 @@
           const row = make("div", "ff-pool-list-item");
           const copy = make("div");
           copy.appendChild(make("strong", "", pool.pool));
-          copy.appendChild(make("small", "", pool.quantity === null ? "Детализация выключена" : (pool.quantity + " шт · " + money(pool.capital_rub) + " · WAC " + (pool.wac_rub || "—"))));
+          copy.appendChild(make("small", "", pool.quantity === null ? "Детализация выключена" : ("physical " + pool.physical_quantity + " · reserved " + pool.reservation_quantity + " · available " + pool.available_quantity + " шт · " + money(pool.capital_rub) + " · WAC " + (pool.wac_rub || "—"))));
           const button = make("button", "button ghost", "Состав");
           button.type = "button";
           button.addEventListener("click", function () { loadPoolDetail(id, pool.pool); });
@@ -23622,6 +23876,23 @@
         edit.disabled = !(state.capabilities.feature || {}).writer_effective;
         edit.addEventListener("click", function () { showFacilityEditor(payload.facility); });
         nodes.facilityDetail.appendChild(edit);
+        const orders = make("button", "button secondary", "FBS-заказы этого склада");
+        orders.type = "button";
+        orders.addEventListener("click", function () {
+          if (fbsOrdersFacility) {
+            if (!Array.from(fbsOrdersFacility.options).some(function(option) { return option.value === payload.facility.facility_id; })) {
+              const option = document.createElement("option");
+              option.value = payload.facility.facility_id;
+              option.textContent = payload.facility.name || payload.facility.code;
+              fbsOrdersFacility.appendChild(option);
+            }
+            fbsOrdersFacility.value = payload.facility.facility_id;
+          }
+          closeModal();
+          activateWarehouseSubsection("fbs-orders");
+          loadFbsOrders(1);
+        });
+        nodes.facilityDetail.appendChild(orders);
       } catch (error) { setAlert(nodes.facilityDetail, error.message, "error"); }
     }
     async function loadPoolDetail(id, pool) {
@@ -23630,7 +23901,7 @@
         const section = make("section", "ff-pool-details");
         section.appendChild(make("h4", "", "Состав " + pool));
         if (!(payload.balances || []).length) section.appendChild(make("p", "ff-pool-note", payload.status === "detail_unavailable" ? "Детализация выключена до подтверждённой reader-эпохи." : "Остаток пуст."));
-        (payload.balances || []).forEach(function (line) { section.appendChild(make("p", "ff-pool-note", line.nm_id + " · " + (line.name || line.sku || "SKU") + " · " + line.quantity + " шт · " + money(line.capital_rub))); });
+        (payload.balances || []).forEach(function (line) { section.appendChild(make("p", "ff-pool-note", line.nm_id + " · " + (line.name || line.sku || "SKU") + " · physical " + line.physical_quantity + " · reserved " + line.reserved_quantity + " · available " + line.available_quantity + " шт · " + money(line.capital_rub))); });
         nodes.facilityDetail.appendChild(section);
       } catch (error) { setAlert(nodes.facilityDetail, error.message, "error"); }
     }

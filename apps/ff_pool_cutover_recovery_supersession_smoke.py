@@ -98,6 +98,15 @@ def main() -> int:
         )
         reason = _warehouse_sync_error_reason(timeout_bearing_error)
         assert "Recovery Policy" in reason and "не ответил" not in reason
+        source_contract_reason = _warehouse_sync_error_reason(
+            "official WB snapshot source contract aggregate sentinel invalid; "
+            "sqlite_busy_timeout_ms=30000"
+        )
+        assert "source-contract" in source_contract_reason
+        pagination_reason = _warehouse_sync_error_reason(
+            "coverage is incomplete: missing_nm_ids=[1]; sqlite_busy_timeout_ms=30000"
+        )
+        assert "неполный снимок" in pagination_reason
 
         result = runner.apply(
             plan,

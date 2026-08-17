@@ -453,6 +453,67 @@ td, th { overflow-wrap: anywhere; }
   word-break: break-word;
 }
 
+.inventory-planning-card { margin-bottom: var(--ui-space-3); }
+.inventory-metric-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0 0 var(--ui-space-3);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-font-size-sm);
+}
+.inventory-metric-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.inventory-metric-controls input { min-height: 0; }
+.inventory-metric-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+  gap: var(--ui-space-3);
+}
+.inventory-metric-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-control);
+}
+.inventory-metric-card span, .inventory-metric-card small { color: var(--ui-text-muted); }
+.inventory-metric-card strong { font-size: 1.15rem; overflow-wrap: anywhere; }
+.inventory-metric-card[data-quality^="unavailable"] { border-color: var(--ui-warning, #9a6b18); }
+.inventory-disclosure { margin-top: var(--ui-space-3); }
+.fbs-orders-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: var(--ui-space-3);
+  align-items: end;
+  margin: var(--ui-space-3) 0;
+}
+.fbs-orders-filters label { display: grid; gap: 5px; color: var(--ui-text-muted); font-size: var(--ui-font-size-sm); }
+.fbs-order-counters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+  gap: 8px;
+  margin: 0 0 var(--ui-space-3);
+}
+.fbs-order-counter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-control);
+  color: var(--ui-text);
+  text-align: left;
+}
+.fbs-order-counter.is-active { border-color: var(--ui-accent-border); background: var(--ui-accent-soft); }
+.fbs-orders-pagination { display: flex; align-items: center; justify-content: center; gap: var(--ui-space-3); margin-top: var(--ui-space-3); }
+.fbs-order-detail { margin-top: var(--ui-space-3); padding-top: var(--ui-space-3); border-top: 1px solid var(--ui-border); }
+.fbs-orders-table small { color: var(--ui-text-muted); }
+
 /* Embedded surfaces inherit the same rhythm without double framing. */
 body.is-embedded { overflow-x: hidden; }
 body.is-embedded main, body.is-embedded .page { max-width: 100%; }
@@ -500,6 +561,8 @@ body.is-embedded .panel, body.is-embedded .block { box-shadow: none; }
   .research-form-grid, .autoanswers-control-grid, .autoanswers-filter-grid,
   .calculation-grid, .grid, .totals { grid-template-columns: 1fr; }
   .operator-embed-panel { padding: var(--ui-space-2); }
+  .fbs-orders-table { min-width: 760px; }
+  .inventory-metric-controls { display: grid; grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

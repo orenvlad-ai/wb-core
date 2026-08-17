@@ -106,6 +106,17 @@ update_note: "Общий Seller Analytics CSV transport сохраняет `STOC
 
 ## 3.1 Seller-level incident policy and shared stock projection
 
+Migration 145 adds a separate current planning/read contract around this
+policy. `Остаток WB: всего` remains the official seller/account aggregate.
+`Остаток WB без инц.: всего` may subtract an active incident only from exact
+append-only evidence bound to the current WB snapshot, policy revision, date
+and full SKU-scope digest. Its per-SKU lines must cover that scope exactly and
+the canonical manifest digest must match those quantities. Missing or partial
+evidence is `unavailable`, not zero; no stale
+warehouse snapshot is reconstructed and no synthetic cap is applied. The exact
+aggregate sentinel continues to prove only WB total, so current district and
+regional incident values remain unavailable while historical values are kept.
+
 Canonical stock snapshots remain immutable. `wb_incident_policy` resolves one append-only seller/account revision for the exact snapshot date, then strict `build_incident_stock_projection` publishes three projections per nmID and canonical region: fact, physical quantity on incident warehouses, and operational/effective quantity. Supply and SKU Management consume this strict server projection and continue to require complete pagination plus source digest; browsers and page calculators never subtract warehouses independently.
 
 Web Vitrina alone calls the separately named `build_vitrina_incident_stock_projection` information adapter. For an already accepted incomplete/digestless historical payload it projects only received rows, leaves unprovable triples blank, validates every published SKU/region/TOTAL triple and emits provisional quality/evidence. Its deterministic accepted-payload digest is cache identity only, not upstream completeness evidence. This adapter is intentionally absent from Supply/SKU business-action imports. Confirmed projections remain keyed by seller/date/source digest/policy revision; provisional Vitrina projections use seller/date/accepted-payload digest/policy revision under a separate cache namespace.

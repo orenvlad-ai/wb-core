@@ -125,6 +125,16 @@ publishes `ff = SUM(facility × pool)` exactly once, and derives available from
 physical minus reservations. A prior business projection remains last-good
 until that publication succeeds; it is never patched directly.
 
+Migration 145 adds a query-only current planning composition beside this
+accounting projection. It combines the fresh official WB aggregate with signed
+FBS available across active facilities for the user-facing planning metrics,
+while leaving six-stage quantity/capital `TOTAL` and every existing calculator
+unchanged. The formula/cutover epoch and provenance are explicit, old history
+is not rematerialized, and the ordinary publisher performs only a readback of
+the combined surface after canonical publication. Incident-adjusted values
+fail closed without exact snapshot-bound per-SKU evidence; aggregate-only WB
+never fabricates current district values.
+
 # 2. Physical and cost rules
 
 ## 2.1 Production and China → FF
