@@ -46,7 +46,10 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_METRIC_KEY,
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
 )
-from packages.application.sheet_vitrina_v1_incident_stocks import INCIDENT_STOCK_FACT_METRIC_KEYS  # noqa: E402
+from packages.application.sheet_vitrina_v1_incident_stocks import INCIDENT_STOCK_METRIC_KEYS  # noqa: E402
+from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: E402
+    INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
+)
 from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     PROXY_V4_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
@@ -71,7 +74,11 @@ TOTAL_ORDER_SUM_SELECTOR = (
     "[data-metric-display-select]"
 )
 RETIRED_METRIC_KEYS = frozenset(
-    (*INCIDENT_STOCK_FACT_METRIC_KEYS, *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS)
+    (
+        *INCIDENT_STOCK_METRIC_KEYS,
+        *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
+        *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
+    )
 )
 
 

@@ -9,7 +9,10 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_STOCKS_SOURCE_KEY,
 )
 from packages.application.sheet_vitrina_v1_incident_stocks import (
-    INCIDENT_STOCK_FACT_METRIC_KEYS,
+    INCIDENT_STOCK_METRIC_KEYS,
+)
+from packages.application.sheet_vitrina_v1_inventory_planning import (
+    INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import OUR_WB_ARCHIVED_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_own_product_capital import (
@@ -34,7 +37,8 @@ ARCHIVED_PUBLIC_METRIC_KEYS = frozenset(
         *ONEC_STOCKS_ARCHIVED_METRIC_KEYS,
         *OUR_WB_ARCHIVED_METRIC_KEYS,
         *OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
-        *INCIDENT_STOCK_FACT_METRIC_KEYS,
+        *INCIDENT_STOCK_METRIC_KEYS,
+        *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
         *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
     )
 )

@@ -27,11 +27,19 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
 from packages.application.inventory_planning_read_model import (  # noqa: E402
     INCIDENT_LINES_TABLE,
     INCIDENT_MANIFESTS_TABLE,
+    InventoryPlanningReadModel,
+)
+from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+)
+from packages.application.sheet_vitrina_v1_incident_stocks import (  # noqa: E402
+    INCIDENT_STOCK_METRIC_KEYS,
 )
 from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: E402
     COMBINED_EFFECTIVE_ALIAS_KEY,
     COMBINED_TOTAL_ALIAS_KEY,
     INVENTORY_FBS_TOTAL_KEY,
+    INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
     INVENTORY_WB_EFFECTIVE_KEY,
     INVENTORY_WB_TOTAL_KEY,
     inventory_planning_facility_metric_key,
@@ -71,10 +79,8 @@ def main() -> int:
         rows = {row.row_id: row for row in contract.rows}
         sku_specs = (
             (INVENTORY_WB_TOTAL_KEY, "Остаток WB: всего"),
-            (INVENTORY_WB_EFFECTIVE_KEY, "Остаток WB без инц.: всего"),
             (INVENTORY_FBS_TOTAL_KEY, "Остаток FBS: всего"),
             (inventory_planning_facility_metric_key("moscow"), "Остаток FBS: Москва"),
-            (COMBINED_EFFECTIVE_ALIAS_KEY, "Остаток без инц.: всего"),
             (COMBINED_TOTAL_ALIAS_KEY, "Остаток: всего"),
         )
         for sku_key, label in sku_specs:
@@ -100,23 +106,31 @@ def main() -> int:
         assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}") == 37
         assert 37 == 7 + 30, "TOTAL must equal WB + FBS once, without FF/FBS double count"
 
-        for row_id in (
-            f"SKU:{first_nm_id}|{INVENTORY_WB_EFFECTIVE_KEY}",
-            f"SKU:{second_nm_id}|{INVENTORY_WB_EFFECTIVE_KEY}",
-            f"TOTAL|{inventory_planning_total_metric_key(INVENTORY_WB_EFFECTIVE_KEY)}",
-            f"SKU:{first_nm_id}|{COMBINED_EFFECTIVE_ALIAS_KEY}",
-            f"TOTAL|{inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY)}",
-        ):
-            row = rows[row_id]
-            assert row.values_by_date[CURRENT_DATE] == ""
-            presentation = row.presentation_by_date[CURRENT_DATE]
-            assert presentation["quality_state"] == "inventory_planning_unavailable"
-            assert presentation["reason"] == MISSING_INCIDENT_REASON
+        hidden_metric_keys = {
+            *INCIDENT_STOCK_METRIC_KEYS,
+            *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
+        }
+        assert hidden_metric_keys <= ARCHIVED_PUBLIC_METRIC_KEYS
+        assert not ({row.metric_key for row in contract.rows} & hidden_metric_keys)
+        assert not any(
+            "инц" in row.metric_label.casefold()
+            for row in contract.rows
+        )
 
         _seed_exact_incident_evidence(
             runtime.db_path,
             nm_ids=(first_nm_id, second_nm_id),
         )
+        internal = InventoryPlanningReadModel(db_path=runtime.db_path).current()
+        internal_by_nm_id = {
+            int(item["nm_id"]): item
+            for item in internal["skus"]
+        }
+        assert internal_by_nm_id[first_nm_id]["wb_effective_total"] == 6
+        assert internal_by_nm_id[second_nm_id]["wb_effective_total"] == 19
+        assert internal_by_nm_id[first_nm_id]["effective_total"] == 3
+        assert internal_by_nm_id[second_nm_id]["effective_total"] == 29
+        assert internal["formula"]["stock_total"] == "Остаток WB: всего + Остаток FBS: всего"
         exact_contract = fixture.entrypoint.web_vitrina_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -124,23 +138,9 @@ def main() -> int:
             date_to=CURRENT_DATE,
         )
         exact_rows = {row.row_id: row for row in exact_contract.rows}
-        assert _value(exact_rows, f"SKU:{first_nm_id}|{INVENTORY_WB_EFFECTIVE_KEY}") == 6
-        assert _value(exact_rows, f"SKU:{second_nm_id}|{INVENTORY_WB_EFFECTIVE_KEY}") == 19
-        assert _value(exact_rows, f"SKU:{first_nm_id}|{COMBINED_EFFECTIVE_ALIAS_KEY}") == 3
-        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_EFFECTIVE_ALIAS_KEY}") == 29
-        assert _value(
-            exact_rows,
-            f"TOTAL|{inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY)}",
-        ) == 32
-
-        # The familiar effective alias keeps exact old-date evidence while only
-        # current inventory_planning_v1 becomes fail-closed.
-        assert rows[f"TOTAL|{inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY)}"].values_by_date[
-            "2026-04-20"
-        ] == 5
-        assert rows[f"SKU:{first_nm_id}|{COMBINED_EFFECTIVE_ALIAS_KEY}"].values_by_date[
-            "2026-04-20"
-        ] == 5
+        assert not ({row.metric_key for row in exact_contract.rows} & hidden_metric_keys)
+        assert _value(exact_rows, f"SKU:{first_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 10
+        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 30
 
         assert STAGES == (
             "production",
@@ -199,21 +199,9 @@ def main() -> int:
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
             as_of_date="2026-04-20",
         )
-        assert not any(
-            is_inventory_planning_presentation_metric_key(row.metric_key)
-            and row.metric_key not in {
-                COMBINED_EFFECTIVE_ALIAS_KEY,
-                inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY),
-            }
-            for row in historical.rows
-        )
-        historical_effective = next(
-            row
-            for row in historical.rows
-            if row.row_id == f"TOTAL|{inventory_planning_total_metric_key(COMBINED_EFFECTIVE_ALIAS_KEY)}"
-        )
-        assert historical_effective.metric_label == "Остаток без инц.: всего"
-        assert historical_effective.values_by_date["2026-04-20"] == 5
+        assert not ({row.metric_key for row in historical.rows} & hidden_metric_keys)
+        persisted_after = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
+        assert persisted_after == before, "hidden legacy rows must remain byte-for-byte in ready history"
     finally:
         fixture.__exit__(None, None, None)
 

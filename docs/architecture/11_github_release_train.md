@@ -287,6 +287,14 @@ pre-change digest, backup/evidence, expected records, non-target invariants,
 idempotency/recovery и post-apply reconciliation. Ad-hoc local/server-only
 scripts production mutation не выполняют.
 
+Migration 147 binds this contract to
+`apps/wb_incident_policy_legacy_disable.py`: the pre-merge release gate names
+the exact PR head; only after merge and exact-SHA deploy may the query-only
+dry-run produce the reviewed `2026-08-16` manifest; a distinct post-merge apply
+gate names that manifest before the one append-only revision. The terminal
+command binds its manifest, reconciliation and evidence digests. Legacy policy
+Apply/rematerialization cannot substitute for either gate.
+
 ## Baseline И Security Boundary
 
 `baseline-ci.yml` выполняет `compileall`, `git diff --check`,

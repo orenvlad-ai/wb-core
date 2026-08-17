@@ -658,6 +658,12 @@ def _run_warehouse_ui_flow(
                 _assert(visible_quantity == Decimal(str(contour.get("total") or 0)), "Склад WB: contour total")
                 policy_card = page.locator("[data-wb-incident-policy-card]")
                 policy_card.wait_for(state="visible", timeout=60_000)
+                legacy_disclosure = policy_card.locator("[data-wb-incident-legacy]")
+                _assert(
+                    legacy_disclosure.get_attribute("open") is None,
+                    "Склад WB: legacy incident disclosure is collapsed by default",
+                )
+                legacy_disclosure.locator(":scope > summary").click()
                 page.wait_for_function(
                     """() => {
                       const audit = document.querySelector("[data-wb-incident-audit]");

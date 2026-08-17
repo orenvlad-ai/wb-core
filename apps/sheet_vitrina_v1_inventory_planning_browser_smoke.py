@@ -16,7 +16,6 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_inventory_planning_smoke import (  # noqa: E402
     CURRENT_DATE,
-    MISSING_INCIDENT_REASON,
     _seed_inventory_planning,
 )
 from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import (  # noqa: E402
@@ -32,6 +31,9 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: 
     INVENTORY_WB_EFFECTIVE_KEY,
     INVENTORY_WB_TOTAL_KEY,
     inventory_planning_facility_metric_key,
+)
+from packages.application.sheet_vitrina_v1_incident_stocks import (  # noqa: E402
+    INCIDENT_STOCK_METRIC_KEYS,
 )
 from packages.application.ff_pool_foundation import FACILITIES_TABLE  # noqa: E402
 
@@ -131,10 +133,8 @@ def main() -> int:
             expect(active_tab).to_have_attribute("aria-selected", "true")
             planning_keys = [
                 INVENTORY_WB_TOTAL_KEY,
-                INVENTORY_WB_EFFECTIVE_KEY,
                 INVENTORY_FBS_TOTAL_KEY,
                 inventory_planning_facility_metric_key("moscow"),
-                COMBINED_EFFECTIVE_ALIAS_KEY,
                 COMBINED_TOTAL_ALIAS_KEY,
             ]
             for metric_key in planning_keys:
@@ -155,22 +155,30 @@ def main() -> int:
                     f'[data-cell-date="{CURRENT_DATE}"]'
                 )
             ).to_have_text("30")
-            unavailable = page.locator(
-                f'td[data-row-id="SKU:{first_nm_id}|{INVENTORY_WB_EFFECTIVE_KEY}"]'
-                f'[data-cell-date="{CURRENT_DATE}"]'
-            )
-            expect(unavailable).to_have_text("Недоступно")
-            if MISSING_INCIDENT_REASON not in (unavailable.get_attribute("title") or ""):
-                raise AssertionError("canonical missing-incident reason must be visible in the N/A cell")
+            hidden_keys = {
+                INVENTORY_WB_EFFECTIVE_KEY,
+                "total_" + INVENTORY_WB_EFFECTIVE_KEY,
+                COMBINED_EFFECTIVE_ALIAS_KEY,
+                "total_" + COMBINED_EFFECTIVE_ALIAS_KEY,
+                *INCIDENT_STOCK_METRIC_KEYS,
+            }
+            for metric_key in hidden_keys:
+                expect(page.locator(f'[data-metric-key="{metric_key}"]')).to_have_count(0)
+            body_text = page.locator("body").inner_text()
+            for retired_label in (
+                "Остаток WB без инц.: всего",
+                "Остаток без инц.: всего",
+                "Остаток WB инцидент",
+            ):
+                if retired_label in body_text:
+                    raise AssertionError(f"legacy incident row leaked into ordinary UI: {retired_label}")
 
             page.locator("[data-metrics-settings-open]").click()
             page.wait_for_selector("[data-metrics-presentation]:not([hidden])")
             expected_labels = (
                 "Остаток WB: всего",
-                "Остаток WB без инц.: всего",
                 "Остаток FBS: всего",
                 "Остаток FBS: Москва",
-                "Остаток без инц.: всего",
                 "Остаток: всего",
             )
             config_labels = page.locator("[data-metric-config-row] .metrics-config-label").all_inner_texts()
@@ -206,6 +214,8 @@ def main() -> int:
             migrated_keys = persisted["migrations"]["inventory_planning_metric_keys_v1"]
             if not set(planning_keys).issubset(set(migrated_keys)):
                 raise AssertionError(f"planning-key migration evidence missing: {persisted}")
+            if hidden_keys & set(preset_keys) or hidden_keys & set(migrated_keys):
+                raise AssertionError("legacy incident planning keys survived public preference sanitation")
 
             with sqlite3.connect(runtime.db_path) as conn:
                 conn.execute(

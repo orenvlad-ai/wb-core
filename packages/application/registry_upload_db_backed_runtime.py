@@ -1474,6 +1474,34 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
         return _wb_incident_policy_row_to_dict(row, seller_id=normalized_seller_id)
 
+    def list_wb_incident_policy_revisions(
+        self,
+        *,
+        seller_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read bounded append-only policy history for the explicit legacy UI."""
+
+        normalized_seller_id = _normalize_required_storage_key(seller_id, field_name="seller_id")
+        bounded_limit = max(1, min(int(limit), 500))
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_incident_policy_revisions
+                WHERE seller_id = ?
+                ORDER BY revision DESC
+                LIMIT ?
+                """,
+                (normalized_seller_id, bounded_limit),
+            ).fetchall()
+        return [
+            _wb_incident_policy_row_to_dict(row, seller_id=normalized_seller_id)
+            for row in rows
+        ]
+
     def load_wb_incident_policy_for_date(
         self,
         *,

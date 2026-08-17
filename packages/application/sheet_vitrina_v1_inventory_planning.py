@@ -47,6 +47,20 @@ def inventory_planning_total_metric_key(sku_key: str) -> str:
     return f"total_{sku_key}"
 
 
+INVENTORY_PLANNING_LEGACY_SKU_METRIC_KEYS = frozenset(
+    {INVENTORY_WB_EFFECTIVE_KEY, COMBINED_EFFECTIVE_ALIAS_KEY}
+)
+INVENTORY_PLANNING_LEGACY_METRIC_KEYS = frozenset(
+    {
+        *INVENTORY_PLANNING_LEGACY_SKU_METRIC_KEYS,
+        *(
+            inventory_planning_total_metric_key(key)
+            for key in INVENTORY_PLANNING_LEGACY_SKU_METRIC_KEYS
+        ),
+    }
+)
+
+
 def inventory_planning_facility_metric_key(facility_id: str) -> str:
     return f"{INVENTORY_FBS_FACILITY_PREFIX}{facility_id}"
 
@@ -55,15 +69,13 @@ def is_inventory_planning_presentation_metric_key(metric_key: str) -> bool:
     normalized = str(metric_key or "").removeprefix("total_")
     return normalized in {
         INVENTORY_WB_TOTAL_KEY,
-        INVENTORY_WB_EFFECTIVE_KEY,
         INVENTORY_FBS_TOTAL_KEY,
-        COMBINED_EFFECTIVE_ALIAS_KEY,
         COMBINED_TOTAL_ALIAS_KEY,
     } or normalized.startswith(INVENTORY_FBS_FACILITY_PREFIX)
 
 
 def inventory_planning_sku_metric_keys(planning: Mapping[str, Any]) -> list[str]:
-    return [spec.sku_key for spec in _metric_specs(planning)]
+    return [spec.sku_key for spec in _public_metric_specs(planning)]
 
 
 def extend_rows_with_inventory_planning(
@@ -80,7 +92,7 @@ def extend_rows_with_inventory_planning(
         return source_rows
 
     current_date = str((planning.get("wb") or {}).get("snapshot_date") or "")
-    specs = _metric_specs(planning)
+    specs = _public_metric_specs(planning)
     planning_keys = {
         key
         for spec in specs
@@ -244,6 +256,16 @@ def _metric_specs(planning: Mapping[str, Any]) -> list[_MetricSpec]:
         )
     )
     return specs
+
+
+def _public_metric_specs(planning: Mapping[str, Any]) -> list[_MetricSpec]:
+    """Return the ordinary-table profile without legacy incident-aware rows."""
+
+    return [
+        spec
+        for spec in _metric_specs(planning)
+        if spec.sku_key not in INVENTORY_PLANNING_LEGACY_SKU_METRIC_KEYS
+    ]
 
 
 def _planning_applies(planning: Mapping[str, Any], *, date_columns: list[str]) -> bool:

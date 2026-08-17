@@ -4347,22 +4347,6 @@
                   <ul id="wbSupplyOverlayWarningList"></ul>
                 </details>
               </div>
-              <details class="wb-supply-overlay-selector" id="wbWarehouseExclusionSelector">
-                <summary id="wbWarehouseExclusionSummary">Политика инцидентов · не активна</summary>
-                <div class="wb-supply-overlay-head">
-                  <div>
-                    <h3>Политика инцидентов WB</h3>
-                    <p class="field-note">Read-only: управление находится в «Остатки → Склад WB».</p>
-                    <p id="wbWarehouseExclusionEvidence" class="field-note">Читаем полный официальный снимок WB...</p>
-                  </div>
-                  <div class="district-selector-actions">
-                    <button id="wbWarehouseExclusionRefreshButton" class="district-selector-button" type="button">Обновить</button>
-                    <button id="wbWarehouseExclusionClearButton" class="district-selector-button" type="button" hidden disabled>Сброс</button>
-                  </div>
-                </div>
-                <div id="wbWarehouseExclusionOptions" class="wb-supply-overlay-options"></div>
-                <p id="wbWarehouseExclusionMessage" class="section-message"></p>
-              </details>
               <p id="sharedStockMessage" class="section-message"></p>
             </article>
           </div>
@@ -4783,13 +4767,12 @@
                     <th>Итог</th>
                     <th>Ключевые параметры</th>
                     <th>WB-поставки</th>
-                    <th>Incident policy</th>
                     <th>Статус записи</th>
                     <th>Действия</th>
                   </tr>
                 </thead>
                 <tbody id="supplyCalculationRegistryBody">
-                  <tr><td colspan="9">Реестр ещё не загружен.</td></tr>
+                  <tr><td colspan="8">Реестр ещё не загружен.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -9077,21 +9060,14 @@
           : {};
         supplyCalculationRegistryTotal = Number(pagination.total || 0);
         if (!records.length) {
-          supplyCalculationRegistryBody.innerHTML = "<tr><td colspan=\"9\">По выбранным фильтрам расчётов нет.</td></tr>";
+          supplyCalculationRegistryBody.innerHTML = "<tr><td colspan=\"8\">По выбранным фильтрам расчётов нет.</td></tr>";
           updateSupplyCalculationRegistryPagination();
           return;
         }
         supplyCalculationRegistryBody.innerHTML = records.map((record) => {
           const summary = record.summary && typeof record.summary === "object" ? record.summary : {};
-          const incident = record.incident_policy && typeof record.incident_policy === "object"
-            ? record.incident_policy
-            : {};
           const wbText = formatWbNumber(record.selected_wb_supply_count || 0) + " шт. поставок · " +
             formatWbNumber(record.selected_wb_supply_qty || 0) + " ед.";
-          const incidentText = incident.status === "unknown"
-            ? "evidence отсутствует"
-            : "rev " + valueOrDash(incident.revision) + " · " + valueOrDash(incident.status) +
-              (incident.quality_state ? " · " + incident.quality_state : "");
           const completeness = record.is_reproducible
             ? "Полная · immutable"
             : "Legacy · metadata-only";
@@ -9114,7 +9090,6 @@
               escapeHtml(formatWbNumber(summary.estimated_volume || 0)) + " м³</span></td>",
             "<td>" + escapeHtml(supplyCalculationKeySettingsText(record.key_settings)) + "</td>",
             "<td>" + escapeHtml(wbText) + "</td>",
-            "<td>" + escapeHtml(incidentText) + "</td>",
             "<td>" + escapeHtml(completeness) +
               (record.legacy_note ? "<br><span class=\"field-note\">" + escapeHtml(record.legacy_note) + "</span>" : "") +
               "</td>",
@@ -10128,16 +10103,6 @@
         if (diagnostics.calculation_mode) {
           parts.push("Режим: " + String(diagnostics.calculation_mode) + ".");
         }
-        const incident = diagnostics.wb_warehouse_exclusion && typeof diagnostics.wb_warehouse_exclusion === "object"
-          ? diagnostics.wb_warehouse_exclusion
-          : null;
-        if (incident) {
-          parts.push(
-            "Склады WB: фактически " + valueOrDash(incident.actual_stock_total_mp) +
-            ", исключено " + valueOrDash(incident.excluded_stock_total_mp) +
-            ", эффективно " + valueOrDash(incident.effective_stock_total_mp) + "."
-          );
-        }
         if (diagnostics.requested_valid_day_count) {
           parts.push("Идеальные дни по всем округам: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count) + ".");
         }
@@ -10187,9 +10152,6 @@
           : {};
         const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
         const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
-        const incident = diagnostics.wb_warehouse_exclusion && typeof diagnostics.wb_warehouse_exclusion === "object"
-          ? diagnostics.wb_warehouse_exclusion
-          : null;
         const qualityRows = [
           "Fallback на старую формулу: " + valueOrDash(diagnostics.fallback_sku_count || 0) + " SKU",
           "Низкая уверенность: " + valueOrDash(diagnostics.low_confidence_sku_district_count || 0) + " направлений SKU-округ",
@@ -10212,16 +10174,6 @@
             "Достоверные дни ЦФО-направлений: " +
             formatReasonCounts(transition.direction_observation_counts, { districtLabels: true }) +
             " из " + valueOrDash(transition.required_observation_count)
-          );
-        }
-        if (incident) {
-          qualityRows.push(
-            "Исключение складов WB: actual " + valueOrDash(incident.actual_stock_total_mp) +
-            ", excluded " + valueOrDash(incident.excluded_stock_total_mp) +
-            ", effective " + valueOrDash(incident.effective_stock_total_mp) +
-            "; IDs " + (Array.isArray(incident.excluded_wb_warehouse_ids)
-              ? incident.excluded_wb_warehouse_ids.join(", ")
-              : "—")
           );
         }
         const htmlParts = [

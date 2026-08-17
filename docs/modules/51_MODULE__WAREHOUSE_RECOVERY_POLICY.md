@@ -119,6 +119,9 @@ probe, full-store integrity/SHA scan or a second T3 backup call.
 `apps/storage_recovery_writer_inventory_static_smoke.py` separately classifies
 every production SQLite backup primitive/caller and fails if a new
 unclassified writer appears or a scheduled full-monolith writer is introduced.
+The one-shot `wb_incident_policy_legacy_disable` runner is classified in that
+inventory as a human-gated coherent pre-mutation backup retained with private
+reconciliation evidence; it is never a scheduled or ordinary runtime writer.
 
 Legacy bytes are not adopted by ordinary retention. The separate
 `apps/storage_recovery_sanitation.py` runner inventories both canonical backup

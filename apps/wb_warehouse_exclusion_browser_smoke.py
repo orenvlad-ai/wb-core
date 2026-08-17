@@ -1,4 +1,4 @@
-"""Read-only browser smoke for the shared WB incident-policy selector."""
+"""Browser smoke for hidden incident settings with unchanged calculation state."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ def main() -> None:
         embedded_tab="factory-order",
     )
     saved: list[dict[str, object]] = []
+    reads: list[str] = []
     revision = [0]
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -62,6 +63,7 @@ def main() -> None:
                         "canonical_store": "server_runtime_user_config",
                     }
                 else:
+                    reads.append("settings")
                     response = {
                         "status": "ok",
                         "exists": True,
@@ -79,6 +81,7 @@ def main() -> None:
                 )
                 return
             if path == DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH:
+                reads.append("options")
                 route.fulfill(
                     status=200,
                     content_type="application/json",
@@ -128,46 +131,30 @@ def main() -> None:
         page.route("http://warehouse.test/**", route_handler)
         page.goto("http://warehouse.test/page", wait_until="domcontentloaded")
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-wb-warehouse-exclusion-checkbox]').length === 5"
+            "() => JSON.parse(localStorage.getItem('wb-core:sheet-vitrina-v1:operator-ui-state:v1') || '{}').excluded_wb_warehouse_ids?.includes(77)"
         )
-        page.wait_for_function(
-            "() => document.querySelector('#wbWarehouseExclusionMessage').textContent.includes('Read-only политика подтверждена')"
-        )
+        page.wait_for_timeout(100)
         if saved:
             raise AssertionError("reading canonical settings must not cause a write")
-        ids = page.locator(
-            "[data-wb-warehouse-exclusion-checkbox]"
-        ).evaluate_all("nodes => nodes.map(node => Number(node.value))")
-        if ids != [3, 4, 2, 1, 77]:
-            raise AssertionError(
-                f"warehouses must sort by total desc, Russian name, ID; missing selected last: {ids}"
-            )
-        missing = page.locator('[data-wb-warehouse-exclusion-checkbox="77"]')
-        if missing.count():
-            raise AssertionError("selector uses value, not an accidental attribute contract")
-        row_77_text = page.locator(
-            '[data-wb-warehouse-exclusion-checkbox][value="77"]'
-        ).evaluate("node => node.closest('label').textContent")
-        if "временно отсутствует" not in row_77_text.lower():
-            raise AssertionError(
-                f"missing selected warehouse must retain its warning: {row_77_text!r}"
-            )
-        if not all(
-            page.locator("[data-wb-warehouse-exclusion-checkbox]")
-            .nth(index)
-            .is_disabled()
-            for index in range(
-                page.locator("[data-wb-warehouse-exclusion-checkbox]").count()
-            )
+        if reads.count("settings") != 1 or reads.count("options") != 1:
+            raise AssertionError(f"hidden calculation state was not loaded once: {reads}")
+        for selector in (
+            "#wbWarehouseExclusionSelector",
+            "#wbWarehouseExclusionSummary",
+            "[data-wb-warehouse-exclusion-checkbox]",
         ):
-            raise AssertionError("Supply incident selector must be read-only")
-        if (
-            "Учитывается политика инцидентов"
-            not in page.locator("#wbWarehouseExclusionSummary").inner_text()
+            if page.locator(selector).count():
+                raise AssertionError(f"ordinary Supply UI leaked incident selector: {selector}")
+        body_text = page.locator("body").inner_text()
+        for text in (
+            "Учитывается политика инцидентов",
+            "Политика инцидентов",
+            "Исключение складов WB",
         ):
-            raise AssertionError("Supply must show the effective policy badge")
+            if text in body_text:
+                raise AssertionError(f"ordinary Supply UI leaked incident text: {text}")
         if saved:
-            raise AssertionError("read-only Supply policy must never persist a browser copy")
+            raise AssertionError("hidden Supply policy must never persist a browser copy")
         browser.close()
     print("wb_warehouse_exclusion_browser_smoke: OK")
 

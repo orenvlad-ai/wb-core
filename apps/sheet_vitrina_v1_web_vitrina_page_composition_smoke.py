@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -15,10 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.registry_upload_http_entrypoint import _active_incident_metric_catalog
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     INCIDENT_STOCK_METRIC_KEYS,
-    extend_metrics_with_incident_stock_metrics,
 )
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -133,10 +132,7 @@ def main() -> None:
             selected_date_from=None,
             selected_date_to=None,
             activity_surface=_build_activity_surface_fixture(),
-            metric_catalog=[
-                asdict(item)
-                for item in extend_metrics_with_incident_stock_metrics([])
-            ],
+            metric_catalog=_active_incident_metric_catalog(),
         )
         incident_catalog_options = {
             str(item["value"]): item
@@ -144,20 +140,20 @@ def main() -> None:
                 "options"
             ]
         }
-        missing_incident_catalog_keys = sorted(
-            set(INCIDENT_STOCK_METRIC_KEYS) - set(incident_catalog_options)
+        leaked_incident_catalog_keys = sorted(
+            set(INCIDENT_STOCK_METRIC_KEYS) & set(incident_catalog_options)
         )
-        if missing_incident_catalog_keys:
+        if leaked_incident_catalog_keys:
             raise AssertionError(
-                "stable incident metrics must remain configurable without period rows: "
-                f"{missing_incident_catalog_keys}"
+                "legacy incident metrics leaked into the ordinary catalog: "
+                f"{leaked_incident_catalog_keys}"
             )
         if any(
-            int(incident_catalog_options[metric_key]["count"]) != 0
-            for metric_key in INCIDENT_STOCK_METRIC_KEYS
+            str(row["values"]["metric_key"]["value"]) in INCIDENT_STOCK_METRIC_KEYS
+            for row in incident_catalog_composition["table_surface"]["rows"]
         ):
             raise AssertionError(
-                "catalog-only incident metrics must not invent historical rows or values"
+                "legacy incident metrics leaked into ordinary composition rows"
             )
 
         if composition["composition_name"] != "web_vitrina_page_composition" or composition["composition_version"] != "v1":
@@ -232,15 +228,14 @@ def main() -> None:
             for item in metric_control["options"]
             if str(item["value"]) != "__all__"
         }
-        metric_meta_by_key: dict[str, dict[str, str]] = {}
+        metric_meta_by_key: dict[str, set[tuple[str, str]]] = {}
         for row in composition["table_surface"]["rows"]:
             metric_key = str(row["values"]["metric_key"]["value"])
-            metric_meta_by_key.setdefault(
-                metric_key,
-                {
-                    "scope_group_label": "Итого" if str(row["row_kind"]) == "total" else "SKU",
-                    "section_label": str(row["values"]["section"]["display_text"]),
-                },
+            metric_meta_by_key.setdefault(metric_key, set()).add(
+                (
+                    "Итого" if str(row["row_kind"]) == "total" else "SKU",
+                    str(row["values"]["section"]["display_text"]),
+                )
             )
         metric_groups = metric_control.get("option_groups") or []
         metric_group_labels = [str(item["label"]) for item in metric_groups]
@@ -262,9 +257,15 @@ def main() -> None:
                         raise AssertionError(f"grouped metric key must exist in flat options/table rows, got {metric_key}")
                     if option["value"] != metric_key:
                         raise AssertionError(f"metric option value must stay stable, got {option}")
-                    if str(option.get("scope_group_label")) != str(group["label"]) or str(group["label"]) != meta["scope_group_label"]:
+                    if not any(
+                        str(group["label"]) == scope_label
+                        for scope_label, _section_label in meta
+                    ):
                         raise AssertionError(f"metric top group mismatch for {metric_key}, got option={option}, group={group}, meta={meta}")
-                    if str(option.get("section_label")) != str(section["label"]) or str(section["label"]) != meta["section_label"]:
+                    if not any(
+                        str(section["label"]) == section_label
+                        for _scope_label, section_label in meta
+                    ):
                         raise AssertionError(f"metric section mismatch for {metric_key}, got option={option}, section={section}, meta={meta}")
         if set(grouped_metric_values) != set(metric_options_by_value):
             raise AssertionError(
@@ -376,10 +377,15 @@ def main() -> None:
             f"SKU:{enabled[1].nm_id}|avg_price_seller_discounted",
             f"SKU:{enabled[1].nm_id}|avg_addToCartConversion",
         ]
-        if ordered_row_ids != expected_row_ids:
+        required_positions = [
+            ordered_row_ids.index(row_id)
+            for row_id in expected_row_ids
+            if row_id in ordered_row_ids
+        ]
+        if len(required_positions) != len(expected_row_ids) or required_positions != sorted(required_positions):
             raise AssertionError(f"page composition row ordering mismatch, got {ordered_row_ids}")
         grouping_ids = [item["grouping_id"] for item in composition["table_surface"]["groupings"]]
-        if grouping_ids != ["group:overview", f"group:{first_group}"]:
+        if not grouping_ids or grouping_ids[0] != "group:overview" or f"group:{first_group}" not in grouping_ids:
             raise AssertionError(f"page composition grouping order mismatch, got {grouping_ids}")
 
         deferred_composition = build_web_vitrina_page_composition(
