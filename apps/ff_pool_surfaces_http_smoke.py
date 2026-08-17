@@ -67,6 +67,7 @@ def main() -> None:
             base = f"http://127.0.0.1:{config.port}"
             _read_contract(base)
             _mutation_contract(base)
+            _guided_acceptance_csrf_contract(base)
             _prebuffer_limit(config.port)
             _ui_contract(base)
         finally:
@@ -126,6 +127,93 @@ def _mutation_contract(base: str) -> None:
         headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"},
     )
     assert off_code == 409 and off["code"] == "facility_pool_feature_off"
+
+
+def _guided_acceptance_csrf_contract(base: str) -> None:
+    preview_url = f"{base}{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview"
+    missing_preview_code, missing_preview = _multipart_request(preview_url)
+    assert missing_preview_code == 403 and missing_preview["code"] == "csrf_failed"
+    cross_preview_code, cross_preview = _multipart_request(
+        preview_url,
+        headers={
+            "X-WB-FF-Pool-CSRF": "1",
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert cross_preview_code == 403 and cross_preview["code"] == "csrf_failed"
+    guarded_preview_code, guarded_preview = _multipart_request(
+        preview_url,
+        headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert guarded_preview_code == 404 and guarded_preview["code"] == "supplier_shipment_not_found"
+
+    confirm_url = f"{base}{DEFAULT_FF_POOL_PATH}/requests/missing-guided-request/confirm"
+    confirm_body = {"confirm": True}
+    missing_confirm_code, missing_confirm, _ = _json_request(
+        confirm_url, method="POST", payload=confirm_body
+    )
+    assert missing_confirm_code == 403 and missing_confirm["code"] == "csrf_failed"
+    cross_confirm_code, cross_confirm, _ = _json_request(
+        confirm_url,
+        method="POST",
+        payload=confirm_body,
+        headers={
+            "X-WB-FF-Pool-CSRF": "1",
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert cross_confirm_code == 403 and cross_confirm["code"] == "csrf_failed"
+    guarded_confirm_code, guarded_confirm, _ = _json_request(
+        confirm_url,
+        method="POST",
+        payload=confirm_body,
+        headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert guarded_confirm_code == 409 and guarded_confirm["code"] == "facility_pool_feature_off"
+
+
+def _multipart_request(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, object]]:
+    boundary = "----wb-core-guided-csrf-smoke"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="request_id"\r\n\r\n'
+        "guided:http:csrf\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="business_date"\r\n\r\n'
+        "2026-08-17\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="shipment_id"\r\n\r\n'
+        "missing-shipment\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="expenses_json"\r\n\r\n'
+        "[]\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="guided.xlsx"\r\n'
+        "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+        "not-a-valid-xlsx\r\n"
+        f"--{boundary}--\r\n"
+    ).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _prebuffer_limit(port: int) -> None:

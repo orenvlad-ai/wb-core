@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import os
 import socket
 import sqlite3
 import sys
@@ -19,9 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_FF_POOL_DOCUMENTS_PATH,
+    DEFAULT_FF_POOL_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -53,6 +57,9 @@ def main() -> None:
         runtime.list_ff_stock_operations(limit=1)
         clock = Clock()
         _seed(runtime, clock)
+        _seed_guided_supplier_shipment(runtime)
+        guided_upload_path = root / "guided-acceptance.xlsx"
+        guided_upload_path.write_bytes(b"browser fixture intercepted before parsing")
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),
@@ -76,7 +83,12 @@ def main() -> None:
                 browser = playwright.chromium.launch()
                 try:
                     screenshot_path = Path(os.environ.get("FF_POOL_SCREENSHOT_PATH") or root / "mobile.png")
-                    _run(browser, f"http://127.0.0.1:{config.port}", screenshot_path)
+                    _run(
+                        browser,
+                        f"http://127.0.0.1:{config.port}",
+                        screenshot_path,
+                        guided_upload_path,
+                    )
                 finally:
                     browser.close()
         finally:
@@ -112,7 +124,63 @@ def _seed(runtime: RegistryUploadDbBackedRuntime, clock: Clock) -> None:
         )
 
 
-def _run(browser: object, base: str, screenshot_path: Path) -> None:
+def _seed_guided_supplier_shipment(runtime: RegistryUploadDbBackedRuntime) -> None:
+    runtime.save_supplier_shipment(
+        header={
+            "shipment_id": "sup_guided_csrf_browser",
+            "created_at": "2026-08-12T07:05:00Z",
+            "updated_at": "2026-08-12T07:05:00Z",
+            "shipment_date": "2026-08-10",
+            "actual_shipment_date": "2026-08-11",
+            "actual_ff_acceptance_date": None,
+            "order_status": "in_transit",
+            "invoice_no": "GUIDED-CSRF",
+            "invoice_date": "2026-08-09",
+            "contract_no": "",
+            "contract_date": "",
+            "supplier_name": "Browser fixture supplier",
+            "customer_name": "",
+            "currency": "RMB",
+            "product_qty_total": 1,
+            "product_amount_total": 1,
+            "extras_amount_total": 0,
+            "invoice_amount_total": 1,
+            "declared_invoice_total": 1,
+            "match_status": "all_matched",
+            "source_filename": "guided-csrf.xlsx",
+            "source_file_sha256": "",
+            "source_file_path": "",
+            "parser_version": "browser-smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        lines=[
+            {
+                "line_id": "ln_guided_csrf_browser",
+                "line_type": "product",
+                "sort_order": 1,
+                "source_no": "1",
+                "product_type": "clear",
+                "model_raw": "Browser fixture",
+                "model_normalized": "browser_fixture",
+                "match_key": "clear|browser_fixture",
+                "internal_sku": "SKU-GUIDED-CSRF",
+                "internal_nm_id": 210183919,
+                "internal_name": "Browser fixture",
+                "qty": 1,
+                "unit_price": 1,
+                "amount": 1,
+                "currency": "RMB",
+                "comment": "",
+                "match_status": "matched",
+                "manual_override": False,
+                "raw": {},
+            }
+        ],
+    )
+
+
+def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: Path) -> None:
     context = browser.new_context(viewport={"width": 1280, "height": 900})
     page = context.new_page()
     page_errors: list[str] = []
@@ -120,6 +188,7 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     server_errors: list[str] = []
     pool_http_errors: list[str] = []
     facility_mutation_headers: list[dict[str, str]] = []
+    guided_mutation_requests: list[dict[str, object]] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
     page.on("response", lambda response: server_errors.append(f"{response.status} {response.url}") if response.status >= 500 else None)
@@ -130,6 +199,53 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
         if request.method == "POST" and "/facility-pools/facilities/" in request.url
         else None,
     )
+
+    def intercept_guided_mutation(route: object) -> None:
+        request = route.request
+        if request.method != "POST":
+            route.continue_()
+            return
+        guided_mutation_requests.append(
+            {
+                "url": request.url,
+                "headers": request.all_headers(),
+                "content_type": request.all_headers().get("content-type", ""),
+            }
+        )
+        if request.url.endswith("/documents/china/preview"):
+            payload = {
+                "request_id": "guided:browser-csrf",
+                "state": "ready",
+                "state_label_ru": "Готово к проведению",
+                "confirm_allowed": True,
+                "guided_acceptance_activation": {"reason_ru": "Локальный mutation fixture."},
+                "preview": {"available": False},
+                "summary": {
+                    "expected_quantity": 1,
+                    "accepted_quantity": 1,
+                    "quantity_fbs": 1,
+                    "quantity_fbo": 0,
+                    "discrepancy_quantity": 0,
+                },
+            }
+        else:
+            payload = {
+                "request_id": "guided:browser-csrf",
+                "state": "complete",
+                "state_label_ru": "Завершено",
+                "confirm_allowed": False,
+                "business_date": "2026-08-12",
+                "guided_acceptance_activation": {"reason_ru": "Локальный mutation fixture."},
+                "summary": {
+                    "expected_quantity": 1,
+                    "accepted_quantity": 1,
+                    "quantity_fbs": 1,
+                    "quantity_fbo": 0,
+                    "discrepancy_quantity": 0,
+                },
+            }
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
     url = f"{base}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}?tab=warehouses&warehouse=ff"
     response = page.goto(url, wait_until="domcontentloaded")
     assert response is not None and response.status == 200
@@ -219,6 +335,38 @@ def _run(browser: object, base: str, screenshot_path: Path) -> None:
     assert facility_mutation_headers[-1].get("x-wb-ff-pool-csrf") == "1"
     assert page.locator("#warehousesGroupPanel").evaluate("node => node.scrollWidth <= node.clientWidth + 1")
     page.screenshot(path=str(screenshot_path.with_name(screenshot_path.stem + "-settings" + screenshot_path.suffix)), full_page=False)
+
+    page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview", intercept_guided_mutation)
+    page.route(f"**{DEFAULT_FF_POOL_PATH}/requests/*/confirm", intercept_guided_mutation)
+    response = page.goto(f"{base}{DEFAULT_SHEET_SUPPLIER_UI_PATH}?embedded=operator", wait_until="domcontentloaded")
+    assert response is not None and response.status == 200
+    guided_row = page.locator('#shipmentRows tr[data-row="sup_guided_csrf_browser"]')
+    guided_row.wait_for(state="visible")
+    guided_row.click()
+    page.locator("#shipmentCard").wait_for(state="visible")
+    page.get_by_role("tab", name="Состав поставки").click()
+    guided_acceptance_button = page.locator("#guidedAcceptanceButton")
+    guided_acceptance_button.wait_for(state="visible")
+    assert guided_acceptance_button.inner_text() == "Принять на FF"
+    guided_acceptance_button.click()
+    page.locator("#guidedAcceptanceModal").wait_for(state="visible")
+    page.locator("#guidedAcceptanceFile").set_input_files(str(guided_upload_path))
+    page.get_by_role("button", name="Необратимо провести приёмку").wait_for(state="visible")
+    assert len(guided_mutation_requests) == 1
+    upload_request = guided_mutation_requests[0]
+    assert str(upload_request["url"]).endswith(f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview")
+    assert dict(upload_request["headers"]).get("x-wb-ff-pool-csrf") == "1"
+    assert str(upload_request["content_type"]).startswith("multipart/form-data;")
+    page.get_by_role("button", name="Необратимо провести приёмку").click()
+    page.wait_for_function(
+        "() => document.querySelector('#guidedAcceptanceStatus')?.textContent.includes('Завершено')",
+        timeout=5000,
+    )
+    assert len(guided_mutation_requests) == 2
+    confirm_request = guided_mutation_requests[1]
+    assert str(confirm_request["url"]).endswith("/requests/guided%3Abrowser-csrf/confirm")
+    assert dict(confirm_request["headers"]).get("x-wb-ff-pool-csrf") == "1"
+    assert str(confirm_request["content_type"]).startswith("application/json")
     assert not page_errors, page_errors
     fatal_console_errors = [item for item in console_errors if not item.startswith("Failed to load resource:")]
     assert not fatal_console_errors, fatal_console_errors

@@ -4330,7 +4330,7 @@
         guidedAcceptanceStatus.textContent = "Файл принят. Проверяем exact nmId/barcode, количества, расходы и расхождения...";
         guidedAcceptanceUploadButton.disabled = true;
         try {
-          const status = await fetchJson(ffPoolChinaPreviewPath, {method:"POST", body:form, headers:{Accept:"application/json"}});
+          const status = await fetchJson(ffPoolChinaPreviewPath, {method:"POST", body:form, headers:{Accept:"application/json", "X-WB-FF-Pool-CSRF":"1"}});
           window.localStorage.setItem(guidedStorageKey(currentShipment.shipment_id), status.request_id || requestId);
           await renderGuidedStatus(status);
         } catch (error) {
@@ -4388,7 +4388,7 @@
         guidedAcceptanceConfirm.disabled = true;
         guidedAcceptanceStatus.textContent = "Проводим единый idempotent документ...";
         try {
-          const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId) + "/confirm", {method:"POST", headers:{"Content-Type":"application/json",Accept:"application/json"}, body:JSON.stringify({confirm:true})});
+          const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId) + "/confirm", {method:"POST", headers:{"Content-Type":"application/json",Accept:"application/json", "X-WB-FF-Pool-CSRF":"1"}, body:JSON.stringify({confirm:true})});
           await renderGuidedStatus(status);
         } catch (error) { guidedAcceptanceStatus.textContent = error.message; }
       }
