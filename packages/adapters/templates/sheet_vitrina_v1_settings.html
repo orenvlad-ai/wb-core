@@ -1036,6 +1036,17 @@
         return String(prefix) + ":" + suffix;
       }
 
+      function ffPoolJsonPost(url, payload) {
+        return fetchJson(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-WB-FF-Pool-CSRF": "1"
+          },
+          body: JSON.stringify(payload)
+        });
+      }
+
       async function loadWarehouses() {
         warehousesActivationMessage.textContent = "Читаем склады и безопасные gates...";
         try {
@@ -1080,7 +1091,7 @@
       async function createWarehouse() {
         createWarehouseButton.disabled = true;
         try {
-          await fetchJson(ffPoolFacilitiesPath, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({request_id:warehouseRequestId('facility-create'), name:warehouseNameInput.value.trim(), city:warehouseCityInput.value.trim(), display_timezone:warehouseTimezoneInput.value.trim(), active:warehouseActiveInput.value === 'true'})});
+          await ffPoolJsonPost(ffPoolFacilitiesPath, {request_id:warehouseRequestId('facility-create'), name:warehouseNameInput.value.trim(), city:warehouseCityInput.value.trim(), display_timezone:warehouseTimezoneInput.value.trim(), active:warehouseActiveInput.value === 'true'});
           warehouseNameInput.value = '';
           warehouseCityInput.value = '';
           await loadWarehouses();
@@ -1095,7 +1106,7 @@
         button.disabled = true;
         try {
           const detail = await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
-          await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...changes, request_id:warehouseRequestId('facility-update'), expected_updated_at:detail.facility.updated_at})});
+          await ffPoolJsonPost(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), {...changes, request_id:warehouseRequestId('facility-update'), expected_updated_at:detail.facility.updated_at});
           await loadWarehouses();
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
