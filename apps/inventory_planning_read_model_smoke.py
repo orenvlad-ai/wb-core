@@ -66,6 +66,22 @@ def main() -> int:
         assert missing["fbs"]["available"] == -3
         assert len(missing["fbs"]["facilities"]) == 1
         assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] == 1
+        missing_skus = {item["nm_id"]: item for item in missing["skus"]}
+        assert missing_skus[1]["wb_total"] == 10
+        assert missing_skus[1]["fbs_physical"] == 5
+        assert missing_skus[1]["fbs_reserved"] == 8
+        assert missing_skus[1]["fbs_total"] == -3
+        assert missing_skus[1]["total"] == 7
+        assert missing_skus[1]["wb_effective_total"] is None
+        assert missing_skus[1]["fbs_facilities"][0]["seller_stock"] == {
+            "quantity": 6,
+            "delta_to_ledger_physical": 1,
+            "role": "reconciliation_only",
+        }
+        assert missing_skus[2]["fbs_total"] is None
+        assert "exact physical FBS ledger row" in missing_skus[2]["quality"][
+            "fbs_total_reason_ru"
+        ]
         assert missing["formula"]["version"] == FORMULA_VERSION
         assert missing["formula"]["effective_from"] == "2026-08-16"
         assert missing["formula"]["six_stage_total_changed"] is False
@@ -109,6 +125,10 @@ def main() -> int:
         assert _metric(exact, "wb_effective_total") == -5
         assert _metric(exact, "effective_total") == -8
         assert exact["wb"]["incident_evidence"]["synthetic_cap_applied"] is False
+        exact_skus = {item["nm_id"]: item for item in exact["skus"]}
+        assert exact_skus[1]["incident_quantity"] == 35
+        assert exact_skus[1]["wb_effective_total"] == -25
+        assert exact_skus[1]["effective_total"] == -28
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(

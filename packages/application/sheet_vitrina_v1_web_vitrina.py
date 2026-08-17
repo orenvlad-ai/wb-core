@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from packages.application.own_product_capital import OwnProductCapitalBlock
+from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_ONLY_SOURCE_KEYS,
@@ -27,6 +28,9 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
+)
+from packages.application.sheet_vitrina_v1_inventory_planning import (
+    extend_rows_with_inventory_planning,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_proxy_v4 import extend_metrics_with_proxy_v4
@@ -284,6 +288,12 @@ class SheetVitrinaV1WebVitrinaBlock:
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
             metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
             current_business_date=date.fromisoformat(current_business_date_iso(now)),
+        )
+        rows = extend_rows_with_inventory_planning(
+            rows,
+            planning=InventoryPlanningReadModel(db_path=self.runtime.db_path).current(),
+            date_columns=list(snapshot.date_columns),
+            enabled_config=[item for item in current_state.config_v2 if item.enabled],
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)

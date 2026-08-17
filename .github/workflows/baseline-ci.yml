@@ -78,6 +78,7 @@ jobs:
           python3 apps/wb_fbs_orders_collector_smoke.py
           python3 apps/wb_fbs_orders_http_smoke.py
           python3 apps/inventory_planning_read_model_smoke.py
+          python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py
           python3 apps/wb_fbs_shadow_polling_smoke.py
           python3 apps/wb_supplies_incremental_sync_smoke.py
           python3 apps/ff_stage_7a_production_smoke.py
@@ -102,6 +103,7 @@ jobs:
           python3 apps/ff_pool_surfaces_browser_smoke.py
           python3 apps/ff_wb_supply_origins_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py
 
       - name: Validate maintenance write-barrier browser state

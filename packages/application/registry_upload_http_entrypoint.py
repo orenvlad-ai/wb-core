@@ -8948,6 +8948,24 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
         source_version >= WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION
         and migrations.get("sku_presets_seeded_v1")
     )
+    inventory_planning_metric_keys_v1: list[str] = []
+    seen_inventory_planning_metric_keys: set[str] = set()
+    raw_inventory_planning_metric_keys = migrations.get(
+        "inventory_planning_metric_keys_v1"
+    )
+    for raw_metric_key in (
+        raw_inventory_planning_metric_keys
+        if isinstance(raw_inventory_planning_metric_keys, list)
+        else []
+    ):
+        metric_key = str(raw_metric_key or "").strip()
+        if (
+            metric_key
+            and len(metric_key) <= 160
+            and metric_key not in seen_inventory_planning_metric_keys
+        ):
+            inventory_planning_metric_keys_v1.append(metric_key)
+            seen_inventory_planning_metric_keys.add(metric_key)
 
     if source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION:
         raw_presentation = source.get("presentation")
@@ -9000,6 +9018,7 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
                 "incident_effective_shown_v1": incident_effective_shown_v1,
                 "sku_presets_seeded_v1": sku_presets_seeded_v1,
                 "unified_presentation_v1": bool(migrations.get("unified_presentation_v1")),
+                "inventory_planning_metric_keys_v1": inventory_planning_metric_keys_v1,
             },
         }
 
@@ -9018,6 +9037,7 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
         "migrations": {
             "incident_effective_shown_v1": incident_effective_shown_v1,
             "sku_presets_seeded_v1": sku_presets_seeded_v1,
+            "inventory_planning_metric_keys_v1": inventory_planning_metric_keys_v1,
         },
     }
 
