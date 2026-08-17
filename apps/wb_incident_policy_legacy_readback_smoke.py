@@ -51,9 +51,9 @@ def main() -> int:
         runtime.append_wb_incident_policy_revision(
             seller_id="canonical",
             active=True,
-            warehouse_ids=[507, 117986],
-            warehouse_identities=identities,
-            warehouse_entries=entries,
+            warehouse_ids=[507],
+            warehouse_identities=identities[:1],
+            warehouse_entries=entries[:1],
             reason="historical incident",
             effective_from="2026-07-01",
             effective_to="",
@@ -64,22 +64,22 @@ def main() -> int:
         )
         runtime.append_wb_incident_policy_revision(
             seller_id="canonical",
-            active=False,
+            active=True,
             warehouse_ids=[507, 117986],
             warehouse_identities=identities,
             warehouse_entries=entries,
-            reason="Legacy mode: incident policy disabled effective 2026-08-16",
-            effective_from="2026-08-16",
+            reason="current monitoring policy",
+            effective_from="2026-07-12",
             effective_to="",
-            policy_status="disabled",
+            policy_status="monitoring",
             actor="owner",
-            created_at="2026-08-17T08:00:00Z",
-            source="incident_policy_legacy_disable_v1",
+            created_at="2026-07-12T08:00:00Z",
+            source="incident_policy_v2",
         )
 
         historical = get_policy_state(
             runtime,
-            snapshot_date="2026-08-15",
+            snapshot_date="2026-07-05",
             seller_id="canonical",
             include_legacy=False,
         )
@@ -91,9 +91,9 @@ def main() -> int:
             seller_id="canonical",
         )
         if (
-            current["configured_active"]
-            or current["active"]
-            or current["currently_effective"]
+            not current["configured_active"]
+            or not current["active"]
+            or not current["currently_effective"]
             or current["effective_revision"] != 2
         ):
             raise AssertionError(f"configured/effective state contradicts the registry: {current}")
@@ -108,17 +108,17 @@ def main() -> int:
             now_factory=lambda: datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc),
         )
         payload = block.get_warehouse_exclusion_settings(user_key="ignored")
-        if payload["active"] or payload["configured_active"]:
+        if not payload["active"] or not payload["configured_active"]:
             raise AssertionError(f"server settings expose opposite active state: {payload}")
         if payload["legacy_warehouse_entries"] != entries:
             raise AssertionError("settings response lost legacy warehouse identities")
         history = payload["revision_history"]
         if [item["revision"] for item in history] != [2, 1]:
             raise AssertionError(f"append-only revision order changed: {history}")
-        if any(item["warehouse_entries"] != entries for item in history):
+        if history[0]["warehouse_entries"] != entries or history[1]["warehouse_entries"] != entries[:1]:
             raise AssertionError(f"revision history lost exact names/dates: {history}")
-        if payload["effective_excluded_wb_warehouse_ids"]:
-            raise AssertionError("disabled current policy must have no effective excluded IDs")
+        if payload["effective_excluded_wb_warehouse_ids"] != [507, 117986]:
+            raise AssertionError("active retained policy must expose its exact effective IDs")
 
     print("wb_incident_policy_legacy_readback_smoke: OK")
     return 0

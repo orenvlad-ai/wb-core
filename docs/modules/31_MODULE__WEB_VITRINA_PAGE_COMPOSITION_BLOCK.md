@@ -518,7 +518,12 @@ The shared `build_incident_stock_projection` default remains strict: an active h
 
 Provisional cache identity and server-owned quality evidence remain API/audit-only. The ordinary header/cells do not render incident badges, quality pills, incident warnings, accessible incident tooltips or N/A rows. Capital `unconfirmed` remains a separate active semantic state with its existing reason tooltip/ARIA evidence and no permanent yellow/amber cell styling.
 
-The legacy transition does not use Policy Apply and does not invoke incident rematerialization. `apps/wb_incident_policy_legacy_disable.py` owns the one separately human-gated append-only inactive revision effective `2026-08-16`; dry-run is query-only, apply pins exact deployed SHA/reviewed manifest, creates a coherent backup, appends one row, preserves prior revisions and proves ready/raw/evidence/cache/rematerialization-audit invariance plus idempotent readback. The historical rematerialization runner remains retained compatibility code and is not part of this migration.
+The legacy presentation transition does not use Policy Apply, does not invoke
+incident rematerialization and has no production-data runner. Existing policy
+rows, configured/effective state, ready/raw/evidence/cache and audit records are
+read-only inputs and remain byte-for-byte unchanged. The historical
+rematerialization runner remains retained compatibility code and is not part of
+this migration.
 
 Non-TOTAL SKU separator labels open the same SKU Management flow through the narrow per-SKU read endpoint, with price, exact campaign/placement bid selection and nmID-filtered history in an opaque accessible modal. Section authorization is unchanged; users without `sku_management` do not receive a clickable control.
 

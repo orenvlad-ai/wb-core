@@ -102,13 +102,13 @@ def main() -> int:
                 raise AssertionError("legacy disclosure summary is not keyboard-focusable")
             summary.press("Enter")
             page.wait_for_function(
-                "() => document.querySelector('[data-wb-incident-policy-badge]')?.textContent?.includes('Сейчас: не действует')"
+                "() => document.querySelector('[data-wb-incident-policy-badge]')?.textContent?.includes('Сейчас: действует')"
             )
             if requests != ["settings", "options"]:
                 raise AssertionError(f"explicit disclosure must load policy exactly once: {requests}")
             expect(legacy).to_have_attribute("open", "")
             expect(page.locator("[data-wb-incident-policy-badge]")).to_have_text(
-                "Настроено: выключено · Сейчас: не действует"
+                "Настроено: включено · Сейчас: действует"
             )
 
             page.locator("[data-wb-incident-drawer] > summary").click()
@@ -129,16 +129,16 @@ def main() -> int:
             history_details.locator(":scope > summary").click()
             history_text = page.locator("[data-wb-incident-history]").inner_text()
             for evidence in (
-                "Revision 3 · disabled",
+                "Revision 3 · enabled",
                 "Revision 2 · enabled",
                 "Revision 1 · enabled",
                 "Коледино (ID 507, 2026-07-01)",
                 "Электросталь (ID 117986, 2026-07-12)",
-                "2026-08-16",
-                "incident_policy_legacy_disable_v1",
-                "actor: owner-disable",
-                "created: 2026-08-17T08:00:00Z",
-                "reason: Legacy mode",
+                "2026-08-10",
+                "incident_policy_v2",
+                "actor: owner-current",
+                "created: 2026-08-10T08:00:00Z",
+                "reason: Current confirmed incident",
             ):
                 if evidence not in history_text:
                     raise AssertionError(
@@ -193,28 +193,29 @@ def _settings_payload() -> dict[str, object]:
         "status": "ok",
         "revision": 3,
         "effective_revision": 3,
-        "active": False,
-        "configured_active": False,
-        "policy_status": "disabled",
-        "reason": "Legacy mode",
-        "actor": "owner",
-        "created_at": "2026-08-17T08:00:00Z",
-        "warehouse_entries": [],
+        "active": True,
+        "configured_active": True,
+        "policy_status": "monitoring",
+        "reason": "Current confirmed incident",
+        "actor": "owner-current",
+        "created_at": "2026-08-10T08:00:00Z",
+        "warehouse_entries": identities,
         "legacy_warehouse_entries": identities,
-        "excluded_wb_warehouse_ids": [],
+        "excluded_wb_warehouse_ids": [507, 117986],
+        "effective_excluded_wb_warehouse_ids": [507, 117986],
         "revision_history": [
             {
                 "revision": 3,
-                "active": False,
+                "active": True,
                 "warehouse_entries": identities,
                 "warehouse_identities": [],
-                "effective_from": "2026-08-16",
+                "effective_from": "2026-08-10",
                 "effective_to": "",
-                "policy_status": "disabled",
-                "actor": "owner-disable",
-                "created_at": "2026-08-17T08:00:00Z",
-                "reason": "Legacy mode",
-                "source": "incident_policy_legacy_disable_v1",
+                "policy_status": "monitoring",
+                "actor": "owner-current",
+                "created_at": "2026-08-10T08:00:00Z",
+                "reason": "Current confirmed incident",
+                "source": "incident_policy_v2",
             },
             {
                 "revision": 2,

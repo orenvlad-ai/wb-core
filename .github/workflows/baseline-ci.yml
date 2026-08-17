@@ -80,7 +80,6 @@ jobs:
           python3 apps/wb_fbs_orders_http_smoke.py
           python3 apps/inventory_planning_read_model_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py
-          python3 apps/wb_incident_policy_legacy_disable_smoke.py
           python3 apps/wb_fbs_shadow_polling_smoke.py
           python3 apps/wb_supplies_incremental_sync_smoke.py
           python3 apps/ff_stage_7a_production_smoke.py

@@ -195,7 +195,13 @@ Official current response may additionally return the exact typed aggregate sent
 
 `Остатки → Склад WB` retains the seller/account-level block only inside the default-collapsed `Legacy: инциденты на складах WB` disclosure. Opening the warehouse tab does not load it; its settings/options GETs run after explicit disclosure. Policy contract v2 stores append-only per-warehouse intervals keyed only by positive stable numeric warehouse ID. Every open entry has its own `effective_from`; an existing start date is immutable, while removal closes that interval at the revision change date and later re-selection creates a new interval. V1/global-date revisions are projected losslessly into entries. ID `0` remains a service bucket and is not an operational incident destination. The legacy readback includes bounded newest-first revisions plus every historical entry/identity, so exact names, IDs and dates survive an aggregate-only current snapshot.
 
-Legacy checkbox/date changes remain browser-local draft only. The historical Apply contour is retained for explicit legacy operation, but Migration 147 does not call it. Instead the separately gated repository runner appends one inactive revision effective `2026-08-16`, preserves exact configured entries and invokes no incident rematerialization. Physical WB quantity, WAC and capital are outside this write set. Supply and SKU Management keep reading the same canonical policy for calculation compatibility, while their ordinary screens no longer render incident selectors/badges/warnings.
+Legacy checkbox/date changes remain browser-local draft only until the existing
+explicit legacy Apply is used by a separately authorized operation. Migration
+147 never calls that Apply, adds no policy runner and leaves every production
+policy row and configured/effective value unchanged. Physical WB quantity, WAC
+and capital are outside this write set. Supply and SKU Management keep reading
+the same canonical policy for calculation compatibility, while their ordinary
+screens no longer render incident selectors/badges/warnings.
 
 The policy creates an availability projection only. The shared default projection used by Supply, SKU Management and every business-action contour excludes exact physical `quantity` from operational total/regions once upstream and requires complete pagination plus snapshot digest; incomplete evidence remains fail-closed. It never removes unattributed `inWayToClient`/`inWayFromClient`.
 
@@ -377,7 +383,6 @@ Targeted verification:
 - `python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py`;
 - `python3 apps/wb_incident_policy_legacy_readback_smoke.py`;
 - `python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py`;
-- `python3 apps/wb_incident_policy_legacy_disable_smoke.py`;
 - `python3 apps/warehouse_functional_smoke.py`;
 - `python3 apps/warehouse_cost_queue_replay_smoke.py`;
 - `python3 apps/sqlite_backup_archive_smoke.py`;
