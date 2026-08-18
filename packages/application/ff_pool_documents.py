@@ -4558,10 +4558,25 @@ def _apply_balance_movement(
     key = (facility_id, pool, nm_id)
     row = _balance_row(conn, key, epoch=epoch, required=False)
     before_quantity = int(row["quantity"]) if row is not None else 0
-    before_capital = _money_cents(row["capital_rub"], field="balance capital") if row is not None else 0
+    try:
+        before_capital = Decimal(str(row["capital_rub"])) if row is not None else ZERO
+    except (InvalidOperation, ValueError) as exc:
+        raise FfPoolDocumentError(
+            "invalid_money", "balance capital must be Decimal-safe"
+        ) from exc
+    if not before_capital.is_finite() or before_capital < ZERO:
+        raise FfPoolDocumentError(
+            "invalid_money", "balance capital is outside the allowed non-negative range"
+        )
     after_quantity = before_quantity + quantity_delta
-    after_capital = before_capital + capital_delta
-    if after_quantity < 0 or after_capital < 0:
+    # Balance capital is an exact Decimal with up to 80 stored characters.
+    # Keep the arithmetic outside the process-wide Decimal precision so a
+    # signed kopeck movement cannot trim an authoritative opening tail.
+    with localcontext() as context:
+        context.prec = 160
+        capital_delta_rub = Decimal(capital_delta) / Decimal(100)
+        after_capital = before_capital + capital_delta_rub
+    if after_quantity < 0 or after_capital < ZERO:
         raise FfPoolDocumentError(
             "negative_pool_balance",
             "Pool movement would create negative quantity or capital",
@@ -4570,10 +4585,10 @@ def _apply_balance_movement(
                 "pool": pool,
                 "nm_id": nm_id,
                 "after_quantity": after_quantity,
-                "after_capital_rub": _cents_text(after_capital),
+                "after_capital_rub": canonical_decimal_text(after_capital),
             },
         )
-    if (after_quantity == 0) != (after_capital == 0):
+    if (after_quantity == 0) != (after_capital == ZERO):
         raise FfPoolDocumentError(
             "pool_quantity_capital_zero_mismatch",
             "Zero pool quantity and capital must close together",
@@ -4602,7 +4617,7 @@ def _apply_balance_movement(
             _json(dict(movement.get("metadata") or {})),
         ),
     )
-    wac = _ratio_text(after_capital, after_quantity) if after_quantity else None
+    wac = _decimal_ratio_text(after_capital, after_quantity) if after_quantity else None
     if row is None:
         conn.execute(
             f"""INSERT INTO {BALANCES_TABLE}(
@@ -4615,7 +4630,7 @@ def _apply_balance_movement(
                 nm_id,
                 epoch,
                 after_quantity,
-                _cents_text(after_capital),
+                canonical_decimal_text(after_capital),
                 wac,
                 operation_id,
                 posted_at,
@@ -4628,7 +4643,7 @@ def _apply_balance_movement(
             "AND projection_epoch=?",
             (
                 after_quantity,
-                _cents_text(after_capital),
+                canonical_decimal_text(after_capital),
                 wac,
                 operation_id,
                 posted_at,
@@ -5495,6 +5510,16 @@ def _ratio_text(capital_cents: int, quantity: int) -> str:
     with localcontext() as context:
         context.prec = 38
         return canonical_decimal_text(Decimal(capital_cents) / Decimal(100) / Decimal(quantity))
+
+
+def _decimal_ratio_text(capital_rub: Decimal, quantity: int) -> str:
+    if capital_rub <= ZERO or quantity <= 0:
+        raise FfPoolDocumentError(
+            "positive_wac_required", "Positive quantity/capital are required for WAC"
+        )
+    with localcontext() as context:
+        context.prec = 38
+        return canonical_decimal_text(capital_rub / Decimal(quantity))
 
 
 def _cents_text(value: int) -> str:
