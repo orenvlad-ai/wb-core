@@ -675,7 +675,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             "data-supply-section-button",
         ),
     }
-    if default_state != {"top_tab": "vitrina", "report_section": "daily", "supply_section": "factory"}:
+    if default_state != {"top_tab": "vitrina", "report_section": "daily", "supply_section": "fbs-fulfillment"}:
         raise AssertionError(f"default operator state must stay truthful, got {default_state}")
     page.wait_for_function(
         "() => document.getElementById('sellerRecoverySummary') && document.getElementById('sellerRecoverySummary').textContent.includes('seller')"
@@ -2112,7 +2112,7 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
             "data-supply-section-button",
         ),
     }
-    if invalid_state != {"top_tab": "vitrina", "report_section": "daily", "supply_section": "factory"}:
+    if invalid_state != {"top_tab": "vitrina", "report_section": "daily", "supply_section": "fbs-fulfillment"}:
         raise AssertionError(f"broken storage must fall back to default operator state, got {invalid_state}")
 
     page.click('[data-tab-button="reports"]')

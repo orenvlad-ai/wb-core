@@ -130,6 +130,68 @@ class InventoryPlanningReadModel:
     def __init__(self, *, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
+    def current_fbs_facilities(
+        self,
+        *,
+        requested_nm_ids: list[int],
+    ) -> dict[str, Any]:
+        """Read facility-level FBS truth without requiring any WB stock snapshot."""
+
+        normalized_nm_ids = sorted(
+            {int(nm_id) for nm_id in requested_nm_ids if int(nm_id) > 0}
+        )
+        with _connect_readonly(self.db_path) as conn:
+            tables = _tables(conn)
+            missing = sorted(_fbs_required_tables() - tables)
+            if missing:
+                return _etagged(
+                    {
+                        "contract_name": CONTRACT_NAME,
+                        "contract_version": CONTRACT_VERSION,
+                        "surface": "selected_facility_fbs",
+                        "status": "schema_absent",
+                        "missing_tables": missing,
+                        "facilities": [],
+                    }
+                )
+            fbs = _fbs_facilities(
+                conn,
+                seller_id=canonical_seller_id(),
+                requested_nm_ids=normalized_nm_ids,
+                include_seller_stock_reconciliation=False,
+            )
+        facilities: list[dict[str, Any]] = []
+        for raw_facility in fbs["facilities"]:
+            facility = {
+                key: value
+                for key, value in dict(raw_facility).items()
+                if key != "seller_stock"
+            }
+            facility["sku_values"] = [
+                {
+                    key: value
+                    for key, value in dict(raw_sku).items()
+                    if key != "seller_stock"
+                }
+                for raw_sku in raw_facility.get("sku_values") or []
+            ]
+            facilities.append(facility)
+        return _etagged(
+            {
+                "contract_name": CONTRACT_NAME,
+                "contract_version": CONTRACT_VERSION,
+                "surface": "selected_facility_fbs",
+                "status": "ready",
+                "requested_nm_ids": normalized_nm_ids,
+                "facilities": facilities,
+                "formula_epoch": dict(fbs["formula_epoch"]),
+                "global_quality": str(fbs["quality"]),
+                "global_reason_ru": str(fbs["reason_ru"]),
+                "selected_facility_may_be_ready_when_global_is_unavailable": True,
+                "wb_stock_operand_present": False,
+            }
+        )
+
     def current(self) -> dict[str, Any]:
         with _connect_readonly(self.db_path) as conn:
             tables = _tables(conn)
@@ -334,6 +396,17 @@ def _required_tables() -> set[str]:
     }
 
 
+def _fbs_required_tables() -> set[str]:
+    return {
+        FACILITIES_TABLE,
+        FACILITY_PROFILES_TABLE,
+        FEATURE_EPOCHS_TABLE,
+        BALANCES_TABLE,
+        MANIFESTS_TABLE,
+        CURRENT_TABLE,
+    }
+
+
 def _active_wb_snapshot(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         f"""SELECT snapshot.*
@@ -510,6 +583,7 @@ def _fbs_facilities(
     *,
     seller_id: str,
     requested_nm_ids: list[int],
+    include_seller_stock_reconciliation: bool = True,
 ) -> dict[str, Any]:
     manifest = conn.execute(
         f"""SELECT cutover_id,business_date,feature_epoch,cutover_at
@@ -533,12 +607,16 @@ def _fbs_facilities(
               ON profile.facility_id=facility.facility_id
             ORDER BY facility.active DESC,facility.code,facility.facility_id"""
     ).fetchall()
-    readback = conn.execute(
-        f"""SELECT * FROM {SELLER_STOCK_READBACKS_TABLE}
-            WHERE seller_id=? AND complete=1
-            ORDER BY captured_at DESC,readback_id DESC LIMIT 1""",
-        (seller_id,),
-    ).fetchone()
+    readback = (
+        conn.execute(
+            f"""SELECT * FROM {SELLER_STOCK_READBACKS_TABLE}
+                WHERE seller_id=? AND complete=1
+                ORDER BY captured_at DESC,readback_id DESC LIMIT 1""",
+            (seller_id,),
+        ).fetchone()
+        if include_seller_stock_reconciliation
+        else None
+    )
     readback_by_facility: dict[str, int] = {}
     readback_by_facility_nm_id: dict[tuple[str, int], int] = {}
     mapped_ids_by_facility: dict[str, list[int]] = {}

@@ -20,6 +20,7 @@ from packages.application.demand_estimation import (
 )
 from packages.application.factory_order_sales_history import FactoryOrderAuthoritativeSalesHistory
 from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
+from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
@@ -211,8 +212,31 @@ class FactoryOrderSupplyBlock:
             if last_result is not None
             else STOCK_FF_SOURCE_MANUAL_EXCEL
         )
+        planning = InventoryPlanningReadModel(db_path=self.runtime.db_path).current()
+        wb_state = planning.get("wb") if isinstance(planning.get("wb"), Mapping) else {}
+        aggregate_only = bool(wb_state.get("aggregate_only"))
+        source_ready = str(planning.get("status") or "") == "ready" and not aggregate_only
+        source_reason = ""
+        if not source_ready:
+            if aggregate_only:
+                source_reason = (
+                    "Текущая складская детализация WB недоступна: официальный снимок "
+                    "содержит только агрегатный остаток."
+                )
+            else:
+                source_reason = str(
+                    (planning.get("quality") or {}).get("reason_ru")
+                    if isinstance(planning.get("quality"), Mapping)
+                    else ""
+                ) or "Текущий источник складской детализации WB недоступен."
         return FactoryOrderStatus(
-            status="ready" if last_result is not None else "idle",
+            status=(
+                "ready"
+                if last_result is not None and source_ready
+                else "stale"
+                if last_result is not None
+                else "idle"
+            ),
             active_sku_count=len(active_skus),
             coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             factory_inbound_source=factory_inbound_source,
@@ -223,6 +247,17 @@ class FactoryOrderSupplyBlock:
             onec_stock_ff_summary=onec_stock_ff_state,
             supplier_registry_inbound_summary=supplier_registry_state,
             last_result=last_result,
+            legacy_scenario=True,
+            current_source_readiness={
+                "ready": source_ready,
+                "reason_ru": source_reason,
+                "wb_snapshot_date": str(wb_state.get("snapshot_date") or ""),
+                "aggregate_only": aggregate_only,
+                "saved_result_is_currently_ready": bool(last_result is not None and source_ready),
+                "last_result_calculated_at": (
+                    str(last_result.calculated_at) if last_result is not None else ""
+                ),
+            },
         )
 
     def build_wb_warehouse_exclusion_options(

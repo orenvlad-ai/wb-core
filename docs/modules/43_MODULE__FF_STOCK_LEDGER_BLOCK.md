@@ -27,6 +27,7 @@ related_modules:
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_supply.py"
+  - "packages/application/fbs_fulfillment_order.py"
   - "packages/application/wb_regional_supply.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/wb_supplies.py"
@@ -87,6 +88,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
   - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins[/{supply_ref}]"
+  - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
+  - "POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders[/{order_id}]"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
@@ -137,6 +140,8 @@ The old `Остатки ФФ` navigation item is a compatibility transition to `
 - an eligible but physically unavailable or identity-ambiguous WB supply creates or adjusts a reservation keyed by its exact supply revision and `nmID`; missing cost alone cannot create a reservation. Reservation quantity is not a physical movement and carries no WAC/capital.
 
 Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
+
+The independent own-FBS fulfillment-order planner reads the facility × FBS read model directly for one selected active facility. Its available operand is the signed value `physical − reserved`; it never reads legacy aggregate `current_stock_ff`, WB stock, FBO pools or WB overlays. Global FBS readiness may remain fail-closed when another active facility is incomplete, but that does not hide or block a selected facility whose every active-SKU physical row is exact. Conversely, any missing selected-facility physical row is unavailable rather than zero and blocks that facility. In the national-demand MVP only FF Москва is executable; FF Оренбург remains visible and explicitly blocked until both its exact ledger and a later demand-allocation stage are approved.
 
 # 2. Operator UI
 

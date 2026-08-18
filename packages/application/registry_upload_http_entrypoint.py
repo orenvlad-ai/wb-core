@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
+from packages.application.fbs_fulfillment_order import FbsFulfillmentOrderBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.ff_inventory_reconciliation import FfInventoryReconciliation
 from packages.application.ff_overhead_allocation import FfOverheadAllocation
@@ -1130,6 +1131,11 @@ class RegistryUploadHttpEntrypoint:
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
         self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerSessionRecoveryController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
+            runtime=self.runtime,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.fbs_fulfillment_order_block = FbsFulfillmentOrderBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
@@ -3424,6 +3430,25 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_factory_order_recommendation_request(self) -> tuple[bytes, str]:
         return self.factory_order_supply_block.download_recommendation()
+
+    def handle_fbs_fulfillment_order_status_request(
+        self,
+        _query: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return asdict(self.fbs_fulfillment_order_block.build_status())
+
+    def handle_fbs_fulfillment_order_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str | None = None,
+    ) -> dict[str, Any]:
+        return asdict(self.fbs_fulfillment_order_block.calculate(payload))
+
+    def handle_fbs_fulfillment_order_recommendation_request(
+        self,
+    ) -> tuple[bytes, str]:
+        return self.fbs_fulfillment_order_block.download_recommendation()
 
     def handle_wb_regional_status_request(self) -> dict[str, Any]:
         return asdict(self.wb_regional_supply_block.build_status())

@@ -24,7 +24,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, Arial, sans-serif; }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     button, .button-link {
       min-height: 36px; border: 0; border-radius: 7px; padding: 8px 13px;
       background: var(--accent); color: #fff; font-weight: 750; cursor: pointer; text-decoration: none;
@@ -58,7 +58,7 @@
     .card-head h2 { margin: 0; font-size: 20px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; }
     label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
-    input { width: 100%; min-height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 7px 9px; color: var(--text); background: #fff; }
+    input, select { width: 100%; min-height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 7px 9px; color: var(--text); background: #fff; }
     input[readonly] { background: #f3f5f8; color: #4f5a6d; }
     .deadline-field { display: grid; align-content: end; gap: 5px; }
     .deadline-field > span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
@@ -99,6 +99,7 @@
             <th>实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</th>
             <th>发票编号 / Invoice No / Номер invoice</th>
             <th>发票日期 / Invoice date / Дата invoice</th>
+            <th>目标履约中心 / Target fulfillment / Целевой фулфилмент</th>
             <th>商品数量 / Product qty / Кол-во товаров</th>
             <th>匹配 / Matching / Матчинг</th>
             <th>订单状态 / Order status / Статус заказа</th>
@@ -106,7 +107,7 @@
           </tr>
         </thead>
         <tbody id="shipmentRows">
-          <tr data-registry-state="loading"><td colspan="10">读取订单 / Loading orders / Загрузка заказов…</td></tr>
+          <tr data-registry-state="loading"><td colspan="11">读取订单 / Loading orders / Загрузка заказов…</td></tr>
         </tbody>
       </table>
     </section>
@@ -145,6 +146,9 @@
         </label>
         <label>发票日期 / Invoice date / Дата invoice
           <input id="invoiceDateInput" type="date">
+        </label>
+        <label>目标履约中心 / Target fulfillment / Целевой фулфилмент
+          <select id="targetFacilityInput" required><option value="">Выберите ФФ</option></select>
         </label>
         <label>币种 / Currency / Валюта invoice
           <input id="currencyInput" type="text">
@@ -221,6 +225,7 @@
         actualFfAcceptanceDate: document.getElementById("actualFfAcceptanceDateInput"),
         invoiceNo: document.getElementById("invoiceNoInput"),
         invoiceDate: document.getElementById("invoiceDateInput"),
+        targetFacility: document.getElementById("targetFacilityInput"),
         currency: document.getElementById("currencyInput"),
         contractNo: document.getElementById("contractNoInput"),
         contractDate: document.getElementById("contractDateInput")
@@ -229,6 +234,7 @@
       let uploadId = "";
       let isNew = false;
       let saving = false;
+      let targetFacilityOptions = [];
 
       document.getElementById("logoutLink").href = config.logout_path;
 
@@ -270,7 +276,7 @@
       }
 
       function setRegistryState(state, message) {
-        rowsNode.innerHTML = '<tr data-registry-state="' + state + '"><td colspan="10">' + escapeHtml(message) + '</td></tr>';
+        rowsNode.innerHTML = '<tr data-registry-state="' + state + '"><td colspan="11">' + escapeHtml(message) + '</td></tr>';
       }
 
       async function loadRegistry() {
@@ -279,6 +285,8 @@
         try {
           const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
           const shipments = Array.isArray(payload.shipments) ? payload.shipments : [];
+          targetFacilityOptions = Array.isArray(payload.target_facility_options) ? payload.target_facility_options : [];
+          renderTargetFacilityOptions(fields.targetFacility.value);
           if (!shipments.length) {
             setRegistryState("loaded_empty", "暂无订单 / No orders yet / Заказов пока нет.");
             return;
@@ -291,6 +299,7 @@
             '<td>' + escapeHtml(row.actual_ff_acceptance_date || "—") + '</td>',
             '<td>' + escapeHtml(row.invoice_no || "—") + '</td>',
             '<td>' + escapeHtml(row.invoice_date || "—") + '</td>',
+            '<td>' + escapeHtml(row.target_facility_name || "Не назначен") + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
             '<td><span class="badge ' + (row.match_status === "all_matched" ? "success" : "yellow") + '">' + escapeHtml(matchText(row.match_status)) + '</span></td>',
             '<td>' + escapeHtml(statusText(row)) + '</td>',
@@ -320,6 +329,14 @@
 
       function fillValue(node, value) { node.value = value || ""; }
 
+      function renderTargetFacilityOptions(selectedId) {
+        const selected = String(selectedId || "");
+        fields.targetFacility.innerHTML = '<option value="">Выберите ФФ</option>' + targetFacilityOptions.map((facility) => (
+          '<option value="' + escapeHtml(facility.facility_id) + '">' + escapeHtml(facility.name || facility.facility_id) + '</option>'
+        )).join("");
+        fields.targetFacility.value = selected;
+      }
+
       function renderCard() {
         if (!current) return;
         const meta = current.metadata || {};
@@ -328,6 +345,8 @@
         fillValue(fields.actualFfAcceptanceDate, current.actual_ff_acceptance_date);
         fillValue(fields.invoiceNo, meta.invoice_no || current.invoice_no);
         fillValue(fields.invoiceDate, meta.invoice_date || current.invoice_date);
+        renderTargetFacilityOptions(current.target_facility_id || "");
+        fields.targetFacility.disabled = Boolean(current.actual_ff_acceptance_date);
         fillValue(fields.currency, meta.currency || current.currency);
         fillValue(fields.contractNo, meta.contract_no || current.contract_no);
         fillValue(fields.contractDate, meta.contract_date || current.contract_date);
@@ -388,7 +407,10 @@
         document.getElementById("totalProducts").textContent = formatNumber(sum(products, "amount"));
         document.getElementById("totalExtras").textContent = formatNumber(sum(extras, "amount"));
         document.getElementById("totalInvoice").textContent = formatNumber(sum(lines, "amount"));
-        saveButton.disabled = saving || !fields.shipmentDate.value || !products.length;
+        const legacyUntargetedExisting = Boolean(
+          !isNew && current && current.shipment_id && !current.target_facility_id
+        );
+        saveButton.disabled = saving || !fields.shipmentDate.value || (!fields.targetFacility.value && !legacyUntargetedExisting) || !products.length;
       }
 
       function safeLineForWrite(line) {
@@ -412,6 +434,7 @@
         syncLineInputs();
         const edited = {
           shipment_date: fields.shipmentDate.value,
+          target_facility_id: fields.targetFacility.value,
           actual_shipment_date: fields.actualShipmentDate.value,
           actual_ff_acceptance_date: fields.actualFfAcceptanceDate.value,
           metadata: {
@@ -428,11 +451,16 @@
         };
         const body = {
           shipment_date: edited.shipment_date,
+          target_facility_id: edited.target_facility_id,
           actual_shipment_date: edited.actual_shipment_date,
           actual_ff_acceptance_date: edited.actual_ff_acceptance_date,
           payload: edited
         };
         if (isNew) body.upload_id = uploadId;
+        if (!isNew && !fields.targetFacility.value && !current.target_facility_id) {
+          delete edited.target_facility_id;
+          delete body.target_facility_id;
+        }
         return body;
       }
 
@@ -513,6 +541,7 @@
           uploadId = current.upload_id || "";
           isNew = true;
           current.shipment_date = "";
+          current.target_facility_id = "";
           current.actual_shipment_date = "";
           current.actual_ff_acceptance_date = "";
           current.deadline = { tone: "neutral", display: "—" };
@@ -524,6 +553,7 @@
       });
 
       saveButton.addEventListener("click", saveCurrent);
+      fields.targetFacility.addEventListener("change", renderTotals);
       closeButton.addEventListener("click", () => { card.hidden = true; current = null; uploadId = ""; isNew = false; });
       loadRegistry();
     })();

@@ -18,11 +18,13 @@ related_modules:
   - "gas/sheet_vitrina_v1/PresentationPass.gs"
   - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/factory_order_supply.py"
+  - "packages/contracts/fbs_fulfillment_order.py"
   - "packages/contracts/web_vitrina_contract.py"
   - "packages/contracts/web_vitrina_gravity_table_adapter.py"
   - "packages/contracts/web_vitrina_view_model.py"
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_supply.py"
+  - "packages/application/fbs_fulfillment_order.py"
   - "packages/application/simple_xlsx.py"
   - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_research.py"
@@ -88,6 +90,9 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
+  - "POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
+  - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/recommendation.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/status"
   - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
@@ -116,6 +121,9 @@ related_runners:
   - "apps/factory_order_supply_smoke.py"
   - "apps/wb_supply_overlay_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/fbs_fulfillment_order_supply_smoke.py"
+  - "apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py"
+  - "apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
   - "apps/wb_regional_demand_diagnostics.py"
@@ -301,10 +309,11 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - log block остаётся fixed-height scrollable viewport с title `Лог` и одной bounded action `Скачать лог`
 - Канонический operator-facing supply surface в том же repo-owned page:
   - top-level tab `Расчёт поставок`
-  - shared block `Остатки ФФ` reused by both supply calculations
-  - bounded subsection `Заказ на фабрике`
+  - default-open independent subsection `Заказ на фулфилмент (FBS)`
+  - shared legacy block `Остатки ФФ` reused only by the old WB factory-order and regional calculations
+  - collapsed compatibility subsection `Заказ на фабрике · старый WB-сценарий`
   - bounded subsection `Поставка на Wildberries`
-  - read-only subsection `Реестр расчётов` for exact factory-order and WB regional history
+  - read-only subsection `Реестр расчётов` for exact FBS fulfillment-order, legacy factory-order and WB regional history
   - explicit actions `Скачать шаблон остатков ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставку на Wildberries`
   - uploads for all operator XLSX files start automatically right after file selection; current uploaded file download/delete lifecycle stays visible in the same block
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
@@ -315,8 +324,11 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
   - operator-facing cycle vocabulary is unified: factory uses `Цикл заказов`, WB block uses `Цикл поставок`
   - page-load defaults are server/operator-owned contract: factory `30/30/15/15/15/14/250/14`, regional `14/7/15-per-district/15/250`, manual dates empty
+  - FBS fulfillment-order defaults copy only the relevant old values: production `30`, factory-to-selected-FF `30`, FF safety `15`, order cycle `14`, production batch `250`, last-N history `14`; FF→WB delivery and marketplace safety are absent from both settings and formula
   - upper `sheet_vitrina_v1` label is a clickable link to the current live spreadsheet target resolved from the bound Apps Script target config
   - authoritative `orderCount` history for this contour lives only server-side in `temporal_source_snapshots[source_key=sales_funnel_history]`
+  - the FBS fulfillment-order history selector has exactly two mutually exclusive modes: `last_n_days` with positive `N` (default `14`) and `custom_period` with required inclusive `date_from/date_to`; start must not exceed end, neither boundary may be future/unclosed, and the whole exact range must exist in authoritative history
+  - availability-adjusted stockout/low-day filtering for the FBS block is constrained to the selected calendar window. It records calendar count, included/excluded dates and used trading-day count, never borrows an outside day, and fails closed when a SKU has no valid demand evidence in the window
   - UI accepts any positive `sales_avg_period_days`; backend calculates any fully covered lookback window and returns an exact coverage blocker only when requested history reaches outside the persisted authoritative window
   - live `DATA_VITRINA` may seed a one-time bounded historical reconcile window `2026-03-01..2026-04-18`, but this is migration input only; ongoing source of truth stays server-side and future exact-date days continue through existing refresh/runtime flow
   - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
@@ -330,6 +342,9 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - inbound datasets are optional for calculation; when a file is absent or deleted, its coverage term is treated as `0`
   - each upload block exposes the current uploaded file as a downloadable link and a bounded delete action for the stored dataset
   - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel, 1C FF_STOCK or `ff_stock_ledger`), inbound from factory to ФФ inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`; selected WB supplies add the same quantity to automatic `inbound_ff_to_wb` rows when their selected operational date is inside the existing inbound window. Manual Excel and `1С / Фулфилмент` also subtract selected quantity from free `stock_ff`; `ff_stock_ledger` keeps ledger `stock_ff` unchanged because WB writeoff movements are already reflected.
+  - the independent FBS fulfillment-order never reads or uses WB/FBO stock, warehouse distribution, FF→WB inbound or WB supply overlays. Its fixed label is `Остатки WB не учитываются`, with no toggle. For each SKU: `horizon_days = production_days + factory_to_target_ff_days + ff_safety_days + order_cycle_days`; `target = national_daily_demand × horizon_days`; `coverage = selected facility (physical − signed reservation) + remaining active inbound assigned to that facility`; `recommendation = max(target − coverage, 0)` rounded upward to the production batch
+  - active facilities remain visible independently. FF Москва may calculate from its complete facility-specific FBS physical ledger even when the global FBS aggregate is fail-closed because another active facility is missing physical rows. FF Оренбург is visible but blocked until its complete physical ledger exists and remains non-executable in the national-demand MVP so two facilities cannot each consume 100% of Russia-wide demand. Missing facility/SKU physical row is unknown, never zero
+  - only supplier orders in derived `production`/`in_transit` status contribute their positive unmatched-to-receipt remainder. Explicit target assignment is authoritative; legacy `NULL` target gets a read-only planning fallback to active FF Москва, while explicit Оренбург never enters Moscow coverage. `accepted_ff`, cancelled/inactive and non-product/unmatched lines are excluded
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
   - regional block does not materialize an upload contract for `Товары в пути от ФФ на Wildberries`; selected WB supplies are the bounded calculation overlay for this flow: mapped supply events add quantity only to their destination calculation district, unmapped warehouse events do not add regional quantity and warn
   - factory-order and WB regional results expose `wb_supply_overlay` diagnostics: selected supplies, selected date/evidence, planned/target `district_source_warehouse_*` evidence, route/display warehouses, warehouse/district mapping evidence, accounted/skipped SKU quantities and reasons, `base_stock_ff`, `selected_wb_supply_qty`, `effective_stock_ff`, `over_reserved_qty`, factory added `inbound_ff_to_wb` and regional added quantities by district
@@ -338,6 +353,8 @@ update_note: "Ordinary immutable Proxy V4 revisions now select one freshest comm
   - direct planning-zone XLSX files retain their stable ASCII route filenames (`wb_regional_central_north_fo.xlsx`, `wb_regional_central_east_fo.xlsx`, `wb_regional_central_south_fo.xlsx`, plus unchanged non-Central stems) and now include only `nmId / SKU / Количество к поставке`; `Дефицит` remains backend/UI calculation truth but is not exported to the operator workbook.
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` and button `Скачать все рекомендации` build one atomic archive `Рекомендации_поставок_<date>_<time>_<calculation_id>.zip`. Every included recommendation follows UI order and gets a unique safe `ordinal + calculation_id + destination` folder/prefix with exactly two files: operator recommendation and WB-upload XLSX copied from the checked-in canonical `Sheet1 / Баркод / Количество` template. Exact nomenclature barcodes are text, duplicates are summed, totals reconcile, and any missing/ambiguous barcode or invalid quantity returns one controlled error without a partial archive.
   - every successful calculation atomically updates the compatible latest-result slot and appends one immutable complete registry snapshot. The unified registry is server-owned, bounded to `200` complete rows, paginated `25` by default (`100` maximum), stably ordered by calculation time and identity, and filtered by type/date. Detail/API retain exact stored settings, selected WB supply ids, incident/source evidence, warnings, summary and full result rows, but the ordinary registry table no longer renders a separate incident-policy column. Historical download streams the exact XLSX/ZIP bytes saved with that record rather than regenerating from latest/current state. Legacy regional metadata-only audit rows remain visible with an explicit incomplete/non-reproducible marker and no fabricated payload or download.
+  - FBS calculation evidence additionally freezes target facility id/name, `national_demand_scope=russia_total_orderCount`, `wb_stock_used=false`, physical/reserved/available operands, assigned inbound evidence, both requested and actual sales-window boundaries, included/excluded dates, demand basis and exact export bytes. Calculation creates no active factory order
+  - legacy factory-order latest history/export remains compatible, but `status=stale` and `current_source_readiness` prevent a saved result from being presented as currently ready when current WB warehouse detail is absent or aggregate-only; UI names it as the old WB scenario, shows the last calculation time and source reason
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows
