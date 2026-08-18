@@ -8607,14 +8607,28 @@ def _add_bucket(
     if stage not in STAGES or nm_id <= 0 or min(quantity, capital, covered) < ZERO:
         raise WarehouseFunctionalError("invalid warehouse bucket contribution")
     target = buckets[(stage, nm_id)]
-    target["quantity"] += quantity
-    target["capital"] += capital
-    target["covered"] += min(covered, quantity)
+    # The facility/pool publisher can carry authoritative capital at the
+    # 80-character storage boundary.  Adding even one contribution to the
+    # zero-valued warehouse bucket under Decimal's process-default precision
+    # would silently round that exact source before publication.
+    with localcontext() as context:
+        context.prec = 160
+        target["quantity"] = _decimal(target["quantity"]) + _decimal(quantity)
+        target["capital"] = _decimal(target["capital"]) + _decimal(capital)
+        target["covered"] = _decimal(target["covered"]) + min(
+            _decimal(covered), _decimal(quantity)
+        )
+        target["wb_quantity"] = _decimal(
+            target.get("wb_quantity", ZERO)
+        ) + _decimal(wb_quantity)
+        target["wb_to_client"] = _decimal(
+            target.get("wb_to_client", ZERO)
+        ) + _decimal(wb_to_client)
+        target["wb_from_client"] = _decimal(
+            target.get("wb_from_client", ZERO)
+        ) + _decimal(wb_from_client)
     target["quality"].append(quality)
     target["provenance"].append(dict(provenance))
-    target["wb_quantity"] = target.get("wb_quantity", ZERO) + wb_quantity
-    target["wb_to_client"] = target.get("wb_to_client", ZERO) + wb_to_client
-    target["wb_from_client"] = target.get("wb_from_client", ZERO) + wb_from_client
 
 
 def _bucket_line(key: tuple[str, int], value: Mapping[str, Any]) -> WarehouseLine:
@@ -10195,10 +10209,15 @@ def _optional_decimal(value: Any) -> Decimal | None:
 def _text(value: Decimal | None) -> str:
     if value is None:
         return ""
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return str(normalized.quantize(ONE))
-    return format(normalized, "f")
+    # Decimal.normalize()/quantize() observe the active context.  Serialization
+    # is part of the accounting boundary, so it must preserve the same exact
+    # tails as source folding regardless of the caller's process context.
+    with localcontext() as context:
+        context.prec = 160
+        normalized = value.normalize()
+        if normalized == normalized.to_integral():
+            return str(normalized.quantize(ONE))
+        return format(normalized, "f")
 
 
 def _discard_uncommitted_backup(backup: Mapping[str, Any] | None) -> None:

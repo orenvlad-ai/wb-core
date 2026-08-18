@@ -157,6 +157,9 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   use the same 160-digit Decimal boundary as the canonical publisher. A
   fractional-kopeck tail therefore cannot be rounded differently merely
   because the pool and aggregate have different base magnitudes.
+  The canonical publisher also preserves that boundary through its warehouse
+  stage bucket and final Decimal-text serialization; a later scheduled or
+  manual publication cannot reintroduce process-default 28-digit rounding.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import defaultdict
 import copy
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
@@ -39,12 +40,15 @@ from packages.application.wb_supplies import validate_functional_supply_sync  # 
 from packages.application.warehouse_functional import (  # noqa: E402
     FUNCTIONAL_CUTOVER_ID,
     STAGES,
+    STAGE_FF,
     STAGE_DISCREPANCY,
     STAGE_WB,
     WAREHOUSE_QUALITY_PRESENTATIONS,
     WarehouseFunctionalBlock,
     WarehouseFunctionalError,
     WarehouseLine,
+    _add_bucket,
+    _bucket_line,
     _build_versioned_historical_correction,
     _calculation_digest,
     _counted_cny_operation,
@@ -278,6 +282,33 @@ def _test_post_cutover_ff_pool_projection_source() -> None:
         and projection["by_nm"][103]["capital"]
         == "319434.32291654259178871196266",
         "publisher serialization preserves a production-shaped tail beyond 28 digits",
+    )
+    buckets = defaultdict(
+        lambda: {
+            "quantity": Decimal("0"),
+            "capital": Decimal("0"),
+            "covered": Decimal("0"),
+            "quality": [],
+            "provenance": [],
+        }
+    )
+    _add_bucket(
+        buckets,
+        stage=STAGE_FF,
+        nm_id=103,
+        quantity=Decimal("3250"),
+        capital=Decimal("319434.32291654259178871196266"),
+        covered=Decimal("3250"),
+        quality="facility_pool_exact_projection",
+        provenance={"source": "production-shaped-current-pool"},
+    )
+    published_line = _line_payload(
+        _bucket_line((STAGE_FF, 103), buckets[(STAGE_FF, 103)])
+    )
+    _assert(
+        published_line["capital_rub"]
+        == "319434.32291654259178871196266",
+        "warehouse bucket fold and line serialization preserve the exact pool tail",
     )
     reordered = dict(capture)
     reordered["ff_pool_balances"] = list(reversed(capture["ff_pool_balances"]))

@@ -761,3 +761,8 @@ same 160-digit Decimal boundary as aggregate publication and parity. The
 process-default 28-digit context is never allowed to round an authoritative
 fractional-kopeck tail differently for a pool base and its larger aggregate;
 the event line, pool delta and aggregate delta remain one exact value.
+
+Canonical warehouse publication keeps that same boundary while adding the
+exact pool aggregate to its stage bucket and while serializing the final
+warehouse line. A later hourly/manual publication therefore cannot replace a
+parity-passing pool sum with a 28-significant-digit aggregate.
