@@ -48,6 +48,8 @@ jobs:
           python3 apps/wb_incident_policy_legacy_readback_smoke.py
           python3 apps/sales_funnel_history_detail_csv_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
+          python3 apps/sheet_vitrina_v1_weighted_seller_price_smoke.py
+          python3 apps/sheet_vitrina_v1_web_vitrina_schema_evolution_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py
@@ -104,6 +106,7 @@ jobs:
           python3 apps/ff_pool_surfaces_browser_smoke.py
           python3 apps/ff_wb_supply_origins_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
           python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py
           python3 apps/wb_warehouse_exclusion_browser_smoke.py

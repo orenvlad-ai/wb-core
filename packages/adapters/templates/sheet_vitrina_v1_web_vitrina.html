@@ -3721,7 +3721,7 @@
     }
 
     .sku-separator-row td {
-      height: 22px;
+      height: calc(var(--table-font-size) * 2.3);
       padding: 0;
       background: rgba(25, 29, 36, 0.96);
       border-top: 1px solid rgba(255, 255, 255, 0.045);
@@ -3739,14 +3739,14 @@
       box-sizing: border-box;
       width: max-content;
       max-width: min(220px, calc(100vw - 48px));
-      min-height: 16px;
+      min-height: calc(var(--table-font-size) * 2.3);
       margin-left: 0;
       border: 0;
       border-radius: 0;
       background: transparent;
       color: var(--muted-strong);
       padding: 0;
-      font-size: var(--table-font-size);
+      font-size: calc(var(--table-font-size) * 2);
       font-weight: 800;
       line-height: 1.15;
       overflow: hidden;
@@ -7118,12 +7118,18 @@
 
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
-    const METRIC_PRESENTATION_VERSION = 4;
-    const METRIC_PRESENTATION_LEGACY_VERSIONS = new Set([2, 3]);
+    const METRIC_PRESENTATION_VERSION = 5;
+    const METRIC_PRESENTATION_LEGACY_VERSIONS = new Set([2, 3, 4]);
     const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
     const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
     const UNIFIED_PRESENTATION_MIGRATION = "unified_presentation_v1";
     const INVENTORY_PLANNING_METRIC_KEYS_MIGRATION = "inventory_planning_metric_keys_v1";
+    const SELLER_PRICE_WEIGHTED_MIGRATION = "seller_price_weighted_v1";
+    const SELLER_PRICE_SKU_METRIC_KEY = "price_seller_discounted";
+    const LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY = "avg_price_seller_discounted";
+    const WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY = "weighted_price_seller_discounted";
+    const LEGACY_SELLER_PRICE_LOGICAL_ID = "pair::avg_price_seller_discounted::price_seller_discounted";
+    const WEIGHTED_SELLER_PRICE_LOGICAL_ID = "pair::weighted_price_seller_discounted::price_seller_discounted";
     const INVENTORY_PLANNING_STATIC_SKU_METRIC_KEYS = new Set([
       "inventory_wb_total_qty_v1",
       "inventory_wb_effective_qty_v1",
@@ -7479,6 +7485,7 @@
           incidentEffectiveShownV1: false,
           skuPresetsSeededV1: false,
           unifiedPresentationV1: false,
+          sellerPriceWeightedV1: false,
           inventoryPlanningMetricKeysV1: []
         },
         presetEditor: {
@@ -11188,7 +11195,10 @@
 
     function deterministicMetricAnalogCandidates(metricKey) {
       const source = String(metricKey || "");
-      const queue = [source];
+      const explicitSkuKey = source === WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY
+        ? SELLER_PRICE_SKU_METRIC_KEY
+        : "";
+      const queue = explicitSkuKey ? [source, explicitSkuKey] : [source];
       const result = [];
       const seen = new Set();
       while (queue.length) {
@@ -11508,7 +11518,7 @@
         ? candidate.scopes
         : {};
       if (
-        candidateVersion < METRIC_PRESENTATION_VERSION
+        candidateVersion <= 3
         && !Object.keys(candidateScopes).length
       ) {
         return null;
@@ -11634,11 +11644,19 @@
             )
           ),
           unifiedPresentationV1: !!(
-            candidateVersion >= METRIC_PRESENTATION_VERSION
+            candidateVersion >= 4
             && candidate.migrations
             && (
               candidate.migrations[UNIFIED_PRESENTATION_MIGRATION]
               || candidate.migrations.unifiedPresentationV1
+            )
+          ),
+          sellerPriceWeightedV1: !!(
+            candidateVersion >= METRIC_PRESENTATION_VERSION
+            && candidate.migrations
+            && (
+              candidate.migrations[SELLER_PRICE_WEIGHTED_MIGRATION]
+              || candidate.migrations.sellerPriceWeightedV1
             )
           ),
           inventoryPlanningMetricKeysV1: uniqueMetricKeys(
@@ -11650,6 +11668,128 @@
           )
         }
       };
+    }
+
+    function sellerPriceSkuSelectionMetricKey(metricKey) {
+      const normalized = String(metricKey || "");
+      return (
+        normalized === LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY
+        || normalized === WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY
+      ) ? SELLER_PRICE_SKU_METRIC_KEY : normalized;
+    }
+
+    function sellerPricePresentationLogicalId(logicalMetricId) {
+      const normalized = String(logicalMetricId || "");
+      return new Set([
+        LEGACY_SELLER_PRICE_LOGICAL_ID,
+        "total::" + LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY,
+        "sku::" + SELLER_PRICE_SKU_METRIC_KEY
+      ]).has(normalized) ? WEIGHTED_SELLER_PRICE_LOGICAL_ID : normalized;
+    }
+
+    function migrateSellerPricePresentationPayload(candidate) {
+      if (!candidate || (candidate.migrations || {}).sellerPriceWeightedV1) {
+        return candidate;
+      }
+      const migrated = Object.assign({}, candidate);
+      const scopes = {};
+      Object.keys(candidate.scopes || {}).forEach(function(scopeId) {
+        const scope = (candidate.scopes || {})[scopeId] || {};
+        const isTotal = String(scopeId) === "total";
+        const mapMetricKey = function(metricKey) {
+          const normalized = String(metricKey || "");
+          if (normalized !== LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY) {
+            return normalized;
+          }
+          return isTotal
+            ? WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY
+            : SELLER_PRICE_SKU_METRIC_KEY;
+        };
+        const order = uniqueMetricKeys((scope.order || []).map(mapMetricKey), 500);
+        const display = {};
+        Object.keys(scope.display || {}).forEach(function(metricKey) {
+          const mappedMetricKey = mapMetricKey(metricKey);
+          if (!Object.prototype.hasOwnProperty.call(display, mappedMetricKey)) {
+            display[mappedMetricKey] = normalizeMetricDisplayStatus(scope.display[metricKey]);
+          }
+        });
+        scopes[scopeId] = {order: order, display: display, manual: !!scope.manual};
+      });
+      migrated.scopes = scopes;
+
+      const presentation = candidate.presentation || {};
+      const oldDisplay = presentation.display || {};
+      const presentationDisplay = {};
+      Object.keys(oldDisplay).forEach(function(logicalMetricId) {
+        const mappedLogicalMetricId = sellerPricePresentationLogicalId(logicalMetricId);
+        if (!Object.prototype.hasOwnProperty.call(presentationDisplay, mappedLogicalMetricId)) {
+          presentationDisplay[mappedLogicalMetricId] = normalizeMetricDisplayStatus(
+            oldDisplay[logicalMetricId]
+          );
+        }
+      });
+      [
+        WEIGHTED_SELLER_PRICE_LOGICAL_ID,
+        LEGACY_SELLER_PRICE_LOGICAL_ID,
+        "total::" + LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY,
+        "sku::" + SELLER_PRICE_SKU_METRIC_KEY
+      ].some(function(logicalMetricId) {
+        if (Object.prototype.hasOwnProperty.call(oldDisplay, logicalMetricId)) {
+          presentationDisplay[WEIGHTED_SELLER_PRICE_LOGICAL_ID] = normalizeMetricDisplayStatus(
+            oldDisplay[logicalMetricId]
+          );
+          return true;
+        }
+        return false;
+      });
+      migrated.presentation = {
+        order: uniqueLogicalMetricIds(
+          (presentation.order || []).map(sellerPricePresentationLogicalId),
+          500
+        ),
+        display: presentationDisplay,
+        manual: !!presentation.manual
+      };
+      migrated.expanded_anchors = uniqueLogicalMetricIds(
+        (candidate.expanded_anchors || []).map(function(token) {
+          const normalized = String(token || "");
+          if (normalized === "total::" + LEGACY_SELLER_PRICE_TOTAL_METRIC_KEY) {
+            return WEIGHTED_SELLER_PRICE_LOGICAL_ID;
+          }
+          if (normalized === "sku::" + SELLER_PRICE_SKU_METRIC_KEY) {
+            return WEIGHTED_SELLER_PRICE_LOGICAL_ID;
+          }
+          return sellerPricePresentationLogicalId(normalized);
+        }),
+        500
+      );
+      migrated.sku_presets = (candidate.sku_presets || []).map(function(preset) {
+        return Object.assign({}, preset, {
+          metricKeys: uniqueMetricKeys(
+            (preset.metricKeys || []).map(sellerPriceSkuSelectionMetricKey),
+            500
+          )
+        });
+      });
+      migrated.sku_highlight_metric_keys = uniqueMetricKeys(
+        (candidate.sku_highlight_metric_keys || []).map(sellerPriceSkuSelectionMetricKey),
+        SKU_METRIC_HIGHLIGHT_PALETTE.length
+      );
+      migrated.sku_metric_selection = Object.assign({}, candidate.sku_metric_selection || {}, {
+        metricKeys: uniqueMetricKeys(
+          ((candidate.sku_metric_selection || {}).metricKeys || []).map(
+            sellerPriceSkuSelectionMetricKey
+          ),
+          500
+        )
+      });
+      migrated.migrations = Object.assign({}, candidate.migrations || {}, {
+        sellerPriceWeightedV1: true
+      });
+      if (Number(candidate.version || 0) >= 4) {
+        migrated.version = METRIC_PRESENTATION_VERSION;
+      }
+      return migrated;
     }
 
     function uniqueMetricKeys(candidate, limit) {
@@ -11950,9 +12090,16 @@
       (model.logicalMetrics || []).forEach(function(record) {
         const sourceKey = record.totalKey || record.skuKey;
         const sourceDisplay = record.totalKey ? totalDisplay : skuDisplay;
-        const savedStatus = Object.prototype.hasOwnProperty.call(sourceDisplay, sourceKey)
+        let savedStatus = Object.prototype.hasOwnProperty.call(sourceDisplay, sourceKey)
           ? sourceDisplay[sourceKey]
           : defaultMetricDisplayStatus(sourceKey);
+        if (record.logicalId === WEIGHTED_SELLER_PRICE_LOGICAL_ID) {
+          if (Object.prototype.hasOwnProperty.call(totalDisplay, WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY)) {
+            savedStatus = totalDisplay[WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY];
+          } else if (Object.prototype.hasOwnProperty.call(skuDisplay, SELLER_PRICE_SKU_METRIC_KEY)) {
+            savedStatus = skuDisplay[SELLER_PRICE_SKU_METRIC_KEY];
+          }
+        }
         display[record.logicalId] = (
           requiresIncidentEffectiveMigration && isIncidentEffectiveStockMetricKey(sourceKey)
         ) ? "shown" : normalizeMetricDisplayStatus(savedStatus);
@@ -11987,7 +12134,17 @@
       const model = buildMetricPresentationModel(payload);
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persistedCandidate = resolveMetricPresentationPersistedCandidate(storageKey, forceDefault);
-      const persisted = persistedCandidate.payload;
+      const persistedBeforeSellerPriceMigration = persistedCandidate.payload;
+      const requiresSellerPriceWeightedMigration = !!(
+        persistedBeforeSellerPriceMigration
+        && (
+          !persistedBeforeSellerPriceMigration.migrations
+          || !persistedBeforeSellerPriceMigration.migrations.sellerPriceWeightedV1
+        )
+      );
+      const persisted = migrateSellerPricePresentationPayload(
+        persistedBeforeSellerPriceMigration
+      );
       const preservedSkuPresets = options && Array.isArray(options.preservedSkuPresets)
         ? options.preservedSkuPresets
         : null;
@@ -12104,6 +12261,7 @@
           || (persisted && persisted.migrations && persisted.migrations.skuPresetsSeededV1)
         ),
         unifiedPresentationV1: true,
+        sellerPriceWeightedV1: true,
         inventoryPlanningMetricKeysV1: uniqueMetricKeys(
           persistedInventoryPlanningKeys.concat(currentInventoryPlanningKeys),
           500
@@ -12118,6 +12276,7 @@
         || requiresIncidentEffectiveMigration
         || requiresSkuPresetSeedMigration
         || requiresUnifiedMigration
+        || requiresSellerPriceWeightedMigration
         || newInventoryPlanningKeys.length
       ) {
         persistMetricPresentation({
@@ -12163,6 +12322,7 @@
           incident_effective_shown_v1: true,
           sku_presets_seeded_v1: true,
           unified_presentation_v1: true,
+          seller_price_weighted_v1: true,
           inventory_planning_metric_keys_v1: uniqueMetricKeys(
             (state.metricPresentation.migrations || {}).inventoryPlanningMetricKeysV1,
             500

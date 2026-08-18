@@ -46,6 +46,9 @@ from packages.application.sheet_vitrina_v1_live_plan import (
 from packages.application.sheet_vitrina_v1_sku_actions import (
     extend_metrics_with_sku_action_metrics,
 )
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (
+    extend_metrics_with_weighted_seller_price,
+)
 from packages.application.wb_incident_policy import get_policy_state, policy_badge
 from packages.application.warehouse_business_projection import (
     apply_warehouse_business_projection_overlay,
@@ -246,12 +249,16 @@ class SheetVitrinaV1WebVitrinaBlock:
             for item in current_state.config_v2
         }
         effective_metrics = extend_metrics_with_buyout_percent(
-            extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_incident_stock_metrics(
-                    extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_proxy_v4(
-                            extend_metrics_with_our_wb_cost_metrics(
-                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            extend_metrics_with_weighted_seller_price(
+                extend_metrics_with_sku_action_metrics(
+                    extend_metrics_with_incident_stock_metrics(
+                        extend_metrics_with_own_product_capital_metrics(
+                            extend_metrics_with_proxy_v4(
+                                extend_metrics_with_our_wb_cost_metrics(
+                                    extend_metrics_with_onec_stock_metrics(
+                                        current_state.metrics_v2
+                                    )
+                                )
                             )
                         )
                     )

@@ -41,7 +41,7 @@ def main() -> None:
         raise AssertionError(f"row-cell renderer mode mismatch, got {columns['date:2026-04-20']}")
 
     rows = {row.row_id: row for row in adapter.rows}
-    price_row = rows["SKU:101|avg_price_seller_discounted"]
+    price_row = rows["SKU:101|price_seller_discounted"]
     percent_row = rows["SKU:101|avg_addToCartConversion"]
     if price_row.values["date:2026-04-20"].renderer_id != "renderer:money:money_rub":
         raise AssertionError(f"money renderer mismatch, got {price_row.values['date:2026-04-20']}")
@@ -66,7 +66,7 @@ def main() -> None:
         raise AssertionError(f"renderer registry mismatch, got {adapter.renderers}")
 
     grouping = next(item for item in adapter.groupings if item.group_id == "group:Чехлы")
-    if grouping.title != "Чехлы" or grouping.row_ids != ["SKU:101|avg_price_seller_discounted", "SKU:101|avg_addToCartConversion"]:
+    if grouping.title != "Чехлы" or grouping.row_ids != ["SKU:101|price_seller_discounted", "SKU:101|avg_addToCartConversion"]:
         raise AssertionError(f"grouping seam mismatch, got {grouping}")
     if grouping.section_id != "section:mixed":
         raise AssertionError(f"grouping section scope mismatch, got {grouping}")
@@ -142,7 +142,7 @@ def _build_view_model_payload() -> dict[str, object]:
                 "filter_tokens": {"scope_kind": ["TOTAL"], "group": [], "nm_id": [], "section": ["Воронка"], "metric_key": ["total_view_count"], "row_kind": ["total"], "group_id": ["group:overview"], "section_id": ["section:Воронка"]},
             },
             {
-                "row_id": "SKU:101|avg_price_seller_discounted",
+                "row_id": "SKU:101|price_seller_discounted",
                 "row_kind": "sku",
                 "section_id": "section:Цены",
                 "group_id": "group:Чехлы",
@@ -153,14 +153,14 @@ def _build_view_model_payload() -> dict[str, object]:
                     {"column_id": "scope_label", "cell_kind": "text", "value_type": "string", "value": "SKU Чехол 101", "display_text": "SKU Чехол 101", "formatter_id": "text_default"},
                     {"column_id": "group", "cell_kind": "text", "value_type": "string_or_null", "value": "Чехлы", "display_text": "Чехлы", "formatter_id": "text_default"},
                     {"column_id": "nm_id", "cell_kind": "number", "value_type": "integer_or_null", "value": 101, "display_text": "101", "formatter_id": "number_default"},
-                    {"column_id": "metric_key", "cell_kind": "text", "value_type": "string", "value": "avg_price_seller_discounted", "display_text": "avg_price_seller_discounted", "formatter_id": "text_default"},
+                    {"column_id": "metric_key", "cell_kind": "text", "value_type": "string", "value": "price_seller_discounted", "display_text": "price_seller_discounted", "formatter_id": "text_default"},
                     {"column_id": "metric_label", "cell_kind": "text", "value_type": "string", "value": "Цена продавца средняя", "display_text": "Цена продавца средняя", "formatter_id": "text_default"},
                     {"column_id": "section", "cell_kind": "badge", "value_type": "string", "value": "Цены", "display_text": "Цены", "formatter_id": "badge_default"},
                     {"column_id": "date:2026-04-19", "cell_kind": "money", "value_type": "number_or_blank", "value": 1200, "display_text": "1200", "formatter_id": "money_rub"},
                     {"column_id": "date:2026-04-20", "cell_kind": "money", "value_type": "number_or_blank", "value": 1250, "display_text": "1250", "formatter_id": "money_rub"},
                 ],
                 "search_text": "SKU Чехол 101 Цена продавца средняя Чехлы Цены 101 1200 1250",
-                "filter_tokens": {"scope_kind": ["SKU"], "group": ["Чехлы"], "nm_id": ["101"], "section": ["Цены"], "metric_key": ["avg_price_seller_discounted"], "row_kind": ["sku"], "group_id": ["group:Чехлы"], "section_id": ["section:Цены"]},
+                "filter_tokens": {"scope_kind": ["SKU"], "group": ["Чехлы"], "nm_id": ["101"], "section": ["Цены"], "metric_key": ["price_seller_discounted"], "row_kind": ["sku"], "group_id": ["group:Чехлы"], "section_id": ["section:Цены"]},
             },
             {
                 "row_id": "SKU:101|avg_addToCartConversion",

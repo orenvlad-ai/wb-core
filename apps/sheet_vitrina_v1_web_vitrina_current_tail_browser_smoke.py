@@ -235,8 +235,8 @@ def _build_one_day_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100 + int(as_of_date[-2:])],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000 + int(as_of_date[-2:])],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 900 + int(as_of_date[-2:])],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1000 + int(as_of_date[-2:])],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", 900 + int(as_of_date[-2:])],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|price_seller_discounted", 1000 + int(as_of_date[-2:])],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 10 + int(as_of_date[-2:]) / 10],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 11 + int(as_of_date[-2:]) / 10],
                 ],
@@ -297,8 +297,8 @@ def _build_default_daily_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 140, 150],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1200, 1300],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 1110, 1120],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1210, 1220],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", 1110, 1120],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|price_seller_discounted", 1210, 1220],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 13.0, 13.2],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 12.0, 12.2],
                 ],
