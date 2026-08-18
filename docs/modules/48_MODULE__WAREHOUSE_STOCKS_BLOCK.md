@@ -161,6 +161,21 @@ Active supplier source view contains only non-excluded financial documents and e
 
 Фактическая FF acceptance создаёт canonical append-only FF ledger receipt. Functional projection не создаёт второй ledger: cutover opening freezes current ledger quantity/cost, а post-cutover receipt/debit replay начинается от opening version. Supplier receipt получает exact source-flow capital; одинаковые SKU смешиваются moving WAC. Ordinary proportional debit сохраняет WAC.
 
+Facility/pool business documents use kopecks as their canonical posting
+boundary even when canonical supplier allocation contains fractional kopecks.
+Guided acceptance rounds only the exact shipment header and allocates the
+canonical kopecks by largest fractional remainder then `nmId`; the immutable
+replay row carries its per-SKU targets and explicit signed normalization
+residuals. The append-only FF receipt lines freeze that same canonical capital
+as authoritative `cost_snapshot` evidence; functional replay consumes the
+capital first and derives its ratio, so repeating Decimal unit division cannot
+lose a sub-kopeck residue. Invoice/payment/expense document controls remain
+independently conserved while supplier receipt, aggregate FF and facility/pool
+detail publish the same total. The recovery receipt freezes the exact negative
+snapshot, and its immutable recovery row restores the pre-acceptance supplier
+stage; it never subtracts a source document component or manufactures a
+zero-cost flow.
+
 WB status `Отгрузка разрешена` creates one idempotent canonical FF debit of the full exact packed composition when identity is confirmed and physical FF quantity is sufficient. The separate reservation ledger is used only for physical shortage or unresolved identity/composition; it never represents missing transit or another cost component. A later supplier receipt fulfils a physically justified reservation atomically. Known FF capital follows the quantity; absent downstream transit/services/storage/paid-acceptance amounts make the cost layer preliminary or unavailable with an explicit blocker and never synthetic zero. Late cost replay enriches that supply layer without another debit. `Допринято` does not create a second debit.
 
 Successful positive Seller Portal transit enrichment is joined into this same downstream supply layer. It does not overwrite official WB facts. The full corrected sent composition remains the denominator, and one post-save callback idempotently rematerializes only dependent cost layers. Confirmed zero is distinct from not-requested/updating/not-found/source-error/session-expired; error or missing cost stays a truthful cost-freshness blocker and repeat sync/recovery cannot debit twice.

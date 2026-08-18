@@ -219,13 +219,20 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
                 "state_label_ru": "Готово к проведению",
                 "confirm_allowed": True,
                 "guided_acceptance_activation": {"reason_ru": "Локальный mutation fixture."},
-                "preview": {"available": False},
-                "summary": {
-                    "expected_quantity": 1,
-                    "accepted_quantity": 1,
-                    "quantity_fbs": 1,
-                    "quantity_fbo": 0,
-                    "discrepancy_quantity": 0,
+                "preview": {
+                    "available": False,
+                    "summary": {
+                        "expected_quantity": 1,
+                        "accepted_quantity": 1,
+                        "quantity_fbs": 1,
+                        "quantity_fbo": 0,
+                        "discrepancy_quantity": 0,
+                        "capital_normalization": {
+                            "exact_total_rub": "20.0049",
+                            "canonical_total_rub": "20.00",
+                            "total_residual_rub": "-0.0049",
+                        },
+                    },
                 },
             }
         else:
@@ -352,6 +359,9 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
     page.locator("#guidedAcceptanceModal").wait_for(state="visible")
     page.locator("#guidedAcceptanceFile").set_input_files(str(guided_upload_path))
     page.get_by_role("button", name="Необратимо провести приёмку").wait_for(state="visible")
+    guided_status = page.locator("#guidedAcceptanceStatus").inner_text()
+    assert "Капитал к проведению: 20.00 ₽" in guided_status
+    assert "остаток нормализации: -0.0049 ₽" in guided_status
     assert len(guided_mutation_requests) == 1
     upload_request = guided_mutation_requests[0]
     assert str(upload_request["url"]).endswith(f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview")

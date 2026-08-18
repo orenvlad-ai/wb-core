@@ -870,6 +870,7 @@ class FfPoolSurface:
                 "quantity_fbs": sum(int(item.get("quantity_fbs") or 0) for item in allocations),
                 "quantity_fbo": sum(int(item.get("quantity_fbo") or 0) for item in allocations),
                 "discrepancy_quantity": sum(int(item.get("discrepancy_quantity") or 0) for item in allocations),
+                "capital_normalization": dict(preview.get("capital_normalization") or {}),
             }
         guided_activation = self._guided_acceptance_activation()
         payload = {

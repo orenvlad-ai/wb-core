@@ -11,6 +11,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping
 
 from packages.adapters.seller_portal_transit_costs import (
@@ -118,6 +119,7 @@ class OurWbCostBlock:
         shipment_id: str,
         *,
         accepted_quantities_by_nm: Mapping[int, int] | None = None,
+        accepted_capital_cents_by_nm: Mapping[int, int] | None = None,
     ) -> dict[str, Any]:
         shipment_id = str(shipment_id or "").strip()
         if not shipment_id:
@@ -155,6 +157,11 @@ class OurWbCostBlock:
             financial_documents=financial_documents,
             expense_lines=expense_lines,
         )
+        if accepted_capital_cents_by_nm is not None:
+            calculation = _apply_accepted_capital_boundary(
+                calculation,
+                accepted_capital_cents_by_nm=accepted_capital_cents_by_nm,
+            )
         hash_payload = (
             {
                 "schema": "supplier_ff_cost_layer_v1",
@@ -163,13 +170,17 @@ class OurWbCostBlock:
                 "financial_documents": [_selected_financial_document_inputs(item) for item in financial_documents],
                 "expense_lines": [_selected_expense_line_inputs(item) for item in expense_lines],
             }
-            if accepted_quantities_by_nm is None else {
-                "schema": "supplier_ff_cost_layer_v2",
+            if accepted_quantities_by_nm is None and accepted_capital_cents_by_nm is None else {
+                "schema": "supplier_ff_cost_layer_v3",
                 "header": _selected_supplier_header_inputs(header),
                 "source_lines": [_selected_supplier_line_inputs(line) for line in source_lines],
                 "accepted_quantities_by_nm": {
                     str(key): int(value)
                     for key, value in sorted((accepted_quantities_by_nm or {}).items())
+                },
+                "accepted_capital_cents_by_nm": {
+                    str(key): int(value)
+                    for key, value in sorted((accepted_capital_cents_by_nm or {}).items())
                 },
                 "financial_documents": [_selected_financial_document_inputs(item) for item in financial_documents],
                 "expense_lines": [_selected_expense_line_inputs(item) for item in expense_lines],
@@ -183,11 +194,13 @@ class OurWbCostBlock:
         shipment_id: str,
         *,
         accepted_quantities_by_nm: Mapping[int, int] | None = None,
+        accepted_capital_cents_by_nm: Mapping[int, int] | None = None,
     ) -> dict[str, Any] | None:
         shipment_id = str(shipment_id or "").strip()
         calculation = self.preview_supplier_ff_cost_layer(
             shipment_id,
             accepted_quantities_by_nm=accepted_quantities_by_nm,
+            accepted_capital_cents_by_nm=accepted_capital_cents_by_nm,
         )
         inputs_hash = str(calculation["inputs_hash"])
         header = dict((self.runtime.load_supplier_shipment(shipment_id) or {}).get("header") or {})
@@ -1863,6 +1876,65 @@ def _selected_wb_supply_inputs(supply: Mapping[str, Any]) -> dict[str, Any]:
         "raw_goods_json",
     )
     return {key: supply.get(key) for key in keys}
+
+
+def _apply_accepted_capital_boundary(
+    calculation: Mapping[str, Any],
+    *,
+    accepted_capital_cents_by_nm: Mapping[int, int],
+) -> dict[str, Any]:
+    """Make the supplier compatibility layer match the posted minor-unit plan."""
+
+    result = dict(calculation)
+    lines = [dict(item) for item in calculation.get("lines") or []]
+    expected = {int(key): int(value) for key, value in accepted_capital_cents_by_nm.items()}
+    if any(nm_id <= 0 or cents <= 0 for nm_id, cents in expected.items()):
+        raise ValueError("accepted capital boundary requires positive nm_id and kopecks")
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for line in lines:
+        nm_id = _optional_int(line.get("nm_id"))
+        qty = _positive_number(line.get("qty"))
+        if nm_id is not None and qty > 0:
+            grouped.setdefault(nm_id, []).append(line)
+    if set(grouped) != set(expected):
+        raise ValueError("accepted capital boundary does not match accepted supplier SKUs")
+    for nm_id, group in sorted(grouped.items()):
+        total_cents = expected[nm_id]
+        weights = [Decimal(str(_positive_number(line.get("qty")))) for line in group]
+        denominator = sum(weights, Decimal("0"))
+        bases = [int(Decimal(total_cents) * weight / denominator) for weight in weights]
+        remainder = total_cents - sum(bases)
+        order = sorted(
+            range(len(group)),
+            key=lambda index: (
+                -(
+                    (Decimal(total_cents) * weights[index] / denominator)
+                    - Decimal(bases[index])
+                ),
+                str(group[index].get("supplier_line_id") or ""),
+            ),
+        )
+        for index in order[:remainder]:
+            bases[index] += 1
+        for line, cents in zip(group, bases):
+            qty = Decimal(str(_positive_number(line.get("qty"))))
+            total = Decimal(cents) / Decimal(100)
+            line["line_total_cost_rub"] = float(total)
+            line["sku_ff_unit_cost_rub"] = float(total / qty)
+            line["capital_boundary"] = "guided_acceptance_minor_unit"
+    total_cents = sum(expected.values())
+    total_qty = sum(Decimal(str(_positive_number(line.get("qty")))) for line in lines)
+    result["lines"] = lines
+    result["weighted_avg_ff_unit_cost_rub"] = (
+        float((Decimal(total_cents) / Decimal(100)) / total_qty) if total_qty > 0 else None
+    )
+    source_status = dict(result.get("source_status") or {})
+    source_status["capital_boundary"] = "guided_acceptance_minor_unit"
+    result["source_status"] = source_status
+    component_status = dict(result.get("component_status") or {})
+    component_status["capital_normalization"] = "confirmed"
+    result["component_status"] = component_status
+    return result
 
 
 def _stable_hash(payload: Mapping[str, Any]) -> str:

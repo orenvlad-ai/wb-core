@@ -7773,6 +7773,16 @@ def _source_rows(
             "SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations "
             "ORDER BY supplier_order_id,payment_document_id,confirmation_id"
         )
+    if "sheet_vitrina_v1_ff_guided_acceptance_replays" in tables:
+        queries["guided_acceptance_replays"] = (
+            "SELECT * FROM sheet_vitrina_v1_ff_guided_acceptance_replays "
+            "ORDER BY replayed_at,request_id"
+        )
+    if "sheet_vitrina_v1_ff_guided_acceptance_recoveries" in tables:
+        queries["guided_acceptance_recoveries"] = (
+            "SELECT * FROM sheet_vitrina_v1_ff_guided_acceptance_recoveries "
+            "ORDER BY recovered_at,recovery_request_id"
+        )
     result = {
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
@@ -7782,6 +7792,8 @@ def _source_rows(
         key=_ff_operation_replay_sort_key,
     )
     result.setdefault("cny_documents", [])
+    result.setdefault("guided_acceptance_replays", [])
+    result.setdefault("guided_acceptance_recoveries", [])
     ready_snapshots, frozen_projection = _historical_recovery_source_rows(
         conn,
         cutover_at=(str(cutover_row["cutover_at"]) if cutover_row is not None else ""),
@@ -9803,15 +9815,22 @@ def _ff_ledger_line_cost_snapshot(
     unit_cost = _optional_decimal(snapshot.get("unit_cost_rub"))
     capital_delta = _optional_decimal(snapshot.get("capital_delta_rub"))
     quantity_delta = _decimal(row.get("quantity_delta"))
-    if unit_cost is None or unit_cost <= ZERO or capital_delta is None:
+    if (
+        quantity_delta == ZERO
+        or unit_cost is None
+        or unit_cost <= ZERO
+        or capital_delta is None
+    ):
         raise WarehouseFunctionalError("invalid frozen FF ledger cost snapshot")
-    if capital_delta != quantity_delta * unit_cost:
+    if abs(capital_delta - quantity_delta * unit_cost) > Decimal("0.000000000000000001"):
         raise WarehouseFunctionalError("frozen FF ledger cost snapshot does not conserve capital")
     quality = str(snapshot.get("quality") or "").strip()
     if not quality:
         raise WarehouseFunctionalError("frozen FF ledger cost snapshot quality is missing")
     return {
-        "unit_cost_rub": unit_cost,
+        # Capital is the authoritative immutable money amount. Re-derive the
+        # ratio so repeating Decimal division cannot leave a sub-audit residue.
+        "unit_cost_rub": abs(capital_delta / quantity_delta),
         "capital_delta_rub": capital_delta,
         "quality": quality,
         "provenance": dict(snapshot.get("provenance") or {}),

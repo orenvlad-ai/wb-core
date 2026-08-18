@@ -51,6 +51,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _current_snapshot_effective_date,
     _daily_wb_cost_row,
     _ff_operation_replay_sort_key,
+    _ff_ledger_line_cost_snapshot,
     _fingerprint,
     _functional_local_source_view,
     _guarded_local_sources,
@@ -119,6 +120,7 @@ DRY_RUN_AT = "2026-07-18T11:55:00Z"
 
 def main() -> None:
     _test_decimal_and_allocations()
+    _test_guided_acceptance_money_boundary_replay()
     _test_invalid_supplier_line_fails_closed()
     _test_blocked_cny_operation_cannot_activate_supplier_flow()
     _test_zero_rub_supplier_payment_fails_closed()
@@ -155,6 +157,51 @@ def main() -> None:
     _test_incident_option_handler_is_local_read_only()
     _test_guarded_publication()
     print("warehouse functional smoke: ok")
+
+
+def _test_guided_acceptance_money_boundary_replay() -> None:
+    positive = _ff_ledger_line_cost_snapshot(
+        {
+            "quantity_delta": "6000",
+            "raw_json": json.dumps(
+                {
+                    "cost_snapshot": {
+                        "unit_cost_rub": "102.4004983333333333333333333",
+                        "capital_delta_rub": "614402.99",
+                        "quality": "guided_acceptance_minor_unit",
+                        "provenance": {"request_id": "guided-request-1"},
+                    }
+                }
+            ),
+        }
+    )
+    _assert(
+        positive is not None
+        and positive["capital_delta_rub"] == Decimal("614402.99")
+        and abs(positive["unit_cost_rub"] * Decimal("6000") - Decimal("614402.99"))
+        <= Decimal("0.000000000000000001"),
+        "guided receipt replay keeps the authoritative kopeck capital",
+    )
+    negative = _ff_ledger_line_cost_snapshot(
+        {
+            "quantity_delta": "-6000",
+            "raw_json": json.dumps(
+                {
+                    "cost_snapshot": {
+                        "unit_cost_rub": "102.4004983333333333333333333",
+                        "capital_delta_rub": "-614402.99",
+                        "quality": "guided_acceptance_recovery",
+                        "provenance": {"target_request_id": "guided-request-1"},
+                    }
+                }
+            ),
+        }
+    )
+    _assert(
+        negative is not None
+        and negative["capital_delta_rub"] == Decimal("-614402.99"),
+        "append-only guided recovery replays the exact inverse capital",
+    )
 
 
 def _test_decimal_and_allocations() -> None:

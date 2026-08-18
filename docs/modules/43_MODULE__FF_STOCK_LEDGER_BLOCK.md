@@ -579,13 +579,28 @@ The guided document replaces routine acceptance-date editing. Its workbook
 records immutable expected quantity, actual accepted quantity, exact
 nmId/barcode/SKU, FBS/FBO allocation, proportional pool-scoped expenses and
 discrepancy evidence. A related immutable discrepancy child is posted with the
-root. Template generation uses a non-persisting exact supplier-cost preview;
-future finalization pins the source revision and materializes the supplier FF
-cost layer with actual accepted quantities rather than shipped quantities. The
-service is the only future owner of the factual date, existing
+root. Template generation uses a non-persisting exact supplier-cost preview.
+Fractional-kopeck supplier capital crosses the document boundary by rounding
+the aggregate header once (`ROUND_HALF_UP`) and distributing its kopecks by
+largest fractional remainder then `nmId`; exact/canonical totals, per-SKU
+residuals and residual owners are immutable evidence. Per-row independent
+rounding, synthetic zero and double capital are forbidden. Finalization pins
+the source revision and materializes the supplier FF cost layer with both
+actual accepted quantities and the same normalized per-SKU capital used by the
+pool movements. The service is the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior
 receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
+
+The exact guided replay and its recovery are append-only. A storno is admitted
+only when supplier factual state, every affected pool/aggregate row and the
+current cost layer still equal the immutable original after-state. It appends a
+negative legacy receipt, reverses the pool document, restores factual status/date
+and the prior cost-layer state, returns aggregate FF to the frozen before-state
+and queues affected-SKU replay. Any downstream reservation/debit, source/cost
+revision or affected balance drift blocks compensation; delete/ad-hoc SQL/blind
+restore is not a recovery path. A recovered shipment can be accepted again only
+through a fresh source revision and a new immutable request.
 
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
