@@ -85,7 +85,11 @@ or canonical Decimal TEXT; no new accounting field uses `REAL`.
   `aggregate_sku_missing`. Confirm materializes its first positive aggregate
   row with the same quantity/capital and full cost coverage. Existing rows add
   the accepted quantity to `cost_covered_quantity` together with physical
-  quantity and capital.
+  quantity and capital. A guided preview is ready only when the complete active
+  aggregate `ff` revision exactly equals all current facility/pool detail, not
+  merely the request's affected SKUs. Its durable posting proof pins both
+  fingerprints and confirm reproduces the same full plan before T1 and under
+  the immediate apply lock.
 - One inter-facility transfer root owns immutable shipment, receipt, loss,
   discrepancy, cancellation, correction, storno and late-expense children.
   Shipment freezes source WAC/capital. Receipt posts only actual accepted
@@ -167,6 +171,12 @@ aggregate/pool before-state and all recovery guards are constructible. Guided
 `confirm_allowed` is false without that proof. An identical older immutable
 `ready` request may be reprocessed in place only to add this stronger proof;
 it cannot create another request or business row.
+An identical guided request blocked by
+`guided_acceptance_parity_failed`, `guided_acceptance_parity_not_current` or
+`guided_acceptance_posting_plan_drift` may be reopened in place only after the
+complete current aggregate/detail proof passes. Processing then rebuilds and
+persists a fresh exact posting proof; the compatibility path never approximates
+the old plan, bypasses source checks or posts a business row.
 Stage 3 must additionally enforce the HTTP request read limit before buffering.
 
 ## Verification and later stages
@@ -185,8 +195,10 @@ observed after production cutover and proves the inverse movement restores every
 prior Decimal exactly; existing balance capital is never silently normalized to
 minor units. The FBS lifecycle smoke proves
 legacy blocked/ready request revalidation, first aggregate-row materialization,
-cost-coverage drift rejection, immutable cost-layer replay and exact append-only
-guided recovery to audited semantic zero. Existing Stage 1, FF
+global aggregate/detail readiness, blocked-request reopening after exact parity,
+stored/live posting-plan drift rejection before business writes, cost-coverage
+drift rejection, immutable cost-layer replay and exact append-only guided
+recovery to audited semantic zero. Existing Stage 1, FF
 ledger/reservation/inventory/overhead/
 documents, functional warehouse, capital and recovery smokes remain required.
 

@@ -473,6 +473,8 @@ class FfPoolDocumentService:
             expected_source_revision=str(identity.source_revision),
         ):
             self.process_request(canonical_request_id)
+        elif self._retry_guided_parity_block(canonical_request_id):
+            self.process_request(canonical_request_id)
         elif self._retry_ready_guided_plan_preview(canonical_request_id):
             self.process_request(canonical_request_id)
         return {**self.status(request_id=identity.request_id), "idempotent": not inserted}
@@ -636,6 +638,61 @@ class FfPoolDocumentService:
                     stage="posting_plan_preview_upgrade",
                     status="complete",
                     details={"immutable_request_reused": True},
+                )
+            conn.commit()
+            return bool(changed)
+
+    def _retry_guided_parity_block(self, request_id: str) -> bool:
+        """Reopen one identical request after current global parity is restored.
+
+        A failed confirm never creates a document or movement because the
+        aggregate/detail parity error rolls back the business transaction.  A
+        later exact retry may reuse that immutable request only after the
+        current active aggregate once again equals the facility/pool detail.
+        """
+
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT document_kind,source_type,state,error_code "
+                f"FROM {REQUESTS_TABLE} WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["document_kind"]) != "china_acceptance"
+                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["state"]) != "blocked"
+                or str(row["error_code"])
+                not in {
+                    "guided_acceptance_parity_failed",
+                    "guided_acceptance_parity_not_current",
+                    "guided_acceptance_posting_plan_drift",
+                }
+            ):
+                conn.rollback()
+                return False
+            try:
+                proof = _guided_current_aggregate_parity_proof(conn)
+            except FfPoolDocumentError as exc:
+                if exc.code != "guided_acceptance_parity_not_current":
+                    raise
+                conn.rollback()
+                return False
+            changed = conn.execute(
+                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',ready_at='',"
+                "updated_at=?,error_code='',error_details_json='null' "
+                "WHERE request_id=? AND state='blocked' AND error_code=?",
+                (now, request_id, str(row["error_code"])),
+            ).rowcount
+            if changed:
+                self._event(
+                    conn,
+                    request_id=request_id,
+                    stage="aggregate_parity_revalidation",
+                    status="complete",
+                    details=proof,
                 )
             conn.commit()
             return bool(changed)
@@ -1255,6 +1312,24 @@ class FfPoolDocumentService:
                 _require_guided_acceptance_activation(conn)
             manifest = _json_object(_loads(request["preview_manifest_json"], {}))
             plan = _build_posting_plan(conn, request=request, manifest=manifest, epoch=epoch)
+            if _is_guided_china_request(request):
+                stored_plan_preview = _json_object(
+                    manifest.get("posting_plan_preview") or {}
+                )
+                live_plan_preview = _posting_plan_preview(plan=plan, epoch=epoch)
+                if stored_plan_preview != live_plan_preview:
+                    raise FfPoolDocumentError(
+                        "guided_acceptance_posting_plan_drift",
+                        "Guided acceptance posting plan changed after preview",
+                        details={
+                            "stored_plan_preview_sha256": _fingerprint(
+                                stored_plan_preview
+                            ),
+                            "live_plan_preview_sha256": _fingerprint(
+                                live_plan_preview
+                            ),
+                        },
+                    )
             before_digest = _balance_digest(conn, plan["balance_keys"])
             plan_fingerprint = _fingerprint(
                 {
@@ -1348,6 +1423,39 @@ class FfPoolDocumentService:
                 guided_recovery = bool(
                     (plan.get("domain_manifest") or {}).get("guided_acceptance_recovery")
                 )
+                if guided_acceptance:
+                    locked_manifest = _json_object(
+                        _loads(current_request["preview_manifest_json"], {})
+                    )
+                    locked_plan = _build_posting_plan(
+                        conn,
+                        request=current_request,
+                        manifest=locked_manifest,
+                        epoch=epoch,
+                    )
+                    locked_plan_preview = _posting_plan_preview(
+                        plan=locked_plan,
+                        epoch=epoch,
+                    )
+                    stored_plan_preview = _json_object(
+                        locked_manifest.get("posting_plan_preview") or {}
+                    )
+                    if (
+                        stored_plan_preview != locked_plan_preview
+                        or _fingerprint(locked_plan) != _fingerprint(plan)
+                    ):
+                        raise FfPoolDocumentError(
+                            "guided_acceptance_posting_plan_drift",
+                            "Guided acceptance posting plan drifted while acquiring the apply lock",
+                            details={
+                                "stored_plan_preview_sha256": _fingerprint(
+                                    stored_plan_preview
+                                ),
+                                "locked_plan_preview_sha256": _fingerprint(
+                                    locked_plan_preview
+                                ),
+                            },
+                        )
                 posted_at = self._now()
                 if guided_acceptance:
                     _apply_guided_acceptance_legacy(
@@ -1827,6 +1935,9 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
     domain = _json_object(plan.get("domain_manifest") or {})
     before = _json_object(domain.get("guided_acceptance_before_state") or {})
     aggregate_before = list(before.get("aggregate_balances") or [])
+    aggregate_pool_parity = _json_object(
+        before.get("aggregate_pool_parity") or {}
+    )
     return {
         "confirm_plan_ready": True,
         "business_mutation_applied": False,
@@ -1855,6 +1966,8 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
             list(before.get("pool_balances") or [])
         ),
         "aggregate_before_state_digest": _fingerprint(aggregate_before),
+        "aggregate_pool_parity": aggregate_pool_parity,
+        "aggregate_pool_parity_digest": _fingerprint(aggregate_pool_parity),
         "dependent_before_state_digest": str(
             (_json_object(before.get("dependent_reservation_debit_state") or {})).get(
                 "digest"
@@ -1864,6 +1977,61 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
         "posted_manifest_sha256": _fingerprint(plan["posted_manifest"]),
         "source_rechecked": True,
     }
+
+
+def _guided_current_aggregate_parity_proof(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Require exact current active aggregate = current facility/pool detail."""
+
+    active = conn.execute(
+        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone()
+    if active is None or not str(active[0] or ""):
+        raise FfPoolDocumentError(
+            "guided_acceptance_parity_not_current",
+            "Guided acceptance requires a current active aggregate FF version",
+            details={"reason": "aggregate_active_missing"},
+        )
+    aggregate_version_id = str(active[0])
+    aggregate_rows = [
+        {
+            "nm_id": int(row[0]),
+            "quantity": _signed_int(row[1], field="aggregate quantity"),
+            "capital_rub": canonical_decimal_text(row[2]),
+        }
+        for row in conn.execute(
+            """SELECT nm_id,quantity,capital_rub
+               FROM sheet_vitrina_v1_warehouse_functional_balances
+               WHERE version_id=? AND warehouse_key='ff' ORDER BY nm_id""",
+            (aggregate_version_id,),
+        ).fetchall()
+    ]
+    parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
+    details = {
+        "status": str(parity.status),
+        "aggregate_version_id": aggregate_version_id,
+        "feature_epoch": int(parity.feature_epoch),
+        "detail_row_count": int(parity.detail_row_count),
+        "aggregate_row_count": int(parity.aggregate_row_count),
+        "detail_quantity": int(parity.detail_quantity),
+        "aggregate_quantity": int(parity.aggregate_quantity),
+        "detail_capital_rub": canonical_decimal_text(parity.detail_capital_rub),
+        "aggregate_capital_rub": canonical_decimal_text(
+            parity.aggregate_capital_rub
+        ),
+        "mismatched_nm_id_count": len(parity.mismatched_nm_ids),
+        "mismatched_nm_ids": list(parity.mismatched_nm_ids[:100]),
+        "detail_fingerprint": str(parity.detail_fingerprint),
+        "aggregate_fingerprint": str(parity.aggregate_fingerprint),
+    }
+    if parity.status != "pass":
+        raise FfPoolDocumentError(
+            "guided_acceptance_parity_not_current",
+            "Current aggregate FF does not exactly equal facility/pool detail",
+            details=details,
+        )
+    return details
 
 
 def _require_guided_acceptance_activation(conn: sqlite3.Connection) -> None:
@@ -2808,14 +2976,10 @@ def _plan_china_acceptance(
                     if row is not None else "0",
                 }
             )
-        active = conn.execute(
-            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-        ).fetchone()
-        if active is None:
-            raise FfPoolDocumentError(
-                "aggregate_active_missing",
-                "Guided acceptance requires the active aggregate FF version",
-            )
+        aggregate_pool_parity = _guided_current_aggregate_parity_proof(conn)
+        aggregate_version_id = str(
+            aggregate_pool_parity["aggregate_version_id"]
+        )
         aggregate_before = []
         for nm_id in sorted(capital_by_nm):
             row = conn.execute(
@@ -2824,7 +2988,7 @@ def _plan_china_acceptance(
                           wb_in_way_from_client,provenance_json
                    FROM sheet_vitrina_v1_warehouse_functional_balances
                    WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-                (str(active[0]), nm_id),
+                (aggregate_version_id, nm_id),
             ).fetchone()
             if row is None:
                 aggregate_before.append(
@@ -2880,8 +3044,9 @@ def _plan_china_acceptance(
                 pool_before,
                 key=lambda item: (item["facility_id"], item["pool"], item["nm_id"]),
             ),
-            "aggregate_version_id": str(active[0]),
+            "aggregate_version_id": aggregate_version_id,
             "aggregate_balances": aggregate_before,
+            "aggregate_pool_parity": aggregate_pool_parity,
             "dependent_reservation_debit_state": dependent_state,
         }
     return {
