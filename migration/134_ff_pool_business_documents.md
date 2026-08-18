@@ -179,7 +179,11 @@ T1 evidence. It also pins the production-shaped 26GN527 composition (21 SKU,
 66,000 accepted, FBS/FBO 39,250/26,750, zero expenses and fractional-kopeck
 capital) through filled-workbook parse, exact plan conservation, idempotent
 repeat and stale-source rejection. It also pins the three production-shaped
-SKUs whose aggregate FF row is initially absent. The FBS lifecycle smoke proves
+SKUs whose aggregate FF row is initially absent. The same 21-SKU fixture applies
+all 39 canonical-kopek movements over the exact fractional-kopeck pool capitals
+observed after production cutover and proves the inverse movement restores every
+prior Decimal exactly; existing balance capital is never silently normalized to
+minor units. The FBS lifecycle smoke proves
 legacy blocked/ready request revalidation, first aggregate-row materialization,
 cost-coverage drift rejection, immutable cost-layer replay and exact append-only
 guided recovery to audited semantic zero. Existing Stage 1, FF

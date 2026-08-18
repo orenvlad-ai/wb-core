@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -29,6 +29,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentError,
     FfPoolDocumentService,
     _allocate_cents,
+    _apply_balance_movement,
     _build_posting_plan,
     _component_share,
     _posting_plan_preview,
@@ -222,6 +223,111 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
         int(key): int(value)
         for key, value in normalization["capital_cents_by_nm"].items()
     }
+    # Production opening balances retain authoritative exact Decimal capital.
+    # A guided receipt adds only its canonical kopeck delta; it must not reject
+    # or silently normalize the pre-existing fractional-kopeck capital.  The
+    # exact inverse movement must return every affected balance byte-for-
+    # semantic-byte to the original quantity/capital pair.
+    fractional_opening = {
+        210183142: (2249, "205231.4311365185716975379064"),
+        210184534: (250, "22685.48291654259178871196266"),
+        245720334: (743, "72996.70782552040825768721842"),
+        259460529: (1228, "117162.7582051580009068280460"),
+        259465495: (3132, "315544.9438867871117622305145"),
+        259473237: (286, "27090.34575724342461900569472"),
+        428853741: (500, "57862.8139406905458181875208"),
+        428854299: (2946, "357448.9272079002304083502190"),
+        428855306: (998, "114141.4070768659663193726124"),
+        428855978: (205, "22944.60690012700219304333326"),
+        497414010: (3889, "392247.7763148711604622173653"),
+        497414624: (9746, "982128.3651914405693875570705"),
+        497416271: (747, "99225.61859946938832759534936"),
+        497417163: (664, "80565.54453038891819115565094"),
+        497417474: (3248, "392768.2532584173349552632159"),
+    }
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("SAVEPOINT production_decimal_pool_apply")
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            with localcontext() as context:
+                context.prec = 38
+                opening_wac = str(Decimal(capital) / Decimal(quantity))
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,?,?,?,?,?)""",
+                (
+                    nm_id,
+                    quantity,
+                    capital,
+                    opening_wac,
+                    "production-shaped-opening",
+                    "2026-08-15T00:00:00Z",
+                ),
+            )
+        movement_by_key = {
+            (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"])): item
+            for item in movements
+        }
+        for line_no, movement in enumerate(movements, start=1):
+            _apply_balance_movement(
+                conn,
+                movement=movement,
+                operation_id="production-shaped-guided-forward",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T01:00:00Z",
+            )
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            row = conn.execute(
+                f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
+                "WHERE facility_id='fac_msk' AND pool='FBS' AND nm_id=?",
+                (nm_id,),
+            ).fetchone()
+            movement = movement_by_key[("fac_msk", "FBS", nm_id)]
+            assert int(row[0]) == quantity + int(movement["quantity_delta"])
+            with localcontext() as context:
+                context.prec = 160
+                expected_capital = Decimal(capital) + (
+                    Decimal(int(movement["capital_delta_cents"])) / Decimal(100)
+                )
+            assert str(row[1]) == format(expected_capital, "f")
+        for line_no, movement in enumerate(movements, start=1):
+            inverse = dict(movement)
+            inverse["quantity_delta"] = -int(movement["quantity_delta"])
+            inverse["capital_delta_cents"] = -int(
+                movement["capital_delta_cents"]
+            )
+            _apply_balance_movement(
+                conn,
+                movement=inverse,
+                operation_id="production-shaped-guided-storno",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T02:00:00Z",
+            )
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            row = conn.execute(
+                f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
+                "WHERE facility_id='fac_msk' AND pool='FBS' AND nm_id=?",
+                (nm_id,),
+            ).fetchone()
+            assert int(row[0]) == quantity
+            assert str(row[1]) == capital
+        movement_capital = conn.execute(
+            f"SELECT capital_delta_rub FROM {LINES_TABLE} "
+            "WHERE operation_id IN ('production-shaped-guided-forward',"
+            "'production-shaped-guided-storno')"
+        ).fetchall()
+        assert len(movement_capital) == 78
+        assert all(
+            Decimal(str(row[0])).quantize(Decimal("0.01"))
+            == Decimal(str(row[0]))
+            for row in movement_capital
+        )
+        conn.execute("ROLLBACK TO production_decimal_pool_apply")
+        conn.execute("RELEASE production_decimal_pool_apply")
     # Production-shaped guided planning must treat an inbound SKU absent from
     # the current aggregate FF snapshot as exact semantic zero, not as an
     # error.  The three missing rows mirror the real 26GN527 preview evidence.

@@ -587,7 +587,13 @@ residuals and residual owners are immutable evidence. Per-row independent
 rounding, synthetic zero and double capital are forbidden. Finalization pins
 the source revision and materializes the supplier FF cost layer with both
 actual accepted quantities and the same normalized per-SKU capital used by the
-pool movements. The service is the only future owner of the factual date, existing
+pool movements. The minor-unit boundary applies to each new immutable movement,
+not to the pre-existing pool balance: opening/cutover capital remains its
+authoritative exact Decimal and apply adds the signed kopeck delta without
+rounding or rewriting that prior value. The inverse storno therefore subtracts
+the same kopeck delta and restores the exact prior capital. A zero-quantity
+close with a non-zero fractional residual remains fail-closed. The service is
+the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior
 receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
