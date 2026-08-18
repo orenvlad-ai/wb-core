@@ -36,7 +36,10 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     process_post_t_fbs_lifecycle,
 )
 from packages.application.ff_pool_foundation import read_ff_pool_feature_state  # noqa: E402
-from packages.application.ff_pool_documents import FfPoolDocumentService  # noqa: E402
+from packages.application.ff_pool_documents import (  # noqa: E402
+    FfPoolDocumentService,
+    _guided_request_source_revision,
+)
 from packages.application.ff_pool_surfaces import FfPoolSurface  # noqa: E402
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
@@ -423,12 +426,20 @@ def main() -> int:
             runtime_dir=runtime_dir,
             timestamp_factory=_DocClock(),
         ).supplier_shipment_source(SHIPMENT_ID)
+        guided_source_bytes = b"guided-26gn527-workbook-evidence"
+        guided_source_sha256 = "sha256:" + hashlib.sha256(
+            guided_source_bytes
+        ).hexdigest()
+        guided_request_revision = _guided_request_source_revision(
+            supplier_source_revision=shipment_revision,
+            source_sha256=guided_source_sha256,
+        )
         identity = DocumentIdentity(
             request_id="guided:26gn527:request",
             source_system="operator_ui",
             source_type="china_acceptance_workbook",
             source_id=SHIPMENT_ID,
-            source_revision=shipment_revision,
+            source_revision=guided_request_revision,
             idempotency_epoch=1,
             actor="warehouse-operator",
             business_date="2026-08-15",
@@ -472,6 +483,7 @@ def main() -> int:
             identity=identity,
             document_kind="china_acceptance",
             manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
         )
         assert preview["state"] == "ready", preview
         assert preview["confirm_allowed"] is True
@@ -520,12 +532,108 @@ def main() -> int:
             identity=identity,
             document_kind="china_acceptance",
             manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
         )
         assert upgraded_ready["request_id"] == preview["request_id"]
         assert upgraded_ready["confirm_allowed"] is True
         assert upgraded_ready["preview_manifest"]["posting_plan_preview"][
             "aggregate_semantic_zero_nm_ids"
         ] == [103]
+        # The first production readiness release compared the current raw
+        # supplier revision with the combined raw+workbook request revision.
+        # An exact request blocked by that defect is reopened in place only
+        # when both stored bindings recompute; no duplicate or business row is
+        # created.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET state='blocked',error_code='supplier_source_revision_changed',
+                       preview_manifest_json=?
+                   WHERE request_id=?""",
+                (
+                    json.dumps(
+                        legacy_ready_manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        source_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert source_contract_retry["request_id"] == preview["request_id"]
+        assert source_contract_retry["state"] == "ready"
+        assert source_contract_retry["confirm_allowed"] is True
+        assert source_contract_retry["idempotent"] is True
+        assert source_contract_retry["preview_manifest"]["posting_plan_preview"][
+            "confirm_plan_ready"
+        ] is True
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_workflow_events
+                   WHERE identity=? AND stage='source_revision_contract_revalidation'
+                     AND status='complete'""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_document_requests
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_documents
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 0
+        # Reopening the compatibility state never weakens the live source
+        # check.  Even an internal caller that repeats the old identity is
+        # blocked again while supplier truth is different.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_supplier_shipments
+                   SET updated_at='2026-08-15T04:00:01Z'
+                   WHERE shipment_id=?""",
+                (SHIPMENT_ID,),
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET state='blocked',error_code='supplier_source_revision_changed'
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            )
+            conn.commit()
+        drifted_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert drifted_contract_retry["state"] == "blocked"
+        assert drifted_contract_retry["error"]["code"] == (
+            "supplier_source_revision_changed"
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_supplier_shipments
+                   SET updated_at='2026-08-15T04:00:00Z'
+                   WHERE shipment_id=?""",
+                (SHIPMENT_ID,),
+            )
+            conn.commit()
+        restored_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert restored_contract_retry["state"] == "ready"
+        assert restored_contract_retry["confirm_allowed"] is True
         # A production request blocked by the former minor-unit check is
         # reopened in place; the immutable request/workbook is not duplicated.
         with sqlite3.connect(runtime.db_path) as conn:
@@ -540,6 +648,7 @@ def main() -> int:
             identity=identity,
             document_kind="china_acceptance",
             manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
         )
         assert retried_preview["request_id"] == preview["request_id"]
         assert retried_preview["state"] == "ready"
@@ -707,12 +816,18 @@ def main() -> int:
         ).supplier_shipment_source(SHIPMENT_ID)
         replacement_manifest = dict(acceptance_manifest)
         replacement_manifest["source_revision"] = replacement_revision
+        replacement_source_bytes = b"guided-26gn527-replacement-workbook"
+        replacement_request_revision = _guided_request_source_revision(
+            supplier_source_revision=replacement_revision,
+            source_sha256="sha256:"
+            + hashlib.sha256(replacement_source_bytes).hexdigest(),
+        )
         replacement_identity = DocumentIdentity(
             request_id="guided:26gn527:replacement",
             source_system="operator_ui",
             source_type="china_acceptance_workbook",
             source_id=SHIPMENT_ID,
-            source_revision=replacement_revision,
+            source_revision=replacement_request_revision,
             idempotency_epoch=1,
             actor="warehouse-operator",
             business_date="2026-08-15",
@@ -721,6 +836,7 @@ def main() -> int:
             identity=replacement_identity,
             document_kind="china_acceptance",
             manifest=replacement_manifest,
+            source_bytes=replacement_source_bytes,
         )
         assert replacement_preview["state"] == "ready"
         replacement_posted = service.post(str(replacement_preview["request_id"]))

@@ -595,7 +595,16 @@ Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
 full posting plan, rechecks the exact supplier source revision and durably pins
 the plan/document totals plus pool, aggregate and dependent before-state
 digests. A pre-upgrade identical ready request is refreshed in place; it never
-creates a duplicate request or business effect.
+creates a duplicate request or business effect. The request-level source
+revision is deliberately the hash of the raw supplier revision plus the exact
+workbook SHA-256, while the workbook manifest retains the raw supplier
+revision. Readiness and confirm compare current raw supplier truth only with
+that manifest value and independently recompute the request-level binding; the
+two revision layers are never compared as though they were the same value. An
+identical request incorrectly blocked by the former raw-versus-combined check
+may be reprocessed in place only when the caller reproduces the stored combined
+revision and it recomputes from the immutable manifest plus workbook digest.
+Real source drift remains blocked on the live raw recheck.
 
 An accepted SKU does not have to exist in the current aggregate `ff` snapshot:
 new inbound inventory is frozen as an absent semantic-zero before-state and its
