@@ -6,6 +6,7 @@ import ast
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -142,6 +143,12 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
     BUYER_PRICE_RUB_METRIC_KEY,
     SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
     extend_metrics_with_sku_action_metrics,
+)
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (
+    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    extend_metrics_with_weighted_seller_price,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
@@ -1153,12 +1160,16 @@ class SheetVitrinaV1LivePlanBlock:
         )
 
         effective_metrics = extend_metrics_with_buyout_percent(
-            extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_incident_stock_metrics(
-                    extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_proxy_v4(
-                            extend_metrics_with_our_wb_cost_metrics(
-                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            extend_metrics_with_weighted_seller_price(
+                extend_metrics_with_sku_action_metrics(
+                    extend_metrics_with_incident_stock_metrics(
+                        extend_metrics_with_own_product_capital_metrics(
+                            extend_metrics_with_proxy_v4(
+                                extend_metrics_with_our_wb_cost_metrics(
+                                    extend_metrics_with_onec_stock_metrics(
+                                        current_state.metrics_v2
+                                    )
+                                )
                             )
                         )
                     )
@@ -3107,6 +3118,13 @@ class _MetricEvaluator:
                     self.enabled_config,
                     temporal_slot,
                 )
+            elif metric.metric_key == WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY:
+                value = self._aggregate_positive_weight_fail_closed(
+                    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+                    SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
                 value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
@@ -3293,6 +3311,34 @@ class _MetricEvaluator:
         if numeric_values and all(value == 0.0 for value in numeric_values):
             return 0.0
         return None
+
+    def _aggregate_positive_weight_fail_closed(
+        self,
+        value_metric_key: str,
+        weight_metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        """Weight exact-slot values and reject any positive-weight missing value."""
+
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for item in config_items:
+            weight = self.resolve_sku(weight_metric_key, item.nm_id, temporal_slot)
+            if weight is None:
+                continue
+            numeric_weight = float(weight)
+            if not math.isfinite(numeric_weight) or numeric_weight <= 0:
+                continue
+            value = self.resolve_sku(value_metric_key, item.nm_id, temporal_slot)
+            if value is None:
+                return None
+            numeric_value = float(value)
+            if not math.isfinite(numeric_value) or numeric_value <= 0:
+                return None
+            weighted_sum += numeric_value * numeric_weight
+            total_weight += numeric_weight
+        return weighted_sum / total_weight if total_weight > 0 else None
 
     def _aggregate_onec_weighted_unit_cost(self, metric_key: str, temporal_slot: str) -> float | None:
         components = onec_weighted_unit_cost_components(metric_key)
@@ -3837,6 +3883,8 @@ def _expand_selected_source_keys_for_dependencies(source_keys: set[str]) -> set[
     expanded = set(source_keys)
     if SPP_PROXY_SOURCE_KEY in expanded:
         expanded.add("prices_snapshot")
+    if "prices_snapshot" in expanded:
+        expanded.add("sales_funnel_history")
     return expanded
 
 

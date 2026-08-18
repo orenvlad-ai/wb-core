@@ -20,6 +20,9 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa:
     OWN_PRODUCT_CAPITAL_SOURCE_KEY,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (  # noqa: E402
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -112,6 +115,10 @@ def main() -> None:
             raise AssertionError("group refresh result must expose latest_confirmed_cell_count at the top level")
         if "price_seller_discounted" not in captured["metric_keys"]:
             raise AssertionError(f"wb_api refresh must select wb_api metric keys, got {captured}")
+        if WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY not in captured["metric_keys"]:
+            raise AssertionError(
+                f"wb_api refresh must materialize the weighted seller-price TOTAL, got {captured}"
+            )
 
         merged = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
         data_rows = {row[1]: row for row in _sheet(merged, "DATA_VITRINA").rows}
