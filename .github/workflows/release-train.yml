@@ -398,6 +398,7 @@ jobs:
       task_class: ${{ steps.prepare.outputs.task_class }}
       loop_root: ${{ steps.prepare.outputs.loop_root }}
       agent_acknowledged: ${{ steps.prepare.outputs.agent_acknowledged }}
+      dcp_handoff: ${{ steps.prepare.outputs.dcp_handoff }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       WB_CORE_ORCHESTRATION_REQUIRED: ${{ vars.WB_CORE_ORCHESTRATION_REQUIRED }}
@@ -623,17 +624,49 @@ jobs:
         env:
           WB_CORE_RELEASE_PR: ${{ needs.select.outputs.pr_number }}
           WB_CORE_RELEASE_HEAD: ${{ needs.prepare.outputs.head_sha }}
-        run: python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
+        run: >-
+          python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
+          --output "$RUNNER_TEMP/wb-core-deploy-evidence.json"
 
-      - name: Mark production completion
+      - name: Read back exact deployed SHA
         if: >-
           steps.merge.outputs.skip_release != 'true' &&
-          needs.prepare.outputs.task_class == 'task:standard'
+          needs.prepare.outputs.task_class == 'task:standard' &&
+          needs.prepare.outputs.dcp_handoff == 'true'
+        run: >-
+          python3 apps/hosted_runtime_transport_reconcile.py
+          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
+          --expected-sha "${{ steps.merge.outputs.merge_sha }}"
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --head "${{ needs.prepare.outputs.head_sha }}"
+          --merge "${{ steps.merge.outputs.merge_sha }}"
+          --failed-stage readback
+          --read-only
+          --output "$RUNNER_TEMP/wb-core-runtime-evidence.json"
+
+      - name: Mark ordinary production completion
+        if: >-
+          steps.merge.outputs.skip_release != 'true' &&
+          needs.prepare.outputs.task_class == 'task:standard' &&
+          needs.prepare.outputs.dcp_handoff != 'true'
         run: >-
           python3 apps/github_release_train.py complete-standard
           --pr "${{ needs.select.outputs.pr_number }}"
           --merge-sha "${{ steps.merge.outputs.merge_sha }}"
           --contour production-verified
+
+      - name: Mark DCP exact production completion
+        if: >-
+          steps.merge.outputs.skip_release != 'true' &&
+          needs.prepare.outputs.task_class == 'task:standard' &&
+          needs.prepare.outputs.dcp_handoff == 'true'
+        run: >-
+          python3 apps/github_release_train.py complete-standard
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
+          --contour production-verified
+          --deploy-evidence-file "$RUNNER_TEMP/wb-core-deploy-evidence.json"
+          --runtime-evidence-file "$RUNNER_TEMP/wb-core-runtime-evidence.json"
 
       - name: Open production UI gate for LOOP
         if: >-

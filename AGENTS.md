@@ -41,6 +41,12 @@
    mergeability и safety gates, при необходимости синхронизирует branch с
    current `main`, запускает fresh baseline и сериализует merge и применимый
    exact-SHA deploy/verify.
+   Исключение — exact DCP branch `ao/wb-core-<positive>/root`: versioned
+   `wb-core.dcp-release-handoff/v1` (legacy repo-only) и
+   `wb-core.dcp-release-handoff/v2` (repo-only/live-runtime) запрещают
+   auto-sync. Actions публикует typed readmission marker, а fresh head/review/
+   admission создаёт только DCP; Release Train остаётся единственным merge и
+   deploy actor.
 9. `scope:repo-only` завершается только на `release:done`;
    `scope:live-runtime` — только на `release:production` после canonical
    deploy/verify. `scope:production-mutation` использует отдельный human-gated
