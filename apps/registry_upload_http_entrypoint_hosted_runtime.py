@@ -87,6 +87,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH,
+    DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
     DEFAULT_INSTRUCTIONS_UI_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
     DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH,
@@ -782,6 +784,13 @@ def collect_public_surface(
             auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
+            name="fbs_fulfillment_order_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
             name="factory_order_template_stock_ff",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}",
@@ -806,6 +815,13 @@ def collect_public_surface(
             name="factory_order_recommendation",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="fbs_fulfillment_order_recommendation",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -12384,6 +12400,10 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         tokens = [
             "Поставки",
             "Общий вход для двух расчётов",
+            "Заказ на фулфилмент (FBS)",
+            "Остатки WB не учитываются",
+            "Последние N дней",
+            "Произвольный период",
             "Заказ на фабрике",
             "Поставка на Wildberries",
             "Остатки ФФ",
@@ -12396,6 +12416,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "data-cny-delete-document",
             "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, средний курс",
             DEFAULT_FACTORY_ORDER_STATUS_PATH,
+            DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
             DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
             DEFAULT_WB_REGIONAL_STATUS_PATH,
             DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
@@ -12614,6 +12635,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route returned XLSX"
             if evaluation["ok"]
             else "expected XLSX content-type for successful recommendation route"
+        )
+        return evaluation
+
+    if route == "fbs_fulfillment_order_recommendation" and status == 200:
+        evaluation["ok"] = "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "FBS fulfillment-order recommendation route returned XLSX"
+            if evaluation["ok"]
+            else "expected XLSX content-type for successful FBS recommendation route"
         )
         return evaluation
 
@@ -13008,6 +13038,33 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "fbs_fulfillment_order_status":
+        facilities = payload.get("facilities")
+        evaluation["ok"] = (
+            status == 200
+            and isinstance(payload.get("status"), str)
+            and isinstance(payload.get("active_sku_count"), int)
+            and payload.get("national_demand_scope") == "russia_total_orderCount"
+            and payload.get("wb_stock_used") is False
+            and isinstance(facilities, list)
+            and all(
+                isinstance(item, dict)
+                and bool(str(item.get("facility_id") or ""))
+                and bool(str(item.get("facility_name") or ""))
+                and isinstance(item.get("calculation_enabled"), bool)
+                and isinstance(item.get("blockers"), list)
+                for item in facilities
+            )
+            and isinstance(payload.get("sales_history_coverage"), dict)
+            and isinstance(payload.get("defaults"), dict)
+        )
+        evaluation["detail"] = (
+            "FBS fulfillment-order status route ok"
+            if evaluation["ok"]
+            else "expected 200 JSON independent FBS planner status contract"
+        )
+        return evaluation
+
     if route == "web_vitrina_group_refresh_missing_group":
         error_text = str(payload.get("error", "") or payload.get("detail", "") or "")
         validation_reached = (
@@ -13053,6 +13110,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route published with truthful 422 before calculation"
             if evaluation["ok"]
             else "expected 200 XLSX or 422 JSON error for recommendation route"
+        )
+        return evaluation
+
+    if route == "fbs_fulfillment_order_recommendation":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 422 and bool(error_text)
+        evaluation["detail"] = (
+            "FBS fulfillment-order recommendation route published with truthful 422 before calculation"
+            if evaluation["ok"]
+            else "expected 200 XLSX or 422 JSON error for FBS recommendation route"
         )
         return evaluation
 
@@ -13509,10 +13576,12 @@ results = [
     _collect("plan_report_baseline_template", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
+    _collect("fbs_fulfillment_order_status", "GET", PAYLOAD["base_url"] + {DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH!r}),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),
     _collect("factory_order_template_inbound_factory", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"),
     _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
+    _collect("fbs_fulfillment_order_recommendation", "GET", PAYLOAD["base_url"] + {DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH!r}),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_warehouse_exclusion_options", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH!r}),
     _collect("wb_warehouse_exclusion_settings", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH!r}),
