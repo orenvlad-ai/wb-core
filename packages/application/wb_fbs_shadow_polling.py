@@ -50,6 +50,7 @@ FRESHNESS_SLO_SECONDS = 10 * 60
 LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 PAGE_LIMIT = 1000
 MAX_PAGES_PER_CYCLE = 10
+FBS_LIFECYCLE_BATCH_LIMIT = 10_000
 RATE_INTERVAL_SECONDS = 0.22
 LOCK_FILENAME = ".wb-fbs-shadow-collector.lock"
 REPEATABLE_HANDOFF_ORDER_THRESHOLD = 3
@@ -257,6 +258,7 @@ class WbFbsShadowPollingService:
                     result = process_post_t_fbs_lifecycle(
                         conn,
                         occurred_at=str(self.timestamp_factory()),
+                        limit=FBS_LIFECYCLE_BATCH_LIMIT,
                         schema_ready=True,
                     )
                     conn.commit()

@@ -66,6 +66,10 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_fbs_status_current"
   - "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
   - "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
+  - "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+  - "sheet_vitrina_v1_ff_pool_fbs_drain_state"
+  - "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+  - "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -732,3 +736,22 @@ resumes from the unchanged `last_status_observation_sequence`; event identity
 and atomic progress make the suffix exactly-once. Thus normal orders after a
 validated preview neither make the receipt owner gate a moving target nor get
 lost/double-counted around its short commit window.
+
+An otherwise valid post-T status whose exact order revision still has
+unmatched or drifted identity evidence cannot pin that global cursor. The same
+transaction appends its exact status sequence to
+`sheet_vitrina_v1_ff_pool_fbs_identity_pending`, advances only the source
+cursor, applies no reservation/debit/capital delta for that order and continues
+later matched statuses in sequence. Every later pass retries a bounded pending
+prefix independently of the new suffix. Resolution is append-only and is
+allowed only when immutable matched evidence proves the same order and exact
+warehouse/nm/chrt tuple; the processor then replays the original pending status
+and records one `...identity_pending_resolutions` row atomically with its normal
+idempotent lifecycle event. No facility/SKU mapping is guessed or changed, an
+unresolved row stays visible as `caught_up_identity_pending`, and an exact retry
+cannot duplicate a physical delta or WB action.
+
+The five-minute collector consumes at most 10,000 new lifecycle observations
+per warehouse-functional transaction (the domain primitive remains capped at
+100,000), so a measured production suffix catches up in bounded passes without
+either a 500-row moving tail or one unbounded lock hold.

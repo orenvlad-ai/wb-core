@@ -40,6 +40,10 @@ CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
 RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
 DRAIN_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_drain_state"
 LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
+IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+IDENTITY_PENDING_RESOLUTIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+)
 
 HANDOFF_SUPPLIER_STATUS = "complete"
 HANDOFF_WB_STATUS = "sorted"
@@ -201,6 +205,48 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(cutover_id,order_id,source_status_observation_sequence)
         );
 
+        CREATE TABLE IF NOT EXISTS {IDENTITY_PENDING_TABLE}(
+            pending_id TEXT PRIMARY KEY,
+            cutover_id TEXT NOT NULL REFERENCES
+                sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            source_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(source_status_observation_sequence)='integer'
+                      AND source_status_observation_sequence>0),
+            order_revision TEXT NOT NULL,
+            status_digest TEXT NOT NULL,
+            deferred_identity_evidence_sequence INTEGER NOT NULL
+                CHECK(typeof(deferred_identity_evidence_sequence)='integer'
+                      AND deferred_identity_evidence_sequence>=0),
+            reason_code TEXT NOT NULL
+                CHECK(reason_code='identity_evidence_missing_or_drifted'),
+            evidence_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
+            UNIQUE(cutover_id,source_status_observation_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS ff_pool_fbs_identity_pending_by_order
+        ON {IDENTITY_PENDING_TABLE}(cutover_id,order_id,source_status_observation_sequence);
+
+        CREATE TABLE IF NOT EXISTS {IDENTITY_PENDING_RESOLUTIONS_TABLE}(
+            resolution_id TEXT PRIMARY KEY,
+            pending_id TEXT NOT NULL UNIQUE REFERENCES {IDENTITY_PENDING_TABLE}(pending_id),
+            cutover_id TEXT NOT NULL,
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            source_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(source_status_observation_sequence)='integer'
+                      AND source_status_observation_sequence>0),
+            matched_identity_evidence_sequence INTEGER NOT NULL
+                CHECK(typeof(matched_identity_evidence_sequence)='integer'
+                      AND matched_identity_evidence_sequence>0),
+            matched_identity_order_revision TEXT NOT NULL,
+            resolution_kind TEXT NOT NULL CHECK(resolution_kind='matched_replay'),
+            resolution_digest TEXT NOT NULL,
+            resolved_at TEXT NOT NULL
+                CHECK(substr(resolved_at,-1,1)='Z' AND julianday(resolved_at) IS NOT NULL),
+            UNIQUE(cutover_id,source_status_observation_sequence)
+        );
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_events_no_update
         BEFORE UPDATE ON {EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS lifecycle evidence is immutable'); END;
@@ -219,6 +265,18 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_late_evidence_no_delete
         BEFORE DELETE ON {LATE_EVIDENCE_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS late evidence is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_identity_pending_no_update
+        BEFORE UPDATE ON {IDENTITY_PENDING_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity pending evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_identity_pending_no_delete
+        BEFORE DELETE ON {IDENTITY_PENDING_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity pending evidence is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_identity_resolution_no_update
+        BEFORE UPDATE ON {IDENTITY_PENDING_RESOLUTIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity resolution evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_identity_resolution_no_delete
+        BEFORE DELETE ON {IDENTITY_PENDING_RESOLUTIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS identity resolution evidence is append-only'); END;
         """
     )
     _ensure_column(
@@ -598,7 +656,31 @@ def drain_post_checkpoint_fbs_lifecycle(
         )
     last_sequence = int(state[3])
     starting_sequence = last_sequence
-    rows = conn.execute(
+    pending_retry_limit = min(bound, 500)
+    pending_rows = conn.execute(
+        f"""SELECT status.observation_sequence,status.order_id,
+                   status.order_revision,status.status_digest,
+                   status.supplier_status,status.wb_status,
+                   status.positive_quantity,status.observed_at,
+                   source.observation_sequence,source.observation_id,
+                   source.source_revision,source.source_created_at,
+                   source.observed_at,source.warehouse_id,source.nm_id,
+                   source.chrt_id,source.skus_json,
+                   pending.deferred_identity_evidence_sequence
+            FROM {IDENTITY_PENDING_TABLE} AS pending
+            JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+              ON status.observation_sequence=pending.source_status_observation_sequence
+            LEFT JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+              ON resolution.pending_id=pending.pending_id
+            WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+            ORDER BY pending.source_status_observation_sequence
+            LIMIT ?""",
+        (cutover_id, pending_retry_limit),
+    ).fetchall()
+    new_rows = conn.execute(
         f"""SELECT status.observation_sequence,status.order_id,
                    status.order_revision,status.status_digest,
                    status.supplier_status,status.wb_status,
@@ -626,8 +708,13 @@ def drain_post_checkpoint_fbs_lifecycle(
         "cancel_noop": 0,
         "reconciliation": 0,
         "late_pre_t": 0,
+        "identity_pending": 0,
+        "identity_resolved": 0,
     }
-    for row in rows:
+    rows = [(row, True) for row in pending_rows] + [
+        (row, False) for row in new_rows
+    ]
+    for row, is_pending_retry in rows:
         status_sequence = int(row[0])
         order_id = int(row[1])
         if row[8] is None:
@@ -657,7 +744,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                 detected_at=now,
             ):
                 summary["late_pre_t"] += 1
-            last_sequence = status_sequence
+            last_sequence = max(last_sequence, status_sequence)
             continue
 
         raw_order = (
@@ -671,7 +758,29 @@ def drain_post_checkpoint_fbs_lifecycle(
             row[15],
             str(row[16]),
         )
-        mapped = _map_order(conn, manifest, raw_order)
+        try:
+            mapped = _map_order(
+                conn,
+                manifest,
+                raw_order,
+                allow_compatible_identity=is_pending_retry,
+                minimum_identity_evidence_sequence=(
+                    int(row[17]) if is_pending_retry else 0
+                ),
+            )
+        except FfPoolFbsLifecycleError as exc:
+            if exc.code != "order_identity_evidence_missing_or_drifted":
+                raise
+            if not is_pending_retry:
+                _persist_identity_pending(
+                    conn,
+                    manifest=manifest,
+                    row=row,
+                    created_at=now,
+                )
+                last_sequence = max(last_sequence, status_sequence)
+            summary["identity_pending"] += 1
+            continue
         order = _order_payload(raw_order, mapped, quantity=int(row[6]))
         state_row = conn.execute(
             f"SELECT state,debit_event_id FROM {CURRENT_TABLE} WHERE cutover_id=? AND order_id=?",
@@ -716,7 +825,20 @@ def drain_post_checkpoint_fbs_lifecycle(
                 )
                 if not event["idempotent"]:
                     summary["cancel_noop"] += 1
-                last_sequence = status_sequence
+                if is_pending_retry:
+                    summary["identity_resolved"] += _resolve_identity_pending(
+                        conn,
+                        cutover_id=cutover_id,
+                        source_status_observation_sequence=status_sequence,
+                        matched_identity_evidence_sequence=int(
+                            mapped["identity_evidence_sequence"]
+                        ),
+                        matched_identity_order_revision=str(
+                            mapped["identity_evidence_order_revision"]
+                        ),
+                        resolved_at=now,
+                    )
+                last_sequence = max(last_sequence, status_sequence)
                 continue
             reserve = _append_event(
                 **common, event_type="reserve", state="reserved", physical_delta=0
@@ -796,7 +918,20 @@ def drain_post_checkpoint_fbs_lifecycle(
             )
             if not event["idempotent"]:
                 summary["cancel_noop"] += 1
-        last_sequence = status_sequence
+        if is_pending_retry:
+            summary["identity_resolved"] += _resolve_identity_pending(
+                conn,
+                cutover_id=cutover_id,
+                source_status_observation_sequence=status_sequence,
+                matched_identity_evidence_sequence=int(
+                    mapped["identity_evidence_sequence"]
+                ),
+                matched_identity_order_revision=str(
+                    mapped["identity_evidence_order_revision"]
+                ),
+                resolved_at=now,
+            )
+        last_sequence = max(last_sequence, status_sequence)
 
     pending = int(
         conn.execute(
@@ -804,12 +939,24 @@ def drain_post_checkpoint_fbs_lifecycle(
             (last_sequence,),
         ).fetchone()[0]
     )
+    identity_pending = int(
+        conn.execute(
+            f"""SELECT COUNT(*)
+                FROM {IDENTITY_PENDING_TABLE} AS pending
+                LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                  ON resolution.pending_id=pending.pending_id
+                WHERE pending.cutover_id=? AND resolution.pending_id IS NULL""",
+            (cutover_id,),
+        ).fetchone()[0]
+    )
     result_material = {
         "cutover_id": cutover_id,
         "from_status_observation_sequence": starting_sequence,
         "last_status_observation_sequence": last_sequence,
-        "processed_count": len(rows),
+        "processed_count": len(new_rows),
         "pending_count": pending,
+        "identity_retry_count": len(pending_rows),
+        "identity_pending_count": identity_pending,
         "summary": summary,
     }
     result_digest = _fingerprint(result_material)
@@ -824,7 +971,13 @@ def drain_post_checkpoint_fbs_lifecycle(
         _record_current_parity(conn, manifest=manifest, checked_at=now)
     return {
         "contract_name": CONTRACT_NAME,
-        "status": "caught_up" if pending == 0 else "processed_partial",
+        "status": (
+            "caught_up"
+            if pending == 0 and identity_pending == 0
+            else "caught_up_identity_pending"
+            if pending == 0
+            else "processed_partial"
+        ),
         **result_material,
         "result_digest": result_digest,
         "mutates_wb": False,
@@ -1144,29 +1297,56 @@ def _record_current_parity(
 
 
 def _map_order(
-    conn: sqlite3.Connection, manifest: Mapping[str, Any], row: sqlite3.Row
+    conn: sqlite3.Connection,
+    manifest: Mapping[str, Any],
+    row: sqlite3.Row,
+    *,
+    allow_compatible_identity: bool = False,
+    minimum_identity_evidence_sequence: int = 0,
 ) -> dict[str, Any]:
     warehouse_id = int(row[5] or 0)
     # Mapping values in the cutover manifest are necessary but not sufficient:
-    # every order revision must also carry its immutable matched identity proof.
-    # ``row`` comes from the latest exact order observation.
-    identity = conn.execute(
-        f"""SELECT outcome,warehouse_id,nm_id,chrt_id,
-                   warehouse_mapping_id,identity_mapping_id
-            FROM {IDENTITY_EVIDENCE_TABLE}
-            WHERE order_id=? AND order_revision=?
-            ORDER BY evidence_sequence DESC LIMIT 1""",
-        (int(row[1]), str(row[2])),
-    ).fetchone()
-    if (
-        identity is None
-        or str(identity[0]) != "matched"
-        or int(identity[1] or 0) != warehouse_id
-        or int(identity[2] or 0) != int(row[6])
-        or int(identity[3] or 0) != int(row[7] or 0)
-        or not str(identity[4] or "")
-        or not str(identity[5] or "")
-    ):
+    # a live suffix row requires its own immutable matched identity proof.  A
+    # previously isolated row may use a later proof only for the same order and
+    # exact warehouse/nm/chrt tuple; the original status is still replayed.
+    if allow_compatible_identity:
+        identity_rows = conn.execute(
+            f"""SELECT evidence_sequence,evidence_id,order_revision,outcome,
+                       warehouse_id,nm_id,chrt_id,warehouse_mapping_id,
+                       identity_mapping_id
+                FROM {IDENTITY_EVIDENCE_TABLE}
+                WHERE order_id=? AND evidence_sequence>?
+                ORDER BY (order_revision=?) DESC,evidence_sequence DESC""",
+            (
+                int(row[1]),
+                int(minimum_identity_evidence_sequence),
+                str(row[2]),
+            ),
+        ).fetchall()
+    else:
+        identity_rows = conn.execute(
+            f"""SELECT evidence_sequence,evidence_id,order_revision,outcome,
+                       warehouse_id,nm_id,chrt_id,warehouse_mapping_id,
+                       identity_mapping_id
+                FROM {IDENTITY_EVIDENCE_TABLE}
+                WHERE order_id=? AND order_revision=?
+                ORDER BY evidence_sequence DESC""",
+            (int(row[1]), str(row[2])),
+        ).fetchall()
+    identity = next(
+        (
+            item
+            for item in identity_rows
+            if str(item[3]) == "matched"
+            and int(item[4] or 0) == warehouse_id
+            and int(item[5] or 0) == int(row[6])
+            and int(item[6] or 0) == int(row[7] or 0)
+            and bool(str(item[7] or ""))
+            and bool(str(item[8] or ""))
+        ),
+        None,
+    )
+    if identity is None:
         raise FfPoolFbsLifecycleError(
             "order_identity_evidence_missing_or_drifted",
             f"Order {int(row[1])} lacks exact matched identity evidence",
@@ -1197,6 +1377,8 @@ def _map_order(
     return {
         "facility_id": facility_id,
         "nm_id": int(mapping.get("target_nm_id", mapping.get("nm_id", source_nm_id))),
+        "identity_evidence_sequence": int(identity[0]),
+        "identity_evidence_order_revision": str(identity[2]),
     }
 
 
@@ -1299,6 +1481,108 @@ def _persist_late_checkpoint_evidence(
         ),
     )
     return bool(inserted)
+
+
+def _persist_identity_pending(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    row: sqlite3.Row | tuple[Any, ...],
+    created_at: str,
+) -> bool:
+    evidence = {
+        "cutover_id": str(manifest["cutover_id"]),
+        "order_id": int(row[1]),
+        "source_status_observation_sequence": int(row[0]),
+        "order_revision": str(row[2]),
+        "status_digest": str(row[3]),
+        "reason_code": "identity_evidence_missing_or_drifted",
+    }
+    digest = _fingerprint(evidence)
+    pending_id = "ffidp_" + digest.removeprefix("sha256:")[:28]
+    deferred_identity_evidence_sequence = int(
+        conn.execute(
+            f"SELECT COALESCE(MAX(evidence_sequence),0) "
+            f"FROM {IDENTITY_EVIDENCE_TABLE} WHERE order_id=?",
+            (int(row[1]),),
+        ).fetchone()[0]
+    )
+    return bool(
+        conn.execute(
+            f"""INSERT OR IGNORE INTO {IDENTITY_PENDING_TABLE}(
+                    pending_id,cutover_id,order_id,
+                    source_status_observation_sequence,order_revision,
+                    status_digest,deferred_identity_evidence_sequence,
+                    reason_code,evidence_digest,created_at
+                ) VALUES(?,?,?,?,?,?,?,'identity_evidence_missing_or_drifted',?,?)""",
+            (
+                pending_id,
+                str(manifest["cutover_id"]),
+                int(row[1]),
+                int(row[0]),
+                str(row[2]),
+                str(row[3]),
+                deferred_identity_evidence_sequence,
+                digest,
+                created_at,
+            ),
+        ).rowcount
+    )
+
+
+def _resolve_identity_pending(
+    conn: sqlite3.Connection,
+    *,
+    cutover_id: str,
+    source_status_observation_sequence: int,
+    matched_identity_evidence_sequence: int,
+    matched_identity_order_revision: str,
+    resolved_at: str,
+) -> int:
+    pending = conn.execute(
+        f"""SELECT pending_id,order_id,evidence_digest
+            FROM {IDENTITY_PENDING_TABLE}
+            WHERE cutover_id=? AND source_status_observation_sequence=?""",
+        (str(cutover_id), int(source_status_observation_sequence)),
+    ).fetchone()
+    if pending is None:
+        raise FfPoolFbsLifecycleError(
+            "identity_pending_missing",
+            "An identity-pending replay has no immutable pending evidence",
+        )
+    material = {
+        "pending_id": str(pending[0]),
+        "pending_evidence_digest": str(pending[2]),
+        "matched_identity_evidence_sequence": int(
+            matched_identity_evidence_sequence
+        ),
+        "matched_identity_order_revision": str(matched_identity_order_revision),
+        "resolution_kind": "matched_replay",
+    }
+    digest = _fingerprint(material)
+    resolution_id = "ffidr_" + digest.removeprefix("sha256:")[:28]
+    return int(
+        conn.execute(
+            f"""INSERT OR IGNORE INTO {IDENTITY_PENDING_RESOLUTIONS_TABLE}(
+                    resolution_id,pending_id,cutover_id,order_id,
+                    source_status_observation_sequence,
+                    matched_identity_evidence_sequence,
+                    matched_identity_order_revision,resolution_kind,
+                    resolution_digest,resolved_at
+                ) VALUES(?,?,?,?,?,?,?,'matched_replay',?,?)""",
+            (
+                resolution_id,
+                str(pending[0]),
+                str(cutover_id),
+                int(pending[1]),
+                int(source_status_observation_sequence),
+                int(matched_identity_evidence_sequence),
+                str(matched_identity_order_revision),
+                digest,
+                resolved_at,
+            ),
+        ).rowcount
+    )
 
 
 def _persist_late_pre_t(

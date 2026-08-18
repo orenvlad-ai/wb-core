@@ -141,6 +141,18 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   recovery before-image rather than invalidating the gate. Receipt source,
   date, allocation, quantities, capital normalization, expenses, epoch and
   document identities remain exact fail-closed bindings.
+  A post-T status without exact matched identity evidence is isolated in an
+  append-only pending ledger with zero inventory/capital/WB effect instead of
+  pinning the shared suffix cursor. New matched rows continue in order; each
+  timer also retries a bounded pending prefix. Only a later immutable matched
+  proof for the same order and exact warehouse/nm/chrt tuple can replay the
+  original status and append its atomic resolution. The processor never
+  invents or changes facility/SKU mappings, and unresolved evidence remains a
+  visible `caught_up_identity_pending` diagnostic rather than silent loss.
+  Each normal collector cycle folds at most 10,000 new lifecycle observations
+  in one warehouse-functional transaction. This remains below the 100,000
+  domain ceiling and avoids both a 500-row moving tail and an unbounded lock
+  hold.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only
