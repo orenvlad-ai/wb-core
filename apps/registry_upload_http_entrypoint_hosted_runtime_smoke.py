@@ -4435,6 +4435,8 @@ def main() -> None:
                 raise AssertionError("own-product-capital status route must be publicly readable")
             if route_map["factory_order_status"]["http_status"] != 200:
                 raise AssertionError("factory-order status route must be publicly readable")
+            if route_map["fbs_fulfillment_order_status"]["http_status"] != 200:
+                raise AssertionError("FBS fulfillment-order status route must be publicly readable")
             if route_map["factory_order_template_stock_ff"]["http_status"] != 200:
                 raise AssertionError("stock_ff template route must be publicly readable")
             if route_map["factory_order_template_inbound_factory"]["http_status"] != 200:
@@ -4443,6 +4445,8 @@ def main() -> None:
                 raise AssertionError("inbound_ff_to_wb template route must be publicly readable")
             if route_map["factory_order_recommendation"]["http_status"] != 422:
                 raise AssertionError("recommendation route without calculation must stay truthful 422")
+            if route_map["fbs_fulfillment_order_recommendation"]["http_status"] != 422:
+                raise AssertionError("FBS recommendation route without calculation must stay truthful 422")
             if route_map["wb_regional_status"]["http_status"] != 200:
                 raise AssertionError("wb-regional status route must be publicly readable")
             if "wb_warehouse_exclusion_options" in route_map:
@@ -4506,6 +4510,10 @@ def main() -> None:
                 raise AssertionError("plan-report baseline template route must stay 200")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must stay 200")
+            if loopback_routes["fbs_fulfillment_order_status"]["http_status"] != 200:
+                raise AssertionError("FBS fulfillment-order status loopback route must stay 200")
+            if loopback_routes["fbs_fulfillment_order_recommendation"]["http_status"] != 422:
+                raise AssertionError("FBS recommendation loopback route without calculation must stay 422")
             if hosted_runtime._probe_include_refresh(
                 type("Args", (), {"include_refresh": True, "skip_refresh": False})()
             ) is not True:
@@ -4548,6 +4556,7 @@ def main() -> None:
             print(f"public_probe_plan_report: ok -> {route_map['plan_report']['http_status']}")
             print(f"public_probe_plan_baseline: ok -> {route_map['plan_report_baseline_status']['http_status']}/{route_map['plan_report_baseline_template']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
+            print(f"fbs_fulfillment_order_status: ok -> {route_map['fbs_fulfillment_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
             print("canonical_probe_refresh_policy: ok -> refresh skipped by default")
