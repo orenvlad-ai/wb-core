@@ -325,6 +325,8 @@ The same runner owns the only production path for the active functional cutover 
 
 Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`. Exact-date warehouse-chain recovery and archived-metric cleanup additionally follow `migration/104_warehouse_chain_audit_recovery.md` through the same repo-owned dry-run/apply/readback/UI contours.
 
+Proxy V4 transit correction uses only the deployed repo-owned `apps/sheet_vitrina_v1_proxy_v4_transit_repair.py`. Its dry-run is read-only apart from private evidence and binds the exact business day/last-closed boundary, one corrected immutable parameter revision effective `2026-08-16`, the complete `2026-08-14..last-closed` ready-snapshot set, exact V4 cells and protected V3/Finance/canonical WAC/COGS/non-target digests. Apply is unavailable without the reviewed manifest hash, exact `.wb-core-runtime-sha` and separate human-gate reference. It takes the shared warehouse writer lock, refuses source drift, creates a capacity-checked coherent integrity-verified operational backup, and performs only the single version insert plus exact snapshot-plan compare-and-swap updates. Finance raw data, Finance aggregates, canonical costs, WAC/COGS, V3 and non-V4 cells are read-only invariants. The current/future day remains owned by ordinary refresh under the new no-transit formula; ad-hoc SQL and server-only repair copies are forbidden.
+
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
 

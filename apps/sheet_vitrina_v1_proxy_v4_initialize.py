@@ -33,6 +33,7 @@ from packages.application.calculation_parameters_v4 import (  # noqa: E402
     PROXY_V4_FIXED_BOUNDARY,
     PROXY_V4_INITIAL_EFFECTIVE_DATES,
     ProxyV4Parameters,
+    _parameter_fingerprint,
     plan_initial_historical_versions,
 )
 from packages.application.proxy_v4_historical_projection import (  # noqa: E402
@@ -489,26 +490,7 @@ def _apply_manifest(
 
 def _planned_version_row(item: ProxyV4Parameters) -> dict[str, Any]:
     public = item.public()
-    fingerprint = _digest(
-        {
-            "contract": PROXY_V4_CONTRACT_VERSION,
-            "effective_date": item.effective_date,
-            "source_window_fingerprint": item.source_window_fingerprint,
-            "rates": {
-                key: public[key]
-                for key in (
-                    "buyout_rate",
-                    "tax_rate",
-                    "agent_remuneration_rate",
-                    "acquiring_rate",
-                    "wb_logistics_rate",
-                    "wb_storage_rate",
-                    "penalties_adjustments_rate",
-                    "other_expense_rate",
-                )
-            },
-        }
-    )
+    fingerprint = _parameter_fingerprint(item)
     public["fingerprint"] = fingerprint
     return {
         "version_id": item.version_id,

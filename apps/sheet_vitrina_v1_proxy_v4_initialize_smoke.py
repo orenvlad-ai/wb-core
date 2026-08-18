@@ -178,7 +178,7 @@ def main() -> None:
                 if not any(row_id.endswith("|" + metric_key) for row_id in rows_by_id):
                     raise AssertionError(f"initialized snapshot misses {metric_key}")
             buyout_rate = Decimal("0.8") if as_of_date <= "2026-08-07" else Decimal("0.9")
-            retained = Decimal("0.754")
+            retained = Decimal("0.759")
             eligible: list[tuple[Decimal, Decimal]] = []
             for index, nm_id in enumerate(enabled_nm_ids[:2], start=1):
                 order_sum = Decimal(1000 + index * 100)

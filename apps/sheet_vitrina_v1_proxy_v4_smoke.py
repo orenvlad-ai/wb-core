@@ -98,7 +98,7 @@ def main() -> None:
             "wb_logistics_rate": "0.03",
             "wb_storage_rate": "0.01",
             "penalties_adjustments_rate": "0.007",
-            "other_expense_rate": "0.019",
+            "other_expense_rate": "0.014",
         }
         if rates != expected:
             raise AssertionError(f"direct SUM/SUM or V4 expense composition drifted: {rates}")
@@ -115,8 +115,18 @@ def main() -> None:
             or Decimal(first_window["aligned_finance"]["net_revenue"]) != Decimal("3000")
         ):
             raise AssertionError(f"aligned source ranges/denominators are not exact: {first_window}")
-        if "marketing" not in first_window["finance"]["composition"]["excluded"]:
-            raise AssertionError("marketing must stay outside included_expense_rate")
+        excluded = first_window["finance"]["composition"]["excluded"]
+        if not {
+            "marketing",
+            "transit_logistics",
+            "capitalized_transit_logistics",
+        }.issubset(excluded):
+            raise AssertionError("marketing and both transit fields must stay outside included_expense_rate")
+        if first_window["aligned_finance"]["excluded_amounts"] != {
+            "transit_logistics": "24",
+            "capitalized_transit_logistics": "9",
+        }:
+            raise AssertionError("excluded transit diagnostics must remain visible and signed")
 
         versions = plan_initial_historical_versions(
             runtime=runtime,
@@ -213,7 +223,7 @@ def main() -> None:
             parameters=parameters,
             business_date="2026-08-08",
         )
-        expected_profit = Decimal("1000") * Decimal("0.9") * (Decimal("1") - Decimal("0.246")) - Decimal("10") * Decimal("0.9") * Decimal("20") - Decimal("30")
+        expected_profit = Decimal("1000") * Decimal("0.9") * (Decimal("1") - Decimal("0.241")) - Decimal("10") * Decimal("0.9") * Decimal("20") - Decimal("30")
         if calculated["proxy_profit_4"] != expected_profit:
             raise AssertionError(f"Proxy V4 formula drifted: {calculated}")
         before_boundary = calculate_proxy_4(
@@ -525,7 +535,7 @@ def main() -> None:
             )
 
     print("proxy_v4_formula_boundary_total: ok")
-    print("proxy_v4_aligned_window_sum_sum_expense_exclusions: ok")
+    print("proxy_v4_aligned_window_sum_sum_transit_exclusion: ok")
     print("proxy_v4_as_of_versions_tax_latest_week_rollover_idempotency: ok")
     print("proxy_v4_latest_common_week_no_average_current_day_freeze: ok")
     print("proxy_v4_one_two_three_week_intersection_zero_fallback: ok")

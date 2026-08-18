@@ -36,10 +36,11 @@ from packages.business_time import (
 
 PROXY_V4_BLOCK_KEY = "proxy_profit_margin_v4"
 PROXY_V4_FIXED_BOUNDARY = "2026-08-01"
-PROXY_V4_CONTRACT_VERSION = "sheet_vitrina_v1_proxy_v4_parameters_v2"
-PROXY_V4_FORMULA_VERSION = "proxy_profit_4_v1"
+PROXY_V4_CONTRACT_VERSION = "sheet_vitrina_v1_proxy_v4_parameters_v3_no_transit"
+PROXY_V4_LEGACY_FORMULA_VERSION = "proxy_profit_4_v1"
+PROXY_V4_FORMULA_VERSION = "proxy_profit_4_v2_no_transit"
 PROXY_V4_LATEST_WEEK_SELECTION_CONTRACT_VERSION = (
-    "sheet_vitrina_v1_proxy_v4_latest_confirmed_week_v1"
+    "sheet_vitrina_v1_proxy_v4_latest_confirmed_week_v2_no_transit"
 )
 PROXY_V4_INITIAL_EFFECTIVE_DATES = ("2026-08-01", "2026-08-08")
 
@@ -110,6 +111,7 @@ class ProxyV4Parameters:
     source_slot_to: str
     buyout_order_count_weight: Decimal
     finance_net_revenue_weight: Decimal
+    formula_version: str
     version_id: str = ""
     revision: int = 0
     version_kind: str = ""
@@ -182,7 +184,7 @@ class ProxyV4Parameters:
             "created_at": self.created_at,
             "created_by": self.created_by,
             "fingerprint": self.fingerprint,
-            "formula_version": PROXY_V4_FORMULA_VERSION,
+            "formula_version": self.formula_version,
         }
 
 
@@ -674,6 +676,10 @@ class ProxyV4ParametersBlock:
         current = self.parameters_for_date(effective_date)
         if current is None:
             raise ValueError("Proxy V4 historical initialization is not complete")
+        if current.formula_version != PROXY_V4_FORMULA_VERSION:
+            raise ValueError(
+                "Proxy V4 transit-exclusion historical correction is required before a tax revision"
+            )
         tax_rate = _bounded_rate(payload.get("tax_rate"), "tax_rate")
         fingerprint = _digest(
             {
@@ -1134,6 +1140,7 @@ def _build_finance_window(
         )
         net_revenue: Decimal | None = None
         amounts: dict[str, Decimal] = {}
+        excluded_amounts: dict[str, Decimal] = {}
         if status == "ready":
             net_revenue = sum(
                 (_metric(source, "net_revenue") for source in week_sources),
@@ -1145,6 +1152,7 @@ def _build_finance_window(
                 net_revenue = None
             else:
                 amounts = _finance_amounts(week_sources)
+                excluded_amounts = _finance_excluded_amounts(week_sources)
         week_results.append(
             {
                 "week_start": week_start,
@@ -1159,6 +1167,9 @@ def _build_finance_window(
                 ),
                 "net_revenue": None if net_revenue is None else _text(net_revenue),
                 "amounts": {key: _text(value) for key, value in amounts.items()},
+                "excluded_amounts": {
+                    key: _text(value) for key, value in excluded_amounts.items()
+                },
                 "rates": (
                     {
                         key: _text(value / net_revenue)
@@ -1240,10 +1251,23 @@ def _finance_amounts(sources: list[Mapping[str, Any]]) -> dict[str, Decimal]:
                 + _metric(source, "other_deductions")
                 + _metric(source, "acceptance")
                 - _metric(source, "capitalized_acceptance")
-                + _metric(source, "transit_logistics")
-                - _metric(source, "capitalized_transit_logistics")
                 for source in sources
             ),
+            Decimal("0"),
+        ),
+    }
+
+
+def _finance_excluded_amounts(
+    sources: list[Mapping[str, Any]],
+) -> dict[str, Decimal]:
+    return {
+        "transit_logistics": sum(
+            (_metric(source, "transit_logistics") for source in sources),
+            Decimal("0"),
+        ),
+        "capitalized_transit_logistics": sum(
+            (_metric(source, "capitalized_transit_logistics") for source in sources),
             Decimal("0"),
         ),
     }
@@ -1255,13 +1279,14 @@ def _finance_composition() -> dict[str, Any]:
         "penalties_adjustments": "penalties + corrections",
         "other_expense": (
             "subscriptions + paid_services + review_points + other_deductions + "
-            "acceptance - capitalized_acceptance + transit_logistics - capitalized_transit_logistics"
+            "acceptance - capitalized_acceptance"
         ),
         "excluded": [
             "marketing",
             "positive_adjustments",
             "wb_remuneration_adjustment",
             "capitalized_acceptance",
+            "transit_logistics",
             "capitalized_transit_logistics",
         ],
     }
@@ -1297,12 +1322,25 @@ def _combine_finance_week_results(
         for field in AUTOMATIC_RATE_FIELDS
         if field != "buyout_rate"
     }
+    excluded_amounts = {
+        field: sum(
+            (
+                _decimal(dict(item.get("excluded_amounts") or {}).get(field))
+                for item in included
+            ),
+            Decimal("0"),
+        )
+        for field in ("transit_logistics", "capitalized_transit_logistics")
+    }
     rates = {field: _text(value / net_revenue) for field, value in amounts.items()}
     fingerprint_payload = {
         "classifier_version": WB_FINANCE_CLASSIFIER_VERSION,
         "week_ranges": included_ranges,
         "net_revenue": _text(net_revenue),
         "amounts": {field: _text(value) for field, value in amounts.items()},
+        "excluded_amounts": {
+            field: _text(value) for field, value in excluded_amounts.items()
+        },
         "rates": rates,
         "source_weeks": [
             {
@@ -1319,6 +1357,9 @@ def _combine_finance_week_results(
         "status": "ready",
         "net_revenue": _text(net_revenue),
         "amounts": {field: _text(value) for field, value in amounts.items()},
+        "excluded_amounts": {
+            field: _text(value) for field, value in excluded_amounts.items()
+        },
         "rates": rates,
         "fingerprint_payload": fingerprint_payload,
     }
@@ -1407,6 +1448,7 @@ def _parameters_from_values(
     version_kind: str,
     created_at: str,
     created_by: str,
+    formula_version: str = PROXY_V4_FORMULA_VERSION,
 ) -> ProxyV4Parameters:
     result = ProxyV4Parameters(
         effective_date=date.fromisoformat(effective_date).isoformat(),
@@ -1425,6 +1467,7 @@ def _parameters_from_values(
         source_slot_to=date.fromisoformat(source_slot_to).isoformat(),
         buyout_order_count_weight=_decimal(buyout_order_count_weight),
         finance_net_revenue_weight=_decimal(finance_net_revenue_weight),
+        formula_version=str(formula_version),
         version_id=version_id,
         revision=revision,
         version_kind=version_kind,
@@ -1436,6 +1479,11 @@ def _parameters_from_values(
         raise ValueError("buyout_rate must be between 0 and 1")
     if result.included_expense_rate >= Decimal("1"):
         raise ValueError("Proxy V4 total included expenses must be below 100%")
+    if result.formula_version not in {
+        PROXY_V4_LEGACY_FORMULA_VERSION,
+        PROXY_V4_FORMULA_VERSION,
+    }:
+        raise ValueError(f"unsupported Proxy V4 formula version: {result.formula_version}")
     return result
 
 
@@ -1464,6 +1512,9 @@ def _parameters_from_row(row: sqlite3.Row) -> ProxyV4Parameters:
         version_kind=str(row["version_kind"]),
         created_at=str(row["created_at"]),
         created_by=str(row["created_by"]),
+        formula_version=str(
+            raw.get("formula_version") or PROXY_V4_LEGACY_FORMULA_VERSION
+        ),
     )
 
 
@@ -1488,6 +1539,7 @@ def _parameter_fingerprint(parameters: ProxyV4Parameters) -> str:
     return _digest(
         {
             "contract": PROXY_V4_CONTRACT_VERSION,
+            "formula_version": parameters.formula_version,
             "effective_date": parameters.effective_date,
             "source_window_fingerprint": parameters.source_window_fingerprint,
             "rates": {
