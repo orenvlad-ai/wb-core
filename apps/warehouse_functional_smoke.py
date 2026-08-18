@@ -249,6 +249,16 @@ def _test_post_cutover_ff_pool_projection_source() -> None:
                 "source_watermark": "fbs-lifecycle-current",
                 "updated_at": "2026-08-15T04:00:02Z",
             },
+            {
+                "facility_id": "fac_moscow",
+                "pool": "FBS",
+                "nm_id": 103,
+                "projection_epoch": 1,
+                "quantity": 3250,
+                "capital_rub": "319434.32291654259178871196266",
+                "source_watermark": "guided-current-with-existing-tail",
+                "updated_at": "2026-08-15T04:00:03Z",
+            },
         ],
     }
     projection = _current_ff_pool_projection(capture)
@@ -262,6 +272,12 @@ def _test_post_cutover_ff_pool_projection_source() -> None:
     _assert(
         projection["by_nm"][102]["capital"] == "73.0000000000000000004",
         "fractional minor-unit capital remains exact",
+    )
+    _assert(
+        projection["by_nm"][103]["quantity"] == 3250
+        and projection["by_nm"][103]["capital"]
+        == "319434.32291654259178871196266",
+        "publisher serialization preserves a production-shaped tail beyond 28 digits",
     )
     reordered = dict(capture)
     reordered["ff_pool_balances"] = list(reversed(capture["ff_pool_balances"]))
