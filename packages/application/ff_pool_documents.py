@@ -2588,66 +2588,76 @@ def _apply_guided_aggregate_projection(
                WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
             (version_id, nm_id),
         ).fetchone()
-        if row is None:
-            if recovery or quantity_delta <= 0 or capital_delta <= ZERO:
-                raise FfPoolDocumentError(
-                    "aggregate_sku_missing",
-                    "Guided acceptance aggregate SKU disappeared before apply",
-                    details={"nm_id": nm_id},
+        # The active aggregate is the exact sum of facility/pool rows and may
+        # carry a long fractional-kopeck tail.  Keep the arithmetic outside
+        # process-default Decimal precision just like the pool writer and the
+        # ordinary functional publisher.
+        with localcontext() as context:
+            context.prec = 160
+            if row is None:
+                if recovery or quantity_delta <= 0 or capital_delta <= ZERO:
+                    raise FfPoolDocumentError(
+                        "aggregate_sku_missing",
+                        "Guided acceptance aggregate SKU disappeared before apply",
+                        details={"nm_id": nm_id},
+                    )
+                quantity = Decimal(quantity_delta)
+                capital = capital_delta
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                           version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                           cost_covered_quantity,quality,certified,wb_quantity,
+                           wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        version_id,
+                        "ff",
+                        nm_id,
+                        canonical_decimal_text(quantity),
+                        canonical_decimal_text(capital / quantity),
+                        canonical_decimal_text(capital),
+                        canonical_decimal_text(quantity),
+                        "guided_acceptance_minor_unit",
+                        0,
+                        "0",
+                        "0",
+                        "0",
+                        _json(_guided_new_aggregate_provenance(request)),
+                    ),
                 )
-            quantity = Decimal(quantity_delta)
-            capital = capital_delta
-            conn.execute(
-                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
-                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
-                       cost_covered_quantity,quality,certified,wb_quantity,
-                       wb_in_way_to_client,wb_in_way_from_client,provenance_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    version_id,
-                    "ff",
-                    nm_id,
-                    canonical_decimal_text(quantity),
-                    canonical_decimal_text(capital / quantity),
-                    canonical_decimal_text(capital),
-                    canonical_decimal_text(quantity),
-                    "guided_acceptance_minor_unit",
-                    0,
-                    "0",
-                    "0",
-                    "0",
-                    _json(_guided_new_aggregate_provenance(request)),
-                ),
-            )
-        else:
-            quantity = Decimal(str(row[0])) + Decimal(quantity_delta)
-            capital = Decimal(str(row[1])) + capital_delta
-            covered = Decimal(str(row[2])) + Decimal(quantity_delta)
-            if (
-                quantity < ZERO
-                or capital < ZERO
-                or covered < ZERO
-                or (quantity == ZERO) != (capital == ZERO)
-            ):
-                raise FfPoolDocumentError(
-                    "guided_acceptance_aggregate_invalid",
-                    "Guided acceptance would create invalid aggregate quantity/capital coverage",
-                    details={"nm_id": nm_id},
+            else:
+                quantity = Decimal(str(row[0])) + Decimal(quantity_delta)
+                capital = Decimal(str(row[1])) + capital_delta
+                covered = Decimal(str(row[2])) + Decimal(quantity_delta)
+                if (
+                    quantity < ZERO
+                    or capital < ZERO
+                    or covered < ZERO
+                    or (quantity == ZERO) != (capital == ZERO)
+                ):
+                    raise FfPoolDocumentError(
+                        "guided_acceptance_aggregate_invalid",
+                        "Guided acceptance would create invalid aggregate quantity/capital coverage",
+                        details={"nm_id": nm_id},
+                    )
+                wac = (
+                    None
+                    if quantity == ZERO
+                    else canonical_decimal_text(capital / quantity)
                 )
-            wac = None if quantity == ZERO else canonical_decimal_text(capital / quantity)
-            conn.execute(
-                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-                   SET quantity=?,capital_rub=?,wac_rub=?,cost_covered_quantity=?
-                   WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-                (
-                    canonical_decimal_text(quantity),
-                    canonical_decimal_text(capital),
-                    wac,
-                    canonical_decimal_text(covered),
-                    version_id,
-                    nm_id,
-                ),
-            )
+                conn.execute(
+                    """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                       SET quantity=?,capital_rub=?,wac_rub=?,cost_covered_quantity=?
+                       WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+                    (
+                        canonical_decimal_text(quantity),
+                        canonical_decimal_text(capital),
+                        wac,
+                        canonical_decimal_text(covered),
+                        version_id,
+                        nm_id,
+                    ),
+                )
     if recovery:
         if set(restore_by_nm) != set(deltas):
             raise FfPoolDocumentError(
@@ -4315,15 +4325,25 @@ def _guided_acceptance_recovery_context(
         )
     deltas: dict[tuple[str, str, int], tuple[int, Decimal]] = {}
     aggregate_deltas: dict[int, tuple[int, Decimal]] = {}
-    for line in source_lines:
-        key = (str(line["facility_id"]), str(line["pool"]), int(line["nm_id"]))
-        quantity, capital = deltas.get(key, (0, ZERO))
-        capital_delta = Decimal(str(line["capital_delta_rub"]))
-        deltas[key] = (quantity + int(line["quantity_delta"]), capital + capital_delta)
-        aq, ac = aggregate_deltas.get(int(line["nm_id"]), (0, ZERO))
-        aggregate_deltas[int(line["nm_id"])] = (
-            aq + int(line["quantity_delta"]), ac + capital_delta
-        )
+    with localcontext() as context:
+        context.prec = 160
+        for line in source_lines:
+            key = (
+                str(line["facility_id"]),
+                str(line["pool"]),
+                int(line["nm_id"]),
+            )
+            quantity, capital = deltas.get(key, (0, ZERO))
+            capital_delta = Decimal(str(line["capital_delta_rub"]))
+            deltas[key] = (
+                quantity + int(line["quantity_delta"]),
+                capital + capital_delta,
+            )
+            aq, ac = aggregate_deltas.get(int(line["nm_id"]), (0, ZERO))
+            aggregate_deltas[int(line["nm_id"])] = (
+                aq + int(line["quantity_delta"]),
+                ac + capital_delta,
+            )
     for item in before.get("pool_balances") or []:
         key = (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"]))
         row = conn.execute(
@@ -4333,7 +4353,9 @@ def _guided_acceptance_recovery_context(
         ).fetchone()
         delta = deltas.get(key, (0, ZERO))
         expected_quantity = int(item["quantity"]) + delta[0]
-        expected_capital = Decimal(str(item["capital_rub"])) + delta[1]
+        with localcontext() as context:
+            context.prec = 160
+            expected_capital = Decimal(str(item["capital_rub"])) + delta[1]
         if (
             row is None
             or int(row["quantity"]) != expected_quantity
@@ -4364,14 +4386,18 @@ def _guided_acceptance_recovery_context(
             (aggregate_version, nm_id),
         ).fetchone()
         delta = aggregate_deltas.get(nm_id, (0, ZERO))
-        expected_quantity = Decimal(str(item["quantity"])) + delta[0]
-        expected_capital = Decimal(str(item["capital_rub"])) + delta[1]
-        expected_covered = Decimal(str(item["cost_covered_quantity"])) + delta[0]
-        expected_wac = (
-            None
-            if expected_quantity == ZERO
-            else canonical_decimal_text(expected_capital / expected_quantity)
-        )
+        with localcontext() as context:
+            context.prec = 160
+            expected_quantity = Decimal(str(item["quantity"])) + delta[0]
+            expected_capital = Decimal(str(item["capital_rub"])) + delta[1]
+            expected_covered = (
+                Decimal(str(item["cost_covered_quantity"])) + delta[0]
+            )
+            expected_wac = (
+                None
+                if expected_quantity == ZERO
+                else canonical_decimal_text(expected_capital / expected_quantity)
+            )
         accounting_matches = bool(
             row is not None
             and Decimal(str(row["quantity"])) == expected_quantity

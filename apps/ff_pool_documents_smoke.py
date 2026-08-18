@@ -30,6 +30,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentService,
     _allocate_cents,
     _apply_balance_movement,
+    _apply_guided_aggregate_projection,
     _build_posting_plan,
     _component_share,
     _posting_plan_preview,
@@ -50,6 +51,7 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     FEATURE_EPOCHS_TABLE,
     LINES_TABLE,
     OPERATIONS_TABLE,
+    evaluate_ff_pool_aggregate_parity,
 )
 from packages.application.warehouse_functional import STAGES  # noqa: E402
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
@@ -364,9 +366,24 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
                    PRIMARY KEY(version_id,warehouse_key,nm_id)
                )"""
         )
+        exact_aggregate_opening = {
+            210184534: (250, "22685.48291654259178871196266"),
+            245720334: (742, "72898.46191996789088452747788"),
+            259473237: (161, "15250.15967453213763517453472"),
+            497414010: (3714, "374597.1306848628156226987078"),
+            497414624: (9744, "981926.8202775904892378777031"),
+            497416271: (747, "99225.61859946938832759534936"),
+            497417163: (605, "73406.85909771881853260417024"),
+            497417474: (3247, "392647.3270720693000614962014"),
+        }
+        aggregate_opening_quantity = 0
         for nm_id, quantity, _fbo, _fbs, capital in rows:
             if nm_id in missing_aggregate_nm_ids:
                 continue
+            quantity, capital = exact_aggregate_opening.get(
+                nm_id, (quantity, capital)
+            )
+            aggregate_opening_quantity += quantity
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances
                    VALUES('26gn527-before','ff',?,?,?,?,?,'fixture',0,'0','0','0','{}')""",
@@ -408,11 +425,74 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
             missing_aggregate_nm_ids
         )
         assert readiness["aggregate_pool_parity"]["status"] == "pass"
-        assert readiness["aggregate_pool_parity"]["detail_quantity"] == 55_750
-        assert readiness["aggregate_pool_parity"]["aggregate_quantity"] == 55_750
+        assert readiness["aggregate_pool_parity"]["detail_quantity"] == (
+            aggregate_opening_quantity
+        )
+        assert readiness["aggregate_pool_parity"]["aggregate_quantity"] == (
+            aggregate_opening_quantity
+        )
         assert readiness["aggregate_pool_parity"]["detail_fingerprint"].startswith(
             "sha256:"
         )
+        conn.execute("SAVEPOINT guided_exact_aggregate")
+        guided_movements = [
+            item
+            for document in guided_plan["documents"]
+            for item in document.get("movements") or []
+        ]
+        for line_no, movement in enumerate(guided_movements, start=1):
+            _apply_balance_movement(
+                conn,
+                movement=movement,
+                operation_id="production-shaped-guided-exact-aggregate",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T03:00:00Z",
+            )
+        _apply_guided_aggregate_projection(
+            conn,
+            plan=guided_plan,
+            request=guided_request,
+            posted_at="2026-08-15T03:00:00Z",
+        )
+        aggregate_rows = [
+            {
+                "nm_id": int(row[0]),
+                "quantity": int(row[1]),
+                "capital_rub": str(row[2]),
+            }
+            for row in conn.execute(
+                """SELECT nm_id,quantity,capital_rub
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='26gn527-before' AND warehouse_key='ff'
+                   ORDER BY nm_id"""
+            ).fetchall()
+        ]
+        exact_parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
+        assert exact_parity.status == "pass", exact_parity
+        for nm_id, (_quantity, opening_capital) in exact_aggregate_opening.items():
+            aggregate_capital = conn.execute(
+                """SELECT capital_rub
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='26gn527-before' AND warehouse_key='ff'
+                     AND nm_id=?""",
+                (nm_id,),
+            ).fetchone()[0]
+            pool_capitals = conn.execute(
+                f"""SELECT capital_rub FROM {BALANCES_TABLE}
+                    WHERE facility_id='fac_msk' AND nm_id=? ORDER BY pool""",
+                (nm_id,),
+            ).fetchall()
+            with localcontext() as context:
+                context.prec = 160
+                expected = sum(
+                    (Decimal(str(item[0])) for item in pool_capitals),
+                    Decimal("0"),
+                )
+            assert str(aggregate_capital) == format(expected, "f")
+            assert Decimal(str(aggregate_capital)) > Decimal(opening_capital)
+        conn.execute("ROLLBACK TO guided_exact_aggregate")
+        conn.execute("RELEASE guided_exact_aggregate")
         conn.execute(
             f"DELETE FROM {BALANCES_TABLE} "
             "WHERE source_watermark='production-shaped-global-parity'"
