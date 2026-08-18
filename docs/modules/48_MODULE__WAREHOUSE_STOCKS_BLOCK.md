@@ -60,7 +60,8 @@ Active state содержит ровно шесть складов:
 
 Migration 133 does not extend this list or `warehouse_key`. Facilities and
 `FBS|FBO` pools are dimensional detail strictly inside `ff`. The only future
-admissible aggregate is `ff quantity/capital = SUM(facility × pool)` per SKU;
+admissible aggregate has exact INTEGER quantity and canonical RUB minor-unit
+capital equal to `SUM(facility × pool)` per SKU and in total;
 detail rows are never additional stage or all-stage operands. The foundation
 is empty and feature-off after deploy, and no active functional writer, read
 route, compact read model, public total, Vitrina cell or recommendation imports
@@ -93,7 +94,8 @@ Supplier registry и warehouse projection не смешиваются. Invoice �
 Migration 138 does not reuse `warehouse_opening_v1` and does not introduce a
 seventh stage. Its future opening manifest decomposes the exact active `ff`
 revision into existing active facilities and `FBS|FBO` pools with equality of
-integer quantity and Decimal capital for every `nmId`. Facility identity,
+integer quantity and exact Decimal capital for every `nmId` at the immutable
+opening boundary. Facility identity,
 Moscow/Orenburg allocation and `T` are external reviewed decisions, never
 deploy-time defaults. Detail remains unpublished and is never added a second
 time to total stock.
@@ -102,7 +104,11 @@ Migration 142 activates that detail only through an exact owner-gated Stage 7C
 manifest. The live aggregate remains the public six-stage `ff` truth and must
 equal the sum of facility × `FBS|FBO` after opening, historical FBS debit and
 every later lifecycle/guided document. Opening accepts signed INTEGER quantity
-and exact Decimal text capital, including fractional kopecks. FBS reservations
+and exact Decimal text capital, including fractional kopecks. Later operational
+parity keeps quantities exact and compares capital through the centralized
+`ROUND_HALF_UP` kopeck policy per SKU and in total. Conserved, attributed raw
+sub-kopeck differences remain audit diagnostics; canonical/cross-boundary or
+unattributed differences fail closed. FBS reservations
 change `available`, not physical aggregate quantity; negative available is a
 valid explicit state. Any aggregate/detail, source, mapping, pending-receipt or
 checkpoint drift disables/rejects the cutover instead of publishing a second

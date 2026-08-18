@@ -154,9 +154,12 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   domain ceiling and avoids both a 500-row moving tail and an unbounded lock
   hold.
   Lifecycle event products and both sides of each pool/aggregate capital fold
-  use the same 160-digit Decimal boundary as the canonical publisher. A
-  fractional-kopeck tail therefore cannot be rounded differently merely
-  because the pool and aggregate have different base magnitudes.
+  use the same 160-digit Decimal arithmetic boundary. Their operational parity
+  gate keeps quantity exact and compares money through the centralized
+  `rub_minor_unit_round_half_up_v1` policy per SKU and in total. Equal canonical
+  kopecks with a conserved, deterministically attributed raw sub-kopeck tail are
+  diagnostic; any canonical mismatch or crossed/unattributed total remains
+  fail-closed.
   The canonical publisher also preserves that boundary through its warehouse
   stage bucket and final Decimal-text serialization; a later scheduled or
   manual publication cannot reintroduce process-default 28-digit rounding.

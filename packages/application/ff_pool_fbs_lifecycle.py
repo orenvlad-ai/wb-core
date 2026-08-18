@@ -1288,7 +1288,23 @@ def _record_current_parity(
         raise FfPoolFbsLifecycleError(
             "post_t_parity_failed",
             "Post-T FBS debit diverged from aggregate FF",
-            details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
+            details={
+                "money_parity_policy": parity.money_parity_policy,
+                "quantity_mismatched_nm_ids": list(
+                    parity.quantity_mismatched_nm_ids
+                ),
+                "canonical_capital_mismatched_nm_ids": list(
+                    parity.canonical_capital_mismatched_nm_ids
+                ),
+                "raw_capital_mismatched_nm_ids": list(
+                    parity.raw_capital_mismatched_nm_ids
+                ),
+                "raw_capital_residuals_by_nm": {
+                    str(nm_id): canonical_decimal_text(residual)
+                    for nm_id, residual in parity.raw_capital_residuals_by_nm
+                },
+                "mismatched_nm_ids": list(parity.mismatched_nm_ids),
+            },
         )
     sequence = int(conn.execute(f"SELECT COALESCE(MAX(event_sequence),0) FROM {EVENTS_TABLE}").fetchone()[0])
     record_ff_pool_parity_diagnostic(
