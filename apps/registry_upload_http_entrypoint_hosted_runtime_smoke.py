@@ -179,9 +179,45 @@ def _assert_pre_prepare_abort_skips_stale_restore() -> None:
         raise AssertionError("unstarted abort must preserve the warehouse boundary")
 
 
+def _assert_fbs_status_probe_uses_public_contract() -> None:
+    result = {
+        "route": "fbs_fulfillment_order_status",
+        "method": "GET",
+        "url": "http://127.0.0.1/fbs-status",
+        "http_status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "json_body": {
+            "status": "ready",
+            "active_sku_count": 1,
+            "national_demand_scope": "russia_total_orderCount",
+            "wb_stock_used": False,
+            "facilities": [
+                {
+                    "facility_id": "fff_moscow",
+                    "name": "FF Москва",
+                    "calculation_enabled": True,
+                    "blockers": [],
+                }
+            ],
+            "sales_history_coverage": {
+                "earliest_available_date": "2026-07-01",
+                "latest_available_date": "2026-07-15",
+            },
+            "defaults": {"sales_history_mode": "last_n_days"},
+        },
+        "network_error": None,
+    }
+    evaluation = hosted_runtime._evaluate_route_result(result, route_paths={})
+    if evaluation.get("ok") is not True:
+        raise AssertionError(
+            "FBS status deploy probe must accept the public facility name field"
+        )
+
+
 def main() -> None:
     _assert_deploy_status_readback_retry()
     _assert_pre_prepare_abort_skips_stale_restore()
+    _assert_fbs_status_probe_uses_public_contract()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"
     ) as bindings_temp_dir:
