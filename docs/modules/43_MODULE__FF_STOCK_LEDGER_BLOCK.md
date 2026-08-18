@@ -591,7 +591,11 @@ pool movements. The minor-unit boundary applies to each new immutable movement,
 not to the pre-existing pool balance: opening/cutover capital remains its
 authoritative exact Decimal and apply adds the signed kopeck delta without
 rounding or rewriting that prior value. The inverse storno therefore subtracts
-the same kopeck delta and restores the exact prior capital. A zero-quantity
+the same kopeck delta and restores the exact prior capital. Guided aggregate
+apply and aggregate/detail parity use the same bounded 160-digit Decimal
+context as the pool writer and ordinary functional publisher; the
+process-default 28-digit context cannot trim or mask a fractional-kopeck tail.
+A zero-quantity
 close with a non-zero fractional residual remains fail-closed. The service is
 the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior

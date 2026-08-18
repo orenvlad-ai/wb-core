@@ -8,7 +8,7 @@ canonical FF ledger, or publish warehouse/Vitrina values.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import sqlite3
@@ -529,34 +529,45 @@ def evaluate_ff_pool_aggregate_parity(
     if not detail_rows:
         return _parity_result(status="detail_empty", feature_epoch=epoch)
 
-    detail_by_nm: dict[int, tuple[int, Decimal]] = {}
-    for row in detail_rows:
-        nm_id = _exact_integer(row[2], field_name="detail nm_id", positive=True)
-        quantity = _exact_integer(row[3], field_name="detail quantity")
-        capital = _decimal(row[4], field_name="detail capital_rub")
-        prior_quantity, prior_capital = detail_by_nm.get(nm_id, (0, ZERO))
-        detail_by_nm[nm_id] = (prior_quantity + quantity, prior_capital + capital)
+    # Capital may contain an authoritative fractional-kopeck tail with up to
+    # 80 stored characters.  Process-default Decimal precision (28) must not
+    # trim it while grouping locations or make an equally rounded aggregate
+    # look exact.
+    with localcontext() as context:
+        context.prec = 160
+        detail_by_nm: dict[int, tuple[int, Decimal]] = {}
+        for row in detail_rows:
+            nm_id = _exact_integer(row[2], field_name="detail nm_id", positive=True)
+            quantity = _exact_integer(row[3], field_name="detail quantity")
+            capital = _decimal(row[4], field_name="detail capital_rub")
+            prior_quantity, prior_capital = detail_by_nm.get(nm_id, (0, ZERO))
+            detail_by_nm[nm_id] = (
+                prior_quantity + quantity,
+                prior_capital + capital,
+            )
 
-    aggregate_by_nm: dict[int, tuple[int, Decimal]] = {}
-    for item in aggregate_rows:
-        nm_id = _exact_integer(item.get("nm_id"), field_name="aggregate nm_id", positive=True)
-        if nm_id in aggregate_by_nm:
-            raise ValueError(f"duplicate aggregate FF nm_id: {nm_id}")
-        aggregate_by_nm[nm_id] = (
-            _exact_integer(item.get("quantity"), field_name="aggregate quantity"),
-            _decimal(item.get("capital_rub"), field_name="aggregate capital_rub"),
+        aggregate_by_nm: dict[int, tuple[int, Decimal]] = {}
+        for item in aggregate_rows:
+            nm_id = _exact_integer(
+                item.get("nm_id"), field_name="aggregate nm_id", positive=True
+            )
+            if nm_id in aggregate_by_nm:
+                raise ValueError(f"duplicate aggregate FF nm_id: {nm_id}")
+            aggregate_by_nm[nm_id] = (
+                _exact_integer(item.get("quantity"), field_name="aggregate quantity"),
+                _decimal(item.get("capital_rub"), field_name="aggregate capital_rub"),
+            )
+
+        mismatches = tuple(
+            nm_id
+            for nm_id in sorted(set(detail_by_nm) | set(aggregate_by_nm))
+            if detail_by_nm.get(nm_id, (0, ZERO))
+            != aggregate_by_nm.get(nm_id, (0, ZERO))
         )
-
-    mismatches = tuple(
-        nm_id
-        for nm_id in sorted(set(detail_by_nm) | set(aggregate_by_nm))
-        if detail_by_nm.get(nm_id, (0, ZERO))
-        != aggregate_by_nm.get(nm_id, (0, ZERO))
-    )
-    detail_quantity = sum(item[0] for item in detail_by_nm.values())
-    aggregate_quantity = sum(item[0] for item in aggregate_by_nm.values())
-    detail_capital = sum((item[1] for item in detail_by_nm.values()), ZERO)
-    aggregate_capital = sum((item[1] for item in aggregate_by_nm.values()), ZERO)
+        detail_quantity = sum(item[0] for item in detail_by_nm.values())
+        aggregate_quantity = sum(item[0] for item in aggregate_by_nm.values())
+        detail_capital = sum((item[1] for item in detail_by_nm.values()), ZERO)
+        aggregate_capital = sum((item[1] for item in aggregate_by_nm.values()), ZERO)
     status = "mismatch" if mismatches else "pass"
     detail_fingerprint = _current_detail_fingerprint(conn, epoch)
     aggregate_fingerprint = _fingerprint(

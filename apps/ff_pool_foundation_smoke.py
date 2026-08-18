@@ -211,7 +211,11 @@ def _assert_typed_forward_acyclic_relations(conn: sqlite3.Connection) -> None:
 
 def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
     aggregate = [
-        {"nm_id": 101, "quantity": 10, "capital_rub": "100.0000"},
+        {
+            "nm_id": 101,
+            "quantity": 10,
+            "capital_rub": "319434.32291654259178871196266",
+        },
         {"nm_id": 202, "quantity": 3, "capital_rub": "37.50"},
     ]
     off = evaluate_ff_pool_aggregate_parity(conn, aggregate)
@@ -248,8 +252,18 @@ def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
 
     _insert_facility(conn, "facility-b", "TEST-B")
     balance_rows = (
-        ("facility-a", "FBS", 101, 2, 4, "40.0000", "10", "wm-1", NOW),
-        ("facility-b", "FBO", 101, 2, 6, "60", "10.0", "wm-1", NOW),
+        (
+            "facility-a",
+            "FBS",
+            101,
+            2,
+            4,
+            "22685.48291654259178871196266",
+            "10",
+            "wm-1",
+            NOW,
+        ),
+        ("facility-b", "FBO", 101, 2, 6, "296748.84", "10.0", "wm-1", NOW),
         ("facility-a", "FBO", 202, 2, 3, "37.50", "12.50", "wm-1", NOW),
     )
     conn.executemany(
@@ -266,6 +280,13 @@ def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
     assert passed.detail_fingerprint.startswith("sha256:")
     assert passed.aggregate_fingerprint.startswith("sha256:")
     assert passed.reader_allowed and passed.aggregate_unchanged
+    rounded_aggregate = deepcopy(aggregate)
+    rounded_aggregate[0]["capital_rub"] = "319434.3229165425917887119627"
+    precision_mismatch = evaluate_ff_pool_aggregate_parity(
+        conn, rounded_aggregate
+    )
+    assert precision_mismatch.status == "mismatch"
+    assert precision_mismatch.mismatched_nm_ids == (101,)
     record_ff_pool_parity_diagnostic(
         conn,
         diagnostic_id="parity-pass",
