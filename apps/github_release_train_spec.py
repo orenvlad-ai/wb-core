@@ -662,9 +662,14 @@ DEPLOY_PROOF_MARKER = "wb-core-loop-deploy-proof"
 CHAIN_AUDIT_MARKER = "wb-core-loop-chain-audit"
 RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
-DCP_RELEASE_HANDOFF_VERSION = "wb-core.dcp-release-handoff/v1"
+DCP_RELEASE_HANDOFF_V1_VERSION = "wb-core.dcp-release-handoff/v1"
+DCP_RELEASE_HANDOFF_VERSION = "wb-core.dcp-release-handoff/v2"
+DCP_RELEASE_HANDOFF_SUPPORTED_VERSIONS = frozenset(
+    {DCP_RELEASE_HANDOFF_V1_VERSION, DCP_RELEASE_HANDOFF_VERSION}
+)
 DCP_RELEASE_HANDOFF_PROOF_MARKER = "wb-core-dcp-release-handoff-proof"
 DCP_RELEASE_READMISSION_PROOF_MARKER = "wb-core-dcp-release-readmission-required"
+DCP_RELEASE_PRODUCTION_PROOF_MARKER = "wb-core-dcp-release-production-proof"
 PRODUCTION_MUTATION_COMPLETION_PROOF_MARKER = (
     "wb-core-production-mutation-completion-proof"
 )
@@ -687,6 +692,7 @@ ORCHESTRATION_ADMISSION_PROOF_MARKER = "wb-core-orchestration-admission-proof"
 RELEASE_LANE_PROOF_MARKER = "wb-core-release-lane-proof"
 LEGACY_RETIREMENT_PROOF_MARKER = "wb-core-legacy-retirement-proof"
 CANONICAL_PRODUCTION_TARGET_ID = "wb_core_eu_hosted_runtime_active"
+CANONICAL_PRODUCTION_SERVICE_NAME = "wb-core-registry-http.service"
 
 TERMINAL_FORBIDDEN_INHERITANCE = frozenset(
     {

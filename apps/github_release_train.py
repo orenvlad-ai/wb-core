@@ -34,12 +34,16 @@ from apps.github_release_train_spec import (
     AWAITING_UI_LABEL,
     BLOCKED_LABEL,
     CHAIN_AUDIT_MARKER,
+    CANONICAL_PRODUCTION_SERVICE_NAME,
     CANONICAL_PRODUCTION_TARGET_ID,
     CLASSIFICATION_BLOCKER_MARKER,
     COMPLETION_PROOF_MARKER,
     DEPLOY_PROOF_MARKER,
     DCP_RELEASE_HANDOFF_PROOF_MARKER,
+    DCP_RELEASE_HANDOFF_SUPPORTED_VERSIONS,
+    DCP_RELEASE_HANDOFF_V1_VERSION,
     DCP_RELEASE_HANDOFF_VERSION,
+    DCP_RELEASE_PRODUCTION_PROOF_MARKER,
     DCP_RELEASE_READMISSION_PROOF_MARKER,
     DONE_LABEL,
     FINANCE_DEPLOY_LEASE_BINDING_PROOF_MARKER,
@@ -84,9 +88,14 @@ PRODUCTION_MUTATION_LABEL = "scope:production-mutation"
 
 CANONICAL_GITHUB_REPOSITORY = "orenvlad-ai/wb-core"
 
-# Repository compatibility marker consumed by the installed DCP target.
+# Repository compatibility markers consumed by installed DCP targets. Version
+# one remains a strict repo-only input; version two adds typed readmission and
+# live-runtime terminal proof without coupling DCP to workflow topology.
 # wb-core.dcp-release-handoff/v1
-if DCP_RELEASE_HANDOFF_VERSION != "wb-core.dcp-release-handoff/v1":
+# wb-core.dcp-release-handoff/v2
+if DCP_RELEASE_HANDOFF_V1_VERSION != "wb-core.dcp-release-handoff/v1":
+    raise RuntimeError("DCP Release Train v1 handoff version drifted")
+if DCP_RELEASE_HANDOFF_VERSION != "wb-core.dcp-release-handoff/v2":
     raise RuntimeError("DCP Release Train handoff version drifted")
 
 STANDARD_TASK_LABEL = "task:standard"
@@ -237,6 +246,8 @@ class ReleaseApi(Protocol):
     def list_comments(self, number: int) -> list[dict[str, Any]]: ...
 
     def get_pull(self, number: int) -> dict[str, Any]: ...
+
+    def get_branch_sha(self, branch: str) -> str: ...
 
     def compare(self, base: str, head: str) -> dict[str, Any]: ...
 
@@ -473,6 +484,13 @@ class GitHubApi:
             raise ReleaseTrainError(f"PR #{number} returned an invalid payload")
         return payload
 
+    def get_branch_sha(self, branch: str) -> str:
+        encoded = urllib_parse.quote(branch, safe="")
+        payload, _ = self._request("GET", self._repo_path(f"branches/{encoded}"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("commit"), Mapping):
+            raise ReleaseTrainError(f"branch {branch!r} returned an invalid payload")
+        return _exact_sha(str((payload.get("commit") or {}).get("sha") or ""), branch)
+
     def compare(self, base: str, head: str) -> dict[str, Any]:
         encoded_base = urllib_parse.quote(base, safe="")
         encoded_head = urllib_parse.quote(head, safe="")
@@ -708,6 +726,16 @@ def _latest_label_timestamp(
 def _proof_marker(marker: str, **values: object) -> str:
     rendered = " ".join(f"{key}={value}" for key, value in sorted(values.items()))
     return f"<!-- {marker} {rendered} -->"
+
+
+def _proof_values_digest(values: Mapping[str, object]) -> str:
+    rendered = json.dumps(
+        {key: values[key] for key in sorted(values)},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 def _exact_sha(value: str, field: str) -> str:
@@ -2370,6 +2398,26 @@ def _dcp_ready_event(api: ReleaseApi, pull: Mapping[str, Any]) -> dict[str, Any]
     return event
 
 
+def _dcp_latest_ready_event(api: ReleaseApi, pull: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the latest immutable DCP admission even after RT removed its label."""
+
+    number = int(pull.get("number") or 0)
+    events = [
+        dict(event)
+        for event in api.list_issue_events(number)
+        if str(event.get("event") or "") == "labeled"
+        and isinstance(event.get("label"), Mapping)
+        and str((event.get("label") or {}).get("name") or "") == READY_LABEL
+        and _dcp_event_actor(event) == DCP_RELEASE_ACTOR
+        and int(event.get("id") or 0) > 0
+    ]
+    if not events:
+        raise ReleaseBlocked("DCP readmission has no immutable release:ready admission")
+    event = max(events, key=lambda item: int(item.get("id") or 0))
+    _dcp_ready_event_timestamp(event)
+    return event
+
+
 def _dcp_timeline_event_index(
     api: ReleaseApi,
     number: int,
@@ -2447,33 +2495,67 @@ def _dcp_revoke_release_eligibility(
     reason: str,
 ) -> None:
     number = int(pull.get("number") or 0)
-    head_sha = _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head")
+    observed_head = _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head")
+    head_ref = str((pull.get("head") or {}).get("ref") or "")
+    session = _dcp_handoff_session(pull)
+    if session is None:
+        raise ReleaseBlocked("DCP readmission requested for an ordinary PR")
     labels = label_names(pull)
+    scope = scope_from_labels(labels)
+    task_class = task_class_from_labels(labels)
+    ready_event = _dcp_latest_ready_event(api, pull)
+    existing_proofs = [
+        item
+        for item in _dcp_handoff_proof_records(api, number)
+        if item["pr"] == number
+        and item["head_ref"] == head_ref
+        and item["session"] == session
+        and item["repo"] == CANONICAL_GITHUB_REPOSITORY
+        and item["base"] == "main"
+    ]
+    latest_proof = max(existing_proofs, key=lambda item: int(item["comment_id"])) if existing_proofs else None
+    admitted_head = str(latest_proof["head"]) if latest_proof else observed_head
+    if latest_proof:
+        if int(latest_proof["ready_event"]) != int(ready_event.get("id") or 0):
+            raise ReleaseBlocked("DCP readmission proof does not match latest admission generation")
+        admission_check_id = int(latest_proof["admission_check"])
+        handoff_proof_id = int(latest_proof["comment_id"])
+    else:
+        admission_check = _dcp_admission_check(api, admitted_head, ready_event)
+        admission_check_id = int(admission_check.get("id") or 0)
+        handoff_proof_id = 0
+    values: dict[str, object] = {
+        "admission_check": admission_check_id,
+        "admitted_head": admitted_head,
+        "base": "main",
+        "handoff_proof": handoff_proof_id,
+        "head_ref": head_ref,
+        "main": api.get_branch_sha("main"),
+        "observed_head": observed_head,
+        "pr": number,
+        "ready_event": int(ready_event.get("id") or 0),
+        "reason": reason,
+        "repo": CANONICAL_GITHUB_REPOSITORY,
+        "scope": scope,
+        "session": session,
+        "task": task_class,
+        "version": DCP_RELEASE_HANDOFF_VERSION,
+    }
+    values["digest"] = _proof_values_digest(values)
     after = labels - STATE_LABELS - {NEEDS_RESUME_LABEL}
     if after != labels:
         api.set_labels(number, sorted(after))
-    proof = _proof_marker(
-        DCP_RELEASE_READMISSION_PROOF_MARKER,
-        base="main",
-        head=head_sha,
-        pr=number,
-        reason=reason,
-        version=DCP_RELEASE_HANDOFF_VERSION,
-    )
+    proof = _proof_marker(DCP_RELEASE_READMISSION_PROOF_MARKER, **values)
     if not _has_comment_proof(
         api,
         number,
         DCP_RELEASE_READMISSION_PROOF_MARKER,
-        base="main",
-        head=head_sha,
-        pr=number,
-        reason=reason,
-        version=DCP_RELEASE_HANDOFF_VERSION,
+        **values,
     ):
         api.add_comment(
             number,
             "Release Train removed DCP release eligibility without updating or merging "
-            f"the admitted head `{head_sha}`. A fresh exact-head baseline, DCP review and "
+            f"the admitted head `{admitted_head}`. A fresh exact-head baseline, DCP review and "
             f"FIFO admission are required.\n\n{proof}",
         )
 
@@ -2491,7 +2573,7 @@ def _dcp_raise_readmission(
     )
 
 
-DCP_HANDOFF_PROOF_FIELDS = frozenset(
+DCP_HANDOFF_V1_PROOF_FIELDS = frozenset(
     {
         "admission_check",
         "base",
@@ -2504,6 +2586,9 @@ DCP_HANDOFF_PROOF_FIELDS = frozenset(
         "session",
         "version",
     }
+)
+DCP_HANDOFF_PROOF_FIELDS = DCP_HANDOFF_V1_PROOF_FIELDS | frozenset(
+    {"digest", "main", "scope", "task"}
 )
 
 
@@ -2547,7 +2632,13 @@ def _dcp_handoff_proof_records(
             if not separator or key in fields:
                 raise ReleaseBlocked("DCP handoff proof has malformed or duplicate fields")
             fields[key] = value
-        if frozenset(fields) != DCP_HANDOFF_PROOF_FIELDS:
+        version = fields.get("version", "")
+        expected_fields = (
+            DCP_HANDOFF_V1_PROOF_FIELDS
+            if version == DCP_RELEASE_HANDOFF_V1_VERSION
+            else DCP_HANDOFF_PROOF_FIELDS
+        )
+        if frozenset(fields) != expected_fields:
             raise ReleaseBlocked("DCP handoff proof fields are incomplete or ambiguous")
         try:
             normalized: dict[str, Any] = {
@@ -2560,8 +2651,17 @@ def _dcp_handoff_proof_records(
                 "release_check": int(fields["release_check"]),
                 "repo": fields["repo"],
                 "session": int(fields["session"]),
-                "version": fields["version"],
+                "version": version,
             }
+            if version == DCP_RELEASE_HANDOFF_VERSION:
+                normalized.update(
+                    {
+                        "digest": fields["digest"],
+                        "main": _exact_sha(fields["main"], "DCP proof main"),
+                        "scope": fields["scope"],
+                        "task": fields["task"],
+                    }
+                )
         except (TypeError, ValueError) as exc:
             raise ReleaseBlocked("DCP handoff proof has invalid numeric fields") from exc
         session_match = DCP_RELEASE_BRANCH.fullmatch(normalized["head_ref"])
@@ -2578,12 +2678,21 @@ def _dcp_handoff_proof_records(
             <= 0
             or normalized["base"] != "main"
             or normalized["repo"] != CANONICAL_GITHUB_REPOSITORY
-            or normalized["version"] != DCP_RELEASE_HANDOFF_VERSION
+            or normalized["version"] not in DCP_RELEASE_HANDOFF_SUPPORTED_VERSIONS
             or session_match is None
             or int(session_match.group(1)) != normalized["session"]
             or body != _dcp_handoff_proof_body(normalized)
         ):
             raise ReleaseBlocked("DCP handoff proof is stale, edited or non-canonical")
+        if normalized["version"] == DCP_RELEASE_HANDOFF_VERSION:
+            digest = str(normalized.pop("digest"))
+            if (
+                normalized["scope"] not in {REPO_ONLY_LABEL, LIVE_RUNTIME_LABEL}
+                or normalized["task"] != STANDARD_TASK_LABEL
+                or digest != _proof_values_digest(normalized)
+            ):
+                raise ReleaseBlocked("DCP handoff proof v2 identity or digest is invalid")
+            normalized["digest"] = digest
         records.append({**normalized, "comment_id": comment_id})
     return records
 
@@ -2648,7 +2757,7 @@ def _dcp_current_handoff_proof(
         and item["session"] == session
         and item["repo"] == CANONICAL_GITHUB_REPOSITORY
         and item["base"] == "main"
-        and item["version"] == DCP_RELEASE_HANDOFF_VERSION
+        and item["version"] in DCP_RELEASE_HANDOFF_SUPPORTED_VERSIONS
     ]
     if len(matches) != 1:
         raise ReleaseBlocked("current DCP exact head requires exactly one canonical handoff proof")
@@ -2675,9 +2784,13 @@ def _dcp_record_handoff_proof(
         "ready_event": int(ready_event.get("id") or 0),
         "release_check": int(release_check.get("id") or 0),
         "repo": CANONICAL_GITHUB_REPOSITORY,
+        "main": api.get_branch_sha("main"),
+        "scope": scope_from_labels(label_names(pull)),
         "session": session,
+        "task": task_class_from_labels(label_names(pull)),
         "version": DCP_RELEASE_HANDOFF_VERSION,
     }
+    values["digest"] = _proof_values_digest(values)
     existing = [
         item
         for item in _dcp_handoff_proof_records(api, number)
@@ -4541,11 +4654,13 @@ def prepare_candidate(
         raise ReleaseBlocked("production data mutation requires a separate exact human gate")
     if dcp_session is not None and (
         repository != CANONICAL_GITHUB_REPOSITORY
-        or scope != REPO_ONLY_LABEL
+        or scope not in {REPO_ONLY_LABEL, LIVE_RUNTIME_LABEL}
         or task_class != STANDARD_TASK_LABEL
         or loop_root is not None
     ):
-        raise ReleaseBlocked("DCP handoff requires exact wb-core repo-only STANDARD identity")
+        raise ReleaseBlocked(
+            "DCP handoff requires exact wb-core repo-only or live-runtime STANDARD identity"
+        )
 
     head_sha = str((pull.get("head") or {}).get("sha") or "")
     head_ref = str((pull.get("head") or {}).get("ref") or "")
@@ -4733,18 +4848,7 @@ def merge_candidate(
         if dcp_session is not None:
             merge_sha = _dcp_require_actions_merge(pull)
             _dcp_current_handoff_proof(api, pull)
-            if RUNNING_LABEL not in labels and not (
-                DONE_LABEL in labels
-                and _dcp_completion_body_proven(pull, merge_sha=merge_sha)
-                and _has_comment_proof(
-                    api,
-                    candidate.number,
-                    COMPLETION_PROOF_MARKER,
-                    contour="repo-only",
-                    merge=merge_sha,
-                    pr=candidate.number,
-                )
-            ):
+            if RUNNING_LABEL not in labels and not terminal_state_proven(api, pull):
                 raise ReleaseBlocked(
                     "DCP merged PR lacks exact Release Train processing or terminal proof"
                 )
@@ -4874,12 +4978,270 @@ def _dcp_publish_completion_body(
         raise ReleaseBlocked("DCP terminal completion proof body readback failed")
 
 
+DCP_PRODUCTION_PROOF_FIELDS = frozenset(
+    {
+        "base",
+        "deploy_evidence",
+        "deployed",
+        "digest",
+        "handoff_proof",
+        "head",
+        "head_ref",
+        "merge",
+        "pr",
+        "repo",
+        "runtime_evidence",
+        "scope",
+        "service",
+        "session",
+        "target",
+        "task",
+        "version",
+    }
+)
+
+
+def _json_evidence_digest(payload: Mapping[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _dcp_validate_live_runtime_evidence(
+    pull: Mapping[str, Any],
+    *,
+    merge_sha: str,
+    deploy_evidence: Mapping[str, Any] | None,
+    runtime_evidence: Mapping[str, Any] | None,
+) -> tuple[str, str]:
+    number = int(pull.get("number") or 0)
+    head = _exact_sha(str((pull.get("head") or {}).get("sha") or ""), "head")
+    if not isinstance(deploy_evidence, Mapping) or not isinstance(runtime_evidence, Mapping):
+        raise ReleaseBlocked("DCP live-runtime completion requires deploy and read-only runtime evidence")
+    deploy = deploy_evidence.get("deploy")
+    loopback = deploy_evidence.get("loopback_probe")
+    public = deploy_evidence.get("public_probe")
+    if (
+        deploy_evidence.get("ok") is not True
+        or deploy_evidence.get("target_id") != CANONICAL_PRODUCTION_TARGET_ID
+        or not isinstance(deploy, Mapping)
+        or deploy.get("ok") is not True
+        or deploy.get("dry_run") is not False
+        or not isinstance(loopback, Mapping)
+        or loopback.get("ok") is not True
+        or not isinstance(public, Mapping)
+        or public.get("ok") is not True
+    ):
+        raise ReleaseBlocked("DCP live-runtime deploy/probe evidence is missing or unsuccessful")
+    required_runtime = {
+        "healthy": True,
+        "status": "reconciled",
+        "pr": number,
+        "head": head,
+        "merge": merge_sha,
+        "expected_sha": merge_sha,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "service_name": CANONICAL_PRODUCTION_SERVICE_NAME,
+        "read_only": True,
+        "repairs_applied": False,
+    }
+    mismatches = [
+        key for key, value in required_runtime.items() if runtime_evidence.get(key) != value
+    ]
+    evidence_rows = runtime_evidence.get("evidence")
+    final = evidence_rows[-1] if isinstance(evidence_rows, list) and evidence_rows else None
+    if mismatches or not isinstance(final, Mapping):
+        raise ReleaseBlocked(
+            "DCP live-runtime readback does not match exact PR/head/merge/target/service: "
+            + ", ".join(mismatches or ["evidence"])
+        )
+    statuses = final.get("probe_statuses")
+    if (
+        final.get("metadata_sha") != merge_sha
+        or final.get("runtime_sha") != merge_sha
+        or final.get("deployment_complete") is not True
+        or final.get("unit") != "active"
+        or isinstance(final.get("main_pid"), bool)
+        or not isinstance(final.get("main_pid"), int)
+        or int(final.get("main_pid") or 0) <= 0
+        or final.get("target_id") != CANONICAL_PRODUCTION_TARGET_ID
+        or final.get("auth_env_ok") is not True
+        or not isinstance(statuses, list)
+        or not statuses
+        or any(status not in {200, 303, 401, 403} for status in statuses)
+    ):
+        raise ReleaseBlocked("DCP live-runtime exact deployed-SHA/service/probe readback is invalid")
+    return _json_evidence_digest(deploy_evidence), _json_evidence_digest(runtime_evidence)
+
+
+def _dcp_production_proof_body(values: Mapping[str, object]) -> str:
+    return (
+        "Release Train deployed and independently read back the exact DCP live-runtime "
+        "merge on the canonical production target.\n\n"
+        + _proof_marker(DCP_RELEASE_PRODUCTION_PROOF_MARKER, **dict(values))
+    )
+
+
+def _dcp_production_proof_records(
+    api: ReleaseApi,
+    number: int,
+) -> list[dict[str, Any]]:
+    prefix = f"<!-- {DCP_RELEASE_PRODUCTION_PROOF_MARKER} "
+    records: list[dict[str, Any]] = []
+    for comment in api.list_comments(number):
+        body = str(comment.get("body") or "")
+        if DCP_RELEASE_PRODUCTION_PROOF_MARKER not in body:
+            continue
+        author = comment.get("user") or {}
+        if str(author.get("login") or "") not in {"github-actions", "github-actions[bot]"}:
+            raise ReleaseBlocked("DCP production proof has a non-Actions author")
+        created_at = _github_timestamp(comment.get("created_at"))
+        updated_at = _github_timestamp(comment.get("updated_at"))
+        lines = [line for line in body.splitlines() if line.startswith(prefix)]
+        if created_at is None or updated_at is None or created_at != updated_at or len(lines) != 1:
+            raise ReleaseBlocked("DCP production proof was edited, duplicated or lacks timestamps")
+        line = lines[0]
+        if not line.endswith(" -->"):
+            raise ReleaseBlocked("DCP production proof marker is malformed")
+        fields: dict[str, str] = {}
+        for token in line[len(prefix) : -4].split():
+            key, separator, value = token.partition("=")
+            if not separator or key in fields:
+                raise ReleaseBlocked("DCP production proof has malformed or duplicate fields")
+            fields[key] = value
+        if frozenset(fields) != DCP_PRODUCTION_PROOF_FIELDS:
+            raise ReleaseBlocked("DCP production proof fields are incomplete or ambiguous")
+        try:
+            normalized: dict[str, Any] = {
+                **fields,
+                "handoff_proof": int(fields["handoff_proof"]),
+                "pr": int(fields["pr"]),
+                "session": int(fields["session"]),
+            }
+            for key in ("deployed", "head", "merge"):
+                normalized[key] = _exact_sha(fields[key], f"DCP production {key}")
+            for key in ("deploy_evidence", "runtime_evidence"):
+                normalized[key] = _sha256_fingerprint(fields[key], key)
+        except (TypeError, ValueError) as exc:
+            raise ReleaseBlocked("DCP production proof has invalid typed fields") from exc
+        digest = str(normalized.pop("digest"))
+        if (
+            normalized["version"] != DCP_RELEASE_HANDOFF_VERSION
+            or normalized["base"] != "main"
+            or normalized["repo"] != CANONICAL_GITHUB_REPOSITORY
+            or normalized["scope"] != LIVE_RUNTIME_LABEL
+            or normalized["task"] != STANDARD_TASK_LABEL
+            or normalized["target"] != CANONICAL_PRODUCTION_TARGET_ID
+            or normalized["service"] != CANONICAL_PRODUCTION_SERVICE_NAME
+            or normalized["deployed"] != normalized["merge"]
+            or digest != _proof_values_digest(normalized)
+        ):
+            raise ReleaseBlocked("DCP production proof identity or digest is invalid")
+        normalized["digest"] = digest
+        if body != _dcp_production_proof_body(normalized):
+            raise ReleaseBlocked("DCP production proof body is non-canonical")
+        records.append({**normalized, "comment_id": int(comment.get("id") or 0)})
+    return records
+
+
+def _dcp_publish_production_proof(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    merge_sha: str,
+    deploy_evidence: Mapping[str, Any] | None,
+    runtime_evidence: Mapping[str, Any] | None,
+) -> None:
+    session = _dcp_handoff_session(pull)
+    if session is None:
+        raise ReleaseBlocked("DCP production proof requested for an ordinary PR")
+    handoff = _dcp_current_handoff_proof(api, pull)
+    if handoff["version"] != DCP_RELEASE_HANDOFF_VERSION or handoff.get("scope") != LIVE_RUNTIME_LABEL:
+        raise ReleaseBlocked("DCP live-runtime completion requires an exact v2 handoff proof")
+    existing = _dcp_production_proof_records(api, int(pull.get("number") or 0))
+    existing_matches = [
+        item
+        for item in existing
+        if item["pr"] == int(pull.get("number") or 0)
+        and item["head"] == handoff["head"]
+        and item["head_ref"] == handoff["head_ref"]
+        and item["handoff_proof"] == handoff["comment_id"]
+        and item["merge"] == merge_sha
+        and item["deployed"] == merge_sha
+    ]
+    if existing:
+        if len(existing) != 1 or len(existing_matches) != 1:
+            raise ReleaseBlocked("DCP live-runtime completion has stale or duplicate production proof")
+        return
+    deploy_digest, runtime_digest = _dcp_validate_live_runtime_evidence(
+        pull,
+        merge_sha=merge_sha,
+        deploy_evidence=deploy_evidence,
+        runtime_evidence=runtime_evidence,
+    )
+    values: dict[str, object] = {
+        "base": "main",
+        "deploy_evidence": deploy_digest,
+        "deployed": merge_sha,
+        "handoff_proof": int(handoff["comment_id"]),
+        "head": str(handoff["head"]),
+        "head_ref": str(handoff["head_ref"]),
+        "merge": merge_sha,
+        "pr": int(pull.get("number") or 0),
+        "repo": CANONICAL_GITHUB_REPOSITORY,
+        "runtime_evidence": runtime_digest,
+        "scope": LIVE_RUNTIME_LABEL,
+        "service": CANONICAL_PRODUCTION_SERVICE_NAME,
+        "session": session,
+        "target": CANONICAL_PRODUCTION_TARGET_ID,
+        "task": STANDARD_TASK_LABEL,
+        "version": DCP_RELEASE_HANDOFF_VERSION,
+    }
+    values["digest"] = _proof_values_digest(values)
+    api.add_comment(int(pull.get("number") or 0), _dcp_production_proof_body(values))
+    matches = [
+        item
+        for item in _dcp_production_proof_records(api, int(pull.get("number") or 0))
+        if all(item.get(key) == value for key, value in values.items())
+    ]
+    if len(matches) != 1:
+        raise ReleaseBlocked("DCP live-runtime production proof readback failed")
+
+
+def _dcp_production_terminal_proven(
+    api: ReleaseApi,
+    pull: Mapping[str, Any],
+    *,
+    merge_sha: str,
+) -> bool:
+    handoff = _dcp_current_handoff_proof(api, pull)
+    records = _dcp_production_proof_records(api, int(pull.get("number") or 0))
+    matches = [
+        item
+        for item in records
+        if item["pr"] == int(pull.get("number") or 0)
+        and item["head"] == handoff["head"]
+        and item["head_ref"] == handoff["head_ref"]
+        and item["handoff_proof"] == handoff["comment_id"]
+        and item["merge"] == merge_sha
+        and item["deployed"] == merge_sha
+    ]
+    return len(records) == 1 and len(matches) == 1
+
+
 def complete_standard_release(
     api: ReleaseApi,
     number: int,
     *,
     merge_sha: str,
     contour: str,
+    deploy_evidence: Mapping[str, Any] | None = None,
+    runtime_evidence: Mapping[str, Any] | None = None,
 ) -> str:
     """Complete STANDARD only from exact merge/deploy evidence owned by this command."""
 
@@ -4903,11 +5265,18 @@ def complete_standard_release(
     else:
         raise ReleaseBlocked("unsupported completion contour")
     if dcp_session is not None:
-        if contour != "repo-only":
-            raise ReleaseBlocked("DCP handoff supports only repo-only completion")
         _dcp_require_actions_merge(pull)
         _dcp_current_handoff_proof(api, pull)
-        _dcp_publish_completion_body(api, pull, merge_sha=exact_merge)
+        if contour == "repo-only":
+            _dcp_publish_completion_body(api, pull, merge_sha=exact_merge)
+        elif contour == "production-verified":
+            _dcp_publish_production_proof(
+                api,
+                pull,
+                merge_sha=exact_merge,
+                deploy_evidence=deploy_evidence,
+                runtime_evidence=runtime_evidence,
+            )
         pull = api.get_pull(number)
         labels = label_names(pull)
     proof = _proof_marker(
@@ -5479,7 +5848,13 @@ def terminal_state_proven(api: ReleaseApi, pull: Mapping[str, Any]) -> bool:
             if dcp_session is not None:
                 _dcp_require_actions_merge(pull)
                 _dcp_current_handoff_proof(api, pull)
-                if not _dcp_completion_body_proven(pull, merge_sha=merge_sha):
+                if scope == REPO_ONLY_LABEL and not _dcp_completion_body_proven(
+                    pull, merge_sha=merge_sha
+                ):
+                    return False
+                if scope == LIVE_RUNTIME_LABEL and not _dcp_production_terminal_proven(
+                    api, pull, merge_sha=merge_sha
+                ):
                     return False
         except (DCPReleaseReadmissionRequired, ReleaseBlocked, TypeError, ValueError):
             return False
@@ -6414,11 +6789,23 @@ def command_correct_loop_identity(args: argparse.Namespace) -> int:
 
 def command_complete(args: argparse.Namespace) -> int:
     api = _api_from_env()
+    deploy_evidence = (
+        json.loads(args.deploy_evidence_file.read_text(encoding="utf-8"))
+        if args.deploy_evidence_file
+        else None
+    )
+    runtime_evidence = (
+        json.loads(args.runtime_evidence_file.read_text(encoding="utf-8"))
+        if args.runtime_evidence_file
+        else None
+    )
     status = complete_standard_release(
         api,
         args.pr,
         merge_sha=args.merge_sha,
         contour=args.contour,
+        deploy_evidence=deploy_evidence,
+        runtime_evidence=runtime_evidence,
     )
     _json_print({"status": status, "pr_number": args.pr, "merge_sha": args.merge_sha})
     return 0
@@ -6520,6 +6907,7 @@ def command_prepare(args: argparse.Namespace) -> int:
             "task_class": candidate.task_class,
             "loop_root": candidate.loop_root or 0,
             "agent_acknowledged": candidate.agent_acknowledged,
+            "dcp_handoff": _dcp_handoff_session(api.get_pull(candidate.number)) is not None,
         },
     )
     _json_print(
@@ -7089,6 +7477,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("repo-only", "production-verified"),
         required=True,
     )
+    complete.add_argument("--deploy-evidence-file", type=Path)
+    complete.add_argument("--runtime-evidence-file", type=Path)
     complete.set_defaults(handler=command_complete)
 
     resume_halted = subparsers.add_parser("resume-halted")
