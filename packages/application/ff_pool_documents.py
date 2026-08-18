@@ -468,6 +468,8 @@ class FfPoolDocumentService:
             self.process_request(canonical_request_id)
         elif self._retry_legacy_money_block(canonical_request_id):
             self.process_request(canonical_request_id)
+        elif self._retry_ready_guided_plan_preview(canonical_request_id):
+            self.process_request(canonical_request_id)
         return {**self.status(request_id=identity.request_id), "idempotent": not inserted}
 
     def _retry_legacy_money_block(self, request_id: str) -> bool:
@@ -512,6 +514,55 @@ class FfPoolDocumentService:
                     stage="money_boundary_revalidation",
                     status="complete",
                     details={"policy": "header_half_up_then_largest_remainder"},
+                )
+            conn.commit()
+            return bool(changed)
+
+    def _retry_ready_guided_plan_preview(self, request_id: str) -> bool:
+        """Upgrade one identical ready guided request to the stronger preview.
+
+        Requests made before posting-plan validation did not prove that every
+        current aggregate/pool/source guard was constructible.  An exact
+        idempotent retry may reprocess that same immutable request in place;
+        posted requests and all blocked/error states remain untouched.
+        """
+
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT document_kind,source_type,state,preview_manifest_json "
+                f"FROM {REQUESTS_TABLE} WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            preview = (
+                _json_object(_loads(row["preview_manifest_json"], {}))
+                if row is not None
+                else {}
+            )
+            readiness = _json_object(preview.get("posting_plan_preview") or {})
+            if (
+                row is None
+                or str(row["document_kind"]) != "china_acceptance"
+                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["state"]) != "ready"
+                or bool(readiness.get("confirm_plan_ready"))
+            ):
+                conn.rollback()
+                return False
+            changed = conn.execute(
+                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',ready_at='',"
+                "updated_at=?,error_code='',error_details_json='null' "
+                "WHERE request_id=? AND state='ready'",
+                (now, request_id),
+            ).rowcount
+            if changed:
+                self._event(
+                    conn,
+                    request_id=request_id,
+                    stage="posting_plan_preview_upgrade",
+                    status="complete",
+                    details={"immutable_request_reused": True},
                 )
             conn.commit()
             return bool(changed)
@@ -718,7 +769,7 @@ class FfPoolDocumentService:
         try:
             with _connect(self.db_path, query_only=True) as conn:
                 row = conn.execute(
-                    f"SELECT document_kind,request_payload_json FROM {REQUESTS_TABLE} WHERE request_id=?",
+                    f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
                     (canonical,),
                 ).fetchone()
             if row is None:
@@ -740,6 +791,48 @@ class FfPoolDocumentService:
                         "normalization_residual_rub_by_nm"
                     ],
                 }
+            if _is_guided_china_request(row):
+                try:
+                    with _connect(self.db_path, query_only=True) as conn:
+                        epoch = _writer_epoch(conn)
+                        _require_guided_acceptance_activation(conn)
+                        plan = _build_posting_plan(
+                            conn,
+                            request=row,
+                            manifest=manifest,
+                            epoch=epoch,
+                        )
+                except FfPoolDocumentError as exc:
+                    if exc.code not in {
+                        "feature_writer_disabled",
+                        "guided_acceptance_opening_not_active",
+                    }:
+                        raise
+                    manifest["posting_plan_preview"] = {
+                        "confirm_plan_ready": False,
+                        "business_mutation_applied": False,
+                        "blocker_code": exc.code,
+                    }
+                else:
+                    from packages.application.ff_pool_surfaces import FfPoolSurface
+
+                    _shipment, _lines, current_source_revision = FfPoolSurface(
+                        db_path=self.db_path,
+                        runtime_dir=self.runtime_dir,
+                        timestamp_factory=self.timestamp_factory,
+                    ).supplier_shipment_source(str(row["source_id"]))
+                    if (
+                        current_source_revision != str(row["source_revision"])
+                        or current_source_revision != str(manifest.get("source_revision") or "")
+                    ):
+                        raise FfPoolDocumentError(
+                            "supplier_source_revision_changed",
+                            "Supplier composition or cost inputs changed during preview",
+                        )
+                    manifest["posting_plan_preview"] = _posting_plan_preview(
+                        plan=plan,
+                        epoch=epoch,
+                    )
             finished = self._now()
             with _connect(self.db_path) as conn:
                 updated = conn.execute(
@@ -821,6 +914,17 @@ class FfPoolDocumentService:
                     f"FROM {DOCUMENTS_TABLE} WHERE document_id=?",
                     (str(row["posted_document_id"]),),
                 ).fetchone()
+            preview_manifest = _loads(row["preview_manifest_json"], {})
+            confirm_allowed = str(row["state"]) == "ready"
+            if _is_guided_china_request(row):
+                readiness = (
+                    dict(preview_manifest.get("posting_plan_preview") or {})
+                    if isinstance(preview_manifest, Mapping)
+                    else {}
+                )
+                confirm_allowed = confirm_allowed and bool(
+                    readiness.get("confirm_plan_ready")
+                )
             return {
                 "contract_name": WORKFLOW_CONTRACT,
                 "service_contract": CONTRACT_NAME,
@@ -829,7 +933,7 @@ class FfPoolDocumentService:
                 "client_request_id": str(row["client_request_id"]),
                 "document_kind": str(row["document_kind"]),
                 "state": str(row["state"]),
-                "confirm_allowed": str(row["state"]) == "ready",
+                "confirm_allowed": confirm_allowed,
                 "source": {
                     "system": str(row["source_system"]),
                     "type": str(row["source_type"]),
@@ -842,7 +946,7 @@ class FfPoolDocumentService:
                 "business_date": str(row["business_date"]),
                 "actor": str(row["actor"]),
                 "template_fingerprint": str(row["template_fingerprint"]),
-                "preview_manifest": _loads(row["preview_manifest_json"], {}),
+                "preview_manifest": preview_manifest,
                 "posted_manifest_sha256": str(row["posted_manifest_sha256"]),
                 "document": dict(document) if document is not None else None,
                 "recovery_operation_id": str(row["recovery_operation_id"]),
@@ -1613,6 +1717,67 @@ def _build_posting_plan(
     return plan
 
 
+def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, Any]:
+    """Return compact durable proof that the current guided plan is buildable."""
+
+    documents = list(plan.get("documents") or [])
+    movements = [
+        dict(movement)
+        for document in documents
+        for movement in document.get("movements") or []
+    ]
+    quantity_by_pool: dict[str, int] = {}
+    capital_cents_by_pool: dict[str, int] = {}
+    for movement in movements:
+        pool = str(movement["pool"])
+        quantity_by_pool[pool] = quantity_by_pool.get(pool, 0) + int(
+            movement["quantity_delta"]
+        )
+        capital_cents_by_pool[pool] = capital_cents_by_pool.get(pool, 0) + int(
+            movement["capital_delta_cents"]
+        )
+    domain = _json_object(plan.get("domain_manifest") or {})
+    before = _json_object(domain.get("guided_acceptance_before_state") or {})
+    aggregate_before = list(before.get("aggregate_balances") or [])
+    return {
+        "confirm_plan_ready": True,
+        "business_mutation_applied": False,
+        "feature_epoch": int(epoch),
+        "primary_document_id": str(plan["primary_document_id"]),
+        "root_document_id": str(plan["root_document_id"]),
+        "document_count": len(documents),
+        "line_count": sum(len(document.get("lines") or []) for document in documents),
+        "movement_count": len(movements),
+        "balance_key_count": len(plan.get("balance_keys") or []),
+        "quantity_delta": sum(int(item["quantity_delta"]) for item in movements),
+        "capital_delta_rub": _cents_text(
+            sum(int(item["capital_delta_cents"]) for item in movements)
+        ),
+        "quantity_delta_by_pool": dict(sorted(quantity_by_pool.items())),
+        "capital_delta_rub_by_pool": {
+            pool: _cents_text(value)
+            for pool, value in sorted(capital_cents_by_pool.items())
+        },
+        "aggregate_semantic_zero_nm_ids": sorted(
+            int(item["nm_id"])
+            for item in aggregate_before
+            if not bool(item.get("row_present"))
+        ),
+        "pool_before_state_digest": _fingerprint(
+            list(before.get("pool_balances") or [])
+        ),
+        "aggregate_before_state_digest": _fingerprint(aggregate_before),
+        "dependent_before_state_digest": str(
+            (_json_object(before.get("dependent_reservation_debit_state") or {})).get(
+                "digest"
+            )
+            or ""
+        ),
+        "posted_manifest_sha256": _fingerprint(plan["posted_manifest"]),
+        "source_rechecked": True,
+    }
+
+
 def _require_guided_acceptance_activation(conn: sqlite3.Connection) -> None:
     from packages.application.ff_pool_cutover import read_ff_pool_cutover_status
 
@@ -2023,6 +2188,18 @@ def _apply_guided_acceptance_recovery_legacy(
     )
 
 
+def _guided_new_aggregate_provenance(request: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "source": "guided_china_acceptance",
+        "request_id": str(request["request_id"]),
+        "shipment_id": str(request["source_id"]),
+        "source_revision": str(request["source_revision"]),
+        "business_date": str(request["business_date"]),
+        "materialized_from_semantic_zero": True,
+        "append_only_recovery_keeps_zero_row": True,
+    }
+
+
 def _apply_guided_aggregate_projection(
     conn: sqlite3.Connection,
     *,
@@ -2050,33 +2227,130 @@ def _apply_guided_aggregate_projection(
             "aggregate_active_missing", "Guided acceptance requires the active aggregate FF version"
         )
     version_id = str(active[0])
+    recovery = _json_object(
+        (plan.get("domain_manifest") or {}).get("guided_acceptance_recovery") or {}
+    )
+    restore_by_nm = {
+        int(item["nm_id"]): dict(item)
+        for item in recovery.get("restore_aggregate_balances") or []
+    }
     for nm_id, (quantity_delta, capital_delta) in sorted(deltas.items()):
         row = conn.execute(
-            """SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances
+            """SELECT quantity,capital_rub,cost_covered_quantity
+               FROM sheet_vitrina_v1_warehouse_functional_balances
                WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
             (version_id, nm_id),
         ).fetchone()
         if row is None:
-            raise FfPoolDocumentError(
-                "aggregate_sku_missing",
-                "Guided acceptance aggregate SKU is missing",
-                details={"nm_id": nm_id},
+            if recovery or quantity_delta <= 0 or capital_delta <= ZERO:
+                raise FfPoolDocumentError(
+                    "aggregate_sku_missing",
+                    "Guided acceptance aggregate SKU disappeared before apply",
+                    details={"nm_id": nm_id},
+                )
+            quantity = Decimal(quantity_delta)
+            capital = capital_delta
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    version_id,
+                    "ff",
+                    nm_id,
+                    canonical_decimal_text(quantity),
+                    canonical_decimal_text(capital / quantity),
+                    canonical_decimal_text(capital),
+                    canonical_decimal_text(quantity),
+                    "guided_acceptance_minor_unit",
+                    0,
+                    "0",
+                    "0",
+                    "0",
+                    _json(_guided_new_aggregate_provenance(request)),
+                ),
             )
-        quantity = _signed_int(row[0], field="aggregate quantity") + quantity_delta
-        capital = Decimal(str(row[1])) + capital_delta
-        wac = None if quantity == 0 else canonical_decimal_text(capital / Decimal(quantity))
-        conn.execute(
-            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-               SET quantity=?,capital_rub=?,wac_rub=?
-               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-            (
-                canonical_decimal_text(Decimal(quantity)),
-                canonical_decimal_text(capital),
-                wac,
-                version_id,
-                nm_id,
-            ),
-        )
+        else:
+            quantity = Decimal(str(row[0])) + Decimal(quantity_delta)
+            capital = Decimal(str(row[1])) + capital_delta
+            covered = Decimal(str(row[2])) + Decimal(quantity_delta)
+            if (
+                quantity < ZERO
+                or capital < ZERO
+                or covered < ZERO
+                or (quantity == ZERO) != (capital == ZERO)
+            ):
+                raise FfPoolDocumentError(
+                    "guided_acceptance_aggregate_invalid",
+                    "Guided acceptance would create invalid aggregate quantity/capital coverage",
+                    details={"nm_id": nm_id},
+                )
+            wac = None if quantity == ZERO else canonical_decimal_text(capital / quantity)
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=?,capital_rub=?,wac_rub=?,cost_covered_quantity=?
+                   WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+                (
+                    canonical_decimal_text(quantity),
+                    canonical_decimal_text(capital),
+                    wac,
+                    canonical_decimal_text(covered),
+                    version_id,
+                    nm_id,
+                ),
+            )
+    if recovery:
+        if set(restore_by_nm) != set(deltas):
+            raise FfPoolDocumentError(
+                "guided_recovery_before_state_missing",
+                "Recovery does not contain every affected aggregate before-state",
+            )
+        for nm_id, before in sorted(restore_by_nm.items()):
+            row = conn.execute(
+                """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+                (version_id, nm_id),
+            ).fetchone()
+            if row is None:
+                raise FfPoolDocumentError(
+                    "guided_recovery_aggregate_drift",
+                    "Recovered aggregate projection row disappeared",
+                    details={"nm_id": nm_id},
+                )
+            if bool(before.get("row_present")):
+                conn.execute(
+                    """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                       SET quantity=?,wac_rub=?,capital_rub=?,cost_covered_quantity=?,
+                           quality=?,certified=?,wb_quantity=?,wb_in_way_to_client=?,
+                           wb_in_way_from_client=?,provenance_json=?
+                       WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+                    (
+                        str(before["quantity"]),
+                        before.get("wac_rub"),
+                        str(before["capital_rub"]),
+                        str(before["cost_covered_quantity"]),
+                        str(before["quality"]),
+                        int(before["certified"]),
+                        str(before["wb_quantity"]),
+                        str(before["wb_in_way_to_client"]),
+                        str(before["wb_in_way_from_client"]),
+                        str(before["provenance_json"]),
+                        version_id,
+                        nm_id,
+                    ),
+                )
+            elif any(
+                Decimal(str(value or "0")) != ZERO
+                for value in (row[0], row[2], row[3])
+            ) or row[1] is not None:
+                raise FfPoolDocumentError(
+                    "guided_recovery_aggregate_drift",
+                    "A semantic-zero aggregate SKU did not recover to zero",
+                    details={"nm_id": nm_id},
+                )
     aggregate_rows = [
         {
             "nm_id": int(row[0]),
@@ -2457,26 +2731,54 @@ def _plan_china_acceptance(
         aggregate_before = []
         for nm_id in sorted(capital_by_nm):
             row = conn.execute(
-                """SELECT quantity,capital_rub,wac_rub
+                """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,
+                          quality,certified,wb_quantity,wb_in_way_to_client,
+                          wb_in_way_from_client,provenance_json
                    FROM sheet_vitrina_v1_warehouse_functional_balances
                    WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
                 (str(active[0]), nm_id),
             ).fetchone()
             if row is None:
-                raise FfPoolDocumentError(
-                    "aggregate_sku_missing",
-                    "Guided acceptance aggregate SKU is missing",
-                    details={"nm_id": nm_id},
+                aggregate_before.append(
+                    {
+                        "nm_id": nm_id,
+                        "row_present": False,
+                        "quantity": "0",
+                        "wac_rub": None,
+                        "capital_rub": "0",
+                        "cost_covered_quantity": "0",
+                        "quality": None,
+                        "certified": None,
+                        "wb_quantity": None,
+                        "wb_in_way_to_client": None,
+                        "wb_in_way_from_client": None,
+                        "provenance_json": None,
+                    }
                 )
-            aggregate_before.append(
-                {
-                    "nm_id": nm_id,
-                    "quantity": canonical_decimal_text(row["quantity"]),
-                    "capital_rub": canonical_decimal_text(row["capital_rub"]),
-                    "wac_rub": canonical_decimal_text(row["wac_rub"])
-                    if row["wac_rub"] is not None else None,
-                }
-            )
+            else:
+                aggregate_before.append(
+                    {
+                        "nm_id": nm_id,
+                        "row_present": True,
+                        "quantity": canonical_decimal_text(row["quantity"]),
+                        "wac_rub": canonical_decimal_text(row["wac_rub"])
+                        if row["wac_rub"] is not None else None,
+                        "capital_rub": canonical_decimal_text(row["capital_rub"]),
+                        "cost_covered_quantity": canonical_decimal_text(
+                            row["cost_covered_quantity"]
+                        ),
+                        "quality": str(row["quality"]),
+                        "certified": int(row["certified"]),
+                        "wb_quantity": canonical_decimal_text(row["wb_quantity"]),
+                        "wb_in_way_to_client": canonical_decimal_text(
+                            row["wb_in_way_to_client"]
+                        ),
+                        "wb_in_way_from_client": canonical_decimal_text(
+                            row["wb_in_way_from_client"]
+                        ),
+                        "provenance_json": str(row["provenance_json"]),
+                    }
+                )
         supplier_before = dict(shipment)
         dependent_state = _guided_dependent_state(
             conn,
@@ -3599,7 +3901,30 @@ def _guided_acceptance_recovery_context(
     domain = _json_object(posted_manifest.get("domain") or {})
     before = _json_object(domain.get("guided_acceptance_before_state") or {})
     supplier_before = _json_object(before.get("supplier") or {})
-    if not supplier_before or not before.get("pool_balances") or not before.get("aggregate_balances"):
+    aggregate_before = list(before.get("aggregate_balances") or [])
+    required_aggregate_fields = {
+        "nm_id",
+        "row_present",
+        "quantity",
+        "wac_rub",
+        "capital_rub",
+        "cost_covered_quantity",
+        "quality",
+        "certified",
+        "wb_quantity",
+        "wb_in_way_to_client",
+        "wb_in_way_from_client",
+        "provenance_json",
+    }
+    if (
+        not supplier_before
+        or not before.get("pool_balances")
+        or not aggregate_before
+        or any(
+            not required_aggregate_fields.issubset(dict(item))
+            for item in aggregate_before
+        )
+    ):
         raise FfPoolDocumentError(
             "guided_recovery_before_state_missing",
             "Guided acceptance lacks the exact immutable before-state required for recovery",
@@ -3684,22 +4009,71 @@ def _guided_acceptance_recovery_context(
             "guided_recovery_projection_drift",
             "Active warehouse projection changed after guided acceptance",
         )
-    for item in before.get("aggregate_balances") or []:
+    for item in aggregate_before:
         nm_id = int(item["nm_id"])
         row = conn.execute(
-            """SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances
+            """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,
+                      quality,certified,wb_quantity,wb_in_way_to_client,
+                      wb_in_way_from_client,provenance_json
+               FROM sheet_vitrina_v1_warehouse_functional_balances
                WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
             (aggregate_version, nm_id),
         ).fetchone()
         delta = aggregate_deltas.get(nm_id, (0, ZERO))
-        if (
-            row is None
-            or Decimal(str(row["quantity"])) != Decimal(str(item["quantity"])) + delta[0]
-            or Decimal(str(row["capital_rub"])) != Decimal(str(item["capital_rub"])) + delta[1]
-        ):
+        expected_quantity = Decimal(str(item["quantity"])) + delta[0]
+        expected_capital = Decimal(str(item["capital_rub"])) + delta[1]
+        expected_covered = Decimal(str(item["cost_covered_quantity"])) + delta[0]
+        expected_wac = (
+            None
+            if expected_quantity == ZERO
+            else canonical_decimal_text(expected_capital / expected_quantity)
+        )
+        accounting_matches = bool(
+            row is not None
+            and Decimal(str(row["quantity"])) == expected_quantity
+            and Decimal(str(row["capital_rub"])) == expected_capital
+            and Decimal(str(row["cost_covered_quantity"])) == expected_covered
+            and (
+                (row["wac_rub"] is None and expected_wac is None)
+                or (
+                    row["wac_rub"] is not None
+                    and expected_wac is not None
+                    and Decimal(str(row["wac_rub"])) == Decimal(expected_wac)
+                )
+            )
+        )
+        if not accounting_matches:
             raise FfPoolDocumentError(
                 "guided_recovery_aggregate_drift",
                 "Aggregate FF state changed after guided acceptance",
+                details={"nm_id": nm_id},
+            )
+        if bool(item.get("row_present")):
+            metadata_matches = bool(
+                str(row["quality"]) == str(item["quality"])
+                and int(row["certified"]) == int(item["certified"])
+                and Decimal(str(row["wb_quantity"]))
+                == Decimal(str(item["wb_quantity"]))
+                and Decimal(str(row["wb_in_way_to_client"]))
+                == Decimal(str(item["wb_in_way_to_client"]))
+                and Decimal(str(row["wb_in_way_from_client"]))
+                == Decimal(str(item["wb_in_way_from_client"]))
+                and str(row["provenance_json"]) == str(item["provenance_json"])
+            )
+        else:
+            metadata_matches = bool(
+                str(row["quality"]) == "guided_acceptance_minor_unit"
+                and int(row["certified"]) == 0
+                and Decimal(str(row["wb_quantity"])) == ZERO
+                and Decimal(str(row["wb_in_way_to_client"])) == ZERO
+                and Decimal(str(row["wb_in_way_from_client"])) == ZERO
+                and str(row["provenance_json"])
+                == _json(_guided_new_aggregate_provenance(target_request))
+            )
+        if not metadata_matches:
+            raise FfPoolDocumentError(
+                "guided_recovery_aggregate_drift",
+                "Aggregate FF metadata changed after guided acceptance",
                 details={"nm_id": nm_id},
             )
     dependent_before = _json_object(
@@ -3736,6 +4110,9 @@ def _guided_acceptance_recovery_context(
             "order_status": str(supplier_before.get("order_status") or ""),
         },
         "affected_nm_ids": sorted(aggregate_deltas),
+        "restore_aggregate_balances": [
+            dict(item) for item in aggregate_before
+        ],
         "before_state_digest": _fingerprint(before),
         "fail_closed_on_any_affected_state_drift": True,
     }

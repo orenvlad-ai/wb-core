@@ -591,6 +591,17 @@ pool movements. The service is the only future owner of the factual date, existi
 aggregate receipt, detail movements and targeted replay, and rejects a prior
 receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
+Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
+full posting plan, rechecks the exact supplier source revision and durably pins
+the plan/document totals plus pool, aggregate and dependent before-state
+digests. A pre-upgrade identical ready request is refreshed in place; it never
+creates a duplicate request or business effect.
+
+An accepted SKU does not have to exist in the current aggregate `ff` snapshot:
+new inbound inventory is frozen as an absent semantic-zero before-state and its
+first positive row is materialized only by confirm. Quantity, canonical capital
+and `cost_covered_quantity` advance together; no synthetic zero or capital-only
+row is allowed. The immutable plan explicitly names every semantic-zero SKU.
 
 The exact guided replay and its recovery are append-only. A storno is admitted
 only when supplier factual state, every affected pool/aggregate row and the
@@ -599,8 +610,12 @@ negative legacy receipt, reverses the pool document, restores factual status/dat
 and the prior cost-layer state, returns aggregate FF to the frozen before-state
 and queues affected-SKU replay. Any downstream reservation/debit, source/cost
 revision or affected balance drift blocks compensation; delete/ad-hoc SQL/blind
-restore is not a recovery path. A recovered shipment can be accepted again only
-through a fresh source revision and a new immutable request.
+restore is not a recovery path. Previously present aggregate rows are restored
+field-for-field. A row first created by the acceptance remains as an audited
+zero row after storno (zero quantity/capital/cost coverage and null WAC), which
+is the canonical no-delete equivalent of its frozen absent state. A recovered
+shipment can be accepted again only through a fresh source revision and a new
+immutable request.
 
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools

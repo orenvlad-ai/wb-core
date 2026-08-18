@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -30,6 +31,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     _allocate_cents,
     _build_posting_plan,
     _component_share,
+    _posting_plan_preview,
 )
 from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
     DEFAULT_LIMITS,
@@ -220,6 +222,75 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
         int(key): int(value)
         for key, value in normalization["capital_cents_by_nm"].items()
     }
+    # Production-shaped guided planning must treat an inbound SKU absent from
+    # the current aggregate FF snapshot as exact semantic zero, not as an
+    # error.  The three missing rows mirror the real 26GN527 preview evidence.
+    missing_aggregate_nm_ids = {210183919, 428855560, 428855758}
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_supplier_shipments(
+                   shipment_id TEXT PRIMARY KEY,actual_ff_acceptance_date TEXT,
+                   order_status TEXT NOT NULL,updated_at TEXT NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_supplier_shipments
+               VALUES('26gn527',NULL,'in_transit','2026-08-15T00:00:00Z')"""
+        )
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(
+                   slot INTEGER PRIMARY KEY,version_id TEXT NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_functional_active
+               VALUES(1,'26gn527-before')"""
+        )
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(
+                   version_id TEXT NOT NULL,warehouse_key TEXT NOT NULL,nm_id INTEGER NOT NULL,
+                   quantity TEXT NOT NULL,wac_rub TEXT,capital_rub TEXT NOT NULL,
+                   cost_covered_quantity TEXT NOT NULL,quality TEXT NOT NULL,
+                   certified INTEGER NOT NULL,wb_quantity TEXT NOT NULL,
+                   wb_in_way_to_client TEXT NOT NULL,wb_in_way_from_client TEXT NOT NULL,
+                   provenance_json TEXT NOT NULL,
+                   PRIMARY KEY(version_id,warehouse_key,nm_id)
+               )"""
+        )
+        for nm_id, quantity, _fbo, _fbs, capital in rows:
+            if nm_id in missing_aggregate_nm_ids:
+                continue
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances
+                   VALUES('26gn527-before','ff',?,?,?,?,?,'fixture',0,'0','0','0','{}')""",
+                (
+                    nm_id,
+                    str(quantity),
+                    str(Decimal(capital) / Decimal(quantity)),
+                    capital,
+                    str(quantity),
+                ),
+            )
+        guided_request = dict(request)
+        guided_request["source_type"] = "china_acceptance_workbook"
+        guided_plan = _build_posting_plan(
+            conn,
+            request=guided_request,
+            manifest=manifest,
+            epoch=1,
+        )
+        readiness = _posting_plan_preview(plan=guided_plan, epoch=1)
+        assert readiness["confirm_plan_ready"] is True
+        assert readiness["quantity_delta"] == 66_000
+        assert readiness["capital_delta_rub"] == "7220382.23"
+        assert readiness["aggregate_semantic_zero_nm_ids"] == sorted(
+            missing_aggregate_nm_ids
+        )
+        conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_balances")
+        conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_active")
+        conn.execute("DROP TABLE sheet_vitrina_v1_supplier_shipments")
+        conn.commit()
     repeated = service.preview_china_acceptance_workbook(
         identity=replace(
             request_identity,
