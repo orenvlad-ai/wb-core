@@ -3738,7 +3738,7 @@
       z-index: 4;
       box-sizing: border-box;
       width: max-content;
-      max-width: min(220px, calc(100vw - 48px));
+      max-width: min(calc(var(--sku-separator-metric-width, 180px) - 18px), calc(100vw - 48px));
       min-height: calc(var(--table-font-size) * 2.3);
       margin-left: 0;
       border: 0;
@@ -15220,7 +15220,7 @@
       let previousRow = null;
       visibleRows.forEach(function(row) {
         if (shouldInsertSkuSeparator(previousRow, row)) {
-          bodyParts.push(buildSkuSeparatorRow(tableColumnCount, row));
+          bodyParts.push(buildSkuSeparatorRow(tableColumnCount, row, columns));
         }
         bodyParts.push(buildDataRow(row, columns, stickyOffsets));
         previousRow = row;
@@ -15237,15 +15237,22 @@
       return '<td class="table-spacer-cell" data-table-spacer-cell="body" aria-hidden="true"></td>';
     }
 
-    function buildSkuSeparatorRow(columnCount, nextRow) {
+    function buildSkuSeparatorRow(columnCount, nextRow, columns) {
       const label = tableObjectLabelForRow(nextRow);
       const nmId = skuClusterIdentity(nextRow);
+      const metricColumn = (Array.isArray(columns) ? columns : []).find(function(column) {
+        return String((column && column.id) || "") === "metric_label";
+      });
+      const metricColumnWidth = Math.max(
+        24,
+        Number((metricColumn && (metricColumn.size || metricColumn.min_size)) || 180)
+      );
       const labelHtml = ALLOWED_UNIFIED_TABS.has(SKU_MANAGEMENT_UNIFIED_TAB) && /^\d+$/.test(nmId)
         ? '<button class="sku-separator-label" type="button" data-open-vitrina-sku="' + escapeHtml(nmId) +
           '" data-vitrina-sku-name="' + escapeHtml(label) + '" title="Открыть управление SKU: ' + escapeHtml(label) + '">' + escapeHtml(label) + '</button>'
         : '<span class="sku-separator-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>';
       return [
-        '<tr class="sku-separator-row" data-row-kind="separator" data-separator-next-label="' + escapeHtml(label) + '">',
+        '<tr class="sku-separator-row" data-row-kind="separator" data-separator-next-label="' + escapeHtml(label) + '" style="--sku-separator-metric-width:' + metricColumnWidth + 'px">',
         '<td colspan="' + columnCount + '">',
         labelHtml,
         "</td>",
