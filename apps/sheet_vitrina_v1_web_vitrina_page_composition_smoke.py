@@ -16,6 +16,10 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import _active_incident_metric_catalog
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (
+    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     INCIDENT_STOCK_METRIC_KEYS,
 )
@@ -371,10 +375,11 @@ def main() -> None:
         expected_row_ids = [
             "TOTAL|total_view_count",
             "TOTAL|total_orderSum",
+            f"TOTAL|{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
             "TOTAL|buyoutPercent",
-            f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted",
+            f"SKU:{enabled[0].nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
             f"SKU:{enabled[0].nm_id}|avg_addToCartConversion",
-            f"SKU:{enabled[1].nm_id}|avg_price_seller_discounted",
+            f"SKU:{enabled[1].nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
             f"SKU:{enabled[1].nm_id}|avg_addToCartConversion",
         ]
         required_positions = [
@@ -533,7 +538,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C7",
+                write_rect="A1:C8",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -541,12 +546,17 @@ def _build_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
+                    [
+                        "Итого: Цена продавца взвеш.",
+                        f"TOTAL|{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
+                        1040,
+                    ],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}", 990],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}", 1090],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
                 ],
-                row_count=6,
+                row_count=7,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

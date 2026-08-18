@@ -191,7 +191,7 @@ def _build_artifact(*, first_nm_id: int, second_nm_id: int) -> HistoricalArtifac
                 values_by_date={"2026-03-01": 1000, "2026-03-02": 1010, "2026-03-03": 1020},
             ),
             HistoricalArtifactRow(
-                row_id=f"SKU:{first_nm_id}|avg_price_seller_discounted",
+                row_id=f"SKU:{first_nm_id}|price_seller_discounted",
                 label="SKU A: Цена продавца",
                 values_by_date={"2026-03-01": 990, "2026-03-02": 992, "2026-03-03": 994},
             ),
@@ -201,7 +201,7 @@ def _build_artifact(*, first_nm_id: int, second_nm_id: int) -> HistoricalArtifac
                 values_by_date={"2026-03-01": 11.5, "2026-03-02": 11.7, "2026-03-03": 11.9},
             ),
             HistoricalArtifactRow(
-                row_id=f"SKU:{second_nm_id}|avg_price_seller_discounted",
+                row_id=f"SKU:{second_nm_id}|price_seller_discounted",
                 label="SKU B: Цена продавца",
                 values_by_date={"2026-03-01": 1090, "2026-03-02": 1092, "2026-03-03": 1094},
             ),
@@ -248,9 +248,9 @@ def _build_daily_plan(*, first_nm_id: int, second_nm_id: int) -> SheetVitrinaV1E
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 140, 150],
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1200, 1300],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 1110, 1120],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", 1110, 1120],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 13.0, 13.2],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1210, 1220],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|price_seller_discounted", 1210, 1220],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 12.0, 12.2],
                 ],
                 row_count=6,

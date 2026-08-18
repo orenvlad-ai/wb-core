@@ -44,9 +44,9 @@ def main() -> None:
         raise AssertionError(f"section mapping mismatch, got {view_model.sections}")
 
     rows = {row.row_id: row for row in view_model.rows}
-    price_row = rows["SKU:101|avg_price_seller_discounted"]
+    price_row = rows["SKU:101|price_seller_discounted"]
     percent_row = rows["SKU:101|avg_addToCartConversion"]
-    second_price_row = rows["SKU:102|avg_price_seller_discounted"]
+    second_price_row = rows["SKU:102|price_seller_discounted"]
     second_percent_row = rows["SKU:102|avg_addToCartConversion"]
     total_row = rows["TOTAL|total_view_count"]
     if total_row.row_kind != "total" or total_row.group_id != "group:overview":
@@ -69,9 +69,9 @@ def main() -> None:
     ordered_row_ids = [row.row_id for row in view_model.rows]
     expected_order = [
         "TOTAL|total_view_count",
-        "SKU:101|avg_price_seller_discounted",
+        "SKU:101|price_seller_discounted",
         "SKU:101|avg_addToCartConversion",
-        "SKU:102|avg_price_seller_discounted",
+        "SKU:102|price_seller_discounted",
         "SKU:102|avg_addToCartConversion",
     ]
     if ordered_row_ids != expected_order:
@@ -200,12 +200,12 @@ def _build_contract_payload() -> dict[str, object]:
                 "values_by_date": {"2026-04-19": 100, "2026-04-20": 140},
             },
             {
-                "row_id": "SKU:101|avg_price_seller_discounted",
+                "row_id": "SKU:101|price_seller_discounted",
                 "row_order": 2,
                 "scope_kind": "SKU",
                 "scope_key": "SKU:101",
                 "scope_label": "SKU Чехол 101",
-                "metric_key": "avg_price_seller_discounted",
+                "metric_key": "price_seller_discounted",
                 "metric_label": "Цена продавца средняя",
                 "section": "Цены",
                 "group": "Чехлы",
@@ -214,12 +214,12 @@ def _build_contract_payload() -> dict[str, object]:
                 "values_by_date": {"2026-04-19": 1200, "2026-04-20": 1250},
             },
             {
-                "row_id": "SKU:102|avg_price_seller_discounted",
+                "row_id": "SKU:102|price_seller_discounted",
                 "row_order": 3,
                 "scope_kind": "SKU",
                 "scope_key": "SKU:102",
                 "scope_label": "SKU Чехол 102",
-                "metric_key": "avg_price_seller_discounted",
+                "metric_key": "price_seller_discounted",
                 "metric_label": "Цена продавца средняя",
                 "section": "Цены",
                 "group": "Чехлы",

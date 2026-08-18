@@ -7,6 +7,7 @@ from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_PUBLIC_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, MetricV2Item
 from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
@@ -21,7 +22,7 @@ RESEARCH_BUSINESS_TIMEZONE = ZoneInfo(RESEARCH_BUSINESS_TIMEZONE_NAME)
 PROMO_FILTER_SOURCE = "ready_snapshot_promo_metrics_latest_closed_day"
 PROMO_FILTER_PRIMARY_METRICS = ("promo_participation", "promo_count_by_price")
 PROMO_FILTER_FALLBACK_METRIC = "promo_entry_price_best"
-DISCOUNTED_PRICE_METRIC_KEYS = ("price_seller_discounted", "avg_price_seller_discounted")
+DISCOUNTED_PRICE_METRIC_KEYS = ("price_seller_discounted",)
 
 _FINANCIAL_SECTIONS = ("финанс", "эконом")
 _FINANCIAL_TOKENS = (
@@ -544,7 +545,11 @@ def _selectable_metric_options(
 ) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for item in sorted(items, key=lambda row: (int(row.display_order), str(row.metric_key))):
-        if not item.enabled or not item.show_in_data:
+        if (
+            not item.enabled
+            or not item.show_in_data
+            or item.metric_key in ARCHIVED_PUBLIC_METRIC_KEYS
+        ):
             continue
         if sku_metric_keys and item.metric_key not in sku_metric_keys:
             continue
