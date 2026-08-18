@@ -36,6 +36,9 @@ from packages.application.warehouse_recovery_policy import (
     RecoveryState,
     WarehouseRecoveryRegistry,
 )
+from packages.application.warehouse_functional_lock import (
+    warehouse_functional_write_lock,
+)
 from packages.contracts.ff_pool_documents import (
     DocumentIdentity,
     ExpenseLine,
@@ -112,6 +115,7 @@ POOLS = ("FBS", "FBO")
 RUB_QUANTUM = Decimal("0.01")
 ZERO = Decimal("0")
 POST_RETRY_LIMIT = 4
+GUIDED_BUSINESS_EFFECT_CONTRACT = "ff_guided_acceptance_business_effect_v1"
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{7,119}")
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
@@ -621,7 +625,15 @@ class FfPoolDocumentService:
                 or str(row["document_kind"]) != "china_acceptance"
                 or str(row["source_type"]) != "china_acceptance_workbook"
                 or str(row["state"]) != "ready"
-                or bool(readiness.get("confirm_plan_ready"))
+                or (
+                    bool(readiness.get("confirm_plan_ready"))
+                    and readiness.get("business_effect_contract")
+                    == GUIDED_BUSINESS_EFFECT_CONTRACT
+                    and re.fullmatch(
+                        r"sha256:[0-9a-f]{64}",
+                        str(readiness.get("business_effect_sha256") or ""),
+                    )
+                )
             ):
                 conn.rollback()
                 return False
@@ -1061,6 +1073,12 @@ class FfPoolDocumentService:
                 )
                 confirm_allowed = confirm_allowed and bool(
                     readiness.get("confirm_plan_ready")
+                    and readiness.get("business_effect_contract")
+                    == GUIDED_BUSINESS_EFFECT_CONTRACT
+                    and re.fullmatch(
+                        r"sha256:[0-9a-f]{64}",
+                        str(readiness.get("business_effect_sha256") or ""),
+                    )
                 )
             return {
                 "contract_name": WORKFLOW_CONTRACT,
@@ -1292,6 +1310,20 @@ class FfPoolDocumentService:
         return canonical, bool(inserted)
 
     def _post_once(self, request_id: str) -> dict[str, Any]:
+        # The shared warehouse writer lock is the short confirm barrier.  The
+        # live plan, T1 before-image and business commit are all produced while
+        # functional publication, pool documents and the normal FBS suffix
+        # drain are excluded.  Final replay happens after release so newly
+        # collected FBS observations are delayed only for this bounded window.
+        with warehouse_functional_write_lock(self.runtime_dir):
+            result = self._post_once_under_writer_lock(request_id)
+        if result is None:
+            return self._finalize_posted(request_id)
+        return result
+
+    def _post_once_under_writer_lock(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
         with _connect(self.db_path, query_only=True) as conn:
             request = conn.execute(
                 f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
@@ -1300,7 +1332,7 @@ class FfPoolDocumentService:
             if request is None:
                 raise FfPoolDocumentError("request_not_found", "Document request was not found")
             if str(request["state"]) in {"posted", "replay", "complete"}:
-                return self._finalize_posted(request_id)
+                return None
             if str(request["state"]) != "ready":
                 raise FfPoolDocumentError(
                     "request_not_ready",
@@ -1317,16 +1349,21 @@ class FfPoolDocumentService:
                     manifest.get("posting_plan_preview") or {}
                 )
                 live_plan_preview = _posting_plan_preview(plan=plan, epoch=epoch)
-                if stored_plan_preview != live_plan_preview:
+                if not _guided_business_effect_matches(
+                    stored=stored_plan_preview,
+                    live=live_plan_preview,
+                ):
                     raise FfPoolDocumentError(
                         "guided_acceptance_posting_plan_drift",
-                        "Guided acceptance posting plan changed after preview",
+                        "Guided acceptance business effect changed after preview",
                         details={
-                            "stored_plan_preview_sha256": _fingerprint(
-                                stored_plan_preview
+                            "stored_business_effect_sha256": str(
+                                stored_plan_preview.get("business_effect_sha256")
+                                or ""
                             ),
-                            "live_plan_preview_sha256": _fingerprint(
-                                live_plan_preview
+                            "live_business_effect_sha256": str(
+                                live_plan_preview.get("business_effect_sha256")
+                                or ""
                             ),
                         },
                     )
@@ -1412,7 +1449,7 @@ class FfPoolDocumentService:
                     raise FfPoolDocumentError("request_not_found", "Document request disappeared")
                 if str(current_request["state"]) in {"posted", "replay", "complete"}:
                     conn.rollback()
-                    return self._finalize_posted(request_id)
+                    return None
                 if _writer_epoch(conn) != epoch or _balance_digest(conn, plan["balance_keys"]) != before_digest:
                     conn.rollback()
                     raise FfPoolDocumentError(
@@ -1440,19 +1477,25 @@ class FfPoolDocumentService:
                     stored_plan_preview = _json_object(
                         locked_manifest.get("posting_plan_preview") or {}
                     )
-                    if (
-                        stored_plan_preview != locked_plan_preview
-                        or _fingerprint(locked_plan) != _fingerprint(plan)
-                    ):
+                    if not _guided_business_effect_matches(
+                        stored=stored_plan_preview,
+                        live=locked_plan_preview,
+                    ) or _fingerprint(locked_plan) != _fingerprint(plan):
                         raise FfPoolDocumentError(
                             "guided_acceptance_posting_plan_drift",
                             "Guided acceptance posting plan drifted while acquiring the apply lock",
                             details={
-                                "stored_plan_preview_sha256": _fingerprint(
-                                    stored_plan_preview
+                                "stored_business_effect_sha256": str(
+                                    stored_plan_preview.get(
+                                        "business_effect_sha256"
+                                    )
+                                    or ""
                                 ),
-                                "locked_plan_preview_sha256": _fingerprint(
-                                    locked_plan_preview
+                                "locked_business_effect_sha256": str(
+                                    locked_plan_preview.get(
+                                        "business_effect_sha256"
+                                    )
+                                    or ""
                                 ),
                             },
                         )
@@ -1511,7 +1554,7 @@ class FfPoolDocumentService:
                 next_action="resume_or_append_storno_pool_document",
             )
             raise
-        return self._finalize_posted(request_id)
+        return None
 
     def _finalize_posted(self, request_id: str) -> dict[str, Any]:
         with _connect(self.db_path) as conn:
@@ -1938,6 +1981,7 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
     aggregate_pool_parity = _json_object(
         before.get("aggregate_pool_parity") or {}
     )
+    business_effect = _guided_business_effect(plan=plan, epoch=epoch)
     return {
         "confirm_plan_ready": True,
         "business_mutation_applied": False,
@@ -1975,8 +2019,55 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
             or ""
         ),
         "posted_manifest_sha256": _fingerprint(plan["posted_manifest"]),
+        "business_effect_contract": GUIDED_BUSINESS_EFFECT_CONTRACT,
+        "business_effect_sha256": _fingerprint(business_effect),
+        "confirm_rebase_boundary": "shared_warehouse_writer_lock",
         "source_rechecked": True,
     }
+
+
+def _guided_business_effect(
+    *, plan: Mapping[str, Any], epoch: int
+) -> dict[str, Any]:
+    """Return the owner-gated receipt effect without volatile before-state.
+
+    Normal reservations, releases and FBS physical debits may legitimately
+    advance after preview.  They change the diagnostic before-state and full
+    posted manifest, but not the immutable receipt that the owner authorizes.
+    The confirm path therefore binds this exact effect and rebases only the T1
+    before-image while holding the shared warehouse writer lock.
+    """
+
+    posted = _json_object(plan.get("posted_manifest") or {})
+    domain = _json_object(plan.get("domain_manifest") or {})
+    domain.pop("guided_acceptance_before_state", None)
+    return {
+        "contract_name": GUIDED_BUSINESS_EFFECT_CONTRACT,
+        "feature_epoch": int(epoch),
+        "request_id": str(posted.get("request_id") or ""),
+        "document_kind": str(posted.get("document_kind") or ""),
+        "business_date": str(posted.get("business_date") or ""),
+        "source": _json_object(posted.get("source") or {}),
+        "primary_document_id": str(plan.get("primary_document_id") or ""),
+        "root_document_id": str(plan.get("root_document_id") or ""),
+        "documents": [dict(item) for item in plan.get("documents") or []],
+        "domain": domain,
+    }
+
+
+def _guided_business_effect_matches(
+    *, stored: Mapping[str, Any], live: Mapping[str, Any]
+) -> bool:
+    stored_digest = str(stored.get("business_effect_sha256") or "")
+    live_digest = str(live.get("business_effect_sha256") or "")
+    return bool(
+        stored.get("business_effect_contract")
+        == GUIDED_BUSINESS_EFFECT_CONTRACT
+        and live.get("business_effect_contract")
+        == GUIDED_BUSINESS_EFFECT_CONTRACT
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", stored_digest)
+        and stored_digest == live_digest
+    )
 
 
 def _guided_current_aggregate_parity_proof(

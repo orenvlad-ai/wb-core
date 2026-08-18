@@ -416,10 +416,11 @@ def main() -> int:
                 ),
             )
             conn.commit()
+        doc_clock = _DocClock()
         service = FfPoolDocumentService(
             db_path=runtime.db_path,
             runtime_dir=runtime_dir,
-            timestamp_factory=_DocClock(),
+            timestamp_factory=doc_clock,
         )
         _shipment, _shipment_lines, shipment_revision = FfPoolSurface(
             db_path=runtime.db_path,
@@ -706,7 +707,7 @@ def main() -> int:
                     (str(preview["request_id"]),),
                 ).fetchone()[0]
             )
-            stored["posting_plan_preview"]["posted_manifest_sha256"] = (
+            stored["posting_plan_preview"]["business_effect_sha256"] = (
                 "sha256:" + "0" * 64
             )
             conn.execute(
@@ -737,7 +738,7 @@ def main() -> int:
         assert plan_reopened["state"] == "ready"
         assert plan_reopened["confirm_allowed"] is True
         assert plan_reopened["preview_manifest"]["posting_plan_preview"][
-            "posted_manifest_sha256"
+            "business_effect_sha256"
         ] != "sha256:" + "0" * 64
         # A production request blocked by the former minor-unit check is
         # reopened in place; the immutable request/workbook is not duplicated.
@@ -758,8 +759,78 @@ def main() -> int:
         assert retried_preview["request_id"] == preview["request_id"]
         assert retried_preview["state"] == "ready"
         assert retried_preview["idempotent"] is True
+        stable_business_effect = retried_preview["preview_manifest"][
+            "posting_plan_preview"
+        ]["business_effect_sha256"]
+        preview_posted_manifest = retried_preview["preview_manifest"][
+            "posting_plan_preview"
+        ]["posted_manifest_sha256"]
+
+        # Ordinary FBS work is allowed to advance after the owner-facing
+        # preview.  Reservations/releases change dependent evidence, while a
+        # handoff debit changes both pool detail and the active aggregate in
+        # one transaction.  None of these events changes the receipt effect.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn, order_id=9450, supplier="new", wb="waiting"
+            )
+            _insert_post_t_order(
+                conn, order_id=9451, supplier="new", wb="waiting"
+            )
+            conn.commit()
+        moving_reservations = _process(
+            runtime.db_path, "2026-08-15T08:10:00Z"
+        )
+        assert moving_reservations["summary"]["reserved"] == 2
+        with sqlite3.connect(runtime.db_path) as conn:
+            _append_status(
+                conn,
+                order_id=9450,
+                revision="post_revision_9450_v2",
+                supplier_status="complete",
+                wb_status="sorted",
+                episode=2,
+                observed_at="2026-08-15T08:10:10Z",
+                insert_current=True,
+            )
+            _append_status(
+                conn,
+                order_id=9451,
+                revision="post_revision_9451_v2",
+                supplier_status="cancel",
+                wb_status="waiting",
+                episode=2,
+                observed_at="2026-08-15T08:10:11Z",
+                insert_current=True,
+            )
+            conn.commit()
+        moving_suffix = _process(runtime.db_path, "2026-08-15T08:10:20Z")
+        assert moving_suffix["summary"]["fulfilled"] == 1
+        assert moving_suffix["summary"]["released"] == 1
+        assert _process(runtime.db_path, "2026-08-15T08:10:30Z")[
+            "processed_count"
+        ] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            pool_after_suffix = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_ff_pool_balances
+                   WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"""
+            ).fetchone()
+            aggregate_after_suffix = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            ).fetchone()
+            assert tuple(pool_after_suffix) == (7, "70")
+            assert tuple(aggregate_after_suffix) == ("7", "70")
+
+        doc_clock.value = datetime(2026, 8, 15, 8, 11, tzinfo=timezone.utc)
         posted = service.post(str(preview["request_id"]))
         assert posted["state"] == "complete", posted
+        assert posted["posted_manifest_sha256"] != preview_posted_manifest
+        assert retried_preview["preview_manifest"]["posting_plan_preview"][
+            "business_effect_sha256"
+        ] == stable_business_effect
         repeated_acceptance = service.post(str(preview["request_id"]))
         assert repeated_acceptance["state"] == "complete"
         with sqlite3.connect(runtime.db_path) as conn:
@@ -787,7 +858,7 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=103"
             ).fetchone()
-            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("90.67")
+            assert int(fbs[0]) == 8 and Decimal(str(fbs[1])) == Decimal("80.67")
             assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("10.68")
             assert int(new_fbs[0]) == 1 and Decimal(str(new_fbs[1])) == Decimal("10.66")
             new_aggregate = conn.execute(
@@ -798,9 +869,12 @@ def main() -> int:
             assert tuple(new_aggregate) == (
                 "1", "10.66", "1", "guided_acceptance_minor_unit", 0,
             )
-            assert read_ff_pool_feature_state(
+            post_acceptance_feature = read_ff_pool_feature_state(
                 conn, aggregate_revision="wf_stage7c"
-            ).reader_effective is True
+            )
+            assert post_acceptance_feature.reader_effective is True, (
+                post_acceptance_feature
+            )
             replay = conn.execute(
                 """SELECT legacy_operation_id,cost_layer_id,capital_normalization_json
                    FROM sheet_vitrina_v1_ff_guided_acceptance_replays
@@ -886,8 +960,8 @@ def main() -> int:
                 """SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances
                    WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"""
             ).fetchone()
-            assert int(recovered_pool[0]) == 8
-            assert Decimal(str(recovered_pool[1])) == Decimal("80")
+            assert int(recovered_pool[0]) == 7
+            assert Decimal(str(recovered_pool[1])) == Decimal("70")
             recovered_new_aggregate = conn.execute(
                 """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,quality
                    FROM sheet_vitrina_v1_warehouse_functional_balances
@@ -976,8 +1050,8 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
-            assert int(exact_balance[0]) == 6
-            assert Decimal(str(exact_balance[1])) == Decimal("60.67")
+            assert int(exact_balance[0]) == 5
+            assert Decimal(str(exact_balance[1])) == Decimal("50.67")
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
         drifted_recovery = service.accept_preview(
