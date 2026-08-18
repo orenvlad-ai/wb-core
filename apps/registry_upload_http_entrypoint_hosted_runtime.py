@@ -13050,7 +13050,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             and all(
                 isinstance(item, dict)
                 and bool(str(item.get("facility_id") or ""))
-                and bool(str(item.get("facility_name") or ""))
+                and bool(str(item.get("name") or ""))
                 and isinstance(item.get("calculation_enabled"), bool)
                 and isinstance(item.get("blockers"), list)
                 for item in facilities
