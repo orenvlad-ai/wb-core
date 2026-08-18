@@ -8407,18 +8407,24 @@ def _current_ff_pool_projection(
     normalized_rows.sort(
         key=lambda item: (item["facility_id"], item["pool"], item["nm_id"])
     )
-    by_nm = {
-        nm_id: {
-            "quantity": int(item["quantity"]),
-            "capital": _text(item["capital"]),
-            "locations": sorted(
-                item["locations"],
-                key=lambda value: (value["facility_id"], value["pool"]),
-            ),
+    # Decimal.normalize() observes the active context.  Keep final aggregate
+    # serialization inside the same high-precision boundary as the location
+    # fold so long fractional-kopeck tails cannot be rounded back to the
+    # process-default 28 digits after exact addition has already succeeded.
+    with localcontext() as context:
+        context.prec = 160
+        by_nm = {
+            nm_id: {
+                "quantity": int(item["quantity"]),
+                "capital": _text(item["capital"]),
+                "locations": sorted(
+                    item["locations"],
+                    key=lambda value: (value["facility_id"], value["pool"]),
+                ),
+            }
+            for nm_id, item in sorted(grouped.items())
+            if int(item["quantity"]) or _decimal(item["capital"]) != ZERO
         }
-        for nm_id, item in sorted(grouped.items())
-        if int(item["quantity"]) or _decimal(item["capital"]) != ZERO
-    }
     return {
         "cutover_id": str(manifest.get("cutover_id") or ""),
         "feature_epoch": feature_epoch,
