@@ -31,6 +31,8 @@ from packages.application.ff_pool_cutover_production import (  # noqa: E402
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     EVENTS_TABLE,
+    IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    IDENTITY_PENDING_TABLE,
     RECONCILIATION_TABLE,
     available_quantity,
     process_post_t_fbs_lifecycle,
@@ -1054,6 +1056,152 @@ def main() -> int:
             assert Decimal(str(exact_balance[1])) == Decimal("50.67")
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
+
+        # An unrelated post-T order without exact identity evidence is
+        # isolated instead of pinning the global suffix cursor forever.  A
+        # later matched order still reserves exactly once, while the isolated
+        # handoff produces no guessed physical/capital effect.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn,
+                order_id=9410,
+                supplier="complete",
+                wb="sorted",
+                observed_at="2026-08-15T08:13:00Z",
+                quantity=2,
+                identity_outcome="unmatched_identity",
+            )
+            _insert_post_t_order(
+                conn,
+                order_id=9411,
+                supplier="new",
+                wb="waiting",
+                observed_at="2026-08-15T08:13:01Z",
+            )
+            balance_before_identity_pending = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            conn.commit()
+        wb_before_identity_pending = _wb_evidence_digest(runtime.db_path)
+        isolated_identity = _process(runtime.db_path, "2026-08-15T08:13:10Z")
+        assert isolated_identity["status"] == "caught_up_identity_pending"
+        assert isolated_identity["processed_count"] == 2
+        assert isolated_identity["summary"]["identity_pending"] == 1
+        assert isolated_identity["summary"]["reserved"] == 1
+        assert isolated_identity["identity_pending_count"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_identity_pending
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_TABLE} WHERE order_id=9410"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_RESOLUTIONS_TABLE}"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9411 "
+                "AND event_type='reserve'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone() == balance_before_identity_pending
+
+        repeated_identity_pending = _process(
+            runtime.db_path, "2026-08-15T08:13:20Z"
+        )
+        assert repeated_identity_pending["processed_count"] == 0
+        assert repeated_identity_pending["identity_retry_count"] == 1
+        assert repeated_identity_pending["identity_pending_count"] == 1
+        assert repeated_identity_pending["summary"]["identity_pending"] == 1
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9410,9411)"
+            ).fetchone()[0] == 1
+
+            # Mapping evidence is append-only.  Once the collector can prove
+            # the exact same order revision, the original pending handoff is
+            # replayed; it is not replaced with a synthetic current status.
+            revision_9410 = str(
+                conn.execute(
+                    "SELECT source_revision FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_order_observations "
+                    "WHERE order_id=9410 ORDER BY observation_sequence DESC LIMIT 1"
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
+                       evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+                       barcode,seller_sku,outcome,warehouse_mapping_id,
+                       identity_mapping_id,evidence_digest,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "post_identity_evidence_9410_matched",
+                    9410,
+                    revision_9410,
+                    501,
+                    101,
+                    201,
+                    "sku-101",
+                    "seller-101",
+                    "matched",
+                    "warehouse_mapping_1",
+                    "identity_mapping_1",
+                    "sha256:"
+                    + hashlib.sha256(b"identity:9410:matched").hexdigest(),
+                    "2026-08-15T08:13:25Z",
+                ),
+            )
+            conn.commit()
+
+        wb_before_identity_resolution = _wb_evidence_digest(runtime.db_path)
+        resolved_identity = _process(runtime.db_path, "2026-08-15T08:13:30Z")
+        assert resolved_identity["status"] == "caught_up"
+        assert resolved_identity["processed_count"] == 0
+        assert resolved_identity["identity_retry_count"] == 1
+        assert resolved_identity["identity_pending_count"] == 0
+        assert resolved_identity["summary"]["identity_resolved"] == 1
+        assert resolved_identity["summary"]["fulfilled"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_identity_resolution
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_RESOLUTIONS_TABLE} "
+                "WHERE order_id=9410 AND resolution_kind='matched_replay'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410 "
+                "AND event_type='handoff_debit' AND physical_quantity_delta=-2"
+            ).fetchone()[0] == 1
+            balance_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            assert int(balance_after_identity_resolution[0]) == int(
+                balance_before_identity_pending[0]
+            ) - 2
+            assert Decimal(str(balance_after_identity_resolution[1])) == Decimal(
+                str(balance_before_identity_pending[1])
+            ) - Decimal("20")
+
+        repeated_identity_resolution = _process(
+            runtime.db_path, "2026-08-15T08:13:40Z"
+        )
+        assert repeated_identity_resolution["status"] == "caught_up"
+        assert repeated_identity_resolution["identity_retry_count"] == 0
+        assert repeated_identity_resolution["summary"]["fulfilled"] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410 "
+                "AND event_type='handoff_debit'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone() == balance_after_identity_resolution
+
         drifted_recovery = service.accept_preview(
             identity=DocumentIdentity(
                 request_id="guided:26gn527:drifted-recovery",
@@ -1091,6 +1239,7 @@ def _insert_post_t_order(
     source_created_at: str = "2026-08-14T06:00:00Z",
     observed_at: str = "2026-08-14T06:01:00Z",
     quantity: int = 1,
+    identity_outcome: str = "matched",
 ) -> None:
     revision = f"post_revision_{order_id}_v1"
     conn.execute(
@@ -1113,8 +1262,9 @@ def _insert_post_t_order(
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             f"post_identity_evidence_{order_id}", order_id, revision, 501, 101, 201,
-            "sku-101", "seller-101", "matched", "warehouse_mapping_1",
-            "identity_mapping_1",
+            "sku-101", "seller-101", identity_outcome,
+            "warehouse_mapping_1",
+            "identity_mapping_1" if identity_outcome == "matched" else "",
             "sha256:" + hashlib.sha256(f"identity:{order_id}".encode()).hexdigest(),
             observed_at,
         ),
