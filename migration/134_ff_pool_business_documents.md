@@ -79,7 +79,13 @@ or canonical Decimal TEXT; no new accounting field uses `REAL`.
   residual and residual owners. Independent per-SKU rounding is forbidden.
   The resulting per-SKU kopecks are split between FBO/FBS by accepted quantity;
   positive quantity may not become synthetic zero. Aggregate, SKU detail and
-  pool totals therefore conserve the same canonical header exactly.
+  pool totals therefore conserve the same canonical header exactly. An
+  accepted inbound SKU may be absent from the current aggregate `ff` snapshot;
+  that absence is frozen as `row_present=false` semantic zero, not rejected as
+  `aggregate_sku_missing`. Confirm materializes its first positive aggregate
+  row with the same quantity/capital and full cost coverage. Existing rows add
+  the accepted quantity to `cost_covered_quantity` together with physical
+  quantity and capital.
 - One inter-facility transfer root owns immutable shipment, receipt, loss,
   discrepancy, cancellation, correction, storno and late-expense children.
   Shipment freezes source WAC/capital. Receipt posts only actual accepted
@@ -114,8 +120,12 @@ it. One transaction appends the negative legacy receipt, reverses the typed
 pool movements, restores the supplier factual status/date, restores or
 deactivates the cost layer and returns aggregate FF to the frozen before-state.
 It then records immutable recovery replay evidence and queues only the affected
-SKU projection. No delete, ad-hoc SQL or blind store restore is part of this
-business compensation.
+SKU projection. A row that was present is restored field-for-field, including
+WAC, cost coverage, quality/certification, WB counters and provenance. A SKU
+that was absent before confirm remains as an audited canonical zero row after
+storno; quantity, capital and cost coverage are zero and WAC is null, so it is
+semantically equal to the frozen absent state without deleting history. No
+delete, ad-hoc SQL or blind store restore is part of this business compensation.
 
 One or more immutable positive RUB expense lines may carry a safe free-text
 basis and optional source-file digest. Their cents are allocated over the whole
@@ -144,7 +154,12 @@ upgrade exception is an identical immutable China workbook previously blocked
 with `money_minor_unit_required`: after deployment it is revalidated by the new
 aggregate boundary and reopened in place, preserving the canonical request,
 source revision, workbook digest and audit history. No other blocked code is
-reopened.
+reopened. `ready` guided previews additionally persist a query-only full
+posting-plan proof after writer epoch, opening, current source revision,
+aggregate/pool before-state and all recovery guards are constructible. Guided
+`confirm_allowed` is false without that proof. An identical older immutable
+`ready` request may be reprocessed in place only to add this stronger proof;
+it cannot create another request or business row.
 Stage 3 must additionally enforce the HTTP request read limit before buffering.
 
 ## Verification and later stages
@@ -156,9 +171,12 @@ reallocation, inventory, overhead/reversal, relations, bounded access plans and
 T1 evidence. It also pins the production-shaped 26GN527 composition (21 SKU,
 66,000 accepted, FBS/FBO 39,250/26,750, zero expenses and fractional-kopeck
 capital) through filled-workbook parse, exact plan conservation, idempotent
-repeat and stale-source rejection. The FBS lifecycle smoke proves legacy blocked
-request revalidation, immutable cost-layer replay and exact append-only guided
-recovery. Existing Stage 1, FF ledger/reservation/inventory/overhead/
+repeat and stale-source rejection. It also pins the three production-shaped
+SKUs whose aggregate FF row is initially absent. The FBS lifecycle smoke proves
+legacy blocked/ready request revalidation, first aggregate-row materialization,
+cost-coverage drift rejection, immutable cost-layer replay and exact append-only
+guided recovery to audited semantic zero. Existing Stage 1, FF
+ledger/reservation/inventory/overhead/
 documents, functional warehouse, capital and recovery smokes remain required.
 
 Stage 3 public API/UI/document registry and later facility CRUD/seeds, opening,

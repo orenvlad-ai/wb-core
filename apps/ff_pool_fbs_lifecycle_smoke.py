@@ -68,6 +68,19 @@ def main() -> int:
                 "updated_at": GATE_AT,
             }
         )
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "ff-pool-lifecycle-nm-103",
+                "is_active": True,
+                "is_hidden": False,
+                "our_sku": "seller-103",
+                "nm_id": 103,
+                "barcode": "sku-103",
+                "nomenclature_name": "New inbound SKU 103",
+                "created_at": GATE_AT,
+                "updated_at": GATE_AT,
+            }
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_warehouse_functional_schema(conn)
@@ -379,11 +392,25 @@ def main() -> int:
             )
             conn.execute(
                 """UPDATE sheet_vitrina_v1_supplier_shipment_lines
-                   SET unit_price='1', amount='66000', currency='CNY',
+                   SET qty=65999, unit_price='1', amount='65999', currency='CNY',
                        invoice_price_yuan_snapshot='1',
                        reference_purchase_price_yuan_snapshot='1'
                    WHERE shipment_id=? AND line_type='product'""",
                 (SHIPMENT_ID,),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_shipment_lines(
+                       line_id,shipment_id,line_type,sort_order,internal_nm_id,qty,
+                       unit_price,amount,currency,invoice_price_yuan_snapshot,
+                       reference_purchase_price_yuan_snapshot,manual_override,
+                       price_conformity_status,price_conformity_check_mode,
+                       price_conformity_reason,price_conformity_context_json,raw_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "line_26gn527_2", SHIPMENT_ID, "product", 2, 103, 1,
+                    "1", "1", "CNY", "1", "1", 0,
+                    "not_checked", "not_checked", "not_checked", "{}", "{}",
+                ),
             )
             conn.commit()
         service = FfPoolDocumentService(
@@ -412,15 +439,26 @@ def main() -> int:
             "allocations": [
                 {
                     "nm_id": 101,
-                    "expected_quantity": 66_000,
+                    "expected_quantity": 65_999,
                     "accepted_quantity": 2,
                     "quantity_fbs": 1,
                     "quantity_fbo": 1,
                     "accepted_capital_rub": "20.0049",
                     "discrepancy_type": "shortage",
-                    "discrepancy_quantity": 65_998,
+                    "discrepancy_quantity": 65_997,
                     "identity_evidence_digest": "sha256:" + "9" * 64,
-                }
+                },
+                {
+                    "nm_id": 103,
+                    "expected_quantity": 1,
+                    "accepted_quantity": 1,
+                    "quantity_fbs": 1,
+                    "quantity_fbo": 0,
+                    "accepted_capital_rub": "10.0049",
+                    "discrepancy_type": "none",
+                    "discrepancy_quantity": 0,
+                    "identity_evidence_digest": "sha256:" + "8" * 64,
+                },
             ],
             "expenses": [
                 {
@@ -436,15 +474,58 @@ def main() -> int:
             manifest=acceptance_manifest,
         )
         assert preview["state"] == "ready", preview
+        assert preview["confirm_allowed"] is True
+        assert preview["preview_manifest"]["posting_plan_preview"][
+            "confirm_plan_ready"
+        ] is True
+        assert preview["preview_manifest"]["posting_plan_preview"][
+            "aggregate_semantic_zero_nm_ids"
+        ] == [103]
         assert preview["preview_manifest"]["capital_normalization"] == {
             "policy": "header_round_half_up_then_largest_fractional_remainder_nm_id",
-            "exact_total_rub": "20.0049",
-            "canonical_total_rub": "20.00",
-            "total_residual_rub": "-0.0049",
-            "residual_owner_nm_ids": [],
-            "capital_cents_by_nm": {"101": 2000},
-            "normalization_residual_rub_by_nm": {"101": "-0.0049"},
+            "exact_total_rub": "30.0098",
+            "canonical_total_rub": "30.01",
+            "total_residual_rub": "0.0002",
+            "residual_owner_nm_ids": [101],
+            "capital_cents_by_nm": {"101": 2001, "103": 1000},
+            "normalization_residual_rub_by_nm": {
+                "101": "0.0051",
+                "103": "-0.0049",
+            },
         }
+        # A pre-upgrade ready request is not confirmable until the identical
+        # immutable source is retried and the complete query-only plan is
+        # durably proven in place.
+        with sqlite3.connect(runtime.db_path) as conn:
+            legacy_ready_manifest = dict(preview["preview_manifest"])
+            legacy_ready_manifest.pop("posting_plan_preview")
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET preview_manifest_json=? WHERE request_id=?""",
+                (
+                    json.dumps(
+                        legacy_ready_manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        assert service.status(request_id=str(preview["request_id"]))[
+            "confirm_allowed"
+        ] is False
+        upgraded_ready = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+        )
+        assert upgraded_ready["request_id"] == preview["request_id"]
+        assert upgraded_ready["confirm_allowed"] is True
+        assert upgraded_ready["preview_manifest"]["posting_plan_preview"][
+            "aggregate_semantic_zero_nm_ids"
+        ] == [103]
         # A production request blocked by the former minor-unit check is
         # reopened in place; the immutable request/workbook is not duplicated.
         with sqlite3.connect(runtime.db_path) as conn:
@@ -488,8 +569,21 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
             ).fetchone()
-            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("91")
-            assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("11")
+            new_fbs = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=103"
+            ).fetchone()
+            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("90.67")
+            assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("10.68")
+            assert int(new_fbs[0]) == 1 and Decimal(str(new_fbs[1])) == Decimal("10.66")
+            new_aggregate = conn.execute(
+                """SELECT quantity,capital_rub,cost_covered_quantity,quality,certified
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            ).fetchone()
+            assert tuple(new_aggregate) == (
+                "1", "10.66", "1", "guided_acceptance_minor_unit", 0,
+            )
             assert read_ff_pool_feature_state(
                 conn, aggregate_revision="wf_stage7c"
             ).reader_effective is True
@@ -500,7 +594,7 @@ def main() -> int:
                 (str(preview["request_id"]),),
             ).fetchone()
             assert replay is not None
-            assert json.loads(replay[2])["canonical_total_rub"] == "20.00"
+            assert json.loads(replay[2])["canonical_total_rub"] == "30.01"
             receipt_snapshot = json.loads(
                 conn.execute(
                     """SELECT raw_json FROM sheet_vitrina_v1_ff_stock_operation_lines
@@ -508,10 +602,46 @@ def main() -> int:
                     (str(replay[0]),),
                 ).fetchone()[0]
             )["cost_snapshot"]
-            assert receipt_snapshot["capital_delta_rub"] == "20.00"
+            assert receipt_snapshot["capital_delta_rub"] == "20.01"
             assert receipt_snapshot["quality"] == "guided_acceptance_minor_unit"
             guided_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert guided_readback["status"] == "pass", guided_readback
+
+        # Recovery freezes cost coverage and metadata as well as headline
+        # quantity/capital.  Any affected-field drift blocks before mutation.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET cost_covered_quantity='0.5'
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            )
+            conn.commit()
+        coverage_drift_preview = service.accept_preview(
+            identity=DocumentIdentity(
+                request_id="guided:26gn527:coverage-drift-recovery",
+                source_system="operator_ui",
+                source_type="guided_acceptance_recovery",
+                source_id=str(posted["document"]["document_id"]),
+                source_revision="sha256:" + "5" * 64,
+                idempotency_epoch=1,
+                actor="warehouse-operator",
+                business_date="2026-08-15",
+            ),
+            document_kind="storno",
+            manifest={"target_document_id": str(posted["document"]["document_id"])},
+        )
+        coverage_drift_result = service.post(
+            str(coverage_drift_preview["request_id"])
+        )
+        assert coverage_drift_result["state"] == "blocked"
+        assert coverage_drift_result["error"]["code"] == "guided_recovery_aggregate_drift"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET cost_covered_quantity='1'
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            )
+            conn.commit()
 
         recovery_identity = DocumentIdentity(
             request_id="guided:26gn527:recovery",
@@ -544,6 +674,14 @@ def main() -> int:
             ).fetchone()
             assert int(recovered_pool[0]) == 8
             assert Decimal(str(recovered_pool[1])) == Decimal("80")
+            recovered_new_aggregate = conn.execute(
+                """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,quality
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            ).fetchone()
+            assert tuple(recovered_new_aggregate) == (
+                "0", None, "0", "0", "guided_acceptance_minor_unit",
+            )
             assert conn.execute(
                 "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_guided_acceptance_recoveries"
             ).fetchone()[0] == 1
@@ -557,7 +695,7 @@ def main() -> int:
                          AND line.nm_id=101"""
                 ).fetchone()[0]
             )["cost_snapshot"]
-            assert Decimal(recovery_snapshot["capital_delta_rub"]) == Decimal("-20")
+            assert Decimal(recovery_snapshot["capital_delta_rub"]) == Decimal("-20.01")
             assert recovery_snapshot["quality"] == "guided_acceptance_recovery"
 
         # Recovery leaves the shipment reusable through a fresh source
@@ -618,7 +756,7 @@ def main() -> int:
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
             assert int(exact_balance[0]) == 6
-            assert Decimal(str(exact_balance[1])) == Decimal("61")
+            assert Decimal(str(exact_balance[1])) == Decimal("60.67")
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
         drifted_recovery = service.accept_preview(
