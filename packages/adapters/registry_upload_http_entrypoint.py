@@ -332,6 +332,15 @@ DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH = (
 )
 DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/calculate"
 DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
+)
+DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
+)
+DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/recommendation.xlsx"
+)
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
 DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/planning-options"
@@ -2513,6 +2522,30 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_fbs_fulfillment_order_calculate_request(
+                        payload,
+                        user_key=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order runtime failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -4951,6 +4984,24 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_factory_order_dataset_urls(payload))
                 return
 
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_fbs_fulfillment_order_status_request(
+                        dict(urllib_parse.parse_qsl(parsed.query)),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order status runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH:
                 try:
                     payload = entrypoint.handle_factory_order_stock_ff_onec_check_request()
@@ -5045,6 +5096,31 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order recommendation runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH:
+                try:
+                    workbook_bytes, filename = (
+                        entrypoint.handle_fbs_fulfillment_order_recommendation_request()
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order recommendation runtime failed: {exc}"},
                     )
                     return
                 _write_binary_response(
@@ -9164,6 +9240,9 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
         "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+        "fbs_fulfillment_order_status_path": DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
+        "fbs_fulfillment_order_calculate_path": DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+        "fbs_fulfillment_order_recommendation_path": DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
         "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
