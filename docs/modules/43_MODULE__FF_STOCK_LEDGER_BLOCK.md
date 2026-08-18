@@ -599,16 +599,28 @@ receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
 Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
 full posting plan, rechecks the exact supplier source revision and durably pins
-the plan/document totals plus pool, aggregate and dependent before-state
-digests. Readiness also recomputes global current-epoch parity between the
+the immutable `ff_guided_acceptance_business_effect_v1`: request/source/file,
+epoch, business date, document identities, every line/movement, exact
+quantity/capital normalization, pool allocation and expenses. Pool, aggregate
+and dependent before-state digests remain explicit diagnostic evidence, but
+are not the owner decision identity because ordinary FBS reservations,
+releases and debits may legitimately advance them after preview. Readiness also
+recomputes global current-epoch parity between the
 complete active functional `ff` revision and every facility × pool row; a stale
 hourly aggregate is blocked before confirm rather than discovered after
-business writes begin. Confirm reproduces the exact stored plan proof before
-T1 and again under `BEGIN IMMEDIATE`; active-version, aggregate, detail or plan
-drift fails closed. Once ordinary publication restores parity, an identical
-request blocked only by this parity/plan guard may be reprocessed in place,
-without a duplicate request or business effect. A pre-upgrade identical ready
-request is refreshed in place; it never
+business writes begin. Confirm acquires the shared warehouse writer lock,
+rebuilds a current parity-passing plan, requires the same stored business-effect
+digest, then creates the recovery T1 from that current before-state and repeats
+the plan under `BEGIN IMMEDIATE`. Functional publication, pool documents and
+the normal FBS lifecycle drain cannot overlap this bounded plan → T1 → commit
+window. A legitimately advanced before-state is rebased; changed receipt
+identity/date/allocation/quantity/capital/expense/source/epoch still fails
+closed. The lock is released before cost-layer replay/final readback, so the
+continuous collector is never disabled and delays only its bounded lifecycle
+drain. Once ordinary publication restores parity, an identical request blocked
+only by this parity/plan guard may be reprocessed in place, without a duplicate
+request or business effect. A pre-upgrade identical ready request is refreshed
+in place; it never
 creates a duplicate request or business effect. The request-level source
 revision is deliberately the hash of the raw supplier revision plus the exact
 workbook SHA-256, while the workbook manifest retains the raw supplier
@@ -705,3 +717,12 @@ opening-reservation FK definition and fails closed on unknown schema objects,
 pre-existing target FK violations or copy drift; deployment itself still posts
 no business rows and invalidates earlier owner gates through the changed
 deployed SHA.
+
+The ordinary collector's post-poll lifecycle pass uses the same shared
+warehouse writer lock as functional publication and guided confirm. It attempts
+that lock non-blocking: collection/audit rows may continue, while a busy confirm
+returns a visible `held` drain with no checkpoint movement. The next timer pass
+resumes from the unchanged `last_status_observation_sequence`; event identity
+and atomic progress make the suffix exactly-once. Thus normal orders after a
+validated preview neither make the receipt owner gate a moving target nor get
+lost/double-counted around its short commit window.

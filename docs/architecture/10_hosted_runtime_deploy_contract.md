@@ -131,6 +131,16 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   maintenance transition lock. The audited abort fingerprints that proof and
   skips stale prior-state restore plus the not-yet-reached warehouse hold;
   changed or partial boundaries remain on the ordinary exact-restore path.
+  Its ordinary post-poll lifecycle drain also takes
+  `.warehouse-functional-sync.lock` non-blocking. While a guided receipt holds
+  the bounded current-plan/T1/commit window, collection continues but drain
+  progress remains unchanged and reports `warehouse_functional_writer_active`;
+  the next pass consumes that suffix exactly once. Guided owner authorization
+  is bound to an immutable receipt-effect digest, so legitimate reservation,
+  release or debit activity before lock acquisition is rebased into the live
+  recovery before-image rather than invalidating the gate. Receipt source,
+  date, allocation, quantities, capital normalization, expenses, epoch and
+  document identities remain exact fail-closed bindings.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

@@ -120,6 +120,13 @@ new order/status/transition rows above `W` are a post-checkpoint suffix, not
 aggregate or manifest drift. Aggregate, facilities/mappings, policy, deployed
 SHA, non-target evidence and pending-receipt proof remain exact apply-time
 gates. The suffix drain preserves the same aggregate = sum(detail) invariant.
+After cutover that drain and guided FF receipt confirm share the functional
+warehouse writer lock. A ready receipt is owner-bound to its immutable business
+effect rather than the continually changing whole-balance digest; confirm
+rebases its T1 before-image only after current global parity passes under the
+lock. A collector cycle that meets the short window retains its observations
+and reports the drain held, then consumes the unchanged sequence suffix exactly
+once on the next pass. Live FBS is never paused or written back to WB.
 
 Migration 144 does not alter that opening or the active facility/pool ledger.
 It may mark one earlier failed Stage 7C Recovery Policy operation
