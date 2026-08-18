@@ -143,6 +143,47 @@ Proof comment считается immutable только при Actions-owned aut
 равных created/updated timestamps, exact canonical body и единственном marker
 для current head. Edited, malformed или duplicate proof не разрешает merge.
 
+## DCP Versioned Handoff V2
+
+Repository-owned compatibility marker `wb-core.dcp-release-handoff/v2`
+расширяет, но не отменяет строгий repo-only marker
+`wb-core.dcp-release-handoff/v1`. V1 остаётся допустимым только для уже
+опубликованного repo-only readmission evidence. Каждый новый handoff/readmission
+proof использует v2. DCP зависит только от этого versioned marker interface,
+configured exact `baseline`, provider facts и terminal proof — не от имён jobs,
+matrix или внутренней топологии Release Train.
+
+V2 принимает exact same-repository DCP branch только как
+`task:standard` с ровно одним из `scope:repo-only` либо
+`scope:live-runtime`. Обе формы сохраняют no-auto-sync: при behind/head/base
+drift Release Train не обновляет и не merge-ит branch. Вместо этого Actions
+создаёт immutable digest-bound marker с repository/base, task/scope, native
+branch/session, admitted и observed head, current main, admission event,
+admission baseline, handoff proof, reason и version. DCP обязан валидировать
+comment id/actor/created/updated metadata и каждый exact field до единственного
+нового readmission generation. Stale, edited, duplicate, malformed, foreign
+или crossed marker inert и fail closed.
+
+Каждый принятый v2 head получает fresh Release Train `baseline`; canonical
+handoff proof связывает scope/task/current-main с admission и release checks.
+`scope:repo-only` затем использует неизменный v1 terminal contour:
+Actions-owned merge, completion proof и `release:done` без deploy.
+
+`scope:live-runtime` не передаёт worker/reviewer production credentials и не
+разрешает DCP merge/deploy. Только GitHub Actions production job merge-ит exact
+proven head, checkout-ит clean merge SHA, запускает canonical
+deploy-and-verify, а затем выполняет отдельный read-only reconciliation exact
+SHA на target `wb_core_eu_hosted_runtime_active` и service
+`wb-core-registry-http.service`. `release:production` появляется лишь после
+одного immutable Actions-owned `wb-core-dcp-release-production-proof`, который
+связывает PR/head/branch/session/handoff comment, merge=deployed SHA, target,
+service и digests успешных deploy/probe и runtime-readback evidence. Merge,
+`release:done`, stale/mixed SHA, failed/missing probe, wrong target/service,
+edited/duplicate proof или `release:halted` не являются terminal success.
+
+Ordinary non-DCP STANDARD и LOOP flows не используют DCP proofs и сохраняют
+существующую release/deploy семантику.
+
 `scope:production-mutation` никогда не merge/deploy/apply автоматически из
 `release:ready`. Worker оставляет его `release:blocked` до separate human-gated
 contract.

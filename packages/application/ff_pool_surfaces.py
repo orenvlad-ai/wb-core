@@ -31,6 +31,7 @@ from packages.application.ff_pool_documents import (
     FfPoolDocumentService,
     REQUESTS_TABLE,
     WORKFLOW_EVENTS_TABLE,
+    _guided_request_source_revision,
 )
 from packages.application.ff_pool_documents_xlsx import (
     FfPoolXlsxError,
@@ -870,6 +871,7 @@ class FfPoolSurface:
                 "quantity_fbs": sum(int(item.get("quantity_fbs") or 0) for item in allocations),
                 "quantity_fbo": sum(int(item.get("quantity_fbo") or 0) for item in allocations),
                 "discrepancy_quantity": sum(int(item.get("discrepancy_quantity") or 0) for item in allocations),
+                "capital_normalization": dict(preview.get("capital_normalization") or {}),
             }
         guided_activation = self._guided_acceptance_activation()
         payload = {
@@ -1206,7 +1208,10 @@ class FfPoolSurface:
         selected_request = _request_id(request_id)
         selected_date = _date(business_date, field="business_date")
         shipment, lines, source_revision = self.supplier_shipment_source(shipment_id)
-        revision = _fingerprint({"source_revision": source_revision, "source_sha256": _sha256(workbook_bytes)})
+        revision = _guided_request_source_revision(
+            supplier_source_revision=source_revision,
+            source_sha256=_sha256(workbook_bytes),
+        )
         identity = DocumentIdentity(
             request_id=selected_request,
             source_system="supplier_registry",

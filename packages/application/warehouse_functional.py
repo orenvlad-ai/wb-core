@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 from pathlib import Path
@@ -139,6 +139,10 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
     "moving_weighted_average": (
         "Скользящая средневзвешенная",
         "Стоимость рассчитана последовательным replay канонического append-only FF ledger.",
+    ),
+    "facility_pool_exact_projection": (
+        "Точный остаток facility × pool",
+        "Количество и капитал FF равны точной сумме текущих остатков FBS/FBO по географическим складам.",
     ),
     "periodic_snapshot_wac": (
         "Средневзвешенная по историческому снимку",
@@ -5943,6 +5947,9 @@ class WarehouseFunctionalBlock:
                     sources["fulfillment_service_uploads"], "updated_at"
                 ),
                 "ff_ledger": _watermark(sources["ff_operations"], "created_at"),
+                "ff_pool_detail": _watermark(
+                    sources.get("ff_pool_balances") or [], "updated_at"
+                ),
                 "ff_auto_writeoff_checkpoint": _watermark(
                     sources["ff_auto_writeoff_checkpoint"], "created_at"
                 ),
@@ -5977,6 +5984,11 @@ class WarehouseFunctionalBlock:
         target_nm_ids = set(wb_items)
         target_nm_ids.update(int(row["nm_id"]) for row in capture["primary_cost_rows"] if int(row["nm_id"] or 0) > 0)
         target_nm_ids.update(int(row["nm_id"]) for row in capture["ff_lines"] if int(row["nm_id"] or 0) > 0)
+        target_nm_ids.update(
+            int(row["nm_id"])
+            for row in capture.get("ff_pool_balances") or []
+            if int(row.get("nm_id") or 0) > 0
+        )
         target_nm_ids.update(
             int(row["nm_id"])
             for row in capture["historical_wb_daily_quantities"]
@@ -6107,6 +6119,9 @@ class WarehouseFunctionalBlock:
         for row in capture["ff_lines"]:
             ff_qty[int(row["nm_id"])] += _decimal(row.get("quantity_delta"))
         ff_outbound_wac_by_supply_nm: dict[tuple[str, int], Decimal] = {}
+        current_pool_projection = (
+            None if cutover_mode else _current_ff_pool_projection(capture)
+        )
         if cutover_mode:
             for nm_id, quantity in ff_qty.items():
                 if quantity < ZERO:
@@ -6289,13 +6304,68 @@ class WarehouseFunctionalBlock:
                     raise WarehouseFunctionalError(
                         f"canonical FF replay mismatch for nmId {nm_id}: {actual_quantity} != {expected_quantity}"
                     )
-            for nm_id, pool in ff_pools.items():
+            projection_pools = (
+                {
+                    int(nm_id): dict(pool)
+                    for nm_id, pool in current_pool_projection["by_nm"].items()
+                }
+                if current_pool_projection is not None
+                else ff_pools
+            )
+            for nm_id, pool in projection_pools.items():
                 quantity = _decimal(pool["quantity"])
                 capital = _decimal(pool["capital"])
                 if quantity == ZERO:
                     continue
                 if capital <= ZERO:
                     raise WarehouseFunctionalError(f"FF replay has no capital for nmId {nm_id}")
+                if current_pool_projection is not None:
+                    legacy_pool = ff_pools.get(nm_id)
+                    quality = (
+                        "moving_weighted_average"
+                        if legacy_pool is not None
+                        else "facility_pool_exact_projection"
+                    )
+                    provenance = {
+                        "source": (
+                            "canonical_append_only_ff_ledger_replay"
+                            if legacy_pool is not None
+                            else "current_facility_pool_exact_projection"
+                        ),
+                        "physical_projection_source": (
+                            "current_facility_pool_exact_projection"
+                        ),
+                        "cutover_id": str(current_pool_projection["cutover_id"]),
+                        "feature_epoch": int(current_pool_projection["feature_epoch"]),
+                        "detail_source_digest": str(
+                            current_pool_projection["source_digest"]
+                        ),
+                        "locations": list(pool["locations"]),
+                        "aggregate_equals_sum_of_facility_pool": True,
+                        "cutover_opening": True,
+                        "cutover_date": _business_date_value(
+                            (cutover or {}).get("cutover_at")
+                        ),
+                        "opening_version_id": str(
+                            (legacy_pool or {}).get("opening_version_id") or ""
+                        ),
+                        "operations": list(
+                            (legacy_pool or {}).get("operations") or []
+                        ),
+                    }
+                else:
+                    quality = "moving_weighted_average"
+                    provenance = {
+                        "source": "canonical_append_only_ff_ledger_replay",
+                        "cutover_opening": True,
+                        "cutover_date": _business_date_value(
+                            (cutover or {}).get("cutover_at")
+                        ),
+                        "opening_version_id": str(
+                            pool.get("opening_version_id") or ""
+                        ),
+                        "operations": pool["operations"],
+                    }
                 _add_bucket(
                     buckets,
                     stage=STAGE_FF,
@@ -6303,14 +6373,8 @@ class WarehouseFunctionalBlock:
                     quantity=quantity,
                     capital=capital,
                     covered=quantity,
-                    quality="moving_weighted_average",
-                    provenance={
-                        "source": "canonical_append_only_ff_ledger_replay",
-                        "cutover_opening": True,
-                        "cutover_date": _business_date_value((cutover or {}).get("cutover_at")),
-                        "opening_version_id": str(pool.get("opening_version_id") or ""),
-                        "operations": pool["operations"],
-                    },
+                    quality=quality,
+                    provenance=provenance,
                 )
 
         downstream_components = _supply_downstream_component_index(capture["downstream_cost_rows"])
@@ -7773,6 +7837,35 @@ def _source_rows(
             "SELECT * FROM sheet_vitrina_v1_supplier_payment_fee_confirmations "
             "ORDER BY supplier_order_id,payment_document_id,confirmation_id"
         )
+    if "sheet_vitrina_v1_ff_guided_acceptance_replays" in tables:
+        queries["guided_acceptance_replays"] = (
+            "SELECT * FROM sheet_vitrina_v1_ff_guided_acceptance_replays "
+            "ORDER BY replayed_at,request_id"
+        )
+    if "sheet_vitrina_v1_ff_guided_acceptance_recoveries" in tables:
+        queries["guided_acceptance_recoveries"] = (
+            "SELECT * FROM sheet_vitrina_v1_ff_guided_acceptance_recoveries "
+            "ORDER BY recovered_at,recovery_request_id"
+        )
+    if "sheet_vitrina_v1_ff_pool_feature_epochs" in tables:
+        queries["ff_pool_feature_epochs"] = (
+            "SELECT epoch,writer_enabled,reader_enabled,source_revision,created_at "
+            "FROM sheet_vitrina_v1_ff_pool_feature_epochs ORDER BY epoch"
+        )
+    if "sheet_vitrina_v1_ff_pool_cutover_manifests" in tables:
+        queries["ff_pool_cutover_manifests"] = (
+            "SELECT cutover_id,manifest_digest,deployed_sha,cutover_at,business_date,"
+            "feature_epoch,aggregate_revision,detail_digest,opening_document_id "
+            "FROM sheet_vitrina_v1_ff_pool_cutover_manifests "
+            "ORDER BY cutover_at,cutover_id"
+        )
+    if "sheet_vitrina_v1_ff_pool_balances" in tables:
+        queries["ff_pool_balances"] = (
+            "SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+            "wac_rub,source_watermark,updated_at "
+            "FROM sheet_vitrina_v1_ff_pool_balances "
+            "ORDER BY facility_id,pool,nm_id"
+        )
     result = {
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
@@ -7782,6 +7875,11 @@ def _source_rows(
         key=_ff_operation_replay_sort_key,
     )
     result.setdefault("cny_documents", [])
+    result.setdefault("guided_acceptance_replays", [])
+    result.setdefault("guided_acceptance_recoveries", [])
+    result.setdefault("ff_pool_feature_epochs", [])
+    result.setdefault("ff_pool_cutover_manifests", [])
+    result.setdefault("ff_pool_balances", [])
     ready_snapshots, frozen_projection = _historical_recovery_source_rows(
         conn,
         cutover_at=(str(cutover_row["cutover_at"]) if cutover_row is not None else ""),
@@ -8202,6 +8300,131 @@ def _guarded_local_sources(sources: Mapping[str, Any]) -> dict[str, Any]:
             # only snapshot state admitted to the optimistic drift digest.
             "historical_correction_ready_snapshots",
         }
+    }
+
+
+def _current_ff_pool_projection(
+    capture: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the active post-cutover FF aggregate from exact pool detail.
+
+    The append-only legacy FF ledger remains necessary for historical replay
+    and WB-supply outbound cost evidence.  Once the separately owner-gated
+    facility/pool cutover is active, however, physical FF truth is the current
+    facility x FBS/FBO balance set.  Hourly functional publication must not
+    discard FBS lifecycle debits by rebuilding the public aggregate from the
+    legacy ledger alone.
+    """
+
+    manifests = [dict(item) for item in capture.get("ff_pool_cutover_manifests") or []]
+    balances = [dict(item) for item in capture.get("ff_pool_balances") or []]
+    epochs = [dict(item) for item in capture.get("ff_pool_feature_epochs") or []]
+    if not manifests:
+        if balances:
+            raise WarehouseFunctionalError(
+                "FF pool balances exist without an applied cutover manifest"
+            )
+        return None
+    if not epochs or not balances:
+        raise WarehouseFunctionalError(
+            "active FF pool cutover lacks its feature epoch or current balances"
+        )
+    manifest = max(
+        manifests,
+        key=lambda item: (
+            str(item.get("cutover_at") or ""),
+            str(item.get("cutover_id") or ""),
+        ),
+    )
+    latest_epoch = max(epochs, key=lambda item: int(item.get("epoch") or 0))
+    feature_epoch = int(manifest.get("feature_epoch") or 0)
+    if (
+        feature_epoch <= 0
+        or int(latest_epoch.get("epoch") or 0) != feature_epoch
+        or not bool(latest_epoch.get("writer_enabled"))
+    ):
+        raise WarehouseFunctionalError(
+            "active FF pool cutover and writer epoch are not exact"
+        )
+
+    normalized_rows: list[dict[str, Any]] = []
+    grouped: dict[int, dict[str, Any]] = {}
+    seen: set[tuple[str, str, int]] = set()
+    with localcontext() as context:
+        context.prec = 160
+        for raw in balances:
+            facility_id = str(raw.get("facility_id") or "").strip()
+            pool = str(raw.get("pool") or "").strip().upper()
+            nm_id = int(raw.get("nm_id") or 0)
+            projection_epoch = int(raw.get("projection_epoch") or 0)
+            raw_quantity = _decimal(raw.get("quantity"))
+            capital = _decimal(raw.get("capital_rub"))
+            if (
+                not facility_id
+                or pool not in {"FBS", "FBO"}
+                or nm_id <= 0
+                or projection_epoch != feature_epoch
+                or raw_quantity != raw_quantity.to_integral_value()
+                or raw_quantity < ZERO
+                or capital < ZERO
+                or (raw_quantity == ZERO) != (capital == ZERO)
+            ):
+                raise WarehouseFunctionalError(
+                    "current FF pool detail is not an exact non-negative physical projection"
+                )
+            key = (facility_id, pool, nm_id)
+            if key in seen:
+                raise WarehouseFunctionalError(
+                    "current FF pool detail contains a duplicate location/SKU row"
+                )
+            seen.add(key)
+            quantity = int(raw_quantity)
+            normalized = {
+                "facility_id": facility_id,
+                "pool": pool,
+                "nm_id": nm_id,
+                "projection_epoch": projection_epoch,
+                "quantity": quantity,
+                "capital_rub": _text(capital),
+                "source_watermark": str(raw.get("source_watermark") or ""),
+                "updated_at": str(raw.get("updated_at") or ""),
+            }
+            normalized_rows.append(normalized)
+            cell = grouped.setdefault(
+                nm_id,
+                {"quantity": 0, "capital": ZERO, "locations": []},
+            )
+            cell["quantity"] = int(cell["quantity"]) + quantity
+            cell["capital"] = _decimal(cell["capital"]) + capital
+            cell["locations"].append(
+                {
+                    "facility_id": facility_id,
+                    "pool": pool,
+                    "quantity": quantity,
+                    "capital_rub": _text(capital),
+                }
+            )
+    normalized_rows.sort(
+        key=lambda item: (item["facility_id"], item["pool"], item["nm_id"])
+    )
+    by_nm = {
+        nm_id: {
+            "quantity": int(item["quantity"]),
+            "capital": _text(item["capital"]),
+            "locations": sorted(
+                item["locations"],
+                key=lambda value: (value["facility_id"], value["pool"]),
+            ),
+        }
+        for nm_id, item in sorted(grouped.items())
+        if int(item["quantity"]) or _decimal(item["capital"]) != ZERO
+    }
+    return {
+        "cutover_id": str(manifest.get("cutover_id") or ""),
+        "feature_epoch": feature_epoch,
+        "row_count": len(normalized_rows),
+        "source_digest": "sha256:" + _hash(normalized_rows),
+        "by_nm": by_nm,
     }
 
 
@@ -9803,15 +10026,22 @@ def _ff_ledger_line_cost_snapshot(
     unit_cost = _optional_decimal(snapshot.get("unit_cost_rub"))
     capital_delta = _optional_decimal(snapshot.get("capital_delta_rub"))
     quantity_delta = _decimal(row.get("quantity_delta"))
-    if unit_cost is None or unit_cost <= ZERO or capital_delta is None:
+    if (
+        quantity_delta == ZERO
+        or unit_cost is None
+        or unit_cost <= ZERO
+        or capital_delta is None
+    ):
         raise WarehouseFunctionalError("invalid frozen FF ledger cost snapshot")
-    if capital_delta != quantity_delta * unit_cost:
+    if abs(capital_delta - quantity_delta * unit_cost) > Decimal("0.000000000000000001"):
         raise WarehouseFunctionalError("frozen FF ledger cost snapshot does not conserve capital")
     quality = str(snapshot.get("quality") or "").strip()
     if not quality:
         raise WarehouseFunctionalError("frozen FF ledger cost snapshot quality is missing")
     return {
-        "unit_cost_rub": unit_cost,
+        # Capital is the authoritative immutable money amount. Re-derive the
+        # ratio so repeating Decimal division cannot leave a sub-audit residue.
+        "unit_cost_rub": abs(capital_delta / quantity_delta),
         "capital_delta_rub": capital_delta,
         "quality": quality,
         "provenance": dict(snapshot.get("provenance") or {}),

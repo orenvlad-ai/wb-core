@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, localcontext
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -28,7 +29,10 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentError,
     FfPoolDocumentService,
     _allocate_cents,
+    _apply_balance_movement,
+    _build_posting_plan,
     _component_share,
+    _posting_plan_preview,
 )
 from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
     DEFAULT_LIMITS,
@@ -101,6 +105,7 @@ def main() -> None:
         )
         _seed(service, clock)
         catalog, shipment_lines = _xlsx_contracts(service)
+        _production_shaped_26gn527(service)
         opening = _opening(service)
         _idempotent_repeat_and_recovery(service, opening)
         _transfer_and_late_expense(service)
@@ -111,6 +116,336 @@ def main() -> None:
         _assert_recovery(service)
         _assert_no_aggregate_or_legacy_writes(db_path)
     print("ff_pool_documents_smoke: OK")
+
+
+def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
+    rows = [
+        (210183142, 3250, 750, 2500, "321477.9087517898"),
+        (210183919, 7000, 2500, 4500, "692413.9573115471"),
+        (210184534, 3000, 500, 2500, "296748.8388478059"),
+        (245720334, 1250, 750, 500, "128000.62296944665"),
+        (259460529, 6000, 5000, 1000, "614402.990253344"),
+        (259465495, 5750, 1500, 4250, "608837.1235272811"),
+        (259473237, 6000, 5500, 500, "614402.990253344"),
+        (391659990, 250, 250, 0, "31697.50742322784"),
+        (428850065, 250, 250, 0, "30826.452733322334"),
+        (428853741, 1500, 500, 1000, "176248.169500879"),
+        (428854140, 500, 500, 0, "60491.49921343734"),
+        (428854299, 1000, 500, 500, "120982.99842687468"),
+        (428855306, 2000, 750, 1250, "234997.55933450535"),
+        (428855560, 1500, 500, 1000, "176248.169500879"),
+        (428855758, 1750, 500, 1250, "199525.48158835364"),
+        (428855978, 1750, 250, 1500, "199525.48158835364"),
+        (497414010, 6500, 1500, 5000, "688250.6613786656"),
+        (497414624, 3000, 1500, 1500, "317654.15140553797"),
+        (497416271, 4750, 750, 4000, "618802.6801495334"),
+        (497417163, 3750, 1250, 2500, "453686.24410078005"),
+        (497417474, 5250, 1250, 4000, "635160.7417410921"),
+    ]
+    shipment_lines = [
+        {
+            "nm_id": nm_id,
+            "barcode": str(nm_id),
+            "sku": f"26GN527-{nm_id}",
+            "accepted_quantity": quantity,
+            "accepted_capital_rub": capital,
+            "identity_evidence_digest": "sha256:" + f"{nm_id:064d}"[-64:],
+        }
+        for nm_id, quantity, _fbo, _fbs, capital in rows
+    ]
+    source_revision = "26gn527-production-shaped-v1"
+    template = service.generate_china_acceptance_template(
+        shipment_lines=shipment_lines,
+        source_revision=source_revision,
+        selected_facility_id="fac_msk",
+    )
+    workbook = load_workbook(BytesIO(template))
+    sheet = workbook[CHINA_SHEET]
+    for row_no, (_nm_id, _quantity, fbo, fbs, _capital) in enumerate(rows, start=6):
+        sheet.cell(row=row_no, column=7, value=fbo)
+        sheet.cell(row=row_no, column=8, value=fbs)
+    filled = BytesIO()
+    workbook.save(filled)
+    evidence = filled.getvalue()
+    request_identity = identity("26gn527", revision=source_revision)
+    preview = service.preview_china_acceptance_workbook(
+        identity=request_identity,
+        source_bytes=evidence,
+        source_filename="FF_приёмка_26GN527_заполнено.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision=source_revision,
+    )
+    assert preview["state"] == "ready", preview
+    manifest = preview["preview_manifest"]
+    assert len(manifest["allocations"]) == 21
+    assert sum(int(item["expected_quantity"]) for item in manifest["allocations"]) == 66_000
+    assert sum(int(item["accepted_quantity"]) for item in manifest["allocations"]) == 66_000
+    assert sum(int(item["quantity_fbs"]) for item in manifest["allocations"]) == 39_250
+    assert sum(int(item["quantity_fbo"]) for item in manifest["allocations"]) == 26_750
+    assert manifest["expenses"] == []
+    normalization = manifest["capital_normalization"]
+    assert normalization["exact_total_rub"] == "7220382.230000000494"
+    assert normalization["canonical_total_rub"] == "7220382.23"
+    assert normalization["total_residual_rub"] == "-0.000000000494"
+    assert normalization["residual_owner_nm_ids"] == [
+        428853741, 428855560, 428855306, 428854140, 210184534,
+        210183142, 428854299, 391659990, 210183919, 497417163,
+    ]
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        request = conn.execute(
+            f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
+            (str(preview["request_id"]),),
+        ).fetchone()
+        plan = _build_posting_plan(
+            conn,
+            request=request,
+            manifest=manifest,
+            epoch=1,
+        )
+    movements = [
+        movement
+        for document in plan["documents"]
+        for movement in document.get("movements") or []
+    ]
+    assert sum(int(item["quantity_delta"]) for item in movements) == 66_000
+    assert sum(int(item["capital_delta_cents"]) for item in movements) == 722_038_223
+    assert sum(int(item["quantity_delta"]) for item in movements if item["pool"] == "FBS") == 39_250
+    assert sum(int(item["quantity_delta"]) for item in movements if item["pool"] == "FBO") == 26_750
+    per_nm = {}
+    for item in movements:
+        per_nm[int(item["nm_id"])] = per_nm.get(int(item["nm_id"]), 0) + int(
+            item["capital_delta_cents"]
+        )
+    assert per_nm == {
+        int(key): int(value)
+        for key, value in normalization["capital_cents_by_nm"].items()
+    }
+    # Production opening balances retain authoritative exact Decimal capital.
+    # A guided receipt adds only its canonical kopeck delta; it must not reject
+    # or silently normalize the pre-existing fractional-kopeck capital.  The
+    # exact inverse movement must return every affected balance byte-for-
+    # semantic-byte to the original quantity/capital pair.
+    fractional_opening = {
+        210183142: (2249, "205231.4311365185716975379064"),
+        210184534: (250, "22685.48291654259178871196266"),
+        245720334: (743, "72996.70782552040825768721842"),
+        259460529: (1228, "117162.7582051580009068280460"),
+        259465495: (3132, "315544.9438867871117622305145"),
+        259473237: (286, "27090.34575724342461900569472"),
+        428853741: (500, "57862.8139406905458181875208"),
+        428854299: (2946, "357448.9272079002304083502190"),
+        428855306: (998, "114141.4070768659663193726124"),
+        428855978: (205, "22944.60690012700219304333326"),
+        497414010: (3889, "392247.7763148711604622173653"),
+        497414624: (9746, "982128.3651914405693875570705"),
+        497416271: (747, "99225.61859946938832759534936"),
+        497417163: (664, "80565.54453038891819115565094"),
+        497417474: (3248, "392768.2532584173349552632159"),
+    }
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("SAVEPOINT production_decimal_pool_apply")
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            with localcontext() as context:
+                context.prec = 38
+                opening_wac = str(Decimal(capital) / Decimal(quantity))
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,?,?,?,?,?)""",
+                (
+                    nm_id,
+                    quantity,
+                    capital,
+                    opening_wac,
+                    "production-shaped-opening",
+                    "2026-08-15T00:00:00Z",
+                ),
+            )
+        movement_by_key = {
+            (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"])): item
+            for item in movements
+        }
+        for line_no, movement in enumerate(movements, start=1):
+            _apply_balance_movement(
+                conn,
+                movement=movement,
+                operation_id="production-shaped-guided-forward",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T01:00:00Z",
+            )
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            row = conn.execute(
+                f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
+                "WHERE facility_id='fac_msk' AND pool='FBS' AND nm_id=?",
+                (nm_id,),
+            ).fetchone()
+            movement = movement_by_key[("fac_msk", "FBS", nm_id)]
+            assert int(row[0]) == quantity + int(movement["quantity_delta"])
+            with localcontext() as context:
+                context.prec = 160
+                expected_capital = Decimal(capital) + (
+                    Decimal(int(movement["capital_delta_cents"])) / Decimal(100)
+                )
+            assert str(row[1]) == format(expected_capital, "f")
+        for line_no, movement in enumerate(movements, start=1):
+            inverse = dict(movement)
+            inverse["quantity_delta"] = -int(movement["quantity_delta"])
+            inverse["capital_delta_cents"] = -int(
+                movement["capital_delta_cents"]
+            )
+            _apply_balance_movement(
+                conn,
+                movement=inverse,
+                operation_id="production-shaped-guided-storno",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T02:00:00Z",
+            )
+        for nm_id, (quantity, capital) in fractional_opening.items():
+            row = conn.execute(
+                f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
+                "WHERE facility_id='fac_msk' AND pool='FBS' AND nm_id=?",
+                (nm_id,),
+            ).fetchone()
+            assert int(row[0]) == quantity
+            assert str(row[1]) == capital
+        movement_capital = conn.execute(
+            f"SELECT capital_delta_rub FROM {LINES_TABLE} "
+            "WHERE operation_id IN ('production-shaped-guided-forward',"
+            "'production-shaped-guided-storno')"
+        ).fetchall()
+        assert len(movement_capital) == 78
+        assert all(
+            Decimal(str(row[0])).quantize(Decimal("0.01"))
+            == Decimal(str(row[0]))
+            for row in movement_capital
+        )
+        conn.execute("ROLLBACK TO production_decimal_pool_apply")
+        conn.execute("RELEASE production_decimal_pool_apply")
+    # Production-shaped guided planning must treat an inbound SKU absent from
+    # the current aggregate FF snapshot as exact semantic zero, not as an
+    # error.  The three missing rows mirror the real 26GN527 preview evidence.
+    missing_aggregate_nm_ids = {210183919, 428855560, 428855758}
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_supplier_shipments(
+                   shipment_id TEXT PRIMARY KEY,actual_ff_acceptance_date TEXT,
+                   order_status TEXT NOT NULL,updated_at TEXT NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_supplier_shipments
+               VALUES('26gn527',NULL,'in_transit','2026-08-15T00:00:00Z')"""
+        )
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(
+                   slot INTEGER PRIMARY KEY,version_id TEXT NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_functional_active
+               VALUES(1,'26gn527-before')"""
+        )
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(
+                   version_id TEXT NOT NULL,warehouse_key TEXT NOT NULL,nm_id INTEGER NOT NULL,
+                   quantity TEXT NOT NULL,wac_rub TEXT,capital_rub TEXT NOT NULL,
+                   cost_covered_quantity TEXT NOT NULL,quality TEXT NOT NULL,
+                   certified INTEGER NOT NULL,wb_quantity TEXT NOT NULL,
+                   wb_in_way_to_client TEXT NOT NULL,wb_in_way_from_client TEXT NOT NULL,
+                   provenance_json TEXT NOT NULL,
+                   PRIMARY KEY(version_id,warehouse_key,nm_id)
+               )"""
+        )
+        for nm_id, quantity, _fbo, _fbs, capital in rows:
+            if nm_id in missing_aggregate_nm_ids:
+                continue
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances
+                   VALUES('26gn527-before','ff',?,?,?,?,?,'fixture',0,'0','0','0','{}')""",
+                (
+                    nm_id,
+                    str(quantity),
+                    str(Decimal(capital) / Decimal(quantity)),
+                    capital,
+                    str(quantity),
+                ),
+            )
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,?,?,?,?,?)""",
+                (
+                    nm_id,
+                    quantity,
+                    capital,
+                    str(Decimal(capital) / Decimal(quantity)),
+                    "production-shaped-global-parity",
+                    "2026-08-15T00:00:00Z",
+                ),
+            )
+        guided_request = dict(request)
+        guided_request["source_type"] = "china_acceptance_workbook"
+        guided_plan = _build_posting_plan(
+            conn,
+            request=guided_request,
+            manifest=manifest,
+            epoch=1,
+        )
+        readiness = _posting_plan_preview(plan=guided_plan, epoch=1)
+        assert readiness["confirm_plan_ready"] is True
+        assert readiness["quantity_delta"] == 66_000
+        assert readiness["capital_delta_rub"] == "7220382.23"
+        assert readiness["aggregate_semantic_zero_nm_ids"] == sorted(
+            missing_aggregate_nm_ids
+        )
+        assert readiness["aggregate_pool_parity"]["status"] == "pass"
+        assert readiness["aggregate_pool_parity"]["detail_quantity"] == 55_750
+        assert readiness["aggregate_pool_parity"]["aggregate_quantity"] == 55_750
+        assert readiness["aggregate_pool_parity"]["detail_fingerprint"].startswith(
+            "sha256:"
+        )
+        conn.execute(
+            f"DELETE FROM {BALANCES_TABLE} "
+            "WHERE source_watermark='production-shaped-global-parity'"
+        )
+        conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_balances")
+        conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_active")
+        conn.execute("DROP TABLE sheet_vitrina_v1_supplier_shipments")
+        conn.commit()
+    repeated = service.preview_china_acceptance_workbook(
+        identity=replace(
+            request_identity,
+            request_id="fixture:26gn527:response-loss-retry",
+        ),
+        source_bytes=evidence,
+        source_filename="renamed-26GN527.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision=source_revision,
+    )
+    assert repeated["request_id"] == preview["request_id"]
+    assert repeated["idempotent"] is True
+    stale = service.preview_china_acceptance_workbook(
+        identity=identity("26gn527-stale", revision="26gn527-stale-v2"),
+        source_bytes=evidence,
+        source_filename="stale-26GN527.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision="26gn527-stale-v2",
+    )
+    assert stale["state"] == "blocked"
+    assert stale["error"]["code"] == "template_fingerprint_mismatch"
 
 
 def _default_off_and_empty_schema() -> None:

@@ -142,12 +142,12 @@ def main() -> None:
                   greenToday: document.querySelector('[data-row-id="TOTAL|total_orderSum"][data-cell-date="2026-04-20"]')?.className || '',
                   yellowYesterday: document.querySelector('[data-row-id="TOTAL|total_view_count"][data-cell-date="2026-04-19"]')?.className || '',
                   yellowToday: document.querySelector('[data-row-id="TOTAL|total_view_count"][data-cell-date="2026-04-20"]')?.className || '',
-                  unrelated: document.querySelector('[data-row-id="SKU:210183919|avg_price_seller_discounted"][data-cell-date="2026-04-20"]')?.className || '',
+                  unrelated: document.querySelector('[data-row-id="SKU:210183919|price_seller_discounted"][data-cell-date="2026-04-20"]')?.className || '',
                   updatedColor: getComputedStyle(document.querySelector('[data-row-id="TOTAL|total_orderSum"][data-cell-date="2026-04-20"]')).color,
                   updatedBackground: getComputedStyle(document.querySelector('[data-row-id="TOTAL|total_orderSum"][data-cell-date="2026-04-20"]')).backgroundColor,
                   latestColor: getComputedStyle(document.querySelector('[data-row-id="TOTAL|total_view_count"][data-cell-date="2026-04-20"]')).color,
                   latestBackground: getComputedStyle(document.querySelector('[data-row-id="TOTAL|total_view_count"][data-cell-date="2026-04-20"]')).backgroundColor,
-                  normalBackground: getComputedStyle(document.querySelector('[data-row-id="SKU:210183919|avg_price_seller_discounted"][data-cell-date="2026-04-20"]')).backgroundColor
+                  normalBackground: getComputedStyle(document.querySelector('[data-row-id="SKU:210183919|price_seller_discounted"][data-cell-date="2026-04-20"]')).backgroundColor
                 })"""
             )
             if (

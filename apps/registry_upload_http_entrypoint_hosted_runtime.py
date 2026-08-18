@@ -2111,6 +2111,8 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         },
         "ok": deploy_summary["ok"] and loopback_summary["ok"] and public_summary["ok"],
     }
+    if str(getattr(args, "output", "") or "").strip():
+        _write_private_json(Path(str(args.output)).resolve(), payload)
     _print_json(payload)
     return 0 if payload["ok"] else 1
 
@@ -10006,6 +10008,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_probe_args(deploy_and_verify)
     deploy_and_verify.add_argument("--dry-run", action="store_true", help="Print deploy commands without executing.")
     deploy_and_verify.add_argument("--allow-dirty", action="store_true", help="Allow deploy from dirty checkout.")
+    deploy_and_verify.add_argument(
+        "--output",
+        type=Path,
+        help="Write the exact deploy/probe evidence as a private JSON artifact.",
+    )
     deploy_and_verify.set_defaults(handler=run_deploy_and_verify_command)
 
     autoanswers_readonly = subparsers.add_parser(

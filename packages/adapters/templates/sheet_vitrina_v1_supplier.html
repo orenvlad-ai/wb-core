@@ -4330,7 +4330,7 @@
         guidedAcceptanceStatus.textContent = "Файл принят. Проверяем exact nmId/barcode, количества, расходы и расхождения...";
         guidedAcceptanceUploadButton.disabled = true;
         try {
-          const status = await fetchJson(ffPoolChinaPreviewPath, {method:"POST", body:form, headers:{Accept:"application/json"}});
+          const status = await fetchJson(ffPoolChinaPreviewPath, {method:"POST", body:form, headers:{Accept:"application/json", "X-WB-FF-Pool-CSRF":"1"}});
           window.localStorage.setItem(guidedStorageKey(currentShipment.shipment_id), status.request_id || requestId);
           await renderGuidedStatus(status);
         } catch (error) {
@@ -4359,6 +4359,7 @@
           acc.discrepancies += Number(row.discrepancy_quantity || 0); return acc;
         }, {expected:0,accepted:0,fbs:0,fbo:0,discrepancies:0});
         const exactSummary = (status.preview && status.preview.summary) || {};
+        const capitalNormalization = exactSummary.capital_normalization || {};
         const totals = {
           expected: Number(exactSummary.expected_quantity ?? pageTotals.expected),
           accepted: Number(exactSummary.accepted_quantity ?? pageTotals.accepted),
@@ -4368,6 +4369,9 @@
         };
         guidedAcceptanceStatus.innerHTML = '<strong>' + escapeHtml(status.state_label_ru || status.state || "") + '</strong>' +
           '<p>Отправлено: ' + totals.expected + ' · принято: ' + totals.accepted + ' · FBS: ' + totals.fbs + ' · FBO: ' + totals.fbo + ' · расхождения: ' + totals.discrepancies + '</p>' +
+          (capitalNormalization.canonical_total_rub ? '<p>Капитал к проведению: ' + escapeHtml(capitalNormalization.canonical_total_rub) + ' ₽' +
+            ' · точный источник: ' + escapeHtml(capitalNormalization.exact_total_rub || capitalNormalization.canonical_total_rub) + ' ₽' +
+            ' · остаток нормализации: ' + escapeHtml(capitalNormalization.total_residual_rub || '0') + ' ₽</p>' : '') +
           '<p>' + escapeHtml(activation.reason_ru || "") + '</p>' +
           (status.error && status.error.code ? '<p class="message error">' + escapeHtml(status.error.code) + '</p>' : '');
         guidedAcceptanceConfirm.dataset.requestId = status.request_id || "";
@@ -4388,7 +4392,7 @@
         guidedAcceptanceConfirm.disabled = true;
         guidedAcceptanceStatus.textContent = "Проводим единый idempotent документ...";
         try {
-          const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId) + "/confirm", {method:"POST", headers:{"Content-Type":"application/json",Accept:"application/json"}, body:JSON.stringify({confirm:true})});
+          const status = await fetchJson(ffPoolPath + "/requests/" + encodeURIComponent(requestId) + "/confirm", {method:"POST", headers:{"Content-Type":"application/json",Accept:"application/json", "X-WB-FF-Pool-CSRF":"1"}, body:JSON.stringify({confirm:true})});
           await renderGuidedStatus(status);
         } catch (error) { guidedAcceptanceStatus.textContent = error.message; }
       }

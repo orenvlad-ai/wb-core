@@ -106,7 +106,13 @@ and exact Decimal text capital, including fractional kopecks. FBS reservations
 change `available`, not physical aggregate quantity; negative available is a
 valid explicit state. Any aggregate/detail, source, mapping, pending-receipt or
 checkpoint drift disables/rejects the cutover instead of publishing a second
-total.
+total. Once this cutover is applied, every ordinary functional publication
+derives physical `ff` quantity/capital directly from the complete current
+facility × pool balance set. Legacy FF replay is retained only for chronology,
+historical evidence and WB-outbound WAC. The pool manifest, writer epoch and
+exact rows are captured in the functional local-source digest and rechecked
+under the apply lock, so a concurrent pool movement rejects a stale plan and a
+later hourly version cannot undo an already posted FBS lifecycle debit.
 
 Migration 143 separates immutable opening truth from continuous FBS ingestion.
 The reviewed source fingerprint covers only frozen rows at/below compound `W`;
@@ -160,6 +166,21 @@ Active supplier source view contains only non-excluded financial documents and e
 ## 2.2 FF
 
 Фактическая FF acceptance создаёт canonical append-only FF ledger receipt. Functional projection не создаёт второй ledger: cutover opening freezes current ledger quantity/cost, а post-cutover receipt/debit replay начинается от opening version. Supplier receipt получает exact source-flow capital; одинаковые SKU смешиваются moving WAC. Ordinary proportional debit сохраняет WAC.
+
+Facility/pool business documents use kopecks as their canonical posting
+boundary even when canonical supplier allocation contains fractional kopecks.
+Guided acceptance rounds only the exact shipment header and allocates the
+canonical kopecks by largest fractional remainder then `nmId`; the immutable
+replay row carries its per-SKU targets and explicit signed normalization
+residuals. The append-only FF receipt lines freeze that same canonical capital
+as authoritative `cost_snapshot` evidence; functional replay consumes the
+capital first and derives its ratio, so repeating Decimal unit division cannot
+lose a sub-kopeck residue. Invoice/payment/expense document controls remain
+independently conserved while supplier receipt, aggregate FF and facility/pool
+detail publish the same total. The recovery receipt freezes the exact negative
+snapshot, and its immutable recovery row restores the pre-acceptance supplier
+stage; it never subtracts a source document component or manufactures a
+zero-cost flow.
 
 WB status `Отгрузка разрешена` creates one idempotent canonical FF debit of the full exact packed composition when identity is confirmed and physical FF quantity is sufficient. The separate reservation ledger is used only for physical shortage or unresolved identity/composition; it never represents missing transit or another cost component. A later supplier receipt fulfils a physically justified reservation atomically. Known FF capital follows the quantity; absent downstream transit/services/storage/paid-acceptance amounts make the cost layer preliminary or unavailable with an explicit blocker and never synthetic zero. Late cost replay enriches that supply layer without another debit. `Допринято` does not create a second debit.
 
@@ -293,6 +314,14 @@ Repo-owned `wb-core-warehouse-functional-sync.timer` запускает bounded 
 Canonical runner default dry-run получает coherent sources + uncached fresh WB snapshot, строит six-stage plan, frozen cost map, historical/daily WB cost projection, source watermarks/digests and invariants. Apply требует exact reviewed fingerprint, повторный uncached official snapshot, optimistic source recheck и совпадение semantic `calculation_digest` по costs/balances/events/documents/invariants, coherent SQLite backup `0600` with `integrity_check=ok`, one `BEGIN IMMEDIATE`, readback and idempotent second apply. Canonical business date сверяется до apply, после получения write lock и непосредственно перед commit; пересечение полуночи откатывает всю derived transaction. Каждый functional apply/rollback и archival-estimate apply/rollback входит в общий re-entrant `.warehouse-functional-sync.lock`, включая backup и transaction. Active archival version с exact row lineage входит в functional local-source digest, поэтому plan, рассчитанный до archival activation/rollback, после получения lock отклоняется и не может перезаписать correction. Archival dry-run держит одну explicit SQLite read transaction для rows и всех digests; daily provenance с factual inbound/accepted evidence или отличающимся WAC блокирует замену оценкой. Каждый target обязан иметь ровно одну nomenclature row: duplicate, identity conflict или factual purchase price блокирует estimate. Fresh post-apply archival plan имеет `status=no_op`, `apply_allowed=false` и при передаче runner остаётся inert readback без backup/новой version. Rollback сохраняет version/audit и делает использованный fingerprint необратимо non-reusable; parent functional rollback запрещён до archival rollback/deactivation. После factual acceptance archival row перестаёт быть допустимым сразу: до успешного daily replay resolver, archival readback и exact idempotent retry возвращают явный blocker, затем обычная WAC заменяет оценку. Targeted archival lookup сначала ограничивает active rows одним requested `nmId`, использует indexed factual-event range и для non-target не сканирует events. Current open business day сохраняет `periodic_snapshot_wac_provisional`, закрытые дни — `periodic_snapshot_wac_closed`. Shared backup API до открытия destination требует свободное место не меньше source size плюс bounded safety margin и при любой последующей ошибке удаляет только созданные этой попыткой partial destination/sidecars. Уже оставленный оборванной попыткой invalid backup удаляется только отдельным repo-owned dry-run/apply: exact path ограничен functional backup directory/name, stat/full SHA и invalid header/integrity входят в fingerprint, coherent SQLite/live DB fail closed, а `0600` cleanup manifest остаётся в audit. WB supply revision digest включает status, packed/accepted composition, raw goods and upstream business update, но исключает собственные `synced_at`/`last_list_synced_at`/`last_enriched_at`, чтобы повторный capture без business change не создавал ложный drift. Hourly/manual publication также pins `base_active_version_id`; concurrent stale plan отклоняется, а exact already-applied fingerprint остаётся idempotent. Initial Proxy settings version создаётся внутри той же transaction. Primary supplier/CNY/FF/WB records не изменяются.
 
 FF replay сохраняет persisted chronology между различными timestamp. Если idempotent supplier receipt и зависимый WB outbound имеют одну и ту же секунду `created_at`, supplier receipt детерминированно применяется первым; случайный порядок `operation_id` не может создать ложный `no positive cost pool` blocker.
+
+Guided China acceptance readiness evaluates the complete current active
+functional `ff` revision against current-epoch pool detail on every preview.
+`confirm_allowed=true` therefore pins the active revision, aggregate/detail
+fingerprints and exact posting manifest. Confirm must reproduce the same proof
+before recovery T1 and again under the immediate transaction lock; mismatch
+blocks before any supplier date, legacy receipt, pool movement or projection
+write.
 
 Hourly timer включается только после successful cutover readback. Its oneshot uses `TimeoutStartSec=3h`: production-scale backup validation, source refresh, six-stage publication, reconciliation and lossless archive must complete under the shared lock instead of being killed at an intermediate post-publication stage. Rollback сначала disables timer, сохраняет backup и удаляет только functional derived state/initial settings when safe.
 

@@ -108,10 +108,13 @@ from apps.github_release_train_wait import (  # noqa: E402
 from apps.github_release_train_spec import (  # noqa: E402
     ACTIVE_PRIMARY_LABELS,
     ACTIVE_STATE_LABELS,
+    CANONICAL_PRODUCTION_SERVICE_NAME,
     CANONICAL_PRODUCTION_TARGET_ID,
     CRITICAL_TRANSITIONS,
     DCP_RELEASE_HANDOFF_PROOF_MARKER,
+    DCP_RELEASE_HANDOFF_V1_VERSION,
     DCP_RELEASE_HANDOFF_VERSION,
+    DCP_RELEASE_PRODUCTION_PROOF_MARKER,
     DCP_RELEASE_READMISSION_PROOF_MARKER,
     EXPLICIT_TASK_PROMPTS,
     ExecutionContour,
@@ -198,6 +201,10 @@ class FakeApi:
 
     def get_pull(self, number: int) -> dict[str, Any]:
         return self.pulls[number]
+
+    def get_branch_sha(self, branch: str) -> str:
+        assert branch == "main"
+        return SHA_C
 
     def compare(self, base: str, head: str) -> dict[str, Any]:
         if len(self.comparisons) > 1:
@@ -531,11 +538,12 @@ def _dcp_release_fixture(
     *,
     head_sha: str = SHA_A,
     comparison: dict[str, Any] | None = None,
+    scope: str = REPO_ONLY_LABEL,
 ) -> tuple[FakeApi, dict[str, Any]]:
     api = FakeApi()
     pull = _pull(
         number,
-        labels=[READY_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL],
+        labels=[READY_LABEL, STANDARD_TASK_LABEL, scope],
         created_at="2026-08-17T09:00:00Z",
         sha=head_sha,
     )
@@ -587,7 +595,7 @@ def _dcp_proof_comment_index(api: FakeApi, number: int) -> int:
     )
 
 
-def _assert_dcp_release_handoff_v1() -> None:
+def _assert_dcp_release_handoff_v2() -> None:
     # Exact admitted head: no update-branch, one fresh Release Train baseline,
     # one Actions merge and one exact terminal proof in the PR body.
     api, pull = _dcp_release_fixture(701)
@@ -633,6 +641,30 @@ def _assert_dcp_release_handoff_v1() -> None:
         for number, body in behind_api.comments
         if number == 702
     )
+    readmission = next(
+        body
+        for number, body in behind_api.comments
+        if number == 702 and DCP_RELEASE_READMISSION_PROOF_MARKER in body
+    )
+    for exact_field in (
+        "admission_check=70202",
+        f"admitted_head={SHA_A}",
+        "base=main",
+        "handoff_proof=0",
+        "head_ref=ao/wb-core-702/root",
+        f"main={SHA_C}",
+        f"observed_head={SHA_A}",
+        "pr=702",
+        "ready_event=70201",
+        "reason=base-behind-after-admission",
+        "repo=orenvlad-ai/wb-core",
+        "scope=scope:repo-only",
+        "session=702",
+        "task=task:standard",
+        f"version={DCP_RELEASE_HANDOFF_VERSION}",
+        "digest=sha256:",
+    ):
+        assert exact_field in readmission
 
     _set_labels(behind_pull, [BLOCKED_LABEL, STANDARD_TASK_LABEL, REPO_ONLY_LABEL])
     try:
@@ -780,6 +812,131 @@ def _assert_dcp_release_handoff_v1() -> None:
         raise AssertionError("post-proof DCP head drift must require readmission")
     assert stale_api.updated == [] and stale_api.merges == []
     assert not (_labels(stale_pull) & {READY_LABEL, RUNNING_LABEL, BLOCKED_LABEL})
+
+    # V2 live-runtime uses the same no-sync/exact-baseline seam, but terminal
+    # success additionally requires exact Actions deploy and read-only runtime
+    # evidence. Merge alone and release:done cannot pass.
+    live_api, live_pull = _dcp_release_fixture(721, scope=LIVE_RUNTIME_LABEL)
+    live_candidate = _prepare_dcp(live_api, 721)
+    assert live_candidate.deploy_required
+    handoff = next(
+        body
+        for number, body in live_api.comments
+        if number == 721 and DCP_RELEASE_HANDOFF_PROOF_MARKER in body
+    )
+    assert "scope=scope:live-runtime" in handoff
+    assert "task=task:standard" in handoff
+    assert f"main={SHA_C}" in handoff
+    live_merge = merge_candidate(live_api, live_candidate)
+    try:
+        complete_standard_release(
+            live_api,
+            721,
+            merge_sha=live_merge.merge_sha,
+            contour="production-verified",
+        )
+    except ReleaseBlocked as exc:
+        assert "deploy and read-only runtime evidence" in str(exc)
+    else:
+        raise AssertionError("DCP live-runtime merge without exact deploy proof must fail closed")
+    assert not terminal_state_proven(live_api, live_pull)
+    deploy_evidence = {
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "deploy": {"ok": True, "dry_run": False},
+        "loopback_probe": {"ok": True, "routes": []},
+        "public_probe": {"ok": True, "routes": []},
+        "ok": True,
+    }
+    runtime_evidence = {
+        "status": "reconciled",
+        "pr": 721,
+        "head": SHA_A,
+        "merge": live_merge.merge_sha,
+        "expected_sha": live_merge.merge_sha,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "service_name": CANONICAL_PRODUCTION_SERVICE_NAME,
+        "healthy": True,
+        "repairs_applied": False,
+        "read_only": True,
+        "evidence": [
+            {
+                "metadata_sha": live_merge.merge_sha,
+                "runtime_sha": live_merge.merge_sha,
+                "deployment_complete": True,
+                "unit": "active",
+                "main_pid": 721,
+                "probe_statuses": [200, 401, 403, 303],
+                "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+                "auth_env_ok": True,
+            }
+        ],
+    }
+    complete_standard_release(
+        live_api,
+        721,
+        merge_sha=live_merge.merge_sha,
+        contour="production-verified",
+        deploy_evidence=deploy_evidence,
+        runtime_evidence=runtime_evidence,
+    )
+    assert PRODUCTION_LABEL in _labels(live_pull)
+    assert DONE_LABEL not in _labels(live_pull)
+    assert sum(
+        DCP_RELEASE_PRODUCTION_PROOF_MARKER in body
+        for number, body in live_api.comments
+        if number == 721
+    ) == 1
+    assert terminal_state_proven(live_api, live_pull)
+    complete_standard_release(
+        live_api,
+        721,
+        merge_sha=live_merge.merge_sha,
+        contour="production-verified",
+    )
+    assert sum(
+        DCP_RELEASE_PRODUCTION_PROOF_MARKER in body
+        for number, body in live_api.comments
+        if number == 721
+    ) == 1
+    production_index = next(
+        index
+        for index, (number, body) in enumerate(live_api.comments)
+        if number == 721 and DCP_RELEASE_PRODUCTION_PROOF_MARKER in body
+    )
+    production_id = live_api.comment_ids[production_index]
+    live_api.update_comment(production_id, live_api.comments[production_index][1] + "\nedited")
+    assert not terminal_state_proven(live_api, live_pull)
+
+    wrong_api, _ = _dcp_release_fixture(722, scope=LIVE_RUNTIME_LABEL)
+    wrong_candidate = _prepare_dcp(wrong_api, 722)
+    wrong_merge = merge_candidate(wrong_api, wrong_candidate)
+    wrong_runtime = {
+        **runtime_evidence,
+        "pr": 722,
+        "merge": wrong_merge.merge_sha,
+        "expected_sha": wrong_merge.merge_sha,
+        "service_name": "wrong.service",
+        "evidence": [
+            {
+                **runtime_evidence["evidence"][0],
+                "metadata_sha": wrong_merge.merge_sha,
+                "runtime_sha": wrong_merge.merge_sha,
+            }
+        ],
+    }
+    try:
+        complete_standard_release(
+            wrong_api,
+            722,
+            merge_sha=wrong_merge.merge_sha,
+            contour="production-verified",
+            deploy_evidence=deploy_evidence,
+            runtime_evidence=wrong_runtime,
+        )
+    except ReleaseBlocked as exc:
+        assert "service_name" in str(exc)
+    else:
+        raise AssertionError("wrong DCP production service identity must fail closed")
 
 
 def _assert_orchestration_lane_and_legacy_retirement() -> None:
@@ -3388,6 +3545,10 @@ def _assert_workflow_contract() -> None:
         "/wb-core finance-lease ",
         "preflight-finance-lease",
         "handle-finance-lease",
+        "wb-core-deploy-evidence.json",
+        "wb-core-runtime-evidence.json",
+        "--deploy-evidence-file",
+        "--runtime-evidence-file",
         "finance:migration-deploy-lease",
         "finance:migration-deploy-lease-audit",
         "wb-core-finance-migration-deploy-lease-binding",
@@ -3407,7 +3568,9 @@ def _assert_workflow_contract() -> None:
         ROOT / "apps" / "github_release_train.py",
         ROOT / "apps" / "github_release_train_spec.py",
     ):
-        assert DCP_RELEASE_HANDOFF_VERSION in path.read_text(encoding="utf-8")
+        source = path.read_text(encoding="utf-8")
+        assert DCP_RELEASE_HANDOFF_VERSION in source
+        assert DCP_RELEASE_HANDOFF_V1_VERSION in source
     assert 'if stage == "metadata-complete"' in (
         ROOT / "apps" / "registry_upload_http_entrypoint_hosted_runtime.py"
     ).read_text(encoding="utf-8")
@@ -4603,7 +4766,7 @@ def main() -> int:
     _assert_queue_status_local_auth_contract()
     _assert_label_and_input_validation()
     _assert_standard_repo_only_and_live()
-    _assert_dcp_release_handoff_v1()
+    _assert_dcp_release_handoff_v2()
     api, root = _assert_loop_handshake_and_gate()
     _assert_recovery_transfer_and_acceptance(api, root)
     _assert_foreign_gate_waiting_and_queue_progress()

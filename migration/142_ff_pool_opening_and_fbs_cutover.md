@@ -139,4 +139,7 @@ once, historical and later post-handoff reconciliation, active reservations
 and negative available, cancellations, order arrival
 during the boundary, late pre-T isolation, concurrent supplier acceptance
 failure, guided post-cutover receipt, no WB writes, pre-commit crash recovery,
-retry/idempotency and exact readback after lifecycle events.
+retry/idempotency and exact readback after lifecycle events. The functional
+publisher regression also proves that, after cutover, current aggregate `ff` is
+rebuilt from the exact facility × pool rows with fractional-kopeck capital,
+while manifest/epoch/detail drift remains fail closed and deterministic.

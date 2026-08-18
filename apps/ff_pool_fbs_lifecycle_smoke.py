@@ -36,7 +36,10 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     process_post_t_fbs_lifecycle,
 )
 from packages.application.ff_pool_foundation import read_ff_pool_feature_state  # noqa: E402
-from packages.application.ff_pool_documents import FfPoolDocumentService  # noqa: E402
+from packages.application.ff_pool_documents import (  # noqa: E402
+    FfPoolDocumentService,
+    _guided_request_source_revision,
+)
 from packages.application.ff_pool_surfaces import FfPoolSurface  # noqa: E402
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
@@ -64,6 +67,19 @@ def main() -> int:
                 "nm_id": 101,
                 "barcode": "sku-101",
                 "nomenclature_name": "Lifecycle SKU 101",
+                "created_at": GATE_AT,
+                "updated_at": GATE_AT,
+            }
+        )
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "ff-pool-lifecycle-nm-103",
+                "is_active": True,
+                "is_hidden": False,
+                "our_sku": "seller-103",
+                "nm_id": 103,
+                "barcode": "sku-103",
+                "nomenclature_name": "New inbound SKU 103",
                 "created_at": GATE_AT,
                 "updated_at": GATE_AT,
             }
@@ -379,11 +395,25 @@ def main() -> int:
             )
             conn.execute(
                 """UPDATE sheet_vitrina_v1_supplier_shipment_lines
-                   SET unit_price='1', amount='66000', currency='CNY',
+                   SET qty=65999, unit_price='1', amount='65999', currency='CNY',
                        invoice_price_yuan_snapshot='1',
                        reference_purchase_price_yuan_snapshot='1'
                    WHERE shipment_id=? AND line_type='product'""",
                 (SHIPMENT_ID,),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_supplier_shipment_lines(
+                       line_id,shipment_id,line_type,sort_order,internal_nm_id,qty,
+                       unit_price,amount,currency,invoice_price_yuan_snapshot,
+                       reference_purchase_price_yuan_snapshot,manual_override,
+                       price_conformity_status,price_conformity_check_mode,
+                       price_conformity_reason,price_conformity_context_json,raw_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "line_26gn527_2", SHIPMENT_ID, "product", 2, 103, 1,
+                    "1", "1", "CNY", "1", "1", 0,
+                    "not_checked", "not_checked", "not_checked", "{}", "{}",
+                ),
             )
             conn.commit()
         service = FfPoolDocumentService(
@@ -396,45 +426,338 @@ def main() -> int:
             runtime_dir=runtime_dir,
             timestamp_factory=_DocClock(),
         ).supplier_shipment_source(SHIPMENT_ID)
+        guided_source_bytes = b"guided-26gn527-workbook-evidence"
+        guided_source_sha256 = "sha256:" + hashlib.sha256(
+            guided_source_bytes
+        ).hexdigest()
+        guided_request_revision = _guided_request_source_revision(
+            supplier_source_revision=shipment_revision,
+            source_sha256=guided_source_sha256,
+        )
         identity = DocumentIdentity(
             request_id="guided:26gn527:request",
             source_system="operator_ui",
             source_type="china_acceptance_workbook",
             source_id=SHIPMENT_ID,
-            source_revision=shipment_revision,
+            source_revision=guided_request_revision,
             idempotency_epoch=1,
             actor="warehouse-operator",
             business_date="2026-08-15",
         )
+        acceptance_manifest = {
+            "facility_id": "fac_moscow",
+            "source_revision": shipment_revision,
+            "allocations": [
+                {
+                    "nm_id": 101,
+                    "expected_quantity": 65_999,
+                    "accepted_quantity": 2,
+                    "quantity_fbs": 1,
+                    "quantity_fbo": 1,
+                    "accepted_capital_rub": "20.0049",
+                    "discrepancy_type": "shortage",
+                    "discrepancy_quantity": 65_997,
+                    "identity_evidence_digest": "sha256:" + "9" * 64,
+                },
+                {
+                    "nm_id": 103,
+                    "expected_quantity": 1,
+                    "accepted_quantity": 1,
+                    "quantity_fbs": 1,
+                    "quantity_fbo": 0,
+                    "accepted_capital_rub": "10.0049",
+                    "discrepancy_type": "none",
+                    "discrepancy_quantity": 0,
+                    "identity_evidence_digest": "sha256:" + "8" * 64,
+                },
+            ],
+            "expenses": [
+                {
+                    "amount_rub": "2.00",
+                    "basis": "Фактическая приёмка",
+                    "metadata": {"allocation_scope": "both"},
+                }
+            ],
+        }
         preview = service.accept_preview(
             identity=identity,
             document_kind="china_acceptance",
-            manifest={
-                "facility_id": "fac_moscow",
-                "source_revision": shipment_revision,
-                "allocations": [
-                    {
-                        "nm_id": 101,
-                        "expected_quantity": 66_000,
-                        "accepted_quantity": 2,
-                        "quantity_fbs": 1,
-                        "quantity_fbo": 1,
-                        "accepted_capital_rub": "20.00",
-                        "discrepancy_type": "shortage",
-                        "discrepancy_quantity": 65_998,
-                        "identity_evidence_digest": "sha256:" + "9" * 64,
-                    }
-                ],
-                "expenses": [
-                    {
-                        "amount_rub": "2.00",
-                        "basis": "Фактическая приёмка",
-                        "metadata": {"allocation_scope": "both"},
-                    }
-                ],
-            },
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
         )
         assert preview["state"] == "ready", preview
+        assert preview["confirm_allowed"] is True
+        assert preview["preview_manifest"]["posting_plan_preview"][
+            "confirm_plan_ready"
+        ] is True
+        assert preview["preview_manifest"]["posting_plan_preview"][
+            "aggregate_semantic_zero_nm_ids"
+        ] == [103]
+        assert preview["preview_manifest"]["capital_normalization"] == {
+            "policy": "header_round_half_up_then_largest_fractional_remainder_nm_id",
+            "exact_total_rub": "30.0098",
+            "canonical_total_rub": "30.01",
+            "total_residual_rub": "0.0002",
+            "residual_owner_nm_ids": [101],
+            "capital_cents_by_nm": {"101": 2001, "103": 1000},
+            "normalization_residual_rub_by_nm": {
+                "101": "0.0051",
+                "103": "-0.0049",
+            },
+        }
+        # A pre-upgrade ready request is not confirmable until the identical
+        # immutable source is retried and the complete query-only plan is
+        # durably proven in place.
+        with sqlite3.connect(runtime.db_path) as conn:
+            legacy_ready_manifest = dict(preview["preview_manifest"])
+            legacy_ready_manifest.pop("posting_plan_preview")
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET preview_manifest_json=? WHERE request_id=?""",
+                (
+                    json.dumps(
+                        legacy_ready_manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        assert service.status(request_id=str(preview["request_id"]))[
+            "confirm_allowed"
+        ] is False
+        upgraded_ready = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert upgraded_ready["request_id"] == preview["request_id"]
+        assert upgraded_ready["confirm_allowed"] is True
+        assert upgraded_ready["preview_manifest"]["posting_plan_preview"][
+            "aggregate_semantic_zero_nm_ids"
+        ] == [103]
+        # The first production readiness release compared the current raw
+        # supplier revision with the combined raw+workbook request revision.
+        # An exact request blocked by that defect is reopened in place only
+        # when both stored bindings recompute; no duplicate or business row is
+        # created.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET state='blocked',error_code='supplier_source_revision_changed',
+                       preview_manifest_json=?
+                   WHERE request_id=?""",
+                (
+                    json.dumps(
+                        legacy_ready_manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        source_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert source_contract_retry["request_id"] == preview["request_id"]
+        assert source_contract_retry["state"] == "ready"
+        assert source_contract_retry["confirm_allowed"] is True
+        assert source_contract_retry["idempotent"] is True
+        assert source_contract_retry["preview_manifest"]["posting_plan_preview"][
+            "confirm_plan_ready"
+        ] is True
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_workflow_events
+                   WHERE identity=? AND stage='source_revision_contract_revalidation'
+                     AND status='complete'""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_document_requests
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_documents
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 0
+        # Reopening the compatibility state never weakens the live source
+        # check.  Even an internal caller that repeats the old identity is
+        # blocked again while supplier truth is different.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_supplier_shipments
+                   SET updated_at='2026-08-15T04:00:01Z'
+                   WHERE shipment_id=?""",
+                (SHIPMENT_ID,),
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET state='blocked',error_code='supplier_source_revision_changed'
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            )
+            conn.commit()
+        drifted_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert drifted_contract_retry["state"] == "blocked"
+        assert drifted_contract_retry["error"]["code"] == (
+            "supplier_source_revision_changed"
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_supplier_shipments
+                   SET updated_at='2026-08-15T04:00:00Z'
+                   WHERE shipment_id=?""",
+                (SHIPMENT_ID,),
+            )
+            conn.commit()
+        restored_contract_retry = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert restored_contract_retry["state"] == "ready"
+        assert restored_contract_retry["confirm_allowed"] is True
+        assert restored_contract_retry["preview_manifest"]["posting_plan_preview"][
+            "aggregate_pool_parity"
+        ]["status"] == "pass"
+        # Global aggregate/detail parity is a readiness and confirm boundary,
+        # not merely a post-mutation assertion.  A stale hourly aggregate
+        # therefore blocks before T1/business writes, and the same immutable
+        # request may reopen only after exact parity is restored.
+        with sqlite3.connect(runtime.db_path) as conn:
+            before_aggregate = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            ).fetchone()
+            assert before_aggregate is not None
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=CAST(quantity AS INTEGER)+1
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            )
+            conn.commit()
+        parity_block = service.post(str(preview["request_id"]))
+        assert parity_block["state"] == "blocked"
+        assert parity_block["error"]["code"] == "guided_acceptance_parity_not_current"
+        parity_repeat_while_stale = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_repeat_while_stale["state"] == "blocked"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=?,capital_rub=?
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101""",
+                (str(before_aggregate[0]), str(before_aggregate[1])),
+            )
+            conn.commit()
+        parity_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_reopened["state"] == "ready"
+        assert parity_reopened["confirm_allowed"] is True
+        assert parity_reopened["request_id"] == preview["request_id"]
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_workflow_events
+                   WHERE identity=? AND stage='aggregate_parity_revalidation'
+                     AND status='complete'""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_documents
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 0
+
+        # The confirm path must reproduce the exact durable preview, including
+        # its aggregate/pool proof, both before and while holding the apply
+        # lock.  A corrupted/stale stored proof blocks with no business row.
+        with sqlite3.connect(runtime.db_path) as conn:
+            stored = json.loads(
+                conn.execute(
+                    """SELECT preview_manifest_json FROM
+                              sheet_vitrina_v1_ff_pool_document_requests
+                       WHERE request_id=?""",
+                    (str(preview["request_id"]),),
+                ).fetchone()[0]
+            )
+            stored["posting_plan_preview"]["posted_manifest_sha256"] = (
+                "sha256:" + "0" * 64
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET preview_manifest_json=? WHERE request_id=?""",
+                (
+                    json.dumps(
+                        stored,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        plan_drift_block = service.post(str(preview["request_id"]))
+        assert plan_drift_block["state"] == "blocked"
+        assert plan_drift_block["error"]["code"] == (
+            "guided_acceptance_posting_plan_drift"
+        )
+        plan_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert plan_reopened["state"] == "ready"
+        assert plan_reopened["confirm_allowed"] is True
+        assert plan_reopened["preview_manifest"]["posting_plan_preview"][
+            "posted_manifest_sha256"
+        ] != "sha256:" + "0" * 64
+        # A production request blocked by the former minor-unit check is
+        # reopened in place; the immutable request/workbook is not duplicated.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET state='blocked',error_code='money_minor_unit_required'
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            )
+            conn.commit()
+        retried_preview = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert retried_preview["request_id"] == preview["request_id"]
+        assert retried_preview["state"] == "ready"
+        assert retried_preview["idempotent"] is True
         posted = service.post(str(preview["request_id"]))
         assert posted["state"] == "complete", posted
         repeated_acceptance = service.post(str(preview["request_id"]))
@@ -460,13 +783,169 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
             ).fetchone()
-            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("91")
-            assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("11")
+            new_fbs = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=103"
+            ).fetchone()
+            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("90.67")
+            assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("10.68")
+            assert int(new_fbs[0]) == 1 and Decimal(str(new_fbs[1])) == Decimal("10.66")
+            new_aggregate = conn.execute(
+                """SELECT quantity,capital_rub,cost_covered_quantity,quality,certified
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            ).fetchone()
+            assert tuple(new_aggregate) == (
+                "1", "10.66", "1", "guided_acceptance_minor_unit", 0,
+            )
             assert read_ff_pool_feature_state(
                 conn, aggregate_revision="wf_stage7c"
             ).reader_effective is True
+            replay = conn.execute(
+                """SELECT legacy_operation_id,cost_layer_id,capital_normalization_json
+                   FROM sheet_vitrina_v1_ff_guided_acceptance_replays
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()
+            assert replay is not None
+            assert json.loads(replay[2])["canonical_total_rub"] == "30.01"
+            receipt_snapshot = json.loads(
+                conn.execute(
+                    """SELECT raw_json FROM sheet_vitrina_v1_ff_stock_operation_lines
+                       WHERE operation_id=? AND nm_id=101""",
+                    (str(replay[0]),),
+                ).fetchone()[0]
+            )["cost_snapshot"]
+            assert receipt_snapshot["capital_delta_rub"] == "20.01"
+            assert receipt_snapshot["quality"] == "guided_acceptance_minor_unit"
             guided_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert guided_readback["status"] == "pass", guided_readback
+
+        # Recovery freezes cost coverage and metadata as well as headline
+        # quantity/capital.  Any affected-field drift blocks before mutation.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET cost_covered_quantity='0.5'
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            )
+            conn.commit()
+        coverage_drift_preview = service.accept_preview(
+            identity=DocumentIdentity(
+                request_id="guided:26gn527:coverage-drift-recovery",
+                source_system="operator_ui",
+                source_type="guided_acceptance_recovery",
+                source_id=str(posted["document"]["document_id"]),
+                source_revision="sha256:" + "5" * 64,
+                idempotency_epoch=1,
+                actor="warehouse-operator",
+                business_date="2026-08-15",
+            ),
+            document_kind="storno",
+            manifest={"target_document_id": str(posted["document"]["document_id"])},
+        )
+        coverage_drift_result = service.post(
+            str(coverage_drift_preview["request_id"])
+        )
+        assert coverage_drift_result["state"] == "blocked"
+        assert coverage_drift_result["error"]["code"] == "guided_recovery_aggregate_drift"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET cost_covered_quantity='1'
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            )
+            conn.commit()
+
+        recovery_identity = DocumentIdentity(
+            request_id="guided:26gn527:recovery",
+            source_system="operator_ui",
+            source_type="guided_acceptance_recovery",
+            source_id=str(posted["document"]["document_id"]),
+            source_revision="sha256:" + "7" * 64,
+            idempotency_epoch=1,
+            actor="warehouse-operator",
+            business_date="2026-08-15",
+        )
+        recovery_preview = service.accept_preview(
+            identity=recovery_identity,
+            document_kind="storno",
+            manifest={"target_document_id": str(posted["document"]["document_id"])},
+        )
+        assert recovery_preview["state"] == "ready"
+        recovered = service.post(str(recovery_preview["request_id"]))
+        assert recovered["state"] == "complete", recovered
+        with sqlite3.connect(runtime.db_path) as conn:
+            supplier_after_recovery = conn.execute(
+                """SELECT actual_ff_acceptance_date,order_status
+                   FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?""",
+                (SHIPMENT_ID,),
+            ).fetchone()
+            assert tuple(supplier_after_recovery) == (None, "in_transit")
+            recovered_pool = conn.execute(
+                """SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances
+                   WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"""
+            ).fetchone()
+            assert int(recovered_pool[0]) == 8
+            assert Decimal(str(recovered_pool[1])) == Decimal("80")
+            recovered_new_aggregate = conn.execute(
+                """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,quality
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=103"""
+            ).fetchone()
+            assert tuple(recovered_new_aggregate) == (
+                "0", None, "0", "0", "guided_acceptance_minor_unit",
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_guided_acceptance_recoveries"
+            ).fetchone()[0] == 1
+            recovery_snapshot = json.loads(
+                conn.execute(
+                    """SELECT line.raw_json
+                       FROM sheet_vitrina_v1_ff_stock_operation_lines AS line
+                       JOIN sheet_vitrina_v1_ff_stock_operations AS operation
+                         ON operation.operation_id=line.operation_id
+                       WHERE operation.source_type='supplier_shipment_acceptance_recovery'
+                         AND line.nm_id=101"""
+                ).fetchone()[0]
+            )["cost_snapshot"]
+            assert Decimal(recovery_snapshot["capital_delta_rub"]) == Decimal("-20.01")
+            assert recovery_snapshot["quality"] == "guided_acceptance_recovery"
+
+        # Recovery leaves the shipment reusable through a fresh source
+        # revision; the recovered immutable request itself never reactivates.
+        _shipment, _shipment_lines, replacement_revision = FfPoolSurface(
+            db_path=runtime.db_path,
+            runtime_dir=runtime_dir,
+            timestamp_factory=_DocClock(),
+        ).supplier_shipment_source(SHIPMENT_ID)
+        replacement_manifest = dict(acceptance_manifest)
+        replacement_manifest["source_revision"] = replacement_revision
+        replacement_source_bytes = b"guided-26gn527-replacement-workbook"
+        replacement_request_revision = _guided_request_source_revision(
+            supplier_source_revision=replacement_revision,
+            source_sha256="sha256:"
+            + hashlib.sha256(replacement_source_bytes).hexdigest(),
+        )
+        replacement_identity = DocumentIdentity(
+            request_id="guided:26gn527:replacement",
+            source_system="operator_ui",
+            source_type="china_acceptance_workbook",
+            source_id=SHIPMENT_ID,
+            source_revision=replacement_request_revision,
+            idempotency_epoch=1,
+            actor="warehouse-operator",
+            business_date="2026-08-15",
+        )
+        replacement_preview = service.accept_preview(
+            identity=replacement_identity,
+            document_kind="china_acceptance",
+            manifest=replacement_manifest,
+            source_bytes=replacement_source_bytes,
+        )
+        assert replacement_preview["state"] == "ready"
+        replacement_posted = service.post(str(replacement_preview["request_id"]))
+        assert replacement_posted["state"] == "complete", replacement_posted
 
         # Quantity comes from immutable official status evidence; it is never
         # approximated as one unit merely because one order row is present.
@@ -498,8 +977,33 @@ def main() -> int:
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
             assert int(exact_balance[0]) == 6
-            assert Decimal(str(exact_balance[1])) == Decimal("61")
-            assert read_ff_pool_cutover_status(conn)["readback"]["status"] == "pass"
+            assert Decimal(str(exact_balance[1])) == Decimal("60.67")
+            final_readback = read_ff_pool_cutover_status(conn)["readback"]
+            assert final_readback["status"] == "pass", final_readback
+        drifted_recovery = service.accept_preview(
+            identity=DocumentIdentity(
+                request_id="guided:26gn527:drifted-recovery",
+                source_system="operator_ui",
+                source_type="guided_acceptance_recovery",
+                source_id=str(replacement_posted["document"]["document_id"]),
+                source_revision="sha256:" + "6" * 64,
+                idempotency_epoch=1,
+                actor="warehouse-operator",
+                business_date="2026-08-15",
+            ),
+            document_kind="storno",
+            manifest={
+                "target_document_id": str(replacement_posted["document"]["document_id"])
+            },
+        )
+        drifted_result = service.post(str(drifted_recovery["request_id"]))
+        assert drifted_result["state"] == "blocked"
+        assert drifted_result["error"]["code"] in {
+            "guided_recovery_pool_drift",
+            "guided_recovery_aggregate_drift",
+            "guided_recovery_dependent_state_drift",
+            "guided_recovery_projection_drift",
+        }
     print("ff_pool_fbs_lifecycle_smoke: OK")
     return 0
 

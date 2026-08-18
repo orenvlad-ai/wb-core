@@ -77,7 +77,7 @@ def main() -> None:
         metric_keys = {item["metric_key"] for item in metric_options}
         if "total_fin_buyout_rub" in metric_keys:
             raise AssertionError(f"financial metrics must be excluded from research options, got {metric_options}")
-        if "avg_price_seller_discounted" not in metric_keys:
+        if "price_seller_discounted" not in metric_keys:
             raise AssertionError(f"operational price metric must stay selectable, got {metric_options}")
         if any(str(item.get("section") or "").lower() in {"финансы", "экономика"} for item in metric_options):
             raise AssertionError(f"financial sections must be excluded, got {metric_options}")
@@ -87,7 +87,7 @@ def main() -> None:
         payload = {
             "research_sku_ids": [first_sku],
             "control_sku_ids": [second_sku],
-            "metric_keys": ["avg_price_seller_discounted", "total_view_count"],
+            "metric_keys": ["price_seller_discounted", "total_view_count"],
             "baseline_period": {"date_from": "2026-04-14", "date_to": "2026-04-15"},
             "analysis_period": {"date_from": "2026-04-19", "date_to": "2026-04-20"},
         }
@@ -98,7 +98,7 @@ def main() -> None:
             raise AssertionError(f"research result must not claim causal effect, got {result}")
         if len(result["rows"]) != 2:
             raise AssertionError(f"research result must return one row per metric, got {result}")
-        price_row = next(row for row in result["rows"] if row["metric_key"] == "avg_price_seller_discounted")
+        price_row = next(row for row in result["rows"] if row["metric_key"] == "price_seller_discounted")
         if price_row["aggregation_method"] != "mean_observed_values":
             raise AssertionError(f"price metrics must be averaged, got {price_row}")
         count_row = next(row for row in result["rows"] if row["metric_key"] == "total_view_count")
@@ -124,7 +124,7 @@ def main() -> None:
             raise AssertionError(f"research promotions contract mismatch, got {promotions_result}")
         if promotions_result.get("read_only") is not True or promotions_result.get("causal_claim") is not False:
             raise AssertionError(f"research promotions must stay read-only/non-causal, got {promotions_result}")
-        if promotions_result.get("price_metric_keys") != ["price_seller_discounted", "avg_price_seller_discounted"]:
+        if promotions_result.get("price_metric_keys") != ["price_seller_discounted"]:
             raise AssertionError(f"research promotions must use discounted price metric candidates, got {promotions_result}")
         if promotions_result.get("summary", {}).get("total_observed_points") != 8:
             raise AssertionError(f"research promotions observed point count mismatch, got {promotions_result}")
@@ -275,8 +275,8 @@ def _build_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", first_views + second_views],
                     [f"{first_group}: Показы", f"GROUP:{first_group}|total_view_count", first_views],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", first_price],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", second_price],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", first_price],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|price_seller_discounted", second_price],
                     [f"SKU A: Показы", f"SKU:{first_nm_id}|total_view_count", first_views],
                     [f"SKU B: Показы", f"SKU:{second_nm_id}|total_view_count", second_views],
                     [f"SKU A: Акция", f"SKU:{first_nm_id}|promo_participation", first_in_promo],

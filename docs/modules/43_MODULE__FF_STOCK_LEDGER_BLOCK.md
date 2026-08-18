@@ -579,13 +579,66 @@ The guided document replaces routine acceptance-date editing. Its workbook
 records immutable expected quantity, actual accepted quantity, exact
 nmId/barcode/SKU, FBS/FBO allocation, proportional pool-scoped expenses and
 discrepancy evidence. A related immutable discrepancy child is posted with the
-root. Template generation uses a non-persisting exact supplier-cost preview;
-future finalization pins the source revision and materializes the supplier FF
-cost layer with actual accepted quantities rather than shipped quantities. The
-service is the only future owner of the factual date, existing
+root. Template generation uses a non-persisting exact supplier-cost preview.
+Fractional-kopeck supplier capital crosses the document boundary by rounding
+the aggregate header once (`ROUND_HALF_UP`) and distributing its kopecks by
+largest fractional remainder then `nmId`; exact/canonical totals, per-SKU
+residuals and residual owners are immutable evidence. Per-row independent
+rounding, synthetic zero and double capital are forbidden. Finalization pins
+the source revision and materializes the supplier FF cost layer with both
+actual accepted quantities and the same normalized per-SKU capital used by the
+pool movements. The minor-unit boundary applies to each new immutable movement,
+not to the pre-existing pool balance: opening/cutover capital remains its
+authoritative exact Decimal and apply adds the signed kopeck delta without
+rounding or rewriting that prior value. The inverse storno therefore subtracts
+the same kopeck delta and restores the exact prior capital. A zero-quantity
+close with a non-zero fractional residual remains fail-closed. The service is
+the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior
 receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
+Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
+full posting plan, rechecks the exact supplier source revision and durably pins
+the plan/document totals plus pool, aggregate and dependent before-state
+digests. Readiness also recomputes global current-epoch parity between the
+complete active functional `ff` revision and every facility × pool row; a stale
+hourly aggregate is blocked before confirm rather than discovered after
+business writes begin. Confirm reproduces the exact stored plan proof before
+T1 and again under `BEGIN IMMEDIATE`; active-version, aggregate, detail or plan
+drift fails closed. Once ordinary publication restores parity, an identical
+request blocked only by this parity/plan guard may be reprocessed in place,
+without a duplicate request or business effect. A pre-upgrade identical ready
+request is refreshed in place; it never
+creates a duplicate request or business effect. The request-level source
+revision is deliberately the hash of the raw supplier revision plus the exact
+workbook SHA-256, while the workbook manifest retains the raw supplier
+revision. Readiness and confirm compare current raw supplier truth only with
+that manifest value and independently recompute the request-level binding; the
+two revision layers are never compared as though they were the same value. An
+identical request incorrectly blocked by the former raw-versus-combined check
+may be reprocessed in place only when the caller reproduces the stored combined
+revision and it recomputes from the immutable manifest plus workbook digest.
+Real source drift remains blocked on the live raw recheck.
+
+An accepted SKU does not have to exist in the current aggregate `ff` snapshot:
+new inbound inventory is frozen as an absent semantic-zero before-state and its
+first positive row is materialized only by confirm. Quantity, canonical capital
+and `cost_covered_quantity` advance together; no synthetic zero or capital-only
+row is allowed. The immutable plan explicitly names every semantic-zero SKU.
+
+The exact guided replay and its recovery are append-only. A storno is admitted
+only when supplier factual state, every affected pool/aggregate row and the
+current cost layer still equal the immutable original after-state. It appends a
+negative legacy receipt, reverses the pool document, restores factual status/date
+and the prior cost-layer state, returns aggregate FF to the frozen before-state
+and queues affected-SKU replay. Any downstream reservation/debit, source/cost
+revision or affected balance drift blocks compensation; delete/ad-hoc SQL/blind
+restore is not a recovery path. Previously present aggregate rows are restored
+field-for-field. A row first created by the acceptance remains as an audited
+zero row after storno (zero quantity/capital/cost coverage and null WAC), which
+is the canonical no-delete equivalent of its frozen absent state. A recovered
+shipment can be accepted again only through a fresh source revision and a new
+immutable request.
 
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
@@ -630,7 +683,13 @@ after the five-minute collector commits them and performs no WB mutation. An
 explicit clean `excluded_pending_receipt` stays outside opening/backfill and can
 later enter both aggregate and pools exactly once through guided acceptance.
 Aggregate/detail parity is recomputed after every physical lifecycle or guided
-document movement.
+document movement. After the owner-gated pool cutover, ordinary functional
+publication takes current physical `ff` quantity/capital from the exact sum of
+facility × `FBS|FBO` balances. The append-only legacy FF ledger remains the
+historical and outbound-WAC evidence source, but can no longer resurrect an FBS
+lifecycle debit in the public aggregate. Epoch, cutover manifest and every pool
+row participate in the coherent local-source digest and are rechecked while the
+functional apply holds its immediate write lock.
 
 Migration 143 makes the opening checkpoint replayable without a moving owner
 gate. The immutable manifest owns local observation boundary `T`, three

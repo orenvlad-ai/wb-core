@@ -3207,7 +3207,10 @@ def _known_post_cutover_non_target_growth(
     allowed_operation_ids = {
         str(row[0])
         for row in new_operations
-        if str(row[1]) == "supplier_shipment_acceptance"
+        if str(row[1]) in {
+            "supplier_shipment_acceptance",
+            "supplier_shipment_acceptance_recovery",
+        }
         and str(row[2]) in allowed_shipments
     }
     if len(allowed_operation_ids) != len(new_operations):

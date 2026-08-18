@@ -420,6 +420,15 @@ Repo-owned [GitHub Release Train](11_github_release_train.md) является o
 
 `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify`
 
+Для exact DCP `scope:live-runtime` handoff v2 эта же команда дополнительно
+пишет private runner evidence, после чего Release Train выполняет read-only
+`hosted_runtime_transport_reconcile.py` на exact merge SHA. Terminal
+`release:production` допускается только по immutable Actions-owned proof,
+который связывает exact PR/head/merge=deployed SHA, canonical target
+`wb_core_eu_hosted_runtime_active`, service `wb-core-registry-http.service` и
+digests deploy/probe/readback evidence. Это не второй deploy implementation и
+не передаёт DCP production credentials.
+
 LOOP PR использует тот же единственный deploy command, но после final sync/baseline сначала обязан остановиться на `release:awaiting-agent`. Exact-head acknowledgement одноразово потребляется перед merge. Потерянный владелец может получить только fail-closed overlay `release:needs-resume`; auto-ack, skip и перехват gate запрещены, а время ожидания не является deploy blocker. После успешного deploy/verify LOOP получает `release:awaiting-ui`, а не terminal success; несвязанные releases ждут UI acceptance либо exact-linked recovery. Ни agent handshake, ни UI gate не меняют canonical deploy implementation или target.
 
 Production failure после merge ставит global `release:halted` и блокирует выбор следующего release. SSH exit `255` не считается доказанным deploy failure: это `transport-indeterminate`, после которого bounded reconciler читает exact metadata/runtime SHA, canonical EnvironmentFile key-presence без вывода values, systemd state/MainPID и mandatory status/operator probes. Healthy exact SHA продолжает transition; wrong/mixed SHA, invalid auth env, inactive systemd и failed probes сохраняют halted. Разрешены только safe retries `daemon-reload/restart/probes/readback`; rsync, metadata и dependencies не повторяются. Repo-owned `resume-halted` снимает label только по exact PR/head/merge/canonical-target evidence. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets остаются вне Git/logs.

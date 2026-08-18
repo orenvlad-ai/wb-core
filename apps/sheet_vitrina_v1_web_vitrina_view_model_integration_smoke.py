@@ -83,7 +83,7 @@ def main() -> None:
             raise AssertionError(f"view_model must not expose row update timestamp as a visible table column, got {column_ids}")
 
         rows = {row.row_id: row for row in view_model.rows}
-        money_row = rows[f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted"]
+        money_row = rows[f"SKU:{enabled[0].nm_id}|price_seller_discounted"]
         percent_row = rows[f"SKU:{enabled[1].nm_id}|avg_addToCartConversion"]
         total_row = rows["TOTAL|total_view_count"]
         if total_row.group_id != "group:overview" or total_row.row_kind != "total":
@@ -147,7 +147,7 @@ def _build_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
                     [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", 990, 1110],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.115, 0.13],
                 ],
                 row_count=4,

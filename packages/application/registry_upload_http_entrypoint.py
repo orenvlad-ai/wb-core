@@ -153,6 +153,10 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
     SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
     extend_metrics_with_sku_action_metrics,
 )
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    extend_metrics_with_weighted_seller_price,
+)
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
 )
@@ -331,7 +335,8 @@ SHEET_OPERATOR_JOB_ID: ContextVar[str] = ContextVar("sheet_vitrina_v1_operator_j
 WEB_VITRINA_METRIC_PRESENTATION_CONFIG_KEY = "metric_presentation"
 WEB_VITRINA_USER_CONFIG_SCHEMA_VERSION = 2
 WEB_VITRINA_METRIC_PRESENTATION_LEGACY_PAYLOAD_VERSION = 3
-WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 4
+WEB_VITRINA_METRIC_PRESENTATION_UNIFIED_PAYLOAD_VERSION = 4
+WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION = 5
 WEB_VITRINA_METRIC_DISPLAY_STATUSES = {"shown", "collapsed", "hidden"}
 WEB_VITRINA_SKU_METRIC_SELECTION_MODES = {"manual", "preset"}
 WEB_VITRINA_SKU_METRIC_PRESET_LIMIT = 40
@@ -513,6 +518,7 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
     ),
     "prices_snapshot": (
         "avg_price_seller_discounted",
+        WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
         "price_seller_discounted",
         "price_seller",
     ),
@@ -1522,11 +1528,13 @@ class RegistryUploadHttpEntrypoint:
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
             extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_proxy_v4(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(
-                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                extend_metrics_with_weighted_seller_price(
+                    extend_metrics_with_own_product_capital_metrics(
+                        extend_metrics_with_proxy_v4(
+                            extend_metrics_with_our_wb_cost_metrics(
+                                extend_metrics_with_onec_stock_metrics(
+                                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                                )
                             )
                         )
                     )
@@ -3146,10 +3154,12 @@ class RegistryUploadHttpEntrypoint:
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
             extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_our_wb_cost_metrics(
-                        extend_metrics_with_onec_stock_metrics(
-                            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                extend_metrics_with_weighted_seller_price(
+                    extend_metrics_with_own_product_capital_metrics(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(
+                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                            )
                         )
                     )
                 )
@@ -7316,9 +7326,11 @@ class RegistryUploadHttpEntrypoint:
                 current_state = self.runtime.load_current_state()
                 metric_keys = _metric_keys_for_source_keys(
                     extend_metrics_with_sku_action_metrics(
-                        extend_metrics_with_own_product_capital_metrics(
-                            extend_metrics_with_our_wb_cost_metrics(
-                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        extend_metrics_with_weighted_seller_price(
+                            extend_metrics_with_own_product_capital_metrics(
+                                extend_metrics_with_our_wb_cost_metrics(
+                                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                                )
                             )
                         )
                     ),
@@ -8967,7 +8979,7 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
             inventory_planning_metric_keys_v1.append(metric_key)
             seen_inventory_planning_metric_keys.add(metric_key)
 
-    if source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION:
+    if source_version >= WEB_VITRINA_METRIC_PRESENTATION_UNIFIED_PAYLOAD_VERSION:
         raw_presentation = source.get("presentation")
         presentation_source = raw_presentation if isinstance(raw_presentation, Mapping) else {}
         presentation_order: list[str] = []
@@ -8999,7 +9011,11 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
                     presentation_display[logical_metric_id] = status
 
         return {
-            "version": WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION,
+            "version": (
+                WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+                if source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+                else WEB_VITRINA_METRIC_PRESENTATION_UNIFIED_PAYLOAD_VERSION
+            ),
             "presentation": {
                 "order": presentation_order,
                 "display": presentation_display,
@@ -9018,6 +9034,10 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
                 "incident_effective_shown_v1": incident_effective_shown_v1,
                 "sku_presets_seeded_v1": sku_presets_seeded_v1,
                 "unified_presentation_v1": bool(migrations.get("unified_presentation_v1")),
+                "seller_price_weighted_v1": bool(
+                    source_version >= WEB_VITRINA_METRIC_PRESENTATION_PAYLOAD_VERSION
+                    and migrations.get("seller_price_weighted_v1")
+                ),
                 "inventory_planning_metric_keys_v1": inventory_planning_metric_keys_v1,
             },
         }

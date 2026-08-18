@@ -33,6 +33,11 @@ service and the following operational objects:
   chronology and recursive cycle protection;
 - existing `sheet_vitrina_v1_ff_workflow_events` records
   `accepted/processing/blocked/ready/posted/replay/complete/error` transitions.
+- guided China acceptance additionally records one immutable replay row with
+  accepted quantities, the materialized supplier-cost layer and the exact
+  money-normalization manifest. Its append-only recovery table binds at most
+  one compensating storno to that replay; neither table is a second movement
+  ledger.
 
 Legacy documents are not related or backfilled. Correction, storno and late
 expense edges are also mirrored into the narrower Stage 1 operation relation
@@ -67,6 +72,24 @@ or canonical Decimal TEXT; no new accounting field uses `REAL`.
 - A China acceptance allocation selects one facility and exact FBS/FBO line
   quantities. Common expenses are distributed deterministically across the
   whole accepted quantity, with exact nmId/barcode identity and no fuzzy match.
+  Supplier capital may contain fractional kopecks. The document rounds the
+  exact aggregate header once with `ROUND_HALF_UP`, floors every per-SKU share
+  to kopecks and assigns the remaining kopecks by largest fractional remainder,
+  then `nmId`. It persists the exact header, canonical header, total/per-SKU
+  residual and residual owners. Independent per-SKU rounding is forbidden.
+  The resulting per-SKU kopecks are split between FBO/FBS by accepted quantity;
+  positive quantity may not become synthetic zero. Aggregate, SKU detail and
+  pool totals therefore conserve the same canonical header exactly. An
+  accepted inbound SKU may be absent from the current aggregate `ff` snapshot;
+  that absence is frozen as `row_present=false` semantic zero, not rejected as
+  `aggregate_sku_missing`. Confirm materializes its first positive aggregate
+  row with the same quantity/capital and full cost coverage. Existing rows add
+  the accepted quantity to `cost_covered_quantity` together with physical
+  quantity and capital. A guided preview is ready only when the complete active
+  aggregate `ff` revision exactly equals all current facility/pool detail, not
+  merely the request's affected SKUs. Its durable posting proof pins both
+  fingerprints and confirm reproduces the same full plan before T1 and under
+  the immediate apply lock.
 - One inter-facility transfer root owns immutable shipment, receipt, loss,
   discrepancy, cancellation, correction, storno and late-expense children.
   Shipment freezes source WAC/capital. Receipt posts only actual accepted
@@ -92,6 +115,22 @@ or canonical Decimal TEXT; no new accounting field uses `REAL`.
   using only positive selected physical quantities and stable largest-remainder
   kopeck rounding. Reversal and late expense are append-only linked documents.
 
+A guided-acceptance storno is stricter than generic movement reversal. The
+original posted manifest freezes supplier factual status/date, affected pool
+balances and active aggregate rows. Recovery is allowed only while all those
+affected states and the exact current supplier cost layer still equal
+`before + original effect`; later reservations/debits/cost/source drift block
+it. One transaction appends the negative legacy receipt, reverses the typed
+pool movements, restores the supplier factual status/date, restores or
+deactivates the cost layer and returns aggregate FF to the frozen before-state.
+It then records immutable recovery replay evidence and queues only the affected
+SKU projection. A row that was present is restored field-for-field, including
+WAC, cost coverage, quality/certification, WB counters and provenance. A SKU
+that was absent before confirm remains as an audited canonical zero row after
+storno; quantity, capital and cost coverage are zero and WAC is null, so it is
+semantically equal to the frozen absent state without deleting history. No
+delete, ad-hoc SQL or blind store restore is part of this business compensation.
+
 One or more immutable positive RUB expense lines may carry a safe free-text
 basis and optional source-file digest. Their cents are allocated over the whole
 shipped/reallocated quantity in stable-line order; partial loss retains the
@@ -114,7 +153,30 @@ barcodes, duplicate resolved SKU and unknown/ambiguous/conflicting identity
 fail with machine-readable errors. XML parts must be UTF-8, self-closing row/
 cell/formula tags count toward the same bounds, and generated server/catalog
 text is forced to string cells so formula-like labels/SKUs cannot execute in a
-downloaded template. A blocked preview can never be posted.
+downloaded template. A blocked preview can never be posted. The only bounded
+upgrade exception is an identical immutable China workbook previously blocked
+with `money_minor_unit_required`: after deployment it is revalidated by the new
+aggregate boundary and reopened in place, preserving the canonical request,
+source revision, workbook digest and audit history. No other blocked code is
+normally reopened. One further bounded compatibility case covers the initial
+posting-plan readiness release: an identical guided request blocked with
+`supplier_source_revision_changed` is reprocessed only when its stored request
+revision exactly recomputes as `hash(raw supplier revision + workbook SHA-256)`
+and the retry reproduces that same immutable identity. Processing then rechecks
+the current raw supplier revision against the raw revision in the workbook
+manifest, so genuine composition/cost drift remains fail closed. `ready` guided
+previews additionally persist a query-only full
+posting-plan proof after writer epoch, opening, current source revision,
+aggregate/pool before-state and all recovery guards are constructible. Guided
+`confirm_allowed` is false without that proof. An identical older immutable
+`ready` request may be reprocessed in place only to add this stronger proof;
+it cannot create another request or business row.
+An identical guided request blocked by
+`guided_acceptance_parity_failed`, `guided_acceptance_parity_not_current` or
+`guided_acceptance_posting_plan_drift` may be reopened in place only after the
+complete current aggregate/detail proof passes. Processing then rebuilds and
+persists a fresh exact posting proof; the compatibility path never approximates
+the old plan, bypasses source checks or posts a business row.
 Stage 3 must additionally enforce the HTTP request read limit before buffering.
 
 ## Verification and later stages
@@ -123,7 +185,21 @@ Stage 3 must additionally enforce the HTTP request read limit before buffering.
 XLSX generation and attack/identity limits, lifecycle recovery/idempotency,
 transfer conservation and partial outcomes, mis-sort fail-closed behavior,
 reallocation, inventory, overhead/reversal, relations, bounded access plans and
-T1 evidence. Existing Stage 1, FF ledger/reservation/inventory/overhead/
+T1 evidence. It also pins the production-shaped 26GN527 composition (21 SKU,
+66,000 accepted, FBS/FBO 39,250/26,750, zero expenses and fractional-kopeck
+capital) through filled-workbook parse, exact plan conservation, idempotent
+repeat and stale-source rejection. It also pins the three production-shaped
+SKUs whose aggregate FF row is initially absent. The same 21-SKU fixture applies
+all 39 canonical-kopek movements over the exact fractional-kopeck pool capitals
+observed after production cutover and proves the inverse movement restores every
+prior Decimal exactly; existing balance capital is never silently normalized to
+minor units. The FBS lifecycle smoke proves
+legacy blocked/ready request revalidation, first aggregate-row materialization,
+global aggregate/detail readiness, blocked-request reopening after exact parity,
+stored/live posting-plan drift rejection before business writes, cost-coverage
+drift rejection, immutable cost-layer replay and exact append-only guided
+recovery to audited semantic zero. Existing Stage 1, FF
+ledger/reservation/inventory/overhead/
 documents, functional warehouse, capital and recovery smokes remain required.
 
 Stage 3 public API/UI/document registry and later facility CRUD/seeds, opening,

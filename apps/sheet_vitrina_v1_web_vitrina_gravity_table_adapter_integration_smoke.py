@@ -87,7 +87,7 @@ def main() -> None:
         expected_row_ids = [
             "TOTAL|total_view_count",
             f"GROUP:{enabled[0].group}|view_count",
-            f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted",
+            f"SKU:{enabled[0].nm_id}|price_seller_discounted",
             f"SKU:{enabled[1].nm_id}|avg_addToCartConversion",
         ]
         if row_ids != expected_row_ids:
@@ -95,7 +95,7 @@ def main() -> None:
 
         columns = {column.id: column for column in adapter.columns}
         group_row = next(row for row in adapter.rows if row.row_id == f"GROUP:{enabled[0].group}|view_count")
-        money_row = next(row for row in adapter.rows if row.row_id == f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted")
+        money_row = next(row for row in adapter.rows if row.row_id == f"SKU:{enabled[0].nm_id}|price_seller_discounted")
         percent_row = next(row for row in adapter.rows if row.row_id == f"SKU:{enabled[1].nm_id}|avg_addToCartConversion")
         if columns["scope_label"].meta.pin != "left":
             raise AssertionError(f"sticky pin mismatch, got {columns['scope_label']}")
@@ -162,7 +162,7 @@ def _build_plan(
                 rows=[
                     ["Итого: Показы в воронке", "TOTAL|total_view_count", 100, 140],
                     [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990, 1110],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|price_seller_discounted", 990, 1110],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.115, 0.13],
                 ],
                 row_count=4,

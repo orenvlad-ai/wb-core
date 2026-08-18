@@ -22,6 +22,9 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (  # noqa: E402
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -131,6 +134,11 @@ def main() -> None:
             "price snapshot must remain readable after new registry metric",
         )
         _assert_values(
+            rows[f"TOTAL|{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"].values_by_date,
+            {OLD_DATE: None, NEW_DATE: 1100.0},
+            "weighted seller price must stay blank in ready snapshots created before its schema row",
+        )
+        _assert_values(
             rows[f"SKU:{nm_id}|stock_total"].values_by_date,
             {OLD_DATE: 5.0, NEW_DATE: 7.0},
             "stocks must remain readable after new registry metric",
@@ -186,6 +194,11 @@ def _build_new_snapshot(*, nm_id: int) -> SheetVitrinaV1Envelope:
         snapshot_id="new-schema-ready",
         as_of_date=NEW_DATE,
         rows=[
+            [
+                "Цена продавца взвеш.",
+                f"TOTAL|{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
+                1100.0,
+            ],
             ["SPP-прокси средняя", "TOTAL|avg_spp_proxy", 0.23],
             [f"SKU {nm_id}: Заказы", f"SKU:{nm_id}|orderSum", 222.0],
             [f"SKU {nm_id}: Цена со скидкой", f"SKU:{nm_id}|price_seller_discounted", 1100.0],
