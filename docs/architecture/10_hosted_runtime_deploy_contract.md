@@ -153,6 +153,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   in one warehouse-functional transaction. This remains below the 100,000
   domain ceiling and avoids both a 500-row moving tail and an unbounded lock
   hold.
+  Lifecycle event products and both sides of each pool/aggregate capital fold
+  use the same 160-digit Decimal boundary as the canonical publisher. A
+  fractional-kopeck tail therefore cannot be rounded differently merely
+  because the pool and aggregate have different base magnitudes.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only

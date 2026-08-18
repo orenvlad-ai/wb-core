@@ -755,3 +755,9 @@ The five-minute collector consumes at most 10,000 new lifecycle observations
 per warehouse-functional transaction (the domain primitive remains capped at
 100,000), so a measured production suffix catches up in bounded passes without
 either a 500-row moving tail or one unbounded lock hold.
+
+Every post-T lifecycle capital product, pool fold and aggregate fold uses the
+same 160-digit Decimal boundary as aggregate publication and parity. The
+process-default 28-digit context is never allowed to round an authoritative
+fractional-kopeck tail differently for a pool base and its larger aggregate;
+the event line, pool delta and aggregate delta remain one exact value.
