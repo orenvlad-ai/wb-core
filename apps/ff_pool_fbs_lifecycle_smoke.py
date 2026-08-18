@@ -37,6 +37,9 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     available_quantity,
     process_post_t_fbs_lifecycle,
 )
+from packages.application.canonical_rub_money import (  # noqa: E402
+    compare_canonical_rub_money,
+)
 from packages.application.ff_pool_foundation import read_ff_pool_feature_state  # noqa: E402
 from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentService,
@@ -1086,6 +1089,20 @@ def main() -> int:
                 "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101",
                 (str(tailed_fbo),),
             )
+            # Mirror the production writer history: aggregate text differs by
+            # a raw 10^-23 tail while both sides are the same canonical kopeck.
+            # The lifecycle gate must retain that evidence but not block an
+            # otherwise exact debit.
+            aggregate_raw_tail = Decimal(
+                "0.00000000000000000000004"
+            )
+            tailed_aggregate = Decimal(str(aggregate_balance[0])) + aggregate_raw_tail
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET capital_rub=? WHERE version_id='wf_stage7c' "
+                "AND warehouse_key='ff' AND nm_id=101",
+                (format(tailed_aggregate, "f"),),
+            )
             conn.commit()
 
         # An unrelated post-T order without exact identity evidence is
@@ -1227,11 +1244,19 @@ def main() -> int:
                 expected_capital = Decimal(
                     str(balance_before_identity_pending[1])
                 ) - Decimal("20")
-                assert (
+                detail_capital_after_resolution = (
                     Decimal(str(balance_after_identity_resolution[1]))
                     + Decimal(str(fbo_after_identity_resolution[1]))
-                    == Decimal(str(aggregate_after_identity_resolution[1]))
                 )
+            raw_tail_parity = compare_canonical_rub_money(
+                detail_capital_after_resolution,
+                aggregate_after_identity_resolution[1],
+                left_field="production-shaped detail capital",
+                right_field="production-shaped aggregate capital",
+            )
+            assert raw_tail_parity.canonical_equal
+            assert raw_tail_parity.residual_attributable
+            assert raw_tail_parity.raw_residual_rub == -aggregate_raw_tail
             assert Decimal(str(balance_after_identity_resolution[1])) == expected_capital
 
         repeated_identity_resolution = _process(
@@ -1249,6 +1274,85 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone() == balance_after_identity_resolution
+
+            # Return the fixture aggregate to raw equality for later recovery
+            # assertions.  The previous debit already proved the canonical
+            # gate accepts and preserves the diagnostic-only raw tail.
+            exact_detail_capital = sum(
+                (
+                    Decimal(str(row[0]))
+                    for row in conn.execute(
+                        "SELECT capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                        "WHERE nm_id=101"
+                    ).fetchall()
+                ),
+                Decimal("0"),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET capital_rub=? WHERE version_id='wf_stage7c' "
+                "AND warehouse_key='ff' AND nm_id=101",
+                (format(exact_detail_capital, "f"),),
+            )
+            conn.commit()
+
+        # A frozen acceptance watermark closes independently of rows appended
+        # afterwards.  Two bounded rows reach W exactly; the third remains a
+        # normal live suffix until the next scheduled-equivalent pass.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn, order_id=9420, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:00Z",
+            )
+            _insert_post_t_order(
+                conn, order_id=9421, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:01Z",
+            )
+            frozen_w = int(
+                conn.execute(
+                    "SELECT MAX(observation_sequence) FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+                ).fetchone()[0]
+            )
+            _insert_post_t_order(
+                conn, order_id=9422, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:02Z",
+            )
+            post_w = int(
+                conn.execute(
+                    "SELECT MAX(observation_sequence) FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+                ).fetchone()[0]
+            )
+            assert post_w > frozen_w
+            conn.commit()
+        wb_before_watermark = _wb_evidence_digest(runtime.db_path)
+        watermark_closed = _process(
+            runtime.db_path, "2026-08-15T08:14:10Z", limit=2
+        )
+        assert watermark_closed["last_status_observation_sequence"] == frozen_w
+        assert watermark_closed["processed_count"] == 2
+        assert watermark_closed["pending_count"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_watermark
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9420,9421)"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9422"
+            ).fetchone()[0] == 0
+        post_w_drained = _process(
+            runtime.db_path, "2026-08-15T08:14:20Z", limit=2
+        )
+        assert post_w_drained["last_status_observation_sequence"] == post_w
+        assert post_w_drained["processed_count"] == 1
+        assert _process(runtime.db_path, "2026-08-15T08:14:30Z", limit=2)[
+            "processed_count"
+        ] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9420,9421,9422)"
+            ).fetchone()[0] == 3
 
         drifted_recovery = service.accept_preview(
             identity=DocumentIdentity(
@@ -1432,12 +1536,12 @@ def _append_status(
         )
 
 
-def _process(path: Path, timestamp: str) -> dict[str, object]:
+def _process(path: Path, timestamp: str, *, limit: int = 500) -> dict[str, object]:
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
         result = process_post_t_fbs_lifecycle(
-            conn, occurred_at=timestamp, schema_ready=True
+            conn, occurred_at=timestamp, limit=limit, schema_ready=True
         )
         conn.commit()
         return result

@@ -46,17 +46,22 @@ Supplier registry не является седьмым складом. Он хр
 
 Facility и pool не являются седьмой/восьмой стадией. Когда отдельный будущий
 cutover активирует dimensional FF reader, сумма `facility × (FBS|FBO)` обязана
-в точности совпасть с текущим `ff` quantity/capital по каждому SKU. До этого
+совпасть с текущим `ff` по exact INTEGER quantity и canonical RUB kopecks для
+каждого SKU и итога. Exact raw Decimal сохраняется как audit/recovery evidence;
+детерминированно атрибутированный sub-kopeck residual при одинаковых копейках
+является diagnostic, а не blocker. До этого
 feature epoch отсутствует, detail tables пусты и canonical capital calculation
 их не читает. После cutover detail лишь объясняет уже учтённый `ff`: public
-stage/TOTAL formula не может прибавлять его второй раз. Любой mismatch держит
-detail reader fail-closed и оставляет существующий aggregate FF без изменений.
+stage/TOTAL formula не может прибавлять его второй раз. Quantity/canonical-money
+mismatch, crossed total residual или failed attribution держит detail reader
+fail-closed и оставляет существующий aggregate FF без изменений.
 Stage 2 immutable documents may prove facility/pool conservation on fixtures,
 but until a later explicit writer/reader cutover they are not an active capital
 source, consumer or TOTAL operand and do not alter the aggregate FF ledger.
 Stage 3 API/UI reads that same detail only after the existing current-version
 parity gate. Its displayed facility/pool capital is exact Decimal explanatory
-evidence, never another input to stage capital, overall capital or overall WAC.
+evidence, including diagnostic sub-kopeck residuals, never another input to
+stage capital, overall capital or overall WAC.
 Default deploy leaves the reader and writer off and publishes no capital row.
 
 # 2. Количество и капитал

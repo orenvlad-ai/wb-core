@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 import fcntl
 import hashlib
 import json
@@ -19,6 +19,10 @@ import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
+from packages.application.canonical_rub_money import (
+    RUB_MINOR_UNIT as RUB_QUANTUM,
+    canonical_rub_minor_units,
+)
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -112,7 +116,6 @@ RELATION_CHILD_KINDS = {
 }
 STAGE1_RELATION_TYPES = frozenset({"correction_of", "storno_of", "late_expense_for"})
 POOLS = ("FBS", "FBO")
-RUB_QUANTUM = Decimal("0.01")
 ZERO = Decimal("0")
 POST_RETRY_LIMIT = 4
 GUIDED_BUSINESS_EFFECT_CONTRACT = "ff_guided_acceptance_business_effect_v1"
@@ -2073,7 +2076,7 @@ def _guided_business_effect_matches(
 def _guided_current_aggregate_parity_proof(
     conn: sqlite3.Connection,
 ) -> dict[str, Any]:
-    """Require exact current active aggregate = current facility/pool detail."""
+    """Require exact quantities and canonical-money aggregate/detail parity."""
 
     active = conn.execute(
         "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
@@ -2111,6 +2114,24 @@ def _guided_current_aggregate_parity_proof(
         "aggregate_capital_rub": canonical_decimal_text(
             parity.aggregate_capital_rub
         ),
+        "money_parity_policy": parity.money_parity_policy,
+        "detail_canonical_capital_minor_units": (
+            parity.detail_canonical_capital_minor_units
+        ),
+        "aggregate_canonical_capital_minor_units": (
+            parity.aggregate_canonical_capital_minor_units
+        ),
+        "raw_capital_residual_rub": canonical_decimal_text(
+            parity.raw_capital_residual_rub
+        ),
+        "raw_residual_conserved": parity.raw_residual_conserved,
+        "raw_capital_mismatched_nm_ids": list(
+            parity.raw_capital_mismatched_nm_ids[:100]
+        ),
+        "raw_capital_residuals_by_nm": {
+            str(nm_id): canonical_decimal_text(residual)
+            for nm_id, residual in parity.raw_capital_residuals_by_nm[:100]
+        },
         "mismatched_nm_id_count": len(parity.mismatched_nm_ids),
         "mismatched_nm_ids": list(parity.mismatched_nm_ids[:100]),
         "detail_fingerprint": str(parity.detail_fingerprint),
@@ -2119,7 +2140,7 @@ def _guided_current_aggregate_parity_proof(
     if parity.status != "pass":
         raise FfPoolDocumentError(
             "guided_acceptance_parity_not_current",
-            "Current aggregate FF does not exactly equal facility/pool detail",
+            "Current aggregate FF fails canonical facility/pool parity",
             details=details,
         )
     return details
@@ -5630,7 +5651,7 @@ def _normalize_acceptance_capital(allocations: Iterable[Mapping[str, Any]]) -> d
     exact_by_nm: dict[int, Decimal] = {}
     accepted_by_nm: dict[int, int] = {}
     with localcontext() as context:
-        context.prec = 80
+        context.prec = 160
         for item in allocations:
             nm_id = _positive_int(item.get("nm_id"), field="acceptance nm_id")
             if nm_id in exact_by_nm:
@@ -5668,8 +5689,10 @@ def _normalize_acceptance_capital(allocations: Iterable[Mapping[str, Any]]) -> d
             accepted_by_nm[nm_id] = accepted
 
         exact_total = sum(exact_by_nm.values(), ZERO)
-        canonical_total = exact_total.quantize(RUB_QUANTUM, rounding=ROUND_HALF_UP)
-        canonical_total_cents = int(canonical_total * 100)
+        canonical_total_cents = canonical_rub_minor_units(
+            exact_total, field="acceptance exact total capital_rub"
+        )
+        canonical_total = Decimal(canonical_total_cents) / Decimal(100)
         base_cents = {
             nm_id: int(amount * 100)
             for nm_id, amount in exact_by_nm.items()
@@ -5770,10 +5793,10 @@ def _signed_money_cents(value: Any, *, field: str) -> int:
 
 
 def _decimal_to_cents(value: Decimal, *, field: str, positive: bool) -> int:
-    quantized = value.quantize(RUB_QUANTUM, rounding=ROUND_HALF_UP)
-    if positive and quantized <= ZERO:
+    cents = canonical_rub_minor_units(value, field=field)
+    if positive and cents <= 0:
         raise FfPoolDocumentError("positive_cost_required", f"{field} must be positive")
-    return int(quantized * 100)
+    return cents
 
 
 def _positive_decimal(value: Any, *, field: str) -> Decimal:

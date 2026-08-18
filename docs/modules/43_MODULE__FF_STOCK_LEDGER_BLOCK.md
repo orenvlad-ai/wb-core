@@ -528,10 +528,13 @@ Feature epochs are absent by default, which means both future writer and reader
 are off. A reader cannot be configured before the writer and does not become
 effective until a current-epoch parity diagnostic passes. Empty detail is a
 neutral `detail_empty` state. A populated fixture compares every SKU and the
-exact quantity/capital totals against the caller-owned aggregate FF readback;
-the reader also requires the same current aggregate revision and unchanged
-detail fingerprint. Any mismatch or drift is fail-closed for the future detail
-reader and never edits or invalidates the aggregate ledger. Current FF writers,
+exact integer quantities plus canonical RUB minor-unit capital against the
+caller-owned aggregate FF readback; the reader also requires the same current
+aggregate revision and unchanged detail fingerprint. Any quantity mismatch,
+canonical-kopek mismatch, unattributed/cross-boundary residual or drift is
+fail-closed for the future detail reader and never edits or invalidates the
+aggregate ledger. Raw sub-kopeck differences with identical canonical values
+remain append-only diagnostic evidence. Current FF writers,
 reservations, warehouse publication, public totals, Vitrina and recommendations
 remain unchanged.
 
@@ -596,11 +599,15 @@ not to the pre-existing pool balance: opening/cutover capital remains its
 authoritative exact Decimal and apply adds the signed kopeck delta without
 rounding or rewriting that prior value. The inverse storno therefore subtracts
 the same kopeck delta and restores the exact prior capital. Guided aggregate
-apply and aggregate/detail parity use the same bounded 160-digit Decimal
-context as the pool writer and ordinary functional publisher; the
-ordinary publisher keeps both the facility/pool fold and final aggregate
-serialization inside that context, so `Decimal.normalize()` cannot reintroduce
-process-default 28-digit rounding or mask a fractional-kopeck tail.
+apply and aggregate/detail arithmetic use the same bounded 160-digit Decimal
+context as the pool writer and ordinary functional publisher. Operational
+parity then applies the centralized `rub_minor_unit_round_half_up_v1` policy:
+quantities remain exact INTEGER, while capital must match in canonical kopecks
+per SKU and in total. Raw Decimal values, per-SKU residuals and their conserved
+total remain diagnostic/audit evidence; a canonical mismatch, boundary-crossing
+total or failed attribution stays fail-closed. The ordinary publisher keeps
+both the facility/pool fold and final aggregate serialization inside the exact
+context, so it never rewrites or silently discards those raw tails.
 A zero-quantity
 close with a non-zero fractional residual remains fail-closed. The service is
 the only future owner of the factual date, existing
@@ -615,10 +622,11 @@ quantity/capital normalization, pool allocation and expenses. Pool, aggregate
 and dependent before-state digests remain explicit diagnostic evidence, but
 are not the owner decision identity because ordinary FBS reservations,
 releases and debits may legitimately advance them after preview. Readiness also
-recomputes global current-epoch parity between the
-complete active functional `ff` revision and every facility × pool row; a stale
-hourly aggregate is blocked before confirm rather than discovered after
-business writes begin. Confirm acquires the shared warehouse writer lock,
+recomputes global current-epoch parity between the complete active functional
+`ff` revision and every facility × pool row. Exact quantity and centralized
+canonical-money mismatches are blocked, while an attributed sub-kopeck raw tail
+with identical canonical totals is diagnostic only. Confirm acquires the shared
+warehouse writer lock,
 rebuilds a current parity-passing plan, requires the same stored business-effect
 digest, then creates the recovery T1 from that current before-state and repeats
 the plan under `BEGIN IMMEDIATE`. Functional publication, pool documents and
@@ -757,7 +765,16 @@ per warehouse-functional transaction (the domain primitive remains capped at
 either a 500-row moving tail or one unbounded lock hold.
 
 Every post-T lifecycle capital product, pool fold and aggregate fold uses the
-same 160-digit Decimal boundary as aggregate publication and parity. The
-process-default 28-digit context is never allowed to round an authoritative
-fractional-kopeck tail differently for a pool base and its larger aggregate;
-the event line, pool delta and aggregate delta remain one exact value.
+same 160-digit Decimal arithmetic boundary. Operational parity is centralized:
+integer quantity is exact, while detail and aggregate capital must match per SKU
+and in total after deterministic `ROUND_HALF_UP` normalization to kopecks. Raw
+Decimal tails are retained in source fingerprints and parity diagnostics. An
+equal-kopeck tail does not block; a kopeck mismatch, a total residual that
+crosses the boundary or failed deterministic attribution remains fail-closed.
+
+Canonical warehouse publication keeps the 160-digit boundary while adding the
+exact pool aggregate to its stage bucket and while serializing the final
+warehouse line. A later hourly/manual publication therefore preserves raw
+audit quality; lifecycle safety itself does not depend on byte-equal
+sub-kopeck tails once the centralized minor-unit and residual-conservation gate
+passes.
