@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 import sqlite3
 import sys
@@ -1057,6 +1057,37 @@ def main() -> int:
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
 
+            # Reproduce the production capital shape: aggregate parity is
+            # exact, but one pool owns a tail beyond process-default Decimal
+            # precision.  A later FBS debit must conserve that tail in both
+            # pool detail and aggregate rather than rounding each base at a
+            # different significant digit.
+            tail = Decimal("0.000000000000000000000000000000000000000000000001")
+            fbo_balance = conn.execute(
+                "SELECT capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
+            ).fetchone()
+            aggregate_balance = conn.execute(
+                "SELECT capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"
+            ).fetchone()
+            with localcontext() as context:
+                context.prec = 160
+                tailed_fbs = Decimal(str(exact_balance[1])) + tail
+                tailed_fbo = Decimal(str(fbo_balance[0])) - tail
+                assert tailed_fbs + tailed_fbo == Decimal(str(aggregate_balance[0]))
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_pool_balances SET capital_rub=? "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101",
+                (str(tailed_fbs),),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_pool_balances SET capital_rub=? "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101",
+                (str(tailed_fbo),),
+            )
+            conn.commit()
+
         # An unrelated post-T order without exact identity evidence is
         # isolated instead of pinning the global suffix cursor forever.  A
         # later matched order still reserves exactly once, while the isolated
@@ -1171,20 +1202,37 @@ def main() -> int:
                 f"SELECT COUNT(*) FROM {IDENTITY_PENDING_RESOLUTIONS_TABLE} "
                 "WHERE order_id=9410 AND resolution_kind='matched_replay'"
             ).fetchone()[0] == 1
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410 "
-                "AND event_type='handoff_debit' AND physical_quantity_delta=-2"
-            ).fetchone()[0] == 1
+            debit_event = conn.execute(
+                f"SELECT physical_quantity_delta,capital_delta_rub FROM {EVENTS_TABLE} "
+                "WHERE order_id=9410 AND event_type='handoff_debit'"
+            ).fetchone()
+            assert tuple(debit_event) == (-2, "-20")
             balance_after_identity_resolution = conn.execute(
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
+            fbo_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
+            ).fetchone()
+            aggregate_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"
+            ).fetchone()
             assert int(balance_after_identity_resolution[0]) == int(
                 balance_before_identity_pending[0]
             ) - 2
-            assert Decimal(str(balance_after_identity_resolution[1])) == Decimal(
-                str(balance_before_identity_pending[1])
-            ) - Decimal("20")
+            with localcontext() as context:
+                context.prec = 160
+                expected_capital = Decimal(
+                    str(balance_before_identity_pending[1])
+                ) - Decimal("20")
+                assert (
+                    Decimal(str(balance_after_identity_resolution[1]))
+                    + Decimal(str(fbo_after_identity_resolution[1]))
+                    == Decimal(str(aggregate_after_identity_resolution[1]))
+                )
+            assert Decimal(str(balance_after_identity_resolution[1])) == expected_capital
 
         repeated_identity_resolution = _process(
             runtime.db_path, "2026-08-15T08:13:40Z"

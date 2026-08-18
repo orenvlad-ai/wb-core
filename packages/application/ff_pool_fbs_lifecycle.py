@@ -9,7 +9,7 @@ activated the reviewed ``complete/sorted`` handoff rule.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 import json
 import sqlite3
@@ -454,7 +454,10 @@ def apply_opening_fbs_backfill(
                 )
             counts["debit"] += 1
             quantity["debit"] += int(order["quantity"])
-            capital += wac * Decimal(int(order["quantity"]))
+            capital = _decimal_sum(
+                capital,
+                _capital_delta(wac, int(order["quantity"])),
+            )
             reconciliation_evidence = dict(
                 order.get("post_handoff_reconciliation") or {}
             )
@@ -1029,7 +1032,7 @@ def _append_event(
 ) -> dict[str, Any]:
     cutover_id = str(manifest["cutover_id"])
     quantity = int(order["quantity"])
-    capital_delta = wac * Decimal(physical_delta)
+    capital_delta = _capital_delta(wac, physical_delta)
     evidence_digest = _fingerprint(evidence)
     identity = {
         "cutover_id": cutover_id,
@@ -1147,9 +1150,9 @@ def _apply_exact_physical_delta(
             "fbs_balance_missing",
             f"FBS balance is missing for {facility_id}/{nm_id}",
         )
-    capital_delta = wac * Decimal(quantity_delta)
+    capital_delta = _capital_delta(wac, quantity_delta)
     new_quantity = int(balance[0]) + int(quantity_delta)
-    new_capital = Decimal(str(balance[1])) + capital_delta
+    new_capital = _decimal_sum(Decimal(str(balance[1])), capital_delta)
     operation_id = "ffbo_" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:28]
     conn.execute(
         f"""INSERT INTO {OPERATIONS_TABLE}(
@@ -1231,7 +1234,7 @@ def _apply_exact_aggregate_projection(
             "aggregate_sku_missing", f"Aggregate FF SKU is missing: {nm_id}"
         )
     quantity = _exact_int(row[0], "aggregate.quantity") + int(quantity_delta)
-    capital = Decimal(str(row[1])) + capital_delta
+    capital = _decimal_sum(Decimal(str(row[1])), capital_delta)
     columns = {
         str(item[1])
         for item in conn.execute(
@@ -1239,7 +1242,11 @@ def _apply_exact_aggregate_projection(
         ).fetchall()
     }
     if "wac_rub" in columns:
-        wac = None if quantity == 0 else canonical_decimal_text(capital / Decimal(quantity))
+        wac = (
+            None
+            if quantity == 0
+            else canonical_decimal_text(_decimal_ratio(capital, quantity))
+        )
         conn.execute(
             """UPDATE sheet_vitrina_v1_warehouse_functional_balances
                SET quantity=?,capital_rub=?,wac_rub=?
@@ -1683,6 +1690,27 @@ def _exact_int(value: Any, field: str) -> int:
     if not decimal.is_finite() or decimal != decimal.to_integral_value():
         raise FfPoolFbsLifecycleError("non_integral_quantity", f"{field} is not exact INTEGER")
     return int(decimal)
+
+
+def _capital_delta(wac: Decimal, quantity: int) -> Decimal:
+    # Capital text can carry authoritative fractional-kopeck tails close to
+    # the schema's 80-character boundary.  The process-default precision (28)
+    # is not an accounting boundary and must not round an event delta.
+    with localcontext() as context:
+        context.prec = 160
+        return Decimal(wac) * Decimal(int(quantity))
+
+
+def _decimal_sum(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = 160
+        return Decimal(left) + Decimal(right)
+
+
+def _decimal_ratio(capital: Decimal, quantity: int) -> Decimal:
+    with localcontext() as context:
+        context.prec = 160
+        return Decimal(capital) / Decimal(int(quantity))
 
 
 def _require_utc(value: str) -> None:
