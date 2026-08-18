@@ -28,6 +28,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentError,
     FfPoolDocumentService,
     _allocate_cents,
+    _build_posting_plan,
     _component_share,
 )
 from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
@@ -101,6 +102,7 @@ def main() -> None:
         )
         _seed(service, clock)
         catalog, shipment_lines = _xlsx_contracts(service)
+        _production_shaped_26gn527(service)
         opening = _opening(service)
         _idempotent_repeat_and_recovery(service, opening)
         _transfer_and_late_expense(service)
@@ -111,6 +113,138 @@ def main() -> None:
         _assert_recovery(service)
         _assert_no_aggregate_or_legacy_writes(db_path)
     print("ff_pool_documents_smoke: OK")
+
+
+def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
+    rows = [
+        (210183142, 3250, 750, 2500, "321477.9087517898"),
+        (210183919, 7000, 2500, 4500, "692413.9573115471"),
+        (210184534, 3000, 500, 2500, "296748.8388478059"),
+        (245720334, 1250, 750, 500, "128000.62296944665"),
+        (259460529, 6000, 5000, 1000, "614402.990253344"),
+        (259465495, 5750, 1500, 4250, "608837.1235272811"),
+        (259473237, 6000, 5500, 500, "614402.990253344"),
+        (391659990, 250, 250, 0, "31697.50742322784"),
+        (428850065, 250, 250, 0, "30826.452733322334"),
+        (428853741, 1500, 500, 1000, "176248.169500879"),
+        (428854140, 500, 500, 0, "60491.49921343734"),
+        (428854299, 1000, 500, 500, "120982.99842687468"),
+        (428855306, 2000, 750, 1250, "234997.55933450535"),
+        (428855560, 1500, 500, 1000, "176248.169500879"),
+        (428855758, 1750, 500, 1250, "199525.48158835364"),
+        (428855978, 1750, 250, 1500, "199525.48158835364"),
+        (497414010, 6500, 1500, 5000, "688250.6613786656"),
+        (497414624, 3000, 1500, 1500, "317654.15140553797"),
+        (497416271, 4750, 750, 4000, "618802.6801495334"),
+        (497417163, 3750, 1250, 2500, "453686.24410078005"),
+        (497417474, 5250, 1250, 4000, "635160.7417410921"),
+    ]
+    shipment_lines = [
+        {
+            "nm_id": nm_id,
+            "barcode": str(nm_id),
+            "sku": f"26GN527-{nm_id}",
+            "accepted_quantity": quantity,
+            "accepted_capital_rub": capital,
+            "identity_evidence_digest": "sha256:" + f"{nm_id:064d}"[-64:],
+        }
+        for nm_id, quantity, _fbo, _fbs, capital in rows
+    ]
+    source_revision = "26gn527-production-shaped-v1"
+    template = service.generate_china_acceptance_template(
+        shipment_lines=shipment_lines,
+        source_revision=source_revision,
+        selected_facility_id="fac_msk",
+    )
+    workbook = load_workbook(BytesIO(template))
+    sheet = workbook[CHINA_SHEET]
+    for row_no, (_nm_id, _quantity, fbo, fbs, _capital) in enumerate(rows, start=6):
+        sheet.cell(row=row_no, column=7, value=fbo)
+        sheet.cell(row=row_no, column=8, value=fbs)
+    filled = BytesIO()
+    workbook.save(filled)
+    evidence = filled.getvalue()
+    request_identity = identity("26gn527", revision=source_revision)
+    preview = service.preview_china_acceptance_workbook(
+        identity=request_identity,
+        source_bytes=evidence,
+        source_filename="FF_приёмка_26GN527_заполнено.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision=source_revision,
+    )
+    assert preview["state"] == "ready", preview
+    manifest = preview["preview_manifest"]
+    assert len(manifest["allocations"]) == 21
+    assert sum(int(item["expected_quantity"]) for item in manifest["allocations"]) == 66_000
+    assert sum(int(item["accepted_quantity"]) for item in manifest["allocations"]) == 66_000
+    assert sum(int(item["quantity_fbs"]) for item in manifest["allocations"]) == 39_250
+    assert sum(int(item["quantity_fbo"]) for item in manifest["allocations"]) == 26_750
+    assert manifest["expenses"] == []
+    normalization = manifest["capital_normalization"]
+    assert normalization["exact_total_rub"] == "7220382.230000000494"
+    assert normalization["canonical_total_rub"] == "7220382.23"
+    assert normalization["total_residual_rub"] == "-0.000000000494"
+    assert normalization["residual_owner_nm_ids"] == [
+        428853741, 428855560, 428855306, 428854140, 210184534,
+        210183142, 428854299, 391659990, 210183919, 497417163,
+    ]
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        request = conn.execute(
+            f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
+            (str(preview["request_id"]),),
+        ).fetchone()
+        plan = _build_posting_plan(
+            conn,
+            request=request,
+            manifest=manifest,
+            epoch=1,
+        )
+    movements = [
+        movement
+        for document in plan["documents"]
+        for movement in document.get("movements") or []
+    ]
+    assert sum(int(item["quantity_delta"]) for item in movements) == 66_000
+    assert sum(int(item["capital_delta_cents"]) for item in movements) == 722_038_223
+    assert sum(int(item["quantity_delta"]) for item in movements if item["pool"] == "FBS") == 39_250
+    assert sum(int(item["quantity_delta"]) for item in movements if item["pool"] == "FBO") == 26_750
+    per_nm = {}
+    for item in movements:
+        per_nm[int(item["nm_id"])] = per_nm.get(int(item["nm_id"]), 0) + int(
+            item["capital_delta_cents"]
+        )
+    assert per_nm == {
+        int(key): int(value)
+        for key, value in normalization["capital_cents_by_nm"].items()
+    }
+    repeated = service.preview_china_acceptance_workbook(
+        identity=replace(
+            request_identity,
+            request_id="fixture:26gn527:response-loss-retry",
+        ),
+        source_bytes=evidence,
+        source_filename="renamed-26GN527.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision=source_revision,
+    )
+    assert repeated["request_id"] == preview["request_id"]
+    assert repeated["idempotent"] is True
+    stale = service.preview_china_acceptance_workbook(
+        identity=identity("26gn527-stale", revision="26gn527-stale-v2"),
+        source_bytes=evidence,
+        source_filename="stale-26GN527.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        shipment_lines=shipment_lines,
+        expenses=[],
+        template_source_revision="26gn527-stale-v2",
+    )
+    assert stale["state"] == "blocked"
+    assert stale["error"]["code"] == "template_fingerprint_mismatch"
 
 
 def _default_off_and_empty_schema() -> None:

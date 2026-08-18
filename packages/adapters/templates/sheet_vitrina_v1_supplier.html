@@ -4359,6 +4359,7 @@
           acc.discrepancies += Number(row.discrepancy_quantity || 0); return acc;
         }, {expected:0,accepted:0,fbs:0,fbo:0,discrepancies:0});
         const exactSummary = (status.preview && status.preview.summary) || {};
+        const capitalNormalization = exactSummary.capital_normalization || {};
         const totals = {
           expected: Number(exactSummary.expected_quantity ?? pageTotals.expected),
           accepted: Number(exactSummary.accepted_quantity ?? pageTotals.accepted),
@@ -4368,6 +4369,9 @@
         };
         guidedAcceptanceStatus.innerHTML = '<strong>' + escapeHtml(status.state_label_ru || status.state || "") + '</strong>' +
           '<p>Отправлено: ' + totals.expected + ' · принято: ' + totals.accepted + ' · FBS: ' + totals.fbs + ' · FBO: ' + totals.fbo + ' · расхождения: ' + totals.discrepancies + '</p>' +
+          (capitalNormalization.canonical_total_rub ? '<p>Капитал к проведению: ' + escapeHtml(capitalNormalization.canonical_total_rub) + ' ₽' +
+            ' · точный источник: ' + escapeHtml(capitalNormalization.exact_total_rub || capitalNormalization.canonical_total_rub) + ' ₽' +
+            ' · остаток нормализации: ' + escapeHtml(capitalNormalization.total_residual_rub || '0') + ' ₽</p>' : '') +
           '<p>' + escapeHtml(activation.reason_ru || "") + '</p>' +
           (status.error && status.error.code ? '<p class="message error">' + escapeHtml(status.error.code) + '</p>' : '');
         guidedAcceptanceConfirm.dataset.requestId = status.request_id || "";
