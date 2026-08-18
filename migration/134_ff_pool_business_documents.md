@@ -154,7 +154,14 @@ upgrade exception is an identical immutable China workbook previously blocked
 with `money_minor_unit_required`: after deployment it is revalidated by the new
 aggregate boundary and reopened in place, preserving the canonical request,
 source revision, workbook digest and audit history. No other blocked code is
-reopened. `ready` guided previews additionally persist a query-only full
+normally reopened. One further bounded compatibility case covers the initial
+posting-plan readiness release: an identical guided request blocked with
+`supplier_source_revision_changed` is reprocessed only when its stored request
+revision exactly recomputes as `hash(raw supplier revision + workbook SHA-256)`
+and the retry reproduces that same immutable identity. Processing then rechecks
+the current raw supplier revision against the raw revision in the workbook
+manifest, so genuine composition/cost drift remains fail closed. `ready` guided
+previews additionally persist a query-only full
 posting-plan proof after writer epoch, opening, current source revision,
 aggregate/pool before-state and all recovery guards are constructible. Guided
 `confirm_allowed` is false without that proof. An identical older immutable

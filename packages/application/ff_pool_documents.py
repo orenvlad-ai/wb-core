@@ -468,6 +468,11 @@ class FfPoolDocumentService:
             self.process_request(canonical_request_id)
         elif self._retry_legacy_money_block(canonical_request_id):
             self.process_request(canonical_request_id)
+        elif self._retry_guided_source_revision_contract_block(
+            canonical_request_id,
+            expected_source_revision=str(identity.source_revision),
+        ):
+            self.process_request(canonical_request_id)
         elif self._retry_ready_guided_plan_preview(canonical_request_id):
             self.process_request(canonical_request_id)
         return {**self.status(request_id=identity.request_id), "idempotent": not inserted}
@@ -514,6 +519,74 @@ class FfPoolDocumentService:
                     stage="money_boundary_revalidation",
                     status="complete",
                     details={"policy": "header_half_up_then_largest_remainder"},
+                )
+            conn.commit()
+            return bool(changed)
+
+    def _retry_guided_source_revision_contract_block(
+        self,
+        request_id: str,
+        *,
+        expected_source_revision: str,
+    ) -> bool:
+        """Reprocess the one exact request blocked by the raw/combined bug.
+
+        The HTTP surface binds a guided request to both the raw supplier
+        revision carried by the workbook and the workbook bytes.  The first
+        posting-plan readiness release compared that combined revision to the
+        current raw supplier revision and therefore blocked every otherwise
+        current request.  Reopening remains fail closed: the caller must have
+        reproduced the same immutable request revision, and the stored value
+        must independently recompute from the manifest raw revision plus the
+        stored workbook digest.  Processing then rechecks the live raw source
+        again before making the request ready.
+        """
+
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT document_kind,source_type,state,error_code,source_revision,"
+                f"source_sha256,request_payload_json FROM {REQUESTS_TABLE} "
+                "WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["document_kind"]) != "china_acceptance"
+                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["state"]) != "blocked"
+                or str(row["error_code"]) != "supplier_source_revision_changed"
+            ):
+                conn.rollback()
+                return False
+            manifest = _json_object(_loads(row["request_payload_json"], {}))
+            _validate_manifest("china_acceptance", manifest)
+            stored_revision = str(row["source_revision"] or "")
+            recomputed_revision = _guided_request_source_revision(
+                supplier_source_revision=str(manifest.get("source_revision") or ""),
+                source_sha256=str(row["source_sha256"] or ""),
+            )
+            if (
+                stored_revision != str(expected_source_revision or "")
+                or stored_revision != recomputed_revision
+            ):
+                conn.rollback()
+                return False
+            changed = conn.execute(
+                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',ready_at='',"
+                "updated_at=?,error_code='',error_details_json='null' "
+                "WHERE request_id=? AND state='blocked' "
+                "AND error_code='supplier_source_revision_changed' AND source_revision=?",
+                (now, request_id, stored_revision),
+            ).rowcount
+            if changed:
+                self._event(
+                    conn,
+                    request_id=request_id,
+                    stage="source_revision_contract_revalidation",
+                    status="complete",
+                    details={"immutable_request_reused": True},
                 )
             conn.commit()
             return bool(changed)
@@ -821,9 +894,16 @@ class FfPoolDocumentService:
                         runtime_dir=self.runtime_dir,
                         timestamp_factory=self.timestamp_factory,
                     ).supplier_shipment_source(str(row["source_id"]))
+                    manifest_source_revision = str(
+                        manifest.get("source_revision") or ""
+                    )
+                    expected_request_revision = _guided_request_source_revision(
+                        supplier_source_revision=manifest_source_revision,
+                        source_sha256=str(row["source_sha256"] or ""),
+                    )
                     if (
-                        current_source_revision != str(row["source_revision"])
-                        or current_source_revision != str(manifest.get("source_revision") or "")
+                        current_source_revision != manifest_source_revision
+                        or str(row["source_revision"]) != expected_request_revision
                     ):
                         raise FfPoolDocumentError(
                             "supplier_source_revision_changed",
@@ -1193,7 +1273,15 @@ class FfPoolDocumentService:
                 runtime_dir=self.runtime_dir,
                 timestamp_factory=self.timestamp_factory,
             ).supplier_shipment_source(str(request["source_id"]))
-            if current_source_revision != str(manifest.get("source_revision") or ""):
+            manifest_source_revision = str(manifest.get("source_revision") or "")
+            expected_request_revision = _guided_request_source_revision(
+                supplier_source_revision=manifest_source_revision,
+                source_sha256=str(request["source_sha256"] or ""),
+            )
+            if (
+                current_source_revision != manifest_source_revision
+                or str(request["source_revision"]) != expected_request_revision
+            ):
                 raise FfPoolDocumentError(
                     "supplier_source_revision_changed",
                     "Supplier composition or cost inputs changed after preview",
@@ -5505,6 +5593,30 @@ def _fingerprint(value: Any) -> str:
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _guided_request_source_revision(
+    *,
+    supplier_source_revision: str,
+    source_sha256: str,
+) -> str:
+    """Bind one guided request to raw supplier truth and exact workbook bytes."""
+
+    raw_revision = str(supplier_source_revision or "").strip()
+    workbook_sha256 = str(source_sha256 or "").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", raw_revision) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", workbook_sha256
+    ):
+        raise FfPoolDocumentError(
+            "supplier_source_revision_invalid",
+            "Guided acceptance requires raw supplier and workbook SHA-256 revisions",
+        )
+    return _fingerprint(
+        {
+            "source_revision": raw_revision,
+            "source_sha256": workbook_sha256,
+        }
+    )
 
 
 def _sha256(value: bytes) -> str:
