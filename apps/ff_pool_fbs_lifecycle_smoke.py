@@ -634,6 +634,111 @@ def main() -> int:
         )
         assert restored_contract_retry["state"] == "ready"
         assert restored_contract_retry["confirm_allowed"] is True
+        assert restored_contract_retry["preview_manifest"]["posting_plan_preview"][
+            "aggregate_pool_parity"
+        ]["status"] == "pass"
+        # Global aggregate/detail parity is a readiness and confirm boundary,
+        # not merely a post-mutation assertion.  A stale hourly aggregate
+        # therefore blocks before T1/business writes, and the same immutable
+        # request may reopen only after exact parity is restored.
+        with sqlite3.connect(runtime.db_path) as conn:
+            before_aggregate = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            ).fetchone()
+            assert before_aggregate is not None
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=CAST(quantity AS INTEGER)+1
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            )
+            conn.commit()
+        parity_block = service.post(str(preview["request_id"]))
+        assert parity_block["state"] == "blocked"
+        assert parity_block["error"]["code"] == "guided_acceptance_parity_not_current"
+        parity_repeat_while_stale = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_repeat_while_stale["state"] == "blocked"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=?,capital_rub=?
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101""",
+                (str(before_aggregate[0]), str(before_aggregate[1])),
+            )
+            conn.commit()
+        parity_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_reopened["state"] == "ready"
+        assert parity_reopened["confirm_allowed"] is True
+        assert parity_reopened["request_id"] == preview["request_id"]
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_workflow_events
+                   WHERE identity=? AND stage='aggregate_parity_revalidation'
+                     AND status='complete'""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_documents
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 0
+
+        # The confirm path must reproduce the exact durable preview, including
+        # its aggregate/pool proof, both before and while holding the apply
+        # lock.  A corrupted/stale stored proof blocks with no business row.
+        with sqlite3.connect(runtime.db_path) as conn:
+            stored = json.loads(
+                conn.execute(
+                    """SELECT preview_manifest_json FROM
+                              sheet_vitrina_v1_ff_pool_document_requests
+                       WHERE request_id=?""",
+                    (str(preview["request_id"]),),
+                ).fetchone()[0]
+            )
+            stored["posting_plan_preview"]["posted_manifest_sha256"] = (
+                "sha256:" + "0" * 64
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET preview_manifest_json=? WHERE request_id=?""",
+                (
+                    json.dumps(
+                        stored,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        plan_drift_block = service.post(str(preview["request_id"]))
+        assert plan_drift_block["state"] == "blocked"
+        assert plan_drift_block["error"]["code"] == (
+            "guided_acceptance_posting_plan_drift"
+        )
+        plan_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert plan_reopened["state"] == "ready"
+        assert plan_reopened["confirm_allowed"] is True
+        assert plan_reopened["preview_manifest"]["posting_plan_preview"][
+            "posted_manifest_sha256"
+        ] != "sha256:" + "0" * 64
         # A production request blocked by the former minor-unit check is
         # reopened in place; the immutable request/workbook is not duplicated.
         with sqlite3.connect(runtime.db_path) as conn:

@@ -600,7 +600,15 @@ without them preview is durable but all business posting remains zero.
 Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
 full posting plan, rechecks the exact supplier source revision and durably pins
 the plan/document totals plus pool, aggregate and dependent before-state
-digests. A pre-upgrade identical ready request is refreshed in place; it never
+digests. Readiness also recomputes global current-epoch parity between the
+complete active functional `ff` revision and every facility × pool row; a stale
+hourly aggregate is blocked before confirm rather than discovered after
+business writes begin. Confirm reproduces the exact stored plan proof before
+T1 and again under `BEGIN IMMEDIATE`; active-version, aggregate, detail or plan
+drift fails closed. Once ordinary publication restores parity, an identical
+request blocked only by this parity/plan guard may be reprocessed in place,
+without a duplicate request or business effect. A pre-upgrade identical ready
+request is refreshed in place; it never
 creates a duplicate request or business effect. The request-level source
 revision is deliberately the hash of the raw supplier revision plus the exact
 workbook SHA-256, while the workbook manifest retains the raw supplier
@@ -675,7 +683,13 @@ after the five-minute collector commits them and performs no WB mutation. An
 explicit clean `excluded_pending_receipt` stays outside opening/backfill and can
 later enter both aggregate and pools exactly once through guided acceptance.
 Aggregate/detail parity is recomputed after every physical lifecycle or guided
-document movement.
+document movement. After the owner-gated pool cutover, ordinary functional
+publication takes current physical `ff` quantity/capital from the exact sum of
+facility × `FBS|FBO` balances. The append-only legacy FF ledger remains the
+historical and outbound-WAC evidence source, but can no longer resurrect an FBS
+lifecycle debit in the public aggregate. Epoch, cutover manifest and every pool
+row participate in the coherent local-source digest and are rechecked while the
+functional apply holds its immediate write lock.
 
 Migration 143 makes the opening checkpoint replayable without a moving owner
 gate. The immutable manifest owns local observation boundary `T`, three

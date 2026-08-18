@@ -378,6 +378,20 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
                     str(quantity),
                 ),
             )
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,?,?,?,?,?)""",
+                (
+                    nm_id,
+                    quantity,
+                    capital,
+                    str(Decimal(capital) / Decimal(quantity)),
+                    "production-shaped-global-parity",
+                    "2026-08-15T00:00:00Z",
+                ),
+            )
         guided_request = dict(request)
         guided_request["source_type"] = "china_acceptance_workbook"
         guided_plan = _build_posting_plan(
@@ -392,6 +406,16 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
         assert readiness["capital_delta_rub"] == "7220382.23"
         assert readiness["aggregate_semantic_zero_nm_ids"] == sorted(
             missing_aggregate_nm_ids
+        )
+        assert readiness["aggregate_pool_parity"]["status"] == "pass"
+        assert readiness["aggregate_pool_parity"]["detail_quantity"] == 55_750
+        assert readiness["aggregate_pool_parity"]["aggregate_quantity"] == 55_750
+        assert readiness["aggregate_pool_parity"]["detail_fingerprint"].startswith(
+            "sha256:"
+        )
+        conn.execute(
+            f"DELETE FROM {BALANCES_TABLE} "
+            "WHERE source_watermark='production-shaped-global-parity'"
         )
         conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_balances")
         conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_active")
