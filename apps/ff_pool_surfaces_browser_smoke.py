@@ -287,6 +287,14 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
     dialog.wait_for(state="visible")
 
     page.locator('[data-ff-pool-tab="create"]').click()
+    page.locator("[data-ff-pool-action-kind]").select_option("pool_inventory")
+    page.locator("[data-ff-pool-scope]").select_option("FBS")
+    assert page.locator('[data-ff-pool-field="scope"]').is_visible()
+    assert page.locator('[data-ff-pool-field="workbook"]').is_visible()
+    assert page.locator("[data-ff-pool-template]").is_visible()
+    assert "Явный 0 в полном FBS-шаблоне" in page.locator(
+        "[data-ff-pool-action-help]"
+    ).inner_text()
     page.locator("[data-ff-pool-action-kind]").select_option("transfer_root")
     source = page.locator("[data-ff-pool-facility]")
     destination = page.locator("[data-ff-pool-destination-facility]")

@@ -675,6 +675,19 @@ is the canonical no-delete equivalent of its frozen absent state. A recovered
 shipment can be accepted again only through a fresh source revision and a new
 immutable request.
 
+Routine facility/pool inventory uses a full selected-scope workbook and stores
+immutable `pool_inventory` absolute-target lines. If an included FBS target is
+explicitly zero while the exact facility × FBS × SKU balance row is absent,
+confirmation materializes an audited row with `quantity=0`, `capital_rub=0`,
+`wac_rub=NULL` and the root inventory document as source watermark. The
+zero-to-zero result creates no movement, quantity/capital delta or synthetic
+cost. Its absent before-image is part of the same T1 balance-key closure and a
+row appearing between plan and commit fails closed. Existing rows, unselected
+pools and every SKU outside the uploaded full scope remain unchanged. This is a
+general operator-document rule, not a SKU/facility allowlist, hidden backfill or
+production runner; missing rows remain unknown until a human confirms the
+corresponding ordinary inventory document.
+
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
 remain unchanged. The repo-owned production runner does not acquire a writer

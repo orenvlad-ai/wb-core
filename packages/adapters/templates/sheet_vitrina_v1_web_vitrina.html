@@ -24040,7 +24040,7 @@
       transfer_discrepancy: { label: "Расхождение / пересорт", fields: ["root", "items"], help: "Строки: «ожидалось nmId количество» для возврата источнику или «получено nmId количество» для фактически пришедшего пересорта." },
       transfer_cancellation: { label: "Отмена остатка перемещения", fields: ["root"], help: "Возвращает весь ещё открытый остаток в исходный сегмент." },
       pool_reallocation: { label: "Перемещение FBO ↔ FBS", fields: ["facility", "source_pool", "destination_pool", "items", "expenses"], help: "Переносит товар внутри одного склада без повторного включения в FF." },
-      pool_inventory: { label: "Инвентаризация FBS/FBO", fields: ["facility", "scope", "workbook"], workbook: true, help: "Скачайте полный шаблон выбранного склада и сегмента; пропущенные SKU блокируют проведение." },
+      pool_inventory: { label: "Инвентаризация FBS/FBO", fields: ["facility", "scope", "workbook"], workbook: true, help: "Скачайте полный шаблон выбранного склада и сегмента; пропущенные SKU блокируют проведение. Явный 0 в полном FBS-шаблоне подтверждает физический ноль и сохраняется как аудируемый остаток без движения." },
       pool_overhead: { label: "Накладные расходы", fields: ["facility", "scope", "amount", "reason"], help: "Распределяет сумму только по положительному физическому остатку выбранного сегмента." },
       correction: { label: "Корректировка", fields: ["target", "facility", "source_pool", "items"], help: "Строки: nmId, изменение количества, изменение капитала. Корректировка добавляется, исходный документ не меняется." },
       storno: { label: "Сторно", fields: ["target"], help: "Создаёт точный обратный документ; исходная запись остаётся в истории." },
