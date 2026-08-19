@@ -130,6 +130,19 @@ def _mutation_contract(base: str) -> None:
 
 
 def _guided_acceptance_csrf_contract(base: str) -> None:
+    inventory_url = f"{base}{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview"
+    missing_inventory_code, missing_inventory = _multipart_request(inventory_url)
+    assert missing_inventory_code == 403 and missing_inventory["code"] == "csrf_failed"
+    cross_inventory_code, cross_inventory = _multipart_request(
+        inventory_url,
+        headers={
+            "X-WB-FF-Pool-CSRF": "1",
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert cross_inventory_code == 403 and cross_inventory["code"] == "csrf_failed"
+
     preview_url = f"{base}{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview"
     missing_preview_code, missing_preview = _multipart_request(preview_url)
     assert missing_preview_code == 403 and missing_preview["code"] == "csrf_failed"
@@ -262,6 +275,9 @@ def _ui_contract(base: str) -> None:
         page = response.read().decode("utf-8")
     assert response.status == 200
     assert "data-ff-pool-open" in page and "Документы фулфилмента" in page
+    assert "Явный 0 в полном FBS-шаблоне" in page
+    assert "inventory-template.xlsx?" in page and "/documents/inventory" in page
+    assert "Подтвердить проведение" in page
     assert "facility_pool_opening" not in page
     assert "state.capabilities.document_kinds" in page
     assert page.count('data-warehouse-key="') >= 6

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from io import BytesIO
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -109,6 +110,7 @@ def main() -> None:
         catalog, shipment_lines = _xlsx_contracts(service)
         _production_shaped_26gn527(service)
         opening = _opening(service)
+        _inventory_missing_fbs_zero(service, catalog)
         _idempotent_repeat_and_recovery(service, opening)
         _transfer_and_late_expense(service)
         _mis_sort(service)
@@ -1107,6 +1109,138 @@ def _idempotent_repeat_and_recovery(
         "request_id_identity_conflict"
     }
     assert _table_count(service.db_path, REQUESTS_TABLE) == before_race + 1
+
+
+def _inventory_missing_fbs_zero(
+    service: FfPoolDocumentService,
+    catalog: list[dict[str, object]],
+) -> None:
+    """Routine full-scope inventory makes an absent FBS zero explicit."""
+
+    target_key = ("fac_orb", "FBS", 101)
+    with sqlite3.connect(service.db_path) as conn:
+        assert conn.execute(
+            f"SELECT 1 FROM {BALANCES_TABLE} WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone() is None
+        non_target_before = conn.execute(
+            f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,"
+            f"source_watermark,updated_at FROM {BALANCES_TABLE} "
+            "WHERE NOT (facility_id=? AND pool=? AND nm_id=?) "
+            "ORDER BY facility_id,pool,nm_id",
+            target_key,
+        ).fetchall()
+        movement_count_before = int(
+            conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0]
+        )
+
+    targets = {
+        (101, "FBS"): 0,
+        (102, "FBS"): _balance(service.db_path, "fac_orb", "FBS", 102)[0],
+    }
+    workbook_bytes = service.generate_inventory_template(
+        facility_id="fac_orb",
+        scope="FBS",
+        catalog=catalog,
+        source_revision="inventory-explicit-zero-v1",
+        targets=targets,
+    )
+    inventory_identity = replace(
+        identity("inventory-explicit-zero", revision="inventory-explicit-zero-v1"),
+        source_system="operator_http",
+        source_type="pool_inventory_workbook",
+    )
+    preview = service.preview_inventory_workbook(
+        identity=inventory_identity,
+        source_bytes=workbook_bytes,
+        source_filename="inventory-explicit-zero.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        catalog=catalog,
+    )
+    assert preview["state"] == "ready", preview
+    result = service.post(str(preview["request_id"]))
+    assert result["state"] == "complete", result
+    root_document_id = str(result["document"]["document_id"])
+
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        target = conn.execute(
+            f"SELECT quantity,capital_rub,wac_rub,source_watermark FROM {BALANCES_TABLE} "
+            "WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone()
+        assert target is not None
+        assert dict(target) == {
+            "quantity": 0,
+            "capital_rub": "0",
+            "wac_rub": None,
+            "source_watermark": root_document_id,
+        }
+        assert conn.execute(
+            f"SELECT 1 FROM {BALANCES_TABLE} "
+            "WHERE facility_id='fac_orb' AND pool='FBO' AND nm_id=101"
+        ).fetchone() is None
+        non_target_after = conn.execute(
+            f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,"
+            f"source_watermark,updated_at FROM {BALANCES_TABLE} "
+            "WHERE NOT (facility_id=? AND pool=? AND nm_id=?) "
+            "ORDER BY facility_id,pool,nm_id",
+            target_key,
+        ).fetchall()
+        assert [tuple(row) for row in non_target_after] == [
+            tuple(row) for row in non_target_before
+        ]
+        assert (
+            int(conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0])
+            == movement_count_before
+        )
+        evidence = conn.execute(
+            f"SELECT quantity,capital_rub,metadata_json FROM {DOCUMENT_LINES_TABLE} "
+            "WHERE document_id=? AND line_role='absolute_target' "
+            "AND facility_id=? AND pool=? AND nm_id=?",
+            (root_document_id, *target_key),
+        ).fetchone()
+        assert evidence is not None
+        assert int(evidence["quantity"]) == 0
+        assert Decimal(str(evidence["capital_rub"])) == 0
+        assert json.loads(str(evidence["metadata_json"])) == {
+            "before_quantity": 0,
+            "explicit_physical_zero": True,
+            "selected_pool": True,
+        }
+        posted_manifest = json.loads(
+            str(
+                conn.execute(
+                    f"SELECT posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?",
+                    (root_document_id,),
+                ).fetchone()[0]
+            )
+        )
+        assert posted_manifest["domain"]["explicit_zero_fbs_balance_count"] == 1
+        assert posted_manifest["domain"]["explicit_zero_fbs_nm_ids"] == [101]
+
+    repeated = service.preview_inventory_workbook(
+        identity=replace(
+            inventory_identity,
+            request_id="fixture:inventory-explicit-zero:response-loss-retry",
+        ),
+        source_bytes=workbook_bytes,
+        source_filename="renamed-inventory-explicit-zero.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        catalog=catalog,
+    )
+    assert repeated["request_id"] == result["request_id"]
+    assert repeated["state"] == "complete" and repeated["idempotent"] is True
+    with sqlite3.connect(service.db_path) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {BALANCES_TABLE} "
+            "WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone()[0] == 1
+        assert (
+            int(conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0])
+            == movement_count_before
+        )
 
 
 def _transfer_and_late_expense(service: FfPoolDocumentService) -> None:

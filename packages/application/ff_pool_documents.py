@@ -1924,6 +1924,10 @@ def _build_posting_plan(
             for document in plan["documents"]
             for item in document.get("movements", [])
         }
+        | {
+            (str(item[0]), str(item[1]), int(item[2]))
+            for item in plan.get("additional_balance_keys", [])
+        }
     )
     plan["posted_manifest"] = {
         "contract_name": CONTRACT_NAME,
@@ -3843,6 +3847,7 @@ def _plan_pool_inventory(
     surplus_movements: list[dict[str, Any]] = []
     shortage_lines: list[dict[str, Any]] = []
     shortage_movements: list[dict[str, Any]] = []
+    explicit_zero_balances: list[dict[str, Any]] = []
     unselected = tuple(pool for pool in POOLS if pool not in selected_pools)
     unselected_keys = [(facility_id, pool, nm_id) for nm_id in sorted(by_nm) for pool in unselected]
     unselected_digest = _balance_digest(conn, unselected_keys)
@@ -3861,10 +3866,22 @@ def _plan_pool_inventory(
                     nm_id=nm_id,
                     quantity=target,
                     capital_cents=0,
-                    metadata={"before_quantity": before_q, "selected_pool": True},
+                    metadata={
+                        "before_quantity": before_q,
+                        "selected_pool": True,
+                        **(
+                            {"explicit_physical_zero": True}
+                            if pool == "FBS" and balance is None and target == 0
+                            else {}
+                        ),
+                    },
                 )
             )
             delta = target - before_q
+            if pool == "FBS" and balance is None and target == 0:
+                explicit_zero_balances.append(
+                    {"facility_id": facility_id, "pool": pool, "nm_id": nm_id}
+                )
             if delta > 0:
                 unit_cost = _inventory_cost_basis(
                     conn,
@@ -3963,7 +3980,7 @@ def _plan_pool_inventory(
                 movements=shortage_movements,
             )
         )
-    return {
+    result = {
         "primary_document_id": root_document_id,
         "root_document_id": root_document_id,
         "documents": documents,
@@ -3978,9 +3995,20 @@ def _plan_pool_inventory(
             "target_count": len(parent_lines),
             "surplus_count": len(surplus_lines),
             "shortage_count": len(shortage_lines),
+            "explicit_zero_fbs_balance_count": len(explicit_zero_balances),
+            "explicit_zero_fbs_nm_ids": [
+                int(item["nm_id"]) for item in explicit_zero_balances
+            ],
             "zero_or_synthetic_cost": False,
         },
     }
+    if explicit_zero_balances:
+        result["additional_balance_keys"] = [
+            [item["facility_id"], item["pool"], item["nm_id"]]
+            for item in explicit_zero_balances
+        ]
+        result["explicit_zero_balances"] = explicit_zero_balances
+    return result
 
 
 def _plan_pool_overhead(
@@ -4814,6 +4842,12 @@ def _apply_plan(
                 epoch=epoch,
                 posted_at=posted_at,
             )
+    _materialize_explicit_zero_balances(
+        conn,
+        plan=plan,
+        epoch=epoch,
+        posted_at=posted_at,
+    )
     for document in plan["documents"]:
         relation = document.get("relation")
         if not relation:
@@ -4842,6 +4876,50 @@ def _apply_plan(
                 "inventory_unselected_pool_changed",
                 "Unselected inventory pool changed during posting",
             )
+
+
+def _materialize_explicit_zero_balances(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+    epoch: int,
+    posted_at: str,
+) -> None:
+    """Materialize an audited FBS physical zero without inventing a movement.
+
+    The immutable ``pool_inventory`` absolute-target lines are the accounting
+    evidence.  A zero-to-zero physical delta is deliberately not a movement,
+    but a missing row must still become an exact facility/pool/SKU read-model
+    row when a routine inventory document confirms an absolute target of zero.
+    """
+
+    rows = list(plan.get("explicit_zero_balances") or [])
+    if not rows:
+        return
+    root_document_id = str(plan["primary_document_id"])
+    for item in rows:
+        facility_id = str(item["facility_id"])
+        pool = _pool(str(item["pool"]))
+        nm_id = int(item["nm_id"])
+        existing = _balance_row(
+            conn,
+            (facility_id, pool, nm_id),
+            epoch=epoch,
+            required=False,
+        )
+        if existing is not None:
+            raise FfPoolDocumentError(
+                "explicit_zero_balance_drift",
+                "Inventory zero target row appeared after the posting plan",
+                details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
+            )
+        conn.execute(
+            f"""INSERT INTO {BALANCES_TABLE}(
+                facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+                source_watermark,updated_at
+            ) VALUES(?,?,?,?,0,'0',NULL,?,?)""",
+            (facility_id, pool, nm_id, epoch, root_document_id, posted_at),
+        )
 
 
 def _apply_balance_movement(
