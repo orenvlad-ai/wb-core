@@ -147,6 +147,21 @@ security change, new external destination или material scope/risk change.
 Такой gate получает один direct pre-terminal callback с exact resource/effect
 и одним минимальным owner action; hidden UI state не заменяет callback.
 
+Human-only boundary относится к source business/risk decision, а не к
+механическому GitHub comment transport. Если exact owner authorization уже
+дано в visible Codex task и передано qualified executor-у дословно с
+source task/thread ID, executor сам relays его в exact PR через уже
+авторизованную non-interactive GitHub identity с association `OWNER` или
+`MEMBER`. Владелец не обязан вручную открывать PR, публиковать GitHub
+comment, запускать command или выполнять GitHub action. Executor не
+invent/synthesize/broaden-ит authorization: relay фиксирует source и executor
+task/thread IDs, отдельно включает неизменённый authorization payload и
+только связывает его с уже разрешёнными exact PR/head, а для apply
+также deployed SHA и manifest. Missing/ambiguous authorization, недоказанный
+source/task binding, association вне `OWNER`/`MEMBER` или любой
+head/semantic/deployed-SHA/manifest drift fail closed и требуют direct
+callback, а не синтеза разрешения.
+
 ## Duplicate-executor guard
 
 Только после допустимого wake signal, `CANARY_RESTRICTED`/routing-defect
@@ -276,6 +291,11 @@ duplicate executor; bounded read-only duplicate guard после wake signal.
 canary. `autonomy_ready` не превращается в обычный callback, heartbeat или
 периодический monitor. Обязательная terminal-handoff фраза остаётся последней
 директивой prompt.
+Если production-mutation может потребовать owner decision, prompt кроме этого
+требует transport-neutral contract выше: exact authorization из visible
+source task передаётся дословно с source task/thread ID; executor либо
+механически relays его через qualified `OWNER`/`MEMBER` GitHub lane, либо
+fail closed с direct callback, но не поручает владельцу comment/command transport.
 
 Если нужны production evidence/data, используй canonical server-side path:
 сначала определи current target/runtime и конкретный source по code/docs, затем
@@ -361,7 +381,7 @@ idempotency либо документированный recovery, post-apply rea
 reconciliation. Ad-hoc SQL, случайные local/server-only scripts и mutation
 через архивный read-only MCP запрещены.
 
-Human-gated `scope:production-mutation` закрывается только trusted-main exact
+Human-authorized `scope:production-mutation` закрывается только trusted-main exact
 command после pre-merge release gate, merge, separately authorized exact
 post-merge apply и reconciliation:
 
@@ -373,6 +393,12 @@ Release gate и apply gate — разные immutable OWNER/MEMBER comments. П�
 production-apply authorization. Reconciliation следует после apply gate.
 Append-only source suffix либо сама reconciliation не могут подменить apply
 gate; редактирование любого из трёх comments инвалидирует exact digest.
+Оба gate comments могут быть введены владельцем в GitHub либо
+транспортированы qualified executor-ом из visible source task по
+контракту выше; machine contract и схема command от способа transport не
+меняются. После действительного exact authorization executor также сам
+публикует factual reconciliation comment и terminalization command; эти
+механические closure actions не требуют нового owner decision.
 
 Finance/storage migrations дополнительно сохраняют все lease, snapshot,
 backup, restore, writer/timer, exact-SHA и non-target contracts из
@@ -418,7 +444,9 @@ decision, exact production-mutation gate, credential/login/2FA/captcha без
 разрешённого non-interactive path, доказанный необратимый data risk, security
 change, новая внешняя data destination или material scope/risk change. До
 terminal handoff такой gate сообщает direct pre-terminal callback с одним
-минимальным owner action. `waitingOnApproval`, missing platform capability,
+минимальным owner decision в visible task. GitHub PR/comment/command/action
+transport не является human-only action при наличии qualified non-interactive
+`OWNER`/`MEMBER` lane. `waitingOnApproval`, missing platform capability,
 permission prompt и platform hard stop являются routing/tooling defects, не
 Human Gates и не основаниями просить покомандное подтверждение.
 
