@@ -1,6 +1,6 @@
 # Migration 149 — FF Moscow FBS confirmed physical zero publication
 
-Date: 2026-08-19  
+Date: 2026-08-19
 Contour: separately owner-gated production-data mutation
 
 ## Decision and exact scope
