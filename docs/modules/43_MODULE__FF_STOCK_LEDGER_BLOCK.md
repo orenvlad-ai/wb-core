@@ -675,6 +675,25 @@ is the canonical no-delete equivalent of its frozen absent state. A recovered
 shipment can be accepted again only through a fresh source revision and a new
 immutable request.
 
+Migration 149 adds one separate production-only confirmed-zero publication on
+top of the same document/recovery contour. The allowlisted source contract may
+materialize a missing `FF Москва × FBS × SKU` balance row only when the
+immutable `pool_inventory` target is absolute zero, the current row is absent,
+and the reviewed cohort is exactly `497413772`, `497415593`, `497416931`. The
+immutable inventory lines are the physical-zero evidence; zero-to-zero creates
+no movement, cost or capital. The resulting balance is `quantity=0`,
+`capital_rub=0`, `wac_rub=NULL` with the root document as source watermark.
+Ordinary operator inventory requests cannot opt into this source contract.
+
+The canonical runner is dry-run by default, binds exact deployed SHA/facility/
+epoch/cutover/targets/reservations and non-target digests, and applies only after
+the separate production-mutation gate. Central T1 retains the absent target
+before-images and document closure; no ad-hoc SQL, synthetic movement, delete
+or full-store restore is introduced. Readback preserves signed
+`available=physical-reserved`, so an existing reservation can make availability
+negative while the confirmed physical row remains exact zero. Missing rows for
+any other facility/SKU remain unknown.
+
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
 remain unchanged. The repo-owned production runner does not acquire a writer

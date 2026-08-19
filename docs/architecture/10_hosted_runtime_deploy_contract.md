@@ -106,6 +106,15 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   releases the barrier; failure or transport ambiguity retains it for recovery.
   The runner never writes WB, and deployment of the default-off runner alone
   never applies opening or chooses the complete/sorted policy.
+- Migration 149 adds canonical hosted
+  `ff-pool-zero-physical-production-dry-run/apply/readback` for exactly three
+  owner-confirmed `FF Москва × FBS` physical-zero rows (`497413772`,
+  `497415593`, `497416931`). The wrapper pins the active target, runtime and
+  `.wb-core-runtime-sha`, streams the reviewed manifest over stdin, requires an
+  exact apply-gate reference and stores evidence below the canonical runtime
+  backup root. Dry-run/readback are query-only. Apply goes only through the
+  audited `pool_inventory`/T1 contour, creates no movement/cost delta and must
+  prove the selected-facility status no longer reports these rows missing.
 - Migration 144 adds
   `ff-pool-recovery-supersession-dry-run/apply/readback` for one exact stale
   failed Stage 7C recovery. The hosted wrapper pins the active EU target,

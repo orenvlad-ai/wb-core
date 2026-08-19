@@ -58,6 +58,8 @@ DOCUMENTS_TABLE = "sheet_vitrina_v1_ff_pool_documents"
 DOCUMENT_LINES_TABLE = "sheet_vitrina_v1_ff_pool_document_lines"
 EXPENSE_LINES_TABLE = "sheet_vitrina_v1_ff_pool_document_expense_lines"
 DOCUMENT_RELATIONS_TABLE = "sheet_vitrina_v1_ff_pool_document_relations"
+CONFIRMED_ZERO_PHYSICAL_CONTRACT = "ff_pool_confirmed_zero_physical_v1"
+CONFIRMED_ZERO_PHYSICAL_SOURCE_TYPE = "ff_pool_confirmed_zero_physical_v1"
 WORKFLOW_EVENTS_TABLE = "sheet_vitrina_v1_ff_workflow_events"
 GUIDED_REPLAYS_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_replays"
 GUIDED_RECOVERIES_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_recoveries"
@@ -437,12 +439,13 @@ class FfPoolDocumentService:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             ensure_ff_pool_document_schema(conn)
-            now = self._now()
-            conn.execute(
-                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',updated_at=? "
-                "WHERE state='processing'",
-                (now,),
-            )
+            if resume:
+                now = self._now()
+                conn.execute(
+                    f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',updated_at=? "
+                    "WHERE state='processing'",
+                    (now,),
+                )
             conn.commit()
         if resume:
             self.resume_incomplete()
@@ -1923,6 +1926,10 @@ def _build_posting_plan(
             (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"]))
             for document in plan["documents"]
             for item in document.get("movements", [])
+        }
+        | {
+            (str(item[0]), str(item[1]), int(item[2]))
+            for item in plan.get("additional_balance_keys", [])
         }
     )
     plan["posted_manifest"] = {
@@ -3837,12 +3844,49 @@ def _plan_pool_inventory(
             raise FfPoolDocumentError("duplicate_nm_id", "Inventory contains duplicate resolved SKU")
         by_nm[nm_id] = item
     cost_bases = _json_object(manifest.get("cost_basis_by_nm") or {})
+    confirmed_zero = _json_object(
+        manifest.get("confirmed_zero_physical") or {}
+    )
+    confirmed_zero_enabled = bool(confirmed_zero)
+    if confirmed_zero_enabled:
+        target_nm_ids = sorted(
+            int(value) for value in confirmed_zero.get("target_nm_ids") or []
+        )
+        expected_missing_nm_ids = sorted(
+            int(value)
+            for value in confirmed_zero.get("expected_missing_nm_ids") or []
+        )
+        expected_existing_zero_nm_ids = sorted(
+            int(value)
+            for value in confirmed_zero.get("expected_existing_zero_nm_ids") or []
+        )
+        if (
+            str(request["source_type"] or "")
+            != CONFIRMED_ZERO_PHYSICAL_SOURCE_TYPE
+            or str(confirmed_zero.get("contract_name") or "")
+            != CONFIRMED_ZERO_PHYSICAL_CONTRACT
+            or str(confirmed_zero.get("pool") or "") != "FBS"
+            or confirmed_zero.get("absolute_target") != 0
+            or scope != "FBS"
+            or target_nm_ids != sorted(by_nm)
+            or sorted(expected_missing_nm_ids + expected_existing_zero_nm_ids)
+            != target_nm_ids
+            or set(expected_missing_nm_ids) & set(expected_existing_zero_nm_ids)
+            or not str(confirmed_zero.get("reviewed_plan_fingerprint") or "")
+            or not str(confirmed_zero.get("approval_reference") or "")
+            or not str(confirmed_zero.get("decision_date") or "")
+        ):
+            raise FfPoolDocumentError(
+                "confirmed_zero_contract_invalid",
+                "Confirmed zero physical publication requires the exact production contract",
+            )
     root_document_id = _request_document_id(request)
     parent_lines: list[dict[str, Any]] = []
     surplus_lines: list[dict[str, Any]] = []
     surplus_movements: list[dict[str, Any]] = []
     shortage_lines: list[dict[str, Any]] = []
     shortage_movements: list[dict[str, Any]] = []
+    confirmed_zero_balances: list[dict[str, Any]] = []
     unselected = tuple(pool for pool in POOLS if pool not in selected_pools)
     unselected_keys = [(facility_id, pool, nm_id) for nm_id in sorted(by_nm) for pool in unselected]
     unselected_digest = _balance_digest(conn, unselected_keys)
@@ -3861,10 +3905,50 @@ def _plan_pool_inventory(
                     nm_id=nm_id,
                     quantity=target,
                     capital_cents=0,
-                    metadata={"before_quantity": before_q, "selected_pool": True},
+                    metadata={
+                        "before_quantity": before_q,
+                        "selected_pool": True,
+                        **(
+                            {"confirmed_zero_physical": True}
+                            if confirmed_zero_enabled and target == 0
+                            else {}
+                        ),
+                    },
                 )
             )
             delta = target - before_q
+            if confirmed_zero_enabled and target != 0:
+                raise FfPoolDocumentError(
+                    "confirmed_zero_target_nonzero",
+                    "Confirmed zero publication accepts only absolute target zero",
+                    details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
+                )
+            if confirmed_zero_enabled and balance is not None and (
+                before_q != 0
+                or _money_cents(
+                    balance["capital_rub"], field="confirmed zero before capital"
+                )
+                != 0
+                or balance["wac_rub"] is not None
+            ):
+                raise FfPoolDocumentError(
+                    "confirmed_zero_existing_balance_conflict",
+                    "Confirmed zero publication cannot overwrite an existing non-zero balance",
+                    details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
+                )
+            if confirmed_zero_enabled and (
+                (nm_id in expected_missing_nm_ids and balance is not None)
+                or (nm_id in expected_existing_zero_nm_ids and balance is None)
+            ):
+                raise FfPoolDocumentError(
+                    "confirmed_zero_reviewed_state_drift",
+                    "Confirmed zero target presence changed after the reviewed plan",
+                    details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
+                )
+            if confirmed_zero_enabled and balance is None:
+                confirmed_zero_balances.append(
+                    {"facility_id": facility_id, "pool": pool, "nm_id": nm_id}
+                )
             if delta > 0:
                 unit_cost = _inventory_cost_basis(
                     conn,
@@ -3963,7 +4047,7 @@ def _plan_pool_inventory(
                 movements=shortage_movements,
             )
         )
-    return {
+    result = {
         "primary_document_id": root_document_id,
         "root_document_id": root_document_id,
         "documents": documents,
@@ -3978,9 +4062,26 @@ def _plan_pool_inventory(
             "target_count": len(parent_lines),
             "surplus_count": len(surplus_lines),
             "shortage_count": len(shortage_lines),
+            **(
+                {
+                    "confirmed_zero_physical": confirmed_zero,
+                    "confirmed_zero_balance_insert_count": len(
+                        confirmed_zero_balances
+                    ),
+                }
+                if confirmed_zero_enabled
+                else {}
+            ),
             "zero_or_synthetic_cost": False,
         },
     }
+    if confirmed_zero_enabled:
+        result["additional_balance_keys"] = [
+            [item["facility_id"], item["pool"], item["nm_id"]]
+            for item in confirmed_zero_balances
+        ]
+        result["confirmed_zero_balances"] = confirmed_zero_balances
+    return result
 
 
 def _plan_pool_overhead(
@@ -4814,6 +4915,12 @@ def _apply_plan(
                 epoch=epoch,
                 posted_at=posted_at,
             )
+    _materialize_confirmed_zero_balances(
+        conn,
+        plan=plan,
+        epoch=epoch,
+        posted_at=posted_at,
+    )
     for document in plan["documents"]:
         relation = document.get("relation")
         if not relation:
@@ -4842,6 +4949,50 @@ def _apply_plan(
                 "inventory_unselected_pool_changed",
                 "Unselected inventory pool changed during posting",
             )
+
+
+def _materialize_confirmed_zero_balances(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+    epoch: int,
+    posted_at: str,
+) -> None:
+    """Publish explicit physical zero evidence without inventing a movement.
+
+    The immutable ``pool_inventory`` absolute-target lines are the accounting
+    evidence.  A zero-to-zero physical delta is deliberately not a movement,
+    but a missing row must still become an exact facility/pool/SKU read-model
+    row when the guarded production contract confirms physical zero.
+    """
+
+    rows = list(plan.get("confirmed_zero_balances") or [])
+    if not rows:
+        return
+    root_document_id = str(plan["primary_document_id"])
+    for item in rows:
+        facility_id = str(item["facility_id"])
+        pool = _pool(str(item["pool"]))
+        nm_id = int(item["nm_id"])
+        existing = _balance_row(
+            conn,
+            (facility_id, pool, nm_id),
+            epoch=epoch,
+            required=False,
+        )
+        if existing is not None:
+            raise FfPoolDocumentError(
+                "confirmed_zero_balance_drift",
+                "Confirmed zero target row appeared after the reviewed plan",
+                details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
+            )
+        conn.execute(
+            f"""INSERT INTO {BALANCES_TABLE}(
+                facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+                source_watermark,updated_at
+            ) VALUES(?,?,?,?,0,'0',NULL,?,?)""",
+            (facility_id, pool, nm_id, epoch, root_document_id, posted_at),
+        )
 
 
 def _apply_balance_movement(

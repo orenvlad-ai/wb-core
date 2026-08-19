@@ -121,3 +121,7 @@ This is `scope:live-runtime`. Release Train deploys and verifies the exact
 merged SHA. There is no production-mutation runner, data backfill, order
 creation, WB write or owner apply gate. Production verification is read-only
 HTTP/authenticated UI and stored-schema/result inspection only.
+
+Migration 149 is a later, separately authorized `scope:production-mutation`
+that publishes three owner-confirmed Moscow FBS physical zero rows. It does not
+change this planner's formula, calculate automatically or create an order.
