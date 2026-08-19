@@ -15,6 +15,7 @@ related_modules:
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_zero_physical_production.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
@@ -98,6 +99,8 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_pool_documents_smoke.py"
+  - "apps/ff_pool_zero_physical_production.py"
+  - "apps/ff_pool_zero_physical_production_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -684,9 +687,13 @@ zero-to-zero result creates no movement, quantity/capital delta or synthetic
 cost. Its absent before-image is part of the same T1 balance-key closure and a
 row appearing between plan and commit fails closed. Existing rows, unselected
 pools and every SKU outside the uploaded full scope remain unchanged. This is a
-general operator-document rule, not a SKU/facility allowlist, hidden backfill or
-production runner; missing rows remain unknown until a human confirms the
-corresponding ordinary inventory document.
+general operator-document rule, not a SKU/facility allowlist or hidden
+backfill; missing rows remain unknown until an audited inventory document is
+confirmed. Migration 149 reuses this same rule through one separately
+owner-authorized, exact-manifest production runner for 41 already confirmed
+`FF Москва × FBS` zeros. That runner may insert only absent zero rows, while an
+existing target row, facility/catalog drift or any non-target effect fails
+closed.
 
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
