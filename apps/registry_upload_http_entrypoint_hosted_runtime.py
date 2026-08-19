@@ -54,6 +54,7 @@ FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
+FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS = 1800.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
@@ -138,6 +139,12 @@ from packages.application.finance_storage_recovery_contract import (
 from packages.application.ff_pool_cutover_production import (
     CONTRACT_NAME as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
     CONTRACT_VERSION as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION,
+)
+from packages.application.ff_pool_zero_physical_production import (
+    CONTRACT_NAME as FF_POOL_ZERO_PHYSICAL_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION,
+    TARGET_FACILITY_ID as FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID,
+    TARGET_NM_IDS as FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS,
 )
 from packages.application.ff_pool_cutover_recovery_supersession import (
     CONTRACT_NAME as FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME,
@@ -7008,6 +7015,44 @@ def run_ff_stage_7a_production_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ff_pool_zero_physical_production_command(args: argparse.Namespace) -> int:
+    """Run the exact default-dry-run Moscow FBS zero publication contour."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_pool_zero_physical_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("zero-physical reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ff_pool_zero_physical_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("zero-physical evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-pool-zero-physical-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_ff_pool_cutover_production_command(args: argparse.Namespace) -> int:
     """Run the canonical dry-run/readback or owner-gated Stage 7C apply."""
 
@@ -7684,6 +7729,151 @@ def _run_remote_ff_stage_7a_production(
             "http_service_restart": restart,
             "post_restart_readback": readback,
         }
+    return payload
+
+
+def _run_remote_ff_pool_zero_physical_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-pool-zero-physical-production-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported zero-physical production action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-pool-zero-physical-production-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("zero-physical production action requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("zero-physical action requires the canonical active runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("zero-physical action requires the canonical environment file")
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError("zero-physical action requires the canonical HTTP service")
+
+    runner_args = [
+        "python3",
+        "apps/ff_pool_zero_physical_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("zero-physical apply requires an existing --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("zero-physical reviewed plan is invalid JSON") from exc
+        scope = plan.get("scope") if isinstance(plan, dict) else {}
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name") != FF_POOL_ZERO_PHYSICAL_CONTRACT_NAME
+            or int(plan.get("contract_version") or 0)
+            != FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not isinstance(scope, Mapping)
+            or str(scope.get("facility_id") or "")
+            != FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID
+            or str(scope.get("pool") or "") != "FBS"
+            or tuple(scope.get("nm_ids") or ())
+            != tuple(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+            or scope.get("absolute_physical_target") != 0
+            or int((plan.get("expected_effects") or {}).get("balance_insert_count") or 0)
+            != len(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+        ):
+            raise ValueError("zero-physical reviewed plan does not match the exact apply")
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError("zero-physical apply requires approval reference and actor")
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--evidence-dir",
+                "/opt/wb-core-runtime/backups/ff-pool-zero-physical-production",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"zero-physical production {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("zero-physical production runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError("zero-physical production runner returned an invalid result")
+    if action == "apply":
+        readback = _run_remote_ff_pool_zero_physical_production(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        target_rows = list(readback.get("target_rows") or [])
+        status = readback.get("fbs_status_read_model") or {}
+        if (
+            [int(item.get("nm_id") or 0) for item in target_rows]
+            != list(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+            or any(item.get("state") != "explicit_zero" for item in target_rows)
+            or status.get("target_nm_ids_unblocked") is not True
+            or list(status.get("target_nm_ids_missing") or [])
+            or status.get("calculation_enabled") is not True
+        ):
+            raise RuntimeError("post-apply zero-physical query-only readback is incomplete")
+        payload = {**payload, "post_apply_readback": readback}
     return payload
 
 
@@ -10964,6 +11154,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ff_stage_7a_readback.set_defaults(
         handler=run_ff_stage_7a_production_command,
         ff_stage_7a_action="readback",
+    )
+
+    zero_physical_dry_run = subparsers.add_parser(
+        "ff-pool-zero-physical-production-dry-run",
+        help="Build the exact query-only Moscow FBS confirmed-zero manifest.",
+    )
+    zero_physical_dry_run.add_argument("--deployed-sha", required=True)
+    zero_physical_dry_run.add_argument("--output", required=True)
+    zero_physical_dry_run.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="dry-run",
+    )
+
+    zero_physical_apply = subparsers.add_parser(
+        "ff-pool-zero-physical-production-apply",
+        help="Apply one exact owner-gated Moscow FBS confirmed-zero manifest.",
+    )
+    zero_physical_apply.add_argument("--deployed-sha", required=True)
+    zero_physical_apply.add_argument("--plan-file", required=True)
+    zero_physical_apply.add_argument("--fingerprint", required=True)
+    zero_physical_apply.add_argument("--approval-reference", required=True)
+    zero_physical_apply.add_argument("--actor", required=True)
+    zero_physical_apply.add_argument("--output", required=True)
+    zero_physical_apply.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="apply",
+    )
+
+    zero_physical_readback = subparsers.add_parser(
+        "ff-pool-zero-physical-production-readback",
+        help="Read exact Moscow FBS confirmed-zero reconciliation evidence.",
+    )
+    zero_physical_readback.add_argument("--deployed-sha", required=True)
+    zero_physical_readback.add_argument("--output", required=True)
+    zero_physical_readback.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="readback",
     )
 
     ff_pool_cutover_dry_run = subparsers.add_parser(
