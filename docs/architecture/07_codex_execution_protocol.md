@@ -307,6 +307,14 @@ request/forward command approval и duplicate-executor guard после wake sig
 `autonomy_ready` не создаёт callback/heartbeat/monitoring contour. Если
 task-create не pin/report-ит profile, prompt остаётся capability-only до
 результата canary.
+Для production-mutation prompt также явно разделяет source owner
+business/risk decision и GitHub transport. Exact authorization из visible source
+task передаётся executor-у дословно вместе с source task/thread ID;
+summary, paraphrase или hidden-memory claim не являются authorization. Prompt
+требует от qualified executor-а самому relay-ить доказанный payload через
+non-interactive GitHub identity с association `OWNER`/`MEMBER` или fail
+closed с direct callback. Владелец не обязан вручную открывать PR,
+публиковать GitHub comment, запускать command или выполнять GitHub action.
 
 Каждый executor task prompt обязательно заканчивается следующим по смыслу и
 составу полей указанием, после которого нет иных task directives:
@@ -417,10 +425,13 @@ Unattended выполнение начинается только в `CANARY_QUA
 capability match и `platform_approval_count=0`. Широкое предварительное
 разрешение пользователя покрывает последовательный запуск заранее
 согласованных ordinary repo/live stages и устранение non-material технических
-blockers внутри scope, но не расширяет machine profile. Оно не делегирует exact
-production-mutation gate, credential/login/2FA/captcha без разрешённого
+blockers внутри scope, но не расширяет machine profile. Оно не заменяет
+source owner business/risk decision для exact production-mutation gate,
+credential/login/2FA/captcha без разрешённого
 non-interactive path, owner decision при proven irreversible data risk,
 security change, new external destination или material product/risk choice.
+После данного exact decision его GitHub transport и остальной mechanical
+closure принадлежат qualified executor-у, а не владельцу.
 
 Отсутствие владельца не ослабляет `baseline`, GitHub Release Train, exact-SHA
 deploy/verify и production-mutation evidence. Для новой unattended цепочки
@@ -465,7 +476,27 @@ coherent backup и full integrity/foreign-key gates на immutable copy, а не
 долгим `integrity_check` на writer-owned file. Любая source identity, capacity,
 backup, writer или rollback ambiguity оставляет mutation fail closed.
 
-Human-gated terminalization использует exact command:
+### Owner Decision И GitHub Transport
+
+Production-mutation safety требует exact human source decision, но не
+ручного GitHub transport. Relay разрешён, только если qualified executor
+может доказать один exact authorization payload в visible source task,
+получил его дословно с source task/thread ID и имеет non-interactive
+GitHub identity с association `OWNER` или `MEMBER`. Release-gate payload обязан
+сам содержать exact PR/head и merge/deploy semantics; apply-gate payload — exact
+PR, deployed SHA, manifest и apply semantics. Executor не добавляет и не
+расширяет authority: он не invent/synthesize/broaden-ит authorization.
+
+Relay comment фиксирует source и executor task/thread IDs, включает
+authorization payload дословно и явно отмечает transport-only semantics.
+Executor после записи повторно читает comment metadata/body и использует
+его exact UTF-8 digest. Missing/ambiguous payload, paraphrase, недоказанный
+source binding, wrong association или head/semantic/deployed-SHA/manifest drift fail
+closed и приводят к direct callback за новым decision. Владелец не обязан вручную
+открывать PR, публиковать GitHub comment, запускать command или выполнять
+GitHub action.
+
+Human-authorized terminalization использует exact command:
 
 `/wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> release-gate <RELEASE_GATE_COMMENT_ID> release-gate-digest sha256:<RELEASE_GATE_COMMENT_HASH> apply-gate <APPLY_GATE_COMMENT_ID> apply-gate-digest sha256:<APPLY_GATE_COMMENT_HASH> manifest sha256:<MANIFEST_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>`
 
@@ -477,6 +508,9 @@ deployed ancestry, все identities/digests и canonical read-only deploy evide
 также обязательны. Только Actions-owned proof ставит `release:production`.
 Ручной label, local token, одно-gate command, stale SHA/comment/digest, нарушенный
 порядок или missing evidence fail closed.
+После valid exact owner authorization factual post-apply reconciliation comment,
+terminalization command и прочие mechanical closure actions публикует executor;
+они не создают нового business/risk decision.
 
 Finance/storage mutations дополнительно подчиняются active lease, snapshot,
 capacity, backup/restore, writer/timer, SHA and reconciliation contracts из
@@ -582,11 +616,14 @@ User action требуется только для owner business/risk decision,
 production-mutation gate, credential/login/2FA/captcha без разрешённого
 non-interactive path, proven irreversible data risk, security change, new
 external data destination или material scope/risk change. Такой gate сообщает
-direct pre-terminal callback с exact resource/effect/minimal action; hidden UI
+direct pre-terminal callback с exact resource/effect и minimal owner decision в
+visible task; hidden UI
 flag не заменяет callback. `waitingOnApproval`, missing platform capability,
 permission prompt и platform hard stop — routing/tooling defects, не Human
 Gates. Обычные Git, GitHub, checks, review, merge, queue wait, deploy/verify и
-доступная UI automation не перекладываются на пользователя.
+доступная UI automation не перекладываются на пользователя. GitHub comment
+transport, reconciliation и terminalization после exact owner decision также
+остаются executor closure, а не новым human-only gate.
 
 Blocker final содержит exact error, выполненную безопасную работу и один
 минимальный human-only step.

@@ -3732,6 +3732,142 @@ def _assert_permission_routing_and_direct_executor_contract() -> None:
         assert required in curator_plain
 
 
+def _assert_owner_authorization_relay_protocol_contract() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    execution = (
+        ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md"
+    ).read_text(encoding="utf-8")
+    release_train = (
+        ROOT / "docs" / "architecture" / "11_github_release_train.md"
+    ).read_text(encoding="utf-8")
+    active_sources = (agents, execution, release_train)
+
+    manual_transport_is_not_required = (
+        "владелец не обязан вручную открывать pr, публиковать github comment, "
+        "запускать command или выполнять github action"
+    )
+    for source in active_sources:
+        folded = re.sub(r"\s+", " ", source.casefold()).replace("`", "")
+        for required in (
+            manual_transport_is_not_required,
+            "visible source task",
+            "source task/thread id",
+            "owner",
+            "authorization",
+            "owner/member",
+            "fail closed",
+            "reconciliation",
+            "terminalization",
+        ):
+            assert required in folded
+        assert "invent/synthesize/broaden" in folded
+
+    release_folded = re.sub(r"\s+", " ", release_train.casefold()).replace(
+        "`", ""
+    )
+    for required in (
+        "source binding",
+        "direct visible task history",
+        "delegation envelope",
+        "один дословный authorization payload",
+        "verbatim block",
+        "transport-only",
+        "exact utf-8 digest",
+        "existing manual gate comments",
+        "parser, comment ids/digests, command schema",
+        "mechanical executor closure",
+    ):
+        assert required in release_folded
+    for forbidden in (
+        "владелец обязан вручную открывать pr",
+        "владелец обязан вручную публиковать github comment",
+        "owner must manually open the pr",
+        "manual github action required",
+    ):
+        assert forbidden not in "\n".join(active_sources).casefold()
+
+    task_id = "01a00000-0000-7000-8000-000000000001"
+    pr_number = 120
+    release_payload = (
+        f"OWNER AUTHORIZATION for exact PR #{pr_number} head {SHA_A}: "
+        "merge and deploy only; stale on head or semantic drift."
+    )
+    apply_payload = (
+        f"OWNER AUTHORIZATION for exact PR #{pr_number} deployed SHA {SHA_C} "
+        f"and manifest {MANIFEST}: production apply is authorized."
+    )
+
+    def relay_allowed(
+        payloads: tuple[str, ...],
+        *,
+        source_task_id: str,
+        association: str,
+        required_bindings: tuple[str, ...],
+    ) -> bool:
+        if len(payloads) != 1:
+            return False
+        if re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            source_task_id,
+        ) is None:
+            return False
+        if association not in {"OWNER", "MEMBER"}:
+            return False
+        return all(binding in payloads[0] for binding in required_bindings)
+
+    release_bindings = (f"PR #{pr_number}", SHA_A, "merge", "deploy")
+    apply_bindings = (f"PR #{pr_number}", SHA_C, MANIFEST, "apply")
+    assert relay_allowed(
+        (release_payload,),
+        source_task_id=task_id,
+        association="OWNER",
+        required_bindings=release_bindings,
+    )
+    assert relay_allowed(
+        (apply_payload,),
+        source_task_id=task_id,
+        association="MEMBER",
+        required_bindings=apply_bindings,
+    )
+
+    assert not relay_allowed(
+        (),
+        source_task_id=task_id,
+        association="OWNER",
+        required_bindings=release_bindings,
+    )
+    assert not relay_allowed(
+        (release_payload, release_payload + " broader authority"),
+        source_task_id=task_id,
+        association="OWNER",
+        required_bindings=release_bindings,
+    )
+    assert not relay_allowed(
+        (release_payload,),
+        source_task_id=task_id,
+        association="CONTRIBUTOR",
+        required_bindings=release_bindings,
+    )
+    assert not relay_allowed(
+        (release_payload,),
+        source_task_id="unproven-task",
+        association="OWNER",
+        required_bindings=release_bindings,
+    )
+    assert not relay_allowed(
+        (release_payload.replace(SHA_A, SHA_B),),
+        source_task_id=task_id,
+        association="OWNER",
+        required_bindings=release_bindings,
+    )
+    assert not relay_allowed(
+        (apply_payload.replace(MANIFEST, "sha256:" + "f" * 64),),
+        source_task_id=task_id,
+        association="MEMBER",
+        required_bindings=apply_bindings,
+    )
+
+
 def _assert_active_protocol_cutover_contract() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     execution = (
@@ -4782,6 +4918,7 @@ def main() -> int:
     _assert_workflow_contract()
     _assert_visible_codex_task_lifecycle_contract()
     _assert_permission_routing_and_direct_executor_contract()
+    _assert_owner_authorization_relay_protocol_contract()
     _assert_active_protocol_cutover_contract()
     _assert_machine_classification_and_state_spec()
     _assert_resume_status_and_manual_ack_guards()
