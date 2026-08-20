@@ -4980,7 +4980,9 @@ def _build_plan(
 
 
 def _wait_until_ready(url: str) -> None:
-    deadline = time.time() + 10
+    # The live runner imports the full operator surface, including PDF parsing.
+    # Shared CI runners can need more than ten seconds to finish that cold start.
+    deadline = time.time() + 30
     last_error = ""
     while time.time() < deadline:
         try:
