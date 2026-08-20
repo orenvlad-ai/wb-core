@@ -44,9 +44,10 @@ policy.
 Only positive matched product remainder from server-derived `production` and
 `in_transit` supplier orders contributes inbound coverage. `accepted_ff`,
 cancelled/inactive and non-authoritative lines are excluded. Explicit
-`target_facility_id` is authoritative. Historical `NULL` targets receive a
-planning-only fallback to active FF Москва; no row is rewritten and an explicit
-Оренбург target never enters Moscow coverage.
+`target_facility_id` is authoritative. Orders whose target remains `NULL` are
+excluded from every facility-specific inbound pool until an operator assigns an
+active facility; no default, fallback or row rewrite is performed, and an
+explicit Оренбург target never enters Moscow coverage.
 
 ## Sales window
 
@@ -67,9 +68,11 @@ evidence.
 ## Persistence and compatibility
 
 Supplier shipment headers add nullable `target_facility_id` and resolved
-`target_facility_name`. New records must explicitly select an active facility.
-Historical rows are preserved without mass backfill. Target changes after
-actual FF acceptance are rejected.
+`target_facility_name`. Standalone suppliers create records with both values
+`NULL`; internal new records still require one explicit active facility, and an
+internal operator may later assign an active facility to an unassigned supplier
+record. Historical rows are preserved without mass backfill. Target changes
+after actual FF acceptance are rejected.
 
 Successful FBS calculations do not create supplier/factory orders. They update
 only the compatible FBS latest-result slot and append one immutable complete
@@ -96,14 +99,15 @@ document or production order is backfilled or mutated by this migration.
 Status shows selected FF readiness, physical/reserved/available, active inbound,
 history coverage and blockers. Result shows selected mode and exact boundaries,
 calendar/used trading-day counts and per-SKU coverage/recommendation. Supplier
-operator and supplier-safe surfaces show the target selector and registry
-column.
+operator surfaces show the target selector, while the supplier-safe card shows
+the assigned facility as read-only state or `Назначается оператором`; both
+registries retain the target column.
 
 ## Verification
 
 - `apps/fbs_fulfillment_order_supply_smoke.py` covers Moscow happy path,
   signed `physical-reserved`, incomplete Orenburg isolation, no WB operands,
-  legacy-null Moscow fallback, explicit Orenburg exclusion, active/accepted
+  unassigned-target exclusion without fallback, explicit Orenburg exclusion, active/accepted
   inbound statuses, validation, rounding, both history modes, inclusive bounds,
   no outside-window leakage and immutable evidence/export;
 - `apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py` covers protected

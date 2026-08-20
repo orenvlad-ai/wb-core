@@ -41,6 +41,42 @@ from packages.application.supplier_shipments import SupplierShipmentsBlock  # no
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
+TARGET_FACILITY_ID = "fac_supplier_smoke"
+INACTIVE_TARGET_FACILITY_ID = "fac_supplier_smoke_inactive"
+
+
+def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_facilities(
+                facility_id,code,name,active,display_timezone,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                (
+                    TARGET_FACILITY_ID,
+                    "SMOKE",
+                    "FF Smoke",
+                    1,
+                    "Europe/Moscow",
+                    "2026-05-30T08:00:00Z",
+                    "2026-05-30T08:00:00Z",
+                ),
+                (
+                    INACTIVE_TARGET_FACILITY_ID,
+                    "SMOKE-OFF",
+                    "FF Smoke inactive",
+                    0,
+                    "Europe/Moscow",
+                    "2026-05-30T08:00:00Z",
+                    "2026-05-30T08:00:00Z",
+                ),
+            ),
+        )
+        conn.commit()
+
+
 def _assert_price_conformity_application_smoke() -> None:
     timestamp_counter = {"value": 0}
 
@@ -73,6 +109,7 @@ def _assert_price_conformity_application_smoke() -> None:
                 "purchase_price_yuan": "3",
             }
         )
+        _seed_target_facilities(runtime)
         block.create_nomenclature_item(
             {
                 "is_active": True,
@@ -120,6 +157,7 @@ def _assert_price_conformity_application_smoke() -> None:
             {
                 "upload_id": parsed["upload_id"],
                 "shipment_date": "2026-05-30",
+                "target_facility_id": TARGET_FACILITY_ID,
                 "payload": accepted_parsed,
             }
         )
@@ -215,6 +253,98 @@ def _assert_price_conformity_application_smoke() -> None:
         if second_backfill.get("processed_shipments") != 0 or second_backfill.get("updated_line_count") != 0:
             raise AssertionError(f"backfill must be idempotent, got {second_backfill}")
 
+        supplier_parsed = block.parse_upload_supplier_safe(
+            _build_price_conformity_invoice_fixture(),
+            uploaded_filename="supplier-unassigned-target.xlsx",
+        )
+        supplier_line_fields = (
+            "line_id",
+            "source_row_token",
+            "line_type",
+            "sort_order",
+            "source_no",
+            "barcode",
+            "model_raw",
+            "qty",
+            "unit_price",
+            "amount",
+            "currency",
+            "comment",
+        )
+        supplier_lines = [
+            {field: line.get(field) for field in supplier_line_fields}
+            for line in supplier_parsed.get("lines") or []
+        ]
+        supplier_products = [line for line in supplier_lines if line.get("line_type") == "product"]
+        supplier_products[-1]["unit_price"] = 5
+        supplier_products[-1]["amount"] = 5
+        supplier_payload = {
+            "upload_id": supplier_parsed["upload_id"],
+            "shipment_date": "2026-05-30",
+            "payload": {
+                "shipment_date": "2026-05-30",
+                "metadata": supplier_parsed.get("metadata") or {},
+                "lines": supplier_lines,
+                "warnings": supplier_parsed.get("warnings") or [],
+                "errors": supplier_parsed.get("errors") or [],
+            },
+        }
+        supplier_created = block.create_shipment_supplier_safe(supplier_payload)
+        supplier_shipment_id = str(supplier_created.get("shipment_id") or "")
+        if (
+            not supplier_shipment_id
+            or supplier_created.get("target_facility_id")
+            or supplier_created.get("target_facility_name")
+        ):
+            raise AssertionError(f"supplier create must persist an unassigned target, got {supplier_created}")
+        if "target_facility_options" in block.list_shipments_supplier_safe():
+            raise AssertionError("supplier-safe list must not expose facility assignment options")
+        with sqlite3.connect(runtime.db_path) as conn:
+            stored_target = conn.execute(
+                "SELECT target_facility_id,target_facility_name FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                (supplier_shipment_id,),
+            ).fetchone()
+        if stored_target != (None, None):
+            raise AssertionError(f"unassigned supplier target must persist as SQL NULL, got {stored_target}")
+        try:
+            block.create_shipment_supplier_safe(
+                {**supplier_payload, "target_facility_id": TARGET_FACILITY_ID}
+            )
+        except ValueError as exc:
+            if "unsupported" not in str(exc):
+                raise
+        else:
+            raise AssertionError("supplier create must reject target facility mass assignment")
+        try:
+            block.update_shipment(
+                supplier_shipment_id,
+                {"target_facility_id": INACTIVE_TARGET_FACILITY_ID},
+            )
+        except ValueError as exc:
+            if "не существует или не active" not in str(exc):
+                raise
+        else:
+            raise AssertionError("operator assignment must reject inactive target facilities")
+        assigned = block.update_shipment(
+            supplier_shipment_id,
+            {"target_facility_id": TARGET_FACILITY_ID},
+        )
+        if (
+            assigned.get("target_facility_id") != TARGET_FACILITY_ID
+            or assigned.get("target_facility_name") != "FF Smoke"
+        ):
+            raise AssertionError(f"operator assignment readback must preserve exact id/name, got {assigned}")
+        try:
+            block.update_shipment_supplier_safe(
+                supplier_shipment_id,
+                {"target_facility_id": INACTIVE_TARGET_FACILITY_ID},
+            )
+        except ValueError as exc:
+            if "unsupported" not in str(exc):
+                raise
+        else:
+            raise AssertionError("supplier update must not assign or change a target facility")
+
 
 def _assert_authoritative_group_rebinding_smoke() -> None:
     timestamp_counter = {"value": 0}
@@ -264,6 +394,7 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
                     }
                 )["item"]
             )
+        _seed_target_facilities(runtime)
 
         parsed = block.parse_upload(_build_invoice_fixture(), uploaded_filename="authoritative-groups.xlsx")
         products = [line for line in parsed["lines"] if line.get("line_type") == "product"]
@@ -285,7 +416,12 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
         barcode_tamper = json.loads(json.dumps(parsed))
         barcode_tamper["lines"][0]["barcode"] = "9999999999999"
         barcode_tamper_result = block.create_shipment(
-            {"upload_id": parsed["upload_id"], "shipment_date": "2026-06-01", "payload": barcode_tamper}
+            {
+                "upload_id": parsed["upload_id"],
+                "shipment_date": "2026-06-01",
+                "target_facility_id": TARGET_FACILITY_ID,
+                "payload": barcode_tamper,
+            }
         )
         if barcode_tamper_result["product_lines"][0].get("barcode") != "1111111111111":
             raise AssertionError("client-provided barcode must be ignored in favor of source-owned invoice evidence")
@@ -309,7 +445,12 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
                 }
             )
         created = block.create_shipment(
-            {"upload_id": parsed["upload_id"], "shipment_date": "2026-06-01", "payload": tampered}
+            {
+                "upload_id": parsed["upload_id"],
+                "shipment_date": "2026-06-01",
+                "target_facility_id": TARGET_FACILITY_ID,
+                "payload": tampered,
+            }
         )
         created_products = created["product_lines"]
         if [line.get("internal_nm_id") for line in created_products] != [601001, 601002, 601003]:
@@ -637,6 +778,7 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: "2026-05-30T08:00:00Z",
         )
+        _seed_target_facilities(runtime)
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -866,6 +1008,7 @@ def main() -> None:
                     "upload_id": parse_payload["upload_id"],
                     "shipment_date": "2026-05-14",
                     "actual_shipment_date": "2026-05-16",
+                    "target_facility_id": TARGET_FACILITY_ID,
                     "approx_yuan_rate": "13,2",
                     "payload": parse_payload,
                 },

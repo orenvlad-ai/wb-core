@@ -91,7 +91,7 @@ def main() -> int:
         assert facilities[MOSCOW_ID]["available"] == (
             100 + 200 * (len(active_nm_ids) - 1) - 30
         )
-        assert facilities[MOSCOW_ID]["remaining_active_inbound_qty"] == 35
+        assert facilities[MOSCOW_ID]["remaining_active_inbound_qty"] == 15
         assert all(
             "seller_stock" not in item
             for item in facilities[MOSCOW_ID]["sku_values"]
@@ -123,14 +123,16 @@ def main() -> int:
         assert first.selected_facility_physical_fbs == 100
         assert first.selected_facility_reserved_fbs == 30
         assert first.selected_facility_available_fbs == 70
-        assert first.remaining_active_inbound_qty == 35
+        assert first.remaining_active_inbound_qty == 15
         assert second.remaining_active_inbound_qty == 0
-        assert first.coverage_qty == 105
+        assert first.coverage_qty == 85
         assert first.recommended_order_qty == math.ceil(
-            max(first.national_daily_demand * 20 - 105, 0) / 50
+            max(first.national_daily_demand * 20 - 85, 0) / 50
         ) * 50
         assert last_n.wb_stock_used is False
         assert "wb" not in last_n.inbound_coverage
+        assert last_n.inbound_coverage["unassigned_target_excluded_count"] == 1
+        assert last_n.inbound_coverage["legacy_null_target_fallback_moscow_count"] == 0
 
         custom = block.calculate(
             {
