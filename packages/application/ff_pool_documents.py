@@ -46,7 +46,17 @@ from packages.application.warehouse_functional_lock import (
 from packages.contracts.ff_pool_documents import (
     DocumentIdentity,
     ExpenseLine,
+    OVERHEAD_EXPENSE_CATEGORIES,
+    OVERHEAD_EXPENSE_CATEGORY_LABELS_RU,
+    OVERHEAD_SOURCE_MODES,
     PoolLocation,
+)
+from packages.contracts.russian_payment_orders import (
+    RUSSIAN_PAYMENT_ORDER_CURRENCY,
+    RUSSIAN_PAYMENT_ORDER_EXECUTION_EXECUTED,
+    RUSSIAN_PAYMENT_ORDER_FINGERPRINT_VERSION,
+    RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED,
+    RUSSIAN_PAYMENT_ORDER_PARSER_VERSION,
 )
 
 
@@ -61,6 +71,7 @@ DOCUMENT_RELATIONS_TABLE = "sheet_vitrina_v1_ff_pool_document_relations"
 WORKFLOW_EVENTS_TABLE = "sheet_vitrina_v1_ff_workflow_events"
 GUIDED_REPLAYS_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_replays"
 GUIDED_RECOVERIES_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_recoveries"
+OVERHEAD_PAYMENT_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
 
 WORKFLOW_STATES = (
     "accepted",
@@ -324,6 +335,20 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS ff_guided_recoveries_by_shipment
         ON {GUIDED_RECOVERIES_TABLE}(shipment_id,recovered_at,recovery_request_id);
 
+        CREATE TABLE IF NOT EXISTS {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(
+            payment_fingerprint TEXT PRIMARY KEY,
+            fingerprint_version TEXT NOT NULL,
+            request_id TEXT NOT NULL UNIQUE REFERENCES {REQUESTS_TABLE}(request_id),
+            file_sha256 TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            normalized_parser_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK(payment_fingerprint GLOB 'sha256:[0-9a-f]*' AND length(payment_fingerprint)=71),
+            CHECK(file_sha256 GLOB 'sha256:[0-9a-f]*' AND length(file_sha256)=71)
+        );
+        CREATE INDEX IF NOT EXISTS ff_pool_overhead_payment_by_request
+        ON {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(request_id);
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_documents_no_update
         BEFORE UPDATE ON {DOCUMENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'posted FF pool document is immutable'); END;
@@ -416,6 +441,12 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_guided_recoveries_no_delete
         BEFORE DELETE ON {GUIDED_RECOVERIES_TABLE}
         BEGIN SELECT RAISE(ABORT,'guided acceptance recovery is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_evidence_no_update
+        BEFORE UPDATE ON {OVERHEAD_PAYMENT_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'overhead payment evidence is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_evidence_no_delete
+        BEFORE DELETE ON {OVERHEAD_PAYMENT_EVIDENCE_TABLE}
+        BEGIN SELECT RAISE(ABORT,'overhead payment evidence is append-only'); END;
         """
     )
 
@@ -484,7 +515,64 @@ class FfPoolDocumentService:
             self.process_request(canonical_request_id)
         elif self._retry_ready_guided_plan_preview(canonical_request_id):
             self.process_request(canonical_request_id)
-        return {**self.status(request_id=identity.request_id), "idempotent": not inserted}
+        elif (
+            normalized_kind == "pool_overhead"
+            and self._retry_pool_overhead_preview(canonical_request_id)
+        ):
+            self.process_request(canonical_request_id)
+        return {
+            **self.status(request_id=identity.request_id),
+            "idempotent": not inserted,
+            "payment_duplicate": bool(
+                normalized_kind == "pool_overhead"
+                and _payment_fingerprint_from_manifest(normalized_manifest)
+                and not inserted
+            ),
+        }
+
+    def _retry_pool_overhead_preview(self, request_id: str) -> bool:
+        """Refresh one existing non-posted overhead after a transient basis blocker."""
+
+        retryable_blockers = {
+            "overhead_positive_quantity_required",
+            "overhead_positive_quantity_cost_basis_missing",
+            "overhead_preview_stale",
+        }
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT document_kind,state,error_code FROM {REQUESTS_TABLE} WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["document_kind"]) != "pool_overhead"
+                or (
+                    str(row["state"]) != "ready"
+                    and not (
+                        str(row["state"]) == "blocked"
+                        and str(row["error_code"]) in retryable_blockers
+                    )
+                )
+            ):
+                conn.rollback()
+                return False
+            changed = conn.execute(
+                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',ready_at='',"
+                "updated_at=?,error_code='',error_details_json='null' "
+                "WHERE request_id=? AND state IN ('ready','blocked')",
+                (now, request_id),
+            ).rowcount
+            if changed:
+                self._event(
+                    conn,
+                    request_id=request_id,
+                    stage="overhead_preview_revalidation",
+                    status="complete",
+                )
+            conn.commit()
+            return bool(changed)
 
     def _retry_legacy_money_block(self, request_id: str) -> bool:
         """Revalidate the one pre-fix fail-closed state without creating a duplicate.
@@ -869,13 +957,14 @@ class FfPoolDocumentService:
         template_fingerprint: str,
         error_code: str,
         error_details: Any,
+        manifest: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist rejected original bytes; a blocked preview can never post."""
 
         canonical_request_id, inserted = self._accept(
             identity=identity,
             document_kind=_document_kind(document_kind),
-            manifest={},
+            manifest=_json_object(manifest or {}),
             source_bytes=source_bytes,
             source_filename=source_filename,
             source_content_type=source_content_type,
@@ -985,6 +1074,19 @@ class FfPoolDocumentService:
                         plan=plan,
                         epoch=epoch,
                     )
+            elif str(row["document_kind"]) == "pool_overhead":
+                with _connect(self.db_path, query_only=True) as conn:
+                    epoch = _writer_epoch(conn)
+                    plan = _build_posting_plan(
+                        conn,
+                        request=row,
+                        manifest=manifest,
+                        epoch=epoch,
+                    )
+                manifest["posting_plan_preview"] = _pool_overhead_plan_preview(
+                    plan=plan,
+                    epoch=epoch,
+                )
             finished = self._now()
             with _connect(self.db_path) as conn:
                 updated = conn.execute(
@@ -1232,6 +1334,38 @@ class FfPoolDocumentService:
                     "request_id_identity_conflict",
                     "Client request_id was already used for another semantic document",
                 )
+            payment_fingerprint = _payment_fingerprint_from_manifest(manifest)
+            if document_kind == "pool_overhead" and payment_fingerprint:
+                existing_payment = conn.execute(
+                    f"""SELECT evidence.request_id,request.request_identity
+                        FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} AS evidence
+                        JOIN {REQUESTS_TABLE} AS request ON request.request_id=evidence.request_id
+                        WHERE evidence.payment_fingerprint=?""",
+                    (payment_fingerprint,),
+                ).fetchone()
+                if existing_payment is not None:
+                    existing_request_id = str(existing_payment["request_id"])
+                    existing_identity = str(existing_payment["request_identity"])
+                    conn.execute(
+                        f"INSERT OR IGNORE INTO {ALIASES_TABLE}(client_request_id,request_id,request_identity,accepted_at) "
+                        "VALUES(?,?,?,?)",
+                        (client_request_id, existing_request_id, existing_identity, now),
+                    )
+                    alias = conn.execute(
+                        f"SELECT request_id,request_identity FROM {ALIASES_TABLE} WHERE client_request_id=?",
+                        (client_request_id,),
+                    ).fetchone()
+                    if (
+                        alias is None
+                        or str(alias["request_id"]) != existing_request_id
+                        or str(alias["request_identity"]) != existing_identity
+                    ):
+                        raise FfPoolDocumentError(
+                            "request_id_identity_conflict",
+                            "Client request_id was already used for another semantic document",
+                        )
+                    conn.commit()
+                    return existing_request_id, False
             existing_source = conn.execute(
                 f"SELECT request_id,request_identity FROM {REQUESTS_TABLE} "
                 "WHERE source_system=? AND source_type=? AND source_id=? "
@@ -1309,6 +1443,33 @@ class FfPoolDocumentService:
             canonical = str(alias["request_id"])
             if inserted:
                 self._event(conn, request_id=canonical, stage="file_accepted", status="complete")
+            if payment_fingerprint:
+                evidence = _payment_evidence_from_manifest(manifest)
+                conn.execute(
+                    f"""INSERT OR IGNORE INTO {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(
+                           payment_fingerprint,fingerprint_version,request_id,file_sha256,
+                           parser_version,normalized_parser_json,created_at
+                       ) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        payment_fingerprint,
+                        str(evidence.get("fingerprint_version") or ""),
+                        canonical,
+                        str(evidence.get("file_sha256") or source_sha256),
+                        str(evidence.get("parser_version") or ""),
+                        _json(evidence),
+                        now,
+                    ),
+                )
+                stored_evidence = conn.execute(
+                    f"SELECT request_id FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} WHERE payment_fingerprint=?",
+                    (payment_fingerprint,),
+                ).fetchone()
+                if stored_evidence is None or str(stored_evidence["request_id"]) != canonical:
+                    raise FfPoolDocumentError(
+                        "overhead_payment_duplicate",
+                        "Payment order is already linked to another overhead document request",
+                        details={"request_id": str(stored_evidence["request_id"]) if stored_evidence else ""},
+                    )
             conn.commit()
         return canonical, bool(inserted)
 
@@ -1370,6 +1531,11 @@ class FfPoolDocumentService:
                             ),
                         },
                     )
+            elif str(request["document_kind"]) == "pool_overhead":
+                _assert_pool_overhead_preview_current(
+                    stored=_json_object(manifest.get("posting_plan_preview") or {}),
+                    live=_pool_overhead_plan_preview(plan=plan, epoch=epoch),
+                )
             before_digest = _balance_digest(conn, plan["balance_keys"])
             plan_fingerprint = _fingerprint(
                 {
@@ -1501,6 +1667,30 @@ class FfPoolDocumentService:
                                     or ""
                                 ),
                             },
+                        )
+                elif str(current_request["document_kind"]) == "pool_overhead":
+                    locked_manifest = _json_object(
+                        _loads(current_request["preview_manifest_json"], {})
+                    )
+                    locked_plan = _build_posting_plan(
+                        conn,
+                        request=current_request,
+                        manifest=locked_manifest,
+                        epoch=epoch,
+                    )
+                    _assert_pool_overhead_preview_current(
+                        stored=_json_object(
+                            locked_manifest.get("posting_plan_preview") or {}
+                        ),
+                        live=_pool_overhead_plan_preview(
+                            plan=locked_plan,
+                            epoch=epoch,
+                        ),
+                    )
+                    if _fingerprint(locked_plan) != _fingerprint(plan):
+                        raise FfPoolDocumentError(
+                            "overhead_preview_stale",
+                            "Pool overhead basis changed after preview; run preview again",
                         )
                 posted_at = self._now()
                 if guided_acceptance:
@@ -2031,6 +2221,57 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
         "confirm_rebase_boundary": "shared_warehouse_writer_lock",
         "source_rechecked": True,
     }
+
+
+def _pool_overhead_plan_preview(
+    *, plan: Mapping[str, Any], epoch: int
+) -> dict[str, Any]:
+    domain = _json_object(plan.get("domain_manifest") or {})
+    evidence = _json_object(domain.get("payment_evidence") or {})
+    return {
+        "confirm_plan_ready": True,
+        "business_mutation_applied": False,
+        "feature_epoch": int(epoch),
+        "plan_sha256": _fingerprint(plan),
+        "primary_document_id": str(plan["primary_document_id"]),
+        "facility_id": str(domain.get("facility_id") or ""),
+        "scope": str(domain.get("scope") or ""),
+        "category": str(domain.get("category") or ""),
+        "category_label_ru": str(domain.get("category_label_ru") or ""),
+        "comment": str(domain.get("comment") or ""),
+        "source_mode": str(domain.get("source_mode") or ""),
+        "amount_rub": str(domain.get("amount_rub") or ""),
+        "denominator_quantity": int(domain.get("denominator_quantity") or 0),
+        "denominator_sku_count": int(domain.get("denominator_sku_count") or 0),
+        "affected_sku_count": int(domain.get("affected_sku_count") or 0),
+        "allocation_total_rub": str(domain.get("allocation_total_rub") or ""),
+        "pool_allocations_rub": dict(domain.get("pool_allocations_rub") or {}),
+        "basis_digest": str(domain.get("basis_digest") or ""),
+        "payment_evidence": evidence,
+        "payment_fingerprint": str(evidence.get("payment_fingerprint") or ""),
+        "file_sha256": str(evidence.get("file_sha256") or ""),
+        "parser_version": str(evidence.get("parser_version") or ""),
+        "amount_conserved": bool(domain.get("amount_conserved")),
+        "quantity_delta": 0,
+    }
+
+
+def _assert_pool_overhead_preview_current(
+    *, stored: Mapping[str, Any], live: Mapping[str, Any]
+) -> None:
+    if (
+        stored.get("confirm_plan_ready") is not True
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(stored.get("plan_sha256") or ""))
+        or str(stored.get("plan_sha256")) != str(live.get("plan_sha256"))
+    ):
+        raise FfPoolDocumentError(
+            "overhead_preview_stale",
+            "Pool overhead basis, evidence or duplicate state changed after preview; run preview again",
+            details={
+                "stored_plan_sha256": str(stored.get("plan_sha256") or ""),
+                "live_plan_sha256": str(live.get("plan_sha256") or ""),
+            },
+        )
 
 
 def _guided_business_effect(
@@ -4022,8 +4263,16 @@ def _plan_pool_overhead(
     scope = _scope(str(manifest.get("scope") or ""))
     selected_pools = POOLS if scope == "both" else (scope,)
     amount_cents = _money_cents(manifest.get("amount_rub"), field="overhead amount", positive=True)
-    reason = _safe_basis(manifest.get("reason"))
+    category, category_label, comment, source_mode, payment_evidence = _overhead_metadata(
+        conn,
+        request=request,
+        manifest=manifest,
+        amount_cents=amount_cents,
+    )
+    reason = category_label + (f": {comment}" if comment else "")
     eligible: dict[str, list[tuple[int, int]]] = {pool: [] for pool in selected_pools}
+    basis_rows: list[dict[str, Any]] = []
+    missing_cost_rows: list[dict[str, Any]] = []
     for pool in selected_pools:
         rows = conn.execute(
             f"SELECT nm_id,quantity,capital_rub FROM {BALANCES_TABLE} "
@@ -4033,9 +4282,34 @@ def _plan_pool_overhead(
         ).fetchall()
         for row in rows:
             quantity = int(row["quantity"])
-            capital = _money_cents(row["capital_rub"], field="overhead balance capital")
-            if quantity > 0 and capital > 0:
-                eligible[pool].append((int(row["nm_id"]), quantity))
+            try:
+                capital = Decimal(str(row["capital_rub"]))
+            except (InvalidOperation, ValueError):
+                capital = Decimal("NaN")
+            basis = {
+                "pool": pool,
+                "nm_id": int(row["nm_id"]),
+                "quantity": quantity,
+                "capital_rub": (
+                    canonical_decimal_text(capital) if capital.is_finite() else "unavailable"
+                ),
+            }
+            basis_rows.append(basis)
+            if not capital.is_finite() or capital <= ZERO:
+                missing_cost_rows.append(basis)
+                continue
+            eligible[pool].append((int(row["nm_id"]), quantity))
+    if missing_cost_rows:
+        raise FfPoolDocumentError(
+            "overhead_positive_quantity_cost_basis_missing",
+            "Every positive physical SKU in the selected scope requires positive capital",
+            details={
+                "facility_id": facility_id,
+                "scope": scope,
+                "rows": missing_cost_rows[:100],
+                "row_count": len(missing_cost_rows),
+            },
+        )
     pool_weights = [(pool, sum(quantity for _nm_id, quantity in eligible[pool])) for pool in selected_pools]
     if not any(weight > 0 for _pool_name, weight in pool_weights):
         raise FfPoolDocumentError(
@@ -4087,9 +4361,17 @@ def _plan_pool_overhead(
         {
             "amount_cents": amount_cents,
             "basis": reason,
-            "source_file_sha256": "",
-            "source_filename": "",
-            "metadata": {},
+            "source_file_sha256": str(request["source_sha256"] or ""),
+            "source_filename": str(request["source_filename"] or ""),
+            "metadata": {
+                "category": category,
+                "category_label_ru": category_label,
+                "comment": comment,
+                "source_mode": source_mode,
+                "payment_fingerprint": str(payment_evidence.get("payment_fingerprint") or ""),
+                "fingerprint_version": str(payment_evidence.get("fingerprint_version") or ""),
+                "parser_version": str(payment_evidence.get("parser_version") or ""),
+            },
         }
     ]
     document = _document_blueprint(
@@ -4105,19 +4387,163 @@ def _plan_pool_overhead(
         "primary_document_id": document_id,
         "root_document_id": document_id,
         "documents": [document],
+        "additional_balance_keys": [
+            (facility_id, str(item["pool"]), int(item["nm_id"]))
+            for item in basis_rows
+        ],
         "domain_manifest": {
             "facility_id": facility_id,
             "scope": scope,
+            "category": category,
+            "category_label_ru": category_label,
+            "comment": comment,
+            "source_mode": source_mode,
             "amount_rub": _cents_text(amount_cents),
+            "denominator_quantity": sum(weight for _pool, weight in pool_weights),
+            "denominator_sku_count": len(basis_rows),
+            "affected_sku_count": len(lines),
+            "allocation_total_rub": _cents_text(
+                sum(int(item["capital_cents"]) for item in lines)
+            ),
             "pool_allocations_rub": {
                 pool: _cents_text(int(pool_allocations.get(pool, 0)))
                 for pool in selected_pools
             },
+            "basis_digest": _fingerprint(basis_rows),
+            "payment_evidence": payment_evidence,
             "positive_quantity_only": True,
             "reservation_excluded": True,
             "amount_conserved": True,
         },
     }
+
+
+def _overhead_metadata(
+    conn: sqlite3.Connection,
+    *,
+    request: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    amount_cents: int,
+) -> tuple[str, str, str, str, dict[str, Any]]:
+    category = str(manifest.get("category") or "").strip()
+    if category not in OVERHEAD_EXPENSE_CATEGORIES:
+        raise FfPoolDocumentError(
+            "invalid_overhead_category",
+            "Overhead category must be one stable supported code",
+            details={"allowed": list(OVERHEAD_EXPENSE_CATEGORIES)},
+        )
+    comment = _overhead_comment(manifest.get("comment"))
+    if category == "other" and not comment:
+        raise FfPoolDocumentError(
+            "overhead_other_comment_required",
+            "Comment is required when overhead category is other",
+        )
+    source_mode = str(manifest.get("source_mode") or "").strip()
+    if source_mode not in OVERHEAD_SOURCE_MODES:
+        raise FfPoolDocumentError(
+            "invalid_overhead_source_mode",
+            "Overhead source_mode must be manual or payment_order_pdf",
+        )
+    evidence = _payment_evidence_from_manifest(manifest)
+    source_sha256 = str(request["source_sha256"] or "")
+    if source_mode == "manual":
+        if evidence or source_sha256 or str(request["source_filename"] or ""):
+            raise FfPoolDocumentError(
+                "manual_overhead_has_file_evidence",
+                "Manual overhead must not contain payment-order file evidence",
+            )
+        return (
+            category,
+            OVERHEAD_EXPENSE_CATEGORY_LABELS_RU[category],
+            comment,
+            source_mode,
+            {},
+        )
+    required = {
+        "parse_status": RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED,
+        "execution_status": RUSSIAN_PAYMENT_ORDER_EXECUTION_EXECUTED,
+        "currency": RUSSIAN_PAYMENT_ORDER_CURRENCY,
+        "parser_version": RUSSIAN_PAYMENT_ORDER_PARSER_VERSION,
+        "fingerprint_version": RUSSIAN_PAYMENT_ORDER_FINGERPRINT_VERSION,
+    }
+    mismatches = {
+        key: {"expected": expected, "actual": evidence.get(key)}
+        for key, expected in required.items()
+        if evidence.get(key) != expected
+    }
+    if evidence.get("posting_eligible") is not True:
+        mismatches["posting_eligible"] = {
+            "expected": True,
+            "actual": evidence.get("posting_eligible"),
+        }
+    payment_fingerprint = _payment_fingerprint_from_manifest(manifest)
+    file_sha256 = str(evidence.get("file_sha256") or "")
+    source_blob = request["source_file_blob"]
+    source_type = str(request["source_type"] or "")
+    source_filename = str(request["source_filename"] or "")
+    source_content_type = str(request["source_content_type"] or "").split(";", 1)[0].lower()
+    if source_type != "ff_pool_overhead_payment_order_pdf":
+        mismatches["source_type"] = {
+            "expected": "ff_pool_overhead_payment_order_pdf",
+            "actual": source_type,
+        }
+    if not source_filename.lower().endswith(".pdf"):
+        mismatches["source_filename"] = {
+            "expected": "*.pdf",
+            "actual": source_filename,
+        }
+    if source_content_type not in {"application/pdf", "application/octet-stream"}:
+        mismatches["source_content_type"] = {
+            "expected": "application/pdf",
+            "actual": source_content_type,
+        }
+    if source_blob is None or _sha256(bytes(source_blob)) != source_sha256:
+        mismatches["source_blob"] = {
+            "expected": source_sha256,
+            "actual": _sha256(bytes(source_blob)) if source_blob is not None else "",
+        }
+    if not payment_fingerprint:
+        mismatches["payment_fingerprint"] = {"expected": "sha256:<hex>", "actual": ""}
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", file_sha256) or file_sha256 != source_sha256:
+        mismatches["file_sha256"] = {"expected": source_sha256, "actual": file_sha256}
+    if _money_cents(evidence.get("amount"), field="payment order amount", positive=True) != amount_cents:
+        mismatches["amount"] = {
+            "expected": _cents_text(amount_cents),
+            "actual": str(evidence.get("amount") or ""),
+        }
+    if mismatches:
+        raise FfPoolDocumentError(
+            "overhead_payment_evidence_not_eligible",
+            "Payment-order evidence is not eligible for overhead posting",
+            details={"mismatches": mismatches},
+        )
+    stored = conn.execute(
+        f"""SELECT request_id,file_sha256,parser_version,fingerprint_version,
+                   normalized_parser_json
+            FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}
+            WHERE payment_fingerprint=?""",
+        (payment_fingerprint,),
+    ).fetchone()
+    if (
+        stored is None
+        or str(stored["request_id"]) != str(request["request_id"])
+        or str(stored["file_sha256"]) != file_sha256
+        or str(stored["parser_version"]) != RUSSIAN_PAYMENT_ORDER_PARSER_VERSION
+        or str(stored["fingerprint_version"]) != RUSSIAN_PAYMENT_ORDER_FINGERPRINT_VERSION
+        or _json_object(_loads(stored["normalized_parser_json"], {})) != evidence
+    ):
+        raise FfPoolDocumentError(
+            "overhead_payment_evidence_drift",
+            "Payment-order evidence or duplicate ownership changed after acceptance",
+            details={"payment_fingerprint": payment_fingerprint},
+        )
+    return (
+        category,
+        OVERHEAD_EXPENSE_CATEGORY_LABELS_RU[category],
+        comment,
+        source_mode,
+        evidence,
+    )
 
 
 def _plan_storno(
@@ -4244,6 +4670,14 @@ def _plan_storno(
             )
     document_id = _request_document_id(request)
     root_id = str(target["root_document_id"])
+    target_overhead = (
+        _json_object(
+            _json_object(_loads(target["posted_manifest_json"], {})).get("domain")
+            or {}
+        )
+        if str(target["document_kind"]) == "pool_overhead"
+        else {}
+    )
     document = _document_blueprint(
         document_id=document_id,
         document_kind="storno",
@@ -4261,6 +4695,7 @@ def _plan_storno(
             "target_document_id": target_id,
             "exact_original_movement_reversal": True,
             "guided_acceptance_recovery": guided_recovery,
+            "overhead_evidence_link": target_overhead,
         },
     }
 
@@ -5636,7 +6071,13 @@ def _validate_manifest(document_kind: str, manifest: Mapping[str, Any]) -> None:
         "transfer_cancellation": ("root_document_id",),
         "pool_reallocation": ("facility_id", "source_pool", "destination_pool", "items"),
         "pool_inventory": ("facility_id", "scope", "targets"),
-        "pool_overhead": ("facility_id", "scope", "amount_rub", "reason"),
+        "pool_overhead": (
+            "facility_id",
+            "scope",
+            "amount_rub",
+            "category",
+            "source_mode",
+        ),
         "storno": ("target_document_id",),
         "correction": ("target_document_id", "movements"),
         "late_expense": ("expenses",),
@@ -5947,6 +6388,33 @@ def _safe_basis(value: Any) -> str:
     if not token or len(token) > 1000 or any(ord(char) < 32 and char not in "\t" for char in token):
         raise FfPoolDocumentError("invalid_expense_basis", "Expense basis must be safe non-empty text")
     return token
+
+
+def _overhead_comment(value: Any) -> str:
+    token = " ".join(str(value or "").split())
+    if len(token) > 1000 or any(ord(char) < 32 and char not in "\t" for char in token):
+        raise FfPoolDocumentError(
+            "invalid_overhead_comment",
+            "Overhead comment must contain at most 1000 safe characters",
+        )
+    return token
+
+
+def _payment_evidence_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    value = manifest.get("payment_evidence")
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _payment_fingerprint_from_manifest(manifest: Mapping[str, Any]) -> str:
+    evidence = _payment_evidence_from_manifest(manifest)
+    token = str(evidence.get("payment_fingerprint") or "").strip()
+    return (
+        token
+        if evidence.get("parse_status") == RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED
+        and evidence.get("posting_eligible") is True
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", token)
+        else ""
+    )
 
 
 def _optional_sha256(value: Any) -> str:

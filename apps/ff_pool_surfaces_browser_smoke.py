@@ -60,6 +60,8 @@ def main() -> None:
         _seed_guided_supplier_shipment(runtime)
         guided_upload_path = root / "guided-acceptance.xlsx"
         guided_upload_path.write_bytes(b"browser fixture intercepted before parsing")
+        overhead_upload_path = root / "synthetic-payment.pdf"
+        overhead_upload_path.write_bytes(b"%PDF-browser-synthetic-fixture")
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),
@@ -88,6 +90,7 @@ def main() -> None:
                         f"http://127.0.0.1:{config.port}",
                         screenshot_path,
                         guided_upload_path,
+                        overhead_upload_path,
                     )
                 finally:
                     browser.close()
@@ -180,7 +183,13 @@ def _seed_guided_supplier_shipment(runtime: RegistryUploadDbBackedRuntime) -> No
     )
 
 
-def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: Path) -> None:
+def _run(
+    browser: object,
+    base: str,
+    screenshot_path: Path,
+    guided_upload_path: Path,
+    overhead_upload_path: Path,
+) -> None:
     context = browser.new_context(viewport={"width": 1280, "height": 900})
     page = context.new_page()
     page_errors: list[str] = []
@@ -189,6 +198,8 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
     pool_http_errors: list[str] = []
     facility_mutation_headers: list[dict[str, str]] = []
     guided_mutation_requests: list[dict[str, object]] = []
+    overhead_mutation_requests: list[dict[str, object]] = []
+    generic_preview_payloads: list[dict[str, object]] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
     page.on("response", lambda response: server_errors.append(f"{response.status} {response.url}") if response.status >= 500 else None)
@@ -199,6 +210,51 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
         if request.method == "POST" and "/facility-pools/facilities/" in request.url
         else None,
     )
+    page.on(
+        "request",
+        lambda request: generic_preview_payloads.append(request.post_data_json)
+        if request.method == "POST" and request.url.endswith("/documents/preview")
+        else None,
+    )
+
+    def intercept_overhead_mutation(route: object) -> None:
+        request = route.request
+        overhead_mutation_requests.append(
+            {
+                "headers": request.all_headers(),
+                "post_data": request.post_data or "",
+            }
+        )
+        payload = {
+            "request_id": "overhead:browser:" + str(len(overhead_mutation_requests)),
+            "document_kind": "pool_overhead",
+            "document_label_ru": "Накладные расходы FBS/FBO",
+            "state": "ready",
+            "state_label_ru": "Готово к проведению",
+            "confirm_allowed": True,
+            "steps": [],
+            "preview": {
+                "available": True,
+                "summary": {
+                    "facility_id": "fixture-browser-facility",
+                    "scope": "FBS",
+                    "category": "other",
+                    "category_label_ru": "Прочие",
+                    "comment": "Синтетический браузерный расход",
+                    "amount_rub": "1.23",
+                    "source_mode": "payment_order_pdf" if str(request.all_headers().get("content-type", "")).startswith("multipart/form-data;") else "manual",
+                    "business_date": "2026-08-12",
+                    "denominator_quantity": 3,
+                    "denominator_sku_count": 2,
+                    "affected_sku_count": 2,
+                    "allocation_total_rub": "1.23",
+                    "payment_evidence": {},
+                },
+            },
+        }
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview", intercept_overhead_mutation)
 
     def intercept_guided_mutation(route: object) -> None:
         request = route.request
@@ -295,15 +351,75 @@ def _run(browser: object, base: str, screenshot_path: Path, guided_upload_path: 
     assert "Явный 0 в полном FBS-шаблоне" in page.locator(
         "[data-ff-pool-action-help]"
     ).inner_text()
+    page.locator("[data-ff-pool-action-kind]").select_option("pool_overhead")
+    visible_overhead_fields = {
+        "facility", "scope", "amount", "category", "comment", "payment_file"
+    }
+    for field in (
+        "facility", "scope", "amount", "category", "comment", "payment_file", "payment_evidence",
+        "source_pool", "destination_pool", "destination_facility", "root", "target", "items", "reason", "expenses", "shipment", "workbook",
+    ):
+        locator = page.locator(f'[data-ff-pool-field="{field}"]')
+        assert locator.is_visible() == (field in visible_overhead_fields), field
+        if field not in visible_overhead_fields:
+            assert locator.locator("input,select,textarea").count() == 0 or locator.locator("input,select,textarea").first.is_disabled(), field
+    assert page.locator("[data-ff-pool-business-date]").is_visible()
+    assert page.locator("[data-ff-pool-business-date]").get_attribute("readonly") is not None
+    assert page.locator("[data-ff-pool-business-date]").input_value() == ""
+    assert page.locator("[data-ff-pool-facility]").input_value() == ""
+    assert page.locator("[data-ff-pool-scope]").input_value() == ""
+    assert page.locator("[data-ff-pool-overhead-category]").input_value() == ""
+    page.locator("[data-ff-pool-facility]").select_option(index=1)
+    assert page.locator("[data-ff-pool-business-date]").input_value() == "2026-08-12"
+    page.locator("[data-ff-pool-scope]").select_option("FBS")
+    page.locator("[data-ff-pool-overhead-category]").select_option("other")
+    assert page.locator("[data-ff-pool-overhead-comment]").get_attribute("required") is not None
+    page.locator("[data-ff-pool-overhead-comment]").fill("Синтетический браузерный расход")
+    page.locator("[data-ff-pool-amount]").fill("1.23")
+    page.locator("[data-ff-pool-preview]").click()
+    page.locator("[data-ff-pool-workflow-detail] h3").wait_for(state="visible")
+    assert len(overhead_mutation_requests) == 1
+    manual_request = overhead_mutation_requests[0]
+    assert str(dict(manual_request["headers"]).get("content-type", "")).startswith("application/json")
+    manual_body = json.loads(str(manual_request["post_data"]))
+    assert manual_body["facility_id"] and manual_body["scope"] == "FBS"
+    assert manual_body["category"] == "other" and manual_body["amount_rub"] == "1.23"
+
+    page.locator('[data-ff-pool-tab="create"]').click()
+    page.locator("[data-ff-pool-overhead-file]").set_input_files(str(overhead_upload_path))
+    assert page.locator('[data-ff-pool-field="payment_evidence"]').is_visible()
+    assert page.locator("[data-ff-pool-overhead-file-remove]").is_visible()
+    assert page.locator("[data-ff-pool-amount]").is_editable() is False
+    assert page.locator("[data-ff-pool-amount]").input_value() == ""
+    page.locator("[data-ff-pool-overhead-file-remove]").click()
+    assert page.locator("[data-ff-pool-amount]").is_editable()
+    assert page.locator("[data-ff-pool-overhead-file]").input_value() == ""
+    page.locator("[data-ff-pool-overhead-file]").set_input_files(str(overhead_upload_path))
+    page.locator("[data-ff-pool-preview]").click()
+    page.locator("[data-ff-pool-workflow-detail] h3").wait_for(state="visible")
+    assert len(overhead_mutation_requests) == 2
+    assert str(dict(overhead_mutation_requests[1]["headers"]).get("content-type", "")).startswith("multipart/form-data;")
+
+    page.locator('[data-ff-pool-tab="create"]').click()
     page.locator("[data-ff-pool-action-kind]").select_option("transfer_root")
+    assert not page.locator('[data-ff-pool-field="category"]').is_visible()
+    assert page.locator("[data-ff-pool-overhead-category]").is_disabled()
+    assert page.locator("[data-ff-pool-overhead-category]").input_value() == ""
+    assert page.locator("[data-ff-pool-overhead-comment]").input_value() == ""
+    assert page.locator("[data-ff-pool-amount]").input_value() == ""
+    assert page.locator("[data-ff-pool-overhead-file]").input_value() == ""
     source = page.locator("[data-ff-pool-facility]")
     destination = page.locator("[data-ff-pool-destination-facility]")
-    source.select_option(index=0)
-    destination.select_option(index=1)
+    source.select_option(index=1)
+    destination.select_option(index=2)
     page.locator("[data-ff-pool-source-pool]").select_option("FBS")
     page.locator("[data-ff-pool-destination-pool]").select_option("FBO")
     page.locator("[data-ff-pool-preview]").click()
     page.locator("[data-ff-pool-workflow-detail] h3").wait_for(state="visible")
+    assert generic_preview_payloads
+    transfer_manifest = dict(generic_preview_payloads[-1]["manifest"])
+    assert set(transfer_manifest) == {"source", "destination"}
+    assert not ({"amount_rub", "category", "comment", "payment_evidence"} & set(transfer_manifest))
     assert "Готово к проведению" in page.locator("[data-ff-pool-workflow-detail]").inner_text()
     page.get_by_role("button", name="Подтвердить проведение").click()
     page.wait_for_function("document.querySelector('[data-ff-pool-workflow-detail] h3')?.textContent.includes('Завершено')")

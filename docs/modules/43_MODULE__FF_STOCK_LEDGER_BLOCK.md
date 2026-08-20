@@ -15,6 +15,7 @@ related_modules:
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
+  - "packages/application/russian_payment_orders.py"
   - "packages/application/ff_pool_zero_physical_production.py"
   - "packages/application/ff_fbs_mapping_extension_production.py"
   - "packages/application/ff_pool_documents_xlsx.py"
@@ -63,6 +64,7 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_document_lines"
   - "sheet_vitrina_v1_ff_pool_document_expense_lines"
   - "sheet_vitrina_v1_ff_pool_document_relations"
+  - "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
   - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
   - "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
   - "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
@@ -91,6 +93,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/documents/overhead/preview"
   - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins[/{supply_ref}]"
   - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
   - "POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
@@ -812,6 +815,39 @@ unproven identities stay pending. Readback proves the source receipt unchanged,
 the original Moscow mapping unchanged, frozen backlog resolution, no duplicate
 event/operation, live pool/aggregate parity, collector continuation and zero WB
 writes.
+
+Migration 151 makes `pool_overhead` in the existing facility/pool document
+workflow the only operator path for new FF overhead. The operator must select
+one active facility, `FBS|FBO|both` and one stable expense category; the server
+derives the current business date from the selected facility timezone and does
+not allow backdating. Manual entry requires a positive RUB amount. An optional
+payment-order PDF is parsed by the already versioned Russian payment-order
+parser, but never chooses facility, pool or category. Only executed,
+posting-eligible RUB documents may reach ready; unsupported, damaged,
+OCR-only, ambiguous, needs-review and non-executed evidence is retained as a
+durable blocked request and creates no cost document.
+
+The full positive physical facility/pool quantity is the denominator;
+reservations stay excluded. Every positive physical SKU must also have a
+positive known capital basis. One missing/zero cost basis blocks the whole
+preview instead of redistributing over a subset. Preview freezes the exact
+quantities, capitals, evidence, feature epoch and dedup state, and confirm
+rebuilds the plan both before and inside the writer transaction. Posting keeps
+quantity unchanged, adds the exact conserved kopecks to capital and recalculates
+facility-local WAC. Storno retains the category, manual/PDF origin and payment
+evidence link while reversing the exact original capital effect.
+
+For PDF mode the canonical request stores the original authenticated source
+file, normalized parser result, parser/fingerprint versions, file SHA-256 and
+content payment fingerprint. The fingerprint has a unique append-only binding
+to the canonical request, so renamed or regenerated equivalent PDFs and new
+client request IDs read back the existing request/document rather than post a
+second expense. Parsed amount is authoritative while the file is attached;
+another amount requires removing the file and using manual mode. The old
+aggregate FF overhead documents and reversals remain historical compatibility
+evidence, but their UI creation form is retired and links to `Документы
+фулфилмента → Накладные расходы FBS/FBO`; no second allocator or ledger is
+introduced.
 
 The five-minute collector consumes at most 10,000 new lifecycle observations
 per warehouse-functional transaction (the domain primitive remains capped at

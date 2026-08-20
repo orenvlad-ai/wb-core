@@ -5779,6 +5779,23 @@ class RegistryUploadHttpEntrypoint:
     def handle_ff_pool_inventory_preview_request(self, **payload: Any) -> dict[str, Any]:
         return self.ff_pool_surface.accept_inventory_workbook(**payload)
 
+    def handle_ff_pool_overhead_preview_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+        source_bytes: bytes = b"",
+        filename: str = "",
+        content_type: str = "",
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.accept_pool_overhead_preview(
+            payload,
+            actor=actor,
+            source_bytes=source_bytes,
+            filename=filename,
+            content_type=content_type,
+        )
+
     def handle_ff_pool_confirm_request(self, request_id: str) -> dict[str, Any]:
         return self.ff_pool_surface.confirm_document(request_id)
 

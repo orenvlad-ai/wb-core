@@ -36,6 +36,11 @@ This parser creates no posting, expense allocation, FBS warehouse assignment,
 database persistence, HTTP route, UI, runtime/deploy wiring or production data
 mutation. The recipient is not interpreted as a warehouse.
 
+Migration 151 consumes this unchanged parser contract from the canonical
+facility/pool `pool_overhead` document workflow. That downstream integration
+persists normalized evidence and applies its own execution/RUB/dedup/posting
+gates; no allocation or facility/category inference has moved into the parser.
+
 `apps/russian_payment_orders_smoke.py` renders only synthetic/anonymized PDF
 fixtures and proves both adapters, both invoice-reference phrases, VAT 5%,
 non-taxable VAT, optional-date warning, stable content fingerprint across PDF

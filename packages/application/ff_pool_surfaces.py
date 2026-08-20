@@ -33,6 +33,7 @@ from packages.application.ff_pool_documents import (
     WORKFLOW_EVENTS_TABLE,
     _guided_request_source_revision,
 )
+from packages.application.russian_payment_orders import parse_russian_payment_order_pdf
 from packages.application.ff_pool_documents_xlsx import (
     FfPoolXlsxError,
     generate_china_acceptance_workbook,
@@ -51,7 +52,18 @@ from packages.application.ff_pool_foundation import (
     canonical_decimal_text,
     read_ff_pool_feature_state,
 )
-from packages.contracts.ff_pool_documents import DocumentIdentity
+from packages.contracts.ff_pool_documents import (
+    DocumentIdentity,
+    OVERHEAD_EXPENSE_CATEGORIES,
+    OVERHEAD_EXPENSE_CATEGORY_LABELS_RU,
+    OVERHEAD_PAYMENT_ORDER_MAX_FILE_BYTES,
+    OVERHEAD_PAYMENT_ORDER_MAX_REQUEST_BYTES,
+)
+from packages.contracts.russian_payment_orders import (
+    RUSSIAN_PAYMENT_ORDER_CURRENCY,
+    RUSSIAN_PAYMENT_ORDER_EXECUTION_EXECUTED,
+    RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED,
+)
 
 
 CONTRACT_NAME = "ff_facility_pool_surfaces_v1"
@@ -60,6 +72,8 @@ MAX_PAGE_SIZE = 100
 MAX_DETAIL_PAGE_SIZE = 200
 MAX_GRAPH_NODES = 200
 MAX_JSON_REQUEST_BYTES = 256 * 1024
+MAX_OVERHEAD_PAYMENT_ORDER_FILE_BYTES = OVERHEAD_PAYMENT_ORDER_MAX_FILE_BYTES
+MAX_OVERHEAD_PAYMENT_ORDER_REQUEST_BYTES = OVERHEAD_PAYMENT_ORDER_MAX_REQUEST_BYTES
 FACILITY_CODE_PREFIX = "FF-"
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{7,119}")
 SAFE_TEXT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -201,6 +215,16 @@ class FfPoolSurface:
             ],
             "derived_document_kinds": ["inventory_surplus", "inventory_shortage"],
             "hidden_actions": ["facility_pool_opening"],
+            "pool_overhead": {
+                "categories": [
+                    {"code": code, "label_ru": OVERHEAD_EXPENSE_CATEGORY_LABELS_RU[code]}
+                    for code in OVERHEAD_EXPENSE_CATEGORIES
+                ],
+                "source_modes": ["manual", "payment_order_pdf"],
+                "business_date_authority": "selected_facility_timezone_server",
+                "backdating_allowed": False,
+                "pdf_optional": True,
+            },
             "aggregate_contract": {
                 "warehouse_key": "ff",
                 "detail_is_explanatory": True,
@@ -277,7 +301,16 @@ class FfPoolSurface:
                 """,
                 (visible, epoch, visible, epoch, visible, epoch, *params, limit, offset),
             ).fetchall()
-        facilities = [_facility_public(row, detail_visible=bool(visible)) for row in rows]
+        now = self._now()
+        facilities = [
+            {
+                **_facility_public(row, detail_visible=bool(visible)),
+                "current_business_date": _business_date_in_timezone(
+                    now, str(row["display_timezone"])
+                ),
+            }
+            for row in rows
+        ]
         payload = {
             "contract_name": CONTRACT_NAME,
             "status": "ready",
@@ -374,6 +407,9 @@ class FfPoolSurface:
                 "city": str(facility["city"] or ""),
                 "active": bool(facility["active"]),
                 "display_timezone": str(facility["display_timezone"]),
+                "current_business_date": _business_date_in_timezone(
+                    self._now(), str(facility["display_timezone"])
+                ),
                 "created_at": str(facility["created_at"]),
                 "updated_at": str(facility["updated_at"]),
             },
@@ -627,7 +663,9 @@ class FfPoolSurface:
                 f"""
                 WITH page_roots AS (
                     SELECT root.root_document_id,root.document_id,root.document_kind,root.business_date,
-                           root.posted_at,root.source_type,root.source_id,root.actor,root.request_id
+                           root.posted_at,root.source_type,root.source_id,root.actor,root.request_id,
+                           root.source_filename,root.source_content_type,root.source_sha256,
+                           root.posted_manifest_json
                     FROM {DOCUMENTS_TABLE} root
                     WHERE root.document_id=root.root_document_id AND {where}
                     ORDER BY root.business_date DESC,root.posted_at DESC,root.root_document_id DESC
@@ -680,6 +718,12 @@ class FfPoolSurface:
                 "evidence_capital_rub": canonical_decimal_text(row["capital_rub"]),
                 "expense_rub": canonical_decimal_text(row["expense_rub"]),
                 "summary_semantics": "document_evidence_non_additive",
+                "overhead": _overhead_readback(
+                    row["posted_manifest_json"],
+                    filename=str(row["source_filename"] or ""),
+                    content_type=str(row["source_content_type"] or ""),
+                    file_sha256=str(row["source_sha256"] or ""),
+                ),
             }
             for row in rows
         ]
@@ -714,7 +758,9 @@ class FfPoolSurface:
             rows = conn.execute(
                 f"""SELECT document.document_id,document.document_role,document.document_kind,
                            document.business_date,document.posted_at,document.source_type,
-                           document.source_id,document.actor,request.state,
+                           document.source_id,document.actor,document.source_filename,
+                           document.source_content_type,document.source_sha256,
+                           document.posted_manifest_json,request.state,
                            COUNT(DISTINCT line.line_no) AS line_count,
                            COUNT(DISTINCT expense.expense_line_no) AS expense_count
                     FROM {DOCUMENTS_TABLE} document
@@ -733,9 +779,20 @@ class FfPoolSurface:
             "requested_document_id": selected,
             "documents": [
                 {
-                    **dict(row),
+                    **{
+                        key: row[key]
+                        for key in row.keys()
+                        if key != "posted_manifest_json"
+                    },
                     "document_label_ru": DOCUMENT_LABELS_RU.get(str(row["document_kind"]), str(row["document_kind"])),
                     "state_label_ru": WORKFLOW_LABELS_RU.get(str(row["state"]), str(row["state"])),
+                    "overhead": _overhead_readback(
+                        row["posted_manifest_json"],
+                        filename=str(row["source_filename"] or ""),
+                        content_type=str(row["source_content_type"] or ""),
+                        file_sha256=str(row["source_sha256"] or ""),
+                    ),
+                    "source_file_available": bool(row["source_sha256"]),
                     "detail_loaded": False,
                 }
                 for row in rows
@@ -779,7 +836,7 @@ class FfPoolSurface:
             total = int(conn.execute(f"SELECT COUNT(*) FROM {EXPENSE_LINES_TABLE} WHERE document_id=?", (selected,)).fetchone()[0])
             rows = conn.execute(
                 f"""SELECT document_id,expense_line_no,amount_rub,basis,
-                           source_file_sha256,source_filename
+                           source_file_sha256,source_filename,metadata_json
                     FROM {EXPENSE_LINES_TABLE} WHERE document_id=?
                     ORDER BY expense_line_no LIMIT ? OFFSET ?""",
                 (selected, limit, offset),
@@ -789,7 +846,17 @@ class FfPoolSurface:
                 "contract_name": CONTRACT_NAME,
                 "status": "ready",
                 "document_id": selected,
-                "expenses": [dict(row) for row in rows],
+                "expenses": [
+                    {
+                        **{
+                            key: row[key]
+                            for key in row.keys()
+                            if key != "metadata_json"
+                        },
+                        "metadata": _json_object(row["metadata_json"]),
+                    }
+                    for row in rows
+                ],
                 "page": _page_payload(page, limit, total),
             }
         )
@@ -862,6 +929,9 @@ class FfPoolSurface:
             ).fetchall()
         state = str(row["state"])
         preview = _json_object(row["preview_manifest_json"])
+        request_manifest = _json_object(row["request_payload_json"])
+        if str(row["document_kind"]) == "pool_overhead" and not preview:
+            preview = request_manifest
         preview_summary = {}
         if str(row["document_kind"]) == "china_acceptance":
             allocations = [dict(item) for item in preview.get("allocations") or []]
@@ -872,6 +942,47 @@ class FfPoolSurface:
                 "quantity_fbo": sum(int(item.get("quantity_fbo") or 0) for item in allocations),
                 "discrepancy_quantity": sum(int(item.get("discrepancy_quantity") or 0) for item in allocations),
                 "capital_normalization": dict(preview.get("capital_normalization") or {}),
+            }
+        overhead_date_current = True
+        if str(row["document_kind"]) == "pool_overhead":
+            posting_preview = _json_object(preview.get("posting_plan_preview") or {})
+            payment_evidence = _operator_payment_order_evidence(
+                _json_object(preview.get("payment_evidence") or {})
+            )
+            facility_id = str(preview.get("facility_id") or "")
+            current_business_date = self._current_business_date_for_facility(
+                facility_id
+            )
+            overhead_date_current = str(row["business_date"]) == current_business_date
+            preview_summary = {
+                "facility_id": facility_id,
+                "scope": str(preview.get("scope") or ""),
+                "category": str(preview.get("category") or ""),
+                "category_label_ru": OVERHEAD_EXPENSE_CATEGORY_LABELS_RU.get(
+                    str(preview.get("category") or ""), ""
+                ),
+                "comment": str(preview.get("comment") or ""),
+                "amount_rub": str(preview.get("amount_rub") or ""),
+                "source_mode": str(preview.get("source_mode") or ""),
+                "business_date": str(row["business_date"]),
+                "current_business_date": current_business_date,
+                "business_date_current": overhead_date_current,
+                "denominator_quantity": int(
+                    posting_preview.get("denominator_quantity") or 0
+                ),
+                "denominator_sku_count": int(
+                    posting_preview.get("denominator_sku_count") or 0
+                ),
+                "affected_sku_count": int(
+                    posting_preview.get("affected_sku_count") or 0
+                ),
+                "allocation_total_rub": str(
+                    posting_preview.get("allocation_total_rub") or ""
+                ),
+                "pool_allocations_rub": dict(
+                    posting_preview.get("pool_allocations_rub") or {}
+                ),
+                "payment_evidence": payment_evidence,
             }
         guided_activation = self._guided_acceptance_activation()
         payload = {
@@ -886,6 +997,7 @@ class FfPoolSurface:
             "state": state,
             "state_label_ru": WORKFLOW_LABELS_RU.get(state, state),
             "confirm_allowed": state == "ready" and bool(feature["writer_effective"])
+            and overhead_date_current
             and (str(row["document_kind"]) != "china_acceptance" or guided_activation["effective"]),
             "feature_blocked": not bool(feature["writer_effective"]),
             "guided_acceptance_activation": guided_activation
@@ -895,7 +1007,9 @@ class FfPoolSurface:
                 "type": str(row["source_type"]),
                 "id": str(row["source_id"]),
                 "filename": str(row["source_filename"]),
+                "content_type": str(row["source_content_type"]),
                 "sha256": str(row["source_sha256"]),
+                "file_available": row["source_file_blob"] is not None,
             },
             "preview": {
                 "available": bool(preview),
@@ -1166,6 +1280,18 @@ class FfPoolSurface:
                 "China acceptance is available only through the guided workbook workflow",
                 http_status=409,
             )
+        if kind == "pool_overhead":
+            manifest = payload.get("manifest")
+            if not isinstance(manifest, Mapping):
+                raise FfPoolSurfaceError("manifest_required", "manifest must be an object")
+            return self.accept_pool_overhead_preview(
+                {
+                    **dict(manifest),
+                    "request_id": payload.get("request_id"),
+                    "business_date": payload.get("business_date"),
+                },
+                actor=actor,
+            )
         request_id = _request_id(payload.get("request_id"))
         business_date = _date(payload.get("business_date"), field="business_date")
         manifest = payload.get("manifest")
@@ -1192,6 +1318,185 @@ class FfPoolSurface:
         except FfPoolDocumentError as exc:
             raise _surface_from_document_error(exc) from exc
         return self.request_status(str(result.get("request_id") or request_id))
+
+    def accept_pool_overhead_preview(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+        source_bytes: bytes = b"",
+        filename: str = "",
+        content_type: str = "",
+    ) -> dict[str, Any]:
+        """Accept one manual or parsed-payment overhead into the canonical workflow."""
+
+        self._require_writer()
+        request_id = _request_id(payload.get("request_id"))
+        facility_id = _identity_token(payload.get("facility_id"), field="facility_id")
+        scope = _scope(payload.get("scope"))
+        category = str(payload.get("category") or "").strip()
+        if category not in OVERHEAD_EXPENSE_CATEGORIES:
+            raise FfPoolSurfaceError(
+                "invalid_overhead_category",
+                "Выберите категорию расхода.",
+                details={"allowed": list(OVERHEAD_EXPENSE_CATEGORIES)},
+            )
+        comment = _optional_text(payload.get("comment"), field="comment", maximum=1000)
+        if category == "other" and not comment:
+            raise FfPoolSurfaceError(
+                "overhead_other_comment_required",
+                "Для категории «Прочие» обязателен комментарий.",
+            )
+        with self._read() as conn:
+            facility = conn.execute(
+                f"SELECT active,display_timezone FROM {FACILITIES_TABLE} WHERE facility_id=?",
+                (facility_id,),
+            ).fetchone()
+        if facility is None or not bool(facility["active"]):
+            raise FfPoolSurfaceError(
+                "facility_not_active",
+                "Выбранный склад FF не найден или не активен.",
+            )
+        business_date = _business_date_in_timezone(
+            self._now(), str(facility["display_timezone"])
+        )
+        supplied_date = str(payload.get("business_date") or "").strip()
+        if supplied_date and supplied_date != business_date:
+            raise FfPoolSurfaceError(
+                "overhead_business_date_mismatch",
+                "Дата учёта определяется сервером по часовому поясу выбранного склада.",
+                details={"business_date": business_date},
+                http_status=409,
+            )
+        evidence_bytes = bytes(source_bytes or b"")
+        source_mode = "payment_order_pdf" if evidence_bytes else "manual"
+        payment_evidence: dict[str, Any] = {}
+        selected_amount = str(payload.get("amount_rub") or "").strip()
+        if evidence_bytes:
+            _validate_payment_order_upload(
+                evidence_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+            payment_evidence = _normalized_payment_order_evidence(
+                parse_russian_payment_order_pdf(
+                    evidence_bytes,
+                    filename=str(filename or "payment-order.pdf"),
+                )
+            )
+            parsed_amount = _positive_rub_text(
+                payment_evidence.get("amount"),
+                field="payment_order_amount",
+                allow_empty=True,
+            )
+            if selected_amount:
+                manual_amount = _positive_rub_text(
+                    selected_amount,
+                    field="amount_rub",
+                )
+                if parsed_amount and manual_amount != parsed_amount:
+                    raise FfPoolSurfaceError(
+                        "overhead_amount_mismatch",
+                        "Сумма отличается от платёжного поручения. Удалите PDF для ручного ввода другой суммы.",
+                        details={
+                            "parsed_amount_rub": parsed_amount,
+                            "payment_evidence": _operator_payment_order_evidence(
+                                payment_evidence
+                            ),
+                        },
+                    )
+            selected_amount = parsed_amount
+        else:
+            selected_amount = _positive_rub_text(selected_amount, field="amount_rub")
+        manifest = {
+            "facility_id": facility_id,
+            "scope": scope,
+            "category": category,
+            "comment": comment,
+            "amount_rub": selected_amount,
+            "source_mode": source_mode,
+            "payment_evidence": payment_evidence,
+        }
+        semantic = {
+            "document_kind": "pool_overhead",
+            "business_date": business_date,
+            "manifest": manifest,
+        }
+        source_revision = _fingerprint(
+            payment_evidence if payment_evidence else semantic
+        )
+        source_id = (
+            "payment_order:"
+            + str(payment_evidence.get("payment_fingerprint") or payment_evidence.get("file_sha256") or "")
+            .removeprefix("sha256:")[:32]
+            if evidence_bytes
+            else "manual_overhead:" + source_revision.removeprefix("sha256:")[:32]
+        )
+        identity = DocumentIdentity(
+            request_id=request_id,
+            source_system="operator_http",
+            source_type=(
+                "ff_pool_overhead_payment_order_pdf"
+                if evidence_bytes
+                else "ff_pool_overhead_manual"
+            ),
+            source_id=source_id,
+            source_revision=source_revision,
+            idempotency_epoch=self._writer_epoch(),
+            actor=_actor(actor),
+            business_date=business_date,
+        )
+        eligible = bool(
+            not evidence_bytes
+            or (
+                payment_evidence.get("parse_status")
+                == RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED
+                and payment_evidence.get("execution_status")
+                == RUSSIAN_PAYMENT_ORDER_EXECUTION_EXECUTED
+                and payment_evidence.get("posting_eligible") is True
+                and payment_evidence.get("currency") == RUSSIAN_PAYMENT_ORDER_CURRENCY
+                and selected_amount
+                and payment_evidence.get("payment_fingerprint")
+            )
+        )
+        try:
+            if eligible:
+                result = self._service().accept_preview(
+                    identity=identity,
+                    document_kind="pool_overhead",
+                    manifest=manifest,
+                    source_bytes=evidence_bytes,
+                    source_filename=str(filename or ""),
+                    source_content_type=str(content_type or ""),
+                )
+            else:
+                result = self._service().accept_blocked(
+                    identity=identity,
+                    document_kind="pool_overhead",
+                    manifest=manifest,
+                    source_bytes=evidence_bytes,
+                    source_filename=str(filename or ""),
+                    source_content_type=str(content_type or ""),
+                    template_fingerprint="",
+                    error_code="overhead_payment_order_not_eligible",
+                    error_details={
+                        "payment_evidence": _operator_payment_order_evidence(
+                            payment_evidence
+                        )
+                    },
+                )
+        except FfPoolDocumentError as exc:
+            raise _surface_from_document_error(exc) from exc
+        response = self.request_status(str(result.get("request_id") or request_id))
+        response.pop("etag", None)
+        response.pop("payload_bytes", None)
+        response["payment_duplicate"] = bool(result.get("payment_duplicate"))
+        if response["payment_duplicate"]:
+            response["duplicate_link"] = {
+                "request_id": str(response.get("request_id") or ""),
+                "document_id": str((response.get("document") or {}).get("document_id") or ""),
+            }
+        return _etagged(response)
 
     def accept_china_workbook(
         self,
@@ -1285,6 +1590,18 @@ class FfPoolSurface:
                     "guided_acceptance_not_activated",
                     str(activation.get("reason_ru") or "Проведение приёмки ещё не активировано."),
                     details=activation,
+                    http_status=409,
+                )
+        if status.get("document_kind") == "pool_overhead":
+            summary = _json_object((status.get("preview") or {}).get("summary") or {})
+            if not bool(summary.get("business_date_current")):
+                raise FfPoolSurfaceError(
+                    "overhead_business_date_stale",
+                    "Дата выбранного склада изменилась после preview. Выполните проверку заново.",
+                    details={
+                        "preview_business_date": str(status.get("business_date") or ""),
+                        "current_business_date": str(summary.get("current_business_date") or ""),
+                    },
                     http_status=409,
                 )
         self._require_writer()
@@ -1480,6 +1797,19 @@ class FfPoolSurface:
             timestamp_factory=self.timestamp_factory,
             resume=resume,
         )
+
+    def _current_business_date_for_facility(self, facility_id: str) -> str:
+        selected = _identity_token(facility_id, field="facility_id")
+        with self._read() as conn:
+            row = conn.execute(
+                f"SELECT display_timezone FROM {FACILITIES_TABLE} WHERE facility_id=?",
+                (selected,),
+            ).fetchone()
+        if row is None:
+            raise FfPoolSurfaceError(
+                "facility_not_found", "Facility was not found", http_status=404
+            )
+        return _business_date_in_timezone(self._now(), str(row["display_timezone"]))
 
     def _preview_epoch(self) -> int:
         with self._read() as conn:
@@ -1953,6 +2283,189 @@ def _text(value: Any, *, field: str, maximum: int) -> str:
     return token
 
 
+def _optional_text(value: Any, *, field: str, maximum: int) -> str:
+    token = " ".join(str(value or "").split())
+    if len(token) > maximum or SAFE_TEXT_RE.search(token):
+        raise FfPoolSurfaceError(
+            f"invalid_{field}",
+            f"{field} must contain at most {maximum} safe characters",
+        )
+    return token
+
+
+def _positive_rub_text(
+    value: Any,
+    *,
+    field: str,
+    allow_empty: bool = False,
+) -> str:
+    token = str(value or "").strip()
+    if not token and allow_empty:
+        return ""
+    try:
+        amount = Decimal(token.replace(",", "."))
+        quantized = amount.quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError) as exc:
+        raise FfPoolSurfaceError(
+            f"invalid_{field}",
+            "Укажите положительную сумму в рублях с точностью до копеек.",
+        ) from exc
+    if not amount.is_finite() or amount <= 0 or amount != quantized:
+        raise FfPoolSurfaceError(
+            f"invalid_{field}",
+            "Укажите положительную сумму в рублях с точностью до копеек.",
+        )
+    return format(quantized, "f")
+
+
+def _validate_payment_order_upload(
+    value: bytes,
+    *,
+    filename: str,
+    content_type: str,
+) -> None:
+    if not value or len(value) > MAX_OVERHEAD_PAYMENT_ORDER_FILE_BYTES:
+        raise FfPoolSurfaceError(
+            "payment_order_file_size_invalid",
+            "PDF отсутствует или превышает допустимый размер.",
+            http_status=413,
+        )
+    if not str(filename or "").strip().lower().endswith(".pdf"):
+        raise FfPoolSurfaceError(
+            "payment_order_file_type_invalid",
+            "Для платёжного поручения выберите файл PDF.",
+        )
+    normalized_content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_content_type not in {"application/pdf", "application/octet-stream"}:
+        raise FfPoolSurfaceError(
+            "payment_order_file_type_invalid",
+            "Для платёжного поручения выберите файл PDF.",
+        )
+
+
+def _normalized_payment_order_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+    def text(key: str, maximum: int = 4000) -> str:
+        return " ".join(str(value.get(key) or "").split())[:maximum]
+
+    def party(key: str) -> dict[str, Any]:
+        raw = value.get(key) if isinstance(value.get(key), Mapping) else {}
+        bank = raw.get("bank") if isinstance(raw.get("bank"), Mapping) else {}
+        return {
+            "name": " ".join(str(raw.get("name") or "").split())[:500],
+            "inn": str(raw.get("inn") or "")[:20],
+            "kpp": str(raw.get("kpp") or "")[:20],
+            "account": str(raw.get("account") or "")[:32],
+            "bank": {
+                "name": " ".join(str(bank.get("name") or "").split())[:500],
+                "bic": str(bank.get("bic") or "")[:20],
+                "correspondent_account": str(bank.get("correspondent_account") or "")[:32],
+            },
+        }
+
+    invoice = value.get("invoice_reference") if isinstance(value.get("invoice_reference"), Mapping) else {}
+    vat = value.get("vat") if isinstance(value.get("vat"), Mapping) else {}
+    extraction = value.get("extraction") if isinstance(value.get("extraction"), Mapping) else {}
+    return {
+        "form_code": text("form_code", 20),
+        "source_bank": text("source_bank", 80),
+        "adapter": text("adapter", 120),
+        "payment_order_number": text("payment_order_number", 120),
+        "document_date": text("document_date", 20),
+        "debit_date": text("debit_date", 20),
+        "execution_date": text("execution_date", 20),
+        "executed_at": text("executed_at", 40),
+        "execution_status": text("execution_status", 40),
+        "posting_eligible": value.get("posting_eligible") is True,
+        "amount": text("amount", 80),
+        "currency": text("currency", 20),
+        "payer": party("payer"),
+        "beneficiary": party("beneficiary"),
+        "payment_purpose": text("payment_purpose"),
+        "invoice_reference": {
+            "number": " ".join(str(invoice.get("number") or "").split())[:160],
+            "date": str(invoice.get("date") or "")[:20],
+        },
+        "vat": {
+            "status": str(vat.get("status") or "")[:40],
+            "rate_percent": str(vat.get("rate_percent") or "")[:40],
+            "amount": str(vat.get("amount") or "")[:80],
+        },
+        "parse_status": text("parse_status", 40),
+        "warnings": [" ".join(str(item).split())[:500] for item in list(value.get("warnings") or [])[:50]],
+        "errors": [" ".join(str(item).split())[:500] for item in list(value.get("errors") or [])[:50]],
+        "parser_version": text("parser_version", 120),
+        "file_sha256": text("file_sha256", 80),
+        "payment_fingerprint": text("payment_fingerprint", 80),
+        "fingerprint_version": text("fingerprint_version", 120),
+        "extraction": {
+            key: extraction[key]
+            for key in (
+                "method",
+                "text_char_count",
+                "pypdf_available",
+                "pypdf_page_count",
+                "pdftotext_text_nonempty",
+            )
+            if key in extraction
+        },
+    }
+
+
+def _operator_payment_order_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return parsed operator evidence without account, tax-id or BIC fields."""
+
+    payer = value.get("payer") if isinstance(value.get("payer"), Mapping) else {}
+    beneficiary = (
+        value.get("beneficiary")
+        if isinstance(value.get("beneficiary"), Mapping)
+        else {}
+    )
+    payer_bank = payer.get("bank") if isinstance(payer.get("bank"), Mapping) else {}
+    beneficiary_bank = (
+        beneficiary.get("bank")
+        if isinstance(beneficiary.get("bank"), Mapping)
+        else {}
+    )
+    safe = {
+        key: value[key]
+        for key in (
+            "form_code",
+            "source_bank",
+            "adapter",
+            "payment_order_number",
+            "document_date",
+            "debit_date",
+            "execution_date",
+            "executed_at",
+            "execution_status",
+            "posting_eligible",
+            "amount",
+            "currency",
+            "payment_purpose",
+            "invoice_reference",
+            "vat",
+            "parse_status",
+            "warnings",
+            "errors",
+            "parser_version",
+            "file_sha256",
+            "payment_fingerprint",
+            "fingerprint_version",
+            "extraction",
+        )
+        if key in value
+    }
+    safe["payer"] = {
+        "name": str(payer.get("name") or ""),
+        "bank": {"name": str(payer_bank.get("name") or "")},
+    }
+    safe["beneficiary"] = {
+        "name": str(beneficiary.get("name") or ""),
+        "bank": {"name": str(beneficiary_bank.get("name") or "")},
+    }
+    return safe
+
+
 def _actor(value: Any) -> str:
     return _text(value or "web_operator", field="actor", maximum=160)
 
@@ -2064,6 +2577,10 @@ def _json(value: Any) -> str:
 
 
 def _json_value(value: Any, default: Any) -> Any:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
     try:
         return json.loads(str(value or ""))
     except (TypeError, ValueError):
@@ -2073,6 +2590,39 @@ def _json_value(value: Any, default: Any) -> Any:
 def _json_object(value: Any) -> dict[str, Any]:
     parsed = _json_value(value, {})
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _overhead_readback(
+    posted_manifest_json: Any,
+    *,
+    filename: str,
+    content_type: str,
+    file_sha256: str,
+) -> dict[str, Any] | None:
+    manifest = _json_object(posted_manifest_json)
+    domain = _json_object(manifest.get("domain") or {})
+    if not domain.get("category"):
+        return None
+    return {
+        "facility_id": str(domain.get("facility_id") or ""),
+        "scope": str(domain.get("scope") or ""),
+        "category": str(domain.get("category") or ""),
+        "category_label_ru": str(domain.get("category_label_ru") or ""),
+        "comment": str(domain.get("comment") or ""),
+        "source_mode": str(domain.get("source_mode") or ""),
+        "amount_rub": str(domain.get("amount_rub") or ""),
+        "denominator_quantity": int(domain.get("denominator_quantity") or 0),
+        "denominator_sku_count": int(domain.get("denominator_sku_count") or 0),
+        "affected_sku_count": int(domain.get("affected_sku_count") or 0),
+        "allocation_total_rub": str(domain.get("allocation_total_rub") or ""),
+        "pool_allocations_rub": dict(domain.get("pool_allocations_rub") or {}),
+        "filename": str(filename or ""),
+        "content_type": str(content_type or ""),
+        "file_sha256": str(file_sha256 or ""),
+        "payment_evidence": _operator_payment_order_evidence(
+            _json_object(domain.get("payment_evidence") or {})
+        ),
+    }
 
 
 def _fingerprint(value: Any) -> str:
@@ -2152,6 +2702,20 @@ def _surface_from_xlsx_error(exc: FfPoolXlsxError) -> FfPoolSurfaceError:
 def _safe_filename(value: Any) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
     return token[:80] or uuid4().hex[:12]
+
+
+def _business_date_in_timezone(timestamp: str, timezone_name: str) -> str:
+    try:
+        instant = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        if instant.tzinfo is None:
+            raise ValueError("timezone-aware timestamp required")
+        return instant.astimezone(ZoneInfo(str(timezone_name))).date().isoformat()
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise FfPoolSurfaceError(
+            "invalid_facility_business_time",
+            "Не удалось определить текущую дату выбранного склада FF.",
+            http_status=409,
+        ) from exc
 
 
 def _utc_now() -> str:

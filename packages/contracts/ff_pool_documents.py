@@ -9,6 +9,32 @@ from typing import Literal, Mapping, Any
 
 FfPool = Literal["FBS", "FBO"]
 PoolScope = Literal["FBS", "FBO", "both"]
+OverheadExpenseCategory = Literal[
+    "fbs_order_processing",
+    "inbound_logistics_to_ff",
+    "storage",
+    "internal_warehouse_movement",
+    "receiving",
+    "returns_processing",
+    "packaging_labeling_consumables",
+    "other",
+]
+OverheadSourceMode = Literal["manual", "payment_order_pdf"]
+
+OVERHEAD_EXPENSE_CATEGORY_LABELS_RU: dict[str, str] = {
+    "fbs_order_processing": "Обработка FBS-заказов",
+    "inbound_logistics_to_ff": "Логистика до склада FF",
+    "storage": "Хранение",
+    "internal_warehouse_movement": "Перемещение внутри склада",
+    "receiving": "Приёмка",
+    "returns_processing": "Обработка возвратов/невыкупов",
+    "packaging_labeling_consumables": "Упаковка, маркировка и расходные материалы",
+    "other": "Прочие",
+}
+OVERHEAD_EXPENSE_CATEGORIES = tuple(OVERHEAD_EXPENSE_CATEGORY_LABELS_RU)
+OVERHEAD_SOURCE_MODES = ("manual", "payment_order_pdf")
+OVERHEAD_PAYMENT_ORDER_MAX_FILE_BYTES = 8 * 1024 * 1024
+OVERHEAD_PAYMENT_ORDER_MAX_REQUEST_BYTES = 9 * 1024 * 1024
 WorkflowState = Literal[
     "accepted",
     "processing",
