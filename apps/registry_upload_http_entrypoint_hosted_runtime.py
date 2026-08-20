@@ -55,6 +55,7 @@ PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS = 1800.0
+FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
@@ -145,6 +146,13 @@ from packages.application.ff_pool_zero_physical_production import (
     CONTRACT_VERSION as FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION,
     TARGET_FACILITY_ID as FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID,
     TARGET_NM_IDS as FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS,
+)
+from packages.application.ff_fbs_mapping_extension_production import (
+    CONTRACT_NAME as FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION,
+    TARGET_FACILITY_ID as FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+    TARGET_OFFICE_ID as FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID,
+    TARGET_WAREHOUSE_ID as FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
 )
 from packages.application.ff_pool_cutover_recovery_supersession import (
     CONTRACT_NAME as FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME,
@@ -7053,6 +7061,50 @@ def run_ff_pool_zero_physical_production_command(args: argparse.Namespace) -> in
     return 0
 
 
+def run_ff_fbs_mapping_extension_production_command(
+    args: argparse.Namespace,
+) -> int:
+    """Run the exact Orenburg mapping/backlog production contour."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_fbs_mapping_extension_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError(
+            "FBS mapping-extension reviewed plan must stay outside the Git checkout"
+        )
+    payload = _run_remote_ff_fbs_mapping_extension_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError(
+                "FBS mapping-extension evidence output must stay outside the Git checkout"
+            )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-fbs-mapping-extension-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_ff_pool_cutover_production_command(args: argparse.Namespace) -> int:
     """Run the canonical dry-run/readback or owner-gated Stage 7C apply."""
 
@@ -7873,6 +7925,211 @@ def _run_remote_ff_pool_zero_physical_production(
             or status.get("calculation_enabled") is not True
         ):
             raise RuntimeError("post-apply zero-physical query-only readback is incomplete")
+        payload = {**payload, "post_apply_readback": readback}
+    return payload
+
+
+def _run_remote_ff_fbs_mapping_extension_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-fbs-mapping-extension-production-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported FBS mapping-extension action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-fbs-mapping-extension-production-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError(
+            "FBS mapping-extension action requires an exact deployed SHA"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical active runtime dir"
+        )
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical environment file"
+        )
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical HTTP service"
+        )
+
+    runner_args = [
+        "python3",
+        "apps/ff_fbs_mapping_extension_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "FBS mapping-extension apply requires an existing --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "FBS mapping-extension reviewed plan is invalid JSON"
+            ) from exc
+        scope = plan.get("scope") if isinstance(plan, dict) else {}
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name") != FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME
+            or int(plan.get("contract_version") or 0)
+            != FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not isinstance(scope, Mapping)
+            or int(scope.get("seller_warehouse_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID
+            or int(scope.get("official_office_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID
+            or str(scope.get("facility_id") or "")
+            != FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID
+            or str(scope.get("pool") or "") != "FBS"
+            or int(
+                (plan.get("expected_effects") or {}).get("wb_write_count") or 0
+            )
+            != 0
+        ):
+            raise ValueError(
+                "FBS mapping-extension reviewed plan does not match the exact apply"
+            )
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError(
+                "FBS mapping-extension apply requires approval reference and actor"
+            )
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--evidence-dir",
+                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        if action == "apply":
+            try:
+                readback = _run_remote_ff_fbs_mapping_extension_production(
+                    target,
+                    action="readback",
+                    deployed_sha=deployed_sha,
+                    plan_path=None,
+                    fingerprint="",
+                    approval_reference="",
+                    actor="",
+                )
+            except Exception as readback_error:
+                raise RuntimeError(
+                    f"FBS mapping-extension production apply failed and "
+                    f"query-only readback did not reconcile it: {readback_error}"
+                ) from readback_error
+            extension = dict(readback.get("mapping_extension") or {})
+            if (
+                str(extension.get("plan_fingerprint") or "") == fingerprint
+                and str(extension.get("deployed_sha") or "") == deployed_sha
+                and readback.get("status") == "ready"
+                and not readback.get("blockers")
+            ):
+                return {
+                    "status": "complete",
+                    "manifest_fingerprint": fingerprint,
+                    "deployed_sha": deployed_sha,
+                    "recovered_after_transport_ambiguity": True,
+                    "post_apply_readback": readback,
+                }
+        raise RuntimeError(
+            f"FBS mapping-extension production {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "FBS mapping-extension production runner returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError(
+            "FBS mapping-extension production runner returned an invalid result"
+        )
+    if action == "apply":
+        readback = _run_remote_ff_fbs_mapping_extension_production(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        mapping = list(readback.get("mapping") or [])
+        backlog = dict(readback.get("backlog_partition") or {})
+        if (
+            len(mapping) != 1
+            or int(mapping[0].get("seller_warehouse_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID
+            or str(mapping[0].get("facility_id") or "")
+            != FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID
+            or int(backlog.get("frozen_unresolved_pending_count") or 0) != 0
+            or (readback.get("pool_aggregate_parity") or {}).get("status")
+            != "pass"
+            or int(readback.get("wb_writes") or 0) != 0
+        ):
+            raise RuntimeError(
+                "post-apply FBS mapping-extension query-only readback is incomplete"
+            )
         payload = {**payload, "post_apply_readback": readback}
     return payload
 
@@ -11191,6 +11448,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     zero_physical_readback.set_defaults(
         handler=run_ff_pool_zero_physical_production_command,
         ff_pool_zero_physical_action="readback",
+    )
+
+    fbs_mapping_extension_dry_run = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-dry-run",
+        help="Build the exact query-only Orenburg FBS mapping/backlog manifest.",
+    )
+    fbs_mapping_extension_dry_run.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_dry_run.add_argument("--output", required=True)
+    fbs_mapping_extension_dry_run.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="dry-run",
+    )
+
+    fbs_mapping_extension_apply = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-apply",
+        help="Apply one exact owner-gated Orenburg FBS mapping/backlog manifest.",
+    )
+    fbs_mapping_extension_apply.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_apply.add_argument("--plan-file", required=True)
+    fbs_mapping_extension_apply.add_argument("--fingerprint", required=True)
+    fbs_mapping_extension_apply.add_argument("--approval-reference", required=True)
+    fbs_mapping_extension_apply.add_argument("--actor", required=True)
+    fbs_mapping_extension_apply.add_argument("--output", required=True)
+    fbs_mapping_extension_apply.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="apply",
+    )
+
+    fbs_mapping_extension_readback = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-readback",
+        help="Read exact Orenburg mapping/backlog reconciliation evidence.",
+    )
+    fbs_mapping_extension_readback.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_readback.add_argument("--output", required=True)
+    fbs_mapping_extension_readback.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="readback",
     )
 
     ff_pool_cutover_dry_run = subparsers.add_parser(

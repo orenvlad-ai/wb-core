@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
+    FACILITIES_TABLE,
     FEATURE_EPOCHS_TABLE,
     LINES_TABLE,
     OPERATIONS_TABLE,
@@ -27,9 +28,10 @@ from packages.application.ff_pool_foundation import (
 )
 from packages.application.wb_fbs_orders import (
     IDENTITY_EVIDENCE_TABLE,
+    IDENTITY_MAPPINGS_TABLE,
     OBSERVATIONS_TABLE,
-    STATUS_CURRENT_TABLE,
     STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE,
     ensure_wb_fbs_orders_schema,
 )
 
@@ -43,6 +45,10 @@ LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
 IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
 IDENTITY_PENDING_RESOLUTIONS_TABLE = (
     "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+)
+MAPPING_EXTENSIONS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
+MAPPING_EXTENSION_ALLOCATIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
 )
 
 HANDOFF_SUPPLIER_STATUS = "complete"
@@ -247,6 +253,51 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(cutover_id,source_status_observation_sequence)
         );
 
+        CREATE TABLE IF NOT EXISTS {MAPPING_EXTENSIONS_TABLE}(
+            extension_id TEXT PRIMARY KEY,
+            cutover_id TEXT NOT NULL REFERENCES
+                sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            warehouse_mapping_id TEXT NOT NULL REFERENCES
+                {WAREHOUSE_MAPPINGS_TABLE}(mapping_id),
+            seller_warehouse_id INTEGER NOT NULL
+                CHECK(typeof(seller_warehouse_id)='integer' AND seller_warehouse_id>0),
+            official_office_id INTEGER NOT NULL
+                CHECK(typeof(official_office_id)='integer' AND official_office_id>0),
+            facility_id TEXT NOT NULL,
+            source_receipt_document_id TEXT NOT NULL,
+            source_receipt_root_document_id TEXT NOT NULL,
+            source_receipt_digest TEXT NOT NULL,
+            mapping_digest TEXT NOT NULL,
+            official_evidence_digest TEXT NOT NULL,
+            frozen_boundary_json TEXT NOT NULL CHECK(json_valid(frozen_boundary_json)),
+            frozen_rows_digest TEXT NOT NULL,
+            plan_fingerprint TEXT NOT NULL,
+            deployed_sha TEXT NOT NULL CHECK(length(deployed_sha)=40),
+            approval_reference TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
+            UNIQUE(cutover_id,seller_warehouse_id),
+            UNIQUE(cutover_id,warehouse_mapping_id)
+        );
+        CREATE INDEX IF NOT EXISTS ff_pool_fbs_mapping_extension_by_facility
+        ON {MAPPING_EXTENSIONS_TABLE}(cutover_id,facility_id,seller_warehouse_id);
+
+        CREATE TABLE IF NOT EXISTS {MAPPING_EXTENSION_ALLOCATIONS_TABLE}(
+            extension_id TEXT NOT NULL REFERENCES
+                {MAPPING_EXTENSIONS_TABLE}(extension_id),
+            nm_id INTEGER NOT NULL CHECK(typeof(nm_id)='integer' AND nm_id>0),
+            opening_quantity INTEGER NOT NULL
+                CHECK(typeof(opening_quantity)='integer' AND opening_quantity>=0),
+            opening_capital_rub TEXT NOT NULL CHECK({_decimal_check('opening_capital_rub')}),
+            frozen_wac_rub TEXT NOT NULL CHECK({_decimal_check('frozen_wac_rub')}),
+            source_balance_watermark TEXT NOT NULL,
+            allocation_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
+            PRIMARY KEY(extension_id,nm_id)
+        );
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_events_no_update
         BEFORE UPDATE ON {EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS lifecycle evidence is immutable'); END;
@@ -277,6 +328,18 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_identity_resolution_no_delete
         BEFORE DELETE ON {IDENTITY_PENDING_RESOLUTIONS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS identity resolution evidence is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_mapping_extension_no_update
+        BEFORE UPDATE ON {MAPPING_EXTENSIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS mapping extension is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_mapping_extension_no_delete
+        BEFORE DELETE ON {MAPPING_EXTENSIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS mapping extensions are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_extension_allocation_no_update
+        BEFORE UPDATE ON {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS mapping extension allocation is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_extension_allocation_no_delete
+        BEFORE DELETE ON {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS mapping extension allocations are append-only'); END;
         """
     )
     _ensure_column(
@@ -398,7 +461,7 @@ def apply_opening_fbs_backfill(
         classification = str(order["classification"])
         if classification == "unmatched" or classification == "post_t_deferred":
             continue
-        wac = _frozen_wac(manifest, order)
+        wac = _frozen_wac(conn, manifest, order)
         evidence = {
             "cutover_id": cutover_id,
             "order_id": int(order["order_id"]),
@@ -668,7 +731,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                    source.observation_sequence,source.observation_id,
                    source.source_revision,source.source_created_at,
                    source.observed_at,source.warehouse_id,source.nm_id,
-                   source.chrt_id,source.skus_json,
+                   source.chrt_id,source.skus_json,source.office_id,
                    pending.deferred_identity_evidence_sequence
             FROM {IDENTITY_PENDING_TABLE} AS pending
             JOIN {STATUS_OBSERVATIONS_TABLE} AS status
@@ -679,7 +742,13 @@ def drain_post_checkpoint_fbs_lifecycle(
             LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
               ON resolution.pending_id=pending.pending_id
             WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
-            ORDER BY pending.source_status_observation_sequence
+            ORDER BY EXISTS(
+                SELECT 1 FROM {IDENTITY_EVIDENCE_TABLE} AS later_identity
+                WHERE later_identity.order_id=pending.order_id
+                  AND later_identity.evidence_sequence>
+                      pending.deferred_identity_evidence_sequence
+                  AND later_identity.outcome='matched'
+            ) DESC,pending.source_status_observation_sequence
             LIMIT ?""",
         (cutover_id, pending_retry_limit),
     ).fetchall()
@@ -691,7 +760,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                    source.observation_sequence,source.observation_id,
                    source.source_revision,source.source_created_at,
                    source.observed_at,source.warehouse_id,source.nm_id,
-                   source.chrt_id,source.skus_json
+                   source.chrt_id,source.skus_json,source.office_id
             FROM {STATUS_OBSERVATIONS_TABLE} AS status
             LEFT JOIN {OBSERVATIONS_TABLE} AS source
               ON source.order_id=status.order_id
@@ -760,6 +829,7 @@ def drain_post_checkpoint_fbs_lifecycle(
             int(row[14]),
             row[15],
             str(row[16]),
+            row[17],
         )
         try:
             mapped = _map_order(
@@ -768,7 +838,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                 raw_order,
                 allow_compatible_identity=is_pending_retry,
                 minimum_identity_evidence_sequence=(
-                    int(row[17]) if is_pending_retry else 0
+                    int(row[18]) if is_pending_retry else 0
                 ),
             )
         except FfPoolFbsLifecycleError as exc:
@@ -791,7 +861,7 @@ def drain_post_checkpoint_fbs_lifecycle(
         ).fetchone()
         supplier_status = str(row[4])
         wb_status = str(row[5])
-        wac = _frozen_wac(manifest, order)
+        wac = _frozen_wac(conn, manifest, order)
         evidence = {
             "order_id": order_id,
             "order_revision": str(row[2]),
@@ -800,6 +870,9 @@ def drain_post_checkpoint_fbs_lifecycle(
             "source_status_observation_sequence": status_sequence,
             "supplier_status": supplier_status,
             "wb_status": wb_status,
+            "mapping_extension_id": str(
+                order.get("mapping_extension_id") or ""
+            ),
         }
         common = dict(
             conn=conn,
@@ -1379,20 +1452,86 @@ def _map_order(
         for item in manifest.get("seller_warehouse_mappings") or []
     }
     facility_id = facility_by_warehouse.get(warehouse_id)
-    if not facility_id:
-        raise FfPoolFbsLifecycleError(
-            "order_warehouse_unmapped", f"Order {int(row[1])} warehouse is unmapped"
-        )
     source_nm_id = int(row[6])
     chrt_id = int(row[7] or 0)
-    mapping = next(
-        (
-            item
-            for item in manifest.get("sku_mappings") or []
-            if int(item["nm_id"]) == source_nm_id and int(item["chrt_id"]) == chrt_id
-        ),
-        None,
-    )
+    extension_id = ""
+    if facility_id:
+        mapping = next(
+            (
+                item
+                for item in manifest.get("sku_mappings") or []
+                if int(item["nm_id"]) == source_nm_id
+                and int(item["chrt_id"]) == chrt_id
+            ),
+            None,
+        )
+    else:
+        office_id = int(row[9] or 0)
+        extension_rows = conn.execute(
+            f"""SELECT extension.extension_id,extension.facility_id,
+                       extension.warehouse_mapping_id
+                FROM {MAPPING_EXTENSIONS_TABLE} AS extension
+                JOIN {WAREHOUSE_MAPPINGS_TABLE} AS warehouse
+                  ON warehouse.mapping_id=extension.warehouse_mapping_id
+                JOIN {FACILITIES_TABLE} AS facility
+                  ON facility.facility_id=extension.facility_id
+                WHERE extension.cutover_id=?
+                  AND extension.seller_warehouse_id=?
+                  AND extension.official_office_id=?
+                  AND warehouse.seller_warehouse_id=extension.seller_warehouse_id
+                  AND warehouse.facility_id=extension.facility_id
+                  AND warehouse.mapping_digest=extension.mapping_digest
+                  AND warehouse.official_office_id=extension.official_office_id
+                  AND warehouse.official_evidence_digest=
+                      extension.official_evidence_digest
+                  AND warehouse.active=1
+                  AND facility.active=1
+                ORDER BY extension.extension_id""",
+            (str(manifest["cutover_id"]), warehouse_id, office_id),
+        ).fetchall()
+        if len(extension_rows) != 1:
+            raise FfPoolFbsLifecycleError(
+                "order_identity_evidence_missing_or_drifted",
+                f"Order {int(row[1])} warehouse/office is unmapped or ambiguous",
+            )
+        extension = extension_rows[0]
+        if str(identity[7]) != str(extension[2]):
+            raise FfPoolFbsLifecycleError(
+                "order_identity_evidence_missing_or_drifted",
+                f"Order {int(row[1])} warehouse evidence predates the active extension",
+            )
+        identity_mapping = conn.execute(
+            f"""SELECT target_nm_id FROM {IDENTITY_MAPPINGS_TABLE}
+                WHERE mapping_id=? AND source_nm_id=? AND source_chrt_id=?
+                  AND active=1""",
+            (str(identity[8]), source_nm_id, chrt_id),
+        ).fetchall()
+        if len(identity_mapping) != 1:
+            raise FfPoolFbsLifecycleError(
+                "order_identity_evidence_missing_or_drifted",
+                f"Order {int(row[1])} exact SKU identity is unmapped or ambiguous",
+            )
+        facility_id = str(extension[1])
+        extension_id = str(extension[0])
+        target_nm_id = int(identity_mapping[0][0])
+        allocation_count = int(
+            conn.execute(
+                f"""SELECT COUNT(*)
+                    FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+                    WHERE extension_id=? AND nm_id=?""",
+                (extension_id, target_nm_id),
+            ).fetchone()[0]
+        )
+        if allocation_count != 1:
+            raise FfPoolFbsLifecycleError(
+                "order_identity_evidence_missing_or_drifted",
+                f"Order {int(row[1])} has no exact extension allocation/WAC",
+            )
+        mapping = {
+            "target_nm_id": target_nm_id,
+            "nm_id": source_nm_id,
+            "chrt_id": chrt_id,
+        }
     if mapping is None:
         raise FfPoolFbsLifecycleError(
             "order_sku_unmapped", f"Order {int(row[1])} identity is unmapped"
@@ -1400,6 +1539,7 @@ def _map_order(
     return {
         "facility_id": facility_id,
         "nm_id": int(mapping.get("target_nm_id", mapping.get("nm_id", source_nm_id))),
+        "mapping_extension_id": extension_id,
         "identity_evidence_sequence": int(identity[0]),
         "identity_evidence_order_revision": str(identity[2]),
     }
@@ -1418,10 +1558,15 @@ def _order_payload(
         "pool": "FBS",
         "nm_id": int(mapped["nm_id"]),
         "quantity": int(quantity),
+        "mapping_extension_id": str(mapped.get("mapping_extension_id") or ""),
     }
 
 
-def _frozen_wac(manifest: Mapping[str, Any], order: Mapping[str, Any]) -> Decimal:
+def _frozen_wac(
+    conn: sqlite3.Connection,
+    manifest: Mapping[str, Any],
+    order: Mapping[str, Any],
+) -> Decimal:
     match = next(
         (
             item
@@ -1432,12 +1577,25 @@ def _frozen_wac(manifest: Mapping[str, Any], order: Mapping[str, Any]) -> Decima
         ),
         None,
     )
-    if match is None or match.get("wac_rub") is None:
+    if match is not None and match.get("wac_rub") is not None:
+        return Decimal(str(match["wac_rub"]))
+    extension_id = str(order.get("mapping_extension_id") or "")
+    extension_rows = (
+        conn.execute(
+            f"""SELECT frozen_wac_rub
+                FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+                WHERE extension_id=? AND nm_id=?""",
+            (extension_id, int(order["nm_id"])),
+        ).fetchall()
+        if extension_id
+        else []
+    )
+    if len(extension_rows) != 1:
         raise FfPoolFbsLifecycleError(
             "frozen_wac_missing",
             f"Opening WAC is missing for {order['facility_id']}/{order['nm_id']}",
         )
-    return Decimal(str(match["wac_rub"]))
+    return Decimal(str(extension_rows[0][0]))
 
 
 def _persist_late_checkpoint_evidence(

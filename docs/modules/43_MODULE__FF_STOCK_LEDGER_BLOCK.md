@@ -16,6 +16,7 @@ related_modules:
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_zero_physical_production.py"
+  - "packages/application/ff_fbs_mapping_extension_production.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
@@ -72,6 +73,8 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_fbs_drain_state"
   - "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
   - "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+  - "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
+  - "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -101,6 +104,8 @@ related_runners:
   - "apps/ff_pool_documents_smoke.py"
   - "apps/ff_pool_zero_physical_production.py"
   - "apps/ff_pool_zero_physical_production_smoke.py"
+  - "apps/ff_fbs_mapping_extension_production.py"
+  - "apps/ff_fbs_mapping_extension_production_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -783,6 +788,30 @@ and records one `...identity_pending_resolutions` row atomically with its normal
 idempotent lifecycle event. No facility/SKU mapping is guessed or changed, an
 unresolved row stays visible as `caught_up_identity_pending`, and an exact retry
 cannot duplicate a physical delta or WB action.
+
+Migration 150 adds one supported post-cutover mapping-extension path without
+rewriting the immutable Stage 7C manifest/checkpoint. The canonical warehouse
+mapping table remains the sole routing source and gains exact official office
+evidence. One append-only extension envelope binds that mapping to the applied
+cutover, exact facility, official warehouse/office identities, deployed SHA,
+reviewed manifest, accepted transfer receipt and compound frozen `W`; its
+per-SKU allocation rows freeze receipt-backed positive WAC. The lifecycle uses
+the extension only when warehouse, office, mapping row, matched identity row
+and allocation all agree exactly. Name/fuzzy routing and inferred SKU ownership
+remain forbidden.
+
+The extension runner is query-only by default. Its reviewed source contains
+complete frozen-row digests for all three streams plus the exact target backlog
+partition. Ordinary append-only rows above `W` do not stale the gate and enter
+the normal exactly-once suffix. Apply holds the shared warehouse writer lock,
+creates a central T2 domain checkpoint and private `0600` target before-image,
+appends only reviewed mappings/evidence, and invokes the unchanged lifecycle
+drain. `new|eligible` reserves, only `complete+sorted` debits physical once,
+complete alone remains forbidden, late/terminal evidence stays audited, and
+unproven identities stay pending. Readback proves the source receipt unchanged,
+the original Moscow mapping unchanged, frozen backlog resolution, no duplicate
+event/operation, live pool/aggregate parity, collector continuation and zero WB
+writes.
 
 The five-minute collector consumes at most 10,000 new lifecycle observations
 per warehouse-functional transaction (the domain primitive remains capped at
