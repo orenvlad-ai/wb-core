@@ -852,8 +852,8 @@ def _snapshot(
         if (
             receipt_line is None
             or int(allocation["quantity"]) != int(receipt_line["quantity"])
-            or canonical_decimal_text(allocation["capital_rub"])
-            != canonical_decimal_text(receipt_line["capital_rub"])
+            or Decimal(str(allocation["capital_rub"]))
+            != Decimal(str(receipt_line["capital_rub"]))
             or not str(allocation.get("source_watermark") or "").startswith(
                 RECEIPT_DOCUMENT_ID
             )

@@ -309,7 +309,12 @@ def _seed_orenburg(runtime: RegistryUploadDbBackedRuntime) -> None:
                    ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
                     TARGET_FACILITY_ID, "FBS", nm_id, feature_epoch, quantity,
-                    format(capital, "f"), format(wac, "f"), RECEIPT_DOCUMENT_ID, NOW,
+                    (
+                        format(capital, ".2f")
+                        if offset == 0
+                        else format(capital, "f")
+                    ),
+                    format(wac, "f"), RECEIPT_DOCUMENT_ID, NOW,
                 ),
             )
             conn.execute(
