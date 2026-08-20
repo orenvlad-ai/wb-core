@@ -368,6 +368,24 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
     }
     if "seller_sku" not in observation_columns:
         conn.execute(f"ALTER TABLE {OBSERVATIONS_TABLE} ADD COLUMN seller_sku TEXT NOT NULL DEFAULT ''")
+    warehouse_mapping_columns = {
+        str(row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({WAREHOUSE_MAPPINGS_TABLE})"
+        ).fetchall()
+    }
+    for column, declaration in (
+        ("official_office_id", "INTEGER NOT NULL DEFAULT 0"),
+        ("official_warehouse_name", "TEXT NOT NULL DEFAULT ''"),
+        ("official_office_name", "TEXT NOT NULL DEFAULT ''"),
+        ("official_office_city", "TEXT NOT NULL DEFAULT ''"),
+        ("official_evidence_digest", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if column not in warehouse_mapping_columns:
+            conn.execute(
+                f"ALTER TABLE {WAREHOUSE_MAPPINGS_TABLE} "
+                f"ADD COLUMN {column} {declaration}"
+            )
 
 
 class WbFbsOrdersCollector:

@@ -230,6 +230,9 @@ OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
     "warehouse_opening_publication": _policy(
         "warehouse_opening_publication", RecoveryTier.T2, "warehouse_domain"
     ),
+    "fbs_mapping_backlog_publication": _policy(
+        "fbs_mapping_backlog_publication", RecoveryTier.T2, "warehouse_domain"
+    ),
     "schema_migration": _policy(
         "schema_migration", RecoveryTier.T3, "full_store"
     ),

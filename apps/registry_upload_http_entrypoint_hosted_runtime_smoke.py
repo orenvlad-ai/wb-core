@@ -2612,6 +2612,163 @@ def main() -> None:
         ):
             raise AssertionError("hosted runner must expose zero-physical commands")
 
+        mapping_sha = "f" * 40
+        mapping_fingerprint = "sha256:" + "1" * 64
+        mapping_plan_path = Path(partner_temp_dir) / "ff-fbs-mapping-plan.json"
+        mapping_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": hosted_runtime.FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME,
+                    "contract_version": hosted_runtime.FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION,
+                    "mode": "dry_run",
+                    "apply_allowed": True,
+                    "deployed_sha": mapping_sha,
+                    "fingerprint": mapping_fingerprint,
+                    "scope": {
+                        "seller_warehouse_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
+                        "official_office_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID,
+                        "facility_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+                        "pool": "FBS",
+                    },
+                    "expected_effects": {"wb_write_count": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        mapping_apply_payload = {
+            "status": "complete",
+            "manifest_fingerprint": mapping_fingerprint,
+        }
+        mapping_readback_payload = {
+            "status": "ready",
+            "mapping_extension": {
+                "plan_fingerprint": mapping_fingerprint,
+                "deployed_sha": mapping_sha,
+            },
+            "mapping": [
+                {
+                    "seller_warehouse_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
+                    "facility_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+                }
+            ],
+            "backlog_partition": {"frozen_unresolved_pending_count": 0},
+            "pool_aggregate_parity": {"status": "pass"},
+            "wb_writes": 0,
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_apply_payload),
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_readback_payload),
+                    stderr="",
+                ),
+            ],
+        ) as mapping_run:
+            mapping_result = hosted_runtime._run_remote_ff_fbs_mapping_extension_production(
+                active_target,
+                action="apply",
+                deployed_sha=mapping_sha,
+                plan_path=mapping_plan_path,
+                fingerprint=mapping_fingerprint,
+                approval_reference="github-pr#issuecomment-orenburg-apply-gate",
+                actor="owner-relay",
+            )
+        mapping_command = " ".join(mapping_run.call_args_list[0].args[0])
+        if not all(
+            token in mapping_command
+            for token in (
+                "ff_fbs_mapping_extension_production.py",
+                ".wb-core-runtime-sha",
+                mapping_sha,
+                "--reviewed-plan-stdin",
+                mapping_fingerprint,
+                "github-pr#issuecomment-orenburg-apply-gate",
+                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+            )
+        ):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost exact scope, SHA, or gate"
+            )
+        if mapping_run.call_args_list[0].kwargs.get(
+            "input"
+        ) != mapping_plan_path.read_text(encoding="utf-8"):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost the reviewed plan"
+            )
+        if (
+            mapping_run.call_args_list[0].kwargs.get("timeout")
+            != hosted_runtime.FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS
+        ):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost its bounded timeout"
+            )
+        if mapping_result.get("post_apply_readback") != mapping_readback_payload:
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lacks exact readback evidence"
+            )
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[], returncode=255, stdout="", stderr="ssh reset"
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_readback_payload),
+                    stderr="",
+                ),
+            ],
+        ) as ambiguous_mapping_run:
+            ambiguous_mapping_result = (
+                hosted_runtime._run_remote_ff_fbs_mapping_extension_production(
+                    active_target,
+                    action="apply",
+                    deployed_sha=mapping_sha,
+                    plan_path=mapping_plan_path,
+                    fingerprint=mapping_fingerprint,
+                    approval_reference="github-pr#issuecomment-orenburg-apply-gate",
+                    actor="owner-relay",
+                )
+            )
+        if (
+            len(ambiguous_mapping_run.call_args_list) != 2
+            or ambiguous_mapping_result.get("recovered_after_transport_ambiguity")
+            is not True
+            or ambiguous_mapping_result.get("post_apply_readback")
+            != mapping_readback_payload
+        ):
+            raise AssertionError(
+                "ambiguous FBS mapping apply must reconcile query-only before retry"
+            )
+        mapping_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-fbs-mapping-extension-production-dry-run",
+                "--deployed-sha",
+                mapping_sha,
+                "--output",
+                str(Path(partner_temp_dir) / "ff-fbs-mapping-dry-run.json"),
+            ]
+        )
+        if (
+            mapping_args.handler
+            is not hosted_runtime.run_ff_fbs_mapping_extension_production_command
+            or mapping_args.ff_fbs_mapping_extension_action != "dry-run"
+        ):
+            raise AssertionError(
+                "hosted runner must expose FBS mapping-extension commands"
+            )
+
         cutover_sha = "b" * 40
         cutover_gate = {
             "contract_name": hosted_runtime.FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,

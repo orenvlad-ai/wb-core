@@ -206,6 +206,16 @@ apply/readback and exact prior-control restore supply the
 reconciliation/evidence digests for the ordinary production-mutation
 terminalization command below.
 
+Migration 150 uses the same two-gate terminalization. The pre-merge release
+gate authorizes only merge/deploy of the default-dry-run mapping-extension
+runner. After exact-SHA deploy, a fresh query-only manifest must bind warehouse
+`854205`, office `12223`, the Orenburg facility, accepted receipt/root, compound
+frozen `W` and complete frozen target-row digests. Only the distinct post-merge
+apply gate authorizes that exact manifest. Rows appended above `W` do not stale
+the gate; official identity, frozen rows, receipt/allocation, deployed SHA,
+mapping semantics or target drift does. Query-only reconciliation and private
+evidence digests then feed the unchanged production-mutation completion command.
+
 ## Exact-SHA Deploy И Reconciliation
 
 Live deploy выполняется только canonical repo-owned runner из clean merge SHA.

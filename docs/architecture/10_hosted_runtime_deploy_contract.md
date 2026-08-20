@@ -116,6 +116,20 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   query-only. Apply posts one audited `pool_inventory` document, creates no
   movement/capital/WAC effect and must prove all 41 explicit rows plus Moscow
   FBS `calculation_enabled=true`; it never starts a calculation or order.
+- Migration 150 adds canonical hosted
+  `ff-fbs-mapping-extension-production-dry-run/apply/readback` for exactly
+  seller warehouse `854205`, official office `12223` and facility
+  `fff_2579bb2741ed4ab23b11bb4c4183`. The wrapper pins the active EU target,
+  canonical runtime/environment and exact `.wb-core-runtime-sha`; apply accepts
+  only the external reviewed fingerprint plus immutable owner apply-gate
+  reference over stdin. Dry-run/readback call only official WB read endpoints
+  and query-only SQLite. Apply creates a central T2 warehouse-domain checkpoint
+  and private `0600` target before-image, appends one audited mapping/Stage 7C
+  extension with receipt-backed WAC allocations, re-evidences exact identities
+  and uses the ordinary lifecycle drain. The historical cutover manifest,
+  Orenburg transfer receipt, Moscow mapping, FBO/factory-order semantics and WB
+  remain non-targets. Append-only observations above compound frozen `W` are a
+  normal exactly-once suffix and do not stale the reviewed gate.
 - Migration 144 adds
   `ff-pool-recovery-supersession-dry-run/apply/readback` for one exact stale
   failed Stage 7C recovery. The hosted wrapper pins the active EU target,
