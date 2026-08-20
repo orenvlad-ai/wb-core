@@ -175,7 +175,6 @@ _SUPPLIER_SAFE_WRITE_ROOT_FIELDS = frozenset(
         "shipment_date",
         "actual_shipment_date",
         "actual_ff_acceptance_date",
-        "target_facility_id",
         "payload",
     }
 )
@@ -184,7 +183,6 @@ _SUPPLIER_SAFE_EDIT_PAYLOAD_FIELDS = frozenset(
         "shipment_date",
         "actual_shipment_date",
         "actual_ff_acceptance_date",
-        "target_facility_id",
         "metadata",
         "lines",
         "warnings",
@@ -269,7 +267,6 @@ class SupplierShipmentsBlock:
             "contract_name": "sheet_vitrina_v1_supplier_shipments_supplier_safe_v1",
             "status": "ok",
             "business_today": business_today,
-            "target_facility_options": self.runtime.list_active_ff_facilities(),
             "shipments": [
                 _supplier_safe_header_projection(row, business_today=business_today)
                 for row in self.runtime.list_supplier_shipments()
@@ -353,7 +350,12 @@ class SupplierShipmentsBlock:
         )
         return _supplier_safe_parse_projection(parsed)
 
-    def create_shipment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_shipment(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        allow_unassigned_target_facility: bool = False,
+    ) -> dict[str, Any]:
         if "historical_status_exception" in payload:
             raise ValueError(
                 "Историческое исключение статуса доступно только через audited repo-owned flow."
@@ -381,10 +383,12 @@ class SupplierShipmentsBlock:
             or edited_payload.get("target_facility_id")
             or ""
         ).strip()
-        if not requested_target_facility_id:
+        if not requested_target_facility_id and not allow_unassigned_target_facility:
             raise ValueError("Для нового заказа обязательно выберите целевой фулфилмент")
-        target_facility = self.runtime.resolve_active_ff_facility(
-            requested_target_facility_id
+        target_facility = (
+            self.runtime.resolve_active_ff_facility(requested_target_facility_id)
+            if requested_target_facility_id
+            else {"facility_id": "", "name": ""}
         )
         status_resolution = validate_supplier_factual_dates(
             actual_shipment_date=actual_shipment_date,
@@ -486,7 +490,10 @@ class SupplierShipmentsBlock:
 
     def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         sanitized = _sanitize_supplier_write_payload(payload, require_upload_id=True)
-        created = self.create_shipment(sanitized)
+        created = self.create_shipment(
+            sanitized,
+            allow_unassigned_target_facility=True,
+        )
         return _supplier_safe_detail_projection(
             created,
             business_today=supplier_business_today(timestamp=self.timestamp_factory()),
@@ -3011,7 +3018,6 @@ def _sanitize_supplier_write_payload(
         "shipment_date",
         "actual_shipment_date",
         "actual_ff_acceptance_date",
-        "target_facility_id",
     ):
         if field in payload:
             sanitized[field] = deepcopy(payload[field])

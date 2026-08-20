@@ -90,7 +90,6 @@ class FbsFulfillmentOrderBlock:
         for facility in facilities:
             inbound = self._remaining_inbound(
                 selected_facility_id=str(facility["facility_id"]),
-                facilities=facilities,
                 active_skus=active_skus,
             )
             facility["remaining_active_inbound_qty"] = inbound["total_quantity"]
@@ -168,7 +167,6 @@ class FbsFulfillmentOrderBlock:
         )
         inbound = self._remaining_inbound(
             selected_facility_id=str(selected["facility_id"]),
-            facilities=readiness,
             active_skus=active_skus,
         )
         inbound_by_nm = {
@@ -396,39 +394,24 @@ class FbsFulfillmentOrderBlock:
         self,
         *,
         selected_facility_id: str,
-        facilities: list[Mapping[str, Any]],
         active_skus: list[tuple[int, str]],
     ) -> dict[str, Any]:
-        moscow = next(
-            (
-                item
-                for item in facilities
-                if str(item.get("city") or "") == MOSCOW_CITY
-                or str(item.get("name") or "") == "FF Москва"
-            ),
-            None,
-        )
-        moscow_id = str((moscow or {}).get("facility_id") or "")
         active_nm_ids = {nm_id for nm_id, _ in active_skus}
         totals: dict[int, float] = {}
         evidence_rows: list[dict[str, Any]] = []
-        fallback_count = 0
+        unassigned_count = 0
         explicit_other_count = 0
         for shipment in self.runtime.list_supplier_shipments():
             status = str(shipment.get("order_status") or "")
             if status not in {ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT}:
                 continue
             explicit_target = str(shipment.get("target_facility_id") or "").strip()
-            effective_target = explicit_target or moscow_id
-            target_source = (
-                "explicit" if explicit_target else "legacy_null_target_fallback_moscow"
-            )
-            if effective_target != selected_facility_id:
-                if explicit_target:
-                    explicit_other_count += 1
-                continue
             if not explicit_target:
-                fallback_count += 1
+                unassigned_count += 1
+                continue
+            if explicit_target != selected_facility_id:
+                explicit_other_count += 1
+                continue
             detail = self.runtime.load_supplier_shipment(
                 str(shipment.get("shipment_id") or "")
             )
@@ -456,8 +439,8 @@ class FbsFulfillmentOrderBlock:
                     {
                         "shipment_id": str(shipment.get("shipment_id") or ""),
                         "order_status": status,
-                        "target_facility_id": effective_target,
-                        "target_assignment_source": target_source,
+                        "target_facility_id": explicit_target,
+                        "target_assignment_source": "explicit",
                         "remaining_quantity": shipment_qty,
                         "quantity_by_nm_id": quantity_by_nm,
                     }
@@ -468,7 +451,8 @@ class FbsFulfillmentOrderBlock:
             "total_quantity": sum(totals.values()),
             "included_shipments": evidence_rows,
             "included_shipment_count": len(evidence_rows),
-            "legacy_null_target_fallback_moscow_count": fallback_count,
+            "unassigned_target_excluded_count": unassigned_count,
+            "legacy_null_target_fallback_moscow_count": 0,
             "explicit_other_facility_excluded_count": explicit_other_count,
             "active_statuses": [ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT],
             "accepted_or_inactive_excluded": True,
