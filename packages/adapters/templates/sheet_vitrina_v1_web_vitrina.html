@@ -5308,6 +5308,7 @@
     .ff-pool-modal { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, #101722 62%, transparent); }
     .ff-pool-modal[hidden] { display: none; }
     .ff-pool-dialog { width: min(1080px, 100%); max-height: min(880px, calc(100vh - 32px)); overflow: auto; background: var(--panel-bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,.34); }
+    .ff-pool-dialog [hidden] { display: none !important; }
     .ff-pool-dialog-head { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border); background: var(--panel-bg); }
     .ff-pool-dialog-head h2 { margin: 0; font-size: 20px; }
     .ff-pool-dialog-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
@@ -5756,14 +5757,8 @@
           </div>
           <div class="warehouse-ff-action">
             <h3>Накладные расходы FF</h3>
-            <p class="warehouse-meta">Сумма распределяется по положительному физическому остатку на дату; количество не меняется.</p>
-            <div class="warehouse-ff-form">
-              <label>Дата учёта<input class="input" type="date" data-ff-overhead-date></label>
-              <label>Сумма, RUB<input class="input" type="number" min="0.01" step="0.01" inputmode="decimal" data-ff-overhead-amount></label>
-              <label class="wide">Основание / комментарий<textarea class="input" rows="2" data-ff-overhead-reason></textarea></label>
-              <div class="warehouse-ff-actions-row wide"><button class="button secondary" type="button" data-ff-overhead-preview>Проверить распределение</button><button class="button primary" type="button" data-ff-overhead-confirm disabled>Подтвердить проведение</button></div>
-            </div>
-            <div class="warehouse-ff-result" data-ff-overhead-result role="status" aria-live="polite" hidden></div>
+            <p class="warehouse-meta">Создание агрегатного документа выведено из эксплуатации. Используйте единственный путь: «Документы фулфилмента → Накладные расходы FBS/FBO».</p>
+            <div class="warehouse-ff-actions-row"><button class="button secondary" type="button" data-ff-pool-open-overhead>Открыть новый путь</button></div>
           </div>
         </div>
         </details>
@@ -5807,7 +5802,7 @@
               <label class="wide">Действие<select class="input" data-ff-pool-action-kind></select></label>
               <label>Дата учёта<input class="input" type="date" required data-ff-pool-business-date></label>
               <label data-ff-pool-field="facility">Склад FF<select class="input" data-ff-pool-facility></select></label>
-              <label data-ff-pool-field="scope">Сегмент<select class="input" data-ff-pool-scope><option value="both">FBS + FBO</option><option value="FBS">FBS</option><option value="FBO">FBO</option></select></label>
+              <label data-ff-pool-field="scope">Сегмент<select class="input" data-ff-pool-scope><option value="">Выберите сегмент</option><option value="FBS">FBS</option><option value="FBO">FBO</option><option value="both">FBS + FBO</option></select></label>
               <label data-ff-pool-field="source_pool">Откуда<select class="input" data-ff-pool-source-pool><option>FBS</option><option>FBO</option></select></label>
               <label data-ff-pool-field="destination_pool">Куда<select class="input" data-ff-pool-destination-pool><option>FBO</option><option>FBS</option></select></label>
               <label data-ff-pool-field="destination_facility">Склад назначения<select class="input" data-ff-pool-destination-facility></select></label>
@@ -5815,6 +5810,10 @@
               <label class="wide" data-ff-pool-field="target">Документ-основание<input class="input" data-ff-pool-target placeholder="ID документа"></label>
               <label class="wide" data-ff-pool-field="items">Товары, по строке «nmId количество»<textarea class="input" rows="4" data-ff-pool-items placeholder="123456 10"></textarea></label>
               <label data-ff-pool-field="amount">Сумма, RUB<input class="input" type="number" min="0.01" step="0.01" data-ff-pool-amount></label>
+              <label data-ff-pool-field="category">Категория расхода<select class="input" data-ff-pool-overhead-category><option value="">Выберите категорию</option><option value="fbs_order_processing">Обработка FBS-заказов</option><option value="inbound_logistics_to_ff">Логистика до склада FF</option><option value="storage">Хранение</option><option value="internal_warehouse_movement">Перемещение внутри склада</option><option value="receiving">Приёмка</option><option value="returns_processing">Обработка возвратов/невыкупов</option><option value="packaging_labeling_consumables">Упаковка, маркировка и расходные материалы</option><option value="other">Прочие</option></select></label>
+              <label class="wide" data-ff-pool-field="comment">Комментарий<textarea class="input" rows="2" maxlength="1000" data-ff-pool-overhead-comment></textarea></label>
+              <label class="wide" data-ff-pool-field="payment_file">Платёжное поручение PDF (необязательно)<input class="input" type="file" accept=".pdf,application/pdf" data-ff-pool-overhead-file><button class="button ghost" type="button" data-ff-pool-overhead-file-remove hidden>Удалить PDF и ввести сумму вручную</button></label>
+              <div class="ff-pool-alert wide" data-ff-pool-field="payment_evidence" data-ff-pool-overhead-evidence hidden></div>
               <label class="wide" data-ff-pool-field="reason">Основание<input class="input" data-ff-pool-reason maxlength="500"></label>
               <label class="wide" data-ff-pool-field="expenses">Расходы, по строке «Название | сумма»<textarea class="input" rows="3" data-ff-pool-expenses placeholder="Доставка | 1200.00"></textarea></label>
               <label class="wide" data-ff-pool-field="shipment">Поставка из Китая<input class="input" data-ff-pool-shipment placeholder="ID поставки"></label>
@@ -24018,6 +24017,11 @@
       target: modal.querySelector("[data-ff-pool-target]"),
       items: modal.querySelector("[data-ff-pool-items]"),
       amount: modal.querySelector("[data-ff-pool-amount]"),
+      overheadCategory: modal.querySelector("[data-ff-pool-overhead-category]"),
+      overheadComment: modal.querySelector("[data-ff-pool-overhead-comment]"),
+      overheadFile: modal.querySelector("[data-ff-pool-overhead-file]"),
+      overheadFileRemove: modal.querySelector("[data-ff-pool-overhead-file-remove]"),
+      overheadEvidence: modal.querySelector("[data-ff-pool-overhead-evidence]"),
       reason: modal.querySelector("[data-ff-pool-reason]"),
       expenses: modal.querySelector("[data-ff-pool-expenses]"),
       shipment: modal.querySelector("[data-ff-pool-shipment]"),
@@ -24029,7 +24033,7 @@
       requestId: modal.querySelector("[data-ff-pool-request-id]"),
       workflow: modal.querySelector("[data-ff-pool-workflow-detail]")
     };
-    const state = { loaded: false, capabilities: null, facilities: [], opener: null, busy: false };
+    const state = { loaded: false, capabilities: null, facilities: [], opener: null, busy: false, currentAction: "" };
     const requestStorageKey = "wb.ffPool.lastRequestId.v1";
     const actions = {
       china_acceptance: { label: "Приёмка Китай → FF", fields: ["facility", "shipment", "workbook", "expenses"], workbook: true, help: "Скачайте шаблон для выбранной поставки, распределите принятое количество между FBO и FBS и загрузите файл." },
@@ -24041,7 +24045,7 @@
       transfer_cancellation: { label: "Отмена остатка перемещения", fields: ["root"], help: "Возвращает весь ещё открытый остаток в исходный сегмент." },
       pool_reallocation: { label: "Перемещение FBO ↔ FBS", fields: ["facility", "source_pool", "destination_pool", "items", "expenses"], help: "Переносит товар внутри одного склада без повторного включения в FF." },
       pool_inventory: { label: "Инвентаризация FBS/FBO", fields: ["facility", "scope", "workbook"], workbook: true, help: "Скачайте полный шаблон выбранного склада и сегмента; пропущенные SKU блокируют проведение. Явный 0 в полном FBS-шаблоне подтверждает физический ноль и сохраняется как аудируемый остаток без движения." },
-      pool_overhead: { label: "Накладные расходы", fields: ["facility", "scope", "amount", "reason"], help: "Распределяет сумму только по положительному физическому остатку выбранного сегмента." },
+      pool_overhead: { label: "Накладные расходы FBS/FBO", fields: ["facility", "scope", "amount", "category", "comment", "payment_file", "payment_evidence"], required: ["facility", "scope", "amount", "category"], help: "Дата берётся с сервера по часовому поясу выбранного склада. PDF необязателен и никогда не определяет склад, сегмент или категорию." },
       correction: { label: "Корректировка", fields: ["target", "facility", "source_pool", "items"], help: "Строки: nmId, изменение количества, изменение капитала. Корректировка добавляется, исходный документ не меняется." },
       storno: { label: "Сторно", fields: ["target"], help: "Создаёт точный обратный документ; исходная запись остаётся в истории." },
       late_expense: { label: "Поздний расход", fields: ["root", "expenses"], help: "Добавляет расходы к корню перемещения без изменения ранее проведённых документов." }
@@ -24160,6 +24164,9 @@
       [nodes.facility, nodes.destinationFacility].forEach(function (select) {
         const selected = select.value;
         clear(select);
+        const placeholder = make("option", "", "Выберите склад FF");
+        placeholder.value = "";
+        select.appendChild(placeholder);
         state.facilities.filter(function (item) { return item.active; }).forEach(function (facility) {
           const option = make("option", "", facility.name + " · " + facility.code);
           option.value = facility.facility_id;
@@ -24167,6 +24174,8 @@
         });
         if (Array.from(select.options).some(function (item) { return item.value === selected; })) select.value = selected;
       });
+      applyNonOverheadDefaults();
+      updateOverheadBusinessDate();
     }
     async function loadFacilityDetail(id) {
       nodes.facilityDetail.hidden = false;
@@ -24271,11 +24280,14 @@
         const selected = (payload.documents || [])[0] || {};
         nodes.documentDetail.appendChild(make("h3", "", (selected.document_label_ru || selected.document_kind || "Документ") + " · " + (selected.document_id || id)));
         nodes.documentDetail.appendChild(make("p", "ff-pool-note", (selected.business_date || "—") + " · " + (selected.actor || "—") + " · " + (selected.posted_at || "—")));
+        if (selected.overhead) appendOverheadSummary(nodes.documentDetail, selected.overhead);
         const actionsRow = make("div", "warehouse-ff-actions-row");
         [["lines","Строки"],["expenses","Расходы"],["relations","Связи"],["graph","Граф"]].forEach(function (spec) {
           const button = make("button", "button ghost", spec[1]); button.type="button"; button.addEventListener("click", function(){ loadDocumentPart(id, spec[0]); }); actionsRow.appendChild(button);
         });
-        const file = make("a", "button ghost", "Исходный файл"); file.href = base + "/documents/" + encodeURIComponent(id) + "/file"; file.rel = "noopener"; actionsRow.appendChild(file);
+        if (selected.source_file_available) {
+          const file = make("a", "button ghost", "Исходный файл"); file.href = base + "/documents/" + encodeURIComponent(id) + "/file"; file.rel = "noopener"; actionsRow.appendChild(file);
+        }
         nodes.documentDetail.appendChild(actionsRow);
       } catch (error) { setAlert(nodes.documentDetail, error.message, "error"); }
     }
@@ -24290,12 +24302,69 @@
         nodes.documentDetail.appendChild(section);
       } catch (error) { setAlert(nodes.documentDetail, error.message, "error"); }
     }
+    function clearActionControl(control) {
+      if (!control || control.dataset.ffPoolActionKind) return;
+      if (control.type === "file") control.value = "";
+      else if (control.tagName === "SELECT") control.selectedIndex = 0;
+      else if (!["button", "submit"].includes(control.type)) control.value = "";
+    }
+    function updateOverheadBusinessDate() {
+      if (nodes.kind.value !== "pool_overhead") return;
+      const facility = state.facilities.find(function(item){ return item.facility_id === nodes.facility.value; });
+      nodes.date.value = facility ? String(facility.current_business_date || "") : "";
+    }
+    function updateOverheadAmountMode() {
+      const attached = Boolean(nodes.overheadFile.files && nodes.overheadFile.files[0]);
+      nodes.amount.readOnly = nodes.kind.value === "pool_overhead" && attached;
+      nodes.overheadFileRemove.hidden = nodes.kind.value !== "pool_overhead" || !attached;
+      if (attached) nodes.amount.value = "";
+      if (nodes.kind.value === "pool_overhead") {
+        nodes.overheadEvidence.hidden = !attached;
+        if (attached) setAlert(nodes.overheadEvidence, "PDF будет проверен сервером. Склад, сегмент и категория остаются только ручным выбором.", "neutral");
+      }
+    }
+    function applyNonOverheadDefaults() {
+      const kind = nodes.kind.value;
+      const action = actions[kind] || { fields: [] };
+      if (!kind || kind === "pool_overhead") return;
+      if (action.fields.indexOf("facility") >= 0 && !nodes.facility.value && nodes.facility.options.length > 1) nodes.facility.selectedIndex = 1;
+      if (action.fields.indexOf("destination_facility") >= 0 && !nodes.destinationFacility.value && nodes.destinationFacility.options.length > 1) nodes.destinationFacility.selectedIndex = 1;
+      if (action.fields.indexOf("scope") >= 0 && !nodes.scope.value) nodes.scope.value = "both";
+    }
     function updateActionFields() {
-      const action = actions[nodes.kind.value] || { fields: [], help: "" };
-      modal.querySelectorAll("[data-ff-pool-field]").forEach(function (field) { field.hidden = action.fields.indexOf(field.dataset.ffPoolField) < 0; });
+      const kind = nodes.kind.value;
+      const action = actions[kind] || { fields: [], required: [], help: "" };
+      if (state.currentAction && state.currentAction !== kind && kind === "pool_overhead") {
+        nodes.facility.value = "";
+        nodes.scope.value = "";
+        nodes.overheadCategory.value = "";
+        nodes.amount.value = "";
+        nodes.overheadComment.value = "";
+        nodes.overheadFile.value = "";
+      }
+      modal.querySelectorAll("[data-ff-pool-field]").forEach(function (field) {
+        const key = field.dataset.ffPoolField;
+        const visible = action.fields.indexOf(key) >= 0;
+        field.hidden = !visible;
+        field.querySelectorAll("input,select,textarea").forEach(function(control) {
+          control.disabled = !visible;
+          control.required = visible && (action.required || []).indexOf(key) >= 0;
+          if (!visible) clearActionControl(control);
+        });
+      });
+      nodes.date.readOnly = kind === "pool_overhead";
+      nodes.date.required = true;
+      if (kind === "pool_overhead") updateOverheadBusinessDate();
+      else {
+        applyNonOverheadDefaults();
+        if (!nodes.date.value) nodes.date.value = new Date().toISOString().slice(0, 10);
+      }
+      nodes.overheadComment.required = kind === "pool_overhead" && nodes.overheadCategory.value === "other";
       nodes.help.textContent = action.help;
       nodes.template.hidden = !action.workbook;
       nodes.preview.textContent = action.workbook ? "Загрузить и проверить" : "Проверить документ";
+      state.currentAction = kind;
+      updateOverheadAmountMode();
     }
     function parseItems(text, correction) {
       return String(text || "").split(/\r?\n/).map(function(line){return line.trim();}).filter(Boolean).map(function(line){
@@ -24325,7 +24394,7 @@
       if (kind === "transfer_discrepancy") return Object.assign({root_document_id:root},parseDiscrepancy(nodes.items.value));
       if (kind === "transfer_cancellation") return {root_document_id:root};
       if (kind === "pool_reallocation") return {facility_id:facility,source_pool:nodes.sourcePool.value,destination_pool:nodes.destinationPool.value,items:parseItems(nodes.items.value),expenses:parseExpenses(nodes.expenses.value)};
-      if (kind === "pool_overhead") return {facility_id:facility,scope:nodes.scope.value,amount_rub:nodes.amount.value,reason:nodes.reason.value};
+      if (kind === "pool_overhead") return {facility_id:facility,scope:nodes.scope.value,amount_rub:nodes.amount.value,category:nodes.overheadCategory.value,comment:nodes.overheadComment.value};
       if (kind === "correction") return {target_document_id:target,movements:parseItems(nodes.items.value,true)};
       if (kind === "storno") return {target_document_id:target};
       if (kind === "late_expense") return {root_document_id:root,expenses:parseExpenses(nodes.expenses.value)};
@@ -24337,7 +24406,26 @@
       const kind = nodes.kind.value; const requestId = "ffui_" + Date.now() + "_" + Math.random().toString(16).slice(2,10);
       try {
         let payload;
-        if (kind === "china_acceptance" || kind === "pool_inventory") {
+        if (kind === "pool_overhead") {
+          if (!nodes.facility.value) throw new Error("Выберите склад FF.");
+          if (!nodes.scope.value) throw new Error("Выберите сегмент FBS/FBO.");
+          if (!nodes.overheadCategory.value) throw new Error("Выберите категорию расхода.");
+          if (nodes.overheadCategory.value === "other" && !nodes.overheadComment.value.trim()) throw new Error("Для категории «Прочие» обязателен комментарий.");
+          const overheadBody = {request_id:requestId,business_date:nodes.date.value,facility_id:nodes.facility.value,scope:nodes.scope.value,category:nodes.overheadCategory.value,comment:nodes.overheadComment.value,amount_rub:nodes.amount.value};
+          const paymentFile = nodes.overheadFile.files && nodes.overheadFile.files[0];
+          if (paymentFile) {
+            const form = new FormData();
+            form.append("file", paymentFile);
+            Object.keys(overheadBody).forEach(function(key){ form.append(key, overheadBody[key]); });
+            payload = await api("/documents/overhead/preview", {method:"POST",body:form});
+          } else {
+            if (!nodes.amount.value) throw new Error("Укажите сумму расхода.");
+            payload = await jsonPost("/documents/overhead/preview", overheadBody);
+          }
+          const overheadSummary = payload && payload.preview && payload.preview.summary || {};
+          if (overheadSummary.amount_rub) nodes.amount.value = overheadSummary.amount_rub;
+          renderOverheadEvidence(overheadSummary.payment_evidence || {});
+        } else if (kind === "china_acceptance" || kind === "pool_inventory") {
           const file = nodes.workbook.files && nodes.workbook.files[0]; if (!file) throw new Error("Выберите заполненный XLSX.");
           const form = new FormData(); form.append("file", file); form.append("request_id", requestId); form.append("business_date", nodes.date.value);
           if (kind === "china_acceptance") { form.append("shipment_id", nodes.shipment.value.trim()); form.append("expenses_json", JSON.stringify(parseExpenses(nodes.expenses.value))); }
@@ -24358,10 +24446,54 @@
       try { const payload=await api("/requests/"+encodeURIComponent(requestId)); renderWorkflow(payload); }
       catch(error){setAlert(nodes.workflow,error.message,"error");}
     }
+    function overheadEvidenceLines(evidence) {
+      if (!evidence || !Object.keys(evidence).length) return [];
+      const payer = evidence.payer || {}, beneficiary = evidence.beneficiary || {}, invoice = evidence.invoice_reference || {}, vat = evidence.vat || {};
+      const lines = [
+        "Банк / адаптер: " + [evidence.source_bank, evidence.adapter].filter(Boolean).join(" · "),
+        "Платёж: № " + (evidence.payment_order_number || "—") + " от " + (evidence.document_date || "—"),
+        "Исполнение: " + (evidence.execution_date || "—") + " · " + (evidence.execution_status || "—"),
+        "Сумма: " + (evidence.amount || "—") + " " + (evidence.currency || ""),
+        "Плательщик: " + (payer.name || "—"),
+        "Получатель: " + (beneficiary.name || "—"),
+        "Назначение: " + (evidence.payment_purpose || "—"),
+        "Счёт: " + (invoice.number || "—") + (invoice.date ? " от " + invoice.date : ""),
+        "НДС: " + [vat.status, vat.rate_percent ? vat.rate_percent + "%" : "", vat.amount].filter(Boolean).join(" · "),
+        "Parser: " + (evidence.parser_version || "—")
+      ];
+      if ((evidence.warnings || []).length) lines.push("Предупреждения: " + evidence.warnings.join("; "));
+      if ((evidence.errors || []).length) lines.push("Ошибки: " + evidence.errors.join("; "));
+      return lines;
+    }
+    function renderOverheadEvidence(evidence) {
+      const lines = overheadEvidenceLines(evidence);
+      if (!lines.length) { nodes.overheadEvidence.hidden = true; nodes.overheadEvidence.textContent = ""; return; }
+      setAlert(nodes.overheadEvidence, lines.join("\n"), evidence.posting_eligible ? "success" : "error");
+    }
+    function appendOverheadSummary(container, summary) {
+      if (!summary || !summary.category) return;
+      const facility = state.facilities.find(function(item){ return item.facility_id === summary.facility_id; });
+      container.appendChild(make("h4", "", "Накладные расходы FBS/FBO"));
+      container.appendChild(make("p", "ff-pool-note", (facility ? facility.name : summary.facility_id) + " · " + summary.scope + " · " + (summary.category_label_ru || summary.category)));
+      container.appendChild(make("p", "ff-pool-note", "Дата: " + summary.business_date + " · сумма: " + money(summary.amount_rub) + " · основание: " + (summary.source_mode === "payment_order_pdf" ? "PDF" : "ручной ввод")));
+      container.appendChild(make("p", "ff-pool-note", "Положительный физический остаток: " + summary.denominator_quantity + " шт · SKU в denominator: " + summary.denominator_sku_count + " · затронуто SKU: " + summary.affected_sku_count + " · распределено: " + money(summary.allocation_total_rub)));
+      if (summary.comment) container.appendChild(make("p", "ff-pool-note", "Комментарий: " + summary.comment));
+      if (summary.filename || summary.file_sha256) container.appendChild(make("p", "ff-pool-note", "Файл: " + (summary.filename || "—") + " · SHA-256: " + (summary.file_sha256 || "—") + (summary.payment_evidence && summary.payment_evidence.payment_fingerprint ? " · fingerprint: " + summary.payment_evidence.payment_fingerprint : "")));
+      if (summary.payment_evidence && Object.keys(summary.payment_evidence).length) {
+        const evidenceNode = make("pre", "ff-pool-alert", overheadEvidenceLines(summary.payment_evidence).join("\n"));
+        evidenceNode.dataset.tone = summary.payment_evidence.posting_eligible ? "success" : "error";
+        container.appendChild(evidenceNode);
+      }
+    }
     function renderWorkflow(payload) {
       clear(nodes.workflow); nodes.workflow.hidden=false;
       nodes.workflow.appendChild(make("h3","",payload.state_label_ru||payload.state||"Статус"));
       nodes.workflow.appendChild(make("p","ff-pool-note","Запрос "+(payload.request_id||"—")+" · "+(payload.document_label_ru||payload.document_kind||"")));
+      if (payload.payment_duplicate) {
+        const duplicate = payload.duplicate_link || {};
+        nodes.workflow.appendChild(make("p", "ff-pool-alert", "Этот платёж уже связан с существующим запросом " + (duplicate.request_id || payload.request_id || "—") + (duplicate.document_id ? " и документом " + duplicate.document_id : "") + ". Повторный расход не создан."));
+      }
+      if (payload.document_kind === "pool_overhead") appendOverheadSummary(nodes.workflow, payload.preview && payload.preview.summary || {});
       const steps=make("ol","ff-pool-steps"); (payload.steps||[]).forEach(function(step){const item=make("li","ff-pool-step",step.label_ru);item.dataset.status=step.status;steps.appendChild(item);}); nodes.workflow.appendChild(steps);
       if(payload.error&&payload.error.code)nodes.workflow.appendChild(make("p","ff-pool-alert",payload.error.code+": "+JSON.stringify(payload.error.details||{})));
       const actionsRow=make("div","warehouse-ff-actions-row");
@@ -24371,7 +24503,17 @@
     async function loadPreview(id){try{const payload=await api("/requests/"+encodeURIComponent(id)+"/preview?page=1&limit=200");const section=make("section","ff-pool-details");section.appendChild(make("h4","","Предпросмотр: "+(payload.collection||"сводка")));(payload.rows||[]).forEach(function(row){section.appendChild(make("p","ff-pool-note",JSON.stringify(row)));});nodes.workflow.appendChild(section);}catch(error){setAlert(nodes.workflow,error.message,"error");}}
     async function confirmRequest(id,button){button.disabled=true;try{const payload=await jsonPost("/requests/"+encodeURIComponent(id)+"/confirm",{confirm:true});renderWorkflow(payload);await loadDocuments();}catch(error){setAlert(nodes.workflow,error.message,"error");}finally{button.disabled=false;}}
 
-    openButton.addEventListener("click", function () { state.opener=document.activeElement;modal.hidden=false;document.body.style.overflow="hidden";dialog.focus();initialize(); });
+    async function openModal(preferredAction) {
+      state.opener=document.activeElement;modal.hidden=false;document.body.style.overflow="hidden";dialog.focus();
+      await initialize();
+      if (preferredAction && Array.from(nodes.kind.options).some(function(option){ return option.value === preferredAction; })) {
+        activateTab("create");
+        nodes.kind.value = preferredAction;
+        updateActionFields();
+      }
+    }
+    openButton.addEventListener("click", function () { openModal(""); });
+    document.querySelectorAll("[data-ff-pool-open-overhead]").forEach(function(button){ button.addEventListener("click", function(){ openModal("pool_overhead"); }); });
     function closeModal(){modal.hidden=true;document.body.style.overflow="";if(state.opener&&state.opener.focus)state.opener.focus();}
     closeButton.addEventListener("click",closeModal); modal.addEventListener("click",function(event){if(event.target===modal)closeModal();});
     document.addEventListener("keydown",function(event){if(!modal.hidden&&event.key==="Escape")closeModal();});
@@ -24380,7 +24522,12 @@
     modal.querySelector("[data-ff-pool-facility-new]").addEventListener("click",function(){showFacilityEditor(null);});
     modal.querySelector("[data-ff-pool-document-refresh]").addEventListener("click",loadDocuments);
     modal.querySelector("[data-ff-pool-request-load]").addEventListener("click",loadWorkflow);
-    nodes.kind.addEventListener("change",updateActionFields); nodes.form.addEventListener("submit",submitAction); nodes.template.addEventListener("click",downloadTemplate);
+    nodes.kind.addEventListener("change",updateActionFields);
+    nodes.facility.addEventListener("change",updateOverheadBusinessDate);
+    nodes.overheadCategory.addEventListener("change",function(){ nodes.overheadComment.required = nodes.kind.value === "pool_overhead" && nodes.overheadCategory.value === "other"; });
+    nodes.overheadFile.addEventListener("change",updateOverheadAmountMode);
+    nodes.overheadFileRemove.addEventListener("click",function(){ nodes.overheadFile.value = ""; nodes.overheadEvidence.textContent = ""; updateOverheadAmountMode(); nodes.amount.focus(); });
+    nodes.form.addEventListener("submit",submitAction); nodes.template.addEventListener("click",downloadTemplate);
   }());
   </script>
 </body>

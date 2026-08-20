@@ -20,6 +20,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_FF_POOL_FACILITIES_PATH,
     DEFAULT_FF_POOL_PATH,
     DEFAULT_FF_POOL_DOCUMENTS_PATH,
+    DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
     DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -33,7 +34,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.ff_pool_surfaces import MAX_JSON_REQUEST_BYTES  # noqa: E402
-from packages.contracts.ff_pool_documents import XlsxParserLimits  # noqa: E402
+from packages.contracts.ff_pool_documents import (  # noqa: E402
+    OVERHEAD_PAYMENT_ORDER_MAX_REQUEST_BYTES,
+    XlsxParserLimits,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 from apps.registry_upload_http_entrypoint_supplier_auth_smoke import (  # noqa: E402
     _login,
@@ -68,6 +72,7 @@ def main() -> None:
             _read_contract(base)
             _mutation_contract(base)
             _guided_acceptance_csrf_contract(base)
+            _overhead_csrf_contract(base)
             _prebuffer_limit(config.port)
             _ui_contract(base)
         finally:
@@ -187,6 +192,60 @@ def _guided_acceptance_csrf_contract(base: str) -> None:
     assert guarded_confirm_code == 409 and guarded_confirm["code"] == "facility_pool_feature_off"
 
 
+def _overhead_csrf_contract(base: str) -> None:
+    body = {
+        "request_id": "fixture:http:overhead",
+        "facility_id": "fac_fixture",
+        "scope": "FBS",
+        "category": "storage",
+        "comment": "",
+        "amount_rub": "1.00",
+    }
+    missing_code, missing, _ = _json_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}",
+        method="POST",
+        payload=body,
+    )
+    assert missing_code == 403 and missing["code"] == "csrf_failed"
+    cross_code, cross, _ = _json_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}",
+        method="POST",
+        payload=body,
+        headers={
+            "X-WB-FF-Pool-CSRF": "1",
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert cross_code == 403 and cross["code"] == "csrf_failed"
+    off_code, off, _ = _json_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}",
+        method="POST",
+        payload=body,
+        headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert off_code == 409 and off["code"] == "facility_pool_feature_off"
+
+    missing_pdf_code, missing_pdf = _multipart_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}"
+    )
+    assert missing_pdf_code == 403 and missing_pdf["code"] == "csrf_failed"
+    cross_pdf_code, cross_pdf = _multipart_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}",
+        headers={
+            "X-WB-FF-Pool-CSRF": "1",
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert cross_pdf_code == 403 and cross_pdf["code"] == "csrf_failed"
+    off_pdf_code, off_pdf = _multipart_request(
+        f"{base}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}",
+        headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert off_pdf_code == 409 and off_pdf["code"] == "facility_pool_feature_off"
+
+
 def _multipart_request(
     url: str,
     *,
@@ -243,6 +302,17 @@ def _prebuffer_limit(port: int) -> None:
         "Connection: close\r\n\r\n"
     ).encode("ascii")
     _assert_prebuffer_413(port, multipart_head)
+    payment_head = (
+        f"POST {DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Accept: application/json\r\n"
+        "Content-Type: multipart/form-data; boundary=fixture\r\n"
+        "X-WB-FF-Pool-CSRF: 1\r\n"
+        "Sec-Fetch-Site: same-origin\r\n"
+        f"Content-Length: {OVERHEAD_PAYMENT_ORDER_MAX_REQUEST_BYTES + 1}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    _assert_prebuffer_413(port, payment_head)
     json_head = (
         f"POST {DEFAULT_FF_POOL_FACILITIES_PATH} HTTP/1.1\r\n"
         f"Host: 127.0.0.1:{port}\r\n"
@@ -278,6 +348,12 @@ def _ui_contract(base: str) -> None:
     assert "Явный 0 в полном FBS-шаблоне" in page
     assert "inventory-template.xlsx?" in page and "/documents/inventory" in page
     assert "Подтвердить проведение" in page
+    assert 'data-ff-pool-overhead-category' in page
+    assert 'data-ff-pool-overhead-file' in page
+    assert 'data-ff-pool-open-overhead' in page
+    assert '.ff-pool-dialog [hidden] { display: none !important; }' in page
+    assert '/documents/overhead/preview' in page
+    assert "Создание агрегатного документа выведено из эксплуатации" in page
     assert "facility_pool_opening" not in page
     assert "state.capabilities.document_kinds" in page
     assert page.count('data-warehouse-key="') >= 6

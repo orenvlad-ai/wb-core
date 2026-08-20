@@ -77,6 +77,7 @@ from packages.application.ff_inventory_reconciliation import FfInventoryReconcil
 from packages.application.ff_overhead_allocation import FfOverheadAllocationError
 from packages.application.ff_pool_surfaces import (
     MAX_JSON_REQUEST_BYTES as FF_POOL_MAX_JSON_REQUEST_BYTES,
+    MAX_OVERHEAD_PAYMENT_ORDER_REQUEST_BYTES as FF_POOL_OVERHEAD_MAX_REQUEST_BYTES,
     FfPoolSurfaceError,
 )
 from packages.application.ff_pool_documents_xlsx import (
@@ -396,6 +397,7 @@ DEFAULT_FF_POOL_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/facility-pools"
 DEFAULT_FF_POOL_PREFIX = f"{DEFAULT_FF_POOL_PATH}/"
 DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
+DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
 DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
 DEFAULT_FF_POOL_FBS_ORDERS_PATH = f"{DEFAULT_FF_POOL_PATH}/fbs-orders"
@@ -5876,6 +5878,7 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
+        DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
     }:
         return True
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
@@ -5908,6 +5911,35 @@ def _handle_ff_pool_post(
             _load_request_payload(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ), actor=actor
+        )
+    if normalized == DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH:
+        request_content_type = str(handler.headers.get("Content-Type") or "")
+        if request_content_type.lower().startswith("multipart/form-data"):
+            upload = _load_uploaded_file_payload(
+                handler,
+                max_request_bytes=FF_POOL_OVERHEAD_MAX_REQUEST_BYTES,
+            )
+            fields = dict(upload.get("fields") or {})
+            return entrypoint.handle_ff_pool_overhead_preview_request(
+                {
+                    "request_id": str(fields.get("request_id") or ""),
+                    "business_date": str(fields.get("business_date") or ""),
+                    "facility_id": str(fields.get("facility_id") or ""),
+                    "scope": str(fields.get("scope") or ""),
+                    "category": str(fields.get("category") or ""),
+                    "comment": str(fields.get("comment") or ""),
+                    "amount_rub": str(fields.get("amount_rub") or ""),
+                },
+                actor=actor,
+                source_bytes=bytes(upload["workbook_bytes"]),
+                filename=str(upload.get("filename") or ""),
+                content_type=str(upload.get("content_type") or ""),
+            )
+        return entrypoint.handle_ff_pool_overhead_preview_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
         )
     if normalized in {
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
