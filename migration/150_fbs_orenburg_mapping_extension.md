@@ -70,6 +70,10 @@ allocation, exact identity evidence and ordinary lifecycle effects in one
 SQLite transaction. After a possibly committed transport failure, operators
 must query-only reconcile before any retry.
 
+Receipt-backed capital checks compare exact Decimal values. Equivalent SQLite
+text scales such as `60491.5` and `60491.50` are not business drift and must not
+block an otherwise exact manifest.
+
 ## Lifecycle invariants
 
 - `new|eligible` creates or refreshes one reservation;
