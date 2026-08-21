@@ -15,12 +15,15 @@ OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY = "proxy_profit_3_rub"
 OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY = "total_proxy_profit_3_rub"
 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY = "proxy_margin_3_pct"
 OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY = "proxy_margin_3_pct_total"
+SALES_WITHOUT_COST_RUB_METRIC_KEY = "sales_without_cost_rub"
+TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY = "total_sales_without_cost_rub"
 OUR_WB_ARCHIVED_METRIC_KEYS: tuple[str, ...] = (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
 )
 
-OUR_WB_UNIT_COST_RUB_LABEL = "Себестоимость WB наша, ₽/шт"
+OUR_WB_UNIT_COST_RUB_LABEL = "Себестоимость наша, ₽/шт"
+SALES_WITHOUT_COST_RUB_LABEL = "Продажи без себестоимости, ₽"
 OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL = "Доля подтверждённой себестоимости, %"
 OUR_WB_PROXY_PROFIT_3_RUB_LABEL = "proxy прибыль 3"
 OUR_WB_PROXY_MARGIN_3_PCT_LABEL = "Прокси маржинальность 3, %"
@@ -39,6 +42,34 @@ def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> 
             existing.add(metric.metric_key)
             additions.append(metric)
 
+    _append(
+        MetricV2Item(
+            metric_key=SALES_WITHOUT_COST_RUB_METRIC_KEY,
+            enabled=True,
+            scope="SKU",
+            label_ru=SALES_WITHOUT_COST_RUB_LABEL,
+            calc_type="metric",
+            calc_ref=SALES_WITHOUT_COST_RUB_METRIC_KEY,
+            show_in_data=True,
+            format="rub",
+            display_order=23,
+            section="Экономика",
+        )
+    )
+    _append(
+        MetricV2Item(
+            metric_key=TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru=SALES_WITHOUT_COST_RUB_LABEL,
+            calc_type="metric",
+            calc_ref="aggregate:sum:sales_without_cost_rub",
+            show_in_data=True,
+            format="rub",
+            display_order=22,
+            section="Экономика",
+        )
+    )
     _append(
         MetricV2Item(
             metric_key=OUR_WB_UNIT_COST_RUB_METRIC_KEY,

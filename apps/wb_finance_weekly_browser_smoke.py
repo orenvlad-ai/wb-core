@@ -119,7 +119,7 @@ def main() -> None:
                   const noMarketingRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Расходы WB без маркетинга');
                   const subscriptionsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Подписки');
                   const correctionsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Корректировки (расходы)');
-                  const cogsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Себестоимость продаж');
+                  const cogsRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Себестоимость наша');
                   const profitRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Прибыль после себестоимости');
                   const marginRow = [...table.querySelectorAll('tbody tr')].find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Итоговая рентабельность, %');
                   const metricCell = cogsRow.cells[0];

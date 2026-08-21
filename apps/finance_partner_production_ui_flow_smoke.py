@@ -262,7 +262,7 @@ def main() -> None:
         def break_cogs(workbook: object) -> None:
             sheet = workbook["Партнёрский отчёт"]  # type: ignore[index]
             for row in sheet.iter_rows(min_row=2):
-                if row[1].value == "Себестоимость":
+                if row[1].value == "Себестоимость наша":
                     row[2].value = 999
                     return
             raise AssertionError("COGS row not found")

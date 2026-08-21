@@ -99,6 +99,8 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    SALES_WITHOUT_COST_RUB_METRIC_KEY,
+    TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
@@ -2963,20 +2965,20 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY:
-                value = self._aggregate_complete_sum(
+                value = self._aggregate_covered_proxy_profit_sum(
                     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
                     self.enabled_config,
                     temporal_slot,
                 )
             elif metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY:
                 parameters = self._proxy_parameters(temporal_slot)
-                total_orders = self._aggregate_complete_sum(
-                    "orderSum", self.enabled_config, temporal_slot
+                covered_order_sum = self._aggregate_covered_order_sum(
+                    self.enabled_config, temporal_slot
                 )
                 expected_revenue = (
                     None
-                    if total_orders is None
-                    else float(total_orders) * float(parameters.buyout_rate)
+                    if covered_order_sum is None
+                    else float(covered_order_sum) * float(parameters.buyout_rate)
                 )
                 value = _divide_or_none(
                     self.resolve_total(
@@ -2984,6 +2986,12 @@ class _MetricEvaluator:
                         temporal_slot,
                     ),
                     expected_revenue,
+                )
+            elif metric.metric_key == TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY:
+                value = self._aggregate_complete_sum(
+                    SALES_WITHOUT_COST_RUB_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
                 )
             elif metric.metric_key in {
                 PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
@@ -3162,19 +3170,47 @@ class _MetricEvaluator:
             raise ValueError(f"metric_key missing in current registry: {metric_key}")
         group_items = self.grouped_config.get(group_name, [])
         if metric.calc_type == "metric":
-            if metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
-                total_orders = self._aggregate_complete_sum(
-                    "orderSum", group_items, temporal_slot
+            if metric.metric_key in {
+                OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                PROXY_V4_PROFIT_RUB_METRIC_KEY,
+            }:
+                value = self._aggregate_covered_proxy_profit_sum(
+                    metric.metric_key,
+                    group_items,
+                    temporal_slot,
+                )
+            elif metric.metric_key == SALES_WITHOUT_COST_RUB_METRIC_KEY:
+                value = self._aggregate_complete_sum(
+                    metric.metric_key,
+                    group_items,
+                    temporal_slot,
+                )
+            elif metric.metric_key in {
+                OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+                PROXY_V4_MARGIN_PCT_METRIC_KEY,
+            }:
+                covered_order_sum = self._aggregate_covered_order_sum(
+                    group_items, temporal_slot
+                )
+                parameters = (
+                    self._proxy_parameters(temporal_slot)
+                    if metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY
+                    else self._proxy_v4_parameters(temporal_slot)
                 )
                 denominator = (
                     None
-                    if total_orders is None
-                    else float(total_orders)
-                    * float(self._proxy_parameters(temporal_slot).buyout_rate)
+                    if covered_order_sum is None or parameters is None
+                    else float(covered_order_sum)
+                    * float(parameters.buyout_rate)
                 )
                 value = _divide_or_none(
-                    self._aggregate_complete_sum(
-                        OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                    self._aggregate_covered_proxy_profit_sum(
+                        (
+                            OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY
+                            if metric.metric_key
+                            == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY
+                            else PROXY_V4_PROFIT_RUB_METRIC_KEY
+                        ),
                         group_items,
                         temporal_slot,
                     ),
@@ -3255,11 +3291,25 @@ class _MetricEvaluator:
                 item.nm_id,
                 temporal_slot,
             )
-            order_sum = self.resolve_sku("orderSum", item.nm_id, temporal_slot)
-            if profit is None or order_sum is None:
+            inputs = self._covered_proxy_inputs(item.nm_id, temporal_slot)
+            if profit is None or inputs is None:
+                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                    continue
+                raw_order_sum = self.resolve_sku(
+                    "orderSum", item.nm_id, temporal_slot
+                )
+                if raw_order_sum is not None and float(raw_order_sum) > 0:
+                    return {
+                        "proxy_profit_4": None,
+                        "expected_buyout_revenue": None,
+                        "proxy_margin_4": None,
+                    }
                 continue
             eligible.append(
-                (float(profit), float(order_sum) * float(parameters.buyout_rate))
+                (
+                    float(profit),
+                    float(inputs["order_sum"]) * float(parameters.buyout_rate),
+                )
             )
         if not eligible:
             return {
@@ -3273,6 +3323,113 @@ class _MetricEvaluator:
             "proxy_profit_4": profit,
             "expected_buyout_revenue": revenue,
             "proxy_margin_4": None if revenue == 0 else profit / revenue,
+        }
+
+    def _aggregate_covered_order_sum(
+        self,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        values: list[float] = []
+        for item in config_items:
+            inputs = self._covered_proxy_inputs(item.nm_id, temporal_slot)
+            if inputs is None:
+                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                    continue
+                return None
+            values.append(float(inputs["order_sum"]))
+        return sum(values) if values else None
+
+    def _aggregate_covered_proxy_profit_sum(
+        self,
+        metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        values: list[float] = []
+        for item in config_items:
+            value = self.resolve_sku(metric_key, item.nm_id, temporal_slot)
+            if value is None:
+                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                    continue
+                return None
+            values.append(float(value))
+        return sum(values) if values else None
+
+    def _proxy_coverage_state(self, nm_id: int, temporal_slot: str) -> str:
+        daily = (
+            self._slot_lookups(temporal_slot)
+            .our_wb_cost_lookup.get(nm_id, {})
+            .get("daily_profit_coverage")
+        )
+        if not isinstance(daily, Mapping):
+            return "unknown"
+        sales_revenue = _optional_float(daily.get("sales_revenue_rub"))
+        covered_revenue = _optional_float(daily.get("covered_sales_revenue_rub"))
+        uncovered_revenue = _optional_float(
+            daily.get("uncovered_sales_revenue_rub")
+        )
+        if (
+            sales_revenue is not None
+            and sales_revenue > 0
+            and covered_revenue is not None
+            and covered_revenue <= 0
+            and uncovered_revenue is not None
+            and uncovered_revenue > 0
+        ):
+            return "uncovered"
+        return "covered" if covered_revenue is not None and covered_revenue > 0 else "unknown"
+
+    def _covered_proxy_inputs(
+        self,
+        nm_id: int,
+        temporal_slot: str,
+    ) -> dict[str, float] | None:
+        """Restrict every Proxy profit input to Finance cost-covered sales."""
+
+        order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+        order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
+        ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
+        if None in {order_sum, order_count, ads_sum}:
+            return None
+        daily = (
+            self._slot_lookups(temporal_slot)
+            .our_wb_cost_lookup.get(nm_id, {})
+            .get("daily_profit_coverage")
+        )
+        if not isinstance(daily, Mapping):
+            return None
+        sales_revenue = _optional_float(daily.get("sales_revenue_rub"))
+        covered_revenue = _optional_float(
+            daily.get("covered_sales_revenue_rub")
+        )
+        sales_orders = _optional_float(daily.get("sales_order_count"))
+        covered_orders = _optional_float(daily.get("covered_sales_order_count"))
+        covered_units = _optional_float(daily.get("covered_sales_units"))
+        covered_cogs = _optional_float(daily.get("covered_sales_cogs_rub"))
+        if (
+            sales_revenue is None
+            or covered_revenue is None
+            or sales_orders is None
+            or covered_orders is None
+            or covered_units is None
+            or covered_cogs is None
+            or sales_revenue <= 0
+            or covered_revenue <= 0
+            or sales_orders <= 0
+            or covered_orders <= 0
+            or covered_units <= 0
+            or covered_cogs <= 0
+        ):
+            return None
+        revenue_share = min(max(covered_revenue / sales_revenue, 0.0), 1.0)
+        order_share = min(max(covered_orders / sales_orders, 0.0), 1.0)
+        return {
+            "order_sum": float(order_sum) * revenue_share,
+            "order_count": float(order_count) * order_share,
+            "ads_sum": float(ads_sum) * revenue_share,
+            "unit_cost": covered_cogs / covered_units,
+            "coverage_share": revenue_share,
         }
 
     def _aggregate_avg(
@@ -3511,28 +3668,32 @@ class _MetricEvaluator:
             return _optional_float(
                 self._slot_lookups(temporal_slot).our_wb_cost_lookup.get(nm_id, {}).get("confirmed_share_pct")
             )
+        if metric_key == SALES_WITHOUT_COST_RUB_METRIC_KEY:
+            return _optional_float(
+                self._slot_lookups(temporal_slot)
+                .our_wb_cost_lookup.get(nm_id, {})
+                .get("sales_without_cost_rub")
+            )
         if metric_key == OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY:
-            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
-            order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
-            our_wb_unit_cost = self.resolve_sku(OUR_WB_UNIT_COST_RUB_METRIC_KEY, nm_id, temporal_slot)
-            ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
-            if None in {order_sum, order_count, our_wb_unit_cost, ads_sum}:
+            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            if inputs is None:
                 return None
             calculated = calculate_proxy_3(
-                order_sum=order_sum,
-                order_count=order_count,
-                canonical_wb_wac=our_wb_unit_cost,
-                ads_sum=ads_sum,
+                order_sum=inputs["order_sum"],
+                order_count=inputs["order_count"],
+                canonical_wb_wac=inputs["unit_cost"],
+                ads_sum=inputs["ads_sum"],
                 parameters=self._proxy_parameters(temporal_slot),
             )
             value = calculated["proxy_profit_3"]
             return None if value is None else float(value)
         if metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
-            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
             expected_revenue = (
                 None
-                if order_sum is None
-                else float(order_sum) * float(self._proxy_parameters(temporal_slot).buyout_rate)
+                if inputs is None
+                else float(inputs["order_sum"])
+                * float(self._proxy_parameters(temporal_slot).buyout_rate)
             )
             return _divide_or_none(
                 self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
@@ -3540,15 +3701,14 @@ class _MetricEvaluator:
             )
         if metric_key == PROXY_V4_PROFIT_RUB_METRIC_KEY:
             column_date = self._slot_lookups(temporal_slot).column_date
+            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            if inputs is None:
+                return None
             calculated = calculate_proxy_4(
-                order_sum=self.resolve_sku("orderSum", nm_id, temporal_slot),
-                order_count=self.resolve_sku("orderCount", nm_id, temporal_slot),
-                canonical_wb_wac=self.resolve_sku(
-                    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
-                    nm_id,
-                    temporal_slot,
-                ),
-                ads_sum=self.resolve_sku("ads_sum", nm_id, temporal_slot),
+                order_sum=inputs["order_sum"],
+                order_count=inputs["order_count"],
+                canonical_wb_wac=inputs["unit_cost"],
+                ads_sum=inputs["ads_sum"],
                 parameters=self._proxy_v4_parameters(temporal_slot),
                 business_date=column_date,
             )
@@ -3556,11 +3716,11 @@ class _MetricEvaluator:
             return None if value is None else float(value)
         if metric_key == PROXY_V4_MARGIN_PCT_METRIC_KEY:
             parameters = self._proxy_v4_parameters(temporal_slot)
-            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
             expected_revenue = (
                 None
-                if parameters is None or order_sum is None
-                else float(order_sum) * float(parameters.buyout_rate)
+                if parameters is None or inputs is None
+                else float(inputs["order_sum"]) * float(parameters.buyout_rate)
             )
             return _divide_or_none(
                 self.resolve_sku(PROXY_V4_PROFIT_RUB_METRIC_KEY, nm_id, temporal_slot),

@@ -1017,6 +1017,11 @@ def ensure_ff_document_workflow_schema(conn: sqlite3.Connection) -> None:
             "economics_started_at": "TEXT",
             "economics_finished_at": "TEXT",
             "economics_error": "TEXT",
+            "finance_status": "TEXT NOT NULL DEFAULT ''",
+            "finance_source_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "finance_started_at": "TEXT",
+            "finance_finished_at": "TEXT",
+            "finance_error": "TEXT",
         },
     )
     conn.executescript(
@@ -1157,6 +1162,103 @@ def mark_ff_replay_economics(
             status=normalized,
             duration_ms=_elapsed_ms(str(row["stage_started_at"] or ""), occurred_at),
         )
+    return updated_count
+
+
+def mark_ff_replay_finance(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    queue_ids: Iterable[str],
+    status: str,
+    occurred_at: str,
+    source_fingerprint: str = "",
+    error: str = "",
+) -> int:
+    """Acknowledge the exact Finance dependency after its CAS readback."""
+
+    selected = sorted({str(item) for item in queue_ids if str(item)})
+    if not selected:
+        return 0
+    normalized = "complete" if status == "complete" else "error"
+    fingerprint = str(source_fingerprint or "").strip()
+    if normalized == "complete" and not fingerprint.startswith("sha256:"):
+        raise ValueError(
+            "completed Finance replay requires an exact source fingerprint"
+        )
+    placeholders = ",".join("?" for _ in selected)
+    with _connect(runtime.db_path) as conn:
+        ensure_ff_document_workflow_schema(conn)
+        rows = conn.execute(
+            f"SELECT queue_id,stable_source_id,"
+            "COALESCE(finance_started_at,economics_finished_at,finished_at,requested_at) "
+            f"AS stage_started_at FROM {QUEUE_TABLE} "
+            f"WHERE queue_id IN ({placeholders}) "
+            "AND (finance_status<>? OR finance_source_fingerprint<>? "
+            "OR finance_error<>?)",
+            (*selected, normalized, fingerprint, str(error or "")[:1000]),
+        ).fetchall()
+        changed_ids = [str(row["queue_id"]) for row in rows]
+        if not changed_ids:
+            return 0
+        changed_placeholders = ",".join("?" for _ in changed_ids)
+        cursor = conn.execute(
+            f"UPDATE {QUEUE_TABLE} SET finance_status=?,"
+            "finance_source_fingerprint=?,finance_started_at=COALESCE("
+            "finance_started_at,economics_finished_at,finished_at,?),"
+            "finance_finished_at=?,finance_error=? "
+            f"WHERE queue_id IN ({changed_placeholders})",
+            (
+                normalized,
+                fingerprint,
+                occurred_at,
+                occurred_at,
+                str(error or "")[:1000],
+                *changed_ids,
+            ),
+        )
+        updated_count = int(cursor.rowcount)
+        for row in rows:
+            action_type = (
+                INVENTORY_ACTION
+                if str(row["stable_source_id"] or "").startswith(
+                    "ff_inventory:"
+                )
+                else OVERHEAD_ACTION
+            )
+            duration_ms = _elapsed_ms(
+                str(row["stage_started_at"] or ""), occurred_at
+            )
+            event_id = "ffwf_" + _digest(
+                {
+                    "action_type": action_type,
+                    "identity": str(row["stable_source_id"] or ""),
+                    "stage": "replay_finance",
+                    "status": normalized,
+                    "source_fingerprint": fingerprint,
+                    "occurred_at": occurred_at,
+                }
+            )[:24]
+            conn.execute(
+                f"INSERT OR IGNORE INTO {EVENT_TABLE}(event_id,action_type,identity,"
+                "stage,status,occurred_at,duration_ms,details_json) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    event_id,
+                    action_type,
+                    str(row["stable_source_id"] or ""),
+                    "replay_finance",
+                    normalized,
+                    occurred_at,
+                    duration_ms,
+                    _json(
+                        {
+                            "queue_id": str(row["queue_id"] or ""),
+                            "source_fingerprint": fingerprint,
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
     return updated_count
 
 

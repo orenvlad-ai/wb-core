@@ -1,8 +1,9 @@
-"""Shared temporal consumer for canonical ``Our WB Cost`` history.
+"""Shared channel/location-aware consumer for ``Себестоимость наша``.
 
-Finance, Partner Report, the Vitrina and Proxy 3 all resolve the same nmID and
-business date through this module.  No consumer is allowed to maintain a
-parallel retrospective map or substitute another SKU/average/legacy value.
+Finance, Partner Report, the Vitrina and Proxy surfaces resolve through this
+module.  FBS uses the exact facility/pool/SKU WAC frozen by the durable handoff
+event; FBO/WB keeps the canonical daily WB WAC.  No consumer may substitute a
+different facility, SKU, average, legacy value, or zero.
 """
 
 from __future__ import annotations
@@ -24,8 +25,13 @@ from packages.application.warehouse_archival_estimate import (
 
 CANONICAL_COST_POLICY_DATE = date(2026, 7, 1)
 CANONICAL_COST_FORMULA_VERSION = "canonical_our_wb_cost_temporal_policy_v4"
+CHANNEL_LOCATION_COST_FORMULA_VERSION = "canonical_our_cost_channel_location_v1"
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 FUNCTIONAL_DAILY_TABLE = "sheet_vitrina_v1_warehouse_wb_daily_cost"
+FBS_OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+FBS_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
+FBS_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+FBS_CUTOVER_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
 FORBIDDEN_QUALITIES = frozenset(
     {"fallback", "fallback_average", "zero_quantity_without_cost_basis"}
 )
@@ -115,6 +121,85 @@ class CanonicalWbCostSnapshot:
         if as_of_date >= self.archival_first_factual_dates.get(int(nm_id), "9999-12-31"):
             return None
         return item
+
+
+@dataclass(frozen=True)
+class CanonicalChannelCostSnapshot:
+    """Coherent WB plus privacy-safe exact FBS order/cost indexes."""
+
+    wb: CanonicalWbCostSnapshot
+    fbs_order_ids_by_identity_hash: Mapping[str, tuple[int, ...]]
+    fbs_cost_by_order_id: Mapping[int, Mapping[str, Any]]
+
+    @classmethod
+    def from_connection(cls, conn: sqlite3.Connection) -> "CanonicalChannelCostSnapshot":
+        wb = CanonicalWbCostSnapshot.from_connection(conn)
+        identity_index: dict[str, set[int]] = {}
+        costs: dict[int, Mapping[str, Any]] = {}
+        required = {
+            FBS_OBSERVATIONS_TABLE,
+            FBS_CURRENT_TABLE,
+            FBS_EVENTS_TABLE,
+            FBS_CUTOVER_TABLE,
+        }
+        if required <= set(wb.table_names):
+            observation_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    f"PRAGMA table_info({FBS_OBSERVATIONS_TABLE})"
+                ).fetchall()
+            }
+            if {"rid_sha256", "order_uid_sha256"} <= observation_columns:
+                for row in conn.execute(
+                    f"""SELECT order_id,rid_sha256,order_uid_sha256
+                         FROM {FBS_OBSERVATIONS_TABLE}
+                         WHERE rid_sha256<>'' OR order_uid_sha256<>''
+                         ORDER BY observation_sequence"""
+                ).fetchall():
+                    for value in (row[1], row[2]):
+                        token = str(value or "")
+                        if token:
+                            identity_index.setdefault(token, set()).add(int(row[0]))
+            latest = conn.execute(
+                f"SELECT cutover_id FROM {FBS_CUTOVER_TABLE} "
+                "ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"
+            ).fetchone()
+            if latest is not None:
+                for row in conn.execute(
+                    f"""SELECT current.order_id,current.facility_id,current.pool,
+                                current.nm_id,current.quantity,current.frozen_wac_rub,
+                                current.debit_event_id,event.event_type,
+                                event.event_sequence,event.evidence_digest,event.occurred_at,
+                                event.details_json,event.source_observed_at
+                         FROM {FBS_CURRENT_TABLE} AS current
+                         JOIN {FBS_EVENTS_TABLE} AS event
+                           ON event.event_id=current.debit_event_id
+                         WHERE current.cutover_id=? AND current.debit_event_id<>''
+                         ORDER BY current.order_id""",
+                    (str(latest[0]),),
+                ).fetchall():
+                    costs[int(row[0])] = {
+                        "order_id": int(row[0]),
+                        "facility_id": str(row[1]),
+                        "pool": str(row[2]),
+                        "nm_id": int(row[3]),
+                        "quantity": int(row[4]),
+                        "frozen_wac_rub": str(row[5]),
+                        "debit_event_id": str(row[6]),
+                        "event_type": str(row[7]),
+                        "event_sequence": int(row[8]),
+                        "evidence_digest": str(row[9]),
+                        "occurred_at": str(row[10]),
+                        "details_json": str(row[11] or "{}"),
+                        "source_observed_at": str(row[12] or ""),
+                    }
+        return cls(
+            wb=wb,
+            fbs_order_ids_by_identity_hash={
+                key: tuple(sorted(values)) for key, values in identity_index.items()
+            },
+            fbs_cost_by_order_id=costs,
+        )
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -361,6 +446,168 @@ def resolve_canonical_wb_cost(
     }
 
 
+def resolve_channel_location_cost(
+    conn: sqlite3.Connection,
+    *,
+    nm_id: str,
+    operation_date: date,
+    operation: Mapping[str, Any] | None = None,
+    fbs_order_id: int | None = None,
+    snapshot: CanonicalChannelCostSnapshot | None = None,
+) -> dict[str, Any]:
+    """Resolve one sale/return through the single channel-aware contract.
+
+    A privacy-safe hash match or an explicit ``fbs_order_id`` selects FBS and
+    makes the frozen handoff event mandatory.  An explicit FBS channel without
+    one unique exact order also fails closed.  Only rows not identified as FBS
+    may use the canonical WB/FBO daily resolver.
+    """
+
+    state = snapshot or CanonicalChannelCostSnapshot.from_connection(conn)
+    raw = dict(operation or {})
+    identity_hashes = {
+        _identity_hash(raw.get(key))
+        for key in ("srid", "rid", "orderUid", "order_uid")
+        if str(raw.get(key) or "").strip()
+    }
+    identity_hashes.discard("")
+    matched_order_ids: set[int] = set()
+    for identity_hash in identity_hashes:
+        matched_order_ids.update(
+            state.fbs_order_ids_by_identity_hash.get(identity_hash, ())
+        )
+    if fbs_order_id is not None and int(fbs_order_id) > 0:
+        matched_order_ids.add(int(fbs_order_id))
+    channel_tokens = {
+        str(raw.get(key) or "").strip().casefold()
+        for key in ("deliveryType", "delivery_type", "orderType", "order_type")
+        if str(raw.get(key) or "").strip()
+    }
+    explicit_fbs = any("fbs" in token for token in channel_tokens)
+    base = {
+        "nm_id": str(nm_id or "").strip(),
+        "operation_date": operation_date.isoformat(),
+        "formula_version": CHANNEL_LOCATION_COST_FORMULA_VERSION,
+        "identity_hashes": sorted(identity_hashes),
+    }
+    if len(matched_order_ids) > 1:
+        return {
+            **base,
+            "status": "missing",
+            "reason": "fbs_order_identity_ambiguous",
+            "channel": "FBS",
+            "pool": "FBS",
+        }
+    if matched_order_ids or explicit_fbs:
+        if not matched_order_ids:
+            return {
+                **base,
+                "status": "missing",
+                "reason": "fbs_order_identity_missing",
+                "channel": "FBS",
+                "pool": "FBS",
+            }
+        order_id = next(iter(matched_order_ids))
+        source = state.fbs_cost_by_order_id.get(order_id)
+        if source is None:
+            return {
+                **base,
+                "status": "missing",
+                "reason": "fbs_handoff_cost_missing",
+                "channel": "FBS",
+                "pool": "FBS",
+                "fbs_order_id": order_id,
+            }
+        if str(source.get("pool") or "") != "FBS":
+            return {
+                **base,
+                "status": "missing",
+                "reason": "fbs_pool_identity_drift",
+                "channel": "FBS",
+                "pool": str(source.get("pool") or ""),
+                "fbs_order_id": order_id,
+            }
+        if str(source.get("nm_id") or "") != str(nm_id or "").strip():
+            return {
+                **base,
+                "status": "missing",
+                "reason": "fbs_order_nm_id_mismatch",
+                "channel": "FBS",
+                "pool": "FBS",
+                "facility_id": str(source.get("facility_id") or ""),
+                "fbs_order_id": order_id,
+            }
+        unit_cost = _decimal_or_none(source.get("frozen_wac_rub"))
+        if unit_cost is None or unit_cost <= 0:
+            return {
+                **base,
+                "status": "missing",
+                "reason": "fbs_handoff_cost_non_positive",
+                "channel": "FBS",
+                "pool": "FBS",
+                "facility_id": str(source.get("facility_id") or ""),
+                "fbs_order_id": order_id,
+            }
+        source_payload = {
+            key: source.get(key)
+            for key in (
+                "order_id",
+                "facility_id",
+                "pool",
+                "nm_id",
+                "quantity",
+                "frozen_wac_rub",
+                "debit_event_id",
+                "event_type",
+                "event_sequence",
+                "evidence_digest",
+                "occurred_at",
+                "source_observed_at",
+            )
+        }
+        source_digest = _digest(source_payload)
+        return {
+            **base,
+            "status": "resolved",
+            "reason": "",
+            "channel": "FBS",
+            "pool": "FBS",
+            "facility_id": str(source["facility_id"]),
+            "fbs_order_id": order_id,
+            "unit_cost_rub": format(unit_cost, "f"),
+            "quality": "frozen_handoff_exact",
+            "selection_method": "exact_fbs_order_handoff_event",
+            "canonical_source_date": operation_date.isoformat(),
+            "canonical_source_identity": str(source["debit_event_id"]),
+            "canonical_source_version": str(source["evidence_digest"]),
+            "source_table": FBS_EVENTS_TABLE,
+            "source_digest": source_digest,
+            "source_row": source_payload,
+            "projection_quality": "exact_sale_handoff_frozen_wac",
+        }
+    wb = resolve_canonical_wb_cost(
+        conn,
+        nm_id=nm_id,
+        operation_date=operation_date,
+        snapshot=state.wb,
+    )
+    return {
+        **wb,
+        "formula_version": CHANNEL_LOCATION_COST_FORMULA_VERSION,
+        "channel": "WB",
+        "pool": "FBO",
+        "facility_id": "wb",
+        "identity_hashes": sorted(identity_hashes),
+    }
+
+
+def _identity_hash(value: Any) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def resolve_finance_canonical_cost(
     conn: sqlite3.Connection,
     *,
@@ -399,6 +646,33 @@ def load_canonical_wb_cost_lookup(
         if day == source_date
     }
     candidates.update(str(nm_id) for nm_id in snapshot.archival_rows)
+    daily_profit_coverage: dict[int, dict[str, Any]] = {}
+    if "wb_finance_weekly_sku_aggregates" in snapshot.table_names:
+        for row in conn.execute(
+            """SELECT nm_id,coverage_json
+                 FROM wb_finance_weekly_sku_aggregates
+                WHERE nm_id<>'__account__' AND week_start<=? AND week_end>=?
+                ORDER BY calculated_at,nm_id""",
+            (as_of_date.isoformat(), as_of_date.isoformat()),
+        ).fetchall():
+            try:
+                coverage = json.loads(str(row[1] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            exact_day = next(
+                (
+                    dict(item)
+                    for item in coverage.get("daily_rows") or []
+                    if str(item.get("operation_date") or "")
+                    == as_of_date.isoformat()
+                ),
+                None,
+            )
+            if exact_day is None:
+                continue
+            nm_id = int(row[0])
+            candidates.add(str(nm_id))
+            daily_profit_coverage[nm_id] = exact_day
     result: dict[int, dict[str, Any]] = {}
     for nm_id in sorted(candidates, key=lambda value: int(value)):
         resolved = resolve_canonical_wb_cost(
@@ -457,6 +731,12 @@ def load_canonical_wb_cost_lookup(
                 resolved.get("canonical_source_version")
                 or resolved.get("source_digest")
                 or ""
+            ),
+            "daily_profit_coverage": daily_profit_coverage.get(int(nm_id)),
+            "sales_without_cost_rub": (
+                daily_profit_coverage.get(int(nm_id), {}).get(
+                    "uncovered_sales_revenue_rub"
+                )
             ),
         }
     return result

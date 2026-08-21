@@ -253,7 +253,7 @@ def main() -> None:
         sku_proxy3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
         sku_margin3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY}"]
         sku_cost_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
-        if total_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or total_cost_row.format != "rub":
+        if total_cost_row.metric_label != "Себестоимость наша, ₽/шт" or total_cost_row.format != "rub":
             raise AssertionError(f"TOTAL our WB cost metadata mismatch, got {total_cost_row}")
         if sku_proxy3_row.metric_label != "proxy прибыль 3" or sku_proxy3_row.format != "rub":
             raise AssertionError(f"SKU proxy3 metadata mismatch, got {sku_proxy3_row}")
@@ -269,7 +269,7 @@ def main() -> None:
             raise AssertionError("TOTAL proxy margin 3 row must immediately follow TOTAL proxy profit 3")
         if row_ids.index(sku_margin3_row.row_id) != row_ids.index(sku_proxy3_row.row_id) + 1:
             raise AssertionError("SKU proxy margin 3 row must immediately follow SKU proxy profit 3")
-        if sku_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or sku_cost_row.format != "rub":
+        if sku_cost_row.metric_label != "Себестоимость наша, ₽/шт" or sku_cost_row.format != "rub":
             raise AssertionError(f"SKU our WB cost metadata mismatch, got {sku_cost_row}")
         for archived_row_id in (
             f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
@@ -664,7 +664,7 @@ def _build_plan(
                     [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 20, 30],
                     [f"SKU B: Заказы, шт.", f"SKU:{second_nm_id}|orderSum", 5, 7],
                     [
-                        "Итого: Себестоимость WB наша, ₽/шт",
+                        "Итого: Себестоимость наша, ₽/шт",
                         f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
                         108.5,
                         "",
@@ -700,7 +700,7 @@ def _build_plan(
                         "",
                     ],
                     [
-                        "SKU A: Себестоимость WB наша, ₽/шт",
+                        "SKU A: Себестоимость наша, ₽/шт",
                         f"SKU:{first_nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
                         96.2,
                         "",

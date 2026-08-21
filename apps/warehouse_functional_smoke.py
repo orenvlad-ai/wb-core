@@ -106,6 +106,11 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    WarehouseFunctionalBusyError,
+    warehouse_functional_job_lock,
+    warehouse_functional_write_lock,
+)
 from packages.business_time import current_business_date_iso  # noqa: E402
 from packages.application.wb_finance_weekly import (  # noqa: E402
     CALCULATION_REFERENCE_ROWS,
@@ -155,7 +160,8 @@ def main() -> None:
     _test_initial_settings_preserve_outer_transaction()
     _test_external_optimistic_recheck()
     _test_hourly_and_manual_cost_materialization_journal_details()
-    _test_downstream_cost_refresh_recalculates_finance_before_unlock()
+    _test_heavy_job_lock_does_not_block_interactive_writer()
+    _test_downstream_cost_refresh_recalculates_finance_after_warehouse_commit()
     _test_finance_recalculation_is_the_last_cost_writer()
     _test_semantic_digest_ignores_volatile_capture_identity()
     _test_source_capture_exposes_calculation_timestamp()
@@ -388,7 +394,7 @@ def _test_decimal_and_allocations() -> None:
     )
 
 
-def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
+def _test_downstream_cost_refresh_recalculates_finance_after_warehouse_commit() -> None:
     class FakeFinance:
         def __init__(self) -> None:
             self.date_from = None
@@ -424,6 +430,37 @@ def _test_downstream_cost_refresh_recalculates_finance_before_unlock() -> None:
         and result["non_target_preserved"] is True,
         "last cost writer must expose exact Finance post-verify/non-target evidence",
     )
+
+
+def _test_heavy_job_lock_does_not_block_interactive_writer() -> None:
+    with tempfile.TemporaryDirectory(prefix="warehouse-job-lock-") as tmp:
+        runtime_dir = Path(tmp)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_heavy_job() -> None:
+            with warehouse_functional_job_lock(runtime_dir):
+                entered.set()
+                release.wait(timeout=2)
+
+        thread = threading.Thread(target=hold_heavy_job, daemon=True)
+        thread.start()
+        _assert(entered.wait(timeout=1), "heavy job lock fixture did not start")
+        try:
+            with warehouse_functional_write_lock(
+                runtime_dir,
+                blocking=False,
+            ):
+                pass
+            try:
+                with warehouse_functional_job_lock(runtime_dir):
+                    raise AssertionError("second heavy job acquired single-flight lock")
+            except WarehouseFunctionalBusyError:
+                pass
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        _assert(not thread.is_alive(), "heavy job lock fixture did not stop")
 
 
 def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
@@ -607,7 +644,7 @@ def _test_finance_recalculation_is_the_last_cost_writer() -> None:
         )
         _assert(
             any(retention > line for retention in retention_lines),
-            "Finance recalculation must finish before final retention and unlock",
+            "Finance recalculation must finish before final retention and completion",
         )
     manual_source = inspect.getsource(
         RegistryUploadHttpEntrypoint.handle_warehouse_manual_sync_request

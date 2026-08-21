@@ -27,6 +27,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     DOCUMENT_RELATIONS_TABLE,
     EXPENSE_LINES_TABLE,
     REQUESTS_TABLE,
+    TARGETED_RECALC_QUEUE_TABLE,
     FfPoolDocumentError,
     FfPoolDocumentService,
     _allocate_cents,
@@ -146,7 +147,7 @@ def _overhead_fail_closed_contracts() -> None:
                     "VALUES(?,?,?,?,?,?,?)",
                     (facility_id, code, f"Fixture {code}", 1, "Asia/Yekaterinburg", now, now),
                 )
-            conn.execute(
+            changed = conn.execute(
                 f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) "
                 "VALUES(1,1,0,'overhead-domain-v1',?,'{}')",
                 (clock(),),
@@ -1917,6 +1918,24 @@ def _accept_post(
     )
     assert preview["state"] == "ready", preview
     result = service.post(str(preview["request_id"]))
+    if result.get("publication") is not None:
+        assert result["state"] == "posted", result
+        assert result["publication"]["status"] == "queued", result
+        with sqlite3.connect(service.db_path) as conn:
+            changed = conn.execute(
+                f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET status='complete',"
+                "started_at=requested_at,finished_at=requested_at,"
+                "economics_status='complete',economics_started_at=requested_at,"
+                "economics_finished_at=requested_at,finance_status='complete',"
+                "finance_source_fingerprint='sha256:"
+                + "1" * 64
+                + "',finance_started_at=requested_at,"
+                "finance_finished_at=requested_at WHERE queue_id=?",
+                (str(result["publication"]["queue_id"]),),
+            )
+            conn.commit()
+            assert changed.rowcount == 1
+        result = service._finalize_posted(str(preview["request_id"]))
     assert result["state"] == "complete", result
     return result
 

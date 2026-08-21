@@ -98,6 +98,20 @@ _ENTITY_CONTROL_MARKERS = (
     "рез. поле",
     "код",
 )
+_ENTITY_CONTROL_LABEL_RE = re.compile(
+    r"(?i)(?:^|(?<=\s))(?:"
+    r"ИНН(?=\s|[:№])|КПП(?=\s|[:№])|Сумма(?=\s|[:№])|"
+    r"Сч\.?\s*№|БИК(?=\s|[:№])|Вид\s+оп\.|Наз\.\s*пл\.|"
+    r"Срок\s+плат\.|Очер\.\s*плат\.|Рез\.\s*поле|Код(?=\s|[:№])"
+    r")"
+)
+_ENTITY_CONTROL_TAIL_LABEL_RE = re.compile(
+    r"(?i)(?:"
+    r"ИНН(?=\s|[:№])|КПП(?=\s|[:№])|Сумма(?=\s|[:№]|$)|"
+    r"Сч\.?\s*№|БИК(?=\s|[:№]|$)|Вид\s+оп\.|Наз\.\s*пл\.|"
+    r"Срок\s+плат\.|Очер\.\s*плат\.|Рез\.\s*поле|Код(?=\s|[:№]|$)"
+    r")"
+)
 
 _NON_BLOCKING_WARNINGS = {
     "invoice reference date is not present",
@@ -272,14 +286,18 @@ def _parse_0401060_adapter(
     if payer_start and bank_identity:
         bank_line_start = text.rfind("\n", 0, bank_identity.start()) + 1
         result["payer"]["name"] = _extract_entity_name(
-            text[payer_start.start() : bank_line_start]
+            text[payer_start.start() : bank_line_start],
+            warnings=warnings,
+            entity_label="payer",
         )
     if len(inns) >= 2:
         second_inn = list(_INN_RE.finditer(text))[1]
         purpose_start = _purpose_start(text)
         if purpose_start > second_inn.start():
             result["beneficiary"]["name"] = _extract_entity_name(
-                text[second_inn.start() : purpose_start]
+                text[second_inn.start() : purpose_start],
+                warnings=warnings,
+                entity_label="beneficiary",
             )
 
     payer_bic = result["payer"]["bank"]["bic"]
@@ -510,10 +528,26 @@ def _purpose_start(text: str) -> int:
     return starts[-1].start() if starts else marker.start()
 
 
-def _extract_entity_name(segment: str) -> str:
+def _extract_entity_name(
+    segment: str,
+    *,
+    warnings: list[str],
+    entity_label: str,
+) -> str:
     candidates: list[str] = []
     for line in segment.splitlines():
-        compact = " ".join(line.split()).strip(" ,;:")
+        normalized_line = " ".join(line.split())
+        control = _ENTITY_CONTROL_LABEL_RE.search(normalized_line)
+        if control is not None:
+            control_tail = normalized_line[control.start() :]
+            residue = _ENTITY_CONTROL_TAIL_LABEL_RE.sub(" ", control_tail)
+            residue = re.sub(r"[\d\s.,:;/№()\[\]{}+\-=]+", "", residue)
+            if any(character.isalpha() for character in residue):
+                warnings.append(
+                    f"{entity_label} name is ambiguous after form controls"
+                )
+            normalized_line = normalized_line[: control.start()]
+        compact = normalized_line.strip(" ,;:")
         folded = compact.casefold()
         if not compact or not any(character.isalpha() for character in compact):
             continue
@@ -524,7 +558,7 @@ def _extract_entity_name(segment: str) -> str:
             "банк получателя",
         }:
             continue
-        if any(marker in folded for marker in _ENTITY_CONTROL_MARKERS):
+        if any(folded == marker for marker in _ENTITY_CONTROL_MARKERS):
             continue
         candidates.append(compact)
     return " ".join(candidates)

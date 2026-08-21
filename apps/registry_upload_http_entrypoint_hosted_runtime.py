@@ -55,6 +55,7 @@ PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS = 1800.0
+FF_POOL_OVERHEAD_BACKFILL_TIMEOUT_SECONDS = 3600.0
 FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
@@ -146,6 +147,12 @@ from packages.application.ff_pool_zero_physical_production import (
     CONTRACT_VERSION as FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION,
     TARGET_FACILITY_ID as FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID,
     TARGET_NM_IDS as FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS,
+)
+from packages.application.ff_pool_overhead_backfill import (
+    CONTRACT_NAME as FF_POOL_OVERHEAD_BACKFILL_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_POOL_OVERHEAD_BACKFILL_CONTRACT_VERSION,
+    EXPECTED_DOCUMENT_COUNT as FF_POOL_OVERHEAD_BACKFILL_DOCUMENT_COUNT,
+    EXPECTED_TOTAL_RUB as FF_POOL_OVERHEAD_BACKFILL_TOTAL_RUB,
 )
 from packages.application.ff_fbs_mapping_extension_production import (
     CONTRACT_NAME as FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME,
@@ -7061,6 +7068,48 @@ def run_ff_pool_zero_physical_production_command(args: argparse.Namespace) -> in
     return 0
 
 
+def run_ff_pool_overhead_backfill_command(args: argparse.Namespace) -> int:
+    """Run the exact default-dry-run five-document overhead repair."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_pool_overhead_backfill_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("overhead backfill plan must stay outside the Git checkout")
+    payload = _run_remote_ff_pool_overhead_backfill(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(
+            getattr(args, "approval_reference", "") or ""
+        ),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError(
+                "overhead backfill evidence must stay outside the Git checkout"
+            )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-pool-overhead-backfill-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_ff_fbs_mapping_extension_production_command(
     args: argparse.Namespace,
 ) -> int:
@@ -7925,6 +7974,176 @@ def _run_remote_ff_pool_zero_physical_production(
             or status.get("calculation_enabled") is not True
         ):
             raise RuntimeError("post-apply zero-physical query-only readback is incomplete")
+        payload = {**payload, "post_apply_readback": readback}
+    return payload
+
+
+def _run_remote_ff_pool_overhead_backfill(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-pool-overhead-backfill-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported overhead backfill action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-pool-overhead-backfill-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("overhead backfill requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("overhead backfill requires the canonical runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("overhead backfill requires the canonical environment file")
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError("overhead backfill requires the canonical HTTP service")
+
+    runner_args = [
+        "python3",
+        "apps/ff_pool_overhead_backfill.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("overhead backfill apply requires --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("overhead backfill plan is invalid JSON") from exc
+        scope = plan.get("scope") if isinstance(plan, dict) else {}
+        expected_effects = (
+            plan.get("expected_effects") if isinstance(plan, dict) else {}
+        )
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name")
+            != FF_POOL_OVERHEAD_BACKFILL_CONTRACT_NAME
+            or int(plan.get("contract_version") or 0)
+            != FF_POOL_OVERHEAD_BACKFILL_CONTRACT_VERSION
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or list(plan.get("blockers") or [])
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not isinstance(scope, Mapping)
+            or len(scope.get("document_ids") or [])
+            != FF_POOL_OVERHEAD_BACKFILL_DOCUMENT_COUNT
+            or str(scope.get("pool") or "") != "FBS"
+            or not isinstance(expected_effects, Mapping)
+            or str(expected_effects.get("capital_delta_rub") or "")
+            != format(FF_POOL_OVERHEAD_BACKFILL_TOTAL_RUB, ".2f")
+            or int(expected_effects.get("quantity_delta") or 0) != 0
+            or int(expected_effects.get("business_document_replay_count") or 0)
+            != 0
+        ):
+            raise ValueError(
+                "overhead backfill plan does not match the exact five-document apply"
+            )
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError(
+                "overhead backfill apply requires approval reference and actor"
+            )
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill",
+                "--evidence-dir",
+                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill/evidence",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_POOL_OVERHEAD_BACKFILL_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"overhead backfill {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("overhead backfill returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError("overhead backfill returned an invalid result")
+    if action == "apply":
+        apply_readback = payload.get("readback") or {}
+        if (
+            not isinstance(apply_readback, Mapping)
+            or apply_readback.get("status") != "complete"
+            or apply_readback.get("quantity_unchanged") is not True
+            or apply_readback.get("past_fulfilled_lifecycle_unchanged") is not True
+            or apply_readback.get("documents_unchanged") is not True
+            or apply_readback.get("non_target_unchanged") is not True
+            or apply_readback.get("pre_change_invariants_verified") is not True
+        ):
+            raise RuntimeError(
+                "overhead apply result lacks reviewed pre-change reconciliation"
+            )
+        readback = _run_remote_ff_pool_overhead_backfill(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        if (
+            readback.get("status") != "complete"
+            or readback.get("projection_current") is not True
+            or readback.get("capital_conserved") is not True
+            or readback.get("no_duplicate_submit") is not True
+            or len(readback.get("queues") or [])
+            != FF_POOL_OVERHEAD_BACKFILL_DOCUMENT_COUNT
+        ):
+            raise RuntimeError(
+                "post-apply overhead query-only readback is incomplete"
+            )
         payload = {**payload, "post_apply_readback": readback}
     return payload
 
@@ -11448,6 +11667,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     zero_physical_readback.set_defaults(
         handler=run_ff_pool_zero_physical_production_command,
         ff_pool_zero_physical_action="readback",
+    )
+
+    overhead_backfill_dry_run = subparsers.add_parser(
+        "ff-pool-overhead-backfill-dry-run",
+        help="Resolve and plan the exact five posted 2026-08-21 FBS overhead documents.",
+    )
+    overhead_backfill_dry_run.add_argument("--deployed-sha", required=True)
+    overhead_backfill_dry_run.add_argument("--output", required=True)
+    overhead_backfill_dry_run.set_defaults(
+        handler=run_ff_pool_overhead_backfill_command,
+        ff_pool_overhead_backfill_action="dry-run",
+    )
+
+    overhead_backfill_apply = subparsers.add_parser(
+        "ff-pool-overhead-backfill-apply",
+        help="Apply one exact owner-gated five-document FBS overhead manifest.",
+    )
+    overhead_backfill_apply.add_argument("--deployed-sha", required=True)
+    overhead_backfill_apply.add_argument("--plan-file", required=True)
+    overhead_backfill_apply.add_argument("--fingerprint", required=True)
+    overhead_backfill_apply.add_argument("--approval-reference", required=True)
+    overhead_backfill_apply.add_argument("--actor", required=True)
+    overhead_backfill_apply.add_argument("--output", required=True)
+    overhead_backfill_apply.set_defaults(
+        handler=run_ff_pool_overhead_backfill_command,
+        ff_pool_overhead_backfill_action="apply",
+    )
+
+    overhead_backfill_readback = subparsers.add_parser(
+        "ff-pool-overhead-backfill-readback",
+        help="Read query-only five-document overhead reconciliation evidence.",
+    )
+    overhead_backfill_readback.add_argument("--deployed-sha", required=True)
+    overhead_backfill_readback.add_argument("--output", required=True)
+    overhead_backfill_readback.set_defaults(
+        handler=run_ff_pool_overhead_backfill_command,
+        ff_pool_overhead_backfill_action="readback",
     )
 
     fbs_mapping_extension_dry_run = subparsers.add_parser(

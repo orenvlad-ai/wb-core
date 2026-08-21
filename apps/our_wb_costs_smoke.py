@@ -47,7 +47,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
     OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    SALES_WITHOUT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
 )
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
@@ -287,7 +289,11 @@ def main() -> None:
             supplier_block.update_shipment(
                 "sup_trigger",
                 {
-                    **updated,
+                    **{
+                        key: value
+                        for key, value in updated.items()
+                        if key != "target_facility_id"
+                    },
                     "actual_ff_acceptance_date": "",
                     "metadata": updated.get("metadata") or {},
                     "lines": updated.get("lines") or [],
@@ -1343,6 +1349,13 @@ def _assert_proxy_profit_3_evaluator() -> None:
     ]
     metrics = extend_metrics_with_our_wb_cost_metrics(extend_metrics_with_onec_stock_metrics(base_metrics))
     metrics_by_key = {item.metric_key: item for item in metrics}
+    for metric_key in (
+        SALES_WITHOUT_COST_RUB_METRIC_KEY,
+        TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
+    ):
+        metric = metrics_by_key[metric_key]
+        if metric.label_ru != "Продажи без себестоимости, ₽" or metric.format != "rub":
+            raise AssertionError(f"uncovered-sales metric metadata mismatch: {metric}")
     sku_margin_metric = metrics_by_key[OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY]
     total_margin_metric = metrics_by_key[OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY]
     if (
@@ -1476,6 +1489,125 @@ def _assert_proxy_profit_3_evaluator() -> None:
     if missing_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "missing") is not None:
         raise AssertionError("TOTAL proxy margin 3 missing operand must return None")
 
+    covered_only_lookup = _slot_lookup(
+        column_date="2026-07-02", onec_cost=100.0, our_cost=80.0
+    )
+    covered_only_lookup.our_wb_cost_lookup[497413000][
+        "daily_profit_coverage"
+    ] = {
+        "sales_revenue_rub": "1000",
+        "covered_sales_revenue_rub": "500",
+        "sales_order_count": 2,
+        "covered_sales_order_count": 1,
+        "covered_sales_units": 1,
+        "covered_sales_cogs_rub": "80",
+    }
+    covered_only = _MetricEvaluator(
+        enabled_config=config[:1],
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="covered", slot_label="covered", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={"covered": covered_only_lookup},
+            source_temporal_policies={},
+        ),
+    )
+    partial_profit = covered_only.resolve_sku(
+        OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413000, "covered"
+    )
+    expected_partial_profit = 500.0 * 0.5096 - 1.0 * 0.91 * 80.0 - 5.0
+    _assert_close(
+        float(partial_profit or 0.0),
+        expected_partial_profit,
+        "coverage-bound proxy3",
+    )
+
+    uncovered_lookup = _slot_lookup(
+        column_date="2026-07-02", onec_cost=100.0, our_cost=80.0
+    )
+    uncovered_lookup.our_wb_cost_lookup[497413001][
+        "daily_profit_coverage"
+    ] = {
+        "sales_revenue_rub": "500",
+        "covered_sales_revenue_rub": "0",
+        "uncovered_sales_revenue_rub": "500",
+        "sales_order_count": 1,
+        "covered_sales_order_count": 0,
+        "covered_sales_units": 0,
+        "covered_sales_cogs_rub": "0",
+    }
+    uncovered_lookup.our_wb_cost_lookup[497413000][
+        "sales_without_cost_rub"
+    ] = "0"
+    uncovered_lookup.our_wb_cost_lookup[497413001][
+        "sales_without_cost_rub"
+    ] = "500"
+    uncovered_evaluator = _MetricEvaluator(
+        enabled_config=config,
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="uncovered", slot_label="uncovered", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={"uncovered": uncovered_lookup},
+            source_temporal_policies={},
+        ),
+    )
+    first_profit = uncovered_evaluator.resolve_sku(
+        OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413000, "uncovered"
+    )
+    total_covered_profit = uncovered_evaluator.resolve_total(
+        OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, "uncovered"
+    )
+    _assert_close(
+        float(total_covered_profit or 0.0),
+        float(first_profit or 0.0),
+        "TOTAL proxy3 excludes known fully-uncovered sales",
+    )
+    _assert_close(
+        float(
+            uncovered_evaluator.resolve_group(
+                OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                "A",
+                "uncovered",
+            )
+            or 0.0
+        ),
+        float(first_profit or 0.0),
+        "GROUP proxy3 excludes known fully-uncovered sales",
+    )
+    _assert_close(
+        float(
+            uncovered_evaluator.resolve_total(
+                TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
+                "uncovered",
+            )
+            or 0.0
+        ),
+        500.0,
+        "TOTAL uncovered sales retains full amount",
+    )
+    uncovered_lookup.our_wb_cost_lookup[497413001].pop(
+        "sales_without_cost_rub"
+    )
+    missing_uncovered_total = _MetricEvaluator(
+        enabled_config=config,
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="missing-uncovered", slot_label="missing-uncovered", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={"missing-uncovered": uncovered_lookup},
+            source_temporal_policies={},
+        ),
+    )
+    if missing_uncovered_total.resolve_total(
+        TOTAL_SALES_WITHOUT_COST_RUB_METRIC_KEY,
+        "missing-uncovered",
+    ) is not None:
+        raise AssertionError("TOTAL uncovered sales must fail closed on missing SKU coverage")
+
     partial_lookup = _slot_lookup(column_date="2026-07-02", onec_cost=100.0, our_cost=80.0)
     partial_lookup.our_wb_cost_lookup.pop(497413001)
     partial_evaluator = _MetricEvaluator(
@@ -1552,12 +1684,30 @@ def _slot_lookup(
                 "stock_qty": 5.0,
                 "confirmed_qty": 5.0,
                 "confirmed_share_pct": 1.0,
+                "daily_profit_coverage": {
+                    "sales_revenue_rub": first_order_sum,
+                    "covered_sales_revenue_rub": first_order_sum,
+                    "sales_order_count": first_order_count,
+                    "covered_sales_order_count": first_order_count,
+                    "covered_sales_units": first_order_count,
+                    "covered_sales_cogs_rub": first_order_count * our_cost,
+                }
+                if first_order_sum is not None
+                else None,
             },
             497413001: {
                 "our_wb_unit_cost_rub": our_cost,
                 "stock_qty": 5.0,
                 "confirmed_qty": 5.0,
                 "confirmed_share_pct": 1.0,
+                "daily_profit_coverage": {
+                    "sales_revenue_rub": 100.0,
+                    "covered_sales_revenue_rub": 100.0,
+                    "sales_order_count": 1.0,
+                    "covered_sales_order_count": 1.0,
+                    "covered_sales_units": 1.0,
+                    "covered_sales_cogs_rub": our_cost,
+                },
             },
         },
         column_date=column_date,

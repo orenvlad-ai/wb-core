@@ -176,9 +176,47 @@ def main() -> None:
             sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=runtime_dir, runtime=runtime
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "INSERT INTO wb_finance_weekly_sku_aggregates("
+                "seller_id,week_start,week_end,nm_id,formula_version,metrics_json,"
+                "coverage_json,raw_source_digest,week_content_hash,cost_state_hash,"
+                "raw_row_count,calculated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "smoke",
+                    "2026-08-10",
+                    "2026-08-16",
+                    "140557514",
+                    "smoke-v1",
+                    "{}",
+                    json.dumps(
+                        {
+                            "uncovered_fbs_sales_revenue_rub": "900.00",
+                            "uncovered_fbs_sales_order_count": 2,
+                            "uncovered_fbs_sales_units": 2,
+                            "problem_skus": [
+                                {
+                                    "channel": "FBS",
+                                    "reason": "fbs_handoff_cost_event_missing",
+                                    "operation_count": 2,
+                                }
+                            ],
+                        }
+                    ),
+                    "sha256:raw",
+                    "sha256:week",
+                    "sha256:cost",
+                    2,
+                    "2026-08-12T09:00:00Z",
+                ),
+            )
+            conn.commit()
         server = build_registry_upload_http_server(
             config,
-            entrypoint=RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir, runtime=runtime),
+            entrypoint=entrypoint,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -201,10 +239,23 @@ def main() -> None:
                 "sold_closed": 1,
                 "canceled": 1,
                 "reconciliation": 1,
+                "cost_unresolved": 2,
                 "unmatched": 1,
                 "deferred": 1,
                 "ambiguous": 1,
             }, payload["counters"]
+            assert payload["cost_coverage_warning"] == {
+                "status": "error",
+                "unresolved_fbs_order_count": 2,
+                "sales_without_cost_rub": "900.00",
+                "sales_without_cost_order_count": 2,
+                "sales_without_cost_units": 2,
+                "finance_coverage_row_count": 1,
+                "finance_uncovered_order_count_matches_list": True,
+                "reason_counts": {"fbs_handoff_cost_event_missing": 2},
+                "filtered_status_category": "cost_unresolved",
+                "contains_pii": False,
+            }
             assert payload["policy"]["upstream_get_only"] is False
             assert payload["policy"]["status_post_is_read_semantic"] is True
             assert payload["policy"]["creates_movement"] is False
@@ -254,6 +305,15 @@ def main() -> None:
                 assert category_code == 200
                 assert category_payload["page"]["total"] == 1
                 assert len(category_payload["rows"]) == 1
+            unresolved_code, unresolved, _ = _json_request(
+                f"{root}?status_category=cost_unresolved&limit=10"
+            )
+            assert unresolved_code == 200
+            assert unresolved["page"]["total"] == 2
+            assert all(
+                row["cost_coverage"]["status"] == "cost_unresolved"
+                for row in unresolved["rows"]
+            )
             page_code, second_page, _ = _json_request(f"{root}?limit=2&page=2")
             assert page_code == 200
             assert second_page["page"]["number"] == 2

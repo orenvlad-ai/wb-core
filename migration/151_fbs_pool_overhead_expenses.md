@@ -59,6 +59,15 @@ input total and recalculates the facility-local WAC. Other facilities/pools are
 unchanged. Storno reverses the exact original capital effect and retains the
 category/payment evidence link.
 
+Confirm also updates the same exact rows of the active aggregate projection and
+inserts one deterministic targeted queue revision in that document transaction.
+The fast HTTP readback distinguishes `Документ проведён`,
+`Пересчёт выполняется`, `Себестоимость опубликована` and durable error/retry;
+the operator never repeats the business document. Warehouse, economics and
+Finance complete outside the request and persist independent status plus exact
+source fingerprints. Quantity, capital conservation, reversal and idempotent
+retry remain readback invariants.
+
 The legacy aggregate overhead records and reversal APIs remain historical
 compatibility. Their operator creation form is retired with a link to
 `Документы фулфилмента → Накладные расходы FBS/FBO`, making `pool_overhead` the

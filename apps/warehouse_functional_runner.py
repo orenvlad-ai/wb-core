@@ -22,7 +22,10 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.stocks_block import HttpBackedStocksSource  # noqa: E402
 from packages.application.our_wb_costs import OurWbCostBlock  # noqa: E402
-from packages.application.ff_document_workflow import mark_ff_replay_economics  # noqa: E402
+from packages.application.ff_document_workflow import (  # noqa: E402
+    mark_ff_replay_economics,
+    mark_ff_replay_finance,
+)
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
     registry_runtime_sqlite_busy_timeout,
@@ -35,6 +38,7 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     build_functional_economics_backfill_plan,
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_job_lock,
     warehouse_functional_write_lock,
 )
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
@@ -74,16 +78,58 @@ def _mark_plan_ff_replays(
         str(item.get("queue_id") or "")
         for item in plan.get("targeted_recalc_requests") or []
         if str(item.get("stable_source_id") or "").startswith(
-            ("ff_inventory:", "ff_overhead:")
+            ("ff_inventory:", "ff_overhead:", "pool_overhead:")
         )
     ]
-    return mark_ff_replay_economics(
+    changed = mark_ff_replay_economics(
         runtime,
         queue_ids=queue_ids,
         status=status,
         occurred_at=occurred_at,
         error=error,
     )
+    from packages.application.ff_pool_documents import FfPoolDocumentService
+
+    FfPoolDocumentService(
+        db_path=runtime.db_path,
+        runtime_dir=runtime.runtime_dir,
+        resume=False,
+    ).resume_incomplete()
+    return changed
+
+
+def _mark_plan_ff_finance(
+    runtime: RegistryUploadDbBackedRuntime,
+    plan: Mapping[str, Any],
+    *,
+    status: str,
+    occurred_at: str,
+    source_fingerprint: str = "",
+    error: str = "",
+) -> int:
+    queue_ids = [
+        str(item.get("queue_id") or "")
+        for item in plan.get("targeted_recalc_requests") or []
+        if str(item.get("stable_source_id") or "").startswith(
+            ("ff_inventory:", "ff_overhead:", "pool_overhead:")
+        )
+    ]
+    changed = mark_ff_replay_finance(
+        runtime,
+        queue_ids=queue_ids,
+        status=status,
+        occurred_at=occurred_at,
+        source_fingerprint=source_fingerprint,
+        error=error,
+    )
+    from packages.application.ff_pool_documents import FfPoolDocumentService
+
+    FfPoolDocumentService(
+        db_path=runtime.db_path,
+        runtime_dir=runtime.runtime_dir,
+        resume=False,
+    ).resume_incomplete()
+    return changed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -228,7 +274,7 @@ def _run(
             args.fingerprint,
             expected_kind="hourly_wb_sync",
         )
-        with warehouse_functional_write_lock(runtime.runtime_dir):
+        with warehouse_functional_job_lock(runtime.runtime_dir):
             try:
                 retention_before = _run_bounded_recovery_retention(runtime)
                 economics_backup = (
@@ -278,6 +324,15 @@ def _run(
                     status="complete",
                     occurred_at=block.timestamp_factory(),
                 )
+                _mark_plan_ff_finance(
+                    runtime,
+                    reviewed_plan,
+                    status="complete",
+                    occurred_at=block.timestamp_factory(),
+                    source_fingerprint=str(
+                        finance_cost_recalculation.get("fingerprint") or ""
+                    ),
+                )
                 backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
@@ -315,6 +370,13 @@ def _run(
                         occurred_at=block.timestamp_factory(),
                         error=str(exc),
                     )
+                    _mark_plan_ff_finance(
+                        runtime,
+                        reviewed_plan,
+                        status="error",
+                        occurred_at=block.timestamp_factory(),
+                        error=str(exc),
+                    )
                 except Exception:
                     pass
                 block.record_failed_sync(exc)
@@ -324,11 +386,11 @@ def _run(
         journal = WarehouseUpdateJournal(db_path=runtime.db_path)
         durable_run_id = ""
         durable_phase = ""
-        with warehouse_functional_write_lock(runtime.runtime_dir) as lock_evidence:
+        with warehouse_functional_job_lock(runtime.runtime_dir) as lock_evidence:
             durable_run_id = journal.start(
                 trigger_source="hourly" if args.command == "hourly-sync" else "manual"
             )
-            phase_timings_ms["warehouse_lock_wait"] = float(
+            phase_timings_ms["warehouse_job_lock_wait"] = float(
                 lock_evidence.get("wait_ms") or 0
             )
             try:
@@ -461,6 +523,15 @@ def _run(
                     status="complete",
                     occurred_at=block.timestamp_factory(),
                 )
+                _mark_plan_ff_finance(
+                    runtime,
+                    plan,
+                    status="complete",
+                    occurred_at=block.timestamp_factory(),
+                    source_fingerprint=str(
+                        finance_cost_recalculation.get("fingerprint") or ""
+                    ),
+                )
                 completed_backup = backup_result
                 journal.phase_finished(
                     durable_run_id,
@@ -506,6 +577,13 @@ def _run(
                 if durable_phase == "dependent_replay_economics" and "plan" in locals():
                     try:
                         _mark_plan_ff_replays(
+                            runtime,
+                            plan,
+                            status="error",
+                            occurred_at=block.timestamp_factory(),
+                            error=str(exc),
+                        )
+                        _mark_plan_ff_finance(
                             runtime,
                             plan,
                             status="error",
@@ -827,12 +905,12 @@ def _collect_autonomous_transit_costs(
 def _recalculate_downstream_finance_cost(
     runtime: RegistryUploadDbBackedRuntime,
 ) -> dict[str, Any]:
-    """Publish Finance bindings after all warehouse cost writers have finished.
+    """Publish Finance from a fingerprinted snapshot after warehouse commit.
 
-    The caller owns the warehouse functional write lock and invokes this only
-    after supply-layer, functional-version and economics publication, so no
-    later cost writer can invalidate the post-verify before unlock. The July
-    boundary includes the week that starts on 2026-06-29.
+    Planning and recalculation stay outside the shared warehouse writer lock;
+    ``apply_stale_cost_weeks`` uses a short data-version CAS and aborts on any
+    intervening source change. The July boundary includes the week that starts
+    on 2026-06-29.
     """
 
     return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks(

@@ -18,6 +18,7 @@ source_basis:
   - "migration/114_ads_no_statistics_envelope.md"
   - "migration/115_ads_upstream_shape_evidence.md"
   - "migration/116_ads_http_200_null_sentinel.md"
+  - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"
@@ -34,7 +35,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/partner-report/preview"
   - "POST /v1/sheet-vitrina-v1/partner-report/preview.xlsx"
 source_of_truth_level: "module_canonical"
-update_note: "V4 excludes Finance marketing already represented by ads_compact, preserves signed deduction refunds and routes every Finance category explicitly in UI/XLSX/provenance."
+update_note: "Partner retains full sales while uncovered sales are explicit and excluded from every profit numerator and profitability denominator; coverage remains reason-coded and channel/location-aware."
 ---
 
 # 1. Purpose and active surface
@@ -71,7 +72,14 @@ after any separately gated atomic manifest switch it must resolve the exact
 operational generation and matching schema identity. Partner never opens the
 logical raw store in its ordinary preview/XLSX path.
 
-The aggregate is rebuildable from raw Finance rows and shares module 44 classifier/profit/cost services. Preview fails stale when formula version, weekly raw `content_hash`, or canonical cost source digest changed. This includes migration-109 `business_approved_archival_estimate` lineage for its exact 18 legacy `nmId`; Partner never resolves that manifest independently. Source correction therefore requires projection rebuild and cannot silently reuse old values.
+The aggregate is rebuildable from raw Finance rows and shares module 44
+classifier/profit/cost services. Preview fails stale when formula version,
+weekly raw `content_hash`, or canonical channel/location cost source digest
+changed. FBS cost comes only from exact facility/order handoff evidence;
+WB/FBO keep daily warehouse WAC, including migration-109 lineage for its exact
+18 legacy `nmId`. Partner never resolves either source independently. Source
+correction therefore requires projection rebuild and cannot silently reuse old
+values.
 
 Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections, review points and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
 
@@ -87,14 +95,15 @@ Historical recovery schema `ads_historical_recovery_v4` uses the official campai
 
 # 4. Decimal formulas
 
-Formula version is `partner_report_profitability_ui_first_v4` and schema version is `partner_report_v4`.
+Formula version is `partner_report_profitability_ui_first_v4` and schema version is `partner_report_v4`. The inherited Finance aggregate retains full `net_revenue`, but exposes `covered_net_revenue`, `sales_without_cost_rub`, `orders_without_cost`, optional `units_without_cost`, `profit_coverage_status` and reason evidence. Uncovered sales enter neither the margin/profit numerator nor the profitability-revenue denominator; a 500-ruble uncovered sale can never become 500 rubles of profit.
 
 For each week:
 
 ```text
 net_revenue = sales − returns
+profit_revenue = covered sales − covered returns
 
-finance_margin = net_revenue
+finance_margin = profit_revenue
                  − canonical COGS
                  − agent remuneration
                  − acquiring
@@ -105,7 +114,7 @@ finance_margin = net_revenue
                  − penalties/corrections
                  − other attributable expenses
 
-tax = net_revenue × tax_rate
+tax = profit_revenue × tax_rate
 replenishment = MAX(finance_margin, 0) × replenishment_rate
 net_profit = finance_margin − office − tax − replenishment
 dividends = MAX(net_profit, 0) × investor_share
@@ -118,7 +127,7 @@ Negative net profit remains visible; negative dividends are not accrued. For sev
 
 Weekly percentages are not summed. Zero capital is a validation error. The UI tooltip explicitly says this is a calculated, not guaranteed, return.
 
-Rows are: net revenue, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, `Прочие прямые и распределённые расходы`, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return.
+Rows are: full net revenue, `Продажи без себестоимости, ₽`, `Заказы без себестоимости, шт.`, evidence-backed `Единицы без себестоимости, шт.`, COGS, agent remuneration, acquiring, logistics, storage, paid acceptance, marketing, penalties/corrections, `Прочие прямые и распределённые расходы`, Finance margin, office, tax, replenishment, net profit, dividends and calculated annualized investor return. Partial coverage remains a valid truthful preview with missing dependent cells absent; it is not converted to zero or rejected as if the complete sales fact were missing.
 
 `Прочие прямые и распределённые расходы` includes direct expenses of the selected SKU plus the approved revenue-proportional allocation of account-level subrow expenses. Its accessible tooltip describes the formula and single-count marketing boundary but does not expose the numeric allocation coefficient, account revenue or source amount. The possible indented business categories are:
 

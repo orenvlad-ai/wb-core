@@ -319,7 +319,7 @@ def _run(
     page.locator("[data-open-fbs-orders]").click()
     page.locator("[data-fbs-orders-view]").wait_for(state="visible")
     page.locator("[data-fbs-order-counters] .fbs-order-counter").first.wait_for(state="visible")
-    assert page.locator("[data-fbs-order-counters] .fbs-order-counter").count() == 9
+    assert page.locator("[data-fbs-order-counters] .fbs-order-counter").count() == 10
     assert page.locator("[data-fbs-orders-filters] input, [data-fbs-orders-filters] select").count() == 6
     page.locator("[data-open-warehouse-costs]").click()
     launcher = page.locator("[data-ff-pool-open]")
@@ -376,14 +376,27 @@ def _run(
     assert page.locator("[data-ff-pool-overhead-comment]").get_attribute("required") is not None
     page.locator("[data-ff-pool-overhead-comment]").fill("Синтетический браузерный расход")
     page.locator("[data-ff-pool-amount]").fill("1.23")
-    page.locator("[data-ff-pool-preview]").click()
-    page.locator("[data-ff-pool-workflow-detail] h3").wait_for(state="visible")
+    with page.expect_response(
+        lambda response: response.request.method == "POST"
+        and response.url.endswith(f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview")
+    ) as response_info:
+        page.locator("[data-ff-pool-preview]").click()
+    assert response_info.value.status == 200
+    page.wait_for_function(
+        "document.querySelector('[data-ff-pool-workflow-detail]')?.textContent.includes('ручной ввод')"
+    )
     assert len(overhead_mutation_requests) == 1
     manual_request = overhead_mutation_requests[0]
     assert str(dict(manual_request["headers"]).get("content-type", "")).startswith("application/json")
     manual_body = json.loads(str(manual_request["post_data"]))
     assert manual_body["facility_id"] and manual_body["scope"] == "FBS"
     assert manual_body["category"] == "other" and manual_body["amount_rub"] == "1.23"
+    manual_workflow_text = page.locator(
+        "[data-ff-pool-workflow-detail]"
+    ).inner_text()
+    assert "ручной ввод" in manual_workflow_text
+    assert "Parser:" not in manual_workflow_text
+    assert page.locator("[data-ff-pool-overhead-evidence]").is_hidden()
 
     page.locator('[data-ff-pool-tab="create"]').click()
     page.locator("[data-ff-pool-overhead-file]").set_input_files(str(overhead_upload_path))

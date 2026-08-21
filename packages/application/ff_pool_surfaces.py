@@ -30,8 +30,10 @@ from packages.application.ff_pool_documents import (
     FfPoolDocumentError,
     FfPoolDocumentService,
     REQUESTS_TABLE,
+    TARGETED_RECALC_QUEUE_TABLE,
     WORKFLOW_EVENTS_TABLE,
     _guided_request_source_revision,
+    _pool_overhead_publication_state,
 )
 from packages.application.russian_payment_orders import parse_russian_payment_order_pdf
 from packages.application.ff_pool_documents_xlsx import (
@@ -927,6 +929,24 @@ class FfPoolSurface:
                     ORDER BY occurred_at,event_id LIMIT 50""",
                 (canonical,),
             ).fetchall()
+            publication = None
+            if (
+                str(row["posted_document_id"] or "")
+                and TARGETED_RECALC_QUEUE_TABLE in self._tables(conn)
+                and conn.execute(
+                    f"SELECT 1 FROM {TARGETED_RECALC_QUEUE_TABLE} "
+                    "WHERE stable_source_id=? LIMIT 1",
+                    (
+                        "pool_overhead:"
+                        + str(row["posted_document_id"]),
+                    ),
+                ).fetchone()
+                is not None
+            ):
+                publication = _pool_overhead_publication_state(
+                    conn,
+                    document_id=str(row["posted_document_id"]),
+                )
         state = str(row["state"])
         preview = _json_object(row["preview_manifest_json"])
         request_manifest = _json_object(row["request_payload_json"])
@@ -1021,6 +1041,7 @@ class FfPoolSurface:
                 "document_id": str(row["posted_document_id"]),
                 "manifest_sha256": str(row["posted_manifest_sha256"]),
             } if str(row["posted_document_id"] or "") else None,
+            "publication": publication,
             "recovery_operation_id": str(row["recovery_operation_id"]),
             "error": {"code": str(row["error_code"]), "details": _json_value(row["error_details_json"], None)},
             "accepted_at": str(row["accepted_at"]),

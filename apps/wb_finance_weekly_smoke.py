@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -105,6 +106,7 @@ def main() -> None:
             raise AssertionError(f"main/buyout report merge mismatch: {payload}")
         if control["cost_coverage"]["coverage_pct"] != "100.0000":
             raise AssertionError(f"cost coverage mismatch: {payload}")
+        _assert_fbs_channel_partial_coverage(block)
 
         nomenclature_fallback = block.ingest_week(
             date(2026, 2, 2),
@@ -291,7 +293,7 @@ def main() -> None:
                 INSERT INTO wb_finance_weekly_cost_coverage
                 SELECT 'orphan',week_start,week_end,matched_units,unmatched_units,
                        coverage_pct,cogs_rub,problem_skus_json,quality_json,
-                       cost_state_hash,calculated_at
+                       coverage_json,cost_state_hash,calculated_at
                 FROM wb_finance_weekly_cost_coverage WHERE seller_id='seller-1' LIMIT 1;
                 INSERT INTO wb_finance_weekly_reconciliation
                 SELECT 'orphan',week_start,week_end,status,difference_rub,detail_json,checked_at
@@ -898,6 +900,171 @@ def _seed_canonical_cost(db_path: Path) -> None:
             """
         )
         conn.commit()
+
+
+def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
+    """One resolver keeps exact FBS facilities separate and missing fail closed."""
+
+    def identity_hash(value: str) -> str:
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    with sqlite3.connect(block.db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sheet_vitrina_v1_wb_supplies_fbs_order_observations(
+                observation_sequence INTEGER PRIMARY KEY,
+                order_id INTEGER NOT NULL,
+                rid_sha256 TEXT NOT NULL DEFAULT '',
+                order_uid_sha256 TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE sheet_vitrina_v1_ff_pool_cutover_manifests(
+                cutover_id TEXT PRIMARY KEY,cutover_at TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_ff_pool_fbs_lifecycle_current(
+                cutover_id TEXT NOT NULL,order_id INTEGER NOT NULL,
+                facility_id TEXT NOT NULL,pool TEXT NOT NULL,nm_id INTEGER NOT NULL,
+                quantity INTEGER NOT NULL,frozen_wac_rub TEXT NOT NULL,
+                debit_event_id TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_ff_pool_fbs_lifecycle_events(
+                event_sequence INTEGER PRIMARY KEY,event_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,evidence_digest TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,details_json TEXT NOT NULL,
+                source_observed_at TEXT NOT NULL
+            );
+            INSERT INTO sheet_vitrina_v1_ff_pool_cutover_manifests
+            VALUES('cutover-channel-cost','2026-07-15T08:00:00Z');
+            INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events VALUES
+            (1,'event-msk','handoff_debit','sha256:event-msk','2026-07-15T09:00:00Z','{}','2026-07-15T08:59:00Z'),
+            (2,'event-orenburg','handoff_debit','sha256:event-orenburg','2026-07-15T09:01:00Z','{}','2026-07-15T09:00:00Z');
+            INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_current VALUES
+            ('cutover-channel-cost',71001,'fac_moscow','FBS',101,1,'80','event-msk'),
+            ('cutover-channel-cost',71002,'fac_orenburg','FBS',101,1,'120','event-orenburg');
+            """
+        )
+        conn.executemany(
+            """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations
+               (observation_sequence,order_id,rid_sha256,order_uid_sha256)
+               VALUES(?,?,?,?)""",
+            [
+                (1, 71001, identity_hash("synthetic-msk-order"), ""),
+                (2, 71002, identity_hash("synthetic-orenburg-order"), ""),
+                (3, 71003, identity_hash("synthetic-no-handoff-order"), ""),
+            ],
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
+               'warehouse_functional_cutover_v1','2026-07-15',101,'10','100','1000',
+               'periodic_snapshot_wac_closed','{}','sha256:fixture-row-101-jul15',
+               '2026-07-15T00:00:00Z')"""
+        )
+        conn.commit()
+
+    base = {
+        "dateFrom": "2026-07-13",
+        "dateTo": "2026-07-19",
+        "reportId": 713,
+        "reportType": 1,
+        "nmId": 101,
+        "vendorCode": "VC101",
+        "sku": "4600000000101",
+        "docTypeName": "Продажа",
+        "sellerOperName": "Продажа",
+        "quantity": 1,
+        "forPay": "500",
+        "rrDate": "2026-07-15",
+    }
+    rows = [
+        {
+            **base,
+            "rrdId": 7131,
+            "retailPriceWithDisc": "500",
+            "rid": "synthetic-msk-order",
+            "deliveryType": "fbs",
+        },
+        {
+            **base,
+            "rrdId": 7132,
+            "retailPriceWithDisc": "500",
+            "rid": "synthetic-orenburg-order",
+            "deliveryType": "fbs",
+        },
+        {
+            **base,
+            "rrdId": 7133,
+            "retailPriceWithDisc": "500",
+            "rid": "synthetic-unknown-order",
+            "deliveryType": "fbs",
+        },
+        {
+            **base,
+            "rrdId": 7134,
+            "retailPriceWithDisc": "400",
+            "forPay": "400",
+            "rid": "synthetic-no-handoff-order",
+            "deliveryType": "fbs",
+        },
+        {
+            **base,
+            "rrdId": 7135,
+            "retailPriceWithDisc": "500",
+            "rid": "",
+            "deliveryType": "fbo",
+        },
+    ]
+    result = block.ingest_week(date(2026, 7, 13), date(2026, 7, 19), rows)
+    metrics = result["aggregate"]
+    expected = {
+        "net_revenue": "2400.0000",
+        "profit_revenue_covered": "1500.0000",
+        "profit_revenue_uncovered": "900.0000",
+        "sales_without_cost_rub": "900.0000",
+        "orders_without_cost": 2,
+        "units_without_cost": 2,
+        "cogs": "300.0000",
+        "profit_after_cogs": "1200.0000",
+        "final_margin_pct": "80.0000",
+        "profit_coverage_status": "partial",
+    }
+    for key, value in expected.items():
+        if metrics.get(key) != value:
+            raise AssertionError(f"FBS partial coverage {key}: {metrics.get(key)!r}")
+    payload_week = next(
+        item
+        for item in block.build_payload()["weeks"]
+        if item["week_start"] == "2026-07-13"
+    )
+    coverage = payload_week["cost_coverage"]
+    if (
+        coverage["uncovered_fbs_sales_revenue_rub"] != "900.0000"
+        or coverage["uncovered_fbs_sales_order_count"] != 2
+        or coverage["uncovered_fbs_sales_units"] != 2
+    ):
+        raise AssertionError(f"FBS warning evidence is not exact: {coverage}")
+    if coverage["quality"]["source_units"] != {
+        "projected_from_2026_07_01": 0,
+        "canonical_exact_date": 1,
+        "fbs_exact_handoff": 2,
+    }:
+        raise AssertionError(f"channel source split mismatch: {coverage}")
+    reasons = {
+        item["reason"] for item in coverage["problem_skus"]
+    }
+    if reasons != {"fbs_order_identity_missing", "fbs_handoff_cost_missing"}:
+        raise AssertionError(f"FBS missing reason evidence mismatch: {coverage}")
+    with sqlite3.connect(block.db_path) as conn:
+        sku_row = conn.execute(
+            """SELECT coverage_json FROM wb_finance_weekly_sku_aggregates
+               WHERE seller_id='seller-1' AND week_start='2026-07-13' AND nm_id='101'"""
+        ).fetchone()
+    sku_coverage = json.loads(str(sku_row[0]))
+    facilities = {
+        str(item["facility_id"])
+        for item in sku_coverage["detail_rows"]
+        if item["channel"] == "FBS"
+    }
+    if facilities != {"fac_moscow", "fac_orenburg"}:
+        raise AssertionError(f"FBS facilities were mixed or lost: {sku_coverage}")
 
 
 def _fixture_rows() -> list[dict]:
