@@ -6,6 +6,7 @@ import argparse
 import base64
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import hmac
 import json
@@ -8035,6 +8036,20 @@ def _run_remote_ff_pool_overhead_backfill(
         expected_effects = (
             plan.get("expected_effects") if isinstance(plan, dict) else {}
         )
+        try:
+            selected_amount = Decimal(
+                str(expected_effects.get("selected_document_amount_rub") or "")
+            )
+            aggregate_rewrite = Decimal(
+                str(expected_effects.get("aggregate_capital_rewrite_rub") or "")
+            )
+            capital_delta = Decimal(
+                str(expected_effects.get("capital_delta_rub") or "")
+            )
+        except (ArithmeticError, ValueError):
+            selected_amount = Decimal("-1")
+            aggregate_rewrite = Decimal("-1")
+            capital_delta = Decimal("-1")
         if (
             not isinstance(plan, dict)
             or plan.get("contract_name")
@@ -8051,8 +8066,20 @@ def _run_remote_ff_pool_overhead_backfill(
             != FF_POOL_OVERHEAD_BACKFILL_DOCUMENT_COUNT
             or str(scope.get("pool") or "") != "FBS"
             or not isinstance(expected_effects, Mapping)
-            or str(expected_effects.get("capital_delta_rub") or "")
-            != format(FF_POOL_OVERHEAD_BACKFILL_TOTAL_RUB, ".2f")
+            or selected_amount != FF_POOL_OVERHEAD_BACKFILL_TOTAL_RUB
+            or aggregate_rewrite < Decimal("0")
+            or aggregate_rewrite > FF_POOL_OVERHEAD_BACKFILL_TOTAL_RUB
+            or capital_delta != aggregate_rewrite
+            or (
+                str(plan.get("pre_state") or "") == "already_current"
+                and (
+                    aggregate_rewrite != Decimal("0")
+                    or int(
+                        expected_effects.get("aggregate_row_update_count") or 0
+                    )
+                    != 0
+                )
+            )
             or int(expected_effects.get("quantity_delta") or 0) != 0
             or int(expected_effects.get("business_document_replay_count") or 0)
             != 0
