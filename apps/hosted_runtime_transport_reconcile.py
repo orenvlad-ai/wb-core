@@ -1,15 +1,18 @@
 """Bounded exact-SHA reconciliation after an indeterminate SSH disconnect.
 
-Only daemon-reload, service restart, probes and readback may be retried here.  File
-sync, metadata writes and dependency installation deliberately remain fail-closed.
-The explicit read-only mode disables even those bounded service repairs and is
-used when Release Train needs deployment proof without runtime mutation.
+Only daemon-reload, service restart, probes and readback may be retried here.
+File sync and dependency installation deliberately remain fail-closed. A
+separate explicit safe-finalize lane may CAS only an incomplete completion bit
+after exact metadata/runtime SHA, immutable metadata bytes, auth, process and
+probe evidence all agree. The explicit read-only mode disables every repair and
+is used when Release Train needs deployment proof without runtime mutation.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -35,12 +38,18 @@ SAFE_RETRY_STAGES = frozenset({"daemon-reload", "restart", "probes", "readback"}
 TRANSPORT_INDETERMINATE_RETURN_CODES = frozenset({255})
 DEFAULT_ATTEMPTS = 3
 DEFAULT_BACKOFF_SECONDS = (0.0, 15.0, 45.0, 120.0, 300.0)
+SAFE_FINALIZE_CONTRACT = "wb_core_deploy_safe_finalize_v1"
+DEPLOY_METADATA_SCHEMA = "wb_core_deploy_metadata_v2"
 
 
 @dataclass(frozen=True)
 class ReconcileEvidence:
     metadata_sha: str
     runtime_sha: str
+    metadata_schema_version: str
+    metadata_deployed_at: str
+    metadata_sha256: str
+    runtime_sha256: str
     deployment_complete: bool
     unit: str
     main_pid: int
@@ -87,7 +96,16 @@ def _exact_sha(value: str, name: str) -> str:
     return normalized
 
 
-def _remote_command(target: HostedRuntimeTarget, operation: str) -> list[str]:
+def _remote_command(
+    target: HostedRuntimeTarget,
+    operation: str,
+    *,
+    expected_sha: str = "",
+    expected_metadata_sha256: str = "",
+    expected_runtime_sha256: str = "",
+    expected_main_pid: int = 0,
+    expected_post_metadata_sha256: str = "",
+) -> list[str]:
     target_dir = shlex.quote(target.target_dir.rstrip("/"))
     service = shlex.quote(target.service_name)
     target_id = shlex.quote(target.target_id)
@@ -110,7 +128,13 @@ def _remote_command(target: HostedRuntimeTarget, operation: str) -> list[str]:
             '"$d/.wb-core-deploy.json" 2>/dev/null); '
             "complete=$(python3 -c 'import json,sys; print(\"true\" if json.load(open(sys.argv[1])).get(\"deployment_complete\") is True else \"false\")' "
             '"$d/.wb-core-deploy.json" 2>/dev/null); '
+            "schema=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(\"schema_version\",\"\"))' "
+            '"$d/.wb-core-deploy.json" 2>/dev/null); '
+            "deployed=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(\"deployed_at\",\"\"))' "
+            '"$d/.wb-core-deploy.json" 2>/dev/null); '
+            "meta_hash=$(sha256sum \"$d/.wb-core-deploy.json\" 2>/dev/null | cut -d' ' -f1); "
             'runtime=$(tr -d "\\r\\n" < "$d/.wb-core-runtime-sha" 2>/dev/null); '
+            "runtime_hash=$(sha256sum \"$d/.wb-core-runtime-sha\" 2>/dev/null | cut -d' ' -f1); "
             f"unit=$(systemctl is-active {service} 2>/dev/null); "
             f"pid=$(systemctl show {service} -p MainPID --value 2>/dev/null); "
             "auth=false; if test -r " + environment_file + "; then "
@@ -120,14 +144,69 @@ def _remote_command(target: HostedRuntimeTarget, operation: str) -> list[str]:
             'probes=""; for p in ' + path_words + "; do "
             "code=$(curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:8765${p}\" 2>/dev/null); "
             'probes="${probes}${probes:+,}${code:-000}"; done; '
-            "python3 - \"$meta\" \"$runtime\" \"$complete\" \"$unit\" \"$pid\" \"$probes\" \"$auth\" "
+            "python3 - \"$meta\" \"$runtime\" \"$schema\" \"$deployed\" \"$meta_hash\" \"$runtime_hash\" \"$complete\" \"$unit\" \"$pid\" \"$probes\" \"$auth\" "
             + target_id
             + " <<'PY'\n"
             "import json,sys\n"
             "print(json.dumps({'metadata_sha':sys.argv[1], 'runtime_sha':sys.argv[2], "
-            "'deployment_complete':sys.argv[3] == 'true', 'unit':sys.argv[4], "
-            "'main_pid':sys.argv[5], 'probe_statuses':sys.argv[6], "
-            "'auth_env_ok':sys.argv[7] == 'true', 'target_id':sys.argv[8]}, sort_keys=True))\nPY"
+            "'metadata_schema_version':sys.argv[3], 'metadata_deployed_at':sys.argv[4], "
+            "'metadata_sha256':sys.argv[5], 'runtime_sha256':sys.argv[6], "
+            "'deployment_complete':sys.argv[7] == 'true', 'unit':sys.argv[8], "
+            "'main_pid':sys.argv[9], 'probe_statuses':sys.argv[10], "
+            "'auth_env_ok':sys.argv[11] == 'true', 'target_id':sys.argv[12]}, sort_keys=True))\nPY"
+        )
+    elif operation == "safe-finalize":
+        if (
+            not SHA_RE.fullmatch(expected_sha)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_metadata_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_runtime_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_post_metadata_sha256)
+            or expected_main_pid <= 0
+        ):
+            raise ValueError("safe-finalize requires exact immutable CAS evidence")
+        shell = (
+            "set -e; d=" + target_dir + "; "
+            f'test "$(systemctl is-active {service})" = active; '
+            f'test "$(systemctl show {service} -p MainPID --value)" = {expected_main_pid}; '
+            "auth=true; test -r " + environment_file + "; "
+            "for k in WB_CORE_WEB_AUTH_USERNAME WB_CORE_WEB_AUTH_PASSWORD_HASH "
+            "WB_CORE_WEB_AUTH_SESSION_SECRET; do "
+            "grep -Eq \"^${k}=[^[:space:]]+\" " + environment_file + "; done; "
+            "for p in " + path_words + "; do "
+            "code=$(curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:8765${p}\"); "
+            "case \"$code\" in 200|303|401|403) ;; *) exit 41 ;; esac; done; "
+            "python3 - \"$d/.wb-core-deploy.json\" \"$d/.wb-core-runtime-sha\" "
+            + shlex.quote(expected_sha)
+            + " "
+            + shlex.quote(expected_metadata_sha256)
+            + " "
+            + shlex.quote(expected_runtime_sha256)
+            + " "
+            + shlex.quote(expected_post_metadata_sha256)
+            + " <<'PY'\n"
+            "import hashlib,json,os,pathlib,sys\n"
+            "meta_path=pathlib.Path(sys.argv[1]); runtime_path=pathlib.Path(sys.argv[2])\n"
+            "expected_sha,expected_meta,expected_runtime,expected_post=sys.argv[3:7]\n"
+            "raw=meta_path.read_bytes(); runtime_raw=runtime_path.read_bytes()\n"
+            "if hashlib.sha256(raw).hexdigest()!=expected_meta: raise SystemExit('metadata CAS drift')\n"
+            "if hashlib.sha256(runtime_raw).hexdigest()!=expected_runtime: raise SystemExit('runtime marker CAS drift')\n"
+            "payload=json.loads(raw); allowed={'schema_version','commit','deployed_at','deployment_complete'}\n"
+            "if set(payload)!=allowed or payload.get('schema_version')!='wb_core_deploy_metadata_v2': raise SystemExit('metadata schema drift')\n"
+            "if payload.get('commit')!=expected_sha or payload.get('deployment_complete') is not False: raise SystemExit('metadata state drift')\n"
+            "if runtime_raw.decode('utf-8').strip()!=expected_sha: raise SystemExit('runtime SHA drift')\n"
+            "payload['deployment_complete']=True\n"
+            "post=(json.dumps(payload,ensure_ascii=True,sort_keys=True,separators=(',',':'))+'\\n').encode('utf-8')\n"
+            "if hashlib.sha256(post).hexdigest()!=expected_post: raise SystemExit('post metadata digest drift')\n"
+            "tmp=meta_path.with_name(meta_path.name+'.safe-finalize.'+str(os.getpid())+'.tmp')\n"
+            "try:\n"
+            " fd=os.open(tmp,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o644)\n"
+            " with os.fdopen(fd,'wb') as handle: handle.write(post); handle.flush(); os.fsync(handle.fileno())\n"
+            " os.replace(tmp,meta_path)\n"
+            " dirfd=os.open(meta_path.parent,os.O_RDONLY); os.fsync(dirfd); os.close(dirfd)\n"
+            "finally:\n"
+            " try: tmp.unlink()\n"
+            " except FileNotFoundError: pass\n"
+            "print(json.dumps({'status':'finalized','metadata_sha256':expected_post},sort_keys=True))\nPY"
         )
     elif operation == "daemon-reload":
         shell = "systemctl daemon-reload"
@@ -159,6 +238,12 @@ def _parse_evidence(payload: str) -> ReconcileEvidence:
     return ReconcileEvidence(
         metadata_sha=str(raw.get("metadata_sha") or "").strip().lower(),
         runtime_sha=str(raw.get("runtime_sha") or "").strip().lower(),
+        metadata_schema_version=str(
+            raw.get("metadata_schema_version") or ""
+        ).strip(),
+        metadata_deployed_at=str(raw.get("metadata_deployed_at") or "").strip(),
+        metadata_sha256=str(raw.get("metadata_sha256") or "").strip().lower(),
+        runtime_sha256=str(raw.get("runtime_sha256") or "").strip().lower(),
         deployment_complete=bool(raw.get("deployment_complete")),
         unit=str(raw.get("unit") or "").strip(),
         main_pid=main_pid,
@@ -166,6 +251,76 @@ def _parse_evidence(payload: str) -> ReconcileEvidence:
         target_id=str(raw.get("target_id") or "").strip(),
         auth_env_ok=bool(raw.get("auth_env_ok")),
     )
+
+
+def _evidence_fingerprint(value: Mapping[str, Any]) -> str:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _build_safe_finalize_plan(
+    *,
+    evidence: ReconcileEvidence,
+    expected_sha: str,
+    pr: int,
+    head: str,
+    merge: str,
+    target: HostedRuntimeTarget,
+) -> dict[str, Any]:
+    if (
+        not evidence.healthy_for(
+            expected_sha,
+            target.target_id,
+            require_deployment_complete=False,
+        )
+        or evidence.deployment_complete
+        or evidence.metadata_schema_version != DEPLOY_METADATA_SCHEMA
+        or not evidence.metadata_deployed_at
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence.metadata_sha256)
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence.runtime_sha256)
+    ):
+        raise ValueError("incomplete deploy is not eligible for safe-finalize")
+    post_payload = {
+        "schema_version": DEPLOY_METADATA_SCHEMA,
+        "commit": expected_sha,
+        "deployed_at": evidence.metadata_deployed_at,
+        "deployment_complete": True,
+    }
+    post_bytes = (
+        json.dumps(
+            post_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    plan: dict[str, Any] = {
+        "contract_name": SAFE_FINALIZE_CONTRACT,
+        "contract_version": 1,
+        "pr": pr,
+        "head": head,
+        "merge": merge,
+        "expected_sha": expected_sha,
+        "target_id": target.target_id,
+        "service_name": target.service_name,
+        "precondition": dict(evidence.__dict__),
+        "expected_effects": {
+            "metadata_completion_cas_count": 1,
+            "rsync_count": 0,
+            "dependency_install_count": 0,
+            "service_restart_count": 0,
+            "business_data_mutation_count": 0,
+            "post_metadata_sha256": hashlib.sha256(post_bytes).hexdigest(),
+        },
+    }
+    plan["fingerprint"] = _evidence_fingerprint(plan)
+    return plan
 
 
 def classify_disconnect(return_code: int) -> str:
@@ -183,6 +338,7 @@ def reconcile(
     attempts: int = DEFAULT_ATTEMPTS,
     require_deployment_complete: bool = True,
     allow_repairs: bool = True,
+    allow_safe_finalize: bool = False,
     runner: Runner = _default_runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
@@ -198,6 +354,8 @@ def reconcile(
 
     history: list[dict[str, Any]] = []
     repairs_applied = False
+    safe_finalize_applied = False
+    safe_finalize_plan: dict[str, Any] | None = None
     for attempt in range(1, attempts + 1):
         readback = runner(_remote_command(target, "readback"))
         if readback.returncode == 0:
@@ -220,7 +378,9 @@ def reconcile(
                     "healthy": True,
                     "mixed_deployment": False,
                     "repairs_applied": repairs_applied,
-                    "read_only": not allow_repairs,
+                    "safe_finalize_applied": safe_finalize_applied,
+                    "safe_finalize_plan": safe_finalize_plan,
+                    "read_only": not allow_repairs and not allow_safe_finalize,
                     "attempts": attempt,
                     "evidence": history,
                 }
@@ -234,8 +394,117 @@ def reconcile(
                 break
             # Exact files can be visible before the deploy transaction writes its
             # final completion marker.  This is a settling state, not proof of a
-            # wrong deployment and not a reason for an immediate global halt.
+            # wrong deployment. The explicit safe-finalize lane may change only
+            # that bit through an immutable metadata/process/probe CAS.
             if require_deployment_complete and not evidence.deployment_complete:
+                if allow_safe_finalize:
+                    try:
+                        safe_finalize_plan = _build_safe_finalize_plan(
+                            evidence=evidence,
+                            expected_sha=expected,
+                            pr=pr,
+                            head=exact_head,
+                            merge=exact_merge,
+                            target=target,
+                        )
+                    except ValueError as exc:
+                        history.append(
+                            {
+                                "attempt": attempt,
+                                "operation": "safe-finalize-plan",
+                                "status": "blocked",
+                                "error": str(exc),
+                            }
+                        )
+                        break
+                    history.append(
+                        {
+                            "attempt": attempt,
+                            "operation": "safe-finalize-plan",
+                            "fingerprint": safe_finalize_plan["fingerprint"],
+                            "expected_effects": safe_finalize_plan[
+                                "expected_effects"
+                            ],
+                        }
+                    )
+                    finalized = runner(
+                        _remote_command(
+                            target,
+                            "safe-finalize",
+                            expected_sha=expected,
+                            expected_metadata_sha256=evidence.metadata_sha256,
+                            expected_runtime_sha256=evidence.runtime_sha256,
+                            expected_main_pid=evidence.main_pid,
+                            expected_post_metadata_sha256=str(
+                                safe_finalize_plan["expected_effects"][
+                                    "post_metadata_sha256"
+                                ]
+                            ),
+                        )
+                    )
+                    history.append(
+                        {
+                            "attempt": attempt,
+                            "operation": "safe-finalize-cas",
+                            "returncode": finalized.returncode,
+                        }
+                    )
+                    if finalized.returncode not in (
+                        {0} | TRANSPORT_INDETERMINATE_RETURN_CODES
+                    ):
+                        break
+                    post_readback = runner(_remote_command(target, "readback"))
+                    if post_readback.returncode != 0:
+                        history.append(
+                            {
+                                "attempt": attempt,
+                                "operation": "safe-finalize-readback",
+                                "returncode": post_readback.returncode,
+                            }
+                        )
+                        break
+                    post = _parse_evidence(post_readback.stdout)
+                    history.append(
+                        {
+                            "attempt": attempt,
+                            "operation": "safe-finalize-readback",
+                            **post.__dict__,
+                        }
+                    )
+                    expected_post_hash = str(
+                        safe_finalize_plan["expected_effects"][
+                            "post_metadata_sha256"
+                        ]
+                    )
+                    if (
+                        post.healthy_for(
+                            expected,
+                            target.target_id,
+                            require_deployment_complete=True,
+                        )
+                        and post.metadata_sha256 == expected_post_hash
+                        and post.runtime_sha256 == evidence.runtime_sha256
+                    ):
+                        safe_finalize_applied = True
+                        return {
+                            "status": "reconciled",
+                            "transport": "transport-indeterminate",
+                            "pr": pr,
+                            "head": exact_head,
+                            "merge": exact_merge,
+                            "expected_sha": expected,
+                            "target_id": target.target_id,
+                            "service_name": target.service_name,
+                            "healthy": True,
+                            "mixed_deployment": False,
+                            "repairs_applied": repairs_applied,
+                            "safe_finalize_applied": True,
+                            "safe_finalize_plan": safe_finalize_plan,
+                            "read_only": False,
+                            "attempts": attempt,
+                            "evidence": history,
+                        }
+                    break
                 if attempt < attempts:
                     sleep(DEFAULT_BACKOFF_SECONDS[min(attempt, len(DEFAULT_BACKOFF_SECONDS) - 1)])
                 continue
@@ -270,7 +539,9 @@ def reconcile(
         "service_name": target.service_name,
         "healthy": False,
         "repairs_applied": repairs_applied,
-        "read_only": not allow_repairs,
+        "safe_finalize_applied": safe_finalize_applied,
+        "safe_finalize_plan": safe_finalize_plan,
+        "read_only": not allow_repairs and not allow_safe_finalize,
         "attempts": len({int(item["attempt"]) for item in history}),
         "evidence": history,
     }
@@ -290,8 +561,18 @@ def main() -> int:
         action="store_true",
         help="disable daemon-reload, restart and probe repair operations",
     )
+    parser.add_argument(
+        "--safe-finalize-incomplete",
+        action="store_true",
+        help=(
+            "allow one exact-SHA immutable-CAS completion-marker finalize; "
+            "never repeats sync, dependencies or restart"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.read_only and args.safe_finalize_incomplete:
+        parser.error("--read-only cannot be combined with --safe-finalize-incomplete")
     payload = reconcile(
         target_file=args.target_file,
         expected_sha=args.expected_sha,
@@ -301,6 +582,7 @@ def main() -> int:
         failed_stage=args.failed_stage,
         attempts=args.attempts,
         allow_repairs=not args.read_only,
+        allow_safe_finalize=bool(args.safe_finalize_incomplete),
     )
     rendered = json.dumps(payload, sort_keys=True)
     if args.output:

@@ -1126,6 +1126,7 @@ def deploy_current_checkout(
             ),
             require_deployment_complete=stage == "metadata-complete",
             allow_repairs=stage != "metadata-complete",
+            allow_safe_finalize=stage == "metadata-complete",
         )
         summary["transport_reconciliation"] = reconciliation
         if not bool(reconciliation.get("healthy")):

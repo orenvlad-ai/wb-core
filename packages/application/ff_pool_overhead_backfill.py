@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import date, datetime, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 import hashlib
 import json
 from pathlib import Path
@@ -45,8 +45,8 @@ from packages.application.warehouse_functional_lock import (
 from packages.application.wb_finance_weekly import block_from_env
 
 
-CONTRACT_NAME = "ff_pool_overhead_backfill_20260821_v1"
-CONTRACT_VERSION = 1
+CONTRACT_NAME = "ff_pool_overhead_backfill_20260821_v2"
+CONTRACT_VERSION = 2
 BUSINESS_DATE = "2026-08-21"
 EXPECTED_DOCUMENT_COUNT = 5
 EXPECTED_TOTAL_RUB = Decimal("175206.50")
@@ -56,6 +56,8 @@ EXPECTED_CITY_SCOPE = {
 }
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
 ZERO = Decimal("0")
+CAPITAL_MINOR_UNIT = Decimal("0.01")
+CAPITAL_COMPARISON = "decimal_round_half_up_kopeck_v1"
 
 
 class FfPoolOverheadBackfillError(RuntimeError):
@@ -86,6 +88,19 @@ class FfPoolOverheadBackfill:
         self._assert_runtime_sha()
         snapshot = _read_snapshot(self.runtime.db_path)
         blockers = list(snapshot["blockers"])
+        aggregate_updates = [
+            item
+            for item in snapshot["target_projection"]
+            if item["aggregate_write_required"]
+        ]
+        aggregate_delta = sum(
+            (Decimal(str(item["aggregate_write_delta_rub"])) for item in aggregate_updates),
+            ZERO,
+        )
+        publication_required = any(
+            item["publication_state"] != "complete"
+            for item in snapshot["queues"]
+        )
         plan: dict[str, Any] = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -128,11 +143,22 @@ class FfPoolOverheadBackfill:
                 "ledger_insert_count": 0,
                 "business_document_replay_count": 0,
                 "queue_insert_count": snapshot["queue_insert_count"],
-                "aggregate_row_update_count": len(
-                    snapshot["target_projection"]
-                ),
+                "aggregate_row_update_count": len(aggregate_updates),
                 "quantity_delta": 0,
-                "capital_delta_rub": _money(EXPECTED_TOTAL_RUB),
+                "selected_document_amount_rub": _money(EXPECTED_TOTAL_RUB),
+                "aggregate_capital_rewrite_rub": _decimal_text(aggregate_delta),
+                "capital_delta_rub": _decimal_text(aggregate_delta),
+                "canonical_publication_required": publication_required,
+                "canonical_publication_queue_count": sum(
+                    1
+                    for item in snapshot["queues"]
+                    if item["publication_state"] != "complete"
+                ),
+                "already_current_no_op": (
+                    not aggregate_updates
+                    and snapshot["queue_insert_count"] == 0
+                    and not publication_required
+                ),
                 "fulfilled_order_update_count": 0,
                 "current_projection_only": True,
                 "future_handoff_uses_current_wac": True,
@@ -143,6 +169,7 @@ class FfPoolOverheadBackfill:
                 "city_scope": snapshot["city_scope"],
                 "quantities_unchanged": True,
                 "capital_conserved": not blockers,
+                "capital_comparison": CAPITAL_COMPARISON,
                 "past_lifecycle_events_immutable": True,
                 "non_target_digest": snapshot["non_target_digest"],
                 "no_missing_to_zero": True,
@@ -153,6 +180,7 @@ class FfPoolOverheadBackfill:
                 "restore_requires_separate_authorization": True,
                 "idempotency": "exact manifest and queue identities",
             },
+            "pre_state": snapshot["aggregate_pre_state"],
             "apply_allowed": not blockers,
             "blockers": blockers,
         }
@@ -257,8 +285,22 @@ class FfPoolOverheadBackfill:
         stable_source_ids = list(reviewed_plan["scope"]["stable_source_ids"])
         functional_result: dict[str, Any]
         queue_ids = [str(item["queue_id"]) for item in reviewed_plan["event_revisions"]]
+        warehouse_required = any(
+            str(item.get("status") or "") != "complete" for item in queue_rows
+        )
+        economics_required = any(
+            str(item.get("economics_status") or "") != "complete"
+            for item in queue_rows
+        )
+        finance_required = any(
+            str(item.get("finance_status") or "") != "complete"
+            or not str(item.get("finance_source_fingerprint") or "").startswith(
+                "sha256:"
+            )
+            for item in queue_rows
+        )
         try:
-            if all(str(item["status"]) == "complete" for item in queue_rows):
+            if not warehouse_required:
                 functional_result = {
                     "status": "already_complete",
                     "idempotent": True,
@@ -294,74 +336,121 @@ class FfPoolOverheadBackfill:
             )
             raise
 
-        try:
-            economics_plan = build_functional_economics_backfill_plan(
-                self.runtime,
-                affected_nm_ids=affected_nm_ids,
-                earliest_business_date=BUSINESS_DATE,
-            )
-            economics_result = apply_functional_economics_backfill_plan(
-                self.runtime,
-                economics_plan,
-                confirm_fingerprint=str(economics_plan["plan_fingerprint"]),
-                backup_dir=(backup_root / "economics").resolve(),
-                target_scoped_undo=True,
-            )
-        except Exception as exc:
-            _mark_publication_error(
-                self.runtime,
-                queue_ids=queue_ids,
-                occurred_at=str(self.timestamp_factory()),
-                error=f"economics publication: {exc}",
-            )
-            raise
-        completed_at = str(self.timestamp_factory())
-        mark_ff_replay_economics(
-            self.runtime,
-            queue_ids=queue_ids,
-            status="complete",
-            occurred_at=completed_at,
-        )
+        if economics_required:
+            try:
+                economics_plan = build_functional_economics_backfill_plan(
+                    self.runtime,
+                    affected_nm_ids=affected_nm_ids,
+                    earliest_business_date=BUSINESS_DATE,
+                )
+                economics_result = apply_functional_economics_backfill_plan(
+                    self.runtime,
+                    economics_plan,
+                    confirm_fingerprint=str(economics_plan["plan_fingerprint"]),
+                    backup_dir=(backup_root / "economics").resolve(),
+                    target_scoped_undo=True,
+                )
+                completed_at = str(self.timestamp_factory())
+                mark_ff_replay_economics(
+                    self.runtime,
+                    queue_ids=queue_ids,
+                    status="complete",
+                    occurred_at=completed_at,
+                )
+                economics_publication = {
+                    "status": "complete",
+                    "plan_fingerprint": str(economics_plan["plan_fingerprint"]),
+                    "changed_snapshot_count": int(
+                        economics_result.get("changed_snapshot_count") or 0
+                    ),
+                    "database_written": bool(
+                        economics_result.get("database_written")
+                    ),
+                    "rollback_manifest_digest": str(
+                        economics_result.get("rollback_manifest_digest") or ""
+                    ),
+                }
+            except Exception as exc:
+                _mark_publication_error(
+                    self.runtime,
+                    queue_ids=queue_ids,
+                    occurred_at=str(self.timestamp_factory()),
+                    error=f"economics publication: {exc}",
+                )
+                raise
+        else:
+            economics_publication = {
+                "status": "already_complete",
+                "idempotent": True,
+                "database_written": False,
+            }
 
-        try:
-            finance_result = block_from_env(
-                self.runtime.runtime_dir
-            ).recalculate_stale_cost_weeks(date_from=date(2026, 7, 1))
-        except Exception as exc:
-            _mark_publication_error(
+        if finance_required:
+            try:
+                finance_result = block_from_env(
+                    self.runtime.runtime_dir
+                ).recalculate_stale_cost_weeks(date_from=date(2026, 7, 1))
+            except Exception as exc:
+                _mark_publication_error(
+                    self.runtime,
+                    queue_ids=queue_ids,
+                    occurred_at=str(self.timestamp_factory()),
+                    error=f"Finance publication: {exc}",
+                )
+                raise
+            finance_fingerprint = str(finance_result.get("fingerprint") or "")
+            if (
+                str(finance_result.get("status") or "")
+                not in {"applied", "already_current"}
+                or not finance_fingerprint.startswith("sha256:")
+                or finance_result.get("non_target_preserved") is not True
+            ):
+                error = "Finance CAS publication did not produce complete exact readback"
+                _mark_publication_error(
+                    self.runtime,
+                    queue_ids=queue_ids,
+                    occurred_at=str(self.timestamp_factory()),
+                    error=error,
+                )
+                raise FfPoolOverheadBackfillError(error)
+            mark_ff_replay_finance(
                 self.runtime,
                 queue_ids=queue_ids,
+                status="complete",
                 occurred_at=str(self.timestamp_factory()),
-                error=f"Finance publication: {exc}",
+                source_fingerprint=finance_fingerprint,
             )
-            raise
-        finance_fingerprint = str(finance_result.get("fingerprint") or "")
-        if (
-            str(finance_result.get("status") or "")
-            not in {"applied", "already_current"}
-            or not finance_fingerprint.startswith("sha256:")
-            or finance_result.get("non_target_preserved") is not True
-        ):
-            error = "Finance CAS publication did not produce complete exact readback"
-            _mark_publication_error(
-                self.runtime,
-                queue_ids=queue_ids,
-                occurred_at=str(self.timestamp_factory()),
-                error=error,
-            )
-            raise FfPoolOverheadBackfillError(error)
-        mark_ff_replay_finance(
-            self.runtime,
-            queue_ids=queue_ids,
-            status="complete",
-            occurred_at=str(self.timestamp_factory()),
-            source_fingerprint=finance_fingerprint,
-        )
-        FfPoolDocumentService(
-            db_path=self.runtime.db_path,
-            runtime_dir=self.runtime.runtime_dir,
-            resume=False,
-        ).resume_incomplete()
+            finance_publication = {
+                "fingerprint": finance_fingerprint,
+                "status": str(finance_result.get("status") or ""),
+                "recalculated_week_count": int(
+                    finance_result.get("recalculated_week_count") or 0
+                ),
+                "non_target_preserved": bool(
+                    finance_result.get("non_target_preserved")
+                ),
+                "phase_timings_ms": dict(
+                    finance_result.get("phase_timings_ms") or {}
+                ),
+            }
+        else:
+            finance_publication = {
+                "status": "already_complete",
+                "idempotent": True,
+                "database_written": False,
+                "fingerprints": sorted(
+                    {
+                        str(item["finance_source_fingerprint"])
+                        for item in queue_rows
+                    }
+                ),
+            }
+        if warehouse_required or economics_required or finance_required:
+            FfPoolDocumentService(
+                db_path=self.runtime.db_path,
+                runtime_dir=self.runtime.runtime_dir,
+                resume=False,
+            ).resume_incomplete()
 
         readback = self.readback(reviewed_plan=reviewed_plan)
         try:
@@ -385,33 +474,15 @@ class FfPoolOverheadBackfill:
             "completed_at": str(self.timestamp_factory()),
             "backup": backup,
             "functional_publication": functional_result,
-            "economics_publication": {
-                "plan_fingerprint": str(economics_plan["plan_fingerprint"]),
-                "changed_snapshot_count": int(
-                    economics_result.get("changed_snapshot_count") or 0
-                ),
-                "database_written": bool(
-                    economics_result.get("database_written")
-                ),
-                "rollback_manifest_digest": str(
-                    economics_result.get("rollback_manifest_digest") or ""
-                ),
-            },
-            "finance_publication": {
-                "fingerprint": finance_fingerprint,
-                "status": str(finance_result.get("status") or ""),
-                "recalculated_week_count": int(
-                    finance_result.get("recalculated_week_count") or 0
-                ),
-                "non_target_preserved": bool(
-                    finance_result.get("non_target_preserved")
-                ),
-                "phase_timings_ms": dict(
-                    finance_result.get("phase_timings_ms") or {}
-                ),
-            },
+            "economics_publication": economics_publication,
+            "finance_publication": finance_publication,
             "readback": readback,
-            "idempotent": already_short_applied,
+            "idempotent": (
+                already_short_applied
+                and not warehouse_required
+                and not economics_required
+                and not finance_required
+            ),
         }
         evidence["evidence_fingerprint"] = _fingerprint(evidence)
         _write_private_json(evidence_path, evidence)
@@ -442,8 +513,10 @@ class FfPoolOverheadBackfill:
             for item in queues
         )
         projection_current = all(
-            Decimal(str(item["aggregate_capital_rub"]))
-            == Decimal(str(item["detail_capital_rub"]))
+            _capital_equal(
+                Decimal(str(item["aggregate_capital_rub"])),
+                Decimal(str(item["detail_capital_rub"])),
+            )
             and int(item["aggregate_quantity"])
             == int(item["detail_quantity"])
             for item in snapshot["target_projection"]
@@ -488,6 +561,8 @@ class FfPoolOverheadBackfill:
             "queues": queues,
             "target_projection": snapshot["target_projection"],
             "projection_current": projection_current,
+            "capital_comparison": CAPITAL_COMPARISON,
+            "aggregate_pre_state": snapshot["aggregate_pre_state"],
             "quantity_unchanged": quantity_unchanged,
             "capital_conserved": projection_current,
             "past_fulfilled_lifecycle_unchanged": lifecycle_unchanged,
@@ -545,6 +620,16 @@ class FfPoolOverheadBackfill:
                             raise FfPoolOverheadBackfillError(
                                 f"target aggregate row drifted: {item['nm_id']}"
                             )
+                        if not bool(item["aggregate_write_required"]):
+                            if not _capital_equal(
+                                Decimal(str(row["capital_rub"])),
+                                Decimal(str(item["detail_capital_rub"])),
+                            ):
+                                raise FfPoolOverheadBackfillError(
+                                    "already-current aggregate row lost numeric parity: "
+                                    f"{item['nm_id']}"
+                                )
+                            continue
                         provenance = {
                             "source": CONTRACT_NAME,
                             "manifest_fingerprint": str(
@@ -829,6 +914,7 @@ def _read_snapshot(
                 nm_id = int(line["nm_id"])
                 selected_delta[nm_id] += Decimal(str(line["capital_rub"]))
         target_projection: list[dict[str, Any]] = []
+        projection_states: set[str] = set()
         for nm_id in affected_nm_ids:
             detail_rows = conn.execute(
                 f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
@@ -850,15 +936,29 @@ def _read_snapshot(
                 (Decimal(str(row["capital_rub"])) for row in detail_rows), ZERO
             )
             aggregate_capital = Decimal(str(aggregate["capital_rub"]))
-            delta = selected_delta[nm_id]
+            selected_document_delta = selected_delta[nm_id]
+            raw_difference = detail_capital - aggregate_capital
             if detail_quantity <= 0 or aggregate_quantity != detail_quantity:
                 blockers.append(
                     f"quantity parity is not exact for nmID {nm_id}"
                 )
-            if detail_capital - aggregate_capital != delta:
+            if _capital_equal(detail_capital, aggregate_capital):
+                projection_state = "already_current"
+                aggregate_write_required = False
+                aggregate_write_delta = ZERO
+            elif _capital_equal(raw_difference, selected_document_delta):
+                projection_state = "selected_capital_pending"
+                aggregate_write_required = True
+                aggregate_write_delta = raw_difference
+            else:
+                projection_state = "ambiguous_capital"
+                aggregate_write_required = False
+                aggregate_write_delta = ZERO
                 blockers.append(
-                    f"aggregate capital deficit is not the selected documents for nmID {nm_id}"
+                    "aggregate capital is neither already current nor behind by "
+                    f"the selected documents for nmID {nm_id}"
                 )
+            projection_states.add(projection_state)
             with localcontext() as context:
                 context.prec = 160
                 wac = (
@@ -874,7 +974,16 @@ def _read_snapshot(
                     "detail_quantity": detail_quantity,
                     "aggregate_capital_rub": _decimal_text(aggregate_capital),
                     "detail_capital_rub": _decimal_text(detail_capital),
-                    "capital_delta_rub": _decimal_text(delta),
+                    "raw_capital_difference_rub": _decimal_text(raw_difference),
+                    "selected_document_delta_rub": _decimal_text(
+                        selected_document_delta
+                    ),
+                    "projection_state": projection_state,
+                    "aggregate_write_required": aggregate_write_required,
+                    "aggregate_write_delta_rub": _decimal_text(
+                        aggregate_write_delta
+                    ),
+                    "capital_comparison": CAPITAL_COMPARISON,
                     "detail_wac_rub": _decimal_text(wac),
                 }
             )
@@ -890,10 +999,24 @@ def _read_snapshot(
             for item in documents
         ]
         queue_rows = _queue_rows_in_connection(conn, queues)
+        queues = [
+            {
+                **queue,
+                "identity_state": selected["state"],
+                "publication_state": _queue_publication_state(selected),
+            }
+            for queue, selected in zip(queues, queue_rows, strict=True)
+        ]
         queue_insert_count = sum(1 for item in queue_rows if item["state"] == "missing")
         conflicts = [item for item in queue_rows if item["state"] == "conflict"]
         if conflicts:
             blockers.append("one or more canonical queue identities conflict")
+        if any(
+            item["aggregate_write_required"] for item in target_projection
+        ) and any(item["state"] == "present" for item in queue_rows):
+            blockers.append(
+                "pending aggregate capital conflicts with an existing publication queue"
+            )
         document_ids = [item["document_id"] for item in documents]
         stable_ids = [item["stable_source_id"] for item in documents]
         non_target = {
@@ -973,6 +1096,13 @@ def _read_snapshot(
             "non_target_digest": _fingerprint(non_target),
             "selected_amount_rub": _money(selected_total),
             "city_scope": city_scope,
+            "aggregate_pre_state": (
+                "ambiguous"
+                if "ambiguous_capital" in projection_states
+                else "mixed"
+                if len(projection_states) > 1
+                else next(iter(projection_states), "empty")
+            ),
             "blockers": sorted(set(blockers)),
         }
 
@@ -1012,6 +1142,22 @@ def _queue_rows_in_connection(
     return result
 
 
+def _queue_publication_state(selected: Mapping[str, Any]) -> str:
+    if selected.get("state") != "present":
+        return str(selected.get("state") or "missing")
+    row = dict(selected.get("row") or {})
+    if (
+        str(row.get("status") or "") == "complete"
+        and str(row.get("economics_status") or "") == "complete"
+        and str(row.get("finance_status") or "") == "complete"
+        and str(row.get("finance_source_fingerprint") or "").startswith(
+            "sha256:"
+        )
+    ):
+        return "complete"
+    return "publication_pending"
+
+
 def _exact_queue_rows(
     db_path: Path, queues: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -1031,13 +1177,24 @@ def _short_apply_already_complete(
     actual = {int(item["nm_id"]): item for item in current["target_projection"]}
     projection_complete = all(
         int(item["nm_id"]) in actual
-        and str(actual[int(item["nm_id"])]["aggregate_capital_rub"])
-        == str(item["detail_capital_rub"])
+        and _capital_equal(
+            Decimal(
+                str(actual[int(item["nm_id"])]["aggregate_capital_rub"])
+            ),
+            Decimal(str(item["detail_capital_rub"])),
+        )
         and int(actual[int(item["nm_id"])]["aggregate_quantity"])
         == int(item["detail_quantity"])
         for item in expected
     )
-    return projection_complete and len(current["queue_rows"]) == EXPECTED_DOCUMENT_COUNT
+    return (
+        projection_complete
+        and len(current["queue_rows"]) == EXPECTED_DOCUMENT_COUNT
+        and all(
+            item.get("identity_state") == "present"
+            for item in current["queues"]
+        )
+    )
 
 
 def _validate_reviewed_plan(
@@ -1058,8 +1215,18 @@ def _validate_reviewed_plan(
         or reviewed_plan.get("blockers")
         or len(reviewed_plan.get("scope", {}).get("document_ids") or [])
         != EXPECTED_DOCUMENT_COUNT
-        or reviewed_plan.get("expected_effects", {}).get("capital_delta_rub")
+        or reviewed_plan.get("expected_effects", {}).get(
+            "selected_document_amount_rub"
+        )
         != _money(EXPECTED_TOTAL_RUB)
+        or Decimal(
+            str(
+                reviewed_plan.get("expected_effects", {}).get(
+                    "aggregate_capital_rewrite_rub", "-1"
+                )
+            )
+        )
+        < ZERO
     ):
         raise FfPoolOverheadBackfillError(
             "reviewed plan does not match the exact five-document scope"
@@ -1280,6 +1447,18 @@ def _loads(value: Any, fallback: Any) -> Any:
 
 def _money(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.01")), "f")
+
+
+def _capital_equal(left: Decimal, right: Decimal) -> bool:
+    with localcontext() as context:
+        context.prec = 160
+        return left.quantize(
+            CAPITAL_MINOR_UNIT,
+            rounding=ROUND_HALF_UP,
+        ) == right.quantize(
+            CAPITAL_MINOR_UNIT,
+            rounding=ROUND_HALF_UP,
+        )
 
 
 def _decimal_text(value: Decimal) -> str:

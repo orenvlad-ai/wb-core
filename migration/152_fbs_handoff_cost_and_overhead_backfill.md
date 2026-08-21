@@ -69,11 +69,17 @@ operations, facilities, pools, SKUs and event revisions; current detail and
 aggregate projections; pre-change digests; a coherent backup; affected and
 non-target rows; quantity/capital/document/lifecycle invariants; deterministic
 queue identities; idempotency and recovery. Apply requires the exact reviewed
-fingerprint and a separate post-merge apply authorization. Its short mutation
-updates only current aggregate FF capital/WAC/provenance and exact queue rows.
-It never replays a business document or changes historical fulfilled sales.
-Warehouse/economics/Finance publication and query-only reconciliation follow;
-an exact repeat is a no-op and drift never triggers a second submit.
+fingerprint and a separate post-merge apply authorization. Planning classifies
+every aggregate SKU as either `selected_capital_pending`, `already_current` or
+ambiguous using exact `Decimal` arithmetic and the canonical `ROUND_HALF_UP`
+kopeck parity boundary; textual scale and equal-kopeck tails are evidence, not a
+second expense. Only `selected_capital_pending` rows may update current
+aggregate FF capital/WAC/provenance. When facility detail is already reflected,
+aggregate rewrite count and capital delta are exactly zero and only missing
+canonical queue/status/economics/Finance identities are reconciled. Completed
+identities are not recomputed. The runner never replays a business document or
+changes historical fulfilled sales. A fresh dry-run/readback after completion
+is an explicit zero-write no-op; drift never triggers a second submit.
 
 ## UI/parser cleanup
 

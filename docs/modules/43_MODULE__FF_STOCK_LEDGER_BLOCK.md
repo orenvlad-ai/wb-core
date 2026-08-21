@@ -890,3 +890,13 @@ warehouse line. A later hourly/manual publication therefore preserves raw
 audit quality; lifecycle safety itself does not depend on byte-equal
 sub-kopeck tails once the centralized minor-unit and residual-conservation gate
 passes.
+
+The bounded five-document corrective runner uses that same parity boundary.
+It records the full selected `175206.50 RUB` as document evidence separately
+from the actual aggregate rewrite. An aggregate already equal to facility
+detail at the canonical kopeck boundary has rewrite count/capital delta zero;
+raw Decimal tails remain fingerprinted. Only missing deterministic
+`pool_overhead:<document_id>` queue identities and incomplete Warehouse,
+economics or Finance acknowledgements may then advance. Fully complete stages,
+quantities, business documents and fulfilled lifecycle debits remain untouched,
+and a new dry-run after reconciliation is a proven no-op.
