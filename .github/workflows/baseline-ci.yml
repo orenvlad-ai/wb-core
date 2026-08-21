@@ -116,6 +116,7 @@ jobs:
           python3 apps/ff_pool_surfaces_browser_smoke.py
           python3 apps/ff_wb_supply_origins_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_web_vitrina_stable_filters_layout_browser_smoke.py
           python3 apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
           python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py

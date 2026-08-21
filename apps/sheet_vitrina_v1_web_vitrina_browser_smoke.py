@@ -1272,6 +1272,11 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
             separatorRowHeight: separator ? separator.getBoundingClientRect().height : 0,
             separatorCellPaddingTop: separatorCellStyle ? separatorCellStyle.paddingTop : '',
             separatorCellPaddingBottom: separatorCellStyle ? separatorCellStyle.paddingBottom : '',
+            separatorLabelLineHeight: separatorLabelStyle ? separatorLabelStyle.lineHeight : '',
+            separatorLabelPaddingTop: separatorLabelStyle ? separatorLabelStyle.paddingTop : '',
+            separatorLabelPaddingRight: separatorLabelStyle ? separatorLabelStyle.paddingRight : '',
+            separatorLabelPaddingBottom: separatorLabelStyle ? separatorLabelStyle.paddingBottom : '',
+            separatorLabelPaddingLeft: separatorLabelStyle ? separatorLabelStyle.paddingLeft : '',
             separatorLabelBackground: separatorLabelStyle ? separatorLabelStyle.backgroundColor : '',
             separatorLabelBorderTopWidth: separatorLabelStyle ? separatorLabelStyle.borderTopWidth : '',
             separatorLabelBorderRadius: separatorLabelStyle ? separatorLabelStyle.borderRadius : '',
@@ -1283,6 +1288,16 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
     white_backgrounds = {"rgb(255, 255, 255)", "rgba(255, 255, 255, 1)", "white"}
     label_backgrounds = {"rgba(0, 0, 0, 0)", "transparent"}
     separator_font_size = float(str(default_state["separatorLabelFontSize"]).replace("px", "") or 0)
+    separator_line_height = float(str(default_state["separatorLabelLineHeight"]).replace("px", "") or 0)
+    separator_padding = [
+        float(str(default_state[key]).replace("px", "") or 0)
+        for key in (
+            "separatorLabelPaddingTop",
+            "separatorLabelPaddingRight",
+            "separatorLabelPaddingBottom",
+            "separatorLabelPaddingLeft",
+        )
+    ]
     separator_font_weight = int(float(default_state["separatorLabelFontWeight"] or 0))
     if (
         not default_state["allChecked"]
@@ -1303,13 +1318,15 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
         or int(default_state["totalRowCount"]) <= 0
         or default_state["skuMetricToggleBackground"] in white_backgrounds
         or default_state["skuMetricPanelBackground"] in white_backgrounds
-        or float(default_state["separatorRowHeight"]) > 26
+        or float(default_state["separatorRowHeight"]) <= separator_line_height
+        or float(default_state["separatorRowHeight"]) > 36
         or default_state["separatorCellPaddingTop"] != "0px"
         or default_state["separatorCellPaddingBottom"] != "0px"
+        or any(value <= 0 for value in separator_padding)
         or default_state["separatorLabelBackground"] not in label_backgrounds
         or default_state["separatorLabelBorderTopWidth"] != "0px"
         or default_state["separatorLabelBorderRadius"] != "0px"
-        or not (9 <= separator_font_size <= 11.5)
+        or not (20 <= separator_font_size <= 23)
         or separator_font_weight < 700
     ):
         raise AssertionError(f"SKU metric picker default state mismatch, got {default_state}")
