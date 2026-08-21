@@ -22,6 +22,7 @@ from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import (  # noqa: E402
     LocalWebVitrinaFixtureServer,
 )
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_INVENTORY_PLANNING_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
 )
 from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: E402
@@ -236,21 +237,64 @@ def main() -> int:
             if orenburg_key not in reloaded_persisted["sku_presets"][0]["metric_keys"]:
                 raise AssertionError("new active facility must become default-visible once")
 
+            page.locator('[data-unified-tab-button="warehouses"]').click()
+            page.wait_for_selector(
+                "[data-inventory-planning-metrics] [data-inventory-metric-toggle]",
+                timeout=30000,
+            )
+            expected_planning_labels = [
+                "Остаток WB: всего",
+                "Остаток FBS: всего",
+                "Остаток FBS: Москва",
+                "Остаток FBS: Оренбург",
+                "Остаток: всего",
+            ]
+            control_labels = page.locator(
+                "[data-inventory-planning-metrics] .inventory-metric-controls label"
+            ).all_inner_texts()
+            card_labels = page.locator(
+                "[data-inventory-planning-metrics] .inventory-metric-card span"
+            ).all_inner_texts()
+            if control_labels != expected_planning_labels:
+                raise AssertionError(
+                    f"ordinary planning controls leaked legacy incident metrics: {control_labels}"
+                )
+            if card_labels != expected_planning_labels:
+                raise AssertionError(
+                    f"ordinary planning cards leaked legacy incident metrics: {card_labels}"
+                )
+            planning_payload = page.evaluate(
+                """async path => {
+                  const response = await fetch(path, {headers: {Accept: "application/json"}});
+                  if (!response.ok) throw new Error("planning read failed: HTTP " + response.status);
+                  return response.json();
+                }""",
+                DEFAULT_INVENTORY_PLANNING_PATH,
+            )
+            audit_metric_keys = {
+                str(metric.get("metric_key") or "")
+                for metric in planning_payload.get("metrics") or []
+            }
+            if {"wb_effective_total", "effective_total"} - audit_metric_keys:
+                raise AssertionError(
+                    "presentation cleanup removed retained incident audit evidence"
+                )
+
             responsive = page.evaluate(
                 """() => ({
                   width: window.innerWidth,
                   colorScheme: getComputedStyle(document.documentElement).colorScheme,
-                  tableVisible: !!document.querySelector('[data-table-shell]:not(.is-hidden)'),
+                  planningVisible: !!document.querySelector('[data-inventory-planning-card]')?.getClientRects().length,
                   bodyText: (document.body.innerText || '').length
                 })"""
             )
             if (
                 responsive["width"] != 390
                 or "dark" not in responsive["colorScheme"]
-                or not responsive["tableVisible"]
+                or not responsive["planningVisible"]
                 or responsive["bodyText"] < 100
             ):
-                raise AssertionError(f"mobile/dark main table acceptance failed: {responsive}")
+                raise AssertionError(f"mobile/dark planning acceptance failed: {responsive}")
             context.close()
             browser.close()
 
