@@ -2612,6 +2612,112 @@ def main() -> None:
         ):
             raise AssertionError("hosted runner must expose zero-physical commands")
 
+        overhead_sha = "9" * 40
+        overhead_fingerprint = "sha256:" + "8" * 64
+        overhead_plan_path = Path(partner_temp_dir) / "ff-overhead-plan.json"
+        overhead_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": hosted_runtime.FF_POOL_OVERHEAD_BACKFILL_CONTRACT_NAME,
+                    "contract_version": hosted_runtime.FF_POOL_OVERHEAD_BACKFILL_CONTRACT_VERSION,
+                    "mode": "dry_run",
+                    "apply_allowed": True,
+                    "blockers": [],
+                    "deployed_sha": overhead_sha,
+                    "fingerprint": overhead_fingerprint,
+                    "scope": {
+                        "document_ids": [f"doc-{index}" for index in range(5)],
+                        "pool": "FBS",
+                    },
+                    "expected_effects": {
+                        "capital_delta_rub": "175206.50",
+                        "quantity_delta": 0,
+                        "business_document_replay_count": 0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        overhead_apply = {
+            "status": "complete",
+            "manifest_fingerprint": overhead_fingerprint,
+            "readback": {
+                "status": "complete",
+                "quantity_unchanged": True,
+                "past_fulfilled_lifecycle_unchanged": True,
+                "documents_unchanged": True,
+                "non_target_unchanged": True,
+                "pre_change_invariants_verified": True,
+            },
+        }
+        overhead_readback = {
+            "status": "complete",
+            "projection_current": True,
+            "capital_conserved": True,
+            "no_duplicate_submit": True,
+            "queues": [{"queue_id": f"queue-{index}"} for index in range(5)],
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=json.dumps(overhead_apply), stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=json.dumps(overhead_readback), stderr=""
+                ),
+            ],
+        ) as overhead_run:
+            overhead_result = hosted_runtime._run_remote_ff_pool_overhead_backfill(
+                active_target,
+                action="apply",
+                deployed_sha=overhead_sha,
+                plan_path=overhead_plan_path,
+                fingerprint=overhead_fingerprint,
+                approval_reference="github-pr#issuecomment-apply-gate",
+                actor="owner-relay",
+            )
+        overhead_command = " ".join(overhead_run.call_args_list[0].args[0])
+        if not all(
+            token in overhead_command
+            for token in (
+                "ff_pool_overhead_backfill.py",
+                ".wb-core-runtime-sha",
+                overhead_sha,
+                "--reviewed-plan-stdin",
+                overhead_fingerprint,
+                "github-pr#issuecomment-apply-gate",
+                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill",
+            )
+        ):
+            raise AssertionError("overhead hosted apply lost exact SHA, plan, or gate")
+        if overhead_run.call_args_list[0].kwargs.get("input") != overhead_plan_path.read_text(
+            encoding="utf-8"
+        ):
+            raise AssertionError("overhead hosted apply lost the reviewed plan")
+        if (
+            overhead_run.call_args_list[0].kwargs.get("timeout")
+            != hosted_runtime.FF_POOL_OVERHEAD_BACKFILL_TIMEOUT_SECONDS
+        ):
+            raise AssertionError("overhead hosted apply lost bounded timeout")
+        if overhead_result.get("post_apply_readback") != overhead_readback:
+            raise AssertionError("overhead hosted apply lacks query-only readback")
+        overhead_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-pool-overhead-backfill-dry-run",
+                "--deployed-sha",
+                overhead_sha,
+                "--output",
+                str(Path(partner_temp_dir) / "ff-overhead-dry-run.json"),
+            ]
+        )
+        if (
+            overhead_args.handler is not hosted_runtime.run_ff_pool_overhead_backfill_command
+            or overhead_args.ff_pool_overhead_backfill_action != "dry-run"
+        ):
+            raise AssertionError("hosted runner must expose overhead backfill commands")
+
         mapping_sha = "f" * 40
         mapping_fingerprint = "sha256:" + "1" * 64
         mapping_plan_path = Path(partner_temp_dir) / "ff-fbs-mapping-plan.json"

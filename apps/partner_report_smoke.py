@@ -53,6 +53,7 @@ def main() -> None:
         report = _assert_preview(block)
         _assert_workbook(block, report)
         _assert_only_marketing_workbook(block)
+        _assert_partial_cost_surface(block)
         _assert_incomplete_and_stale_states(block)
         _assert_negative_profit_and_validation(block)
         performance = _assert_indexed_performance(block)
@@ -448,6 +449,57 @@ def _assert_only_marketing_workbook(block: PartnerReportBlock) -> None:
         raise AssertionError("marketing-only Partner XLSX rendered a zero expense subrow")
 
 
+def _assert_partial_cost_surface(block: PartnerReportBlock) -> None:
+    missing = _sale(
+        29,
+        WEEK_TWO + timedelta(days=1),
+        TARGET_NM,
+        revenue="500",
+        for_pay="500",
+        acquiring="0",
+    )
+    missing.update(
+        {
+            "reportId": 29,
+            "rrdId": 29,
+            "deliveryType": "fbs",
+            "rid": "synthetic-partner-unresolved-fbs",
+        }
+    )
+    block.finance.ingest_week(
+        WEEK_TWO,
+        WEEK_TWO + timedelta(days=6),
+        [*_week_two_finance_rows(), missing],
+    )
+    partial = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_TWO.isoformat()]}
+    )
+    if partial["status"] != "ready" or any(
+        item["code"] == "partner_cost_coverage_incomplete"
+        for item in partial["blockers"]
+    ):
+        raise AssertionError(f"partial cost coverage incorrectly blocked Partner: {partial}")
+    week = partial["weeks"][0]
+    values = week["values"]
+    if (
+        values["net_revenue"] != "200500.0000"
+        or values["sales_without_cost_rub"] != "500.0000"
+        or values["orders_without_cost"] != "1.0000"
+        or values["units_without_cost"] != "1.0000"
+        or values["cogs"] != "100000.0000"
+        or values["estimated_tax"] != "12000.0000"
+    ):
+        raise AssertionError(f"Partner partial metrics are not coverage-bound: {partial}")
+    cost = week["coverage"]["cost"]
+    if (
+        cost["profit_coverage_status"] != "partial"
+        or cost["covered_sales_revenue_rub"] != "200000.0000"
+        or cost["uncovered_sales_revenue_rub"] != "500.0000"
+        or cost["uncovered_sales_order_count"] != 1
+    ):
+        raise AssertionError(f"Partner coverage evidence missing: {partial}")
+
+
 def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
     missing_day = (WEEK_ONE + timedelta(days=3)).isoformat()
     with sqlite3.connect(block.db_path) as conn:
@@ -678,26 +730,30 @@ def _seed_finance(block: PartnerReportBlock) -> None:
     block.finance.ingest_week(
         WEEK_TWO,
         WEEK_TWO + timedelta(days=6),
-        [
-            _sale(2, WEEK_TWO + timedelta(days=1), TARGET_NM, revenue="200000", for_pay="155000", acquiring="5000"),
-            _sale(3, WEEK_TWO + timedelta(days=1), OTHER_NM, revenue="200000", for_pay="170000", acquiring="4000"),
-            {
-                **_sale(4, WEEK_TWO + timedelta(days=1), 0, revenue="0", for_pay="0", acquiring="0"),
-                "nmId": 0,
-                "vendorCode": "",
-                "sku": "",
-                "docTypeName": "",
-                "sellerOperName": "Удержание",
-                "quantity": 0,
-                "deduction": "5000",
-                "bonusTypeName": "Общее удержание продавца",
-            },
-            _deduction(5, WEEK_TWO + timedelta(days=2), TARGET_NM, "3000", "WB Продвижение"),
-            _deduction(6, WEEK_TWO + timedelta(days=2), 0, "7000", "Оказание услуг «WB Продвижение»"),
-            _deduction(7, WEEK_TWO + timedelta(days=2), 0, "1000", "Аванс за услугу \"Баллы за отзывы\""),
-            _deduction(8, WEEK_TWO + timedelta(days=2), 0, "-1000", "Возврат неиспользованного остатка аванса за услугу \"Баллы за отзывы\""),
-        ],
+        _week_two_finance_rows(),
     )
+
+
+def _week_two_finance_rows() -> list[dict]:
+    return [
+        _sale(2, WEEK_TWO + timedelta(days=1), TARGET_NM, revenue="200000", for_pay="155000", acquiring="5000"),
+        _sale(3, WEEK_TWO + timedelta(days=1), OTHER_NM, revenue="200000", for_pay="170000", acquiring="4000"),
+        {
+            **_sale(4, WEEK_TWO + timedelta(days=1), 0, revenue="0", for_pay="0", acquiring="0"),
+            "nmId": 0,
+            "vendorCode": "",
+            "sku": "",
+            "docTypeName": "",
+            "sellerOperName": "Удержание",
+            "quantity": 0,
+            "deduction": "5000",
+            "bonusTypeName": "Общее удержание продавца",
+        },
+        _deduction(5, WEEK_TWO + timedelta(days=2), TARGET_NM, "3000", "WB Продвижение"),
+        _deduction(6, WEEK_TWO + timedelta(days=2), 0, "7000", "Оказание услуг «WB Продвижение»"),
+        _deduction(7, WEEK_TWO + timedelta(days=2), 0, "1000", "Аванс за услугу \"Баллы за отзывы\""),
+        _deduction(8, WEEK_TWO + timedelta(days=2), 0, "-1000", "Возврат неиспользованного остатка аванса за услугу \"Баллы за отзывы\""),
+    ]
 
 
 def _seed_ads(db_path: Path) -> None:

@@ -198,7 +198,8 @@ def _overhead_operator_workflows() -> None:
         assert manual_summary["source_mode"] == "manual"
         assert manual_summary["denominator_quantity"] == 5, manual_summary
         manual_complete = surface.confirm_document(str(manual["request_id"]))
-        assert manual_complete["state"] == "complete"
+        assert manual_complete["state"] == "posted"
+        assert manual_complete["publication"]["status"] == "queued"
         assert _surface_quantities(service.db_path) == quantities_before
         assert _surface_balance(service.db_path, "fac_control", "FBS", 101) == control_before
         manual_document_id = str(manual_complete["document"]["document_id"])
@@ -328,8 +329,8 @@ def _overhead_operator_workflows() -> None:
             content_type="application/pdf",
         )
         assert not vtb_preview["payment_duplicate"]
-        assert vtb_preview["preview"]["summary"]["payment_evidence"]["adapter"] == "vtb_0401060_v1"
-        assert surface.confirm_document(str(vtb_preview["request_id"]))["state"] == "complete"
+        assert vtb_preview["preview"]["summary"]["payment_evidence"]["adapter"] == "vtb_0401060_v2"
+        assert surface.confirm_document(str(vtb_preview["request_id"]))["state"] == "posted"
 
         not_executed_pdf = _render_pdf(
             wb_text.replace("ИСПОЛНЕН\n19.08.2026 10:11:12", "НЕ ИСПОЛНЕН"),

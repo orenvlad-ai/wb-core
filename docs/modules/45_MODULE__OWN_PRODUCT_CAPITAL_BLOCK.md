@@ -116,7 +116,7 @@ Legacy `paid_equivalent_qty`, cost coverage/confirmation, old `Недоприн�
 
 На производстве capital включает factual CNY supplier payments по weighted RUB cost списанного CNY и относящиеся direct bank fees ровно один раз. В China → FF добавляются confirmed logistics/customs components с canonical allocation rules. FF receipt переносит exact supplier-flow capital. FF → WB добавляет confirmed FF services, storage и transit по packed quantity. Paid WB acceptance относится только к actually accepted units и не входит в discrepancy cost.
 
-WB использует periodic/snapshot WAC: official snapshot задаёт quantity, accepted supplies добавляют доказанный inbound capital, current day provisional, closed days versioned. Zero-stock SKU сохраняет last valid WAC. `Себестоимость WB наша` является direct read projection этого canonical WB WAC.
+WB использует periodic/snapshot WAC: official snapshot задаёт quantity, accepted supplies добавляют доказанный inbound capital, current day provisional, closed days versioned. Zero-stock SKU сохраняет last valid WAC. WB/FBO-контур единой `Себестоимость наша` является direct read projection этого canonical WB WAC.
 
 # 5. Historical and migration boundary
 

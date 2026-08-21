@@ -27,8 +27,9 @@ from packages.application.storage_registry import GenerationManifest, StoreRegis
 from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
-    CanonicalWbCostSnapshot,
-    resolve_canonical_wb_cost,
+    CHANNEL_LOCATION_COST_FORMULA_VERSION,
+    CanonicalChannelCostSnapshot,
+    resolve_channel_location_cost,
 )
 from packages.application.warehouse_archival_estimate import (
     archival_estimate_for_nm_id,
@@ -38,7 +39,7 @@ from packages.business_time import business_date_from_timestamp
 
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v3_signed_review_points"
-SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v4"
+SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v5"
 CALCULATION_REFERENCE_CONTRACT_VERSION = "wb_finance_calculation_reference_v3"
 MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
@@ -58,8 +59,8 @@ RETRO_COST_PERIOD_END = date(2026, 6, 30)
 RETRO_COST_REFERENCE_DATE = date(2026, 7, 1)
 RETRO_COST_FIRST_WEEK_START = date(2026, 4, 27)
 RETRO_COST_FORMULA_VERSION = CANONICAL_COST_FORMULA_VERSION
-PROFIT_METHOD_VERSION = "wb_finance_profit_attributed_capitalization_v3_signed_deductions"
-COST_METHOD_VERSION = CANONICAL_COST_FORMULA_VERSION
+PROFIT_METHOD_VERSION = "wb_finance_profit_covered_revenue_v4_signed_deductions"
+COST_METHOD_VERSION = CHANNEL_LOCATION_COST_FORMULA_VERSION
 
 
 # The calculation-parameters reference is a read projection of these canonical
@@ -351,6 +352,31 @@ def _operation_date(row: Mapping[str, Any], fallback: date) -> tuple[date, str]:
         except ValueError:
             continue
     return fallback, "week_start_fallback"
+
+
+def _finance_sale_identity(row: Mapping[str, Any]) -> str:
+    """Return one non-PII stable order identity for coverage counts."""
+
+    for field in ("srid", "rid", "orderUid", "order_uid"):
+        token = str(row.get(field) or "").strip()
+        if token:
+            return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    material = {
+        "report_id": str(row.get("reportId") or ""),
+        "rrd_id": str(row.get("rrdId") or ""),
+        "nm_id": str(row.get("nmId") or ""),
+        "operation_date": next(
+            (
+                str(row.get(field) or "")[:10]
+                for field in ("rrDate", "saleDt", "orderDt")
+                if str(row.get(field) or "")
+            ),
+            "",
+        ),
+    }
+    return "finance-row:" + hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _nomenclature_identity_index(
@@ -707,9 +733,9 @@ class WbFinanceWeeklyBlock:
         self._capitalization_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._capitalization_cache_connection: sqlite3.Connection | None = None
         self._canonical_cost_snapshot_connection: sqlite3.Connection | None = None
-        self._canonical_cost_snapshot: CanonicalWbCostSnapshot | None = None
+        self._canonical_cost_snapshot: CanonicalChannelCostSnapshot | None = None
         self._canonical_cost_resolution_cache: dict[
-            tuple[str, str], dict[str, Any]
+            tuple[str, str, str], dict[str, Any]
         ] = {}
         self._nomenclature_cache_connection: sqlite3.Connection | None = None
         self._nomenclature_cache: tuple[
@@ -781,6 +807,7 @@ class WbFinanceWeeklyBlock:
                     matched_units INTEGER NOT NULL, unmatched_units INTEGER NOT NULL,
                     coverage_pct TEXT, cogs_rub TEXT, problem_skus_json TEXT NOT NULL,
                     quality_json TEXT NOT NULL DEFAULT '{}',
+                    coverage_json TEXT NOT NULL DEFAULT '{}',
                     cost_state_hash TEXT NOT NULL DEFAULT '',
                     calculated_at TEXT NOT NULL, PRIMARY KEY (seller_id, week_start, week_end)
                 );
@@ -825,6 +852,10 @@ class WbFinanceWeeklyBlock:
             if "cost_state_hash" not in coverage_columns:
                 conn.execute(
                     "ALTER TABLE wb_finance_weekly_cost_coverage ADD COLUMN cost_state_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "coverage_json" not in coverage_columns:
+                conn.execute(
+                    "ALTER TABLE wb_finance_weekly_cost_coverage ADD COLUMN coverage_json TEXT NOT NULL DEFAULT '{}'"
                 )
             conn.commit()
 
@@ -1436,6 +1467,27 @@ class WbFinanceWeeklyBlock:
         week_start: date,
         week_end: date,
     ) -> dict[str, Any]:
+        projection = self._build_week_target_projection(
+            conn,
+            week_start=week_start,
+            week_end=week_end,
+        )
+        self._replace_finance_target_images(
+            conn,
+            target_keys={(self.seller_id, week_start.isoformat(), week_end.isoformat())},
+            images=projection["images"],
+        )
+        return dict(projection["metrics"])
+
+    def _build_week_target_projection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        week_start: date,
+        week_end: date,
+    ) -> dict[str, Any]:
+        """Build exact Finance target after-images without mutating SQLite."""
+
         db_rows = conn.execute(
             "SELECT report_id,rrd_id,row_hash,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
             (self.seller_id, week_start.isoformat(), week_end.isoformat()),
@@ -1452,23 +1504,7 @@ class WbFinanceWeeklyBlock:
             .isoformat()
             .replace("+00:00", "Z")
         )
-        conn.execute(
-            """INSERT OR REPLACE INTO wb_finance_weekly_aggregates
-                (seller_id,week_start,week_end,classifier_version,metrics_json,report_ids_json,report_types_json,unknown_reasons_json,calculated_at)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
-            (
-                self.seller_id,
-                week_start.isoformat(),
-                week_end.isoformat(),
-                CLASSIFIER_VERSION,
-                json.dumps(aggregate, ensure_ascii=False),
-                json.dumps([r["report_id"] for r in reports]),
-                json.dumps([int(r["report_type"] or 0) for r in reports]),
-                json.dumps(unknown, ensure_ascii=False),
-                now,
-            ),
-        )
-        self._rebuild_sku_week_aggregates(
+        sku_projections = self._rebuild_sku_week_aggregates(
             conn,
             week_start=week_start,
             week_end=week_end,
@@ -1476,25 +1512,7 @@ class WbFinanceWeeklyBlock:
             global_metrics=aggregate,
             calculated_at=now,
             parsed_rows=rows,
-        )
-        conn.execute(
-            """INSERT OR REPLACE INTO wb_finance_weekly_cost_coverage
-                (seller_id,week_start,week_end,matched_units,unmatched_units,coverage_pct,cogs_rub,
-                 problem_skus_json,quality_json,cost_state_hash,calculated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                self.seller_id,
-                week_start.isoformat(),
-                week_end.isoformat(),
-                coverage["matched_units"],
-                coverage["unmatched_units"],
-                coverage["coverage_pct"],
-                coverage["cogs_rub"],
-                json.dumps(coverage["problem_skus"], ensure_ascii=False),
-                json.dumps(coverage["quality"], ensure_ascii=False),
-                coverage["cost_state_hash"],
-                now,
-            ),
+            persist=False,
         )
         expected_for_pay = sum(
             (
@@ -1510,35 +1528,90 @@ class WbFinanceWeeklyBlock:
         actual_for_pay = _decimal(aggregate["to_seller"])
         diff = actual_for_pay - expected_for_pay
         reconcile_status = "ok" if abs(diff) <= Decimal("0.01") else "error"
-        conn.execute(
-            """INSERT OR REPLACE INTO wb_finance_weekly_reconciliation
-                (seller_id,week_start,week_end,status,difference_rub,detail_json,checked_at) VALUES (?,?,?,?,?,?,?)""",
-            (
-                self.seller_id,
-                week_start.isoformat(),
-                week_end.isoformat(),
-                reconcile_status,
-                _money_text(diff),
-                json.dumps(
-                    {
-                        "raw_for_pay_sum": _money_text(expected_for_pay),
-                        "aggregate_to_seller": aggregate["to_seller"],
-                    }
-                ),
-                now,
-            ),
-        )
+        sync = conn.execute(
+            "SELECT * FROM wb_finance_weekly_sync WHERE seller_id=? "
+            "AND week_start=? AND week_end=?",
+            (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()
+        if sync is None:
+            raise ValueError("Finance sync identity is missing for loaded week")
+        sync_row = dict(sync)
         if coverage["unmatched_units"] != 0:
-            conn.execute(
-                "UPDATE wb_finance_weekly_sync SET status='incomplete_cost' WHERE seller_id=? AND week_start=? AND week_end=? AND status<>'error_loading'",
-                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-            )
-        else:
-            conn.execute(
-                "UPDATE wb_finance_weekly_sync SET status='completed' WHERE seller_id=? AND week_start=? AND week_end=? AND status='incomplete_cost'",
-                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-            )
-        return aggregate
+            if str(sync_row.get("status") or "") != "error_loading":
+                sync_row["status"] = "incomplete_cost"
+        elif str(sync_row.get("status") or "") == "incomplete_cost":
+            sync_row["status"] = "completed"
+        rows_by_table: dict[str, list[Mapping[str, Any]]] = {
+            "wb_finance_weekly_aggregates": [
+                {
+                    "seller_id": self.seller_id,
+                    "week_start": week_start.isoformat(),
+                    "week_end": week_end.isoformat(),
+                    "classifier_version": CLASSIFIER_VERSION,
+                    "metrics_json": json.dumps(aggregate, ensure_ascii=False),
+                    "report_ids_json": json.dumps([r["report_id"] for r in reports]),
+                    "report_types_json": json.dumps(
+                        [int(r["report_type"] or 0) for r in reports]
+                    ),
+                    "unknown_reasons_json": json.dumps(unknown, ensure_ascii=False),
+                    "calculated_at": now,
+                }
+            ],
+            "wb_finance_weekly_cost_coverage": [
+                {
+                    "seller_id": self.seller_id,
+                    "week_start": week_start.isoformat(),
+                    "week_end": week_end.isoformat(),
+                    "matched_units": coverage["matched_units"],
+                    "unmatched_units": coverage["unmatched_units"],
+                    "coverage_pct": coverage["coverage_pct"],
+                    "cogs_rub": coverage["cogs_rub"],
+                    "problem_skus_json": json.dumps(
+                        coverage["problem_skus"], ensure_ascii=False
+                    ),
+                    "quality_json": json.dumps(
+                        coverage["quality"], ensure_ascii=False
+                    ),
+                    "coverage_json": json.dumps(coverage, ensure_ascii=False),
+                    "cost_state_hash": coverage["cost_state_hash"],
+                    "calculated_at": now,
+                }
+            ],
+            "wb_finance_weekly_reconciliation": [
+                {
+                    "seller_id": self.seller_id,
+                    "week_start": week_start.isoformat(),
+                    "week_end": week_end.isoformat(),
+                    "status": reconcile_status,
+                    "difference_rub": _money_text(diff),
+                    "detail_json": json.dumps(
+                        {
+                            "raw_for_pay_sum": _money_text(expected_for_pay),
+                            "aggregate_to_seller": aggregate["to_seller"],
+                        }
+                    ),
+                    "checked_at": now,
+                }
+            ],
+            "wb_finance_weekly_sku_aggregates": [
+                {**item, "calculated_at": now} for item in sku_projections
+            ],
+            "wb_finance_weekly_sync": [sync_row],
+        }
+        images: dict[str, Any] = {}
+        for table, projected_rows in rows_by_table.items():
+            columns = [
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            images[table] = {
+                "columns": columns,
+                "rows": [
+                    [row.get(column) for column in columns]
+                    for row in projected_rows
+                ],
+            }
+        return {"metrics": aggregate, "coverage": coverage, "images": images}
 
     def _rebuild_sku_week_aggregates(
         self,
@@ -1628,6 +1701,10 @@ class WbFinanceWeeklyBlock:
                         for field in (
                             "nm_id",
                             "operation_date",
+                            "channel",
+                            "facility_id",
+                            "pool",
+                            "fbs_order_id",
                             "source_date",
                             "source_identity",
                             "source_digest",
@@ -1822,7 +1899,6 @@ class WbFinanceWeeklyBlock:
         profit_period_expenses = (
             total_expenses - capitalized_acceptance - capitalized_transit
         )
-        before_cogs = net_revenue - profit_period_expenses + values["positive_adjustments"]
         coverage = (
             dict(coverage_override)
             if coverage_override is not None
@@ -1832,8 +1908,30 @@ class WbFinanceWeeklyBlock:
                 week_start,
             )
         )
+        covered_net_revenue = _decimal(coverage["covered_net_revenue_rub"])
+        uncovered_net_revenue = _decimal(coverage["uncovered_net_revenue_rub"])
+        uncovered_sales_revenue = _decimal(
+            coverage["uncovered_sales_revenue_rub"]
+        )
+        covered_sales_revenue = _decimal(coverage["covered_sales_revenue_rub"])
+        profit_eligible = not (
+            int(coverage["unmatched_units"]) > 0
+            and int(coverage["matched_units"]) <= 0
+        )
+        before_cogs = (
+            covered_net_revenue
+            - profit_period_expenses
+            + values["positive_adjustments"]
+            if profit_eligible
+            else None
+        )
+        # A partial canonical COGS is truthful when its revenue denominator is
+        # restricted to the same covered sales.  Missing cost never becomes
+        # zero and uncovered revenue never leaks into the profit numerator.
         cogs = (
-            _decimal(coverage["cogs_rub"]) if coverage["cogs_rub"] is not None else None
+            _decimal(coverage["partial_cogs_rub"])
+            if profit_eligible
+            else None
         )
         profit = (
             before_cogs - cogs
@@ -1847,6 +1945,13 @@ class WbFinanceWeeklyBlock:
             "revenue_before_returns": _money_text(values["revenue_before_returns"]),
             "returns_amount": _money_text(values["returns_amount"]),
             "net_revenue": _money_text(net_revenue),
+            "profit_revenue_covered": _money_text(covered_net_revenue),
+            "profit_revenue_uncovered": _money_text(uncovered_net_revenue),
+            "sales_without_cost_rub": _money_text(uncovered_sales_revenue),
+            "orders_without_cost": int(coverage["uncovered_sales_order_count"]),
+            "units_without_cost": int(coverage["uncovered_sales_units"]),
+            "sales_cost_coverage_pct": coverage["sales_revenue_coverage_pct"],
+            "profit_coverage_status": coverage["profit_coverage_status"],
             "agent_remuneration": _money_text(values["agent_remuneration"]),
             "commission": _money_text(values["agent_remuneration"]),
             "combined_commission_control": _money_text(values["combined_commission_control"]),
@@ -1876,10 +1981,15 @@ class WbFinanceWeeklyBlock:
             "capitalized_transit_logistics": _money_text(capitalized_transit),
             "to_seller": _money_text(values["to_seller"]),
             "before_cogs_profit": _money_text(before_cogs),
-            "before_cogs_margin_pct": _money_text(_ratio(before_cogs, net_revenue)),
+            "before_cogs_margin_pct": _money_text(
+                _ratio(before_cogs, covered_net_revenue)
+            ),
             "cogs": _money_text(cogs),
+            "cogs_complete": coverage["unmatched_units"] == 0,
             "profit_after_cogs": _money_text(profit),
-            "final_margin_pct": _money_text(_ratio(profit, net_revenue)),
+            "final_margin_pct": _money_text(
+                _ratio(profit, covered_net_revenue)
+            ),
             "commission_control_reconciliation_rub": _money_text(
                 values["combined_commission_control"]
                 - values["agent_remuneration"]
@@ -1890,7 +2000,7 @@ class WbFinanceWeeklyBlock:
             "transit_accounting_note": "addback_only_when_supply_cost_layer_lineage_is_matched_and_capped",
             "capitalization_reconciliation": capitalization,
             "profit_method_version": PROFIT_METHOD_VERSION,
-            "profit_semantics_complete": True,
+            "profit_semantics_complete": coverage["unmatched_units"] == 0,
         }
         return metrics, coverage, sorted(unknown)
 
@@ -2721,18 +2831,43 @@ class WbFinanceWeeklyBlock:
         *,
         nm_id: str,
         operation_date: date,
+        operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self._canonical_cost_snapshot_connection is not conn:
-            self._canonical_cost_snapshot = CanonicalWbCostSnapshot.from_connection(conn)
+            self._canonical_cost_snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
             self._canonical_cost_snapshot_connection = conn
             self._canonical_cost_resolution_cache = {}
-        cache_key = (str(nm_id), operation_date.isoformat())
+        raw = dict(operation or {})
+        identity_material = {
+            key: str(raw.get(key) or "")
+            for key in (
+                "srid",
+                "rid",
+                "orderUid",
+                "order_uid",
+                "deliveryType",
+                "delivery_type",
+                "orderType",
+                "order_type",
+            )
+            if str(raw.get(key) or "")
+        }
+        identity_digest = hashlib.sha256(
+            json.dumps(
+                identity_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_key = (str(nm_id), operation_date.isoformat(), identity_digest)
         cached = self._canonical_cost_resolution_cache.get(cache_key)
         if cached is None:
-            cached = resolve_canonical_wb_cost(
+            cached = resolve_channel_location_cost(
                 conn,
                 nm_id=nm_id,
                 operation_date=operation_date,
+                operation=raw,
                 snapshot=self._canonical_cost_snapshot,
             )
             self._canonical_cost_resolution_cache[cache_key] = cached
@@ -2757,8 +2892,25 @@ class WbFinanceWeeklyBlock:
         problem_rows: dict[tuple[str, ...], dict[str, Any]] = {}
         detail_rows: list[dict[str, Any]] = []
         dependency_digest = _StreamingCostDependencyDigest()
-        resolution_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        source_units = {"projected_from_2026_07_01": 0, "canonical_exact_date": 0}
+        source_units = {
+            "projected_from_2026_07_01": 0,
+            "canonical_exact_date": 0,
+            "fbs_exact_handoff": 0,
+        }
+        covered_sales_rub = ZERO
+        uncovered_sales_rub = ZERO
+        covered_returns_rub = ZERO
+        uncovered_returns_rub = ZERO
+        covered_sales_orders: set[str] = set()
+        uncovered_sales_orders: set[str] = set()
+        uncovered_fbs_sales_rub = ZERO
+        uncovered_fbs_sales_orders: set[str] = set()
+        uncovered_fbs_sales_units = 0
+        covered_sales_units = 0
+        uncovered_sales_units = 0
+        covered_sales_cogs_rub = ZERO
+        covered_returns_cogs_rub = ZERO
+        daily_coverage: dict[str, dict[str, Any]] = {}
         operation_date_fallback_rows = 0
         operation_date_fallback_units = 0
         for row in rows:
@@ -2777,6 +2929,40 @@ class WbFinanceWeeklyBlock:
                 ambiguous_aliases=ambiguous_aliases,
             )
             operation_date, operation_date_source = _operation_date(row, week_start)
+            operation_day = (
+                operation_date.isoformat()
+                if operation_date_source != "week_start_fallback"
+                else ""
+            )
+            revenue = _decimal(row.get("retailPriceWithDisc"))
+            order_identity = _finance_sale_identity(row)
+            daily = daily_coverage.setdefault(
+                operation_day,
+                {
+                    "operation_date": operation_day,
+                    "sales_revenue_rub": ZERO,
+                    "returns_revenue_rub": ZERO,
+                    "covered_sales_revenue_rub": ZERO,
+                    "uncovered_sales_revenue_rub": ZERO,
+                    "covered_returns_revenue_rub": ZERO,
+                    "uncovered_returns_revenue_rub": ZERO,
+                    "covered_sales_cogs_rub": ZERO,
+                    "covered_returns_cogs_rub": ZERO,
+                    "sales_units": 0,
+                    "covered_sales_units": 0,
+                    "uncovered_sales_units": 0,
+                    "sales_order_ids": set(),
+                    "covered_sales_order_ids": set(),
+                    "uncovered_sales_order_ids": set(),
+                    "reason_counts": {},
+                },
+            )
+            if sign > 0:
+                daily["sales_revenue_rub"] += revenue
+                daily["sales_units"] += gross_qty
+                daily["sales_order_ids"].add(order_identity)
+            else:
+                daily["returns_revenue_rub"] += revenue
             if operation_date_source == "week_start_fallback":
                 operation_date_fallback_rows += 1
                 operation_date_fallback_units += gross_qty
@@ -2804,15 +2990,12 @@ class WbFinanceWeeklyBlock:
                     "formula_version": COST_METHOD_VERSION,
                 }
             else:
-                cache_key = (nm_id, operation_date.isoformat())
-                resolution = resolution_cache.get(cache_key)
-                if resolution is None:
-                    resolution = self._resolve_canonical_cost(
-                        conn,
-                        nm_id=nm_id,
-                        operation_date=operation_date,
-                    )
-                    resolution_cache[cache_key] = resolution
+                resolution = self._resolve_canonical_cost(
+                    conn,
+                    nm_id=nm_id,
+                    operation_date=operation_date,
+                    operation=row,
+                )
             dependency = {
                 **resolution,
                 "report_id": str(row.get("reportId") or ""),
@@ -2834,6 +3017,10 @@ class WbFinanceWeeklyBlock:
                         "source_digest",
                         "quality",
                         "selection_method",
+                        "channel",
+                        "facility_id",
+                        "pool",
+                        "fbs_order_id",
                         "status",
                         "reason",
                     )
@@ -2856,6 +3043,22 @@ class WbFinanceWeeklyBlock:
                     resolution.get("canonical_source_date") or ""
                 )
                 reason = str(resolution.get("reason") or "canonical_cost_missing")
+                reason_counts = daily["reason_counts"]
+                reason_counts[reason] = int(reason_counts.get(reason) or 0) + 1
+                if sign > 0:
+                    uncovered_sales_rub += revenue
+                    uncovered_sales_units += gross_qty
+                    uncovered_sales_orders.add(order_identity)
+                    if str(resolution.get("channel") or "") == "FBS":
+                        uncovered_fbs_sales_rub += revenue
+                        uncovered_fbs_sales_units += gross_qty
+                        uncovered_fbs_sales_orders.add(order_identity)
+                    daily["uncovered_sales_revenue_rub"] += revenue
+                    daily["uncovered_sales_units"] += gross_qty
+                    daily["uncovered_sales_order_ids"].add(order_identity)
+                else:
+                    uncovered_returns_rub += revenue
+                    daily["uncovered_returns_revenue_rub"] += revenue
                 problem_key = (
                     sku,
                     nm_id,
@@ -2863,6 +3066,8 @@ class WbFinanceWeeklyBlock:
                     canonical_source_date,
                     reason,
                     operation_date_source,
+                    str(resolution.get("channel") or ""),
+                    str(resolution.get("facility_id") or ""),
                 )
                 problem = problem_rows.setdefault(
                     problem_key,
@@ -2874,6 +3079,9 @@ class WbFinanceWeeklyBlock:
                         "canonical_source_date": canonical_source_date,
                         "reason": reason,
                         "operation_date_source": operation_date_source,
+                        "channel": str(resolution.get("channel") or ""),
+                        "facility_id": str(resolution.get("facility_id") or ""),
+                        "pool": str(resolution.get("pool") or ""),
                         "operation_count": 0,
                         "sales_qty": 0,
                         "returns_qty": 0,
@@ -2890,8 +3098,24 @@ class WbFinanceWeeklyBlock:
             signed_cogs = Decimal(signed_qty) * unit_cost
             cogs += signed_cogs
             matched_units += gross_qty
+            if sign > 0:
+                covered_sales_rub += revenue
+                covered_sales_cogs_rub += signed_cogs
+                covered_sales_units += gross_qty
+                covered_sales_orders.add(order_identity)
+                daily["covered_sales_revenue_rub"] += revenue
+                daily["covered_sales_cogs_rub"] += signed_cogs
+                daily["covered_sales_units"] += gross_qty
+                daily["covered_sales_order_ids"].add(order_identity)
+            else:
+                covered_returns_rub += revenue
+                covered_returns_cogs_rub += abs(signed_cogs)
+                daily["covered_returns_revenue_rub"] += revenue
+                daily["covered_returns_cogs_rub"] += abs(signed_cogs)
             source_key = (
-                "projected_from_2026_07_01"
+                "fbs_exact_handoff"
+                if str(resolution.get("channel") or "") == "FBS"
+                else "projected_from_2026_07_01"
                 if operation_date < CANONICAL_COST_POLICY_DATE
                 else "canonical_exact_date"
             )
@@ -2909,6 +3133,10 @@ class WbFinanceWeeklyBlock:
                         "signed_quantity": signed_qty,
                         "unit_cost_rub": _money_text(unit_cost),
                         "cost_source": "canonical_our_wb_cost",
+                        "channel": str(resolution.get("channel") or ""),
+                        "facility_id": str(resolution.get("facility_id") or ""),
+                        "pool": str(resolution.get("pool") or ""),
+                        "fbs_order_id": int(resolution.get("fbs_order_id") or 0),
                         "source_date": str(resolution["canonical_source_date"]),
                         "source_identity": str(resolution["canonical_source_identity"]),
                         "source_digest": str(resolution["source_digest"]),
@@ -2926,12 +3154,75 @@ class WbFinanceWeeklyBlock:
             else None
         )
         cost_state_hash = dependency_digest.finish()
+        total_sales_rub = covered_sales_rub + uncovered_sales_rub
+        sales_revenue_coverage_pct = (
+            covered_sales_rub / total_sales_rub * Decimal("100")
+            if total_sales_rub
+            else None
+        )
+        daily_rows = []
+        for operation_day in sorted(daily_coverage):
+            item = daily_coverage[operation_day]
+            sales_revenue = _decimal(item["sales_revenue_rub"])
+            covered_revenue = _decimal(item["covered_sales_revenue_rub"])
+            daily_rows.append(
+                {
+                    "operation_date": operation_day,
+                    "sales_revenue_rub": _money_text(sales_revenue),
+                    "returns_revenue_rub": _money_text(item["returns_revenue_rub"]),
+                    "net_revenue_rub": _money_text(
+                        sales_revenue - _decimal(item["returns_revenue_rub"])
+                    ),
+                    "covered_sales_revenue_rub": _money_text(covered_revenue),
+                    "uncovered_sales_revenue_rub": _money_text(
+                        item["uncovered_sales_revenue_rub"]
+                    ),
+                    "covered_returns_revenue_rub": _money_text(
+                        item["covered_returns_revenue_rub"]
+                    ),
+                    "uncovered_returns_revenue_rub": _money_text(
+                        item["uncovered_returns_revenue_rub"]
+                    ),
+                    "covered_sales_cogs_rub": _money_text(
+                        item["covered_sales_cogs_rub"]
+                    ),
+                    "covered_returns_cogs_rub": _money_text(
+                        item["covered_returns_cogs_rub"]
+                    ),
+                    "covered_net_revenue_rub": _money_text(
+                        covered_revenue
+                        - _decimal(item["covered_returns_revenue_rub"])
+                    ),
+                    "sales_units": int(item["sales_units"]),
+                    "covered_sales_units": int(item["covered_sales_units"]),
+                    "uncovered_sales_units": int(item["uncovered_sales_units"]),
+                    "sales_order_count": len(item["sales_order_ids"]),
+                    "covered_sales_order_count": len(
+                        item["covered_sales_order_ids"]
+                    ),
+                    "uncovered_sales_order_count": len(
+                        item["uncovered_sales_order_ids"]
+                    ),
+                    "sales_revenue_coverage_pct": _money_text(
+                        covered_revenue / sales_revenue * Decimal("100")
+                        if sales_revenue
+                        else None
+                    ),
+                    "status": (
+                        "partial"
+                        if _decimal(item["uncovered_sales_revenue_rub"]) > ZERO
+                        else "covered"
+                    ),
+                    "reason_counts": dict(sorted(item["reason_counts"].items())),
+                }
+            )
         quality = {
             "cost_method_version": COST_METHOD_VERSION,
             "policy_date": CANONICAL_COST_POLICY_DATE.isoformat(),
             "source_units": source_units,
             "projected_units": source_units["projected_from_2026_07_01"],
             "exact_units": source_units["canonical_exact_date"],
+            "fbs_exact_handoff_units": source_units["fbs_exact_handoff"],
             "fallback_units": "0.0000",
             "fallback_average_created": False,
             "silent_zero_created": False,
@@ -2948,6 +3239,36 @@ class WbFinanceWeeklyBlock:
             "coverage_pct": _money_text(coverage_pct),
             "cogs_rub": _money_text(cogs) if unmatched_units == 0 else None,
             "partial_cogs_rub": _money_text(cogs),
+            "covered_sales_revenue_rub": _money_text(covered_sales_rub),
+            "uncovered_sales_revenue_rub": _money_text(uncovered_sales_rub),
+            "covered_returns_revenue_rub": _money_text(covered_returns_rub),
+            "uncovered_returns_revenue_rub": _money_text(uncovered_returns_rub),
+            "covered_sales_cogs_rub": _money_text(covered_sales_cogs_rub),
+            "covered_returns_cogs_rub": _money_text(covered_returns_cogs_rub),
+            "covered_net_revenue_rub": _money_text(
+                covered_sales_rub - covered_returns_rub
+            ),
+            "uncovered_net_revenue_rub": _money_text(
+                uncovered_sales_rub - uncovered_returns_rub
+            ),
+            "sales_revenue_coverage_pct": _money_text(
+                sales_revenue_coverage_pct
+            ),
+            "covered_sales_order_count": len(covered_sales_orders),
+            "uncovered_sales_order_count": len(uncovered_sales_orders),
+            "uncovered_fbs_sales_revenue_rub": _money_text(
+                uncovered_fbs_sales_rub
+            ),
+            "uncovered_fbs_sales_order_count": len(
+                uncovered_fbs_sales_orders
+            ),
+            "uncovered_fbs_sales_units": uncovered_fbs_sales_units,
+            "covered_sales_units": covered_sales_units,
+            "uncovered_sales_units": uncovered_sales_units,
+            "profit_coverage_status": (
+                "partial" if uncovered_sales_rub > ZERO else "complete"
+            ),
+            "daily_rows": daily_rows,
             "problem_skus": [problem_rows[key] for key in sorted(problem_rows)],
             "quality": quality,
             "cost_state_hash": cost_state_hash,
@@ -2961,7 +3282,7 @@ class WbFinanceWeeklyBlock:
                 """SELECT s.week_start,s.week_end,a.metrics_json,a.report_ids_json,a.report_types_json,
                 a.unknown_reasons_json,a.classifier_version,s.status,s.first_loaded_at,s.last_synced_at,
                 s.report_count,s.raw_row_count,s.last_error,c.matched_units,c.unmatched_units,c.coverage_pct,
-                c.problem_skus_json,c.quality_json,c.cost_state_hash,r.status reconciliation_status
+                c.problem_skus_json,c.quality_json,c.coverage_json,c.cost_state_hash,r.status reconciliation_status
                 FROM wb_finance_weekly_sync s
                 LEFT JOIN wb_finance_weekly_aggregates a USING(seller_id,week_start,week_end)
                 LEFT JOIN wb_finance_weekly_cost_coverage c USING(seller_id,week_start,week_end)
@@ -2987,14 +3308,17 @@ class WbFinanceWeeklyBlock:
                     or CLASSIFIER_VERSION,
                     "unknown_reasons": json.loads(row["unknown_reasons_json"] or "[]"),
                     "last_error": row["last_error"],
-                    "cost_coverage": {
-                        "matched_units": row["matched_units"],
-                        "unmatched_units": row["unmatched_units"],
-                        "coverage_pct": row["coverage_pct"],
-                        "problem_skus": json.loads(row["problem_skus_json"] or "[]"),
-                        "quality": json.loads(row["quality_json"] or "{}"),
-                        "cost_state_hash": row["cost_state_hash"] or "",
-                    },
+                    "cost_coverage": (
+                        json.loads(row["coverage_json"] or "{}")
+                        or {
+                            "matched_units": row["matched_units"],
+                            "unmatched_units": row["unmatched_units"],
+                            "coverage_pct": row["coverage_pct"],
+                            "problem_skus": json.loads(row["problem_skus_json"] or "[]"),
+                            "quality": json.loads(row["quality_json"] or "{}"),
+                            "cost_state_hash": row["cost_state_hash"] or "",
+                        }
+                    ),
                     "reconciliation_status": row["reconciliation_status"] or "pending",
                 }
             )
@@ -5082,56 +5406,115 @@ class WbFinanceWeeklyBlock:
         date_from: date = date.min,
         date_to: date | None = None,
     ) -> dict[str, Any]:
-        """Apply an exact stale-cost plan in one optimistic SQLite transaction."""
+        """Build on an immutable snapshot, then perform one short CAS apply."""
+
+        phase_started = datetime.now(timezone.utc)
         with self._connect() as conn:
+            source_data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            plan = self._plan_stale_cost_weeks_in_connection(
+                conn, date_from=date_from, date_to=date_to
+            )
+            if str(plan["fingerprint"]) != expected_fingerprint:
+                raise ValueError("stale Finance cost plan fingerprint changed before apply")
+            target_keys = {
+                (self.seller_id, str(item["week_start"]), str(item["week_end"]))
+                for item in plan["weeks"]
+            }
+            if not target_keys:
+                return {
+                    "status": "already_current",
+                    "runtime_mutation": False,
+                    "fingerprint": expected_fingerprint,
+                    "checked_week_count": plan["checked_week_count"],
+                    "recalculated_week_count": 0,
+                    "weeks": [],
+                    "non_target_digest_before": plan["non_target_digest"],
+                    "non_target_digest_after": plan["non_target_digest"],
+                    "non_target_preserved": True,
+                    "post_verify_stale_week_count": 0,
+                    "phase_timings_ms": {
+                        "query_plan": 0,
+                        "query_projection": 0,
+                        "writer_lock_hold": 0,
+                        "post_commit_readback": 0,
+                    },
+                }
+            snapshot_started = datetime.now(timezone.utc)
+            recalculated: list[dict[str, Any]] = []
+            after_images: dict[str, Any] = {}
+            for item in plan["weeks"]:
+                start = date.fromisoformat(str(item["week_start"]))
+                end = date.fromisoformat(str(item["week_end"]))
+                projection = self._build_week_target_projection(
+                    conn,
+                    week_start=start,
+                    week_end=end,
+                )
+                metrics = dict(projection["metrics"])
+                coverage = dict(projection["coverage"])
+                if (
+                    str(coverage["cost_state_hash"])
+                    != str(item["expected_cost_state_hash"])
+                    or self._json_digest(metrics)
+                    != str(item["expected_metrics_digest"])
+                ):
+                    raise ValueError(
+                        "query projection differs from the reviewed stale Finance plan"
+                    )
+                for table, image in dict(projection["images"]).items():
+                    selected = after_images.setdefault(
+                        table,
+                        {"columns": list(image["columns"]), "rows": []},
+                    )
+                    if list(selected["columns"]) != list(image["columns"]):
+                        raise ValueError("Finance query projection schema drifted")
+                    selected["rows"].extend(list(image["rows"]))
+                recalculated.append(
+                    {
+                        "week_start": start.isoformat(),
+                        "week_end": end.isoformat(),
+                        "cost_state_hash": item["expected_cost_state_hash"],
+                        "cogs": metrics["cogs"],
+                    }
+                )
+            snapshot_finished = datetime.now(timezone.utc)
+
+            writer_started = datetime.now(timezone.utc)
             conn.execute("BEGIN IMMEDIATE")
             try:
-                plan = self._plan_stale_cost_weeks_in_connection(
-                    conn, date_from=date_from, date_to=date_to
-                )
-                if str(plan["fingerprint"]) != expected_fingerprint:
+                if int(conn.execute("PRAGMA data_version").fetchone()[0]) != source_data_version:
                     raise ValueError(
-                        "stale Finance cost plan fingerprint changed before apply"
+                        "Finance source changed after snapshot planning; rebuild the plan"
                     )
-                target_keys = {
-                    (
-                        self.seller_id,
-                        str(item["week_start"]),
-                        str(item["week_end"]),
-                    )
-                    for item in plan["weeks"]
-                }
-                recalculated: list[dict[str, Any]] = []
-                for item in plan["weeks"]:
-                    start = date.fromisoformat(str(item["week_start"]))
-                    end = date.fromisoformat(str(item["week_end"]))
-                    metrics = self._recalculate_week_in_connection(conn, start, end)
-                    recalculated.append(
-                        {
-                            "week_start": start.isoformat(),
-                            "week_end": end.isoformat(),
-                            "cost_state_hash": item["expected_cost_state_hash"],
-                            "cogs": metrics["cogs"],
-                        }
-                    )
-                non_target_after = self._finance_state_digest(
-                    conn, target_keys=target_keys, target_only=False
+                self._replace_finance_target_images(
+                    conn,
+                    target_keys=target_keys,
+                    images=after_images,
                 )
-                if non_target_after != plan["non_target_digest"]:
-                    raise ValueError(
-                        "non-target Finance state changed during recalculation"
-                    )
-                verification = self._plan_stale_cost_weeks_in_connection(
-                    conn, date_from=date_from, date_to=date_to
-                )
-                if int(verification["stale_week_count"]) != 0:
-                    raise ValueError(
-                        "post-recalculation verification still contains stale weeks"
-                    )
+                applied_images = self._finance_target_images(conn, target_keys)
+                if self._json_digest(applied_images) != self._json_digest(after_images):
+                    raise ValueError("Finance target CAS readback differs from snapshot")
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
+            writer_finished = datetime.now(timezone.utc)
+
+        with self._connect() as conn:
+            non_target_after = self._finance_state_digest(
+                conn, target_keys=target_keys, target_only=False
+            )
+            if non_target_after != plan["non_target_digest"]:
+                raise ValueError("non-target Finance state changed during scoped apply")
+            post_verify = self._plan_stale_cost_weeks_in_connection(
+                conn, date_from=date_from, date_to=date_to
+            )
+            if int(post_verify["stale_week_count"]) != 0:
+                raise ValueError("post-recalculation verification still contains stale weeks")
+        phase_finished = datetime.now(timezone.utc)
+        milliseconds = lambda start, end: max(
+            0.0, (end - start).total_seconds() * 1000
+        )
         return {
             "status": "already_current" if not recalculated else "applied",
             "runtime_mutation": bool(recalculated),
@@ -5143,7 +5526,73 @@ class WbFinanceWeeklyBlock:
             "non_target_digest_after": non_target_after,
             "non_target_preserved": True,
             "post_verify_stale_week_count": 0,
+            "phase_timings_ms": {
+                "query_plan": milliseconds(
+                    phase_started, snapshot_started
+                ),
+                "query_projection": milliseconds(
+                    snapshot_started, snapshot_finished
+                ),
+                "writer_lock_hold": milliseconds(writer_started, writer_finished),
+                "post_commit_readback": milliseconds(writer_finished, phase_finished),
+            },
         }
+
+    @staticmethod
+    def _finance_target_images(
+        conn: sqlite3.Connection,
+        target_keys: set[tuple[str, str, str]],
+    ) -> dict[str, Any]:
+        images: dict[str, Any] = {}
+        for table in (
+            "wb_finance_weekly_aggregates",
+            "wb_finance_weekly_cost_coverage",
+            "wb_finance_weekly_reconciliation",
+            "wb_finance_weekly_sku_aggregates",
+            "wb_finance_weekly_sync",
+        ):
+            columns = [
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            rows: list[list[Any]] = []
+            for seller_id, week_start, week_end in sorted(target_keys):
+                selected = conn.execute(
+                    f"SELECT * FROM {table} WHERE seller_id=? AND week_start=? "
+                    "AND week_end=? ORDER BY "
+                    + ",".join(
+                        name
+                        for name in ("seller_id", "week_start", "week_end", "nm_id")
+                        if name in columns
+                    ),
+                    (seller_id, week_start, week_end),
+                ).fetchall()
+                rows.extend([[row[column] for column in columns] for row in selected])
+            images[table] = {"columns": columns, "rows": rows}
+        return images
+
+    @staticmethod
+    def _replace_finance_target_images(
+        conn: sqlite3.Connection,
+        *,
+        target_keys: set[tuple[str, str, str]],
+        images: Mapping[str, Any],
+    ) -> None:
+        for table, image in images.items():
+            columns = [str(item) for item in image["columns"]]
+            for seller_id, week_start, week_end in sorted(target_keys):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE seller_id=? AND week_start=? AND week_end=?",
+                    (seller_id, week_start, week_end),
+                )
+            rows = list(image["rows"])
+            if rows:
+                conn.executemany(
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES("
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    rows,
+                )
 
     def _finance_state_digest(
         self,

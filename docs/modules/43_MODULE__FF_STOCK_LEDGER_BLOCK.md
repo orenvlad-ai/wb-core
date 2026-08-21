@@ -10,11 +10,14 @@ source_basis:
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
+  - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_fbs_lifecycle.py"
+  - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/russian_payment_orders.py"
   - "packages/application/ff_pool_zero_physical_production.py"
   - "packages/application/ff_fbs_mapping_extension_production.py"
@@ -836,6 +839,25 @@ rebuilds the plan both before and inside the writer transaction. Posting keeps
 quantity unchanged, adds the exact conserved kopecks to capital and recalculates
 facility-local WAC. Storno retains the category, manual/PDF origin and payment
 evidence link while reversing the exact original capital effect.
+
+The posting transaction also updates the exact affected rows of the active
+aggregate `ff` projection, without changing quantity, and atomically inserts
+one `pool_overhead:<document_id>` targeted queue revision. HTTP ends at the
+durable `posted/queued` readback; Warehouse, Proxy/economics and Finance
+continue outside the interactive request. The queue persists separate
+Warehouse, economics and Finance states, and Finance completion stores its
+exact stale-plan CAS fingerprint. `Себестоимость опубликована` is possible
+only after all three stages read back complete; durable error never asks the
+operator to repeat the business document.
+
+For a post-cutover FBS order the lifecycle debit freezes the positive current
+WAC of its exact `facility_id + FBS + nmId` inside the serialized debit
+transaction and records the source operation order/revision. A debit committed
+before overhead retains the previous WAC; one committed after it receives the
+new WAC. Fulfilled history is immutable. Missing mapping, balance, positive
+capital or exact WAC remains unavailable with a reason instead of using an
+opening/cutover value, another facility/SKU, an average or zero. Storno fails
+closed if a later immutable debit already froze the overhead-derived WAC.
 
 For PDF mode the canonical request stores the original authenticated source
 file, normalized parser result, parser/fingerprint versions, file SHA-256 and

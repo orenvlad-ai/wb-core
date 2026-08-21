@@ -3975,7 +3975,7 @@
             <section class="block">
               <h2 class="block-title">Финотчёт ВБ</h2>
               <p id="wbFinanceReportPeriod" class="report-period">Еженедельные отчёты Wildberries с начала 2026 года.</p>
-              <p class="field-note">Официальный Finance API WB и единая каноническая «Себестоимость WB наша»: для операций до 01.07.2026 — утверждённая ретроспективная проекция стоимости того же nmId на 01.07, начиная с 01.07 — exact-date стоимость по дате операции.</p>
+              <p class="field-note">Официальный Finance API WB и единая каноническая «Себестоимость наша»: FBS использует exact facility/order handoff WAC, FBO/WB — canonical daily WB WAC.</p>
               <p id="wbFinanceReportStatus" class="section-message">Читаем финансовые отчёты...</p>
               <section class="report-card">
                 <h3>Хранилища Finance</h3>
@@ -14449,7 +14449,11 @@
 
       function renderPartnerReport(report) {
         const rows = [
-          ["net_revenue","Чистая выручка","money"], ["cogs","Себестоимость","money"],
+          ["net_revenue","Чистая выручка","money"],
+          ["sales_without_cost_rub","Продажи без себестоимости, ₽","money"],
+          ["orders_without_cost","Заказы без себестоимости, шт.","count"],
+          ["units_without_cost","Единицы без себестоимости, шт.","count"],
+          ["cogs","Себестоимость наша","money"],
           ["agent_remuneration","Агентское вознаграждение WB","money"], ["acquiring","Эквайринг","money"],
           ["logistics","Логистика WB","money"], ["storage","Хранение WB","money"],
           ["acceptance","Платная приёмка","money"], ["ads","Маркетинг WB","money"],
@@ -14495,7 +14499,8 @@
         const blockers = Array.isArray(report.blockers) ? report.blockers : [];
         partnerReportBlockers.innerHTML = blockers.length ? "<p class=\"section-message error\">Недостаточно данных: " + escapeHtml(blockers.map(formatPartnerBlocker).join("; ")) + ".</p>" : "";
         partnerReportNotes.innerHTML = "<p>Formula: " + escapeHtml(report.formula_version) + " · source digest: " + escapeHtml(report.source_digest) + ".</p>" +
-          "<p>Маркетинг — только accepted ads_compact выбранного nmId. Отсутствующие источники не заменяются нулями.</p>";
+          "<p>При неполном покрытии прибыль и маржа считаются только по продажам с подтверждённой себестоимостью; полный факт продаж сохраняется отдельно. Отсутствующие источники не заменяются нулями.</p>" +
+          "<p>Маркетинг — только accepted ads_compact выбранного nmId.</p>";
         partnerReportDownload.disabled = report.status !== "ready";
         scheduleEmbeddedHeightPost();
       }
@@ -14600,7 +14605,7 @@
           {key:"before_cogs_profit", label:"Финансовый результат до себестоимости", type:"money"},
           {key:"before_cogs_margin_pct", label:"Рентабельность до себестоимости, %", type:"percent"},
           {internal: true, label:"Внутренние данные WB Core — не входят в финансовый отчёт Wildberries"},
-          {key:"cogs", label:"Себестоимость продаж", type:"money"}, {key:"profit_after_cogs", label:"Прибыль после себестоимости", type:"money"},
+          {key:"cogs", label:"Себестоимость наша", type:"money"}, {key:"profit_after_cogs", label:"Прибыль после себестоимости", type:"money"},
           {key:"final_margin_pct", label:"Итоговая рентабельность, %", type:"percent"}
         ];
         const head = "<thead><tr><th>Метрика</th>" + weeks.map((week) => {

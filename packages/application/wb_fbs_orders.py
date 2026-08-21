@@ -8,6 +8,7 @@ inventory document, operation, reservation, movement, balance, or cutover.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -77,6 +78,7 @@ STATUS_CATEGORIES = frozenset(
         "sold_closed",
         "canceled",
         "reconciliation",
+        "cost_unresolved",
         "unmatched",
         "deferred",
         "ambiguous",
@@ -129,6 +131,8 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
             nm_id INTEGER NOT NULL CHECK(nm_id > 0),
             chrt_id INTEGER,
             seller_sku TEXT NOT NULL DEFAULT '',
+            rid_sha256 TEXT NOT NULL DEFAULT '',
+            order_uid_sha256 TEXT NOT NULL DEFAULT '',
             skus_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skus_json)),
             cargo_type INTEGER,
             cross_border_type INTEGER,
@@ -368,6 +372,20 @@ def ensure_wb_fbs_orders_schema(conn: sqlite3.Connection) -> None:
     }
     if "seller_sku" not in observation_columns:
         conn.execute(f"ALTER TABLE {OBSERVATIONS_TABLE} ADD COLUMN seller_sku TEXT NOT NULL DEFAULT ''")
+    for column in ("rid_sha256", "order_uid_sha256"):
+        if column not in observation_columns:
+            conn.execute(
+                f"ALTER TABLE {OBSERVATIONS_TABLE} "
+                f"ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+            )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS wb_fbs_observations_by_rid_hash "
+        f"ON {OBSERVATIONS_TABLE}(rid_sha256,order_id) WHERE rid_sha256<>''"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS wb_fbs_observations_by_order_uid_hash "
+        f"ON {OBSERVATIONS_TABLE}(order_uid_sha256,order_id) WHERE order_uid_sha256<>''"
+    )
     warehouse_mapping_columns = {
         str(row[1])
         for row in conn.execute(
@@ -718,6 +736,8 @@ class WbFbsOrdersCollector:
                 category_column = (
                     "mapping_category"
                     if category_value in {"unmatched", "deferred", "ambiguous"}
+                    else "cost_status"
+                    if category_value == "cost_unresolved"
                     else "status_category"
                 )
                 where += f" AND {category_column}=?"
@@ -736,6 +756,7 @@ class WbFbsOrdersCollector:
                          SUM(status_category='sold_closed') AS sold_closed,
                          SUM(status_category='canceled') AS canceled,
                          SUM(status_category='reconciliation') AS reconciliation,
+                         SUM(cost_status='cost_unresolved') AS cost_unresolved,
                          SUM(mapping_category='unmatched') AS unmatched,
                          SUM(mapping_category='deferred') AS deferred,
                          SUM(mapping_category='ambiguous') AS ambiguous
@@ -751,11 +772,13 @@ class WbFbsOrdersCollector:
                     "sold_closed",
                     "canceled",
                     "reconciliation",
+                    "cost_unresolved",
                     "unmatched",
                     "deferred",
                     "ambiguous",
                 )
             }
+            cost_warning = _cost_coverage_warning(conn, counters=counters)
             offset = (page_number - 1) * page_size
             rows = conn.execute(
                 current_cte
@@ -785,6 +808,7 @@ class WbFbsOrdersCollector:
                 "date_to": date_to_value,
             },
             "counters": counters,
+            "cost_coverage_warning": cost_warning,
             "page": _page(page_number, page_size, total),
             "rows": [_public_order(row, enriched=lifecycle_available) for row in rows],
         }
@@ -924,15 +948,17 @@ class WbFbsOrdersCollector:
             conn.executemany(
                 f"""INSERT OR IGNORE INTO {OBSERVATIONS_TABLE}(
                        observation_id,order_id,source_revision,supply_id,delivery_type,
-                       source_created_at,warehouse_id,office_id,nm_id,chrt_id,seller_sku,skus_json,
+                       source_created_at,warehouse_id,office_id,nm_id,chrt_id,seller_sku,
+                       rid_sha256,order_uid_sha256,skus_json,
                        cargo_type,cross_border_type,is_zero_order,observed_at,
                        collector_date_from,collector_date_to,collector_cursor
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         row["observation_id"], row["order_id"], row["source_revision"],
                         row["supply_id"], row["delivery_type"], row["source_created_at"],
                         row["warehouse_id"], row["office_id"], row["nm_id"], row["chrt_id"], row["seller_sku"],
+                        row["rid_sha256"], row["order_uid_sha256"],
                         row["skus_json"], row["cargo_type"], row["cross_border_type"],
                         int(row["is_zero_order"]), row["observed_at"], row["collector_date_from"],
                         row["collector_date_to"], row["collector_cursor"],
@@ -1128,6 +1154,12 @@ def _normalize_order(
         "nm_id": nm_id,
         "chrt_id": _safe_nonnegative_int(raw.get("chrtId")),
         "seller_sku": _safe_text(raw.get("article") or raw.get("vendorCode"), maximum=160),
+        # The official commerce identifiers can link a later Finance sale to
+        # this exact FBS order, but their plaintext is deliberately never
+        # persisted or returned.  A typed one-way digest is sufficient for an
+        # equality join and keeps the existing no-PII surface intact.
+        "rid_sha256": _identity_sha256(raw.get("rid")),
+        "order_uid_sha256": _identity_sha256(raw.get("orderUid")),
         "skus": skus,
         "cargo_type": _safe_nonnegative_int(raw.get("cargoType")),
         "cross_border_type": _safe_nonnegative_int(raw.get("crossBorderType")),
@@ -1147,6 +1179,13 @@ def _normalize_order(
         "collector_date_to": date_to,
         "collector_cursor": cursor,
     }
+
+
+def _identity_sha256(value: Any) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _normalize_status(
@@ -1432,12 +1471,15 @@ def _current_cte(*, lifecycle_available: bool) -> str:
     lifecycle_joins = ""
     lifecycle_columns = """
         NULL AS lifecycle_state,NULL AS lifecycle_quantity,NULL AS lifecycle_facility_id,
+        NULL AS lifecycle_frozen_wac_rub,
         NULL AS debit_event_id,NULL AS lifecycle_updated_at,NULL AS lifecycle_event_type,
         NULL AS lifecycle_event_digest,NULL AS lifecycle_event_at,NULL AS reconciliation_reason,
         NULL AS reconciliation_digest,NULL AS late_reason,NULL AS late_digest,"""
     lifecycle_reconciliation_category = ""
     lifecycle_state_category = ""
     lifecycle_reason = "COALESCE(evidence.outcome,'status_only')"
+    lifecycle_debit_expr = "NULL"
+    lifecycle_wac_expr = "'0'"
     if lifecycle_available:
         lifecycle_ctes = f""", latest_manifest AS (
         SELECT cutover_id FROM {CUTOVER_MANIFESTS_TABLE}
@@ -1467,7 +1509,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
         LEFT JOIN late_evidence ON late_evidence.order_id=base.order_id"""
         lifecycle_columns = """
         lifecycle.state AS lifecycle_state,lifecycle.quantity AS lifecycle_quantity,
-        lifecycle.facility_id AS lifecycle_facility_id,lifecycle.debit_event_id,
+        lifecycle.facility_id AS lifecycle_facility_id,
+        lifecycle.frozen_wac_rub AS lifecycle_frozen_wac_rub,lifecycle.debit_event_id,
         lifecycle.updated_at AS lifecycle_updated_at,event.event_type AS lifecycle_event_type,
         event.evidence_digest AS lifecycle_event_digest,event.occurred_at AS lifecycle_event_at,
         reconciliation.reason_code AS reconciliation_reason,
@@ -1484,6 +1527,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
             "COALESCE(reconciliation.reason_code,late_evidence.reason_code,"
             "event.event_type,lifecycle.state,evidence.outcome,'status_only')"
         )
+        lifecycle_debit_expr = "lifecycle.debit_event_id"
+        lifecycle_wac_expr = "lifecycle.frozen_wac_rub"
     return f"""WITH ranked AS (
         SELECT observation.*,
                ROW_NUMBER() OVER(
@@ -1561,6 +1606,33 @@ def _current_cte(*, lifecycle_available: bool) -> str:
               OR COALESCE(status.wb_status,'') IN ('waiting','ready_for_pickup') THEN 'active'
             ELSE 'reconciliation'
         END AS status_category,
+        CASE
+            WHEN (
+                (COALESCE(status.supplier_status,'')='complete'
+                 AND COALESCE(status.wb_status,'')='sorted')
+                OR COALESCE(status.wb_status,'') IN ('sold','accepted_by_client')
+            ) AND (
+                warehouse_candidates.candidate_count IS NULL
+                OR warehouse_candidates.candidate_count<>1
+                OR identity_candidates.candidate_count IS NULL
+                OR identity_candidates.candidate_count<>1
+                OR {lifecycle_debit_expr} IS NULL
+                OR {lifecycle_debit_expr}=''
+                OR CAST(COALESCE({lifecycle_wac_expr},'0') AS NUMERIC)<=0
+            ) THEN 'cost_unresolved'
+            ELSE 'cost_resolved_or_not_due'
+        END AS cost_status,
+        CASE
+            WHEN warehouse_candidates.candidate_count IS NULL
+              OR warehouse_candidates.candidate_count<>1 THEN 'facility_mapping_missing_or_ambiguous'
+            WHEN identity_candidates.candidate_count IS NULL
+              OR identity_candidates.candidate_count<>1 THEN 'sku_mapping_missing_or_ambiguous'
+            WHEN {lifecycle_debit_expr} IS NULL OR {lifecycle_debit_expr}=''
+              THEN 'fbs_handoff_cost_event_missing'
+            WHEN CAST(COALESCE({lifecycle_wac_expr},'0') AS NUMERIC)<=0
+              THEN 'fbs_handoff_wac_non_positive'
+            ELSE ''
+        END AS cost_reason,
         {lifecycle_reason} AS lifecycle_reason
       FROM base_order base
       LEFT JOIN {STATUS_CURRENT_TABLE} status ON status.order_id=base.order_id
@@ -1575,6 +1647,82 @@ def _current_cte(*, lifecycle_available: bool) -> str:
       LEFT JOIN transition ON transition.order_id=base.order_id
       {lifecycle_joins}
     )"""
+
+
+def _cost_coverage_warning(
+    conn: sqlite3.Connection,
+    *,
+    counters: Mapping[str, int],
+) -> dict[str, Any]:
+    """Combine exact unresolved FBS count with Finance uncovered-sale evidence."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='wb_finance_weekly_sku_aggregates'"
+    ).fetchone()
+    evidence_rows = 0
+    sales_without_cost = Decimal("0")
+    orders_without_cost = 0
+    units_without_cost = 0
+    reason_counts: dict[str, int] = {}
+    if table is not None:
+        for row in conn.execute(
+            "SELECT coverage_json FROM wb_finance_weekly_sku_aggregates "
+            "WHERE nm_id<>'__account__' ORDER BY seller_id,week_start,nm_id"
+        ).fetchall():
+            try:
+                coverage = json.loads(str(row[0] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            evidence_rows += 1
+            try:
+                sales_without_cost += Decimal(
+                    str(
+                        coverage.get("uncovered_fbs_sales_revenue_rub")
+                        or "0"
+                    )
+                )
+            except (InvalidOperation, ValueError):
+                evidence_rows -= 1
+                continue
+            orders_without_cost += int(
+                coverage.get("uncovered_fbs_sales_order_count") or 0
+            )
+            units_without_cost += int(
+                coverage.get("uncovered_fbs_sales_units") or 0
+            )
+            for problem in coverage.get("problem_skus") or []:
+                if str(problem.get("channel") or "") != "FBS":
+                    continue
+                reason = str(problem.get("reason") or "canonical_cost_missing")
+                reason_counts[reason] = reason_counts.get(reason, 0) + int(
+                    problem.get("operation_count") or 1
+                )
+    unresolved_fbs = int(counters.get("cost_unresolved") or 0)
+    if evidence_rows == 0:
+        status = "unavailable"
+    elif unresolved_fbs > 0 or sales_without_cost > 0:
+        status = "error"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "unresolved_fbs_order_count": unresolved_fbs,
+        "sales_without_cost_rub": (
+            format(sales_without_cost, "f") if evidence_rows else None
+        ),
+        "sales_without_cost_order_count": (
+            orders_without_cost if evidence_rows else None
+        ),
+        "sales_without_cost_units": units_without_cost if evidence_rows else None,
+        "finance_coverage_row_count": evidence_rows,
+        "finance_uncovered_order_count_matches_list": (
+            orders_without_cost == unresolved_fbs if evidence_rows else None
+        ),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "filtered_status_category": "cost_unresolved",
+        "contains_pii": False,
+    }
 
 
 def _current_filters(
@@ -1655,6 +1803,15 @@ def _public_order(row: sqlite3.Row, *, enriched: bool = False) -> dict[str, Any]
             "supplier_status": str(_row_value(row, "supplier_status") or ""),
             "wb_status": str(_row_value(row, "wb_status") or ""),
             "status_category": str(_row_value(row, "status_category") or "reconciliation"),
+            "cost_coverage": {
+                "status": str(
+                    _row_value(row, "cost_status") or "cost_resolved_or_not_due"
+                ),
+                "reason": str(_row_value(row, "cost_reason") or ""),
+                "frozen_wac_rub": str(
+                    _row_value(row, "lifecycle_frozen_wac_rub") or ""
+                ),
+            },
             "facility_id": facility_id,
             "mapping_outcome": str(_row_value(row, "mapping_outcome") or "deferred"),
             "mapping_category": str(_row_value(row, "mapping_category") or "deferred"),

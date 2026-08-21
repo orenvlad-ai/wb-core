@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import threading
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -123,18 +124,22 @@ def main() -> None:
             )
             conn.commit()
 
-        original = block._recalculate_week_in_connection
+        original = block._build_week_target_projection
         calls = 0
 
-        def fail_second(conn: sqlite3.Connection, start: date, end: date) -> dict:
+        def fail_second(
+            conn: sqlite3.Connection, *, week_start: date, week_end: date
+        ) -> dict:
             nonlocal calls
             calls += 1
-            result = original(conn, start, end)
+            result = original(
+                conn, week_start=week_start, week_end=week_end
+            )
             if calls == 2:
                 raise RuntimeError("synthetic second-week failure")
             return result
 
-        block._recalculate_week_in_connection = fail_second  # type: ignore[method-assign]
+        block._build_week_target_projection = fail_second  # type: ignore[method-assign]
         try:
             block.apply_stale_cost_weeks(
                 expected_fingerprint=str(plan["fingerprint"]),
@@ -146,12 +151,79 @@ def main() -> None:
         else:
             raise AssertionError("synthetic partial apply unexpectedly committed")
         finally:
-            block._recalculate_week_in_connection = original  # type: ignore[method-assign]
+            block._build_week_target_projection = original  # type: ignore[method-assign]
         _assert(
             _metrics(block, "2026-06-29") == mixed_before, "first week escaped rollback"
         )
         _assert(
             _metrics(block, "2026-07-20") == late_before, "second week escaped rollback"
+        )
+
+        # Recalculation builds target after-images from a query projection
+        # before BEGIN IMMEDIATE. A concurrent interactive writer therefore
+        # commits promptly; the stale background plan then fails its optimistic
+        # CAS without replacing any Finance target image.
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS ff_interactive_status_probe("
+                "probe_id TEXT PRIMARY KEY,created_at TEXT NOT NULL)"
+            )
+            conn.commit()
+        recalculation_entered = threading.Event()
+        release_recalculation = threading.Event()
+        calls = 0
+
+        def pause_snapshot_recalculation(
+            conn: sqlite3.Connection, *, week_start: date, week_end: date
+        ) -> dict:
+            nonlocal calls
+            calls += 1
+            result = original(
+                conn, week_start=week_start, week_end=week_end
+            )
+            if calls == 1:
+                recalculation_entered.set()
+                if not release_recalculation.wait(timeout=5):
+                    raise AssertionError("Finance snapshot contention probe timed out")
+            return result
+
+        background_errors: list[Exception] = []
+
+        def apply_in_background() -> None:
+            try:
+                block.apply_stale_cost_weeks(
+                    expected_fingerprint=str(plan["fingerprint"]),
+                    date_from=date(2026, 6, 29),
+                    date_to=date(2026, 7, 26),
+                )
+            except Exception as exc:
+                background_errors.append(exc)
+
+        block._build_week_target_projection = pause_snapshot_recalculation  # type: ignore[method-assign]
+        background = threading.Thread(target=apply_in_background, daemon=True)
+        background.start()
+        _assert(
+            recalculation_entered.wait(timeout=5),
+            "Finance snapshot recalculation did not start",
+        )
+        with sqlite3.connect(block.db_path, timeout=2) as interactive:
+            interactive.execute(
+                "INSERT INTO ff_interactive_status_probe(probe_id,created_at) VALUES(?,?)",
+                ("ff-document-status", "2026-07-27T00:00:00Z"),
+            )
+            interactive.commit()
+        release_recalculation.set()
+        background.join(timeout=5)
+        block._build_week_target_projection = original  # type: ignore[method-assign]
+        _assert(not background.is_alive(), "stale Finance CAS did not terminate")
+        _assert(
+            background_errors
+            and "changed after snapshot planning" in str(background_errors[0]),
+            f"concurrent writer must invalidate snapshot CAS: {background_errors}",
+        )
+        _assert(
+            _metrics(block, "2026-06-29") == mixed_before,
+            "stale snapshot replaced a Finance target",
         )
 
         backup = _create_sqlite_backup(
@@ -174,6 +246,17 @@ def main() -> None:
             applied["recalculated_week_count"] == 2, f"apply scope mismatch: {applied}"
         )
         _assert(applied["non_target_preserved"], f"non-target mismatch: {applied}")
+        timings = applied["phase_timings_ms"]
+        _assert(
+            set(timings)
+            == {
+                "query_plan",
+                "query_projection",
+                "writer_lock_hold",
+                "post_commit_readback",
+            },
+            f"phase timing evidence missing: {timings}",
+        )
         _assert(_metrics(block, "2026-06-22") == control_before, "control week changed")
 
         repeated = block.plan_stale_cost_weeks(

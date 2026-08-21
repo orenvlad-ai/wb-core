@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CANONICAL-COST V4 / STORAGE PRE-CUTOVER`
+`ACTIVE / HOSTED RUNTIME / CHANNEL-LOCATION COST V1 / STORAGE PRE-CUTOVER`
 
 ## Purpose and source boundary
 
@@ -28,7 +28,7 @@ The current canonical runtime SQLite owns:
 - indexed `wb_finance_weekly_sku_aggregates` keyed by `seller + week + nmId + formula version`;
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
-The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v4`; its coverage dependencies also pin `canonical_our_wb_cost_temporal_policy_v4`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
+The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v5`; its cost dependency is `canonical_our_cost_channel_location_v1`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
 
 The staged split adds `finance_raw_ingest_batches`, immutable
 `finance_raw_rows`, transactional `finance_raw_outbox` and raw consumer
@@ -42,12 +42,17 @@ transaction. It cannot write across two files.
 
 ## Single canonical COGS contract
 
-Formula version is `canonical_our_wb_cost_temporal_policy_v4`. Finance calls the same shared warehouse-domain resolver as Vitrina, Partner and Proxy 3 and does not reproduce warehouse cost-engine rules.
+Formula version is `canonical_our_cost_channel_location_v1`. Finance calls the same shared channel/location resolver as Vitrina, Partner and Proxy and does not reproduce warehouse cost-engine rules.
 
-For each sale/return operation of the same deterministically resolved `nmId`:
+For each sale/return operation the resolver first classifies its channel and
+exact location. FBS requires the privacy-safe exact WB order identity, its
+resolved `facility_id + FBS + nmId` lifecycle row and the immutable positive
+handoff/debit `frozen_wac_rub`. Ambiguous/missing FBS identity, mapping,
+handoff or WAC is an uncovered reason and never falls through to WB/FBO cost.
+FBO/WB then follows the same-`nmId` daily policy:
 
 - operation date is `rrDate → saleDt → orderDt`; a missing operation date is a blocker;
-- before `2026-07-01`, use the exact canonical `Себестоимость WB наша` row of that `nmId` on `2026-07-01` as a business-approved retrospective projection across all loaded Finance history;
+- before `2026-07-01`, the WB/FBO contour of the canonical `Себестоимость наша` uses the exact daily row of that `nmId` on `2026-07-01` as a business-approved retrospective projection across all loaded Finance history;
 - on/after `2026-07-01`, use the exact canonical daily row for the operation date;
 - `2026-06-30` therefore uses the 01.07 row, while `2026-07-01` uses the exact 01.07 row;
 - sale quantity adds COGS; return quantity subtracts COGS using the same operation-date policy. Sale-return linkage is intentionally not required.
@@ -58,7 +63,15 @@ Lineage contains operation date, canonical source date/identity/version/digest, 
 
 Within one plan/apply/readback connection the runner loads the small canonical daily-cost surface, active archival overlay and first factual receipt boundary once, then caches canonical resolution by `nmId + operation date`. Nomenclature identities use the same connection-bound cache. No cache survives into a new connection; apply still re-plans under its single `BEGIN IMMEDIATE` transaction and rejects a dry-run fingerprint after any intervening hourly source change. Future factual receipts therefore invalidate the next plan/apply/readback while the 18-SKU overlay cannot amplify into repeated functional-event scans.
 
-Coverage counts gross sale/return units, so a symmetric sale/return pair cannot hide missing cost even if net COGS is zero. Fully covered weeks become calculated; a real gap lists exact `nmId`, operation date, canonical source date and reason. Repeated missing operations are losslessly collapsed by `week + nmId + operation date + reason`: the evidence retains operation count, separate sale/return quantities, gross unmatched units and signed net units, while per-row report/rrd dependencies remain bound by the cost-state hash. The plan therefore does not duplicate one blocker/matrix row per raw operation.
+Coverage counts gross sale/return units, orders and sale revenue, so a
+symmetric sale/return pair cannot hide missing cost even if net COGS is zero.
+The full sales fact remains visible, but uncovered sales enter neither the
+profit numerator nor the profitability-revenue denominator. Profit/margin use
+covered net revenue and covered signed COGS, publish `partial` plus
+covered/uncovered revenue/orders/units, and never turn a 500-ruble uncovered
+sale into 500 rubles of profit. Formula version is
+`wb_finance_profit_covered_revenue_v4_signed_deductions`. Repeated missing
+operations remain losslessly collapsed and source-bound.
 
 ## Agent remuneration, acquiring and WB correction
 
@@ -86,15 +99,26 @@ Paid acceptance/transit addback is allowed only when exact Finance `giId/supplyI
 
 Global capitalization allocations are built once for the coherent SQLite connection used by one plan/apply/readback pass and then reused by the global and every per-SKU aggregate. A new connection always rebuilds the raw/supply-layer manifest and allocations, so a later Finance sync or canonical layer correction invalidates the cache. This avoids the accidental `weeks × SKUs × all cost layers` re-hashing path without weakening source drift detection.
 
-The existing stale-derived hook now checks every loaded week, including the backward historical projection. It compares canonical cost state, classifier version and the complete deterministic metrics payload, so both a corrected 01.07 cost and a corrected supply-layer cap invalidate every affected historical projection instead of only post-cutover COGS. The hourly/manual warehouse functional writer runs that exact stale-week recalculation inside the same warehouse write lock only after supply-layer materialization, functional-version publication and functional-economics publication have all completed. It returns the Finance post-verify and non-target evidence in the sync result, so releasing the lock cannot expose any later-written warehouse cost source with stale Partner/Finance SKU bindings.
+The existing stale-derived hook now checks every loaded week, including the
+backward historical projection. Planning and expensive recalculation run on an
+immutable in-memory SQLite snapshot outside the shared warehouse writer lock.
+Apply uses one short `BEGIN IMMEDIATE` data-version CAS to replace only exact
+target images; any intervening source commit aborts before publication. The
+originating targeted queue receives the Finance fingerprint only after
+post-commit stale/non-target readback, so mixed Warehouse/Proxy/Finance state
+cannot claim completion.
 
 ```text
 profit_period_expenses = total_wb_expenses
                          − proven_capped_acceptance_addback
                          − proven_capped_transit_addback
-profit_after_cogs = net_revenue − profit_period_expenses
+profit_after_cogs = covered_net_revenue − profit_period_expenses
                     + positive_adjustments − COGS
 ```
+
+The display retains full `net_revenue`; `sales_without_cost_rub` and the
+coverage order/unit counters explain the excluded sales scope. Period expenses
+remain explicit period facts and are not hidden by incomplete COGS coverage.
 
 Every expense money cell shows amount plus `%` and a semantic color, without visible or accessible arrow glyphs. An increased expense share is deterioration and uses red/pink; a decreased share is improvement and uses green; effectively unchanged uses neutral/yellow. The first week or a missing comparison base uses a muted neutral state and must not imply improvement or deterioration. `aria-label` and `title` state the share and meaning in words without `↑`, `↓` or `→`. Numeric deltas and `п.п.` are forbidden.
 

@@ -939,8 +939,18 @@ def drain_post_checkpoint_fbs_lifecycle(
             if not event["idempotent"]:
                 summary["released"] += 1
         elif state == "reserved" and _is_handoff(supplier_status, wb_status):
-            event = _append_event(
+            handoff_wac, cost_basis = _current_handoff_wac(
+                conn,
+                manifest=manifest,
+                order=order,
+            )
+            handoff_common = {
                 **common,
+                "wac": handoff_wac,
+                "evidence": {**evidence, "cost_basis": cost_basis},
+            }
+            event = _append_event(
+                **handoff_common,
                 event_type="handoff_debit",
                 state="fulfilled",
                 physical_delta=-int(order["quantity"]),
@@ -952,7 +962,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                     order=order,
                     event_id=str(event["event_id"]),
                     quantity_delta=-int(order["quantity"]),
-                    wac=wac,
+                    wac=handoff_wac,
                     occurred_at=now,
                 )
                 summary["fulfilled"] += 1
@@ -1596,6 +1606,87 @@ def _frozen_wac(
             f"Opening WAC is missing for {order['facility_id']}/{order['nm_id']}",
         )
     return Decimal(str(extension_rows[0][0]))
+
+
+def _current_handoff_wac(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    order: Mapping[str, Any],
+) -> tuple[Decimal, dict[str, Any]]:
+    """Resolve exact facility FBS WAC at the serialized debit boundary.
+
+    The lifecycle drain and every overhead posting share the same SQLite
+    writer order.  Reading the balance from this writer transaction means a
+    committed overhead operation is visible before the handoff, while a later
+    operation cannot retroactively change this immutable event.  ``rowid`` is
+    retained as the durable tie-breaker when wall-clock timestamps are equal.
+    """
+
+    facility_id = str(order["facility_id"])
+    nm_id = int(order["nm_id"])
+    epoch = int(manifest["feature_epoch"])
+    row = conn.execute(
+        f"""SELECT quantity,capital_rub,wac_rub,source_watermark,updated_at
+              FROM {BALANCES_TABLE}
+             WHERE facility_id=? AND pool='FBS' AND nm_id=?
+               AND projection_epoch=?""",
+        (facility_id, nm_id, epoch),
+    ).fetchone()
+    if row is None:
+        raise FfPoolFbsLifecycleError(
+            "handoff_current_wac_missing",
+            f"Current FBS balance is missing for {facility_id}/{nm_id}",
+        )
+    quantity = int(row[0])
+    requested = int(order["quantity"])
+    capital = Decimal(str(row[1]))
+    stored_wac = Decimal(str(row[2]))
+    if quantity <= 0 or requested <= 0 or quantity < requested or capital <= ZERO:
+        raise FfPoolFbsLifecycleError(
+            "handoff_current_wac_unavailable",
+            f"Positive current FBS cost is unavailable for {facility_id}/{nm_id}",
+            details={
+                "facility_id": facility_id,
+                "pool": "FBS",
+                "nm_id": nm_id,
+                "current_quantity": quantity,
+                "requested_quantity": requested,
+            },
+        )
+    current_wac = _decimal_ratio(capital, quantity)
+    if current_wac <= ZERO:
+        raise FfPoolFbsLifecycleError(
+            "handoff_current_wac_non_positive",
+            f"Current FBS WAC is non-positive for {facility_id}/{nm_id}",
+        )
+    source_watermark = str(row[3] or "")
+    operation = conn.execute(
+        f"""SELECT rowid,operation_id,operation_type,source_revision,posted_at
+              FROM {OPERATIONS_TABLE}
+             WHERE operation_id=? OR source_revision=?
+             ORDER BY rowid DESC LIMIT 1""",
+        (source_watermark, source_watermark),
+    ).fetchone()
+    return current_wac, {
+        "contract": "fbs_handoff_current_facility_wac_v1",
+        "facility_id": facility_id,
+        "pool": "FBS",
+        "nm_id": nm_id,
+        "projection_epoch": epoch,
+        "quantity_before_handoff": quantity,
+        "capital_before_handoff_rub": canonical_decimal_text(capital),
+        "wac_rub": canonical_decimal_text(current_wac),
+        "stored_wac_rub": canonical_decimal_text(stored_wac),
+        "stored_wac_matches_capital_ratio": stored_wac == current_wac,
+        "balance_source_watermark": source_watermark,
+        "balance_updated_at": str(row[4] or ""),
+        "source_operation_rowid": int(operation[0]) if operation else 0,
+        "source_operation_id": str(operation[1]) if operation else "",
+        "source_operation_type": str(operation[2]) if operation else "",
+        "source_operation_revision": str(operation[3]) if operation else "",
+        "source_operation_posted_at": str(operation[4]) if operation else "",
+    }
 
 
 def _persist_late_checkpoint_evidence(

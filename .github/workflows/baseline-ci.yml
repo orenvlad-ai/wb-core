@@ -56,6 +56,9 @@ jobs:
           python3 apps/sheet_vitrina_v1_proxy_v4_transit_repair_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_refresh_preservation_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
+          python3 apps/our_wb_costs_smoke.py
+          python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
+          python3 apps/sheet_vitrina_v1_reports_ui_smoke.py
 
       - name: Validate warehouse recovery policy
         run: |
@@ -93,6 +96,8 @@ jobs:
           python3 apps/ff_pool_cutover_production_smoke.py
           python3 apps/ff_pool_cutover_recovery_supersession_smoke.py
           python3 apps/ff_pool_fbs_lifecycle_smoke.py
+          python3 apps/russian_payment_orders_smoke.py
+          python3 apps/ff_pool_overhead_backfill_smoke.py
           python3 apps/ff_fbs_mapping_extension_production_smoke.py
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
@@ -142,6 +147,8 @@ jobs:
           python3 apps/finance_storage_transport_job_smoke.py
           python3 apps/finance_storage_post_manifest_recovery_smoke.py
           python3 apps/wb_finance_weekly_smoke.py
+          python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py
+          python3 apps/wb_finance_weekly_browser_smoke.py
           python3 apps/partner_report_smoke.py
           python3 apps/partner_finance_production_diagnostic_smoke.py
           python3 apps/finance_partner_production_ui_flow_smoke.py

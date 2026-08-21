@@ -3,18 +3,20 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать direct projection `Себестоимость WB наша`, неизменный Proxy 3 и immutable automatic Proxy 4 поверх canonical functional warehouse/cost engine."
-scope: "Public metric keys, daily WB WAC, Proxy profit/margin 3 and 4, calculation parameters and legacy audit boundary."
+purpose: "Зафиксировать shared channel/location-aware `Себестоимость наша`, Proxy 3/4 и coverage-safe profit semantics поверх canonical functional warehouse/cost engine."
+scope: "Public metric keys, FBS handoff WAC, daily WB/FBO WAC, Proxy profit/margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
+  - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/calculation_parameters.py"
   - "packages/application/calculation_parameters_v4.py"
   - "packages/application/our_wb_costs.py"
+  - "packages/application/canonical_wb_cost_resolver.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1_proxy_v4.py"
   - "packages/application/proxy_v4_historical_projection.py"
@@ -34,12 +36,27 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "Ordinary Proxy V4 revisions select the one latest common READY COMPLETE Buyout/Finance week; the separate three-slot combined reference, frozen history, V3 formula/history and canonical WB WAC remain unchanged."
+update_note: "One channel/location resolver separates exact FBS handoff WAC from WB/FBO daily WAC; uncovered sales stay visible but are excluded from every profit numerator and profitability denominator."
 ---
 
-# 1. Canonical WB WAC
+# 1. Canonical `Себестоимость наша`
 
-`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` (`Себестоимость WB наша`) — direct read projection canonical daily WB WAC. Отдельная formula/baseline в module 40 запрещена. Единственное data-backed archival исключение — active versioned manifest migration 109: ровно 18 legacy `nmId`, 100 ₽ с effective date 01.07.2026 и quality `business_approved_archival_estimate`; Finance не содержит веток по этим ID.
+The user-facing label is `Себестоимость наша`. One
+`canonical_our_cost_channel_location_v1` resolver serves Vitrina, Finance,
+Partner and Proxy and first classifies channel plus exact location. FBS uses
+only the immutable positive WAC frozen by the lifecycle debit at the durable
+handoff order for exact `facility_id + FBS + nmId`. Missing privacy-safe order
+identity, facility mapping, lifecycle debit or WAC remains unavailable with a
+reason; another facility/SKU, WB/FBO daily cost, average, legacy fallback and
+zero are forbidden. A fulfilled order never changes after later overhead.
+
+WB/FBO keep the canonical daily warehouse WAC. Public keys
+`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` retain compatibility but
+render `Себестоимость наша, ₽/шт`. Отдельная formula/baseline в module 40
+запрещена. Единственное data-backed archival исключение для WB/FBO — active
+versioned manifest migration 109: ровно 18 legacy `nmId`, 100 ₽ с effective
+date 01.07.2026 и quality `business_approved_archival_estimate`; Finance не
+содержит веток по этим ID.
 
 WB quantity задаёт только complete official contour snapshot:
 
@@ -49,7 +66,18 @@ Accepted WB supply добавляет доказанный inbound capital, но
 
 `SUM(WB contour capital) / SUM(WB contour quantity)`.
 
-Один warehouse-domain temporal resolver обслуживает Vitrina, Finance weekly/per-SKU projections, Partner и Proxy 3. Для даты до `2026-07-01` он выбирает exact canonical row того же `nmId` на `2026-07-01`; на границе и после неё — exact row соответствующей business/operation date. Для SKU/дат `2026-07-01..functional cutover` loader читает frozen functional historical cost projection. Она построена из frozen 24.06 opening map, persisted historical quantities и known downstream costs. Если ready snapshot содержит период, lookup выбирает только колонку точной business date, даже когда внешний `snapshot.as_of_date` новее. Fallback на предыдущий/current snapshot, other-SKU/average/legacy cost и копирование текущего остатка назад запрещены. После cutover loader читает active functional daily/current state. Legacy WB daily tables остаются audit и не являются параллельным active source.
+For WB/FBO and only after channel classification, the temporal branch chooses
+the exact same-`nmId` daily row. Для даты до `2026-07-01` он выбирает exact
+canonical row того же `nmId` на `2026-07-01`; на границе и после неё — exact
+row соответствующей business/operation date. Для SKU/дат
+`2026-07-01..functional cutover` loader читает frozen functional historical
+cost projection. Она построена из frozen 24.06 opening map, persisted
+historical quantities и known downstream costs. Если ready snapshot содержит
+период, lookup выбирает только колонку точной business date, даже когда внешний
+`snapshot.as_of_date` новее. Fallback на предыдущий/current snapshot,
+other-SKU/average/legacy cost и копирование текущего остатка назад запрещены.
+После cutover loader читает active functional daily/current state. Legacy WB
+daily tables остаются audit и не являются параллельным active source.
 
 # 2. Versioned calculation parameters
 

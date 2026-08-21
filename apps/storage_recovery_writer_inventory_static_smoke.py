@@ -137,6 +137,15 @@ WRITERS = [
         "lifecycle": "family sanitation after terminal proof",
     },
     {
+        "owner": "ff_pool_overhead_backfill",
+        "source": "packages/application/ff_pool_overhead_backfill.py",
+        "cadence": "human_gated_one_shot",
+        "artifact": "coherent pre-mutation SQLite copy",
+        "full_monolith": True,
+        "guard": "exact deployed SHA + reviewed five-document manifest + apply gate",
+        "lifecycle": "private manifest-bound evidence retained through reconciliation",
+    },
+    {
         "owner": "supplier_factual_date_correction",
         "source": "packages/application/supplier_shipment_factual_correction.py",
         "cadence": "human_gated_one_shot",

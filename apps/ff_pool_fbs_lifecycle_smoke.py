@@ -1056,7 +1056,16 @@ def main() -> int:
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
             assert int(exact_balance[0]) == 5
-            assert Decimal(str(exact_balance[1])) == Decimal("50.67")
+            assert Decimal(str(exact_balance[1])) == Decimal("50.41875")
+            handoff_event = conn.execute(
+                "SELECT frozen_wac_rub,details_json FROM "
+                "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
+                "WHERE order_id=9400 AND event_type='handoff_debit'"
+            ).fetchone()
+            assert Decimal(str(handoff_event[0])) == Decimal("10.08375")
+            assert json.loads(str(handoff_event[1]))["cost_basis"]["contract"] == (
+                "fbs_handoff_current_facility_wac_v1"
+            )
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
 
@@ -1223,7 +1232,10 @@ def main() -> int:
                 f"SELECT physical_quantity_delta,capital_delta_rub FROM {EVENTS_TABLE} "
                 "WHERE order_id=9410 AND event_type='handoff_debit'"
             ).fetchone()
-            assert tuple(debit_event) == (-2, "-20")
+            assert tuple(debit_event) == (
+                -2,
+                "-20.1675000000000000000000000000000000000000000000004",
+            )
             balance_after_identity_resolution = conn.execute(
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
@@ -1243,7 +1255,9 @@ def main() -> int:
                 context.prec = 160
                 expected_capital = Decimal(
                     str(balance_before_identity_pending[1])
-                ) - Decimal("20")
+                ) - Decimal(
+                    "20.1675000000000000000000000000000000000000000000004"
+                )
                 detail_capital_after_resolution = (
                     Decimal(str(balance_after_identity_resolution[1]))
                     + Decimal(str(fbo_after_identity_resolution[1]))
@@ -1353,6 +1367,149 @@ def main() -> int:
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9420,9421,9422)"
             ).fetchone()[0] == 3
+
+        # Exact commit order, rather than business-day bucketing, controls the
+        # frozen FBS cost.  The already fulfilled order keeps its old WAC;
+        # an overhead commit atomically changes current facility/FBS capital;
+        # only the later handoff freezes the resulting WAC.
+        with sqlite3.connect(runtime.db_path) as conn:
+            before_overhead = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            before_overhead_pool = conn.execute(
+                "SELECT nm_id,quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' ORDER BY nm_id"
+            ).fetchall()
+            old_frozen = Decimal(
+                str(
+                    conn.execute(
+                        f"SELECT frozen_wac_rub FROM {EVENTS_TABLE} "
+                        "WHERE order_id=9400 AND event_type='handoff_debit'"
+                    ).fetchone()[0]
+                )
+            )
+        overhead_identity = DocumentIdentity(
+            request_id="overhead:same-day-cutover:fac-moscow:fbs:101",
+            source_system="operator_ui",
+            source_type="ff_pool_overhead_manual",
+            source_id="synthetic-same-day-cutover",
+            source_revision="sha256:" + "8" * 64,
+            idempotency_epoch=1,
+            actor="warehouse-operator",
+            business_date="2026-08-15",
+        )
+        overhead_preview = service.accept_preview(
+            identity=overhead_identity,
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_moscow",
+                "scope": "FBS",
+                "amount_rub": "3.00",
+                "category": "storage",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        overhead_posted = service.post(str(overhead_preview["request_id"]))
+        assert overhead_posted["state"] == "posted"
+        assert overhead_posted["publication"]["status"] == "queued"
+        repeated_overhead = service.post(str(overhead_preview["request_id"]))
+        assert repeated_overhead["document"] == overhead_posted["document"]
+        assert repeated_overhead["publication"]["queue_id"] == (
+            overhead_posted["publication"]["queue_id"]
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            after_overhead = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            after_overhead_pool = conn.execute(
+                "SELECT nm_id,quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' ORDER BY nm_id"
+            ).fetchall()
+            assert int(after_overhead[0]) == int(before_overhead[0])
+            assert [tuple(row[:2]) for row in after_overhead_pool] == [
+                tuple(row[:2]) for row in before_overhead_pool
+            ]
+            assert sum(
+                (Decimal(str(row[2])) for row in after_overhead_pool),
+                Decimal("0"),
+            ) - sum(
+                (Decimal(str(row[2])) for row in before_overhead_pool),
+                Decimal("0"),
+            ) == Decimal("3.00")
+            with localcontext() as context:
+                context.prec = 160
+                expected_after_overhead_wac = Decimal(
+                    str(after_overhead[1])
+                ) / Decimal(int(after_overhead[0]))
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                "WHERE stable_source_id=?",
+                (
+                    "pool_overhead:"
+                    + str(overhead_posted["document"]["document_id"]),
+                ),
+            ).fetchone()[0] == 1
+            _insert_post_t_order(
+                conn,
+                order_id=9430,
+                supplier="complete",
+                wb="sorted",
+                observed_at="2026-08-15T08:15:00Z",
+            )
+            conn.commit()
+        after_cutover_handoff = _process(
+            runtime.db_path, "2026-08-15T08:15:10Z"
+        )
+        assert after_cutover_handoff["summary"]["fulfilled"] == 1
+        with sqlite3.connect(runtime.db_path) as conn:
+            old_frozen_after = Decimal(
+                str(
+                    conn.execute(
+                        f"SELECT frozen_wac_rub FROM {EVENTS_TABLE} "
+                        "WHERE order_id=9400 AND event_type='handoff_debit'"
+                    ).fetchone()[0]
+                )
+            )
+            new_event = conn.execute(
+                f"SELECT frozen_wac_rub,capital_delta_rub,details_json FROM {EVENTS_TABLE} "
+                "WHERE order_id=9430 AND event_type='handoff_debit'"
+            ).fetchone()
+            assert old_frozen_after == old_frozen
+            assert Decimal(str(new_event[0])) == expected_after_overhead_wac
+            with localcontext() as context:
+                context.prec = 160
+                assert Decimal(str(new_event[1])) + expected_after_overhead_wac == 0
+            new_cost_basis = json.loads(str(new_event[2]))["cost_basis"]
+            assert new_cost_basis["contract"] == "fbs_handoff_current_facility_wac_v1"
+            assert int(new_cost_basis["source_operation_rowid"]) > 0
+        dependent_storno = service.accept_preview(
+            identity=DocumentIdentity(
+                request_id="overhead:same-day-cutover:dependent-storno",
+                source_system="operator_ui",
+                source_type="ff_pool_overhead_storno",
+                source_id=str(overhead_posted["document"]["document_id"]),
+                source_revision="sha256:" + "9" * 64,
+                idempotency_epoch=1,
+                actor="warehouse-operator",
+                business_date="2026-08-15",
+            ),
+            document_kind="storno",
+            manifest={
+                "target_document_id": str(
+                    overhead_posted["document"]["document_id"]
+                )
+            },
+        )
+        dependent_storno_result = service.post(
+            str(dependent_storno["request_id"])
+        )
+        assert dependent_storno_result["state"] == "blocked"
+        assert dependent_storno_result["error"]["code"] == (
+            "overhead_storno_dependent_handoff"
+        )
 
         drifted_recovery = service.accept_preview(
             identity=DocumentIdentity(

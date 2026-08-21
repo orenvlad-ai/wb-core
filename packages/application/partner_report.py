@@ -32,7 +32,9 @@ from packages.application.wb_finance_weekly import (
     classify_deduction,
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
-from packages.application.canonical_wb_cost_resolver import resolve_canonical_wb_cost
+from packages.application.canonical_wb_cost_resolver import (
+    resolve_channel_location_cost,
+)
 from packages.application.storage_registry import StoreRegistry
 
 
@@ -96,7 +98,10 @@ FINANCE_EXPORT_COLUMNS = (
 )
 REPORT_ROWS = (
     ("net_revenue", "Чистая выручка"),
-    ("cogs", "Себестоимость"),
+    ("sales_without_cost_rub", "Продажи без себестоимости, ₽"),
+    ("orders_without_cost", "Заказы без себестоимости, шт."),
+    ("units_without_cost", "Единицы без себестоимости, шт."),
+    ("cogs", "Себестоимость наша"),
     ("agent_remuneration", "Агентское вознаграждение WB"),
     ("acquiring", "Эквайринг"),
     ("logistics", "Логистика WB"),
@@ -1026,14 +1031,6 @@ class PartnerReportBlock:
             coverage = json.loads(str(sku_row["coverage_json"] or "{}"))
             account_metrics = json.loads(str(account_row["metrics_json"] or "{}"))
             account_coverage = json.loads(str(account_row["coverage_json"] or "{}"))
-            if int(coverage.get("unmatched_units") or 0):
-                blockers.append(
-                    {
-                        "code": "partner_cost_coverage_incomplete",
-                        "week_start": week_start_text,
-                        "problem_skus": coverage.get("problem_skus") or [],
-                    }
-                )
             stale_cost_rows: list[dict[str, Any]] = []
             checked_cost_dependencies: set[tuple[str, str]] = set()
             for detail in coverage.get("detail_rows") or []:
@@ -1049,10 +1046,13 @@ class PartnerReportBlock:
                 except ValueError:
                     stale_cost_rows.append({"reason": "operation_date_invalid", **dict(detail)})
                     continue
-                current = resolve_canonical_wb_cost(
+                current = resolve_channel_location_cost(
                     conn,
                     nm_id=nm_id,
                     operation_date=operation_day,
+                    fbs_order_id=(
+                        int(detail.get("fbs_order_id") or 0) or None
+                    ),
                 )
                 if (
                     current.get("status") != "resolved"
@@ -1152,6 +1152,7 @@ class PartnerReportBlock:
                 cogs=(
                     _decimal(metrics.get("cogs"))
                     if metrics.get("cogs") not in (None, "")
+                    and metrics.get("profit_after_cogs") not in (None, "")
                     else None
                 ),
                 ads=ads_value,
@@ -1183,6 +1184,14 @@ class PartnerReportBlock:
                             "matched_units",
                             "unmatched_units",
                             "coverage_pct",
+                            "covered_sales_revenue_rub",
+                            "uncovered_sales_revenue_rub",
+                            "covered_sales_order_count",
+                            "uncovered_sales_order_count",
+                            "covered_sales_units",
+                            "uncovered_sales_units",
+                            "profit_coverage_status",
+                            "daily_rows",
                             "problem_skus",
                             "cost_state_hash",
                         )
@@ -1469,6 +1478,11 @@ class PartnerReportBlock:
         params: Mapping[str, str],
     ) -> dict[str, str | None]:
         net_revenue = _decimal(components.get("net_revenue"))
+        profit_revenue = (
+            _decimal(components.get("profit_revenue_covered"))
+            if "profit_revenue_covered" in components
+            else net_revenue
+        )
         allocated_main = allocated_main_expenses or {}
         agent = _decimal(components.get("agent_remuneration")) + _decimal(
             allocated_main.get("agent_remuneration")
@@ -1504,7 +1518,7 @@ class PartnerReportBlock:
             )
         )
         margin = (
-            net_revenue
+            profit_revenue
             - cogs
             - agent
             - acquiring
@@ -1518,7 +1532,7 @@ class PartnerReportBlock:
             else None
         )
         office = _decimal(params["weekly_office_expense_rub"])
-        tax = net_revenue * _decimal(params["tax_rate_pct"]) / HUNDRED
+        tax = profit_revenue * _decimal(params["tax_rate_pct"]) / HUNDRED
         reserve = (
             max(margin, ZERO) * _decimal(params["replenishment_reserve_pct"]) / HUNDRED
             if margin is not None
@@ -1538,6 +1552,15 @@ class PartnerReportBlock:
         )
         values: dict[str, Decimal | None] = {
             "net_revenue": net_revenue,
+            "sales_without_cost_rub": _decimal(
+                components.get("sales_without_cost_rub")
+            ),
+            "orders_without_cost": _decimal(
+                components.get("orders_without_cost")
+            ),
+            "units_without_cost": _decimal(
+                components.get("units_without_cost")
+            ),
             "cogs": cogs,
             "agent_remuneration": agent,
             "acquiring": acquiring,

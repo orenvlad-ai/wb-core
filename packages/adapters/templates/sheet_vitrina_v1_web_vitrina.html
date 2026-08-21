@@ -5324,6 +5324,9 @@
     .ff-pool-alert { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted-strong); background: var(--panel-subtle); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .ff-pool-alert[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
     .ff-pool-alert[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
+    .fbs-cost-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 0; padding: 12px 14px; border: 2px solid var(--warning-text); border-radius: 9px; background: var(--warning-bg); color: var(--warning-text); font-weight: 700; }
+    .fbs-cost-warning[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
+    .fbs-cost-warning[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
     .ff-pool-list { display: grid; gap: 8px; }
     .ff-pool-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-subtle); }
     .ff-pool-list-item strong, .ff-pool-list-item span { overflow-wrap: anywhere; }
@@ -5947,6 +5950,7 @@
           </div>
           <span class="warehouse-status" data-tone="neutral" data-fbs-orders-status>Не загружено</span>
         </div>
+        <div class="fbs-cost-warning" data-tone="warning" data-fbs-cost-warning>Проверяем покрытие себестоимости…</div>
         <form class="fbs-orders-filters" data-fbs-orders-filters>
           <label>Дата с<input class="input" type="date" data-fbs-orders-date-from></label>
           <label>Дата по<input class="input" type="date" data-fbs-orders-date-to></label>
@@ -6831,6 +6835,7 @@
     const inventoryPlanningDisclosure = document.querySelector("[data-inventory-planning-disclosure]");
     const inventoryPlanningRefresh = document.querySelector("[data-inventory-planning-refresh]");
     const fbsOrdersStatus = document.querySelector("[data-fbs-orders-status]");
+    const fbsCostWarning = document.querySelector("[data-fbs-cost-warning]");
     const fbsOrdersFilters = document.querySelector("[data-fbs-orders-filters]");
     const fbsOrdersRows = document.querySelector("[data-fbs-orders-rows]");
     const fbsOrderCounters = document.querySelector("[data-fbs-order-counters]");
@@ -7985,6 +7990,11 @@
       const button = event.target.closest("[data-fbs-order-category]");
       if (!button) return;
       state.warehouses.fbsOrders.category = String(button.getAttribute("data-fbs-order-category") || "all");
+      loadFbsOrders(1);
+    });
+    if (fbsCostWarning) fbsCostWarning.addEventListener("click", function(event) {
+      if (!event.target.closest("[data-open-unresolved-cost-orders]")) return;
+      state.warehouses.fbsOrders.category = "cost_unresolved";
       loadFbsOrders(1);
     });
     if (fbsOrdersPrev) fbsOrdersPrev.addEventListener("click", function() { loadFbsOrders(Math.max(1, state.warehouses.fbsOrders.page - 1)); });
@@ -10458,7 +10468,23 @@
       } finally { state.warehouses.inventoryPlanningLoading = false; }
     }
 
-    const fbsCounterLabels = {total:"Все",active:"Reserved / до передачи",handed_over:"Переданы complete+sorted",sold_closed:"Проданы / закрыты",canceled:"Отменены",reconciliation:"Сверка / неизвестный возврат",unmatched:"Не сопоставлены",deferred:"Отложены",ambiguous:"Неоднозначны"};
+    const fbsCounterLabels = {total:"Все",active:"Reserved / до передачи",handed_over:"Переданы complete+sorted",sold_closed:"Проданы / закрыты",canceled:"Отменены",reconciliation:"Сверка / неизвестный возврат",cost_unresolved:"Без себестоимости",unmatched:"Не сопоставлены",deferred:"Отложены",ambiguous:"Неоднозначны"};
+
+    function renderFbsCostWarning(warning) {
+      if (!fbsCostWarning) return;
+      const state = warning || {};
+      const count = Number(state.unresolved_fbs_order_count || 0);
+      const amount = state.sales_without_cost_rub;
+      const amountText = amount == null ? "сумма недоступна" : warehouseMoney(amount);
+      const tone = state.status === "ok" ? "success" : (state.status === "error" ? "error" : "warning");
+      fbsCostWarning.setAttribute("data-tone", tone);
+      if (state.status === "ok") {
+        fbsCostWarning.textContent = "OK: заказов и продаж без подтверждённой себестоимости нет.";
+        return;
+      }
+      fbsCostWarning.innerHTML = '<span>Продажи без себестоимости: ' + escapeHtml(amountText) + ' · FBS-заказов: ' + escapeHtml(warehouseNumber(count)) + '</span>' +
+        '<button class="button secondary" type="button" data-open-unresolved-cost-orders>Открыть точный список</button>';
+    }
 
     function renderFbsOrderCounters(counters) {
       if (!fbsOrderCounters) return;
@@ -10472,6 +10498,7 @@
     function renderFbsOrders(payload) {
       const rows = Array.isArray(payload.rows) ? payload.rows : [];
       renderFbsOrderCounters(payload.counters || {});
+      renderFbsCostWarning(payload.cost_coverage_warning || {});
       if (fbsOrdersRows) fbsOrdersRows.innerHTML = rows.length ? rows.map(function(order) {
         const reservation = order.reservation || {};
         const evidence = order.debit_close_evidence || {};
@@ -24480,7 +24507,7 @@
       container.appendChild(make("p", "ff-pool-note", "Положительный физический остаток: " + summary.denominator_quantity + " шт · SKU в denominator: " + summary.denominator_sku_count + " · затронуто SKU: " + summary.affected_sku_count + " · распределено: " + money(summary.allocation_total_rub)));
       if (summary.comment) container.appendChild(make("p", "ff-pool-note", "Комментарий: " + summary.comment));
       if (summary.filename || summary.file_sha256) container.appendChild(make("p", "ff-pool-note", "Файл: " + (summary.filename || "—") + " · SHA-256: " + (summary.file_sha256 || "—") + (summary.payment_evidence && summary.payment_evidence.payment_fingerprint ? " · fingerprint: " + summary.payment_evidence.payment_fingerprint : "")));
-      if (summary.payment_evidence && Object.keys(summary.payment_evidence).length) {
+      if (summary.source_mode === "payment_order_pdf" && summary.payment_evidence && Object.keys(summary.payment_evidence).length) {
         const evidenceNode = make("pre", "ff-pool-alert", overheadEvidenceLines(summary.payment_evidence).join("\n"));
         evidenceNode.dataset.tone = summary.payment_evidence.posting_eligible ? "success" : "error";
         container.appendChild(evidenceNode);

@@ -72,6 +72,7 @@ WORKFLOW_EVENTS_TABLE = "sheet_vitrina_v1_ff_workflow_events"
 GUIDED_REPLAYS_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_replays"
 GUIDED_RECOVERIES_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_recoveries"
 OVERHEAD_PAYMENT_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
+TARGETED_RECALC_QUEUE_TABLE = "sheet_vitrina_v1_warehouse_targeted_recalc_queue"
 
 WORKFLOW_STATES = (
     "accepted",
@@ -147,6 +148,7 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
     """Create only additive empty Stage 2 tables, indexes and guards."""
 
     ensure_ff_pool_foundation_schema(conn)
+    _ensure_targeted_recalc_queue_schema(conn)
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS {REQUESTS_TABLE}(
@@ -449,6 +451,46 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         BEGIN SELECT RAISE(ABORT,'overhead payment evidence is append-only'); END;
         """
     )
+
+
+def _ensure_targeted_recalc_queue_schema(conn: sqlite3.Connection) -> None:
+    """Keep the canonical queue writable inside the document commit."""
+
+    conn.execute(
+        f"""CREATE TABLE IF NOT EXISTS {TARGETED_RECALC_QUEUE_TABLE}(
+            queue_id TEXT PRIMARY KEY,stable_source_id TEXT NOT NULL,
+            source_revision TEXT NOT NULL,effective_date TEXT NOT NULL,
+            affected_nm_ids_json TEXT NOT NULL,status TEXT NOT NULL,
+            requested_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,error TEXT,
+            economics_status TEXT NOT NULL DEFAULT '',economics_started_at TEXT,
+            economics_finished_at TEXT,economics_error TEXT,
+            finance_status TEXT NOT NULL DEFAULT '',finance_source_fingerprint TEXT NOT NULL DEFAULT '',
+            finance_started_at TEXT,finance_finished_at TEXT,finance_error TEXT,
+            UNIQUE(stable_source_id,source_revision)
+        )"""
+    )
+    existing = {
+        str(row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({TARGETED_RECALC_QUEUE_TABLE})"
+        ).fetchall()
+    }
+    for name, definition in {
+        "economics_status": "TEXT NOT NULL DEFAULT ''",
+        "economics_started_at": "TEXT",
+        "economics_finished_at": "TEXT",
+        "economics_error": "TEXT",
+        "finance_status": "TEXT NOT NULL DEFAULT ''",
+        "finance_source_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "finance_started_at": "TEXT",
+        "finance_finished_at": "TEXT",
+        "finance_error": "TEXT",
+    }.items():
+        if name not in existing:
+            conn.execute(
+                f"ALTER TABLE {TARGETED_RECALC_QUEUE_TABLE} "
+                f"ADD COLUMN {name} {definition}"
+            )
 
 
 class FfPoolDocumentService:
@@ -1168,6 +1210,24 @@ class FfPoolDocumentService:
                     f"FROM {DOCUMENTS_TABLE} WHERE document_id=?",
                     (str(row["posted_document_id"]),),
                 ).fetchone()
+            posted_document_id = str(row["posted_document_id"] or "")
+            publication_row = (
+                conn.execute(
+                    f"SELECT 1 FROM {TARGETED_RECALC_QUEUE_TABLE} "
+                    "WHERE stable_source_id=? LIMIT 1",
+                    (f"pool_overhead:{posted_document_id}",),
+                ).fetchone()
+                if posted_document_id
+                else None
+            )
+            publication = (
+                _pool_overhead_publication_state(
+                    conn,
+                    document_id=posted_document_id,
+                )
+                if publication_row is not None
+                else None
+            )
             preview_manifest = _loads(row["preview_manifest_json"], {})
             confirm_allowed = str(row["state"]) == "ready"
             if _is_guided_china_request(row):
@@ -1209,6 +1269,7 @@ class FfPoolDocumentService:
                 "preview_manifest": preview_manifest,
                 "posted_manifest_sha256": str(row["posted_manifest_sha256"]),
                 "document": dict(document) if document is not None else None,
+                "publication": publication,
                 "recovery_operation_id": str(row["recovery_operation_id"]),
                 "accepted_at": str(row["accepted_at"]),
                 "updated_at": str(row["updated_at"]),
@@ -1718,6 +1779,20 @@ class FfPoolDocumentService:
                     _apply_guided_aggregate_projection(
                         conn, plan=plan, request=current_request, posted_at=posted_at
                     )
+                elif (
+                    str(current_request["document_kind"]) == "pool_overhead"
+                    or bool(
+                        _json_object(plan.get("domain_manifest") or {}).get(
+                            "overhead_evidence_link"
+                        )
+                    )
+                ):
+                    _apply_overhead_current_aggregate_projection(
+                        conn,
+                        plan=plan,
+                        request=current_request,
+                        posted_at=posted_at,
+                    )
                 root_document_id = str(plan["primary_document_id"])
                 manifest_sha = _fingerprint(plan["posted_manifest"])
                 now = self._now()
@@ -1747,6 +1822,15 @@ class FfPoolDocumentService:
                 next_action="resume_or_append_storno_pool_document",
             )
             raise
+        if (
+            str(request["document_kind"]) == "pool_overhead"
+            or bool(
+                _json_object(plan.get("domain_manifest") or {}).get(
+                    "overhead_evidence_link"
+                )
+            )
+        ):
+            return self.status(request_id=request_id)
         return None
 
     def _finalize_posted(self, request_id: str) -> dict[str, Any]:
@@ -1772,6 +1856,49 @@ class FfPoolDocumentService:
                     details={"document_id": document_id},
                 )
                 return self.status(request_id=request_id)
+            publication_row = conn.execute(
+                f"SELECT 1 FROM {TARGETED_RECALC_QUEUE_TABLE} "
+                "WHERE stable_source_id=? LIMIT 1",
+                (f"pool_overhead:{document_id}",),
+            ).fetchone()
+            if publication_row is not None:
+                publication = _pool_overhead_publication_state(
+                    conn, document_id=document_id
+                )
+                public_state = str(publication.get("status") or "missing")
+                now = self._now()
+                if state == "posted":
+                    conn.execute(
+                        f"UPDATE {REQUESTS_TABLE} SET state='replay',replay_at=?,updated_at=? "
+                        "WHERE request_id=? AND state='posted'",
+                        (now, now, request_id),
+                    )
+                    self._event(
+                        conn,
+                        request_id=request_id,
+                        stage="replay",
+                        status="running",
+                        details=publication,
+                    )
+                    state = "replay"
+                if public_state != "complete":
+                    error_code = (
+                        "overhead_publication_failed"
+                        if public_state in {"error", "missing"}
+                        else ""
+                    )
+                    conn.execute(
+                        f"UPDATE {REQUESTS_TABLE} SET updated_at=?,error_code=?,"
+                        "error_details_json=? WHERE request_id=? AND state IN ('posted','replay')",
+                        (
+                            now,
+                            error_code,
+                            _json(publication) if error_code else "null",
+                            request_id,
+                        ),
+                    )
+                    conn.commit()
+                    return self.status(request_id=request_id)
             now = self._now()
             if state == "posted":
                 conn.execute(
@@ -4607,6 +4734,12 @@ def _plan_storno(
         f"SELECT * FROM {LINES_TABLE} WHERE operation_id=? ORDER BY line_no",
         (str(target["operation_id"]),),
     ).fetchall()
+    if str(target["document_kind"]) == "pool_overhead":
+        _assert_overhead_storno_has_no_dependent_handoff(
+            conn,
+            target=target,
+            source_lines=source_lines,
+        )
     guided_recovery = _guided_acceptance_recovery_context(
         conn,
         target=target,
@@ -4698,6 +4831,72 @@ def _plan_storno(
             "overhead_evidence_link": target_overhead,
         },
     }
+
+
+def _assert_overhead_storno_has_no_dependent_handoff(
+    conn: sqlite3.Connection,
+    *,
+    target: Mapping[str, Any],
+    source_lines: Sequence[Mapping[str, Any]],
+) -> None:
+    """Fail closed when a handoff already froze the posted overhead WAC."""
+
+    event_table = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (event_table,),
+    ).fetchone() is None:
+        return
+    operation = conn.execute(
+        f"SELECT rowid FROM {OPERATIONS_TABLE} WHERE operation_id=?",
+        (str(target["operation_id"]),),
+    ).fetchone()
+    if operation is None:
+        raise FfPoolDocumentError(
+            "overhead_storno_operation_missing",
+            "Overhead operation identity disappeared before storno",
+        )
+    operation_rowid = int(operation[0])
+    dependent: list[dict[str, Any]] = []
+    for source in source_lines:
+        if str(source["pool"]) != "FBS":
+            continue
+        rows = conn.execute(
+            f"""SELECT event_id,order_id,facility_id,nm_id,occurred_at
+                  FROM {event_table}
+                 WHERE event_type='handoff_debit'
+                   AND facility_id=? AND pool='FBS' AND nm_id=?
+                   AND CAST(COALESCE(json_extract(
+                         details_json,'$.cost_basis.source_operation_rowid'
+                       ),0) AS INTEGER)>=?
+                 ORDER BY event_sequence LIMIT 20""",
+            (
+                str(source["facility_id"]),
+                int(source["nm_id"]),
+                operation_rowid,
+            ),
+        ).fetchall()
+        dependent.extend(
+            {
+                "event_id": str(row[0]),
+                "order_id": int(row[1]),
+                "facility_id": str(row[2]),
+                "nm_id": int(row[3]),
+                "occurred_at": str(row[4]),
+            }
+            for row in rows
+        )
+    if dependent:
+        raise FfPoolDocumentError(
+            "overhead_storno_dependent_handoff",
+            "Overhead cannot be reversed after a dependent FBS handoff froze its WAC",
+            details={
+                "target_document_id": str(target["document_id"]),
+                "source_operation_rowid": operation_rowid,
+                "dependent_handoffs": dependent,
+                "recovery": "append-only reviewed correction required",
+            },
+        )
 
 
 def _guided_acceptance_recovery_context(
@@ -5311,6 +5510,378 @@ def _apply_plan(
                 "inventory_unselected_pool_changed",
                 "Unselected inventory pool changed during posting",
             )
+    if str(request["document_kind"]) == "pool_overhead":
+        _enqueue_pool_overhead_publication(
+            conn,
+            request=request,
+            plan=plan,
+            posted_at=posted_at,
+        )
+    elif bool(
+        _json_object(plan.get("domain_manifest") or {}).get(
+            "overhead_evidence_link"
+        )
+    ):
+        _enqueue_pool_overhead_reversal_publication(
+            conn,
+            request=request,
+            plan=plan,
+            posted_at=posted_at,
+        )
+
+
+def _enqueue_pool_overhead_publication(
+    conn: sqlite3.Connection,
+    *,
+    request: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    posted_at: str,
+) -> dict[str, Any]:
+    """Atomically bind one overhead document to one canonical replay identity."""
+
+    document_id = str(plan["primary_document_id"])
+    domain = _json_object(plan.get("domain_manifest") or {})
+    movements = [
+        dict(item)
+        for document in plan.get("documents") or []
+        for item in document.get("movements") or []
+    ]
+    nm_ids = sorted({int(item["nm_id"]) for item in movements})
+    event_revision = _fingerprint(
+        {
+            "contract": "pool_overhead_targeted_publication_v1",
+            "document_id": document_id,
+            "request_source_revision": str(request["source_revision"]),
+            "facility_id": str(domain.get("facility_id") or ""),
+            "pools": sorted({str(item["pool"]) for item in movements}),
+            "nm_ids": nm_ids,
+            "basis_digest": str(domain.get("basis_digest") or ""),
+            "amount_rub": str(domain.get("amount_rub") or ""),
+            "posted_manifest_sha256": _fingerprint(plan["posted_manifest"]),
+        }
+    )
+    stable_source_id = f"pool_overhead:{document_id}"
+    queue_id = "whrq_" + hashlib.sha256(
+        _json(
+            {
+                "stable_source_id": stable_source_id,
+                "source_revision": event_revision,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    conn.execute(
+        f"""INSERT OR IGNORE INTO {TARGETED_RECALC_QUEUE_TABLE}(
+               queue_id,stable_source_id,source_revision,effective_date,
+               affected_nm_ids_json,status,requested_at,started_at,finished_at,error,
+               economics_status,economics_started_at,economics_finished_at,economics_error
+           ) VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL,'',NULL,NULL,NULL)""",
+        (
+            queue_id,
+            stable_source_id,
+            event_revision,
+            str(request["business_date"]),
+            _json(nm_ids),
+            posted_at,
+        ),
+    )
+    stored = conn.execute(
+        f"SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE} "
+        "WHERE stable_source_id=? AND source_revision=?",
+        (stable_source_id, event_revision),
+    ).fetchone()
+    if (
+        stored is None
+        or str(stored["queue_id"]) != queue_id
+        or _loads(stored["affected_nm_ids_json"], []) != nm_ids
+    ):
+        raise FfPoolDocumentError(
+            "overhead_publication_queue_identity_conflict",
+            "Posted overhead could not bind its exact publication queue",
+        )
+    return dict(stored)
+
+
+def _enqueue_pool_overhead_reversal_publication(
+    conn: sqlite3.Connection,
+    *,
+    request: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    posted_at: str,
+) -> dict[str, Any]:
+    """Bind an overhead storno to its own exact replay identity once."""
+
+    document_id = str(plan["primary_document_id"])
+    domain = _json_object(plan.get("domain_manifest") or {})
+    target = _json_object(domain.get("overhead_evidence_link") or {})
+    movements = [
+        dict(item)
+        for document in plan.get("documents") or []
+        for item in document.get("movements") or []
+    ]
+    nm_ids = sorted({int(item["nm_id"]) for item in movements})
+    event_revision = _fingerprint(
+        {
+            "contract": "pool_overhead_storno_targeted_publication_v1",
+            "document_id": document_id,
+            "target_document_id": str(domain.get("target_document_id") or ""),
+            "target_evidence": target,
+            "request_source_revision": str(request["source_revision"]),
+            "movement_digest": _fingerprint(movements),
+            "posted_manifest_sha256": _fingerprint(plan["posted_manifest"]),
+        }
+    )
+    stable_source_id = f"pool_overhead:{document_id}"
+    queue_id = "whrq_" + hashlib.sha256(
+        _json(
+            {
+                "stable_source_id": stable_source_id,
+                "source_revision": event_revision,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    conn.execute(
+        f"""INSERT OR IGNORE INTO {TARGETED_RECALC_QUEUE_TABLE}(
+               queue_id,stable_source_id,source_revision,effective_date,
+               affected_nm_ids_json,status,requested_at,started_at,finished_at,error,
+               economics_status,economics_started_at,economics_finished_at,economics_error
+           ) VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL,'',NULL,NULL,NULL)""",
+        (
+            queue_id,
+            stable_source_id,
+            event_revision,
+            str(request["business_date"]),
+            _json(nm_ids),
+            posted_at,
+        ),
+    )
+    stored = conn.execute(
+        f"SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE} "
+        "WHERE stable_source_id=? AND source_revision=?",
+        (stable_source_id, event_revision),
+    ).fetchone()
+    if (
+        stored is None
+        or str(stored["queue_id"]) != queue_id
+        or _loads(stored["affected_nm_ids_json"], []) != nm_ids
+    ):
+        raise FfPoolDocumentError(
+            "overhead_storno_publication_queue_identity_conflict",
+            "Overhead storno could not bind its exact publication queue",
+        )
+    return dict(stored)
+
+
+def _apply_overhead_current_aggregate_projection(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+    request: Mapping[str, Any],
+    posted_at: str,
+) -> None:
+    """Keep current aggregate FF capital atomic with overhead or its storno.
+
+    Pool document fixtures can intentionally run without the aggregate
+    projection.  In an activated warehouse runtime, however, a handoff may
+    follow immediately after the overhead commit and must never observe a
+    pool/aggregate split.  Only the exact affected capital and WAC columns are
+    changed here; heavy Finance publication remains in the durable queue.
+    """
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    required = {
+        "sheet_vitrina_v1_warehouse_functional_active",
+        "sheet_vitrina_v1_warehouse_functional_balances",
+    }
+    if not required.issubset(tables):
+        return
+    active = conn.execute(
+        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone()
+    if active is None:
+        raise FfPoolDocumentError(
+            "overhead_aggregate_active_missing",
+            "Activated pool overhead requires the current aggregate FF projection",
+        )
+    version_id = str(active[0])
+    capital_deltas: dict[int, Decimal] = {}
+    for document in plan.get("documents") or []:
+        for movement in document.get("movements") or []:
+            if int(movement["quantity_delta"]) != 0:
+                raise FfPoolDocumentError(
+                    "overhead_aggregate_quantity_delta",
+                    "Overhead aggregate synchronization cannot change quantity",
+                )
+            nm_id = int(movement["nm_id"])
+            capital_deltas[nm_id] = capital_deltas.get(nm_id, ZERO) + (
+                Decimal(int(movement["capital_delta_cents"])) / Decimal(100)
+            )
+    for nm_id, capital_delta in sorted(capital_deltas.items()):
+        row = conn.execute(
+            """SELECT quantity,capital_rub,provenance_json
+               FROM sheet_vitrina_v1_warehouse_functional_balances
+               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+            (version_id, nm_id),
+        ).fetchone()
+        if row is None:
+            raise FfPoolDocumentError(
+                "overhead_aggregate_sku_missing",
+                "Exact overhead SKU is absent from the current aggregate FF projection",
+                details={"nm_id": nm_id, "version_id": version_id},
+            )
+        with localcontext() as context:
+            context.prec = 160
+            quantity = Decimal(str(row["quantity"]))
+            capital = Decimal(str(row["capital_rub"])) + capital_delta
+            if quantity <= ZERO or capital <= ZERO:
+                raise FfPoolDocumentError(
+                    "overhead_aggregate_invalid",
+                    "Overhead or storno would make current aggregate cost unavailable",
+                    details={"nm_id": nm_id},
+                )
+            wac = canonical_decimal_text(capital / quantity)
+        provenance = {
+            "source": "pool_overhead_current_projection_v1",
+            "request_id": str(request["request_id"]),
+            "document_id": str(plan["primary_document_id"]),
+            "source_revision": str(request["source_revision"]),
+            "posted_at": posted_at,
+            "previous_provenance_sha256": _fingerprint(
+                _loads(row["provenance_json"], {})
+            ),
+        }
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+               SET capital_rub=?,wac_rub=?,provenance_json=?
+               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+            (
+                canonical_decimal_text(capital),
+                wac,
+                _json(provenance),
+                version_id,
+                nm_id,
+            ),
+        )
+    aggregate_rows = [
+        {
+            "nm_id": int(row[0]),
+            "quantity": _signed_int(row[1], field="aggregate quantity"),
+            "capital_rub": canonical_decimal_text(row[2]),
+        }
+        for row in conn.execute(
+            """SELECT nm_id,quantity,capital_rub
+               FROM sheet_vitrina_v1_warehouse_functional_balances
+               WHERE version_id=? AND warehouse_key='ff' ORDER BY nm_id""",
+            (version_id,),
+        ).fetchall()
+    ]
+    parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
+    if parity.status != "pass":
+        raise FfPoolDocumentError(
+            "overhead_aggregate_parity_failed",
+            "Overhead current projection diverged from facility/pool detail",
+            details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
+        )
+    record_ff_pool_parity_diagnostic(
+        conn,
+        diagnostic_id="ffpar_overhead_"
+        + _fingerprint(
+            {"request_id": str(request["request_id"]), "posted_at": posted_at}
+        ).removeprefix("sha256:")[:20],
+        aggregate_revision=version_id,
+        checked_at=posted_at,
+        result=parity,
+        details={
+            "source": "pool_overhead_current_projection_v1",
+            "request_id": str(request["request_id"]),
+            "document_id": str(plan["primary_document_id"]),
+            "finance_publication_deferred": True,
+        },
+    )
+
+
+def _pool_overhead_publication_state(
+    conn: sqlite3.Connection,
+    *,
+    document_id: str,
+) -> dict[str, Any]:
+    stable_source_id = f"pool_overhead:{document_id}"
+    row = conn.execute(
+        f"SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE} "
+        "WHERE stable_source_id=? ORDER BY requested_at DESC,queue_id DESC LIMIT 1",
+        (stable_source_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "status": "missing",
+            "stage": "document_posted",
+            "label_ru": "Документ проведён; очередь пересчёта отсутствует",
+            "stable_source_id": stable_source_id,
+            "queue_id": "",
+            "retry_required": True,
+        }
+    queue_status = str(row["status"] or "")
+    economics_status = str(row["economics_status"] or "")
+    finance_status = str(row["finance_status"] or "")
+    if (
+        queue_status == "complete"
+        and economics_status == "complete"
+        and finance_status == "complete"
+    ):
+        status = "complete"
+        stage = "cost_published"
+        label = "Себестоимость опубликована"
+    elif (
+        queue_status in {"error", "failed"}
+        or economics_status == "error"
+        or finance_status == "error"
+    ):
+        status = "error"
+        stage = "recalculation_error"
+        label = "Ошибка пересчёта; документ повторять не требуется"
+    elif queue_status in {"running", "complete"}:
+        status = "running"
+        stage = "recalculation_running"
+        label = "Пересчёт выполняется"
+    else:
+        status = "queued"
+        stage = "document_posted"
+        label = "Документ проведён; пересчёт поставлен в очередь"
+    return {
+        "status": status,
+        "stage": stage,
+        "label_ru": label,
+        "stable_source_id": stable_source_id,
+        "queue_id": str(row["queue_id"] or ""),
+        "source_revision": str(row["source_revision"] or ""),
+        "affected_nm_ids": _loads(row["affected_nm_ids_json"], []),
+        "queue_status": queue_status,
+        "economics_status": economics_status or "pending",
+        "finance_status": finance_status or "pending",
+        "finance_source_fingerprint": str(
+            row["finance_source_fingerprint"] or ""
+        ),
+        "requested_at": str(row["requested_at"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "finished_at": str(
+            row["finance_finished_at"]
+            or row["economics_finished_at"]
+            or row["finished_at"]
+            or ""
+        ),
+        "error": str(
+            row["finance_error"]
+            or row["economics_error"]
+            or row["error"]
+            or ""
+        ),
+        "retry_required": status == "error",
+        "repeat_business_document": False,
+    }
 
 
 def _materialize_explicit_zero_balances(

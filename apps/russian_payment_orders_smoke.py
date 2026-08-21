@@ -41,6 +41,7 @@ def main() -> None:
     wb_text = _fixture("wb_bank_0401060.txt")
     wb_equivalent_text = _fixture("wb_bank_0401060_equivalent_layout.txt")
     vtb_text = _fixture("vtb_0401060.txt")
+    vtb_inline_text = _fixture("vtb_0401060_inline_controls.txt")
 
     wb_pdf = _render_pdf(wb_text, title="synthetic-wb-layout-a", x_offset=0)
     wb_equivalent_pdf = _render_pdf(
@@ -56,10 +57,33 @@ def main() -> None:
         filename="renamed-equivalent-layout.pdf",
     )
     vtb = parse_russian_payment_order_pdf(vtb_pdf, filename="synthetic-vtb.pdf")
+    vtb_inline = parse_russian_payment_order_text(
+        vtb_inline_text,
+        file_sha256=SYNTHETIC_SHA,
+    )
 
     _assert_wb(wb)
     _assert_wb(wb_equivalent)
     _assert_vtb(vtb)
+    _assert_vtb(vtb_inline)
+    if vtb_inline["beneficiary"]["name"] != "ИП Получателев Виктор Учебный":
+        raise AssertionError(
+            "inline right-side controls must be stripped after beneficiary name"
+        )
+    vtb_ambiguous = parse_russian_payment_order_text(
+        vtb_inline_text.replace(
+            "Рез. поле\nПолучатель",
+            "Рез. поле НЕЯСНЫЙ ТЕКСТ\nПолучатель",
+            1,
+        ),
+        file_sha256=SYNTHETIC_SHA,
+    )
+    _assert_fail_closed(
+        vtb_ambiguous,
+        expected_status=RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_NEEDS_REVIEW,
+    )
+    if "beneficiary name is ambiguous after form controls" not in vtb_ambiguous["warnings"]:
+        raise AssertionError("ambiguous inline beneficiary residue must require review")
     if wb["file_sha256"] == wb_equivalent["file_sha256"]:
         raise AssertionError("different synthetic PDF layouts must keep distinct file SHA-256 values")
     if wb["payment_fingerprint"] != wb_equivalent["payment_fingerprint"]:

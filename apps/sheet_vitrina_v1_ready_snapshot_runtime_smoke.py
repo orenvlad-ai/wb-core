@@ -55,8 +55,8 @@ def main() -> None:
             raise AssertionError("DATA_VITRINA sheet missing")
         labels = "\n".join(str(row[0]) for row in data_sheet.rows if row)
         for expected_label in (
-            "Себестоимость WB наша, ₽/шт",
-            "Доля подтверждённой себестоимости, %",
+            "Себестоимость наша, ₽/шт",
+            "Продажи без себестоимости, ₽",
             "proxy прибыль 3",
         ):
             if expected_label not in labels:

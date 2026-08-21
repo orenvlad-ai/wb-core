@@ -385,7 +385,7 @@ def run_finance_partner_ui_flow(
                     status: document.getElementById('wbFinanceReportStatus').innerText.trim(),
                     headerCount: table ? table.querySelectorAll('thead th').length : 0,
                     rowCount: rows.length,
-                    cogs: value('Себестоимость продаж'),
+                    cogs: value('Себестоимость наша'),
                     profit: value('Прибыль после себестоимости'),
                     margin: value('Итоговая рентабельность, %'),
                     agent: value('Агентское вознаграждение WB'),
