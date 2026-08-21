@@ -533,6 +533,8 @@
         }
       });
 
+      fields.shipmentDate.addEventListener("input", renderTotals);
+      fields.shipmentDate.addEventListener("change", renderTotals);
       saveButton.addEventListener("click", saveCurrent);
       closeButton.addEventListener("click", () => { card.hidden = true; current = null; uploadId = ""; isNew = false; });
       loadRegistry();
