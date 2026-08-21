@@ -179,9 +179,45 @@ def _assert_pre_prepare_abort_skips_stale_restore() -> None:
         raise AssertionError("unstarted abort must preserve the warehouse boundary")
 
 
+def _assert_fbs_status_probe_uses_public_contract() -> None:
+    result = {
+        "route": "fbs_fulfillment_order_status",
+        "method": "GET",
+        "url": "http://127.0.0.1/fbs-status",
+        "http_status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "json_body": {
+            "status": "ready",
+            "active_sku_count": 1,
+            "national_demand_scope": "russia_total_orderCount",
+            "wb_stock_used": False,
+            "facilities": [
+                {
+                    "facility_id": "fff_moscow",
+                    "name": "FF Москва",
+                    "calculation_enabled": True,
+                    "blockers": [],
+                }
+            ],
+            "sales_history_coverage": {
+                "earliest_available_date": "2026-07-01",
+                "latest_available_date": "2026-07-15",
+            },
+            "defaults": {"sales_history_mode": "last_n_days"},
+        },
+        "network_error": None,
+    }
+    evaluation = hosted_runtime._evaluate_route_result(result, route_paths={})
+    if evaluation.get("ok") is not True:
+        raise AssertionError(
+            "FBS status deploy probe must accept the public facility name field"
+        )
+
+
 def main() -> None:
     _assert_deploy_status_readback_retry()
     _assert_pre_prepare_abort_skips_stale_restore()
+    _assert_fbs_status_probe_uses_public_contract()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"
     ) as bindings_temp_dir:
@@ -2463,6 +2499,276 @@ def main() -> None:
         ):
             raise AssertionError("hosted runner must expose Stage 7A production commands")
 
+        zero_sha = "d" * 40
+        zero_fingerprint = "sha256:" + "e" * 64
+        zero_plan_path = Path(partner_temp_dir) / "ff-pool-zero-physical-plan.json"
+        zero_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": hosted_runtime.FF_POOL_ZERO_PHYSICAL_CONTRACT_NAME,
+                    "contract_version": hosted_runtime.FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION,
+                    "mode": "dry_run",
+                    "apply_allowed": True,
+                    "deployed_sha": zero_sha,
+                    "fingerprint": zero_fingerprint,
+                    "scope": {
+                        "facility_id": hosted_runtime.FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID,
+                        "facility_name": "FF Москва",
+                        "pool": "FBS",
+                        "nm_ids": list(hosted_runtime.FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS),
+                        "absolute_physical_target": 0,
+                    },
+                    "expected_effects": {
+                        "balance_insert_count": len(
+                            hosted_runtime.FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS
+                        )
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        zero_apply_payload = {
+            "status": "complete",
+            "manifest_fingerprint": zero_fingerprint,
+        }
+        zero_readback_payload = {
+            "status": "ready",
+            "target_rows": [
+                {"nm_id": nm_id, "state": "explicit_zero"}
+                for nm_id in hosted_runtime.FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS
+            ],
+            "fbs_status_read_model": {
+                "target_nm_ids_unblocked": True,
+                "target_nm_ids_missing": [],
+                "calculation_enabled": True,
+            },
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(zero_apply_payload),
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(zero_readback_payload),
+                    stderr="",
+                ),
+            ],
+        ) as zero_run:
+            zero_result = hosted_runtime._run_remote_ff_pool_zero_physical_production(
+                active_target,
+                action="apply",
+                deployed_sha=zero_sha,
+                plan_path=zero_plan_path,
+                fingerprint=zero_fingerprint,
+                approval_reference="github-pr#issuecomment-apply-gate",
+                actor="owner-relay",
+            )
+        zero_command = " ".join(zero_run.call_args_list[0].args[0])
+        if not all(
+            token in zero_command
+            for token in (
+                "ff_pool_zero_physical_production.py",
+                ".wb-core-runtime-sha",
+                zero_sha,
+                "--reviewed-plan-stdin",
+                zero_fingerprint,
+                "github-pr#issuecomment-apply-gate",
+                "/opt/wb-core-runtime/backups/ff-pool-zero-physical-production",
+            )
+        ):
+            raise AssertionError("zero-physical hosted apply lost exact scope, SHA, or gate")
+        if zero_run.call_args_list[0].kwargs.get("input") != zero_plan_path.read_text(
+            encoding="utf-8"
+        ):
+            raise AssertionError("zero-physical hosted apply lost the reviewed plan")
+        if (
+            zero_run.call_args_list[0].kwargs.get("timeout")
+            != hosted_runtime.FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS
+        ):
+            raise AssertionError("zero-physical hosted apply lost its bounded timeout")
+        if zero_result.get("post_apply_readback") != zero_readback_payload:
+            raise AssertionError("zero-physical hosted apply lacks exact readback evidence")
+
+        zero_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-pool-zero-physical-production-dry-run",
+                "--deployed-sha",
+                zero_sha,
+                "--output",
+                str(Path(partner_temp_dir) / "ff-pool-zero-physical-dry-run.json"),
+            ]
+        )
+        if (
+            zero_args.handler
+            is not hosted_runtime.run_ff_pool_zero_physical_production_command
+            or zero_args.ff_pool_zero_physical_action != "dry-run"
+        ):
+            raise AssertionError("hosted runner must expose zero-physical commands")
+
+        mapping_sha = "f" * 40
+        mapping_fingerprint = "sha256:" + "1" * 64
+        mapping_plan_path = Path(partner_temp_dir) / "ff-fbs-mapping-plan.json"
+        mapping_plan_path.write_text(
+            json.dumps(
+                {
+                    "contract_name": hosted_runtime.FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME,
+                    "contract_version": hosted_runtime.FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION,
+                    "mode": "dry_run",
+                    "apply_allowed": True,
+                    "deployed_sha": mapping_sha,
+                    "fingerprint": mapping_fingerprint,
+                    "scope": {
+                        "seller_warehouse_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
+                        "official_office_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID,
+                        "facility_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+                        "pool": "FBS",
+                    },
+                    "expected_effects": {"wb_write_count": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        mapping_apply_payload = {
+            "status": "complete",
+            "manifest_fingerprint": mapping_fingerprint,
+        }
+        mapping_readback_payload = {
+            "status": "ready",
+            "mapping_extension": {
+                "plan_fingerprint": mapping_fingerprint,
+                "deployed_sha": mapping_sha,
+            },
+            "mapping": [
+                {
+                    "seller_warehouse_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
+                    "facility_id": hosted_runtime.FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+                }
+            ],
+            "backlog_partition": {"frozen_unresolved_pending_count": 0},
+            "pool_aggregate_parity": {"status": "pass"},
+            "wb_writes": 0,
+        }
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_apply_payload),
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_readback_payload),
+                    stderr="",
+                ),
+            ],
+        ) as mapping_run:
+            mapping_result = hosted_runtime._run_remote_ff_fbs_mapping_extension_production(
+                active_target,
+                action="apply",
+                deployed_sha=mapping_sha,
+                plan_path=mapping_plan_path,
+                fingerprint=mapping_fingerprint,
+                approval_reference="github-pr#issuecomment-orenburg-apply-gate",
+                actor="owner-relay",
+            )
+        mapping_command = " ".join(mapping_run.call_args_list[0].args[0])
+        if not all(
+            token in mapping_command
+            for token in (
+                "ff_fbs_mapping_extension_production.py",
+                ".wb-core-runtime-sha",
+                mapping_sha,
+                "--reviewed-plan-stdin",
+                mapping_fingerprint,
+                "github-pr#issuecomment-orenburg-apply-gate",
+                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+            )
+        ):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost exact scope, SHA, or gate"
+            )
+        if mapping_run.call_args_list[0].kwargs.get(
+            "input"
+        ) != mapping_plan_path.read_text(encoding="utf-8"):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost the reviewed plan"
+            )
+        if (
+            mapping_run.call_args_list[0].kwargs.get("timeout")
+            != hosted_runtime.FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS
+        ):
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lost its bounded timeout"
+            )
+        if mapping_result.get("post_apply_readback") != mapping_readback_payload:
+            raise AssertionError(
+                "FBS mapping-extension hosted apply lacks exact readback evidence"
+            )
+        with mock.patch.object(
+            hosted_runtime.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    args=[], returncode=255, stdout="", stderr="ssh reset"
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(mapping_readback_payload),
+                    stderr="",
+                ),
+            ],
+        ) as ambiguous_mapping_run:
+            ambiguous_mapping_result = (
+                hosted_runtime._run_remote_ff_fbs_mapping_extension_production(
+                    active_target,
+                    action="apply",
+                    deployed_sha=mapping_sha,
+                    plan_path=mapping_plan_path,
+                    fingerprint=mapping_fingerprint,
+                    approval_reference="github-pr#issuecomment-orenburg-apply-gate",
+                    actor="owner-relay",
+                )
+            )
+        if (
+            len(ambiguous_mapping_run.call_args_list) != 2
+            or ambiguous_mapping_result.get("recovered_after_transport_ambiguity")
+            is not True
+            or ambiguous_mapping_result.get("post_apply_readback")
+            != mapping_readback_payload
+        ):
+            raise AssertionError(
+                "ambiguous FBS mapping apply must reconcile query-only before retry"
+            )
+        mapping_args = hosted_runtime.build_arg_parser().parse_args(
+            [
+                "ff-fbs-mapping-extension-production-dry-run",
+                "--deployed-sha",
+                mapping_sha,
+                "--output",
+                str(Path(partner_temp_dir) / "ff-fbs-mapping-dry-run.json"),
+            ]
+        )
+        if (
+            mapping_args.handler
+            is not hosted_runtime.run_ff_fbs_mapping_extension_production_command
+            or mapping_args.ff_fbs_mapping_extension_action != "dry-run"
+        ):
+            raise AssertionError(
+                "hosted runner must expose FBS mapping-extension commands"
+            )
+
         cutover_sha = "b" * 40
         cutover_gate = {
             "contract_name": hosted_runtime.FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
@@ -4435,6 +4741,8 @@ def main() -> None:
                 raise AssertionError("own-product-capital status route must be publicly readable")
             if route_map["factory_order_status"]["http_status"] != 200:
                 raise AssertionError("factory-order status route must be publicly readable")
+            if route_map["fbs_fulfillment_order_status"]["http_status"] != 200:
+                raise AssertionError("FBS fulfillment-order status route must be publicly readable")
             if route_map["factory_order_template_stock_ff"]["http_status"] != 200:
                 raise AssertionError("stock_ff template route must be publicly readable")
             if route_map["factory_order_template_inbound_factory"]["http_status"] != 200:
@@ -4443,6 +4751,8 @@ def main() -> None:
                 raise AssertionError("inbound_ff_to_wb template route must be publicly readable")
             if route_map["factory_order_recommendation"]["http_status"] != 422:
                 raise AssertionError("recommendation route without calculation must stay truthful 422")
+            if route_map["fbs_fulfillment_order_recommendation"]["http_status"] != 422:
+                raise AssertionError("FBS recommendation route without calculation must stay truthful 422")
             if route_map["wb_regional_status"]["http_status"] != 200:
                 raise AssertionError("wb-regional status route must be publicly readable")
             if "wb_warehouse_exclusion_options" in route_map:
@@ -4506,6 +4816,10 @@ def main() -> None:
                 raise AssertionError("plan-report baseline template route must stay 200")
             if loopback_routes["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must stay 200")
+            if loopback_routes["fbs_fulfillment_order_status"]["http_status"] != 200:
+                raise AssertionError("FBS fulfillment-order status loopback route must stay 200")
+            if loopback_routes["fbs_fulfillment_order_recommendation"]["http_status"] != 422:
+                raise AssertionError("FBS recommendation loopback route without calculation must stay 422")
             if hosted_runtime._probe_include_refresh(
                 type("Args", (), {"include_refresh": True, "skip_refresh": False})()
             ) is not True:
@@ -4548,6 +4862,7 @@ def main() -> None:
             print(f"public_probe_plan_report: ok -> {route_map['plan_report']['http_status']}")
             print(f"public_probe_plan_baseline: ok -> {route_map['plan_report_baseline_status']['http_status']}/{route_map['plan_report_baseline_template']['http_status']}")
             print(f"factory_order_status: ok -> {route_map['factory_order_status']['http_status']}")
+            print(f"fbs_fulfillment_order_status: ok -> {route_map['fbs_fulfillment_order_status']['http_status']}")
             print(f"wb_regional_status: ok -> {route_map['wb_regional_status']['http_status']}")
             print(f"loopback_probe_status: ok -> {loopback_routes['status']['http_status']}")
             print("canonical_probe_refresh_policy: ok -> refresh skipped by default")
@@ -4665,7 +4980,9 @@ def _build_plan(
 
 
 def _wait_until_ready(url: str) -> None:
-    deadline = time.time() + 10
+    # The live runner imports the full operator surface, including PDF parsing.
+    # Shared CI runners can need more than ten seconds to finish that cold start.
+    deadline = time.time() + 30
     last_error = ""
     while time.time() < deadline:
         try:

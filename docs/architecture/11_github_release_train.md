@@ -185,8 +185,10 @@ Ordinary non-DCP STANDARD и LOOP flows не используют DCP proofs и 
 существующую release/deploy семантику.
 
 `scope:production-mutation` никогда не merge/deploy/apply автоматически из
-`release:ready`. Worker оставляет его `release:blocked` до separate human-gated
-contract.
+`release:ready`. Worker оставляет его `release:blocked` до separate
+human-authorized two-gate contract. GitHub transport доказанного source decision
+может выполнить qualified executor; это не делает apply automatic и не
+ослабляет gates.
 
 For Migration 142/143 Stage 7C, deploy of the trusted default-off runner may
 precede the business gate, but is not the production mutation. The pre-terminal
@@ -203,6 +205,16 @@ a later explicit owner confirmation authorizes `...-apply`; successful
 apply/readback and exact prior-control restore supply the
 reconciliation/evidence digests for the ordinary production-mutation
 terminalization command below.
+
+Migration 150 uses the same two-gate terminalization. The pre-merge release
+gate authorizes only merge/deploy of the default-dry-run mapping-extension
+runner. After exact-SHA deploy, a fresh query-only manifest must bind warehouse
+`854205`, office `12223`, the Orenburg facility, accepted receipt/root, compound
+frozen `W` and complete frozen target-row digests. Only the distinct post-merge
+apply gate authorizes that exact manifest. Rows appended above `W` do not stale
+the gate; official identity, frozen rows, receipt/allocation, deployed SHA,
+mapping semantics or target drift does. Query-only reconciliation and private
+evidence digests then feed the unchanged production-mutation completion command.
 
 ## Exact-SHA Deploy И Reconciliation
 
@@ -223,12 +235,47 @@ environment и снимает halt только после healthy evidence, с�
 PR/head/merge/target. Ручное снятие label или повтор business mutation не
 являются reconciliation.
 
+## Owner Decision И GitHub Comment Transport
+
+Two-gate contract разделяет authority и transport. Owner лично принимает
+business/risk decision для каждого exact gate. Если это authorization уже
+дано в visible source task и передано qualified executor-у дословно
+с source task/thread ID, executor relays его в PR через доступную
+non-interactive GitHub identity с association `OWNER` или `MEMBER`. Владелец не
+обязан вручную открывать PR, публиковать GitHub comment, запускать command
+или выполнять GitHub action.
+
+Source binding доказан только direct visible task history либо delegation
+envelope, который содержит source task/thread ID и один дословный
+authorization payload. Summary, paraphrase, inferred intent, hidden memory или
+несколько несовместимых payload-ов не являются authorization. Executor
+не invent/synthesize/broaden-ит authority. Relay comment:
+
+1. фиксирует source и executor task/thread IDs;
+2. включает неизменённый authorization payload в отдельном verbatim block;
+3. отмечает, что relay transport-only и не добавляет authority;
+4. связывает release gate с already-authorized exact PR/head и merge/deploy
+   semantics, а apply gate с already-authorized exact PR/deployed SHA/manifest и
+   apply semantics;
+5. после записи повторно читает GitHub author/association, immutable body и
+   exact UTF-8 digest.
+
+Missing/ambiguous authorization, недоказанный source/task binding,
+association вне `OWNER`/`MEMBER` или head/semantic/deployed-SHA/manifest drift
+fail closed. Executor делает direct callback за новым exact decision либо
+фиксирует credential/routing blocker; он не подменяет это просьбой
+владельцу вручную транспортировать уже данное decision. Existing manual gate
+comments без relay envelope остаются valid при всех тех же machine
+checks; parser, comment IDs/digests, command schema и current evidence не требуют
+migration.
+
 ## Production-Mutation Terminalization
 
-Human merge/deploy/apply не выполняется queue worker и не возникает из
-`release:ready`. После отдельного pre-merge release gate, exact-head merge,
-отдельного post-merge exact apply gate, canonical apply и bounded reconciliation
-`task:standard + scope:production-mutation` закрывается только comment:
+Business authorization не возникает из `release:ready`, а queue worker не
+выполняет business apply. После отдельного pre-merge release gate,
+exact-head merge, отдельного post-merge exact apply gate, canonical apply и
+bounded reconciliation `task:standard + scope:production-mutation` закрывается
+только comment:
 
 ```text
 /wb-core production-mutation complete <PR> head <HEAD_SHA> merge <MERGE_SHA> deployed <DEPLOYED_SHA> release-gate <RELEASE_GATE_COMMENT_ID> release-gate-digest sha256:<RELEASE_GATE_COMMENT_HASH> apply-gate <APPLY_GATE_COMMENT_ID> apply-gate-digest sha256:<APPLY_GATE_COMMENT_HASH> manifest sha256:<MANIFEST_HASH> reconciliation <RECONCILIATION_COMMENT_ID> reconciliation-digest sha256:<RECONCILIATION_COMMENT_HASH> evidence sha256:<EVIDENCE_HASH>
@@ -256,6 +303,11 @@ Two-gate workflow разделяет authority:
    MainPID и probes. Он не выполняет deploy, restart, repair или business apply.
 5. Только GitHub Actions создаёт completion proof, заменяет stale active/failure
    state на `release:production` и dispatch-ит queue observation.
+
+После valid exact owner authorization factual reconciliation comment и
+terminalization command являются mechanical executor closure, а не новым
+owner gate. Qualified executor публикует их через ту же authorized
+GitHub lane и доводит Actions-owned proof до terminal state.
 
 Повтор exact proven command идемпотентен. Legacy one-gate command, stale
 SHA/comment digest, missing release/apply gate, manifest, deploy,

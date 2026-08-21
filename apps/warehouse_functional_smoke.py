@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import defaultdict
 import copy
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
@@ -39,15 +40,19 @@ from packages.application.wb_supplies import validate_functional_supply_sync  # 
 from packages.application.warehouse_functional import (  # noqa: E402
     FUNCTIONAL_CUTOVER_ID,
     STAGES,
+    STAGE_FF,
     STAGE_DISCREPANCY,
     STAGE_WB,
     WAREHOUSE_QUALITY_PRESENTATIONS,
     WarehouseFunctionalBlock,
     WarehouseFunctionalError,
     WarehouseLine,
+    _add_bucket,
+    _bucket_line,
     _build_versioned_historical_correction,
     _calculation_digest,
     _counted_cny_operation,
+    _current_ff_pool_projection,
     _current_snapshot_effective_date,
     _daily_wb_cost_row,
     _ff_operation_replay_sort_key,
@@ -121,6 +126,7 @@ DRY_RUN_AT = "2026-07-18T11:55:00Z"
 def main() -> None:
     _test_decimal_and_allocations()
     _test_guided_acceptance_money_boundary_replay()
+    _test_post_cutover_ff_pool_projection_source()
     _test_invalid_supplier_line_fails_closed()
     _test_blocked_cny_operation_cannot_activate_supplier_flow()
     _test_zero_rub_supplier_payment_fails_closed()
@@ -202,6 +208,142 @@ def _test_guided_acceptance_money_boundary_replay() -> None:
         and negative["capital_delta_rub"] == Decimal("-614402.99"),
         "append-only guided recovery replays the exact inverse capital",
     )
+
+
+def _test_post_cutover_ff_pool_projection_source() -> None:
+    capture = {
+        "ff_pool_cutover_manifests": [
+            {
+                "cutover_id": "ff_pool_opening_v1",
+                "cutover_at": "2026-08-14T05:00:00Z",
+                "feature_epoch": 1,
+            }
+        ],
+        "ff_pool_feature_epochs": [
+            {"epoch": 1, "writer_enabled": 1, "reader_enabled": 1}
+        ],
+        "ff_pool_balances": [
+            {
+                "facility_id": "fac_moscow",
+                "pool": "FBS",
+                "nm_id": 101,
+                "projection_epoch": 1,
+                "quantity": 39250,
+                "capital_rub": "4346155.410000000000000001",
+                "source_watermark": "fbs-lifecycle-current",
+                "updated_at": "2026-08-15T04:00:00Z",
+            },
+            {
+                "facility_id": "fac_moscow",
+                "pool": "FBO",
+                "nm_id": 101,
+                "projection_epoch": 1,
+                "quantity": 26750,
+                "capital_rub": "2874226.819999999999999999",
+                "source_watermark": "guided-current",
+                "updated_at": "2026-08-15T04:00:01Z",
+            },
+            {
+                "facility_id": "fac_kazan",
+                "pool": "FBS",
+                "nm_id": 102,
+                "projection_epoch": 1,
+                "quantity": 7,
+                "capital_rub": "73.0000000000000000004",
+                "source_watermark": "fbs-lifecycle-current",
+                "updated_at": "2026-08-15T04:00:02Z",
+            },
+            {
+                "facility_id": "fac_moscow",
+                "pool": "FBS",
+                "nm_id": 103,
+                "projection_epoch": 1,
+                "quantity": 3250,
+                "capital_rub": "319434.32291654259178871196266",
+                "source_watermark": "guided-current-with-existing-tail",
+                "updated_at": "2026-08-15T04:00:03Z",
+            },
+        ],
+    }
+    projection = _current_ff_pool_projection(capture)
+    _assert(projection is not None, "post-cutover pool projection is active")
+    assert projection is not None
+    _assert(
+        projection["by_nm"][101]["quantity"] == 66000
+        and projection["by_nm"][101]["capital"] == "7220382.23",
+        "facility/pool projection conserves exact aggregate quantity and capital",
+    )
+    _assert(
+        projection["by_nm"][102]["capital"] == "73.0000000000000000004",
+        "fractional minor-unit capital remains exact",
+    )
+    _assert(
+        projection["by_nm"][103]["quantity"] == 3250
+        and projection["by_nm"][103]["capital"]
+        == "319434.32291654259178871196266",
+        "publisher serialization preserves a production-shaped tail beyond 28 digits",
+    )
+    buckets = defaultdict(
+        lambda: {
+            "quantity": Decimal("0"),
+            "capital": Decimal("0"),
+            "covered": Decimal("0"),
+            "quality": [],
+            "provenance": [],
+        }
+    )
+    _add_bucket(
+        buckets,
+        stage=STAGE_FF,
+        nm_id=103,
+        quantity=Decimal("3250"),
+        capital=Decimal("319434.32291654259178871196266"),
+        covered=Decimal("3250"),
+        quality="facility_pool_exact_projection",
+        provenance={"source": "production-shaped-current-pool"},
+    )
+    published_line = _line_payload(
+        _bucket_line((STAGE_FF, 103), buckets[(STAGE_FF, 103)])
+    )
+    _assert(
+        published_line["capital_rub"]
+        == "319434.32291654259178871196266",
+        "warehouse bucket fold and line serialization preserve the exact pool tail",
+    )
+    reordered = dict(capture)
+    reordered["ff_pool_balances"] = list(reversed(capture["ff_pool_balances"]))
+    _assert(
+        _current_ff_pool_projection(reordered)["source_digest"]
+        == projection["source_digest"],
+        "pool projection is deterministic across source row order",
+    )
+    for mutation, label in (
+        ({"ff_pool_cutover_manifests": []}, "balances without cutover fail closed"),
+        (
+            {
+                "ff_pool_balances": [
+                    {**capture["ff_pool_balances"][0], "projection_epoch": 2}
+                ]
+            },
+            "stale projection epoch fails closed",
+        ),
+        (
+            {
+                "ff_pool_balances": [
+                    {**capture["ff_pool_balances"][0], "quantity": "1.5"}
+                ]
+            },
+            "fractional physical quantity fails closed",
+        ),
+    ):
+        invalid = copy.deepcopy(capture)
+        invalid.update(mutation)
+        try:
+            _current_ff_pool_projection(invalid)
+        except WarehouseFunctionalError:
+            pass
+        else:
+            raise AssertionError(label)
 
 
 def _test_decimal_and_allocations() -> None:

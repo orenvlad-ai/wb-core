@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from io import BytesIO
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -30,6 +31,7 @@ from packages.application.ff_pool_documents import (  # noqa: E402
     FfPoolDocumentService,
     _allocate_cents,
     _apply_balance_movement,
+    _apply_guided_aggregate_projection,
     _build_posting_plan,
     _component_share,
     _posting_plan_preview,
@@ -50,13 +52,17 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     FEATURE_EPOCHS_TABLE,
     LINES_TABLE,
     OPERATIONS_TABLE,
+    evaluate_ff_pool_aggregate_parity,
 )
 from packages.application.warehouse_functional import STAGES  # noqa: E402
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     DOMAIN_EXACT_TABLES,
     WarehouseRecoveryRegistry,
 )
-from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
+from packages.contracts.ff_pool_documents import (  # noqa: E402
+    DocumentIdentity,
+    OVERHEAD_EXPENSE_CATEGORIES,
+)
 
 
 class Clock:
@@ -94,6 +100,7 @@ def main() -> None:
         "wb_acceptance_discrepancy",
     )
     _default_off_and_empty_schema()
+    _overhead_fail_closed_contracts()
     with TemporaryDirectory(prefix="ff-pool-documents-") as directory:
         root = Path(directory)
         db_path = root / "state.sqlite3"
@@ -107,6 +114,7 @@ def main() -> None:
         catalog, shipment_lines = _xlsx_contracts(service)
         _production_shaped_26gn527(service)
         opening = _opening(service)
+        _inventory_missing_fbs_zero(service, catalog)
         _idempotent_repeat_and_recovery(service, opening)
         _transfer_and_late_expense(service)
         _mis_sort(service)
@@ -116,6 +124,219 @@ def main() -> None:
         _assert_recovery(service)
         _assert_no_aggregate_or_legacy_writes(db_path)
     print("ff_pool_documents_smoke: OK")
+
+
+def _overhead_fail_closed_contracts() -> None:
+    """Pool overhead reuses the canonical planner and freezes its full basis."""
+
+    with TemporaryDirectory(prefix="ff-pool-overhead-domain-") as directory:
+        root = Path(directory)
+        clock = Clock()
+        service = FfPoolDocumentService(
+            db_path=root / "state.sqlite3",
+            runtime_dir=root,
+            timestamp_factory=clock,
+            resume=False,
+        )
+        with sqlite3.connect(service.db_path) as conn:
+            for facility_id, code in (("fac_a", "A"), ("fac_b", "B")):
+                now = clock()
+                conn.execute(
+                    f"INSERT INTO {FACILITIES_TABLE}(facility_id,code,name,active,display_timezone,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (facility_id, code, f"Fixture {code}", 1, "Asia/Yekaterinburg", now, now),
+                )
+            conn.execute(
+                f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) "
+                "VALUES(1,1,0,'overhead-domain-v1',?,'{}')",
+                (clock(),),
+            )
+            conn.executemany(
+                f"INSERT INTO {BALANCES_TABLE}(facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,source_watermark,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    ("fac_a", "FBS", 1, 1, 1, "10.0001", "10.0001", "fixture", clock()),
+                    ("fac_a", "FBS", 2, 1, 2, "20.00", "10.00", "fixture", clock()),
+                    ("fac_a", "FBO", 3, 1, 1, "5.00", "5.00", "fixture", clock()),
+                    ("fac_b", "FBS", 1, 1, 7, "70.00", "10.00", "fixture", clock()),
+                ],
+            )
+            conn.commit()
+
+        categories_seen: set[str] = set()
+        for category in OVERHEAD_EXPENSE_CATEGORIES:
+            preview = service.accept_preview(
+                identity=identity(f"overhead-category-{category}"),
+                document_kind="pool_overhead",
+                manifest={
+                    "facility_id": "fac_a",
+                    "scope": "FBS",
+                    "amount_rub": "0.01",
+                    "category": category,
+                    "comment": "Синтетическое основание" if category == "other" else "",
+                    "source_mode": "manual",
+                },
+            )
+            assert preview["state"] == "ready", preview
+            categories_seen.add(category)
+        assert categories_seen == set(OVERHEAD_EXPENSE_CATEGORIES)
+
+        missing_comment = service.accept_preview(
+            identity=identity("overhead-other-without-comment"),
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_a",
+                "scope": "FBS",
+                "amount_rub": "1.00",
+                "category": "other",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert missing_comment["state"] == "blocked"
+        assert missing_comment["error"]["code"] == "overhead_other_comment_required"
+
+        quantities_before = _all_quantities(service.db_path, "fac_a")
+        other_facility_before = _balance(service.db_path, "fac_b", "FBS", 1)
+        capital_before = sum(
+            _balance(service.db_path, "fac_a", pool, nm_id)[1]
+            for pool, nm_id, _quantity in quantities_before
+        )
+        posted = _accept_post(
+            service,
+            "overhead-domain-conservation",
+            "pool_overhead",
+            {
+                "facility_id": "fac_a",
+                "scope": "both",
+                "amount_rub": "0.01",
+                "category": "storage",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert _all_quantities(service.db_path, "fac_a") == quantities_before
+        assert _balance(service.db_path, "fac_b", "FBS", 1) == other_facility_before
+        capital_after = sum(
+            _balance(service.db_path, "fac_a", pool, nm_id)[1]
+            for pool, nm_id, _quantity in quantities_before
+        )
+        assert capital_after - capital_before == 1
+        overhead_id = str(posted["document"]["document_id"])
+        storno = _accept_post(
+            service,
+            "overhead-domain-storno",
+            "storno",
+            {"target_document_id": overhead_id},
+        )
+        assert _all_quantities(service.db_path, "fac_a") == quantities_before
+        assert sum(
+            _balance(service.db_path, "fac_a", pool, nm_id)[1]
+            for pool, nm_id, _quantity in quantities_before
+        ) == capital_before
+        with sqlite3.connect(service.db_path) as conn:
+            manifest = json.loads(
+                str(
+                    conn.execute(
+                        f"SELECT posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?",
+                        (str(storno["document"]["document_id"]),),
+                    ).fetchone()[0]
+                )
+            )
+        evidence_link = manifest["domain"]["overhead_evidence_link"]
+        assert evidence_link["category"] == "storage"
+        assert evidence_link["source_mode"] == "manual"
+
+        stale = service.accept_preview(
+            identity=identity("overhead-stale-basis"),
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_a",
+                "scope": "FBS",
+                "amount_rub": "1.00",
+                "category": "receiving",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert stale["state"] == "ready"
+        with sqlite3.connect(service.db_path) as conn:
+            conn.execute(
+                f"UPDATE {BALANCES_TABLE} SET quantity=quantity+1,wac_rub='5.00' "
+                "WHERE facility_id='fac_a' AND pool='FBS' AND nm_id=1"
+            )
+            conn.commit()
+        stale_result = service.post(str(stale["request_id"]))
+        assert stale_result["state"] == "blocked"
+        assert stale_result["error"]["code"] == "overhead_preview_stale"
+        stale_retry = service.accept_preview(
+            identity=replace(
+                identity("overhead-stale-basis"),
+                request_id="fixture:overhead-stale-basis:retry",
+            ),
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_a",
+                "scope": "FBS",
+                "amount_rub": "1.00",
+                "category": "receiving",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert stale_retry["request_id"] == stale["request_id"]
+        assert stale_retry["state"] == "ready"
+
+        with sqlite3.connect(service.db_path) as conn:
+            conn.execute(
+                f"INSERT INTO {BALANCES_TABLE}(facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,source_watermark,updated_at) "
+                "VALUES('fac_a','FBS',999,1,1,'0','0','fixture',?)",
+                (clock(),),
+            )
+            before_documents = int(
+                conn.execute(f"SELECT COUNT(*) FROM {DOCUMENTS_TABLE}").fetchone()[0]
+            )
+            conn.commit()
+        missing_basis = service.accept_preview(
+            identity=identity("overhead-zero-cost-basis"),
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_a",
+                "scope": "FBS",
+                "amount_rub": "1.00",
+                "category": "storage",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert missing_basis["state"] == "blocked"
+        assert missing_basis["error"]["code"] == "overhead_positive_quantity_cost_basis_missing"
+        details = missing_basis["error"]["details"]
+        assert any(int(item["nm_id"]) == 999 for item in details["rows"])
+        with sqlite3.connect(service.db_path) as conn:
+            assert int(conn.execute(f"SELECT COUNT(*) FROM {DOCUMENTS_TABLE}").fetchone()[0]) == before_documents
+            conn.execute(
+                f"UPDATE {BALANCES_TABLE} SET capital_rub='1.00',wac_rub='1.00' "
+                "WHERE facility_id='fac_a' AND pool='FBS' AND nm_id=999"
+            )
+            conn.commit()
+        basis_retry = service.accept_preview(
+            identity=replace(
+                identity("overhead-zero-cost-basis"),
+                request_id="fixture:overhead-zero-cost-basis:retry",
+            ),
+            document_kind="pool_overhead",
+            manifest={
+                "facility_id": "fac_a",
+                "scope": "FBS",
+                "amount_rub": "1.00",
+                "category": "storage",
+                "comment": "",
+                "source_mode": "manual",
+            },
+        )
+        assert basis_retry["request_id"] == missing_basis["request_id"]
+        assert basis_retry["state"] == "ready"
 
 
 def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
@@ -364,9 +585,24 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
                    PRIMARY KEY(version_id,warehouse_key,nm_id)
                )"""
         )
+        exact_aggregate_opening = {
+            210184534: (250, "22685.48291654259178871196266"),
+            245720334: (742, "72898.46191996789088452747788"),
+            259473237: (161, "15250.15967453213763517453472"),
+            497414010: (3714, "374597.1306848628156226987078"),
+            497414624: (9744, "981926.8202775904892378777031"),
+            497416271: (747, "99225.61859946938832759534936"),
+            497417163: (605, "73406.85909771881853260417024"),
+            497417474: (3247, "392647.3270720693000614962014"),
+        }
+        aggregate_opening_quantity = 0
         for nm_id, quantity, _fbo, _fbs, capital in rows:
             if nm_id in missing_aggregate_nm_ids:
                 continue
+            quantity, capital = exact_aggregate_opening.get(
+                nm_id, (quantity, capital)
+            )
+            aggregate_opening_quantity += quantity
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances
                    VALUES('26gn527-before','ff',?,?,?,?,?,'fixture',0,'0','0','0','{}')""",
@@ -376,6 +612,20 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
                     str(Decimal(capital) / Decimal(quantity)),
                     capital,
                     str(quantity),
+                ),
+            )
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,?,?,?,?,?)""",
+                (
+                    nm_id,
+                    quantity,
+                    capital,
+                    str(Decimal(capital) / Decimal(quantity)),
+                    "production-shaped-global-parity",
+                    "2026-08-15T00:00:00Z",
                 ),
             )
         guided_request = dict(request)
@@ -392,6 +642,79 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
         assert readiness["capital_delta_rub"] == "7220382.23"
         assert readiness["aggregate_semantic_zero_nm_ids"] == sorted(
             missing_aggregate_nm_ids
+        )
+        assert readiness["aggregate_pool_parity"]["status"] == "pass"
+        assert readiness["aggregate_pool_parity"]["detail_quantity"] == (
+            aggregate_opening_quantity
+        )
+        assert readiness["aggregate_pool_parity"]["aggregate_quantity"] == (
+            aggregate_opening_quantity
+        )
+        assert readiness["aggregate_pool_parity"]["detail_fingerprint"].startswith(
+            "sha256:"
+        )
+        conn.execute("SAVEPOINT guided_exact_aggregate")
+        guided_movements = [
+            item
+            for document in guided_plan["documents"]
+            for item in document.get("movements") or []
+        ]
+        for line_no, movement in enumerate(guided_movements, start=1):
+            _apply_balance_movement(
+                conn,
+                movement=movement,
+                operation_id="production-shaped-guided-exact-aggregate",
+                line_no=line_no,
+                epoch=1,
+                posted_at="2026-08-15T03:00:00Z",
+            )
+        _apply_guided_aggregate_projection(
+            conn,
+            plan=guided_plan,
+            request=guided_request,
+            posted_at="2026-08-15T03:00:00Z",
+        )
+        aggregate_rows = [
+            {
+                "nm_id": int(row[0]),
+                "quantity": int(row[1]),
+                "capital_rub": str(row[2]),
+            }
+            for row in conn.execute(
+                """SELECT nm_id,quantity,capital_rub
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='26gn527-before' AND warehouse_key='ff'
+                   ORDER BY nm_id"""
+            ).fetchall()
+        ]
+        exact_parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
+        assert exact_parity.status == "pass", exact_parity
+        for nm_id, (_quantity, opening_capital) in exact_aggregate_opening.items():
+            aggregate_capital = conn.execute(
+                """SELECT capital_rub
+                   FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='26gn527-before' AND warehouse_key='ff'
+                     AND nm_id=?""",
+                (nm_id,),
+            ).fetchone()[0]
+            pool_capitals = conn.execute(
+                f"""SELECT capital_rub FROM {BALANCES_TABLE}
+                    WHERE facility_id='fac_msk' AND nm_id=? ORDER BY pool""",
+                (nm_id,),
+            ).fetchall()
+            with localcontext() as context:
+                context.prec = 160
+                expected = sum(
+                    (Decimal(str(item[0])) for item in pool_capitals),
+                    Decimal("0"),
+                )
+            assert str(aggregate_capital) == format(expected, "f")
+            assert Decimal(str(aggregate_capital)) > Decimal(opening_capital)
+        conn.execute("ROLLBACK TO guided_exact_aggregate")
+        conn.execute("RELEASE guided_exact_aggregate")
+        conn.execute(
+            f"DELETE FROM {BALANCES_TABLE} "
+            "WHERE source_watermark='production-shaped-global-parity'"
         )
         conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_balances")
         conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_active")
@@ -1005,6 +1328,138 @@ def _idempotent_repeat_and_recovery(
     assert _table_count(service.db_path, REQUESTS_TABLE) == before_race + 1
 
 
+def _inventory_missing_fbs_zero(
+    service: FfPoolDocumentService,
+    catalog: list[dict[str, object]],
+) -> None:
+    """Routine full-scope inventory makes an absent FBS zero explicit."""
+
+    target_key = ("fac_orb", "FBS", 101)
+    with sqlite3.connect(service.db_path) as conn:
+        assert conn.execute(
+            f"SELECT 1 FROM {BALANCES_TABLE} WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone() is None
+        non_target_before = conn.execute(
+            f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,"
+            f"source_watermark,updated_at FROM {BALANCES_TABLE} "
+            "WHERE NOT (facility_id=? AND pool=? AND nm_id=?) "
+            "ORDER BY facility_id,pool,nm_id",
+            target_key,
+        ).fetchall()
+        movement_count_before = int(
+            conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0]
+        )
+
+    targets = {
+        (101, "FBS"): 0,
+        (102, "FBS"): _balance(service.db_path, "fac_orb", "FBS", 102)[0],
+    }
+    workbook_bytes = service.generate_inventory_template(
+        facility_id="fac_orb",
+        scope="FBS",
+        catalog=catalog,
+        source_revision="inventory-explicit-zero-v1",
+        targets=targets,
+    )
+    inventory_identity = replace(
+        identity("inventory-explicit-zero", revision="inventory-explicit-zero-v1"),
+        source_system="operator_http",
+        source_type="pool_inventory_workbook",
+    )
+    preview = service.preview_inventory_workbook(
+        identity=inventory_identity,
+        source_bytes=workbook_bytes,
+        source_filename="inventory-explicit-zero.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        catalog=catalog,
+    )
+    assert preview["state"] == "ready", preview
+    result = service.post(str(preview["request_id"]))
+    assert result["state"] == "complete", result
+    root_document_id = str(result["document"]["document_id"])
+
+    with sqlite3.connect(service.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        target = conn.execute(
+            f"SELECT quantity,capital_rub,wac_rub,source_watermark FROM {BALANCES_TABLE} "
+            "WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone()
+        assert target is not None
+        assert dict(target) == {
+            "quantity": 0,
+            "capital_rub": "0",
+            "wac_rub": None,
+            "source_watermark": root_document_id,
+        }
+        assert conn.execute(
+            f"SELECT 1 FROM {BALANCES_TABLE} "
+            "WHERE facility_id='fac_orb' AND pool='FBO' AND nm_id=101"
+        ).fetchone() is None
+        non_target_after = conn.execute(
+            f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,"
+            f"source_watermark,updated_at FROM {BALANCES_TABLE} "
+            "WHERE NOT (facility_id=? AND pool=? AND nm_id=?) "
+            "ORDER BY facility_id,pool,nm_id",
+            target_key,
+        ).fetchall()
+        assert [tuple(row) for row in non_target_after] == [
+            tuple(row) for row in non_target_before
+        ]
+        assert (
+            int(conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0])
+            == movement_count_before
+        )
+        evidence = conn.execute(
+            f"SELECT quantity,capital_rub,metadata_json FROM {DOCUMENT_LINES_TABLE} "
+            "WHERE document_id=? AND line_role='absolute_target' "
+            "AND facility_id=? AND pool=? AND nm_id=?",
+            (root_document_id, *target_key),
+        ).fetchone()
+        assert evidence is not None
+        assert int(evidence["quantity"]) == 0
+        assert Decimal(str(evidence["capital_rub"])) == 0
+        assert json.loads(str(evidence["metadata_json"])) == {
+            "before_quantity": 0,
+            "explicit_physical_zero": True,
+            "selected_pool": True,
+        }
+        posted_manifest = json.loads(
+            str(
+                conn.execute(
+                    f"SELECT posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?",
+                    (root_document_id,),
+                ).fetchone()[0]
+            )
+        )
+        assert posted_manifest["domain"]["explicit_zero_fbs_balance_count"] == 1
+        assert posted_manifest["domain"]["explicit_zero_fbs_nm_ids"] == [101]
+
+    repeated = service.preview_inventory_workbook(
+        identity=replace(
+            inventory_identity,
+            request_id="fixture:inventory-explicit-zero:response-loss-retry",
+        ),
+        source_bytes=workbook_bytes,
+        source_filename="renamed-inventory-explicit-zero.xlsx",
+        source_content_type=XLSX_CONTENT_TYPE,
+        catalog=catalog,
+    )
+    assert repeated["request_id"] == result["request_id"]
+    assert repeated["state"] == "complete" and repeated["idempotent"] is True
+    with sqlite3.connect(service.db_path) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {BALANCES_TABLE} "
+            "WHERE facility_id=? AND pool=? AND nm_id=?",
+            target_key,
+        ).fetchone()[0] == 1
+        assert (
+            int(conn.execute(f"SELECT COUNT(*) FROM {LINES_TABLE}").fetchone()[0])
+            == movement_count_before
+        )
+
+
 def _transfer_and_late_expense(service: FfPoolDocumentService) -> None:
     root = _accept_post(
         service,
@@ -1239,7 +1694,9 @@ def _reallocation_inventory_overhead(
             "facility_id": "fac_single",
             "scope": "both",
             "amount_rub": "5.00",
-            "reason": "Расход при пустом FBO",
+            "category": "storage",
+            "comment": "Расход при пустом FBO",
+            "source_mode": "manual",
         },
     )
     assert single_pool_overhead["preview_manifest"]["scope"] == "both"
@@ -1319,7 +1776,14 @@ def _reallocation_inventory_overhead(
         service,
         "overhead-both",
         "pool_overhead",
-        {"facility_id": "fac_msk", "scope": "both", "amount_rub": "1.01", "reason": "Общая уборка"},
+        {
+            "facility_id": "fac_msk",
+            "scope": "both",
+            "amount_rub": "1.01",
+            "category": "storage",
+            "comment": "Общая уборка",
+            "source_mode": "manual",
+        },
     )
     assert _all_quantities(service.db_path, "fac_msk") == quantities_before
     overhead_id = str(overhead["document"]["document_id"])

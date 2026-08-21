@@ -48,6 +48,8 @@ jobs:
           python3 apps/wb_incident_policy_legacy_readback_smoke.py
           python3 apps/sales_funnel_history_detail_csv_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
+          python3 apps/sheet_vitrina_v1_weighted_seller_price_smoke.py
+          python3 apps/sheet_vitrina_v1_web_vitrina_schema_evolution_smoke.py
           python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py
@@ -73,6 +75,7 @@ jobs:
           python3 apps/cny_ledger_smoke.py
           python3 apps/ff_pool_foundation_smoke.py
           python3 apps/ff_pool_documents_smoke.py
+          python3 apps/ff_pool_zero_physical_production_smoke.py
           python3 apps/ff_pool_surfaces_smoke.py
           python3 apps/ff_pool_surfaces_http_smoke.py
           python3 apps/ff_wb_supply_origins_smoke.py
@@ -80,6 +83,8 @@ jobs:
           python3 apps/wb_fbs_orders_collector_smoke.py
           python3 apps/wb_fbs_orders_http_smoke.py
           python3 apps/inventory_planning_read_model_smoke.py
+          python3 apps/fbs_fulfillment_order_supply_smoke.py
+          python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py
           python3 apps/wb_fbs_shadow_polling_smoke.py
           python3 apps/wb_supplies_incremental_sync_smoke.py
@@ -88,6 +93,7 @@ jobs:
           python3 apps/ff_pool_cutover_production_smoke.py
           python3 apps/ff_pool_cutover_recovery_supersession_smoke.py
           python3 apps/ff_pool_fbs_lifecycle_smoke.py
+          python3 apps/ff_fbs_mapping_extension_production_smoke.py
           python3 apps/warehouse_business_projection_smoke.py
           python3 apps/warehouse_targeted_replay_smoke.py
           python3 apps/warehouse_functional_smoke.py
@@ -105,7 +111,9 @@ jobs:
           python3 apps/ff_pool_surfaces_browser_smoke.py
           python3 apps/ff_wb_supply_origins_browser_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
+          python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py
           python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py
           python3 apps/wb_warehouse_exclusion_browser_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py

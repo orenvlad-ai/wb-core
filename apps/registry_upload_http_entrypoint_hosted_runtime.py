@@ -54,6 +54,8 @@ FINANCE_STORAGE_DURABLE_HOLD_ACTIONS = frozenset(
 PARTNER_FINANCE_DIAGNOSTIC_TIMEOUT_SECONDS = 900.0
 ADS_HISTORICAL_RECOVERY_TIMEOUT_SECONDS = 3600.0
 FF_STAGE_7A_PRODUCTION_TIMEOUT_SECONDS = 7200.0
+FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS = 1800.0
+FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
@@ -87,6 +89,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH,
+    DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
     DEFAULT_INSTRUCTIONS_UI_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
     DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH,
@@ -136,6 +140,19 @@ from packages.application.finance_storage_recovery_contract import (
 from packages.application.ff_pool_cutover_production import (
     CONTRACT_NAME as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_NAME,
     CONTRACT_VERSION as FF_POOL_CUTOVER_PRODUCTION_CONTRACT_VERSION,
+)
+from packages.application.ff_pool_zero_physical_production import (
+    CONTRACT_NAME as FF_POOL_ZERO_PHYSICAL_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION,
+    TARGET_FACILITY_ID as FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID,
+    TARGET_NM_IDS as FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS,
+)
+from packages.application.ff_fbs_mapping_extension_production import (
+    CONTRACT_NAME as FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME,
+    CONTRACT_VERSION as FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION,
+    TARGET_FACILITY_ID as FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID,
+    TARGET_OFFICE_ID as FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID,
+    TARGET_WAREHOUSE_ID as FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID,
 )
 from packages.application.ff_pool_cutover_recovery_supersession import (
     CONTRACT_NAME as FF_POOL_RECOVERY_SUPERSESSION_CONTRACT_NAME,
@@ -782,6 +799,13 @@ def collect_public_surface(
             auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
+            name="fbs_fulfillment_order_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
             name="factory_order_template_stock_ff",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH}",
@@ -806,6 +830,13 @@ def collect_public_surface(
             name="factory_order_recommendation",
             method="GET",
             url=f"{base_url}{DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="fbs_fulfillment_order_recommendation",
+            method="GET",
+            url=f"{base_url}{DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -6992,6 +7023,88 @@ def run_ff_stage_7a_production_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_ff_pool_zero_physical_production_command(args: argparse.Namespace) -> int:
+    """Run the exact default-dry-run Moscow FBS zero publication contour."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_pool_zero_physical_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("zero-physical reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_ff_pool_zero_physical_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("zero-physical evidence output must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-pool-zero-physical-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def run_ff_fbs_mapping_extension_production_command(
+    args: argparse.Namespace,
+) -> int:
+    """Run the exact Orenburg mapping/backlog production contour."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.ff_fbs_mapping_extension_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError(
+            "FBS mapping-extension reviewed plan must stay outside the Git checkout"
+        )
+    payload = _run_remote_ff_fbs_mapping_extension_production(
+        target,
+        action=action,
+        deployed_sha=str(args.deployed_sha).strip().lower(),
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        approval_reference=str(getattr(args, "approval_reference", "") or ""),
+        actor=str(getattr(args, "actor", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError(
+                "FBS mapping-extension evidence output must stay outside the Git checkout"
+            )
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(
+                target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+            ),
+            "action": f"ff-fbs-mapping-extension-production-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
 def run_ff_pool_cutover_production_command(args: argparse.Namespace) -> int:
     """Run the canonical dry-run/readback or owner-gated Stage 7C apply."""
 
@@ -7668,6 +7781,356 @@ def _run_remote_ff_stage_7a_production(
             "http_service_restart": restart,
             "post_restart_readback": readback,
         }
+    return payload
+
+
+def _run_remote_ff_pool_zero_physical_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-pool-zero-physical-production-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported zero-physical production action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-pool-zero-physical-production-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("zero-physical production action requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("zero-physical action requires the canonical active runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("zero-physical action requires the canonical environment file")
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError("zero-physical action requires the canonical HTTP service")
+
+    runner_args = [
+        "python3",
+        "apps/ff_pool_zero_physical_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("zero-physical apply requires an existing --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("zero-physical reviewed plan is invalid JSON") from exc
+        scope = plan.get("scope") if isinstance(plan, dict) else {}
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name") != FF_POOL_ZERO_PHYSICAL_CONTRACT_NAME
+            or int(plan.get("contract_version") or 0)
+            != FF_POOL_ZERO_PHYSICAL_CONTRACT_VERSION
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not isinstance(scope, Mapping)
+            or str(scope.get("facility_id") or "")
+            != FF_POOL_ZERO_PHYSICAL_TARGET_FACILITY_ID
+            or str(scope.get("pool") or "") != "FBS"
+            or tuple(scope.get("nm_ids") or ())
+            != tuple(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+            or scope.get("absolute_physical_target") != 0
+            or int((plan.get("expected_effects") or {}).get("balance_insert_count") or 0)
+            != len(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+        ):
+            raise ValueError("zero-physical reviewed plan does not match the exact apply")
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError("zero-physical apply requires approval reference and actor")
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--evidence-dir",
+                "/opt/wb-core-runtime/backups/ff-pool-zero-physical-production",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_POOL_ZERO_PHYSICAL_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"zero-physical production {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("zero-physical production runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError("zero-physical production runner returned an invalid result")
+    if action == "apply":
+        readback = _run_remote_ff_pool_zero_physical_production(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        target_rows = list(readback.get("target_rows") or [])
+        status = readback.get("fbs_status_read_model") or {}
+        if (
+            [int(item.get("nm_id") or 0) for item in target_rows]
+            != list(FF_POOL_ZERO_PHYSICAL_TARGET_NM_IDS)
+            or any(item.get("state") != "explicit_zero" for item in target_rows)
+            or status.get("target_nm_ids_unblocked") is not True
+            or list(status.get("target_nm_ids_missing") or [])
+            or status.get("calculation_enabled") is not True
+        ):
+            raise RuntimeError("post-apply zero-physical query-only readback is incomplete")
+        payload = {**payload, "post_apply_readback": readback}
+    return payload
+
+
+def _run_remote_ff_fbs_mapping_extension_production(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    deployed_sha: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(
+        target, action=f"ff-fbs-mapping-extension-production-{action}"
+    )
+    if action not in {"dry-run", "apply", "readback"}:
+        raise ValueError(f"unsupported FBS mapping-extension action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(
+            target,
+            action="ff-fbs-mapping-extension-production-apply",
+            dry_run=False,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError(
+            "FBS mapping-extension action requires an exact deployed SHA"
+        )
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical active runtime dir"
+        )
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical environment file"
+        )
+    if target.service_name != ACTIVE_HOSTED_RUNTIME_SERVICE_NAME:
+        raise ValueError(
+            "FBS mapping-extension action requires the canonical HTTP service"
+        )
+
+    runner_args = [
+        "python3",
+        "apps/ff_fbs_mapping_extension_production.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha",
+        deployed_sha,
+        "--compact",
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action == "apply":
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError(
+                "FBS mapping-extension apply requires an existing --plan-file"
+            )
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            plan = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "FBS mapping-extension reviewed plan is invalid JSON"
+            ) from exc
+        scope = plan.get("scope") if isinstance(plan, dict) else {}
+        if (
+            not isinstance(plan, dict)
+            or plan.get("contract_name") != FF_FBS_MAPPING_EXTENSION_CONTRACT_NAME
+            or int(plan.get("contract_version") or 0)
+            != FF_FBS_MAPPING_EXTENSION_CONTRACT_VERSION
+            or plan.get("mode") != "dry_run"
+            or plan.get("apply_allowed") is not True
+            or str(plan.get("deployed_sha") or "") != deployed_sha
+            or str(plan.get("fingerprint") or "") != fingerprint
+            or not isinstance(scope, Mapping)
+            or int(scope.get("seller_warehouse_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID
+            or int(scope.get("official_office_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_OFFICE_ID
+            or str(scope.get("facility_id") or "")
+            != FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID
+            or str(scope.get("pool") or "") != "FBS"
+            or int(
+                (plan.get("expected_effects") or {}).get("wb_write_count") or 0
+            )
+            != 0
+        ):
+            raise ValueError(
+                "FBS mapping-extension reviewed plan does not match the exact apply"
+            )
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError(
+                "FBS mapping-extension apply requires approval reference and actor"
+            )
+        runner_args.extend(
+            [
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+                "--evidence-dir",
+                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+            ]
+        )
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    shell_command = " && ".join(
+        [
+            f"test \"$(cat {shlex.quote(runtime_sha_path)})\" = {shlex.quote(deployed_sha)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        if action == "apply":
+            try:
+                readback = _run_remote_ff_fbs_mapping_extension_production(
+                    target,
+                    action="readback",
+                    deployed_sha=deployed_sha,
+                    plan_path=None,
+                    fingerprint="",
+                    approval_reference="",
+                    actor="",
+                )
+            except Exception as readback_error:
+                raise RuntimeError(
+                    f"FBS mapping-extension production apply failed and "
+                    f"query-only readback did not reconcile it: {readback_error}"
+                ) from readback_error
+            extension = dict(readback.get("mapping_extension") or {})
+            if (
+                str(extension.get("plan_fingerprint") or "") == fingerprint
+                and str(extension.get("deployed_sha") or "") == deployed_sha
+                and readback.get("status") == "ready"
+                and not readback.get("blockers")
+            ):
+                return {
+                    "status": "complete",
+                    "manifest_fingerprint": fingerprint,
+                    "deployed_sha": deployed_sha,
+                    "recovered_after_transport_ambiguity": True,
+                    "post_apply_readback": readback,
+                }
+        raise RuntimeError(
+            f"FBS mapping-extension production {action} failed: "
+            + (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit {result.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "FBS mapping-extension production runner returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"blocked", "error"}:
+        raise RuntimeError(
+            "FBS mapping-extension production runner returned an invalid result"
+        )
+    if action == "apply":
+        readback = _run_remote_ff_fbs_mapping_extension_production(
+            target,
+            action="readback",
+            deployed_sha=deployed_sha,
+            plan_path=None,
+            fingerprint="",
+            approval_reference="",
+            actor="",
+        )
+        mapping = list(readback.get("mapping") or [])
+        backlog = dict(readback.get("backlog_partition") or {})
+        if (
+            len(mapping) != 1
+            or int(mapping[0].get("seller_warehouse_id") or 0)
+            != FF_FBS_MAPPING_EXTENSION_TARGET_WAREHOUSE_ID
+            or str(mapping[0].get("facility_id") or "")
+            != FF_FBS_MAPPING_EXTENSION_TARGET_FACILITY_ID
+            or int(backlog.get("frozen_unresolved_pending_count") or 0) != 0
+            or (readback.get("pool_aggregate_parity") or {}).get("status")
+            != "pass"
+            or int(readback.get("wb_writes") or 0) != 0
+        ):
+            raise RuntimeError(
+                "post-apply FBS mapping-extension query-only readback is incomplete"
+            )
+        payload = {**payload, "post_apply_readback": readback}
     return payload
 
 
@@ -10950,6 +11413,80 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ff_stage_7a_action="readback",
     )
 
+    zero_physical_dry_run = subparsers.add_parser(
+        "ff-pool-zero-physical-production-dry-run",
+        help="Build the exact query-only Moscow FBS confirmed-zero manifest.",
+    )
+    zero_physical_dry_run.add_argument("--deployed-sha", required=True)
+    zero_physical_dry_run.add_argument("--output", required=True)
+    zero_physical_dry_run.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="dry-run",
+    )
+
+    zero_physical_apply = subparsers.add_parser(
+        "ff-pool-zero-physical-production-apply",
+        help="Apply one exact owner-gated Moscow FBS confirmed-zero manifest.",
+    )
+    zero_physical_apply.add_argument("--deployed-sha", required=True)
+    zero_physical_apply.add_argument("--plan-file", required=True)
+    zero_physical_apply.add_argument("--fingerprint", required=True)
+    zero_physical_apply.add_argument("--approval-reference", required=True)
+    zero_physical_apply.add_argument("--actor", required=True)
+    zero_physical_apply.add_argument("--output", required=True)
+    zero_physical_apply.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="apply",
+    )
+
+    zero_physical_readback = subparsers.add_parser(
+        "ff-pool-zero-physical-production-readback",
+        help="Read exact Moscow FBS confirmed-zero reconciliation evidence.",
+    )
+    zero_physical_readback.add_argument("--deployed-sha", required=True)
+    zero_physical_readback.add_argument("--output", required=True)
+    zero_physical_readback.set_defaults(
+        handler=run_ff_pool_zero_physical_production_command,
+        ff_pool_zero_physical_action="readback",
+    )
+
+    fbs_mapping_extension_dry_run = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-dry-run",
+        help="Build the exact query-only Orenburg FBS mapping/backlog manifest.",
+    )
+    fbs_mapping_extension_dry_run.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_dry_run.add_argument("--output", required=True)
+    fbs_mapping_extension_dry_run.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="dry-run",
+    )
+
+    fbs_mapping_extension_apply = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-apply",
+        help="Apply one exact owner-gated Orenburg FBS mapping/backlog manifest.",
+    )
+    fbs_mapping_extension_apply.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_apply.add_argument("--plan-file", required=True)
+    fbs_mapping_extension_apply.add_argument("--fingerprint", required=True)
+    fbs_mapping_extension_apply.add_argument("--approval-reference", required=True)
+    fbs_mapping_extension_apply.add_argument("--actor", required=True)
+    fbs_mapping_extension_apply.add_argument("--output", required=True)
+    fbs_mapping_extension_apply.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="apply",
+    )
+
+    fbs_mapping_extension_readback = subparsers.add_parser(
+        "ff-fbs-mapping-extension-production-readback",
+        help="Read exact Orenburg mapping/backlog reconciliation evidence.",
+    )
+    fbs_mapping_extension_readback.add_argument("--deployed-sha", required=True)
+    fbs_mapping_extension_readback.add_argument("--output", required=True)
+    fbs_mapping_extension_readback.set_defaults(
+        handler=run_ff_fbs_mapping_extension_production_command,
+        ff_fbs_mapping_extension_action="readback",
+    )
+
     ff_pool_cutover_dry_run = subparsers.add_parser(
         "ff-pool-cutover-production-dry-run",
         help=(
@@ -12384,6 +12921,10 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         tokens = [
             "Поставки",
             "Общий вход для двух расчётов",
+            "Заказ на фулфилмент (FBS)",
+            "Остатки WB не учитываются",
+            "Последние N дней",
+            "Произвольный период",
             "Заказ на фабрике",
             "Поставка на Wildberries",
             "Остатки ФФ",
@@ -12396,6 +12937,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "data-cny-delete-document",
             "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, средний курс",
             DEFAULT_FACTORY_ORDER_STATUS_PATH,
+            DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
             DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
             DEFAULT_WB_REGIONAL_STATUS_PATH,
             DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
@@ -12614,6 +13156,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route returned XLSX"
             if evaluation["ok"]
             else "expected XLSX content-type for successful recommendation route"
+        )
+        return evaluation
+
+    if route == "fbs_fulfillment_order_recommendation" and status == 200:
+        evaluation["ok"] = "spreadsheetml.sheet" in content_type
+        evaluation["detail"] = (
+            "FBS fulfillment-order recommendation route returned XLSX"
+            if evaluation["ok"]
+            else "expected XLSX content-type for successful FBS recommendation route"
         )
         return evaluation
 
@@ -13008,6 +13559,33 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "fbs_fulfillment_order_status":
+        facilities = payload.get("facilities")
+        evaluation["ok"] = (
+            status == 200
+            and isinstance(payload.get("status"), str)
+            and isinstance(payload.get("active_sku_count"), int)
+            and payload.get("national_demand_scope") == "russia_total_orderCount"
+            and payload.get("wb_stock_used") is False
+            and isinstance(facilities, list)
+            and all(
+                isinstance(item, dict)
+                and bool(str(item.get("facility_id") or ""))
+                and bool(str(item.get("name") or ""))
+                and isinstance(item.get("calculation_enabled"), bool)
+                and isinstance(item.get("blockers"), list)
+                for item in facilities
+            )
+            and isinstance(payload.get("sales_history_coverage"), dict)
+            and isinstance(payload.get("defaults"), dict)
+        )
+        evaluation["detail"] = (
+            "FBS fulfillment-order status route ok"
+            if evaluation["ok"]
+            else "expected 200 JSON independent FBS planner status contract"
+        )
+        return evaluation
+
     if route == "web_vitrina_group_refresh_missing_group":
         error_text = str(payload.get("error", "") or payload.get("detail", "") or "")
         validation_reached = (
@@ -13053,6 +13631,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "factory-order recommendation route published with truthful 422 before calculation"
             if evaluation["ok"]
             else "expected 200 XLSX or 422 JSON error for recommendation route"
+        )
+        return evaluation
+
+    if route == "fbs_fulfillment_order_recommendation":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 422 and bool(error_text)
+        evaluation["detail"] = (
+            "FBS fulfillment-order recommendation route published with truthful 422 before calculation"
+            if evaluation["ok"]
+            else "expected 200 XLSX or 422 JSON error for FBS recommendation route"
         )
         return evaluation
 
@@ -13509,10 +14097,12 @@ results = [
     _collect("plan_report_baseline_template", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"),
     _collect("plan", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("factory_order_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/status"),
+    _collect("fbs_fulfillment_order_status", "GET", PAYLOAD["base_url"] + {DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH!r}),
     _collect("factory_order_template_stock_ff", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"),
     _collect("factory_order_template_inbound_factory", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"),
     _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
+    _collect("fbs_fulfillment_order_recommendation", "GET", PAYLOAD["base_url"] + {DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH!r}),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_warehouse_exclusion_options", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH!r}),
     _collect("wb_warehouse_exclusion_settings", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH!r}),

@@ -221,7 +221,7 @@
     .exact-cost-complete { color: var(--success); font-weight: 800; }
     .exact-cost-incomplete { color: var(--warning); font-weight: 800; }
     .exact-cost-blocker { color: var(--warning); font-size: 10px; font-weight: 800; }
-    .supplier-registry-table { table-layout: fixed; width: 1865px; min-width: 1865px; max-width: 1865px; }
+    .supplier-registry-table { table-layout: fixed; width: 2000px; min-width: 2000px; max-width: 2000px; }
     .supplier-registry-table th, .supplier-registry-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .supplier-registry-table .badge { white-space: nowrap; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }
     .supplier-registry-table th { padding-inline: 7px; text-transform: none; }
@@ -231,6 +231,7 @@
     .supplier-registry-table [data-column-key="invoice_no"] { width: 90px; }
     .supplier-registry-table [data-column-key="invoice_date"] { width: 84px; }
     .supplier-registry-table [data-column-key="supplier"] { width: 118px; }
+    .supplier-registry-table [data-column-key="target_facility"] { width: 135px; }
     .supplier-registry-table [data-column-key="product_qty"] { width: 70px; }
     .supplier-registry-table [data-column-key="product_amount"] { width: 88px; }
     .supplier-registry-table [data-column-key="extras_amount"] { width: 80px; }
@@ -583,6 +584,7 @@
               <col data-column-key="invoice_no">
               <col data-column-key="invoice_date">
               <col data-column-key="supplier">
+              <col data-column-key="target_facility">
               <col data-column-key="product_qty">
               <col data-column-key="product_amount">
               <col data-column-key="extras_amount">
@@ -606,6 +608,7 @@
                 <th>发票编号 / Invoice No / Номер invoice</th>
                 <th>发票日期 / Invoice date / Дата invoice</th>
                 <th>供应商 / Supplier / Поставщик</th>
+                <th>Целевой фулфилмент</th>
                 <th>商品数量 / Product qty / Кол-во товаров</th>
                 <th>商品金额 / Product amount / Сумма товаров</th>
                 <th>其他费用 / Extras amount / Прочие позиции</th>
@@ -623,7 +626,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
-              <tr data-registry-state="loading"><td colspan="20"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
+              <tr data-registry-state="loading"><td colspan="21"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -660,6 +663,10 @@
           <div id="shipmentDateField" class="field required-missing">
             <label for="shipmentDateInput">计划出货日期 / Planned shipment date / Плановая дата отгрузки</label>
             <input id="shipmentDateInput" type="date" required>
+          </div>
+          <div id="targetFacilityField" class="field required-missing">
+            <label for="targetFacilityInput">目标履约中心 / Target fulfillment / Целевой фулфилмент</label>
+            <select id="targetFacilityInput" required><option value="">Выберите ФФ</option></select>
           </div>
           <div class="field">
             <label for="actualShipmentDateInput">实际出货日期 / Actual shipment date / Фактическая дата отгрузки</label>
@@ -918,6 +925,8 @@
       const selectedFileLabel = document.getElementById("selectedFileLabel");
       const shipmentDateField = document.getElementById("shipmentDateField");
       const shipmentDateInput = document.getElementById("shipmentDateInput");
+      const targetFacilityField = document.getElementById("targetFacilityField");
+      const targetFacilityInput = document.getElementById("targetFacilityInput");
       const actualShipmentDateInput = document.getElementById("actualShipmentDateInput");
       const actualFfAcceptanceDateInput = document.getElementById("actualFfAcceptanceDateInput");
       const guidedAcceptanceButton = document.getElementById("guidedAcceptanceButton");
@@ -1018,6 +1027,7 @@
             ["invoice_no", "Номер invoice", true],
             ["invoice_date", "Дата invoice"],
             ["supplier", "Поставщик"],
+            ["target_facility", "Целевой фулфилмент"],
             ["product_qty", "Кол-во товаров"],
             ["product_amount", "Сумма товаров"],
             ["extras_amount", "Прочие позиции"],
@@ -1050,6 +1060,7 @@
 
       let currentShipment = null;
       let allShipments = [];
+      let targetFacilityOptions = [];
       let currentUploadId = "";
       let isNewShipment = false;
       let cardDirty = false;
@@ -1602,6 +1613,7 @@
             closeShipmentButton.textContent = "Закрыть";
             document.querySelector("section.block[aria-label]")?.setAttribute("aria-label", "Реестр заказов");
             setStaticText("label[for='shipmentDateInput']", "Плановая дата отгрузки");
+            setStaticText("label[for='targetFacilityInput']", "Целевой фулфилмент");
             setStaticText("label[for='actualShipmentDateInput']", "Фактическая дата отгрузки");
             setStaticText("label[for='actualFfAcceptanceDateInput']", "Фактическая дата приёмки на ФФ");
             setStaticText("label[for='approxYuanRateInput']", "Примерный курс юаня, ₽/¥");
@@ -1617,6 +1629,7 @@
               "Invoice №",
               "Дата INV",
               "Поставщик",
+              "Целевой ФФ",
               "Кол-во",
               "Сумма",
               "Прочее",
@@ -1790,12 +1803,22 @@
         return payload;
       }
 
+      function renderTargetFacilityOptions(selectedId) {
+        const selected = String(selectedId || "");
+        targetFacilityInput.innerHTML = '<option value="">Выберите ФФ</option>' + targetFacilityOptions.map((facility) => (
+          '<option value="' + escapeHtml(facility.facility_id) + '">' + escapeHtml(facility.name || facility.facility_id) + '</option>'
+        )).join("");
+        targetFacilityInput.value = selected;
+      }
+
       async function loadRegistry() {
         renderRegistryLoading();
         setMessage(registryMessage, uiText("读取订单 / Loading orders / Читаем заказы...", "Читаем заказы..."), "");
         try {
           const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
           allShipments = Array.isArray(payload.shipments) ? payload.shipments : [];
+          targetFacilityOptions = Array.isArray(payload.target_facility_options) ? payload.target_facility_options : [];
+          renderTargetFacilityOptions(targetFacilityInput.value);
           renderRegistry(applyOrderStatusFilter(allShipments));
           setMessage(registryMessage, "", "");
           if (pendingDeepLinkShipmentId) {
@@ -1814,14 +1837,14 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="20"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="21"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
         if (registryColumnPreference) registryColumnPreference.apply();
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="20">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="21">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
         if (registryColumnPreference) registryColumnPreference.apply();
       }
 
@@ -1833,7 +1856,7 @@
           const emptyText = hasUnfilteredRows
             ? "Нет заказов в выбранных статусах."
             : uiText("暂无订单 / No orders yet / Заказов пока нет.", "Заказов пока нет.");
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="20">' + escapeHtml(emptyText) + '</td></tr>';
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="21">' + escapeHtml(emptyText) + '</td></tr>';
           if (registryColumnPreference) registryColumnPreference.apply();
           return;
         }
@@ -1850,6 +1873,7 @@
                 '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
                 '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
                 '<td title="' + escapeHtml(row.supplier_name || defaultSupplierName) + '">' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
+                '<td title="' + escapeHtml(row.target_facility_name || "Не назначен") + '">' + escapeHtml(row.target_facility_name || "Не назначен") + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
@@ -2028,6 +2052,8 @@
           planned_shipment_date: "",
           actual_shipment_date: "",
           actual_ff_acceptance_date: "",
+          target_facility_id: "",
+          target_facility_name: "",
           approx_yuan_rate: null,
           approx_invoice_cost_rub: null,
           approx_landed_cost_per_unit_rub: null,
@@ -2143,6 +2169,8 @@
         const metadata = shipment.metadata || {};
         cardTitle.textContent = shipment.shipment_id ? uiText("订单 / Order / Заказ ", "Заказ ") + shipment.shipment_id : uiText("新订单 / New order / Новый заказ", "Новый заказ");
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
+        renderTargetFacilityOptions(shipment.target_facility_id || "");
+        targetFacilityInput.disabled = Boolean(shipment.actual_ff_acceptance_date);
         actualShipmentDateInput.value = shipment.actual_shipment_date || "";
         actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
         actualFfAcceptanceDateInput.readOnly = true;
@@ -3849,6 +3877,7 @@
         const result = {
           shipment_date: shipmentDateInput.value,
           planned_shipment_date: shipmentDateInput.value,
+          target_facility_id: targetFacilityInput.value,
           actual_shipment_date: actualShipmentDateInput.value,
           actual_ff_acceptance_date: actualFfAcceptanceDateInput.value,
           approx_yuan_rate: approxYuanRateInput.value.trim(),
@@ -3895,8 +3924,12 @@
         }
         exactLandedCostPerUnit.parentElement.title = exactCostTooltip(shipment);
         const hasDate = Boolean(shipmentDateInput.value);
+        const hasTargetFacility = Boolean(targetFacilityInput.value) || Boolean(
+          !isNewShipment && currentShipment && currentShipment.shipment_id && !currentShipment.target_facility_id
+        );
         shipmentDateField.classList.toggle("required-missing", !hasDate);
-        saveShipmentButton.disabled = factualCorrectionInFlight || saveRequestInFlight || !hasDate || (isNewShipment && !currentUploadId);
+        targetFacilityField.classList.toggle("required-missing", !hasTargetFacility);
+        saveShipmentButton.disabled = factualCorrectionInFlight || saveRequestInFlight || !hasDate || !hasTargetFacility || (isNewShipment && !currentUploadId);
         if (priceCheckButton) {
           priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
         }
@@ -4080,6 +4113,9 @@
               approx_yuan_rate: payload.approx_yuan_rate,
               payload: headerOnly ? readCurrentPayload({ includeLines: false }) : payload
             };
+            if (!targetFacilityInput.value && !currentShipment.target_facility_id) {
+              delete mutationPayload.payload.target_facility_id;
+            }
             const factualDatesChanged = (
               String(payload.actual_shipment_date || "") !== String(currentShipment.actual_shipment_date || "")
               || String(payload.actual_ff_acceptance_date || "") !== String(currentShipment.actual_ff_acceptance_date || "")
@@ -4428,6 +4464,10 @@
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
         invalidateCurrentShipmentCostProof();
+        updateTotalsAndState();
+      });
+      targetFacilityInput.addEventListener("change", () => {
+        cardDirty = true;
         updateTotalsAndState();
       });
       [actualShipmentDateInput, actualFfAcceptanceDateInput].forEach((input) => {

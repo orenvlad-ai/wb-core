@@ -90,6 +90,15 @@ class FfPoolParityResult:
     detail_capital_rub: Decimal
     aggregate_capital_rub: Decimal
     mismatched_nm_ids: tuple[int, ...]
+    quantity_mismatched_nm_ids: tuple[int, ...]
+    canonical_capital_mismatched_nm_ids: tuple[int, ...]
+    raw_capital_mismatched_nm_ids: tuple[int, ...]
+    raw_capital_residuals_by_nm: tuple[tuple[int, Decimal], ...]
+    detail_canonical_capital_minor_units: int
+    aggregate_canonical_capital_minor_units: int
+    raw_capital_residual_rub: Decimal
+    raw_residual_conserved: bool
+    money_parity_policy: str
     detail_fingerprint: str
     aggregate_fingerprint: str
     fail_closed: bool

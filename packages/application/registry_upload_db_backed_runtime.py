@@ -34,7 +34,7 @@ from packages.application.registry_upload_bundle_v1 import (
 )
 from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.application.sqlite_contention import connect_sqlite
-from packages.application.storage_registry import StoreRegistry
+from packages.application.storage_registry import StorageRegistryError, StoreRegistry
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
@@ -93,9 +93,9 @@ SUPPLY_CALCULATION_REGISTRY_MAX_PAGE_SIZE = 100
 SUPPLY_CALCULATION_REGISTRY_MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
 SUPPLY_CALCULATION_REGISTRY_MAX_METADATA_BYTES = 8 * 1024 * 1024
 SUPPLY_CALCULATION_REGISTRY_MAX_EXPORT_BYTES = 64 * 1024 * 1024
-_SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
+_SCHEMA_READY_KEYS: set[tuple[str, int, int, int]] = set()
 _SCHEMA_READY_LOCK = threading.Lock()
-_CONFIRMATION_SCHEMA_READY_KEYS: set[tuple[str, int, int]] = set()
+_CONFIRMATION_SCHEMA_READY_KEYS: set[tuple[str, int, int, int]] = set()
 _CONFIRMATION_SCHEMA_READY_LOCK = threading.Lock()
 _SQLITE_BUSY_TIMEOUT_MS: ContextVar[int | None] = ContextVar(
     "registry_upload_sqlite_busy_timeout_ms",
@@ -5074,6 +5074,8 @@ class RegistryUploadDbBackedRuntime:
                     actual_ff_acceptance_date,
                     historical_status_exception,
                     order_status,
+                    target_facility_id,
+                    target_facility_name,
                     expenses_complete,
                     invoice_no,
                     invoice_date,
@@ -5097,7 +5099,7 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
@@ -5105,6 +5107,8 @@ class RegistryUploadDbBackedRuntime:
                     actual_ff_acceptance_date = excluded.actual_ff_acceptance_date,
                     historical_status_exception = excluded.historical_status_exception,
                     order_status = excluded.order_status,
+                    target_facility_id = excluded.target_facility_id,
+                    target_facility_name = excluded.target_facility_name,
                     expenses_complete = excluded.expenses_complete,
                     invoice_no = excluded.invoice_no,
                     invoice_date = excluded.invoice_date,
@@ -5137,6 +5141,8 @@ class RegistryUploadDbBackedRuntime:
                     header.get("actual_ff_acceptance_date") or None,
                     header.get("historical_status_exception") or "",
                     header.get("order_status") or ORDER_STATUS_DEFAULT,
+                    header.get("target_facility_id") or None,
+                    header.get("target_facility_name") or None,
                     1 if bool(header.get("expenses_complete")) else 0,
                     header.get("invoice_no") or "",
                     header.get("invoice_date") or "",
@@ -5254,6 +5260,8 @@ class RegistryUploadDbBackedRuntime:
                        actual_ff_acceptance_date,
                        historical_status_exception,
                        order_status,
+                       target_facility_id,
+                       target_facility_name,
                        expenses_complete,
                        invoice_no,
                        invoice_date,
@@ -5288,6 +5296,45 @@ class RegistryUploadDbBackedRuntime:
                 """
             ).fetchall()
             return [_supplier_shipment_row_to_dict(row) for row in rows]
+
+    def list_active_ff_facilities(self) -> list[dict[str, Any]]:
+        try:
+            with _connect(self.db_path) as conn:
+                _ensure_schema(conn)
+                rows = conn.execute(
+                    """
+                    SELECT facility.facility_id,
+                           facility.code,
+                           facility.name,
+                           COALESCE(profile.city, '') AS city
+                    FROM sheet_vitrina_v1_ff_facilities AS facility
+                    LEFT JOIN sheet_vitrina_v1_ff_facility_profiles AS profile
+                      ON profile.facility_id = facility.facility_id
+                    WHERE facility.active = 1
+                    ORDER BY facility.code, facility.facility_id
+                    """
+                ).fetchall()
+        except (StorageRegistryError, sqlite3.OperationalError):
+            return []
+        return [
+            {
+                "facility_id": str(row["facility_id"]),
+                "code": str(row["code"] or ""),
+                "name": str(row["name"] or ""),
+                "city": str(row["city"] or ""),
+                "active": True,
+            }
+            for row in rows
+        ]
+
+    def resolve_active_ff_facility(self, facility_id: str) -> dict[str, Any]:
+        normalized = str(facility_id or "").strip()
+        if not normalized:
+            raise ValueError("Целевой фулфилмент обязателен")
+        for facility in self.list_active_ff_facilities():
+            if facility["facility_id"] == normalized:
+                return facility
+        raise ValueError("Выбранный целевой фулфилмент не существует или не active")
 
     def load_supplier_shipment(self, shipment_id: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -7660,6 +7707,50 @@ class RegistryUploadDbBackedRuntime:
                 payload.setdefault("calculated_at", row["calculated_at"])
             return payload
 
+    def save_fbs_fulfillment_order_result_state(
+        self,
+        *,
+        calculated_at: str,
+        payload: Mapping[str, Any],
+        evidence: Mapping[str, Any] | None = None,
+        export_bytes: bytes | None = None,
+        export_filename: str | None = None,
+        export_content_type: str | None = None,
+    ) -> None:
+        _validate_timestamp(calculated_at, field_name="calculated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            _save_supply_calculation_record(
+                conn,
+                calculation_type="fbs_fulfillment_order",
+                calculated_at=calculated_at,
+                payload=payload,
+                evidence=evidence,
+                export_bytes=export_bytes,
+                export_filename=export_filename,
+                export_content_type=export_content_type,
+                latest_table="sheet_vitrina_v1_fbs_fulfillment_order_result_state",
+            )
+            conn.commit()
+
+    def load_fbs_fulfillment_order_result_state(self) -> dict[str, Any] | None:
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT calculated_at, result_json
+                FROM sheet_vitrina_v1_fbs_fulfillment_order_result_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["result_json"])
+            if isinstance(payload, dict):
+                payload.setdefault("calculated_at", row["calculated_at"])
+            return payload
+
     def save_wb_regional_supply_result_state(
         self,
         *,
@@ -9034,6 +9125,8 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "historical_status_exception": row["historical_status_exception"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
+        "target_facility_id": row["target_facility_id"] or "",
+        "target_facility_name": row["target_facility_name"] or "",
         "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
@@ -9076,6 +9169,8 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "historical_status_exception": row["historical_status_exception"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
+        "target_facility_id": row["target_facility_id"] or "",
+        "target_facility_name": row["target_facility_name"] or "",
         "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
@@ -9804,13 +9899,17 @@ def _normalize_supply_calculation_type(
     aliases = {
         "factory": "factory_order",
         "factory_order": "factory_order",
+        "fbs_fulfillment_order": "fbs_fulfillment_order",
+        "fulfillment_order": "fbs_fulfillment_order",
         "regional": "wb_regional",
         "wb_regional": "wb_regional",
     }
     if not normalized and allow_empty:
         return ""
     if normalized not in aliases:
-        raise ValueError("calculation_type must be factory_order or wb_regional")
+        raise ValueError(
+            "calculation_type must be factory_order, fbs_fulfillment_order or wb_regional"
+        )
     return aliases[normalized]
 
 
@@ -9982,6 +10081,7 @@ def _latest_supply_calculation_record_ids(conn: sqlite3.Connection) -> tuple[str
     record_ids: set[str] = set()
     for table_name in (
         "sheet_vitrina_v1_factory_order_result_state",
+        "sheet_vitrina_v1_fbs_fulfillment_order_result_state",
         "sheet_vitrina_v1_wb_regional_supply_result_state",
     ):
         row = conn.execute(
@@ -10042,6 +10142,14 @@ def _build_supply_calculation_registry_metadata(
             "stock_ff_source",
             "factory_inbound_source",
             "sales_avg_period_days",
+            "sales_history_mode",
+            "sales_date_from",
+            "sales_date_to",
+            "target_facility_id",
+            "production_days",
+            "factory_to_target_ff_days",
+            "ff_safety_days",
+            "order_cycle_days",
             "prod_lead_time_days",
             "lead_time_factory_to_ff_days",
             "lead_time_ff_to_wb_days",
@@ -10070,6 +10178,12 @@ def _build_supply_calculation_registry_metadata(
             "estimated_weight": _audit_float(summary.get("estimated_weight")),
             "estimated_volume": _audit_float(summary.get("estimated_volume")),
         },
+        "target_facility": {
+            "facility_id": str(payload.get("target_facility_id") or ""),
+            "name": str(payload.get("target_facility_name") or ""),
+        },
+        "national_demand_scope": str(payload.get("national_demand_scope") or ""),
+        "wb_stock_used": payload.get("wb_stock_used"),
         "key_settings": key_settings,
         "selected_wb_supply_ids": selected_ids,
         "selected_wb_supply_count": selected_supply_count,
@@ -10126,6 +10240,7 @@ def _supply_calculation_registry_row_to_list_item(row: sqlite3.Row) -> dict[str,
     summary = _mapping_or_empty(metadata.get("summary"))
     incident = _mapping_or_empty(metadata.get("incident_policy"))
     export = _mapping_or_empty(metadata.get("export"))
+    target_facility = _mapping_or_empty(metadata.get("target_facility"))
     legacy_settings = _mapping_or_empty(metadata.get("settings"))
     key_settings = _mapping_or_empty(metadata.get("key_settings")) or legacy_settings
     legacy_overlay = _mapping_or_empty(metadata.get("wb_supply_overlay_summary"))
@@ -10152,6 +10267,9 @@ def _supply_calculation_registry_row_to_list_item(row: sqlite3.Row) -> dict[str,
         "report_date": str(row["report_date"] or ""),
         "status": str(row["status"] or ""),
         "summary": dict(summary),
+        "target_facility": dict(target_facility),
+        "national_demand_scope": str(metadata.get("national_demand_scope") or ""),
+        "wb_stock_used": metadata.get("wb_stock_used"),
         "key_settings": dict(key_settings),
         "selected_wb_supply_count": selected_supply_count,
         "selected_wb_supply_qty": selected_supply_qty,
@@ -10620,7 +10738,7 @@ def _connect_supplier_confirmation_store(
                     );
                     """
                 )
-                _CONFIRMATION_SCHEMA_READY_KEYS.add(schema_key)
+                _CONFIRMATION_SCHEMA_READY_KEYS.add(_schema_ready_key(conn))
     return conn
 
 
@@ -10736,15 +10854,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     with _SCHEMA_READY_LOCK:
         if schema_key in _SCHEMA_READY_KEYS:
             return
+        was_in_transaction = conn.in_transaction
         _ensure_schema_uncached(conn)
-        _SCHEMA_READY_KEYS.add(schema_key)
+        if not was_in_transaction and conn.in_transaction:
+            conn.commit()
+        _SCHEMA_READY_KEYS.add(_schema_ready_key(conn))
 
 
-def _schema_ready_key(conn: sqlite3.Connection) -> tuple[str, int, int]:
+def _schema_ready_key(conn: sqlite3.Connection) -> tuple[str, int, int, int]:
     database_row = conn.execute("PRAGMA database_list").fetchone()
     db_path = Path(str(database_row[2] if database_row else "")).resolve()
     stat = db_path.stat()
-    return str(db_path), int(stat.st_dev), int(stat.st_ino)
+    schema_version_row = conn.execute("PRAGMA schema_version").fetchone()
+    schema_version = int(schema_version_row[0] if schema_version_row else 0)
+    return str(db_path), int(stat.st_dev), int(stat.st_ino), schema_version
 
 
 def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
@@ -11228,6 +11351,12 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             result_json TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_fbs_fulfillment_order_result_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            calculated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_regional_supply_result_state (
             slot INTEGER PRIMARY KEY CHECK (slot = 1),
             calculated_at TEXT NOT NULL,
@@ -11458,6 +11587,8 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             actual_ff_acceptance_date TEXT,
             historical_status_exception TEXT NOT NULL DEFAULT '',
             order_status TEXT NOT NULL DEFAULT 'production',
+            target_facility_id TEXT,
+            target_facility_name TEXT,
             expenses_complete INTEGER NOT NULL DEFAULT 0,
             invoice_no TEXT,
             invoice_date TEXT,
@@ -12281,6 +12412,18 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="order_status",
         column_sql="TEXT NOT NULL DEFAULT 'production'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="target_facility_id",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="target_facility_name",
+        column_sql="TEXT",
     )
     _ensure_column(
         conn,

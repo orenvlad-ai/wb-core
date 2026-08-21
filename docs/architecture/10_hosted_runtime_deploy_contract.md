@@ -106,6 +106,30 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   releases the barrier; failure or transport ambiguity retains it for recovery.
   The runner never writes WB, and deployment of the default-off runner alone
   never applies opening or chooses the complete/sorted policy.
+- Migration 149 adds canonical hosted
+  `ff-pool-zero-physical-production-dry-run/apply/readback` for exactly 41
+  owner-confirmed `FF Москва × FBS` physical-zero rows at facility
+  `fff_d67e8c823d5f81dd988d00dbfea6`. The wrapper pins the active target,
+  canonical runtime and exact `.wb-core-runtime-sha`, streams the reviewed
+  manifest over stdin, requires the immutable apply-gate reference and stores
+  private evidence below the canonical backup root. Dry-run/readback are
+  query-only. Apply posts one audited `pool_inventory` document, creates no
+  movement/capital/WAC effect and must prove all 41 explicit rows plus Moscow
+  FBS `calculation_enabled=true`; it never starts a calculation or order.
+- Migration 150 adds canonical hosted
+  `ff-fbs-mapping-extension-production-dry-run/apply/readback` for exactly
+  seller warehouse `854205`, official office `12223` and facility
+  `fff_2579bb2741ed4ab23b11bb4c4183`. The wrapper pins the active EU target,
+  canonical runtime/environment and exact `.wb-core-runtime-sha`; apply accepts
+  only the external reviewed fingerprint plus immutable owner apply-gate
+  reference over stdin. Dry-run/readback call only official WB read endpoints
+  and query-only SQLite. Apply creates a central T2 warehouse-domain checkpoint
+  and private `0600` target before-image, appends one audited mapping/Stage 7C
+  extension with receipt-backed WAC allocations, re-evidences exact identities
+  and uses the ordinary lifecycle drain. The historical cutover manifest,
+  Orenburg transfer receipt, Moscow mapping, FBO/factory-order semantics and WB
+  remain non-targets. Append-only observations above compound frozen `W` are a
+  normal exactly-once suffix and do not stale the reviewed gate.
 - Migration 144 adds
   `ff-pool-recovery-supersession-dry-run/apply/readback` for one exact stale
   failed Stage 7C recovery. The hosted wrapper pins the active EU target,
@@ -131,6 +155,38 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   maintenance transition lock. The audited abort fingerprints that proof and
   skips stale prior-state restore plus the not-yet-reached warehouse hold;
   changed or partial boundaries remain on the ordinary exact-restore path.
+  Its ordinary post-poll lifecycle drain also takes
+  `.warehouse-functional-sync.lock` non-blocking. While a guided receipt holds
+  the bounded current-plan/T1/commit window, collection continues but drain
+  progress remains unchanged and reports `warehouse_functional_writer_active`;
+  the next pass consumes that suffix exactly once. Guided owner authorization
+  is bound to an immutable receipt-effect digest, so legitimate reservation,
+  release or debit activity before lock acquisition is rebased into the live
+  recovery before-image rather than invalidating the gate. Receipt source,
+  date, allocation, quantities, capital normalization, expenses, epoch and
+  document identities remain exact fail-closed bindings.
+  A post-T status without exact matched identity evidence is isolated in an
+  append-only pending ledger with zero inventory/capital/WB effect instead of
+  pinning the shared suffix cursor. New matched rows continue in order; each
+  timer also retries a bounded pending prefix. Only a later immutable matched
+  proof for the same order and exact warehouse/nm/chrt tuple can replay the
+  original status and append its atomic resolution. The processor never
+  invents or changes facility/SKU mappings, and unresolved evidence remains a
+  visible `caught_up_identity_pending` diagnostic rather than silent loss.
+  Each normal collector cycle folds at most 10,000 new lifecycle observations
+  in one warehouse-functional transaction. This remains below the 100,000
+  domain ceiling and avoids both a 500-row moving tail and an unbounded lock
+  hold.
+  Lifecycle event products and both sides of each pool/aggregate capital fold
+  use the same 160-digit Decimal arithmetic boundary. Their operational parity
+  gate keeps quantity exact and compares money through the centralized
+  `rub_minor_unit_round_half_up_v1` policy per SKU and in total. Equal canonical
+  kopecks with a conserved, deterministically attributed raw sub-kopeck tail are
+  diagnostic; any canonical mismatch or crossed/unattributed total remains
+  fail-closed.
+  The canonical publisher also preserves that boundary through its warehouse
+  stage bucket and final Decimal-text serialization; a later scheduled or
+  manual publication cannot reintroduce process-default 28-digit rounding.
 - The protected facility-pool family includes bounded query-only
   `GET .../wb-supply-origins[/{supply_ref}]` and guarded
   `POST .../wb-supply-origins/{supply_ref}`. Stage 4 stores only append-only
@@ -155,6 +211,9 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb`
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/calculate`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status`
+- `POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate`
+- `GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/recommendation.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status`
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate`
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options`
@@ -862,7 +921,7 @@ Current deploy contract note:
   - restart runtime;
   - only after that run loopback/public verification.
 - nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block, prior `WB-CORE MANAGED TLS` block and matching legacy/manual locations from the configured server config, rewrites the target `server_name` directive to the target's explicit `nginx_public_routes.server_names` when provided, then inserts generated TLS and route blocks from target/manifest truth. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
-- The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/warehouses/`, `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
+- The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/warehouses/`, `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
 
 If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for archived Apps Script guard changes.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.
@@ -965,7 +1024,8 @@ Public probe validates:
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`; if exact closed-day capture is currently blocked but an accepted current snapshot for that same date already exists, the visible closed-day cell may be restored only as `latest_confirmed` fallback (`resolution_rule=accepted_current_from_prior_closed_day_latest_confirmed`) without creating accepted closed truth
 - full refresh and date-scoped group refresh must keep prior confirmed visible cells when a selected source/date status is failed or unavailable, while still updating source STATUS/job diagnostics with the exact failure reason; failed bot/web-source materialization must not silently turn previous values into dashes
 - when promo live wiring is active, `STATUS` / `plan` surfaces must disclose truthful `promo_by_price[*]` source facts, including `success/incomplete/missing`, collector trace note and accepted-current preservation instead of keeping promo rows as a permanent blocked gap
-- `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count, recommendation path, selected `stock_ff_source` and 1C FF_STOCK summary
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count, recommendation path, selected `stock_ff_source`, 1C FF_STOCK summary and legacy `current_source_readiness`; an existing saved result is `stale`, not ready, when current WB warehouse detail is absent or aggregate-only
+- `GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status`, `POST .../calculate` and `GET .../recommendation.xlsx` are the protected own-FBS planner surface. Its narrow prefix is present in the repo-owned nginx allowlist and the authenticated public probe checks both status and truthful recommendation availability. Status lists only active FF facilities under the public `facility_id` / `name` identity fields with exact physical/reserved/available/inbound readiness and blockers; calculate is Moscow-only in the national-demand MVP, uses no WB stock operand, persists immutable facility/window evidence and creates no supplier/factory order. The XLSX route streams the exact stored export.
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns `payload_version=v2_planning_zones`, active SKU count, methodology note, shared dataset state, eight planning-zone options and an optional v2 last result. A persisted v1 federal-district result is preserved only in bounded `migration_status.legacy_snapshot` and returns `recalculation_required`; it is never guessed into three Central zones.
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options` returns a protected read-only storage-only payload for one selected planning zone of the latest result. For Central zones the exact warehouseID registry classifies North/East/South, while factual eligibility requires complete barcode coverage from WB `acceptance/options`, requested-package support, active catalog state, direct storage classification and no block/exclusion. The backend returns normalized unique box dates, first available/free dates, explicit blocker/exclusion codes, ranking and stock/demand diagnostics; СЦ/СГТ/specialised/partial/inactive/blocked/unclassified options never enter the manager list. It must not create/draft FBW/FBS supplies, book slots, run Seller Portal automation, mutate WB, write Google Sheets/GAS or persist/reallocate selected variants as fact.
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies` returns protected cached WB supplies JSON only, supports `sort_key=supply_date&sort_dir=asc|desc`, and sorts all filtered rows before pagination.

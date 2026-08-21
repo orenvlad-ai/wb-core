@@ -237,4 +237,6 @@ class FactoryOrderStatus:
     onec_stock_ff_summary: FactoryOrderStockFfOnecState
     supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
     last_result: FactoryOrderCalculationResult | None
+    legacy_scenario: bool = True
+    current_source_readiness: dict[str, Any] | None = None
     wb_supply_overlay_options: dict[str, Any] | None = None

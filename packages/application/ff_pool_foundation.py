@@ -8,12 +8,16 @@ canonical FF ledger, or publish warehouse/Vitrina values.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from packages.application.canonical_rub_money import (
+    CANONICAL_RUB_MONEY_POLICY,
+    compare_canonical_rub_money,
+)
 from packages.contracts.ff_pool_foundation import (
     FfPoolFeatureState,
     FfPoolParityResult,
@@ -529,34 +533,84 @@ def evaluate_ff_pool_aggregate_parity(
     if not detail_rows:
         return _parity_result(status="detail_empty", feature_epoch=epoch)
 
-    detail_by_nm: dict[int, tuple[int, Decimal]] = {}
-    for row in detail_rows:
-        nm_id = _exact_integer(row[2], field_name="detail nm_id", positive=True)
-        quantity = _exact_integer(row[3], field_name="detail quantity")
-        capital = _decimal(row[4], field_name="detail capital_rub")
-        prior_quantity, prior_capital = detail_by_nm.get(nm_id, (0, ZERO))
-        detail_by_nm[nm_id] = (prior_quantity + quantity, prior_capital + capital)
+    # Capital may contain an authoritative fractional-kopeck tail with up to
+    # 80 stored characters.  Preserve it exactly for audit/recovery, but gate
+    # operational parity at the centralized canonical RUB minor-unit boundary.
+    with localcontext() as context:
+        context.prec = 160
+        detail_by_nm: dict[int, tuple[int, Decimal]] = {}
+        for row in detail_rows:
+            nm_id = _exact_integer(row[2], field_name="detail nm_id", positive=True)
+            quantity = _exact_integer(row[3], field_name="detail quantity")
+            capital = _decimal(row[4], field_name="detail capital_rub")
+            prior_quantity, prior_capital = detail_by_nm.get(nm_id, (0, ZERO))
+            detail_by_nm[nm_id] = (
+                prior_quantity + quantity,
+                prior_capital + capital,
+            )
 
-    aggregate_by_nm: dict[int, tuple[int, Decimal]] = {}
-    for item in aggregate_rows:
-        nm_id = _exact_integer(item.get("nm_id"), field_name="aggregate nm_id", positive=True)
-        if nm_id in aggregate_by_nm:
-            raise ValueError(f"duplicate aggregate FF nm_id: {nm_id}")
-        aggregate_by_nm[nm_id] = (
-            _exact_integer(item.get("quantity"), field_name="aggregate quantity"),
-            _decimal(item.get("capital_rub"), field_name="aggregate capital_rub"),
+        aggregate_by_nm: dict[int, tuple[int, Decimal]] = {}
+        for item in aggregate_rows:
+            nm_id = _exact_integer(
+                item.get("nm_id"), field_name="aggregate nm_id", positive=True
+            )
+            if nm_id in aggregate_by_nm:
+                raise ValueError(f"duplicate aggregate FF nm_id: {nm_id}")
+            aggregate_by_nm[nm_id] = (
+                _exact_integer(item.get("quantity"), field_name="aggregate quantity"),
+                _decimal(item.get("capital_rub"), field_name="aggregate capital_rub"),
+            )
+
+        all_nm_ids = sorted(set(detail_by_nm) | set(aggregate_by_nm))
+        quantity_mismatches: list[int] = []
+        canonical_capital_mismatches: list[int] = []
+        raw_capital_mismatches: list[int] = []
+        raw_residual_by_nm: dict[int, Decimal] = {}
+        for nm_id in all_nm_ids:
+            detail_quantity_for_nm, detail_capital_for_nm = detail_by_nm.get(
+                nm_id, (0, ZERO)
+            )
+            aggregate_quantity_for_nm, aggregate_capital_for_nm = aggregate_by_nm.get(
+                nm_id, (0, ZERO)
+            )
+            if detail_quantity_for_nm != aggregate_quantity_for_nm:
+                quantity_mismatches.append(nm_id)
+            comparison = compare_canonical_rub_money(
+                detail_capital_for_nm,
+                aggregate_capital_for_nm,
+                left_field=f"detail capital_rub for nm_id {nm_id}",
+                right_field=f"aggregate capital_rub for nm_id {nm_id}",
+            )
+            raw_residual_by_nm[nm_id] = comparison.raw_residual_rub
+            if comparison.raw_residual_rub != ZERO:
+                raw_capital_mismatches.append(nm_id)
+            if not comparison.canonical_equal or not comparison.residual_attributable:
+                canonical_capital_mismatches.append(nm_id)
+        detail_quantity = sum(item[0] for item in detail_by_nm.values())
+        aggregate_quantity = sum(item[0] for item in aggregate_by_nm.values())
+        detail_capital = sum((item[1] for item in detail_by_nm.values()), ZERO)
+        aggregate_capital = sum((item[1] for item in aggregate_by_nm.values()), ZERO)
+        total_comparison = compare_canonical_rub_money(
+            detail_capital,
+            aggregate_capital,
+            left_field="detail total capital_rub",
+            right_field="aggregate total capital_rub",
         )
-
-    mismatches = tuple(
-        nm_id
-        for nm_id in sorted(set(detail_by_nm) | set(aggregate_by_nm))
-        if detail_by_nm.get(nm_id, (0, ZERO))
-        != aggregate_by_nm.get(nm_id, (0, ZERO))
-    )
-    detail_quantity = sum(item[0] for item in detail_by_nm.values())
-    aggregate_quantity = sum(item[0] for item in aggregate_by_nm.values())
-    detail_capital = sum((item[1] for item in detail_by_nm.values()), ZERO)
-    aggregate_capital = sum((item[1] for item in aggregate_by_nm.values()), ZERO)
+        attributed_residual = sum(raw_residual_by_nm.values(), ZERO)
+        raw_residual_conserved = (
+            attributed_residual == total_comparison.raw_residual_rub
+        )
+        total_boundary_failed = (
+            not total_comparison.canonical_equal
+            or not total_comparison.residual_attributable
+            or not raw_residual_conserved
+        )
+        blocking_nm_ids = set(quantity_mismatches) | set(
+            canonical_capital_mismatches
+        )
+        if total_boundary_failed:
+            blocking_nm_ids.update(raw_capital_mismatches or all_nm_ids)
+        mismatches = tuple(sorted(blocking_nm_ids))
     status = "mismatch" if mismatches else "pass"
     detail_fingerprint = _current_detail_fingerprint(conn, epoch)
     aggregate_fingerprint = _fingerprint(
@@ -579,6 +633,20 @@ def evaluate_ff_pool_aggregate_parity(
         detail_capital_rub=detail_capital,
         aggregate_capital_rub=aggregate_capital,
         mismatched_nm_ids=mismatches,
+        quantity_mismatched_nm_ids=tuple(quantity_mismatches),
+        canonical_capital_mismatched_nm_ids=tuple(
+            canonical_capital_mismatches
+        ),
+        raw_capital_mismatched_nm_ids=tuple(raw_capital_mismatches),
+        raw_capital_residuals_by_nm=tuple(
+            (nm_id, raw_residual_by_nm[nm_id])
+            for nm_id in raw_capital_mismatches
+        ),
+        detail_canonical_capital_minor_units=total_comparison.left_minor_units,
+        aggregate_canonical_capital_minor_units=total_comparison.right_minor_units,
+        raw_capital_residual_rub=total_comparison.raw_residual_rub,
+        raw_residual_conserved=raw_residual_conserved,
+        money_parity_policy=CANONICAL_RUB_MONEY_POLICY,
         detail_fingerprint=detail_fingerprint,
         aggregate_fingerprint=aggregate_fingerprint,
         fail_closed=bool(mismatches),
@@ -629,7 +697,37 @@ def record_ff_pool_parity_diagnostic(
             result.aggregate_fingerprint,
             json.dumps(list(result.mismatched_nm_ids), separators=(",", ":")),
             checked_at,
-            json.dumps(dict(details or {}), sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                {
+                    **dict(details or {}),
+                    "money_parity_policy": result.money_parity_policy,
+                    "quantity_mismatched_nm_ids": list(
+                        result.quantity_mismatched_nm_ids
+                    ),
+                    "canonical_capital_mismatched_nm_ids": list(
+                        result.canonical_capital_mismatched_nm_ids
+                    ),
+                    "raw_capital_mismatched_nm_ids": list(
+                        result.raw_capital_mismatched_nm_ids
+                    ),
+                    "raw_capital_residuals_by_nm": {
+                        str(nm_id): canonical_decimal_text(residual)
+                        for nm_id, residual in result.raw_capital_residuals_by_nm
+                    },
+                    "detail_canonical_capital_minor_units": (
+                        result.detail_canonical_capital_minor_units
+                    ),
+                    "aggregate_canonical_capital_minor_units": (
+                        result.aggregate_canonical_capital_minor_units
+                    ),
+                    "raw_capital_residual_rub": canonical_decimal_text(
+                        result.raw_capital_residual_rub
+                    ),
+                    "raw_residual_conserved": result.raw_residual_conserved,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         ),
     )
 
@@ -652,6 +750,15 @@ def _parity_result(*, status: str, feature_epoch: int) -> FfPoolParityResult:
         detail_capital_rub=ZERO,
         aggregate_capital_rub=ZERO,
         mismatched_nm_ids=(),
+        quantity_mismatched_nm_ids=(),
+        canonical_capital_mismatched_nm_ids=(),
+        raw_capital_mismatched_nm_ids=(),
+        raw_capital_residuals_by_nm=(),
+        detail_canonical_capital_minor_units=0,
+        aggregate_canonical_capital_minor_units=0,
+        raw_capital_residual_rub=ZERO,
+        raw_residual_conserved=True,
+        money_parity_policy=CANONICAL_RUB_MONEY_POLICY,
         detail_fingerprint="",
         aggregate_fingerprint="",
         fail_closed=False,

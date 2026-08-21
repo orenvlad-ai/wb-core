@@ -32,6 +32,26 @@ class DemandEstimate:
     demand_notes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WindowedDemandEstimate:
+    """Availability-adjusted demand constrained to one exact calendar window."""
+
+    daily_demand_total: float
+    demand_estimation_mode: str
+    date_from: str
+    date_to: str
+    calendar_day_count: int
+    used_trading_day_count: int
+    excluded_day_count: int
+    included_dates: tuple[str, ...]
+    excluded_dates: tuple[str, ...]
+    baseline_daily_sales: float
+    valid_day_threshold: float
+    raw_window_daily_demand: float
+    demand_warning: str
+    demand_notes: tuple[str, ...]
+
+
 def parse_sales_avg_period_days(value: Any) -> int:
     if value in ("", None):
         return DEFAULT_SALES_AVG_PERIOD_DAYS
@@ -138,6 +158,102 @@ def estimate_availability_adjusted_demand(
         raw_recent_daily_demand=raw_recent_daily_demand,
         earliest_used_sales_date=used_dates[0] if used_dates else "",
         latest_used_sales_date=used_dates[-1] if used_dates else "",
+        demand_warning=warning,
+        demand_notes=tuple(notes),
+    )
+
+
+def estimate_availability_adjusted_demand_for_window(
+    samples_by_date: list[tuple[str, float]],
+    *,
+    date_from: date,
+    date_to: date,
+) -> WindowedDemandEstimate:
+    """Estimate demand without borrowing samples outside ``date_from..date_to``.
+
+    Source coverage is validated by the authoritative history reader before this
+    helper is called.  This function only applies the shared stockout/low-sales
+    filter inside the already selected inclusive window.
+    """
+
+    if date_to < date_from:
+        raise ValueError("date_to must be >= date_from")
+    samples = sorted(
+        (
+            (str(snapshot_date), float(value))
+            for snapshot_date, value in samples_by_date
+            if date_from <= date.fromisoformat(str(snapshot_date)) <= date_to
+        ),
+        key=lambda item: item[0],
+    )
+    calendar_day_count = (date_to - date_from).days + 1
+    raw_window_daily_demand = (
+        sum(value for _, value in samples) / len(samples) if samples else 0.0
+    )
+    positive_samples = [value for _, value in samples if value > 0]
+    if not positive_samples:
+        return WindowedDemandEstimate(
+            daily_demand_total=0.0,
+            demand_estimation_mode=DEMAND_ESTIMATION_MODE,
+            date_from=date_from.isoformat(),
+            date_to=date_to.isoformat(),
+            calendar_day_count=calendar_day_count,
+            used_trading_day_count=0,
+            excluded_day_count=len(samples),
+            included_dates=(),
+            excluded_dates=tuple(snapshot_date for snapshot_date, _ in samples),
+            baseline_daily_sales=0.0,
+            valid_day_threshold=0.0,
+            raw_window_daily_demand=raw_window_daily_demand,
+            demand_warning=(
+                "В выбранном периоде нет положительных orderCount; "
+                "расчёт спроса для SKU недоступен."
+            ),
+            demand_notes=("no_positive_order_count_samples_in_selected_window",),
+        )
+
+    baseline_daily_sales = float(median(positive_samples))
+    valid_day_threshold = max(
+        1.0,
+        baseline_daily_sales * DEMAND_VALID_DAY_BASELINE_RATIO,
+    )
+    included = [
+        (snapshot_date, value)
+        for snapshot_date, value in samples
+        if value >= valid_day_threshold
+    ]
+    excluded = [
+        (snapshot_date, value)
+        for snapshot_date, value in samples
+        if value < valid_day_threshold
+    ]
+    daily_demand_total = (
+        sum(value for _, value in included) / len(included) if included else 0.0
+    )
+    notes: list[str] = ["selected_window_only_no_external_day_backfill"]
+    warning = ""
+    if excluded:
+        notes.append("excluded_low_sales_days_below_threshold")
+        warning = (
+            f"Использовано {len(included)} торговых дней из {calendar_day_count}; "
+            f"{len(excluded)} подозрительно низких дней исключено только внутри "
+            f"периода {date_from.isoformat()}..{date_to.isoformat()}."
+        )
+    else:
+        notes.append("all_selected_window_days_used")
+    return WindowedDemandEstimate(
+        daily_demand_total=daily_demand_total,
+        demand_estimation_mode=DEMAND_ESTIMATION_MODE,
+        date_from=date_from.isoformat(),
+        date_to=date_to.isoformat(),
+        calendar_day_count=calendar_day_count,
+        used_trading_day_count=len(included),
+        excluded_day_count=len(excluded),
+        included_dates=tuple(snapshot_date for snapshot_date, _ in included),
+        excluded_dates=tuple(snapshot_date for snapshot_date, _ in excluded),
+        baseline_daily_sales=baseline_daily_sales,
+        valid_day_threshold=valid_day_threshold,
+        raw_window_daily_demand=raw_window_daily_demand,
         demand_warning=warning,
         demand_notes=tuple(notes),
     )

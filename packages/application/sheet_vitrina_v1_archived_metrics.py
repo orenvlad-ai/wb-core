@@ -18,6 +18,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import OUR_WB_ARCHIVED_M
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_ARCHIVED_METRIC_KEYS,
 )
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (
+    LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
 
 
@@ -40,6 +43,7 @@ ARCHIVED_PUBLIC_METRIC_KEYS = frozenset(
         *INCIDENT_STOCK_METRIC_KEYS,
         *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
         *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
+        LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
     )
 )
 ARCHIVED_ONLY_SOURCE_KEYS = frozenset({ONEC_STOCKS_SOURCE_KEY, "cost_price"})

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -211,7 +213,11 @@ def _assert_typed_forward_acyclic_relations(conn: sqlite3.Connection) -> None:
 
 def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
     aggregate = [
-        {"nm_id": 101, "quantity": 10, "capital_rub": "100.0000"},
+        {
+            "nm_id": 101,
+            "quantity": 10,
+            "capital_rub": "319434.32291654259178871196266",
+        },
         {"nm_id": 202, "quantity": 3, "capital_rub": "37.50"},
     ]
     off = evaluate_ff_pool_aggregate_parity(conn, aggregate)
@@ -248,8 +254,18 @@ def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
 
     _insert_facility(conn, "facility-b", "TEST-B")
     balance_rows = (
-        ("facility-a", "FBS", 101, 2, 4, "40.0000", "10", "wm-1", NOW),
-        ("facility-b", "FBO", 101, 2, 6, "60", "10.0", "wm-1", NOW),
+        (
+            "facility-a",
+            "FBS",
+            101,
+            2,
+            4,
+            "22685.48291654259178871196266",
+            "10",
+            "wm-1",
+            NOW,
+        ),
+        ("facility-b", "FBO", 101, 2, 6, "296748.84", "10.0", "wm-1", NOW),
         ("facility-a", "FBO", 202, 2, 3, "37.50", "12.50", "wm-1", NOW),
     )
     conn.executemany(
@@ -266,13 +282,77 @@ def _assert_feature_and_parity_contract(conn: sqlite3.Connection) -> None:
     assert passed.detail_fingerprint.startswith("sha256:")
     assert passed.aggregate_fingerprint.startswith("sha256:")
     assert passed.reader_allowed and passed.aggregate_unchanged
+    rounded_aggregate = deepcopy(aggregate)
+    rounded_aggregate[0]["capital_rub"] = "319434.3229165425917887119627"
+    precision_diagnostic = evaluate_ff_pool_aggregate_parity(
+        conn, rounded_aggregate
+    )
+    assert precision_diagnostic.status == "pass"
+    assert precision_diagnostic.mismatched_nm_ids == ()
+    assert precision_diagnostic.raw_capital_mismatched_nm_ids == (101,)
+    assert precision_diagnostic.canonical_capital_mismatched_nm_ids == ()
+    assert precision_diagnostic.detail_canonical_capital_minor_units == (
+        precision_diagnostic.aggregate_canonical_capital_minor_units
+    )
+    assert precision_diagnostic.raw_residual_conserved
+    assert not precision_diagnostic.fail_closed
+
+    canonical_mismatch_aggregate = deepcopy(aggregate)
+    canonical_mismatch_aggregate[0]["capital_rub"] = str(
+        Decimal(str(aggregate[0]["capital_rub"])) + Decimal("0.01")
+    )
+    canonical_mismatch = evaluate_ff_pool_aggregate_parity(
+        conn, canonical_mismatch_aggregate
+    )
+    assert canonical_mismatch.status == "mismatch"
+    assert canonical_mismatch.canonical_capital_mismatched_nm_ids == (101,)
+    assert canonical_mismatch.mismatched_nm_ids == (101,)
+
+    # Individually sub-kopeck residuals may still accumulate across SKUs.  If
+    # their exact total crosses a canonical kopeck boundary, conservation stays
+    # fail-closed even though each row alone remains in the same kopeck bucket.
+    accumulated_residual = deepcopy(aggregate)
+    accumulated_residual[0]["capital_rub"] = str(
+        Decimal(str(aggregate[0]["capital_rub"])) - Decimal("0.004")
+    )
+    accumulated_residual[1]["capital_rub"] = str(
+        Decimal(str(aggregate[1]["capital_rub"])) - Decimal("0.004")
+    )
+    accumulated_mismatch = evaluate_ff_pool_aggregate_parity(
+        conn, accumulated_residual
+    )
+    assert accumulated_mismatch.status == "mismatch"
+    assert accumulated_mismatch.canonical_capital_mismatched_nm_ids == ()
+    assert accumulated_mismatch.raw_capital_mismatched_nm_ids == (101, 202)
+    assert accumulated_mismatch.detail_canonical_capital_minor_units != (
+        accumulated_mismatch.aggregate_canonical_capital_minor_units
+    )
+    assert accumulated_mismatch.raw_residual_conserved
+
+    fractional_quantity = deepcopy(aggregate)
+    fractional_quantity[0]["quantity"] = "10.5"
+    _assert_rejected_value(
+        lambda: evaluate_ff_pool_aggregate_parity(conn, fractional_quantity),
+        "fractional aggregate quantity",
+    )
     record_ff_pool_parity_diagnostic(
         conn,
         diagnostic_id="parity-pass",
         aggregate_revision="aggregate-fixture-v1",
         checked_at="2026-08-11T09:01:00Z",
-        result=passed,
+        result=precision_diagnostic,
     )
+    parity_details = conn.execute(
+        f"SELECT details_json FROM {PARITY_TABLE} WHERE diagnostic_id='parity-pass'"
+    ).fetchone()
+    assert parity_details is not None
+    stored_details = json.loads(str(parity_details[0]))
+    assert stored_details["money_parity_policy"] == "rub_minor_unit_round_half_up_v1"
+    assert stored_details["raw_capital_mismatched_nm_ids"] == [101]
+    assert stored_details["raw_capital_residuals_by_nm"] == {
+        "101": "-0.00000000000000000000004"
+    }
+    assert stored_details["raw_residual_conserved"] is True
     assert not read_ff_pool_feature_state(conn).reader_effective
     state = read_ff_pool_feature_state(
         conn,

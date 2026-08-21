@@ -433,6 +433,12 @@
       "methods": ["GET", "POST", "DELETE"]
     },
     {
+      "name": "sheet_vitrina_supply_fbs_fulfillment_order",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_supply_wb_regional",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/supply/wb-regional/",

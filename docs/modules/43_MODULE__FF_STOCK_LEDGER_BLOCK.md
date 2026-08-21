@@ -15,6 +15,9 @@ related_modules:
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
+  - "packages/application/russian_payment_orders.py"
+  - "packages/application/ff_pool_zero_physical_production.py"
+  - "packages/application/ff_fbs_mapping_extension_production.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
@@ -27,6 +30,7 @@ related_modules:
   - "packages/application/ff_warehouse_documents.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_supply.py"
+  - "packages/application/fbs_fulfillment_order.py"
   - "packages/application/wb_regional_supply.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/wb_supplies.py"
@@ -60,12 +64,19 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_document_lines"
   - "sheet_vitrina_v1_ff_pool_document_expense_lines"
   - "sheet_vitrina_v1_ff_pool_document_relations"
+  - "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
   - "sheet_vitrina_v1_wb_supply_ff_origin_assignments"
   - "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
   - "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
   - "sheet_vitrina_v1_wb_supplies_fbs_status_current"
   - "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
   - "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
+  - "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+  - "sheet_vitrina_v1_ff_pool_fbs_drain_state"
+  - "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+  - "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+  - "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
+  - "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -82,7 +93,10 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/confirm"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/preview"
   - "POST /v1/sheet-vitrina-v1/warehouses/ff/overhead/reversal/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/documents/overhead/preview"
   - "GET|POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-supply-origins[/{supply_ref}]"
+  - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
+  - "POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders[/{order_id}]"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
@@ -91,6 +105,10 @@ related_runners:
   - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_pool_documents_smoke.py"
+  - "apps/ff_pool_zero_physical_production.py"
+  - "apps/ff_pool_zero_physical_production_smoke.py"
+  - "apps/ff_fbs_mapping_extension_production.py"
+  - "apps/ff_fbs_mapping_extension_production_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -133,6 +151,8 @@ The old `Остатки ФФ` navigation item is a compatibility transition to `
 - an eligible but physically unavailable or identity-ambiguous WB supply creates or adjusts a reservation keyed by its exact supply revision and `nmID`; missing cost alone cannot create a reservation. Reservation quantity is not a physical movement and carries no WAC/capital.
 
 Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
+
+The independent own-FBS fulfillment-order planner reads the facility × FBS read model directly for one selected active facility. Its available operand is the signed value `physical − reserved`; it never reads legacy aggregate `current_stock_ff`, WB stock, FBO pools or WB overlays. Global FBS readiness may remain fail-closed when another active facility is incomplete, but that does not hide or block a selected facility whose every active-SKU physical row is exact. Conversely, any missing selected-facility physical row is unavailable rather than zero and blocks that facility. In the national-demand MVP only FF Москва is executable; FF Оренбург remains visible and explicitly blocked until both its exact ledger and a later demand-allocation stage are approved.
 
 # 2. Operator UI
 
@@ -524,10 +544,13 @@ Feature epochs are absent by default, which means both future writer and reader
 are off. A reader cannot be configured before the writer and does not become
 effective until a current-epoch parity diagnostic passes. Empty detail is a
 neutral `detail_empty` state. A populated fixture compares every SKU and the
-exact quantity/capital totals against the caller-owned aggregate FF readback;
-the reader also requires the same current aggregate revision and unchanged
-detail fingerprint. Any mismatch or drift is fail-closed for the future detail
-reader and never edits or invalidates the aggregate ledger. Current FF writers,
+exact integer quantities plus canonical RUB minor-unit capital against the
+caller-owned aggregate FF readback; the reader also requires the same current
+aggregate revision and unchanged detail fingerprint. Any quantity mismatch,
+canonical-kopek mismatch, unattributed/cross-boundary residual or drift is
+fail-closed for the future detail reader and never edits or invalidates the
+aggregate ledger. Raw sub-kopeck differences with identical canonical values
+remain append-only diagnostic evidence. Current FF writers,
 reservations, warehouse publication, public totals, Vitrina and recommendations
 remain unchanged.
 
@@ -591,7 +614,17 @@ pool movements. The minor-unit boundary applies to each new immutable movement,
 not to the pre-existing pool balance: opening/cutover capital remains its
 authoritative exact Decimal and apply adds the signed kopeck delta without
 rounding or rewriting that prior value. The inverse storno therefore subtracts
-the same kopeck delta and restores the exact prior capital. A zero-quantity
+the same kopeck delta and restores the exact prior capital. Guided aggregate
+apply and aggregate/detail arithmetic use the same bounded 160-digit Decimal
+context as the pool writer and ordinary functional publisher. Operational
+parity then applies the centralized `rub_minor_unit_round_half_up_v1` policy:
+quantities remain exact INTEGER, while capital must match in canonical kopecks
+per SKU and in total. Raw Decimal values, per-SKU residuals and their conserved
+total remain diagnostic/audit evidence; a canonical mismatch, boundary-crossing
+total or failed attribution stays fail-closed. The ordinary publisher keeps
+both the facility/pool fold and final aggregate serialization inside the exact
+context, so it never rewrites or silently discards those raw tails.
+A zero-quantity
 close with a non-zero fractional residual remains fail-closed. The service is
 the only future owner of the factual date, existing
 aggregate receipt, detail movements and targeted replay, and rejects a prior
@@ -599,8 +632,29 @@ receipt/date. Confirm requires both the writer epoch and applied opening;
 without them preview is durable but all business posting remains zero.
 Before a guided preview exposes `confirm_allowed=true`, it query-only builds the
 full posting plan, rechecks the exact supplier source revision and durably pins
-the plan/document totals plus pool, aggregate and dependent before-state
-digests. A pre-upgrade identical ready request is refreshed in place; it never
+the immutable `ff_guided_acceptance_business_effect_v1`: request/source/file,
+epoch, business date, document identities, every line/movement, exact
+quantity/capital normalization, pool allocation and expenses. Pool, aggregate
+and dependent before-state digests remain explicit diagnostic evidence, but
+are not the owner decision identity because ordinary FBS reservations,
+releases and debits may legitimately advance them after preview. Readiness also
+recomputes global current-epoch parity between the complete active functional
+`ff` revision and every facility × pool row. Exact quantity and centralized
+canonical-money mismatches are blocked, while an attributed sub-kopeck raw tail
+with identical canonical totals is diagnostic only. Confirm acquires the shared
+warehouse writer lock,
+rebuilds a current parity-passing plan, requires the same stored business-effect
+digest, then creates the recovery T1 from that current before-state and repeats
+the plan under `BEGIN IMMEDIATE`. Functional publication, pool documents and
+the normal FBS lifecycle drain cannot overlap this bounded plan → T1 → commit
+window. A legitimately advanced before-state is rebased; changed receipt
+identity/date/allocation/quantity/capital/expense/source/epoch still fails
+closed. The lock is released before cost-layer replay/final readback, so the
+continuous collector is never disabled and delays only its bounded lifecycle
+drain. Once ordinary publication restores parity, an identical request blocked
+only by this parity/plan guard may be reprocessed in place, without a duplicate
+request or business effect. A pre-upgrade identical ready request is refreshed
+in place; it never
 creates a duplicate request or business effect. The request-level source
 revision is deliberately the hash of the raw supplier revision plus the exact
 workbook SHA-256, while the workbook manifest retains the raw supplier
@@ -631,6 +685,23 @@ zero row after storno (zero quantity/capital/cost coverage and null WAC), which
 is the canonical no-delete equivalent of its frozen absent state. A recovered
 shipment can be accepted again only through a fresh source revision and a new
 immutable request.
+
+Routine facility/pool inventory uses a full selected-scope workbook and stores
+immutable `pool_inventory` absolute-target lines. If an included FBS target is
+explicitly zero while the exact facility × FBS × SKU balance row is absent,
+confirmation materializes an audited row with `quantity=0`, `capital_rub=0`,
+`wac_rub=NULL` and the root inventory document as source watermark. The
+zero-to-zero result creates no movement, quantity/capital delta or synthetic
+cost. Its absent before-image is part of the same T1 balance-key closure and a
+row appearing between plan and commit fails closed. Existing rows, unselected
+pools and every SKU outside the uploaded full scope remain unchanged. This is a
+general operator-document rule, not a SKU/facility allowlist or hidden
+backfill; missing rows remain unknown until an audited inventory document is
+confirmed. Migration 149 reuses this same rule through one separately
+owner-authorized, exact-manifest production runner for 41 already confirmed
+`FF Москва × FBS` zeros. That runner may insert only absent zero rows, while an
+existing target row, facility/catalog drift or any non-target effect fails
+closed.
 
 Migration 140 separately activates only the facility registry and FBS shadow:
 `FF Москва` is active, `FF Оренбург` is inactive, and the fixed system pools
@@ -675,7 +746,13 @@ after the five-minute collector commits them and performs no WB mutation. An
 explicit clean `excluded_pending_receipt` stays outside opening/backfill and can
 later enter both aggregate and pools exactly once through guided acceptance.
 Aggregate/detail parity is recomputed after every physical lifecycle or guided
-document movement.
+document movement. After the owner-gated pool cutover, ordinary functional
+publication takes current physical `ff` quantity/capital from the exact sum of
+facility × `FBS|FBO` balances. The append-only legacy FF ledger remains the
+historical and outbound-WAC evidence source, but can no longer resurrect an FBS
+lifecycle debit in the public aggregate. Epoch, cutover manifest and every pool
+row participate in the coherent local-source digest and are rechecked while the
+functional apply holds its immediate write lock.
 
 Migration 143 makes the opening checkpoint replayable without a moving owner
 gate. The immutable manifest owns local observation boundary `T`, three
@@ -691,3 +768,103 @@ opening-reservation FK definition and fails closed on unknown schema objects,
 pre-existing target FK violations or copy drift; deployment itself still posts
 no business rows and invalidates earlier owner gates through the changed
 deployed SHA.
+
+The ordinary collector's post-poll lifecycle pass uses the same shared
+warehouse writer lock as functional publication and guided confirm. It attempts
+that lock non-blocking: collection/audit rows may continue, while a busy confirm
+returns a visible `held` drain with no checkpoint movement. The next timer pass
+resumes from the unchanged `last_status_observation_sequence`; event identity
+and atomic progress make the suffix exactly-once. Thus normal orders after a
+validated preview neither make the receipt owner gate a moving target nor get
+lost/double-counted around its short commit window.
+
+An otherwise valid post-T status whose exact order revision still has
+unmatched or drifted identity evidence cannot pin that global cursor. The same
+transaction appends its exact status sequence to
+`sheet_vitrina_v1_ff_pool_fbs_identity_pending`, advances only the source
+cursor, applies no reservation/debit/capital delta for that order and continues
+later matched statuses in sequence. Every later pass retries a bounded pending
+prefix independently of the new suffix. Resolution is append-only and is
+allowed only when immutable matched evidence proves the same order and exact
+warehouse/nm/chrt tuple; the processor then replays the original pending status
+and records one `...identity_pending_resolutions` row atomically with its normal
+idempotent lifecycle event. No facility/SKU mapping is guessed or changed, an
+unresolved row stays visible as `caught_up_identity_pending`, and an exact retry
+cannot duplicate a physical delta or WB action.
+
+Migration 150 adds one supported post-cutover mapping-extension path without
+rewriting the immutable Stage 7C manifest/checkpoint. The canonical warehouse
+mapping table remains the sole routing source and gains exact official office
+evidence. One append-only extension envelope binds that mapping to the applied
+cutover, exact facility, official warehouse/office identities, deployed SHA,
+reviewed manifest, accepted transfer receipt and compound frozen `W`; its
+per-SKU allocation rows freeze receipt-backed positive WAC. The lifecycle uses
+the extension only when warehouse, office, mapping row, matched identity row
+and allocation all agree exactly. Name/fuzzy routing and inferred SKU ownership
+remain forbidden.
+
+The extension runner is query-only by default. Its reviewed source contains
+complete frozen-row digests for all three streams plus the exact target backlog
+partition. Ordinary append-only rows above `W` do not stale the gate and enter
+the normal exactly-once suffix. Apply holds the shared warehouse writer lock,
+creates a central T2 domain checkpoint and private `0600` target before-image,
+appends only reviewed mappings/evidence, and invokes the unchanged lifecycle
+drain. `new|eligible` reserves, only `complete+sorted` debits physical once,
+complete alone remains forbidden, late/terminal evidence stays audited, and
+unproven identities stay pending. Readback proves the source receipt unchanged,
+the original Moscow mapping unchanged, frozen backlog resolution, no duplicate
+event/operation, live pool/aggregate parity, collector continuation and zero WB
+writes.
+
+Migration 151 makes `pool_overhead` in the existing facility/pool document
+workflow the only operator path for new FF overhead. The operator must select
+one active facility, `FBS|FBO|both` and one stable expense category; the server
+derives the current business date from the selected facility timezone and does
+not allow backdating. Manual entry requires a positive RUB amount. An optional
+payment-order PDF is parsed by the already versioned Russian payment-order
+parser, but never chooses facility, pool or category. Only executed,
+posting-eligible RUB documents may reach ready; unsupported, damaged,
+OCR-only, ambiguous, needs-review and non-executed evidence is retained as a
+durable blocked request and creates no cost document.
+
+The full positive physical facility/pool quantity is the denominator;
+reservations stay excluded. Every positive physical SKU must also have a
+positive known capital basis. One missing/zero cost basis blocks the whole
+preview instead of redistributing over a subset. Preview freezes the exact
+quantities, capitals, evidence, feature epoch and dedup state, and confirm
+rebuilds the plan both before and inside the writer transaction. Posting keeps
+quantity unchanged, adds the exact conserved kopecks to capital and recalculates
+facility-local WAC. Storno retains the category, manual/PDF origin and payment
+evidence link while reversing the exact original capital effect.
+
+For PDF mode the canonical request stores the original authenticated source
+file, normalized parser result, parser/fingerprint versions, file SHA-256 and
+content payment fingerprint. The fingerprint has a unique append-only binding
+to the canonical request, so renamed or regenerated equivalent PDFs and new
+client request IDs read back the existing request/document rather than post a
+second expense. Parsed amount is authoritative while the file is attached;
+another amount requires removing the file and using manual mode. The old
+aggregate FF overhead documents and reversals remain historical compatibility
+evidence, but their UI creation form is retired and links to `Документы
+фулфилмента → Накладные расходы FBS/FBO`; no second allocator or ledger is
+introduced.
+
+The five-minute collector consumes at most 10,000 new lifecycle observations
+per warehouse-functional transaction (the domain primitive remains capped at
+100,000), so a measured production suffix catches up in bounded passes without
+either a 500-row moving tail or one unbounded lock hold.
+
+Every post-T lifecycle capital product, pool fold and aggregate fold uses the
+same 160-digit Decimal arithmetic boundary. Operational parity is centralized:
+integer quantity is exact, while detail and aggregate capital must match per SKU
+and in total after deterministic `ROUND_HALF_UP` normalization to kopecks. Raw
+Decimal tails are retained in source fingerprints and parity diagnostics. An
+equal-kopeck tail does not block; a kopeck mismatch, a total residual that
+crosses the boundary or failed deterministic attribution remains fail-closed.
+
+Canonical warehouse publication keeps the 160-digit boundary while adding the
+exact pool aggregate to its stage bucket and while serializing the final
+warehouse line. A later hourly/manual publication therefore preserves raw
+audit quality; lifecycle safety itself does not depend on byte-equal
+sub-kopeck tails once the centralized minor-unit and residual-conservation gate
+passes.

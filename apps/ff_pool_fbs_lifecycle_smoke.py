@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 import sqlite3
 import sys
@@ -31,9 +31,14 @@ from packages.application.ff_pool_cutover_production import (  # noqa: E402
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     EVENTS_TABLE,
+    IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    IDENTITY_PENDING_TABLE,
     RECONCILIATION_TABLE,
     available_quantity,
     process_post_t_fbs_lifecycle,
+)
+from packages.application.canonical_rub_money import (  # noqa: E402
+    compare_canonical_rub_money,
 )
 from packages.application.ff_pool_foundation import read_ff_pool_feature_state  # noqa: E402
 from packages.application.ff_pool_documents import (  # noqa: E402
@@ -416,10 +421,11 @@ def main() -> int:
                 ),
             )
             conn.commit()
+        doc_clock = _DocClock()
         service = FfPoolDocumentService(
             db_path=runtime.db_path,
             runtime_dir=runtime_dir,
-            timestamp_factory=_DocClock(),
+            timestamp_factory=doc_clock,
         )
         _shipment, _shipment_lines, shipment_revision = FfPoolSurface(
             db_path=runtime.db_path,
@@ -634,6 +640,111 @@ def main() -> int:
         )
         assert restored_contract_retry["state"] == "ready"
         assert restored_contract_retry["confirm_allowed"] is True
+        assert restored_contract_retry["preview_manifest"]["posting_plan_preview"][
+            "aggregate_pool_parity"
+        ]["status"] == "pass"
+        # Global aggregate/detail parity is a readiness and confirm boundary,
+        # not merely a post-mutation assertion.  A stale hourly aggregate
+        # therefore blocks before T1/business writes, and the same immutable
+        # request may reopen only after exact parity is restored.
+        with sqlite3.connect(runtime.db_path) as conn:
+            before_aggregate = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            ).fetchone()
+            assert before_aggregate is not None
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=CAST(quantity AS INTEGER)+1
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            )
+            conn.commit()
+        parity_block = service.post(str(preview["request_id"]))
+        assert parity_block["state"] == "blocked"
+        assert parity_block["error"]["code"] == "guided_acceptance_parity_not_current"
+        parity_repeat_while_stale = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_repeat_while_stale["state"] == "blocked"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=?,capital_rub=?
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101""",
+                (str(before_aggregate[0]), str(before_aggregate[1])),
+            )
+            conn.commit()
+        parity_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert parity_reopened["state"] == "ready"
+        assert parity_reopened["confirm_allowed"] is True
+        assert parity_reopened["request_id"] == preview["request_id"]
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_workflow_events
+                   WHERE identity=? AND stage='aggregate_parity_revalidation'
+                     AND status='complete'""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                """SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_documents
+                   WHERE request_id=?""",
+                (str(preview["request_id"]),),
+            ).fetchone()[0] == 0
+
+        # The confirm path must reproduce the exact durable preview, including
+        # its aggregate/pool proof, both before and while holding the apply
+        # lock.  A corrupted/stale stored proof blocks with no business row.
+        with sqlite3.connect(runtime.db_path) as conn:
+            stored = json.loads(
+                conn.execute(
+                    """SELECT preview_manifest_json FROM
+                              sheet_vitrina_v1_ff_pool_document_requests
+                       WHERE request_id=?""",
+                    (str(preview["request_id"]),),
+                ).fetchone()[0]
+            )
+            stored["posting_plan_preview"]["business_effect_sha256"] = (
+                "sha256:" + "0" * 64
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_ff_pool_document_requests
+                   SET preview_manifest_json=? WHERE request_id=?""",
+                (
+                    json.dumps(
+                        stored,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(preview["request_id"]),
+                ),
+            )
+            conn.commit()
+        plan_drift_block = service.post(str(preview["request_id"]))
+        assert plan_drift_block["state"] == "blocked"
+        assert plan_drift_block["error"]["code"] == (
+            "guided_acceptance_posting_plan_drift"
+        )
+        plan_reopened = service.accept_preview(
+            identity=identity,
+            document_kind="china_acceptance",
+            manifest=acceptance_manifest,
+            source_bytes=guided_source_bytes,
+        )
+        assert plan_reopened["state"] == "ready"
+        assert plan_reopened["confirm_allowed"] is True
+        assert plan_reopened["preview_manifest"]["posting_plan_preview"][
+            "business_effect_sha256"
+        ] != "sha256:" + "0" * 64
         # A production request blocked by the former minor-unit check is
         # reopened in place; the immutable request/workbook is not duplicated.
         with sqlite3.connect(runtime.db_path) as conn:
@@ -653,8 +764,78 @@ def main() -> int:
         assert retried_preview["request_id"] == preview["request_id"]
         assert retried_preview["state"] == "ready"
         assert retried_preview["idempotent"] is True
+        stable_business_effect = retried_preview["preview_manifest"][
+            "posting_plan_preview"
+        ]["business_effect_sha256"]
+        preview_posted_manifest = retried_preview["preview_manifest"][
+            "posting_plan_preview"
+        ]["posted_manifest_sha256"]
+
+        # Ordinary FBS work is allowed to advance after the owner-facing
+        # preview.  Reservations/releases change dependent evidence, while a
+        # handoff debit changes both pool detail and the active aggregate in
+        # one transaction.  None of these events changes the receipt effect.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn, order_id=9450, supplier="new", wb="waiting"
+            )
+            _insert_post_t_order(
+                conn, order_id=9451, supplier="new", wb="waiting"
+            )
+            conn.commit()
+        moving_reservations = _process(
+            runtime.db_path, "2026-08-15T08:10:00Z"
+        )
+        assert moving_reservations["summary"]["reserved"] == 2
+        with sqlite3.connect(runtime.db_path) as conn:
+            _append_status(
+                conn,
+                order_id=9450,
+                revision="post_revision_9450_v2",
+                supplier_status="complete",
+                wb_status="sorted",
+                episode=2,
+                observed_at="2026-08-15T08:10:10Z",
+                insert_current=True,
+            )
+            _append_status(
+                conn,
+                order_id=9451,
+                revision="post_revision_9451_v2",
+                supplier_status="cancel",
+                wb_status="waiting",
+                episode=2,
+                observed_at="2026-08-15T08:10:11Z",
+                insert_current=True,
+            )
+            conn.commit()
+        moving_suffix = _process(runtime.db_path, "2026-08-15T08:10:20Z")
+        assert moving_suffix["summary"]["fulfilled"] == 1
+        assert moving_suffix["summary"]["released"] == 1
+        assert _process(runtime.db_path, "2026-08-15T08:10:30Z")[
+            "processed_count"
+        ] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            pool_after_suffix = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_ff_pool_balances
+                   WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"""
+            ).fetchone()
+            aggregate_after_suffix = conn.execute(
+                """SELECT quantity,capital_rub FROM
+                          sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"""
+            ).fetchone()
+            assert tuple(pool_after_suffix) == (7, "70")
+            assert tuple(aggregate_after_suffix) == ("7", "70")
+
+        doc_clock.value = datetime(2026, 8, 15, 8, 11, tzinfo=timezone.utc)
         posted = service.post(str(preview["request_id"]))
         assert posted["state"] == "complete", posted
+        assert posted["posted_manifest_sha256"] != preview_posted_manifest
+        assert retried_preview["preview_manifest"]["posting_plan_preview"][
+            "business_effect_sha256"
+        ] == stable_business_effect
         repeated_acceptance = service.post(str(preview["request_id"]))
         assert repeated_acceptance["state"] == "complete"
         with sqlite3.connect(runtime.db_path) as conn:
@@ -682,7 +863,7 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=103"
             ).fetchone()
-            assert int(fbs[0]) == 9 and Decimal(str(fbs[1])) == Decimal("90.67")
+            assert int(fbs[0]) == 8 and Decimal(str(fbs[1])) == Decimal("80.67")
             assert int(fbo[0]) == 1 and Decimal(str(fbo[1])) == Decimal("10.68")
             assert int(new_fbs[0]) == 1 and Decimal(str(new_fbs[1])) == Decimal("10.66")
             new_aggregate = conn.execute(
@@ -693,9 +874,12 @@ def main() -> int:
             assert tuple(new_aggregate) == (
                 "1", "10.66", "1", "guided_acceptance_minor_unit", 0,
             )
-            assert read_ff_pool_feature_state(
+            post_acceptance_feature = read_ff_pool_feature_state(
                 conn, aggregate_revision="wf_stage7c"
-            ).reader_effective is True
+            )
+            assert post_acceptance_feature.reader_effective is True, (
+                post_acceptance_feature
+            )
             replay = conn.execute(
                 """SELECT legacy_operation_id,cost_layer_id,capital_normalization_json
                    FROM sheet_vitrina_v1_ff_guided_acceptance_replays
@@ -781,8 +965,8 @@ def main() -> int:
                 """SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances
                    WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"""
             ).fetchone()
-            assert int(recovered_pool[0]) == 8
-            assert Decimal(str(recovered_pool[1])) == Decimal("80")
+            assert int(recovered_pool[0]) == 7
+            assert Decimal(str(recovered_pool[1])) == Decimal("70")
             recovered_new_aggregate = conn.execute(
                 """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,quality
                    FROM sheet_vitrina_v1_warehouse_functional_balances
@@ -871,10 +1055,305 @@ def main() -> int:
                 "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
                 "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
             ).fetchone()
-            assert int(exact_balance[0]) == 6
-            assert Decimal(str(exact_balance[1])) == Decimal("60.67")
+            assert int(exact_balance[0]) == 5
+            assert Decimal(str(exact_balance[1])) == Decimal("50.67")
             final_readback = read_ff_pool_cutover_status(conn)["readback"]
             assert final_readback["status"] == "pass", final_readback
+
+            # Reproduce the production capital shape: aggregate parity is
+            # exact, but one pool owns a tail beyond process-default Decimal
+            # precision.  A later FBS debit must conserve that tail in both
+            # pool detail and aggregate rather than rounding each base at a
+            # different significant digit.
+            tail = Decimal("0.000000000000000000000000000000000000000000000001")
+            fbo_balance = conn.execute(
+                "SELECT capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
+            ).fetchone()
+            aggregate_balance = conn.execute(
+                "SELECT capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"
+            ).fetchone()
+            with localcontext() as context:
+                context.prec = 160
+                tailed_fbs = Decimal(str(exact_balance[1])) + tail
+                tailed_fbo = Decimal(str(fbo_balance[0])) - tail
+                assert tailed_fbs + tailed_fbo == Decimal(str(aggregate_balance[0]))
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_pool_balances SET capital_rub=? "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101",
+                (str(tailed_fbs),),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ff_pool_balances SET capital_rub=? "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101",
+                (str(tailed_fbo),),
+            )
+            # Mirror the production writer history: aggregate text differs by
+            # a raw 10^-23 tail while both sides are the same canonical kopeck.
+            # The lifecycle gate must retain that evidence but not block an
+            # otherwise exact debit.
+            aggregate_raw_tail = Decimal(
+                "0.00000000000000000000004"
+            )
+            tailed_aggregate = Decimal(str(aggregate_balance[0])) + aggregate_raw_tail
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET capital_rub=? WHERE version_id='wf_stage7c' "
+                "AND warehouse_key='ff' AND nm_id=101",
+                (format(tailed_aggregate, "f"),),
+            )
+            conn.commit()
+
+        # An unrelated post-T order without exact identity evidence is
+        # isolated instead of pinning the global suffix cursor forever.  A
+        # later matched order still reserves exactly once, while the isolated
+        # handoff produces no guessed physical/capital effect.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn,
+                order_id=9410,
+                supplier="complete",
+                wb="sorted",
+                observed_at="2026-08-15T08:13:00Z",
+                quantity=2,
+                identity_outcome="unmatched_identity",
+            )
+            _insert_post_t_order(
+                conn,
+                order_id=9411,
+                supplier="new",
+                wb="waiting",
+                observed_at="2026-08-15T08:13:01Z",
+            )
+            balance_before_identity_pending = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            conn.commit()
+        wb_before_identity_pending = _wb_evidence_digest(runtime.db_path)
+        isolated_identity = _process(runtime.db_path, "2026-08-15T08:13:10Z")
+        assert isolated_identity["status"] == "caught_up_identity_pending"
+        assert isolated_identity["processed_count"] == 2
+        assert isolated_identity["summary"]["identity_pending"] == 1
+        assert isolated_identity["summary"]["reserved"] == 1
+        assert isolated_identity["identity_pending_count"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_identity_pending
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_TABLE} WHERE order_id=9410"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_RESOLUTIONS_TABLE}"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9411 "
+                "AND event_type='reserve'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone() == balance_before_identity_pending
+
+        repeated_identity_pending = _process(
+            runtime.db_path, "2026-08-15T08:13:20Z"
+        )
+        assert repeated_identity_pending["processed_count"] == 0
+        assert repeated_identity_pending["identity_retry_count"] == 1
+        assert repeated_identity_pending["identity_pending_count"] == 1
+        assert repeated_identity_pending["summary"]["identity_pending"] == 1
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9410,9411)"
+            ).fetchone()[0] == 1
+
+            # Mapping evidence is append-only.  Once the collector can prove
+            # the exact same order revision, the original pending handoff is
+            # replayed; it is not replaced with a synthetic current status.
+            revision_9410 = str(
+                conn.execute(
+                    "SELECT source_revision FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_order_observations "
+                    "WHERE order_id=9410 ORDER BY observation_sequence DESC LIMIT 1"
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
+                       evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+                       barcode,seller_sku,outcome,warehouse_mapping_id,
+                       identity_mapping_id,evidence_digest,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "post_identity_evidence_9410_matched",
+                    9410,
+                    revision_9410,
+                    501,
+                    101,
+                    201,
+                    "sku-101",
+                    "seller-101",
+                    "matched",
+                    "warehouse_mapping_1",
+                    "identity_mapping_1",
+                    "sha256:"
+                    + hashlib.sha256(b"identity:9410:matched").hexdigest(),
+                    "2026-08-15T08:13:25Z",
+                ),
+            )
+            conn.commit()
+
+        wb_before_identity_resolution = _wb_evidence_digest(runtime.db_path)
+        resolved_identity = _process(runtime.db_path, "2026-08-15T08:13:30Z")
+        assert resolved_identity["status"] == "caught_up"
+        assert resolved_identity["processed_count"] == 0
+        assert resolved_identity["identity_retry_count"] == 1
+        assert resolved_identity["identity_pending_count"] == 0
+        assert resolved_identity["summary"]["identity_resolved"] == 1
+        assert resolved_identity["summary"]["fulfilled"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_identity_resolution
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_RESOLUTIONS_TABLE} "
+                "WHERE order_id=9410 AND resolution_kind='matched_replay'"
+            ).fetchone()[0] == 1
+            debit_event = conn.execute(
+                f"SELECT physical_quantity_delta,capital_delta_rub FROM {EVENTS_TABLE} "
+                "WHERE order_id=9410 AND event_type='handoff_debit'"
+            ).fetchone()
+            assert tuple(debit_event) == (-2, "-20")
+            balance_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone()
+            fbo_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBO' AND nm_id=101"
+            ).fetchone()
+            aggregate_after_identity_resolution = conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='wf_stage7c' AND warehouse_key='ff' AND nm_id=101"
+            ).fetchone()
+            assert int(balance_after_identity_resolution[0]) == int(
+                balance_before_identity_pending[0]
+            ) - 2
+            with localcontext() as context:
+                context.prec = 160
+                expected_capital = Decimal(
+                    str(balance_before_identity_pending[1])
+                ) - Decimal("20")
+                detail_capital_after_resolution = (
+                    Decimal(str(balance_after_identity_resolution[1]))
+                    + Decimal(str(fbo_after_identity_resolution[1]))
+                )
+            raw_tail_parity = compare_canonical_rub_money(
+                detail_capital_after_resolution,
+                aggregate_after_identity_resolution[1],
+                left_field="production-shaped detail capital",
+                right_field="production-shaped aggregate capital",
+            )
+            assert raw_tail_parity.canonical_equal
+            assert raw_tail_parity.residual_attributable
+            assert raw_tail_parity.raw_residual_rub == -aggregate_raw_tail
+            assert Decimal(str(balance_after_identity_resolution[1])) == expected_capital
+
+        repeated_identity_resolution = _process(
+            runtime.db_path, "2026-08-15T08:13:40Z"
+        )
+        assert repeated_identity_resolution["status"] == "caught_up"
+        assert repeated_identity_resolution["identity_retry_count"] == 0
+        assert repeated_identity_resolution["summary"]["fulfilled"] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9410 "
+                "AND event_type='handoff_debit'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT quantity,capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='fac_moscow' AND pool='FBS' AND nm_id=101"
+            ).fetchone() == balance_after_identity_resolution
+
+            # Return the fixture aggregate to raw equality for later recovery
+            # assertions.  The previous debit already proved the canonical
+            # gate accepts and preserves the diagnostic-only raw tail.
+            exact_detail_capital = sum(
+                (
+                    Decimal(str(row[0]))
+                    for row in conn.execute(
+                        "SELECT capital_rub FROM sheet_vitrina_v1_ff_pool_balances "
+                        "WHERE nm_id=101"
+                    ).fetchall()
+                ),
+                Decimal("0"),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET capital_rub=? WHERE version_id='wf_stage7c' "
+                "AND warehouse_key='ff' AND nm_id=101",
+                (format(exact_detail_capital, "f"),),
+            )
+            conn.commit()
+
+        # A frozen acceptance watermark closes independently of rows appended
+        # afterwards.  Two bounded rows reach W exactly; the third remains a
+        # normal live suffix until the next scheduled-equivalent pass.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn, order_id=9420, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:00Z",
+            )
+            _insert_post_t_order(
+                conn, order_id=9421, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:01Z",
+            )
+            frozen_w = int(
+                conn.execute(
+                    "SELECT MAX(observation_sequence) FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+                ).fetchone()[0]
+            )
+            _insert_post_t_order(
+                conn, order_id=9422, supplier="new", wb="waiting",
+                observed_at="2026-08-15T08:14:02Z",
+            )
+            post_w = int(
+                conn.execute(
+                    "SELECT MAX(observation_sequence) FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+                ).fetchone()[0]
+            )
+            assert post_w > frozen_w
+            conn.commit()
+        wb_before_watermark = _wb_evidence_digest(runtime.db_path)
+        watermark_closed = _process(
+            runtime.db_path, "2026-08-15T08:14:10Z", limit=2
+        )
+        assert watermark_closed["last_status_observation_sequence"] == frozen_w
+        assert watermark_closed["processed_count"] == 2
+        assert watermark_closed["pending_count"] == 1
+        assert _wb_evidence_digest(runtime.db_path) == wb_before_watermark
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9420,9421)"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9422"
+            ).fetchone()[0] == 0
+        post_w_drained = _process(
+            runtime.db_path, "2026-08-15T08:14:20Z", limit=2
+        )
+        assert post_w_drained["last_status_observation_sequence"] == post_w
+        assert post_w_drained["processed_count"] == 1
+        assert _process(runtime.db_path, "2026-08-15T08:14:30Z", limit=2)[
+            "processed_count"
+        ] == 0
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9420,9421,9422)"
+            ).fetchone()[0] == 3
+
         drifted_recovery = service.accept_preview(
             identity=DocumentIdentity(
                 request_id="guided:26gn527:drifted-recovery",
@@ -912,6 +1391,7 @@ def _insert_post_t_order(
     source_created_at: str = "2026-08-14T06:00:00Z",
     observed_at: str = "2026-08-14T06:01:00Z",
     quantity: int = 1,
+    identity_outcome: str = "matched",
 ) -> None:
     revision = f"post_revision_{order_id}_v1"
     conn.execute(
@@ -934,8 +1414,9 @@ def _insert_post_t_order(
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             f"post_identity_evidence_{order_id}", order_id, revision, 501, 101, 201,
-            "sku-101", "seller-101", "matched", "warehouse_mapping_1",
-            "identity_mapping_1",
+            "sku-101", "seller-101", identity_outcome,
+            "warehouse_mapping_1",
+            "identity_mapping_1" if identity_outcome == "matched" else "",
             "sha256:" + hashlib.sha256(f"identity:{order_id}".encode()).hexdigest(),
             observed_at,
         ),
@@ -1055,12 +1536,12 @@ def _append_status(
         )
 
 
-def _process(path: Path, timestamp: str) -> dict[str, object]:
+def _process(path: Path, timestamp: str, *, limit: int = 500) -> dict[str, object]:
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
         result = process_post_t_fbs_lifecycle(
-            conn, occurred_at=timestamp, schema_ready=True
+            conn, occurred_at=timestamp, limit=limit, schema_ready=True
         )
         conn.commit()
         return result

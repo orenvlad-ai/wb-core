@@ -30,6 +30,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (  # noqa: E402
+    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -1806,12 +1810,12 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         first_id,
     )
     if (
-        persisted["version"] != 4
+        persisted["version"] != 5
         or persisted["status"] != "collapsed"
         or persisted["order"] != after_order
         or not persisted["migration"]
     ):
-        raise AssertionError(f"unified presentation must persist server-side as v4, got {persisted}")
+        raise AssertionError(f"unified presentation must persist server-side as v5, got {persisted}")
 
     body_scroll_before = page.evaluate(
         """() => {
@@ -4463,6 +4467,11 @@ def _check_sku_separators(page: object) -> dict[str, object]:
           const heights = separators.map((row) => Math.round(row.getBoundingClientRect().height));
           const labels = separators.map((row) => ((row.querySelector('.sku-separator-label') || {}).textContent || '').trim()).filter(Boolean);
           const first = separators[0] || null;
+          const firstLabel = first ? first.querySelector('.sku-separator-label') : null;
+          const ordinaryMetricLabel = document.querySelector('tr[data-row-kind="total"] .metric-label-text, tr[data-row-kind="sku"] .metric-label-text');
+          const separatorFontSize = firstLabel ? parseFloat(getComputedStyle(firstLabel).fontSize) : 0;
+          const ordinaryMetricFontSize = ordinaryMetricLabel ? parseFloat(getComputedStyle(ordinaryMetricLabel).fontSize) : 0;
+          const separatorLineHeight = firstLabel ? parseFloat(getComputedStyle(firstLabel).lineHeight) : 0;
           const previousKind = first && first.previousElementSibling ? first.previousElementSibling.getAttribute('data-row-kind') : '';
           const nextKind = first && first.nextElementSibling ? first.nextElementSibling.getAttribute('data-row-kind') : '';
           const skuSkuSeparatorCount = separators.filter((row) =>
@@ -4478,6 +4487,10 @@ def _check_sku_separators(page: object) -> dict[str, object]:
             labels,
             labeledCount: labels.length,
             firstLabel: labels[0] || '',
+            separatorFontSize,
+            ordinaryMetricFontSize,
+            fontRatio: ordinaryMetricFontSize > 0 ? separatorFontSize / ordinaryMetricFontSize : 0,
+            separatorLineHeight,
             firstBoundary: previousKind + '->' + nextKind,
             skuSkuSeparatorCount
           };
@@ -4485,8 +4498,10 @@ def _check_sku_separators(page: object) -> dict[str, object]:
     )
     if (
         int(state["count"]) <= 0
-        or int(state["minHeight"]) < 18
-        or int(state["minHeight"]) > 26
+        or float(state["ordinaryMetricFontSize"]) <= 0
+        or abs(float(state["separatorFontSize"]) - 2 * float(state["ordinaryMetricFontSize"])) > 0.01
+        or abs(float(state["fontRatio"]) - 2.0) > 0.001
+        or float(state["minHeight"]) + 0.5 < float(state["separatorLineHeight"])
         or state["firstBoundary"] != "total->sku"
         or int(state["labeledCount"]) != int(state["count"])
         or not state["firstLabel"]
@@ -4563,6 +4578,9 @@ def _check_sku_separators(page: object) -> dict[str, object]:
         "first_boundary": str(state["firstBoundary"]),
         "sku_sku_separator_count": int(state["skuSkuSeparatorCount"]),
         "first_label": str(state["firstLabel"]),
+        "separator_font_size": float(state["separatorFontSize"]),
+        "ordinary_metric_font_size": float(state["ordinaryMetricFontSize"]),
+        "font_ratio": float(state["fontRatio"]),
         "sticky_after_horizontal_scroll": sticky_state,
     }
 
@@ -4611,7 +4629,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C34",
+                write_rect="A1:C35",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -4622,12 +4640,17 @@ def _build_plan(
                     ["Итого: Сумма заказов", "TOTAL|total_orderSum", 1000],
                     ["Итого: В корзину", "TOTAL|total_cartCount", 18],
                     ["Итого: WAC WB", "TOTAL|total_our_wb_unit_cost_rub", 105],
+                    [
+                        "Итого: Цена продавца взвеш.",
+                        f"TOTAL|{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}",
+                        1031.6666666667,
+                    ],
                     [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 60],
                     [f"SKU B: Показы в воронке", f"SKU:{second_nm_id}|view_count", 40],
                     [f"SKU A: Заказы", f"SKU:{first_nm_id}|orderCount", 7],
                     [f"SKU B: Заказы", f"SKU:{second_nm_id}|orderCount", 5],
-                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|avg_price_seller_discounted", 990],
-                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|avg_price_seller_discounted", 1090],
+                    [f"SKU A: Цена продавца", f"SKU:{first_nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}", 990],
+                    [f"SKU B: Цена продавца", f"SKU:{second_nm_id}|{SELLER_PRICE_DISCOUNTED_METRIC_KEY}", 1090],
                     [f"SKU A: Конверсия в корзину", f"SKU:{first_nm_id}|avg_addToCartConversion", 0.115],
                     [f"SKU B: Конверсия в корзину", f"SKU:{second_nm_id}|avg_addToCartConversion", 0.105],
                     [f"SKU A: Поиск", f"SKU:{first_nm_id}|views_current", 340],
@@ -4651,7 +4674,7 @@ def _build_plan(
                     [f"SKU A: Остаток WB инцидент", f"SKU:{first_nm_id}|wb_stock_incident_qty", 10],
                     [f"SKU A: Остаток WB effective", f"SKU:{first_nm_id}|wb_stock_effective_qty", 5],
                 ],
-                row_count=33,
+                row_count=34,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(

@@ -24,7 +24,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, Arial, sans-serif; }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     button, .button-link {
       min-height: 36px; border: 0; border-radius: 7px; padding: 8px 13px;
       background: var(--accent); color: #fff; font-weight: 750; cursor: pointer; text-decoration: none;
@@ -58,8 +58,9 @@
     .card-head h2 { margin: 0; font-size: 20px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; }
     label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
-    input { width: 100%; min-height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 7px 9px; color: var(--text); background: #fff; }
+    input, select { width: 100%; min-height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 7px 9px; color: var(--text); background: #fff; }
     input[readonly] { background: #f3f5f8; color: #4f5a6d; }
+    .readonly-value { width: 100%; min-height: 38px; border: 1px solid #d7dde7; border-radius: 7px; padding: 8px 9px; color: #4f5a6d; background: #f3f5f8; }
     .deadline-field { display: grid; align-content: end; gap: 5px; }
     .deadline-field > span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
     h3 { margin: 18px 0 8px; font-size: 16px; }
@@ -99,6 +100,7 @@
             <th>实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</th>
             <th>发票编号 / Invoice No / Номер invoice</th>
             <th>发票日期 / Invoice date / Дата invoice</th>
+            <th>目标履约中心 / Target fulfillment / Целевой фулфилмент</th>
             <th>商品数量 / Product qty / Кол-во товаров</th>
             <th>匹配 / Matching / Матчинг</th>
             <th>订单状态 / Order status / Статус заказа</th>
@@ -106,7 +108,7 @@
           </tr>
         </thead>
         <tbody id="shipmentRows">
-          <tr data-registry-state="loading"><td colspan="10">读取订单 / Loading orders / Загрузка заказов…</td></tr>
+          <tr data-registry-state="loading"><td colspan="11">读取订单 / Loading orders / Загрузка заказов…</td></tr>
         </tbody>
       </table>
     </section>
@@ -145,6 +147,9 @@
         </label>
         <label>发票日期 / Invoice date / Дата invoice
           <input id="invoiceDateInput" type="date">
+        </label>
+        <label>目标履约中心 / Target fulfillment / Целевой фулфилмент
+          <output id="targetFacilityDisplay" class="readonly-value">由操作员分配 / Assigned by operator / Назначается оператором</output>
         </label>
         <label>币种 / Currency / Валюта invoice
           <input id="currencyInput" type="text">
@@ -221,6 +226,7 @@
         actualFfAcceptanceDate: document.getElementById("actualFfAcceptanceDateInput"),
         invoiceNo: document.getElementById("invoiceNoInput"),
         invoiceDate: document.getElementById("invoiceDateInput"),
+        targetFacilityDisplay: document.getElementById("targetFacilityDisplay"),
         currency: document.getElementById("currencyInput"),
         contractNo: document.getElementById("contractNoInput"),
         contractDate: document.getElementById("contractDateInput")
@@ -270,7 +276,7 @@
       }
 
       function setRegistryState(state, message) {
-        rowsNode.innerHTML = '<tr data-registry-state="' + state + '"><td colspan="10">' + escapeHtml(message) + '</td></tr>';
+        rowsNode.innerHTML = '<tr data-registry-state="' + state + '"><td colspan="11">' + escapeHtml(message) + '</td></tr>';
       }
 
       async function loadRegistry() {
@@ -291,6 +297,7 @@
             '<td>' + escapeHtml(row.actual_ff_acceptance_date || "—") + '</td>',
             '<td>' + escapeHtml(row.invoice_no || "—") + '</td>',
             '<td>' + escapeHtml(row.invoice_date || "—") + '</td>',
+            '<td>' + escapeHtml(row.target_facility_name || "Не назначен") + '</td>',
             '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
             '<td><span class="badge ' + (row.match_status === "all_matched" ? "success" : "yellow") + '">' + escapeHtml(matchText(row.match_status)) + '</span></td>',
             '<td>' + escapeHtml(statusText(row)) + '</td>',
@@ -328,6 +335,8 @@
         fillValue(fields.actualFfAcceptanceDate, current.actual_ff_acceptance_date);
         fillValue(fields.invoiceNo, meta.invoice_no || current.invoice_no);
         fillValue(fields.invoiceDate, meta.invoice_date || current.invoice_date);
+        fields.targetFacilityDisplay.textContent = current.target_facility_name
+          || "由操作员分配 / Assigned by operator / Назначается оператором";
         fillValue(fields.currency, meta.currency || current.currency);
         fillValue(fields.contractNo, meta.contract_no || current.contract_no);
         fillValue(fields.contractDate, meta.contract_date || current.contract_date);
@@ -513,6 +522,7 @@
           uploadId = current.upload_id || "";
           isNew = true;
           current.shipment_date = "";
+          current.target_facility_id = "";
           current.actual_shipment_date = "";
           current.actual_ff_acceptance_date = "";
           current.deadline = { tone: "neutral", display: "—" };

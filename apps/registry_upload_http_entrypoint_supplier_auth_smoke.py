@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -82,6 +83,7 @@ def main() -> None:
                     "updated_at": "2026-05-30T08:00:00Z",
                 }
             )
+        _seed_target_facilities(runtime)
         for user_id, username, password, role, sections in (
             ("usr_internal_operator", "internal_operator", operator_password, "operator", None),
             ("usr_supply_staff", "supply_staff", supply_password, "supply_operator", ["supply"]),
@@ -253,11 +255,17 @@ def main() -> None:
                         raise AssertionError("supplier page must expose actual shipment date label")
                 if "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
                         raise AssertionError("supplier page must expose actual FF acceptance date label")
-                if 'colspan="10"' not in supplier_page or 'colspan="18"' in supplier_page:
-                        raise AssertionError("supplier loading/empty/error states must use the 10-column table width")
+                if 'colspan="11"' not in supplier_page or 'colspan="18"' in supplier_page:
+                        raise AssertionError("supplier loading/empty/error states must use the 11-column table width")
+                if 'id="targetFacilityInput"' in supplier_page or 'id="targetFacilityDisplay"' not in supplier_page:
+                        raise AssertionError("supplier card must expose target facility as read-only operator-owned state")
+                if "由操作员分配 / Assigned by operator / Назначается оператором" not in supplier_page:
+                        raise AssertionError("supplier card must explain that an operator assigns target fulfillment")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                         raise AssertionError("supplier role must access supplier shipment APIs")
+                if "target_facility_options" in supplier_api_payload:
+                        raise AssertionError("supplier list must not expose assignable target facility options")
                 _assert_supplier_safe_payload(supplier_api_payload)
                 parse_code, parse_payload = _opener_post_multipart(
                         supplier,
@@ -268,6 +276,33 @@ def main() -> None:
                 if parse_code != 200 or not parse_payload.get("upload_id"):
                         raise AssertionError(f"supplier role must parse supplier invoices, got {parse_code} {parse_payload}")
                 _assert_supplier_safe_payload(parse_payload)
+                internal_missing_target_code, internal_missing_target_payload = _opener_post_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                        _supplier_write_body(
+                            parse_payload,
+                            upload_id=str(parse_payload["upload_id"]),
+                            shipment_date="2026-05-14",
+                        ),
+                    )
+                if (
+                    internal_missing_target_code != 400
+                    or "целевой фулфилмент" not in str(internal_missing_target_payload.get("error", "")).lower()
+                ):
+                        raise AssertionError("internal new order must still require an explicit target facility")
+                forbidden_target_create = _supplier_write_body(
+                    parse_payload,
+                    upload_id=str(parse_payload["upload_id"]),
+                    shipment_date="2026-05-14",
+                )
+                forbidden_target_create["target_facility_id"] = "fac_moscow"
+                forbidden_target_code, forbidden_target_payload = _opener_post_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                    forbidden_target_create,
+                )
+                if forbidden_target_code != 400 or "unsupported" not in str(forbidden_target_payload.get("error", "")):
+                        raise AssertionError("supplier create must not accept target facility assignment")
                 create_code, create_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
@@ -282,6 +317,8 @@ def main() -> None:
                         raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
                 if create_payload.get("order_status") != "in_transit":
                         raise AssertionError("supplier create status must derive from factual shipment date")
+                if create_payload.get("target_facility_id") or create_payload.get("target_facility_name"):
+                        raise AssertionError("supplier create must persist an unassigned target facility")
                 _assert_supplier_safe_payload(create_payload)
                 if (
                     create_payload.get("planned_shipment_date") != "2026-05-14"
@@ -290,12 +327,49 @@ def main() -> None:
                 ):
                         raise AssertionError("supplier role must create planned/fact shipment dates")
                 shipment_id = str(create_payload["shipment_id"])
+                with sqlite3.connect(runtime.db_path) as conn:
+                    stored_target = conn.execute(
+                        "SELECT target_facility_id,target_facility_name FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                        (shipment_id,),
+                    ).fetchone()
+                if stored_target != (None, None):
+                        raise AssertionError(f"unassigned supplier target must persist as SQL NULL, got {stored_target}")
+                forbidden_target_patch_code, forbidden_target_patch_payload = _opener_patch_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    {"target_facility_id": "fac_moscow"},
+                )
+                if forbidden_target_patch_code != 400 or "unsupported" not in str(forbidden_target_patch_payload.get("error", "")):
+                        raise AssertionError("supplier PATCH must not assign or change target facility")
+                inactive_target_code, inactive_target_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    {"target_facility_id": "fac_inactive"},
+                )
+                if inactive_target_code != 400 or "не существует или не active" not in str(inactive_target_payload.get("error", "")):
+                        raise AssertionError("operator assignment must reject an inactive target facility")
+                operator_assign_code, operator_assign_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    {"target_facility_id": "fac_moscow"},
+                )
+                if (
+                    operator_assign_code != 200
+                    or operator_assign_payload.get("target_facility_id") != "fac_moscow"
+                    or operator_assign_payload.get("target_facility_name") != "FF Москва"
+                ):
+                        raise AssertionError(f"operator must assign one active facility with exact readback, got {operator_assign_payload}")
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
                         raise AssertionError("supplier role must read supplier shipment detail")
                 _assert_supplier_safe_payload(detail_payload)
                 if detail_payload.get("actual_ff_acceptance_date") != "":
                         raise AssertionError("supplier role detail must keep blank actual FF acceptance date until saved")
+                if (
+                    detail_payload.get("target_facility_id") != "fac_moscow"
+                    or detail_payload.get("target_facility_name") != "FF Москва"
+                ):
+                        raise AssertionError("supplier readback must show the operator-assigned target without edit capability")
                 supplier_price_check_code, supplier_price_check_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
@@ -768,6 +842,38 @@ def _assert_supplier_safe_payload(payload: object, *, path: str = "$") -> None:
     elif isinstance(payload, list):
         for index, value in enumerate(payload):
             _assert_supplier_safe_payload(value, path=f"{path}[{index}]")
+
+
+def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_facilities(
+                facility_id,code,name,active,display_timezone,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                (
+                    "fac_moscow",
+                    "MSK",
+                    "FF Москва",
+                    1,
+                    "Europe/Moscow",
+                    "2026-05-30T08:00:00Z",
+                    "2026-05-30T08:00:00Z",
+                ),
+                (
+                    "fac_inactive",
+                    "OFF",
+                    "FF Неактивный",
+                    0,
+                    "Europe/Moscow",
+                    "2026-05-30T08:00:00Z",
+                    "2026-05-30T08:00:00Z",
+                ),
+            ),
+        )
+        conn.commit()
 
 
 def _supplier_write_body(

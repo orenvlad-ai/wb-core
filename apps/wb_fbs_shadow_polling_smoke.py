@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from unittest import mock
 from urllib import error
 
 
@@ -38,10 +39,14 @@ from packages.application.wb_fbs_orders import (  # noqa: E402
     WbFbsOrdersCollector,
 )
 from packages.application.wb_fbs_shadow_polling import (  # noqa: E402
+    FBS_LIFECYCLE_BATCH_LIMIT,
     LOCK_FILENAME,
     WbFbsShadowPollingService,
     build_readiness_report,
     fbs_shadow_poll_lock,
+)
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
 )
 
 
@@ -295,6 +300,48 @@ def _poll_resume_single_flight_and_readiness() -> None:
         ).poll_once()
         assert disabled["status"] == "disabled" and source.order_cursors == []
         service = _service(runtime, clock, source, max_pages=1)
+
+        # Collection remains independent, but the lifecycle suffix never
+        # overlaps the short warehouse confirm/publication window.  The timer
+        # reports a held drain instead of consuming progress; its next normal
+        # cycle can therefore resume from the unchanged durable sequence.
+        writer_entered = threading.Event()
+        writer_release = threading.Event()
+
+        def hold_warehouse_writer() -> None:
+            with warehouse_functional_write_lock(runtime.runtime_dir):
+                writer_entered.set()
+                assert writer_release.wait(timeout=5)
+
+        writer = threading.Thread(target=hold_warehouse_writer)
+        writer.start()
+        assert writer_entered.wait(timeout=5)
+        held_lifecycle = service._process_lifecycle_after_poll()
+        assert held_lifecycle == {
+            "status": "held",
+            "reason": "warehouse_functional_writer_active",
+            "mutates_wb": False,
+        }
+        writer_release.set()
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+
+        # Catch up a production-shaped suffix promptly without taking the
+        # domain primitive's 100k maximum in one warehouse transaction.
+        with mock.patch(
+            "packages.application.wb_fbs_shadow_polling.process_post_t_fbs_lifecycle"
+        ) as lifecycle_processor:
+            lifecycle_processor.return_value = {
+                "status": "caught_up",
+                "mutates_wb": False,
+            }
+            assert service._process_lifecycle_after_poll()["status"] == "caught_up"
+            lifecycle_processor.assert_called_once()
+            assert (
+                lifecycle_processor.call_args.kwargs["limit"]
+                == FBS_LIFECYCLE_BATCH_LIMIT
+                == 10_000
+            )
 
         first = service.poll_once()
         assert first["status"] == "bounded_partial"

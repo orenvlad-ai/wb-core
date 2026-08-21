@@ -77,6 +77,7 @@ from packages.application.ff_inventory_reconciliation import FfInventoryReconcil
 from packages.application.ff_overhead_allocation import FfOverheadAllocationError
 from packages.application.ff_pool_surfaces import (
     MAX_JSON_REQUEST_BYTES as FF_POOL_MAX_JSON_REQUEST_BYTES,
+    MAX_OVERHEAD_PAYMENT_ORDER_REQUEST_BYTES as FF_POOL_OVERHEAD_MAX_REQUEST_BYTES,
     FfPoolSurfaceError,
 )
 from packages.application.ff_pool_documents_xlsx import (
@@ -332,6 +333,15 @@ DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH = (
 )
 DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/calculate"
 DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
+)
+DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
+)
+DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH = (
+    "/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/recommendation.xlsx"
+)
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
 DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/planning-options"
@@ -387,6 +397,7 @@ DEFAULT_FF_POOL_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/facility-pools"
 DEFAULT_FF_POOL_PREFIX = f"{DEFAULT_FF_POOL_PATH}/"
 DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
+DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
 DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
 DEFAULT_FF_POOL_FBS_ORDERS_PATH = f"{DEFAULT_FF_POOL_PATH}/fbs-orders"
@@ -2513,6 +2524,30 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_fbs_fulfillment_order_calculate_request(
+                        payload,
+                        user_key=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order runtime failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -4951,6 +4986,24 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_factory_order_dataset_urls(payload))
                 return
 
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_fbs_fulfillment_order_status_request(
+                        dict(urllib_parse.parse_qsl(parsed.query)),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order status runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH:
                 try:
                     payload = entrypoint.handle_factory_order_stock_ff_onec_check_request()
@@ -5045,6 +5098,31 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"factory order recommendation runtime failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH:
+                try:
+                    workbook_bytes, filename = (
+                        entrypoint.handle_fbs_fulfillment_order_recommendation_request()
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"FBS fulfillment order recommendation runtime failed: {exc}"},
                     )
                     return
                 _write_binary_response(
@@ -5800,6 +5878,7 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
+        DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
     }:
         return True
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
@@ -5832,6 +5911,35 @@ def _handle_ff_pool_post(
             _load_request_payload(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ), actor=actor
+        )
+    if normalized == DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH:
+        request_content_type = str(handler.headers.get("Content-Type") or "")
+        if request_content_type.lower().startswith("multipart/form-data"):
+            upload = _load_uploaded_file_payload(
+                handler,
+                max_request_bytes=FF_POOL_OVERHEAD_MAX_REQUEST_BYTES,
+            )
+            fields = dict(upload.get("fields") or {})
+            return entrypoint.handle_ff_pool_overhead_preview_request(
+                {
+                    "request_id": str(fields.get("request_id") or ""),
+                    "business_date": str(fields.get("business_date") or ""),
+                    "facility_id": str(fields.get("facility_id") or ""),
+                    "scope": str(fields.get("scope") or ""),
+                    "category": str(fields.get("category") or ""),
+                    "comment": str(fields.get("comment") or ""),
+                    "amount_rub": str(fields.get("amount_rub") or ""),
+                },
+                actor=actor,
+                source_bytes=bytes(upload["workbook_bytes"]),
+                filename=str(upload.get("filename") or ""),
+                content_type=str(upload.get("content_type") or ""),
+            )
+        return entrypoint.handle_ff_pool_overhead_preview_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
         )
     if normalized in {
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
@@ -9164,6 +9272,9 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
         "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
+        "fbs_fulfillment_order_status_path": DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,
+        "fbs_fulfillment_order_calculate_path": DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+        "fbs_fulfillment_order_recommendation_path": DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
         "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,

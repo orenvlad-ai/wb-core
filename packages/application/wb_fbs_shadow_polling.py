@@ -37,6 +37,10 @@ from packages.application.ff_pool_fbs_lifecycle import (
     process_post_t_fbs_lifecycle,
 )
 from packages.application.warehouse_domain_write_guard import warehouse_domain_write_status
+from packages.application.warehouse_functional_lock import (
+    WarehouseFunctionalBusyError,
+    warehouse_functional_write_lock,
+)
 
 
 CONTRACT_NAME = "wb_fbs_shadow_polling_v1"
@@ -46,6 +50,7 @@ FRESHNESS_SLO_SECONDS = 10 * 60
 LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 PAGE_LIMIT = 1000
 MAX_PAGES_PER_CYCLE = 10
+FBS_LIFECYCLE_BATCH_LIMIT = 10_000
 RATE_INTERVAL_SECONDS = 0.22
 LOCK_FILENAME = ".wb-fbs-shadow-collector.lock"
 REPEATABLE_HANDOFF_ORDER_THRESHOLD = 3
@@ -232,35 +237,47 @@ class WbFbsShadowPollingService:
     def _process_lifecycle_after_poll(self) -> dict[str, Any]:
         """Keep collection independent while folding an activated epoch exactly."""
 
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
         try:
-            ensure_ff_pool_fbs_lifecycle_schema(conn)
-            conn.commit()
-            barrier = warehouse_domain_write_status(conn)
-            if barrier.get("active") is True:
-                return {
-                    "status": "held",
-                    "reason": "warehouse_domain_write_barrier_active",
-                    "mutates_wb": False,
-                }
-            conn.execute("BEGIN IMMEDIATE")
-            result = process_post_t_fbs_lifecycle(
-                conn,
-                occurred_at=str(self.timestamp_factory()),
-                schema_ready=True,
-            )
-            conn.commit()
-            return result
-        except Exception as exc:
-            conn.rollback()
+            with warehouse_functional_write_lock(
+                self.runtime_dir,
+                blocking=False,
+            ):
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                try:
+                    ensure_ff_pool_fbs_lifecycle_schema(conn)
+                    conn.commit()
+                    barrier = warehouse_domain_write_status(conn)
+                    if barrier.get("active") is True:
+                        return {
+                            "status": "held",
+                            "reason": "warehouse_domain_write_barrier_active",
+                            "mutates_wb": False,
+                        }
+                    conn.execute("BEGIN IMMEDIATE")
+                    result = process_post_t_fbs_lifecycle(
+                        conn,
+                        occurred_at=str(self.timestamp_factory()),
+                        limit=FBS_LIFECYCLE_BATCH_LIMIT,
+                        schema_ready=True,
+                    )
+                    conn.commit()
+                    return result
+                except Exception as exc:
+                    conn.rollback()
+                    return {
+                        "status": "failed",
+                        "error": _safe_error(exc),
+                        "mutates_wb": False,
+                    }
+                finally:
+                    conn.close()
+        except WarehouseFunctionalBusyError:
             return {
-                "status": "failed",
-                "error": _safe_error(exc),
+                "status": "held",
+                "reason": "warehouse_functional_writer_active",
                 "mutates_wb": False,
             }
-        finally:
-            conn.close()
 
     def _resume_window(self) -> tuple[int, int, int]:
         now = int(self.unix_time_factory())

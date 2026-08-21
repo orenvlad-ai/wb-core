@@ -251,6 +251,7 @@ class SupplierShipmentsBlock:
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
+            "target_facility_options": self.runtime.list_active_ff_facilities(),
             "shipments": [
                 {
                     **self._with_document_fields(_with_invoice_download_path(row)),
@@ -349,7 +350,12 @@ class SupplierShipmentsBlock:
         )
         return _supplier_safe_parse_projection(parsed)
 
-    def create_shipment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_shipment(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        allow_unassigned_target_facility: bool = False,
+    ) -> dict[str, Any]:
         if "historical_status_exception" in payload:
             raise ValueError(
                 "Историческое исключение статуса доступно только через audited repo-owned flow."
@@ -372,6 +378,18 @@ class SupplierShipmentsBlock:
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
         approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, None, "approx_yuan_rate")
+        requested_target_facility_id = str(
+            payload.get("target_facility_id")
+            or edited_payload.get("target_facility_id")
+            or ""
+        ).strip()
+        if not requested_target_facility_id and not allow_unassigned_target_facility:
+            raise ValueError("Для нового заказа обязательно выберите целевой фулфилмент")
+        target_facility = (
+            self.runtime.resolve_active_ff_facility(requested_target_facility_id)
+            if requested_target_facility_id
+            else {"facility_id": "", "name": ""}
+        )
         status_resolution = validate_supplier_factual_dates(
             actual_shipment_date=actual_shipment_date,
             actual_ff_acceptance_date=actual_ff_acceptance_date,
@@ -430,6 +448,8 @@ class SupplierShipmentsBlock:
             "actual_shipment_date": actual_shipment_date,
             "actual_ff_acceptance_date": actual_ff_acceptance_date,
             "order_status": order_status,
+            "target_facility_id": target_facility["facility_id"],
+            "target_facility_name": target_facility["name"],
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
             "contract_no": metadata.get("contract_no") or "",
@@ -470,7 +490,10 @@ class SupplierShipmentsBlock:
 
     def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         sanitized = _sanitize_supplier_write_payload(payload, require_upload_id=True)
-        created = self.create_shipment(sanitized)
+        created = self.create_shipment(
+            sanitized,
+            allow_unassigned_target_facility=True,
+        )
         return _supplier_safe_detail_projection(
             created,
             business_today=supplier_business_today(timestamp=self.timestamp_factory()),
@@ -560,6 +583,49 @@ class SupplierShipmentsBlock:
             str(payload.get("shipment_date") or edited_payload.get("shipment_date") or existing["header"].get("shipment_date") or "")
         )
         existing_header = dict(existing["header"])
+        nested_payload = (
+            payload.get("payload")
+            if isinstance(payload.get("payload"), Mapping)
+            else {}
+        )
+        target_field_present = (
+            "target_facility_id" in payload
+            or "target_facility_id" in nested_payload
+        )
+        existing_target_facility_id = str(
+            existing_header.get("target_facility_id") or ""
+        ).strip()
+        requested_target_facility_id = (
+            str(
+                payload.get("target_facility_id")
+                if "target_facility_id" in payload
+                else nested_payload.get("target_facility_id")
+                or ""
+            ).strip()
+            if target_field_present
+            else existing_target_facility_id
+        )
+        if (
+            target_field_present
+            and not requested_target_facility_id
+        ):
+            raise ValueError("Целевой фулфилмент обязателен")
+        target_facility = (
+            self.runtime.resolve_active_ff_facility(requested_target_facility_id)
+            if target_field_present and requested_target_facility_id
+            else {
+                "facility_id": existing_target_facility_id,
+                "name": str(existing_header.get("target_facility_name") or ""),
+            }
+        )
+        if (
+            str(existing_header.get("actual_ff_acceptance_date") or "").strip()
+            and requested_target_facility_id
+            != existing_target_facility_id
+        ):
+            raise ValueError(
+                "Целевой фулфилмент нельзя менять после подтверждённой приёмки на ФФ"
+            )
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_ff_acceptance_date")
         status_resolution = validate_supplier_factual_dates(
@@ -642,6 +708,8 @@ class SupplierShipmentsBlock:
             "actual_shipment_date": actual_shipment_date,
             "actual_ff_acceptance_date": actual_ff_acceptance_date,
             "order_status": order_status,
+            "target_facility_id": target_facility["facility_id"],
+            "target_facility_name": target_facility["name"],
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
             "contract_no": metadata.get("contract_no") or "",
@@ -2945,7 +3013,12 @@ def _sanitize_supplier_write_payload(
                 )
 
     sanitized: dict[str, Any] = {}
-    for field in ("upload_id", "shipment_date", "actual_shipment_date", "actual_ff_acceptance_date"):
+    for field in (
+        "upload_id",
+        "shipment_date",
+        "actual_shipment_date",
+        "actual_ff_acceptance_date",
+    ):
         if field in payload:
             sanitized[field] = deepcopy(payload[field])
     if raw_edited is not None:
@@ -3022,6 +3095,8 @@ def _supplier_safe_header_projection(
         "planned_shipment_date": shipment_date,
         "actual_shipment_date": actual_shipment_date,
         "actual_ff_acceptance_date": actual_ff_acceptance_date,
+        "target_facility_id": str(payload.get("target_facility_id") or ""),
+        "target_facility_name": str(payload.get("target_facility_name") or ""),
         "order_status": str(payload.get("order_status") or ORDER_STATUS_DEFAULT),
         "order_status_label": str(payload.get("order_status_label") or ""),
         "order_status_display": str(payload.get("order_status_display") or ""),

@@ -221,7 +221,7 @@ def _calculate_research_fixture_result(page: object) -> None:
     _set_checked(page.locator('[data-research-sku="control"]:not(:disabled)').nth(1), True)
     _click_research_outside(page)
     page.locator('[data-research-picker="metrics"] > summary').click()
-    metric = page.locator('[data-research-metric][value="avg_price_seller_discounted"]')
+    metric = page.locator('[data-research-metric][value="price_seller_discounted"]')
     if metric.count() == 0:
         metric = page.locator("[data-research-metric]").first
     _set_checked(metric, True)

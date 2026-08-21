@@ -56,6 +56,11 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
 )
+from packages.application.sheet_vitrina_v1_weighted_seller_price import (  # noqa: E402
+    LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
 from packages.application.web_vitrina_gravity_table_adapter import build_web_vitrina_gravity_table_adapter  # noqa: E402
 from packages.application.web_vitrina_page_composition import build_web_vitrina_page_composition  # noqa: E402
@@ -69,6 +74,12 @@ PROXY_V4_LOGICAL_METRIC_IDS = (
     f"pair::{PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY}::{PROXY_V4_PROFIT_RUB_METRIC_KEY}",
     f"pair::{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}::{PROXY_V4_MARGIN_PCT_METRIC_KEY}",
 )
+LEGACY_SELLER_PRICE_LOGICAL_ID = (
+    f"pair::{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}::{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"
+)
+WEIGHTED_SELLER_PRICE_LOGICAL_ID = (
+    f"pair::{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}::{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"
+)
 TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
     "[data-metric-display-select]"
@@ -78,6 +89,7 @@ RETIRED_METRIC_KEYS = frozenset(
         *INCIDENT_STOCK_METRIC_KEYS,
         *INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
         *LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
+        LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
     )
 )
 
@@ -90,6 +102,8 @@ def main() -> None:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 try:
+                    _run_seller_price_pair_checks(browser, server)
+                    server.reset_user_config()
                     _run_buyout_pair_checks(browser, server)
                     server.reset_user_config()
                     _run_checks(browser, server)
@@ -99,7 +113,8 @@ def main() -> None:
         {
             "status": "ok",
             "checks": [
-                "v3_v4_sanitizer",
+                "v3_v4_v5_sanitizer",
+                "seller_price_weighted_pair_migration",
                 "buyout_total_sku_logical_pair",
                 "buyout_saved_preset_compatibility",
                 "buyout_shared_display_control",
@@ -242,6 +257,151 @@ def _check_server_config_sanitizer() -> None:
     ):
         raise AssertionError(f"server sanitizer must preserve bounded v4 unified config, got {unified}")
 
+    weighted_v5 = _sanitize_web_vitrina_metric_presentation_config(
+        {
+            "version": 5,
+            "presentation": {
+                "order": [WEIGHTED_SELLER_PRICE_LOGICAL_ID],
+                "display": {WEIGHTED_SELLER_PRICE_LOGICAL_ID: "collapsed"},
+                "manual": True,
+            },
+            "migrations": {
+                "unified_presentation_v1": True,
+                "seller_price_weighted_v1": True,
+            },
+        }
+    )
+    if (
+        weighted_v5.get("version") != 5
+        or weighted_v5.get("presentation", {}).get("order")
+        != [WEIGHTED_SELLER_PRICE_LOGICAL_ID]
+        or weighted_v5.get("presentation", {}).get("display", {}).get(
+            WEIGHTED_SELLER_PRICE_LOGICAL_ID
+        )
+        != "collapsed"
+        or not weighted_v5.get("migrations", {}).get("seller_price_weighted_v1")
+    ):
+        raise AssertionError(f"server sanitizer must preserve bounded v5 migration state, got {weighted_v5}")
+
+
+def _run_seller_price_pair_checks(browser, server: "FixtureServer") -> None:
+    neighbor_logical_id = "total::total_orderSum"
+    server.user_config = {
+        "status": "ok",
+        "revision": 1,
+        "updated_at": "2026-08-18T10:00:00Z",
+        "config": {
+            "version": 4,
+            "presentation": {
+                "order": [neighbor_logical_id, LEGACY_SELLER_PRICE_LOGICAL_ID],
+                "display": {
+                    neighbor_logical_id: "shown",
+                    LEGACY_SELLER_PRICE_LOGICAL_ID: "collapsed",
+                },
+                "manual": True,
+            },
+            "expanded_anchors": [LEGACY_SELLER_PRICE_LOGICAL_ID],
+            "sku_presets": [
+                {
+                    "preset_id": "seller-price",
+                    "name": "Цена продавца",
+                    "metric_keys": [LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY],
+                }
+            ],
+            "sku_highlight_metric_keys": [LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY],
+            "sku_metric_selection": {
+                "mode": "manual",
+                "preset_id": "",
+                "all": False,
+                "metric_keys": [LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY],
+            },
+            "migrations": {
+                "incident_effective_shown_v1": True,
+                "sku_presets_seeded_v1": True,
+                "unified_presentation_v1": True,
+            },
+        },
+    }
+    server.save_count = 0
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    _wait_for_server_save_count(server, 1)
+
+    _open_metrics(page)
+    pair_row = page.locator(
+        f'[data-metric-config-row="{WEIGHTED_SELLER_PRICE_LOGICAL_ID}"]'
+        f'[data-total-metric-key="{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+        f'[data-sku-metric-key="{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+    )
+    if (
+        pair_row.count() != 1
+        or pair_row.get_attribute("data-metric-availability") != "common"
+        or pair_row.locator(".metrics-config-label").inner_text().strip() != "Цена продавца взвеш."
+        or pair_row.locator("[data-metric-display-select]").input_value() != "collapsed"
+    ):
+        raise AssertionError(
+            "weighted TOTAL and seller-price SKU must be one migrated common item: "
+            f"count={pair_row.count()}, availability={pair_row.get_attribute('data-metric-availability') if pair_row.count() else ''}, "
+            f"label={pair_row.locator('.metrics-config-label').inner_text().strip() if pair_row.count() else ''}, "
+            f"display={pair_row.locator('[data-metric-display-select]').input_value() if pair_row.count() else ''}, "
+            f"config={server.user_config}"
+        )
+    if page.locator(
+        f'[data-total-metric-key="{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"],'
+        f'[data-sku-metric-key="{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+    ).count():
+        raise AssertionError("legacy arithmetic seller price must not enter active settings")
+
+    migrated = server.user_config["config"]
+    serialized = json.dumps(migrated, ensure_ascii=False, sort_keys=True)
+    migrated_order = migrated.get("presentation", {}).get("order", [])
+    if (
+        migrated.get("version") != 5
+        or not migrated.get("migrations", {}).get("seller_price_weighted_v1")
+        or migrated_order.index(WEIGHTED_SELLER_PRICE_LOGICAL_ID)
+        != migrated_order.index(neighbor_logical_id) + 1
+        or migrated.get("presentation", {}).get("display", {}).get(
+            WEIGHTED_SELLER_PRICE_LOGICAL_ID
+        )
+        != "collapsed"
+        or migrated.get("presentation", {}).get("manual") is not True
+        or migrated.get("sku_presets", [{}])[0].get("metric_keys")
+        != [SELLER_PRICE_DISCOUNTED_METRIC_KEY]
+        or migrated.get("sku_highlight_metric_keys")
+        != [SELLER_PRICE_DISCOUNTED_METRIC_KEY]
+        or migrated.get("sku_metric_selection", {}).get("metric_keys")
+        != [SELLER_PRICE_DISCOUNTED_METRIC_KEY]
+        or LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY in serialized
+        or LEGACY_SELLER_PRICE_LOGICAL_ID in serialized
+    ):
+        raise AssertionError(f"seller-price v4->v5 migration lost or retained stale state: {migrated}")
+
+    _open_sku_metric_picker(page)
+    if page.locator(
+        f'[data-sku-metric-option="{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+    ).count() != 1:
+        raise AssertionError("seller price must remain one SKU picker item")
+    if page.locator(
+        f'[data-sku-metric-option="{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+    ).count():
+        raise AssertionError("legacy arithmetic TOTAL must be absent from SKU picker")
+
+    save_count_after_migration = server.save_count
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.wait_for_timeout(700)
+    if server.save_count != save_count_after_migration:
+        raise AssertionError(
+            "seller-price presentation migration must be idempotent after its first save"
+        )
+    if page.locator(
+        f'[data-metric-key="{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}"]'
+    ).count():
+        raise AssertionError("legacy arithmetic seller price must not render in the table")
+    context.close()
+
 
 def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
     server.user_config = {
@@ -249,7 +409,7 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
         "revision": 1,
         "updated_at": "2026-06-01T10:00:00Z",
         "config": {
-            "version": 4,
+            "version": 5,
             "presentation": {
                 "order": [BUYOUT_LOGICAL_METRIC_ID],
                 "display": {BUYOUT_LOGICAL_METRIC_ID: "shown"},
@@ -274,6 +434,7 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
                 "incident_effective_shown_v1": True,
                 "sku_presets_seeded_v1": True,
                 "unified_presentation_v1": True,
+                "seller_price_weighted_v1": True,
             },
         },
     }
@@ -384,6 +545,7 @@ def _run_checks(browser, server: "FixtureServer") -> None:
             "total": {
                 "order": [
                     "total_orderSum",
+                    LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
                     "total_wb_stock_fact_qty",
                     "avg_cost_price_rub",
                     "total_proxy_profit_rub",
@@ -391,6 +553,7 @@ def _run_checks(browser, server: "FixtureServer") -> None:
                 ],
                 "display": {
                     "total_orderSum": "hidden",
+                    LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY: "collapsed",
                     "total_wb_stock_fact_qty": "collapsed",
                     "avg_cost_price_rub": "hidden",
                 },
@@ -398,14 +561,14 @@ def _run_checks(browser, server: "FixtureServer") -> None:
             },
             "sku": {
                 "order": [
-                    "avg_price_seller_discounted",
+                    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
                     "avg_addToCartConversion",
                     "wb_stock_fact_qty",
                     "cost_price_rub",
                     "proxy_profit_rub",
                 ],
                 "display": {
-                    "avg_price_seller_discounted": "collapsed",
+                    SELLER_PRICE_DISCOUNTED_METRIC_KEY: "collapsed",
                     "avg_addToCartConversion": "hidden",
                     "wb_stock_fact_qty": "collapsed",
                     "cost_price_rub": "hidden",
@@ -451,16 +614,19 @@ def _run_checks(browser, server: "FixtureServer") -> None:
         "",
     )
     if (
-        migrated.get("version") != 4
+        migrated.get("version") != 5
         or migrated_total_order_sum != "hidden"
         or migrated.get("presentation", {}).get("order", [None])[0]
         != "total::total_orderSum"
-        or migrated_display.get("sku::avg_price_seller_discounted") != "collapsed"
+        or migrated_display.get(WEIGHTED_SELLER_PRICE_LOGICAL_ID) != "collapsed"
         or migrated_display.get("sku::avg_addToCartConversion") != "hidden"
         or not migrated.get("migrations", {}).get("incident_effective_shown_v1")
         or not migrated.get("migrations", {}).get("unified_presentation_v1")
+        or not migrated.get("migrations", {}).get("seller_price_weighted_v1")
         or [preset.get("name") for preset in migrated.get("sku_presets", [])] != ["Сохранённый"]
-        or migrated.get("sku_highlight_metric_keys") != ["avg_price_seller_discounted"]
+        or migrated.get("sku_presets", [{}])[0].get("metric_keys")
+        != [SELLER_PRICE_DISCOUNTED_METRIC_KEY]
+        or migrated.get("sku_highlight_metric_keys") != [SELLER_PRICE_DISCOUNTED_METRIC_KEY]
         or migrated.get("sku_metric_selection", {}).get("preset_id") != "saved"
     ):
         raise AssertionError(f"valid localStorage must migrate once when server config is missing, got {migrated}")
@@ -519,8 +685,8 @@ def _run_checks(browser, server: "FixtureServer") -> None:
     _wait_for_server_save_count(server, 1)
     if stale_page.locator(TOTAL_ORDER_SUM_SELECTOR).input_value() != "shown":
         raise AssertionError("stale localStorage must not hide total_orderSum when server config exists")
-    if server.user_config["config"].get("version") != 4:
-        raise AssertionError("server v2 metric config must migrate in place to v4")
+    if server.user_config["config"].get("version") != 5:
+        raise AssertionError("server v2 metric config must migrate in place to v5")
     _assert_retired_metrics_absent(stale_page, server.user_config["config"])
 
     stale_page.select_option(TOTAL_ORDER_SUM_SELECTOR, "hidden")

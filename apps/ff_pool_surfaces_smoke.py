@@ -20,6 +20,7 @@ from openpyxl import load_workbook  # noqa: E402
 from packages.application.ff_pool_documents import (  # noqa: E402
     DOCUMENTS_TABLE,
     FfPoolDocumentService,
+    REQUESTS_TABLE,
 )
 from packages.application.ff_pool_documents_xlsx import (  # noqa: E402
     CHINA_SHEET,
@@ -41,6 +42,7 @@ from packages.application.ff_pool_surfaces import (  # noqa: E402
     _resolve_supplier_lines_with_canonical_nomenclature,
 )
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
+from apps.russian_payment_orders_smoke import _fixture, _render_pdf  # noqa: E402
 
 
 class Clock:
@@ -57,6 +59,7 @@ def main() -> None:
     _schema_absence_is_controlled()
     _guided_preview_is_default_off()
     _guided_source_uses_canonical_nomenclature()
+    _overhead_operator_workflows()
     with TemporaryDirectory(prefix="ff-pool-surfaces-") as directory:
         root = Path(directory)
         clock = Clock()
@@ -78,6 +81,317 @@ def main() -> None:
         _deactivation_with_dependencies_is_blocked(surface, facilities)
         _read_models(surface, request_id, facilities)
     print("ff_pool_surfaces_smoke: OK")
+
+
+def _overhead_operator_workflows() -> None:
+    """Manual and synthetic-PDF overheads share one durable pool workflow."""
+
+    with TemporaryDirectory(prefix="ff-pool-overhead-surfaces-") as directory:
+        root = Path(directory)
+        clock = Clock()
+        clock.current = datetime(2026, 8, 12, 21, 30, tzinfo=timezone.utc)
+        service = FfPoolDocumentService(
+            db_path=root / "state.sqlite3",
+            runtime_dir=root,
+            timestamp_factory=clock,
+            resume=False,
+        )
+        surface = FfPoolSurface(
+            db_path=service.db_path,
+            runtime_dir=root,
+            timestamp_factory=clock,
+        )
+        with sqlite3.connect(service.db_path) as conn:
+            conn.execute(
+                f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) "
+                "VALUES(1,1,0,'overhead-surface-v1',?,'{}')",
+                (clock(),),
+            )
+            for facility_id, code in (("fac_overhead", "OH"), ("fac_control", "CTL")):
+                now = clock()
+                conn.execute(
+                    f"INSERT INTO {FACILITIES_TABLE}(facility_id,code,name,active,display_timezone,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (facility_id, code, f"Синтетический FF {code}", 1, "Asia/Yekaterinburg", now, now),
+                )
+                conn.execute(
+                    f"INSERT INTO {FACILITY_PROFILES_TABLE}(facility_id,city,future_fields_json,created_at,updated_at) "
+                    "VALUES(?,?,'{}',?,?)",
+                    (facility_id, "Тестоград", now, now),
+                )
+            conn.executemany(
+                f"INSERT INTO {BALANCES_TABLE}(facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,source_watermark,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    ("fac_overhead", "FBS", 101, 1, 2, "20.00", "10.00", "fixture", clock()),
+                    ("fac_overhead", "FBO", 102, 1, 3, "30.00", "10.00", "fixture", clock()),
+                    ("fac_control", "FBS", 101, 1, 4, "40.00", "10.00", "fixture", clock()),
+                ],
+            )
+            conn.commit()
+
+        facilities = surface.facilities_page()["facilities"]
+        overhead_facility = next(item for item in facilities if item["facility_id"] == "fac_overhead")
+        assert overhead_facility["current_business_date"] == "2026-08-13"
+        base_payload = {
+            "facility_id": "fac_overhead",
+            "scope": "both",
+            "category": "storage",
+            "comment": "",
+        }
+        for missing_field, expected_code in (
+            ("facility_id", "invalid_facility_id"),
+            ("scope", "invalid_pool_scope"),
+            ("category", "invalid_overhead_category"),
+        ):
+            payload = {**base_payload, "request_id": f"overhead:missing:{missing_field}", "amount_rub": "1.00"}
+            payload[missing_field] = ""
+            try:
+                surface.accept_pool_overhead_preview(payload, actor="fixture-operator")
+            except FfPoolSurfaceError as exc:
+                assert exc.code == expected_code, (missing_field, exc.code)
+            else:
+                raise AssertionError(f"{missing_field} must be selected explicitly")
+        try:
+            surface.accept_pool_overhead_preview(
+                {
+                    **base_payload,
+                    "request_id": "overhead:other:missing-comment",
+                    "category": "other",
+                    "amount_rub": "1.00",
+                },
+                actor="fixture-operator",
+            )
+        except FfPoolSurfaceError as exc:
+            assert exc.code == "overhead_other_comment_required"
+        else:
+            raise AssertionError("other overhead category must require a comment")
+        try:
+            surface.accept_pool_overhead_preview(
+                {
+                    **base_payload,
+                    "request_id": "overhead:backdate",
+                    "business_date": "2026-08-12",
+                    "amount_rub": "1.00",
+                },
+                actor="fixture-operator",
+            )
+        except FfPoolSurfaceError as exc:
+            assert exc.code == "overhead_business_date_mismatch"
+            assert exc.details["business_date"] == "2026-08-13"
+        else:
+            raise AssertionError("pool overhead must not accept a browser-selected date")
+
+        quantities_before = _surface_quantities(service.db_path)
+        control_before = _surface_balance(service.db_path, "fac_control", "FBS", 101)
+        manual = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:manual",
+                "amount_rub": "0.01",
+            },
+            actor="fixture-operator",
+        )
+        manual_summary = manual["preview"]["summary"]
+        assert manual["state"] == "ready" and manual["confirm_allowed"]
+        assert manual_summary["business_date"] == "2026-08-13"
+        assert manual_summary["source_mode"] == "manual"
+        assert manual_summary["denominator_quantity"] == 5, manual_summary
+        manual_complete = surface.confirm_document(str(manual["request_id"]))
+        assert manual_complete["state"] == "complete"
+        assert _surface_quantities(service.db_path) == quantities_before
+        assert _surface_balance(service.db_path, "fac_control", "FBS", 101) == control_before
+        manual_document_id = str(manual_complete["document"]["document_id"])
+        manual_detail = surface.document_detail(manual_document_id)["documents"][0]
+        assert manual_detail["overhead"]["source_mode"] == "manual"
+        assert manual_detail["overhead"]["category"] == "storage"
+        assert manual_detail["actor"] == "fixture-operator"
+        assert manual_detail["source_type"] == "ff_pool_overhead_manual"
+        assert not manual_detail["source_file_available"]
+
+        wb_text = _fixture("wb_bank_0401060.txt")
+        wb_equivalent_text = _fixture("wb_bank_0401060_equivalent_layout.txt")
+        vtb_text = _fixture("vtb_0401060.txt")
+        wb_pdf = _render_pdf(wb_text, title="overhead-wb-a", x_offset=0)
+        wb_equivalent_pdf = _render_pdf(wb_equivalent_text, title="overhead-wb-b", x_offset=24)
+        vtb_pdf = _render_pdf(vtb_text, title="overhead-vtb", x_offset=8)
+
+        try:
+            surface.accept_pool_overhead_preview(
+                {
+                    **base_payload,
+                    "request_id": "overhead:pdf:mismatch",
+                    "amount_rub": "1.00",
+                },
+                actor="fixture-operator",
+                source_bytes=wb_pdf,
+                filename="synthetic-wb.pdf",
+                content_type="application/pdf",
+            )
+        except FfPoolSurfaceError as exc:
+            assert exc.code == "overhead_amount_mismatch"
+            assert "account" not in exc.details["payment_evidence"]["payer"]
+        else:
+            raise AssertionError("attached PDF amount must be authoritative")
+
+        wb_preview = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:pdf:wb",
+                "amount_rub": "",
+                "category": "fbs_order_processing",
+            },
+            actor="fixture-operator",
+            source_bytes=wb_pdf,
+            filename="synthetic-wb.pdf",
+            content_type="application/pdf",
+        )
+        wb_summary = wb_preview["preview"]["summary"]
+        assert wb_preview["state"] == "ready" and wb_summary["amount_rub"] == "12345.67"
+        assert wb_summary["business_date"] == "2026-08-13"
+        assert wb_summary["payment_evidence"]["adapter"] == "wb_bank_0401060_v1"
+        assert "account" not in wb_summary["payment_evidence"]["payer"]
+        assert "inn" not in wb_summary["payment_evidence"]["beneficiary"]
+        with sqlite3.connect(service.db_path) as conn:
+            stored_manifest = json.loads(
+                str(
+                    conn.execute(
+                        f"SELECT request_payload_json FROM {REQUESTS_TABLE} WHERE request_id=?",
+                        (str(wb_preview["request_id"]),),
+                    ).fetchone()[0]
+                )
+            )
+        assert stored_manifest["payment_evidence"]["payer"]["account"]
+        wb_complete = surface.confirm_document(str(wb_preview["request_id"]))
+        wb_document_id = str(wb_complete["document"]["document_id"])
+        wb_detail = surface.document_detail(wb_document_id)["documents"][0]
+        assert wb_detail["source_file_available"]
+        assert wb_detail["overhead"]["filename"] == "synthetic-wb.pdf"
+        assert wb_detail["overhead"]["payment_evidence"]["payment_fingerprint"]
+        source_bytes, source_filename, source_type = surface.source_file(wb_document_id)
+        assert source_bytes == wb_pdf and source_filename == "synthetic-wb.pdf"
+        assert source_type == "application/pdf"
+
+        wb_storno_preview = surface.accept_document_preview(
+            {
+                "request_id": "overhead:pdf:wb:storno",
+                "document_kind": "storno",
+                "business_date": "2026-08-13",
+                "manifest": {"target_document_id": wb_document_id},
+            },
+            actor="fixture-operator",
+        )
+        wb_storno = surface.confirm_document(str(wb_storno_preview["request_id"]))
+        with sqlite3.connect(service.db_path) as conn:
+            storno_manifest = json.loads(
+                str(
+                    conn.execute(
+                        f"SELECT posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?",
+                        (str(wb_storno["document"]["document_id"]),),
+                    ).fetchone()[0]
+                )
+            )
+        assert (
+            storno_manifest["domain"]["overhead_evidence_link"]["payment_evidence"]
+            ["payment_fingerprint"]
+            == wb_detail["overhead"]["payment_evidence"]["payment_fingerprint"]
+        )
+
+        duplicate = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:pdf:wb:renamed",
+                "amount_rub": "",
+                "category": "other",
+                "comment": "Эквивалентная синтетическая копия",
+            },
+            actor="fixture-operator",
+            source_bytes=wb_equivalent_pdf,
+            filename="renamed-synthetic.pdf",
+            content_type="application/pdf",
+        )
+        assert duplicate["payment_duplicate"]
+        assert duplicate["request_id"] == wb_complete["request_id"]
+        assert duplicate["duplicate_link"]["document_id"] == wb_document_id
+
+        vtb_preview = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:pdf:vtb",
+                "amount_rub": "",
+                "scope": "FBS",
+                "category": "inbound_logistics_to_ff",
+            },
+            actor="fixture-operator",
+            source_bytes=vtb_pdf,
+            filename="synthetic-vtb.pdf",
+            content_type="application/pdf",
+        )
+        assert not vtb_preview["payment_duplicate"]
+        assert vtb_preview["preview"]["summary"]["payment_evidence"]["adapter"] == "vtb_0401060_v1"
+        assert surface.confirm_document(str(vtb_preview["request_id"]))["state"] == "complete"
+
+        not_executed_pdf = _render_pdf(
+            wb_text.replace("ИСПОЛНЕН\n19.08.2026 10:11:12", "НЕ ИСПОЛНЕН"),
+            title="overhead-not-executed",
+            x_offset=0,
+        )
+        blocked = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:pdf:not-executed",
+                "amount_rub": "",
+                "category": "returns_processing",
+            },
+            actor="fixture-operator",
+            source_bytes=not_executed_pdf,
+            filename="synthetic-not-executed.pdf",
+            content_type="application/pdf",
+        )
+        assert blocked["state"] == "blocked" and not blocked["confirm_allowed"]
+        assert blocked["error"]["code"] == "overhead_payment_order_not_eligible"
+        assert blocked["preview"]["summary"]["payment_evidence"]["execution_status"] == "not_executed"
+        assert blocked["source"]["file_available"]
+
+        blank_pdf = _render_pdf("", title="overhead-ocr-only", x_offset=0)
+        ocr_only = surface.accept_pool_overhead_preview(
+            {
+                **base_payload,
+                "request_id": "overhead:pdf:ocr-only",
+                "amount_rub": "",
+                "category": "packaging_labeling_consumables",
+            },
+            actor="fixture-operator",
+            source_bytes=blank_pdf,
+            filename="synthetic-ocr-only.pdf",
+            content_type="application/pdf",
+        )
+        assert ocr_only["state"] == "blocked" and not ocr_only["confirm_allowed"]
+        assert ocr_only["preview"]["summary"]["payment_evidence"]["parse_status"] == "parse_error"
+
+        documents = surface.documents_page(document_kind="pool_overhead")["documents"]
+        assert len(documents) == 3
+        assert all(item["overhead"] for item in documents)
+
+
+def _surface_balance(db_path: Path, facility_id: str, pool: str, nm_id: int) -> tuple[int, int]:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} WHERE facility_id=? AND pool=? AND nm_id=?",
+            (facility_id, pool, nm_id),
+        ).fetchone()
+    assert row is not None
+    return int(row[0]), int(round(float(row[1]) * 100))
+
+
+def _surface_quantities(db_path: Path) -> list[tuple[str, str, int, int]]:
+    with sqlite3.connect(db_path) as conn:
+        return [
+            (str(row[0]), str(row[1]), int(row[2]), int(row[3]))
+            for row in conn.execute(
+                f"SELECT facility_id,pool,nm_id,quantity FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
+            ).fetchall()
+        ]
 
 
 def _guided_source_uses_canonical_nomenclature() -> None:

@@ -82,6 +82,15 @@ preview-confirm lifecycle in plain Russian. It stores only the latest request
 id in local browser storage, restores that durable server status after reload,
 and cannot create a duplicate from a status refresh or double navigation.
 
+The inventory template is complete for the selected facility and pool scope:
+every active catalog SKU is present and current selected-pool quantities are
+pre-filled, so a partial workbook fails closed. Confirming an explicit zero for
+an absent FBS row records the immutable absolute-target evidence and
+materializes a zero balance row without a movement, capital delta or synthetic
+cost. The T1 closure includes that absent key; unselected pools and non-target
+rows are invariants. Download and preview do not apply this business effect;
+only the ordinary explicit confirm does.
+
 Default-off is presented as a normal read-only state. No placeholder facility,
 opening action, inferred transfer destination, speculative reservation, FBS
 order or WB write is introduced. Legacy aggregate FF inventory/overhead
@@ -94,12 +103,12 @@ existing contracts.
   stable facility identity/audit/idempotency/CAS/no-delete, exact Decimal
   aggregation, pagination/ETag/payload bounds and durable document status;
 - `python3 apps/ff_pool_surfaces_http_smoke.py` proves protected route shape,
-  conditional GET, CSRF and cross-site rejection, feature-off mutation and
-  pre-buffer request-size enforcement;
+  conditional GET, inventory preview CSRF/cross-site rejection, feature-off
+  mutation, complete-scope UI wording and pre-buffer request-size enforcement;
 - `python3 apps/ff_pool_surfaces_browser_smoke.py` proves lazy modal lifecycle,
-  facility navigation, preview/confirm/reload recovery, focus restoration,
-  narrow viewport/no horizontal overflow and no facility-pool 4xx/5xx or fatal
-  page errors;
+  facility navigation, the full-scope FBS inventory action contract,
+  preview/confirm/reload recovery, focus restoration, narrow viewport/no
+  horizontal overflow and no facility-pool 4xx/5xx or fatal page errors;
 - existing Stage 1/2, supplier-role, six-stage warehouse, product-capital,
   recovery and hosted-runtime smokes remain mandatory.
 

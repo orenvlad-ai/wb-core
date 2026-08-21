@@ -1357,13 +1357,13 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.get_by_text("Точная себестоимость", exact=False)).to_have_count(0)
             expect(page.get_by_text("Соответствие цены", exact=False)).to_have_count(0)
             headers = page.locator("#supplierRegistryTable thead th").all_inner_texts()
-            if len(headers) != 10:
-                raise AssertionError(f"supplier registry must have exactly 10 visible columns, got {headers}")
+            if len(headers) != 11:
+                raise AssertionError(f"supplier registry must have exactly 11 visible columns, got {headers}")
             if "Плановая дата отгрузки" not in headers[0] or "Срок до отгрузки" not in headers[1]:
                 raise AssertionError(f"deadline must immediately follow planned shipment date, got {headers[:2]}")
             if any(not value.strip() for value in headers):
                 raise AssertionError(f"supplier registry must not contain empty headers: {headers}")
-            expect(page.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "10")
+            expect(page.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "11")
 
             page.get_by_role("button", name="新增订单 / Add order / Добавить заказ").click()
             expect(page.locator("#uploadPanel")).to_be_visible()
@@ -1371,6 +1371,10 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_be_visible()
             expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_be_visible()
+            expect(page.locator("#targetFacilityInput")).to_have_count(0)
+            expect(page.locator("#targetFacilityDisplay")).to_have_text(
+                "由操作员分配 / Assigned by operator / Назначается оператором"
+            )
             expect(page.locator("#productLines tr").first).to_be_visible(timeout=5000)
             expect(page.locator("#productLines")).to_contain_text("1111111111111")
             expect(page.locator("#productLines")).to_contain_text("210183919")
@@ -1386,6 +1390,7 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             expect(page.locator("#shipmentRows tr[data-shipment-id]").first).to_contain_text("Отгружено")
+            expect(page.locator("#shipmentRows tr[data-shipment-id]").first).to_contain_text("Не назначен")
             shipment_id = page.locator("#shipmentRows tr[data-shipment-id]").first.get_attribute("data-shipment-id") or ""
             if not shipment_id:
                 raise AssertionError("supplier browser smoke must create a shipment row")
@@ -1395,6 +1400,9 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.locator("#shipmentCard")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
             expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("")
+            expect(page.locator("#targetFacilityDisplay")).to_have_text(
+                "由操作员分配 / Assigned by operator / Назначается оператором"
+            )
             expect(page.locator("#productLines input[data-comment]").first).to_have_value("supplier browser edit")
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
@@ -1420,6 +1428,13 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             )
             if network_probe.get("listStatus") != 200 or network_probe.get("detailStatus") != 200:
                 raise AssertionError(f"supplier network projection probe failed: {network_probe}")
+            if "target_facility_options" in (network_probe.get("list") or {}):
+                raise AssertionError("supplier network projection must not expose assignable target options")
+            if (
+                (network_probe.get("detail") or {}).get("target_facility_id")
+                or (network_probe.get("detail") or {}).get("target_facility_name")
+            ):
+                raise AssertionError("supplier-created order must remain unassigned before operator action")
             _assert_supplier_network_payload_safe(network_probe.get("list"))
             _assert_supplier_network_payload_safe(network_probe.get("detail"))
             price_check_probe = page.evaluate(
