@@ -10448,6 +10448,7 @@
     }
 
     const inventoryMetricVisibilityKey = "wb-core:inventory-planning-hidden:v2";
+    const inventoryLegacyIncidentMetricKeys = new Set(["wb_effective_total", "effective_total"]);
     const fbsOrdersBasePath = "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders";
 
     function inventoryVisibleMetricKeys(metrics) {
@@ -10460,7 +10461,9 @@
 
     function renderInventoryPlanning(payload) {
       if (!inventoryPlanningMetrics || !inventoryPlanningDisclosure) return;
-      const metrics = Array.isArray(payload && payload.metrics) ? payload.metrics : [];
+      const metrics = (Array.isArray(payload && payload.metrics) ? payload.metrics : []).filter(function(metric) {
+        return !inventoryLegacyIncidentMetricKeys.has(String(metric.metric_key || ""));
+      });
       const visible = inventoryVisibleMetricKeys(metrics);
       const controls = '<div class="inventory-metric-controls" aria-label="Видимые показатели">' + metrics.map(function(metric) {
         const key = String(metric.metric_key || "");

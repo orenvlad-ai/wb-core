@@ -85,10 +85,12 @@ is an explicit zero-write no-op; drift never triggers a second submit.
 
 Ordinary planning no longer publishes the incident-aware cards/controls
 `Остаток WB без инц.: всего` and `Остаток без инц.: всего`; audit evidence and
-legacy disclosure remain. Manual overhead renders neutral `ручной ввод` and no
-empty PDF parser block. VTB parser v2 safely removes recognized right-side form
-controls before beneficiary extraction; ambiguity remains `needs_review` and
-the regression fixture is wholly synthetic.
+legacy disclosure remain. The warehouse presentation filters their two exact
+metric identities after the query-only payload is received, so retained audit
+values cannot reappear as a control or card. Manual overhead renders neutral
+`ручной ввод` and no empty PDF parser block. VTB parser v2 safely removes
+recognized right-side form controls before beneficiary extraction; ambiguity
+remains `needs_review` and the regression fixture is wholly synthetic.
 
 ## Verification
 
