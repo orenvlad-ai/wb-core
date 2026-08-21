@@ -53,6 +53,7 @@ jobs:
           python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py
+          python3 apps/sheet_vitrina_v1_proxy_v4_transit_repair_smoke.py
           python3 apps/sheet_vitrina_v1_proxy_v4_refresh_preservation_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
 

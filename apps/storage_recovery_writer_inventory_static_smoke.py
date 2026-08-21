@@ -182,6 +182,15 @@ WRITERS = [
         "lifecycle": "private evidence retained through reconciliation",
     },
     {
+        "owner": "proxy_v4_transit_repair",
+        "source": "apps/sheet_vitrina_v1_proxy_v4_transit_repair.py",
+        "cadence": "human_gated_one_shot",
+        "artifact": "coherent pre-mutation SQLite copy",
+        "full_monolith": True,
+        "guard": "reviewed manifest + exact deployed SHA + approval reference",
+        "lifecycle": "private evidence retained through reconciliation",
+    },
+    {
         "owner": "sheet_vitrina_exact_date_recovery",
         "source": "apps/sheet_vitrina_v1_temporal_closure_retry_live.py",
         "cadence": "human_gated_one_shot",
