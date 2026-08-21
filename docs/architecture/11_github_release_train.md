@@ -225,9 +225,13 @@ unit/MainPID и mandatory loopback/public probes.
 
 SSH exit `255`, disconnect или incomplete metadata после merge означает
 `transport-indeterminate`, а не success. Repo-owned reconciler boundedly читает
-canonical evidence. Wrong/mixed SHA, `deployment_complete=false`, inactive unit
-или failed probes сохраняют `release:halted`; ответ старого процесса не заменяет
-exact-SHA proof.
+canonical evidence. Wrong/mixed SHA, inactive unit или failed probes сохраняют
+`release:halted`; ответ старого процесса не заменяет exact-SHA proof. Exact
+merge metadata/runtime SHA with `deployment_complete=false` may use only the
+explicit trusted safe-finalize lane: immutable metadata/runtime byte digests,
+schema/deployed timestamp, auth, active MainPID and probes form one plan and a
+single completion-bit CAS. It performs no rsync, dependency install or restart,
+and a disconnect/repeat is query-only reconciliation rather than a second CAS.
 
 Разрешены только bounded reconnect, exact readback и документированные
 idempotent service/probe repairs. `resume-halted` работает через production

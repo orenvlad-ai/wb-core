@@ -220,22 +220,34 @@ def main() -> None:
             assert posted["state"] == "posted", posted
             documents.append(str(posted["document"]["document_id"]))
 
-        # Recreate the legacy production state: detail ledger already includes
-        # all five costs, while aggregate current projection and queue do not.
+        # Recreate the corrective production state: the canonical posting path
+        # already reflected facility detail in the aggregate projection, but
+        # the five canonical publication queues are absent. Preserve a tiny
+        # sub-kopeck Decimal tail and a textual scale difference to prove that
+        # neither causes a second capitalization.
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(f"DELETE FROM {TARGETED_RECALC_QUEUE_TABLE}")
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
-                "SET capital_rub='100.0000000000000000001',"
-                "wac_rub='10.00000000000000000001' "
+                "SET capital_rub='115306.500000000000000000099999',"
+                "wac_rub='11530.6500000000000000000099999' "
                 "WHERE version_id='v1' AND warehouse_key='ff' AND nm_id=101"
             )
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
-                "SET capital_rub='200.00',wac_rub='10.00' "
+                "SET capital_rub='60200.000',wac_rub='3010.000' "
                 "WHERE version_id='v1' AND warehouse_key='ff' AND nm_id=202"
             )
             conn.commit()
+            before_aggregate = {
+                int(row[0]): str(row[1])
+                for row in conn.execute(
+                    "SELECT nm_id,capital_rub FROM "
+                    "sheet_vitrina_v1_warehouse_functional_balances "
+                    "WHERE version_id='v1' AND warehouse_key='ff' "
+                    "ORDER BY nm_id"
+                )
+            }
 
         mutation = subject.FfPoolOverheadBackfill(
             runtime_dir=root,
@@ -245,7 +257,13 @@ def main() -> None:
         plan = mutation.build_plan()
         assert plan["apply_allowed"] is True, plan["blockers"]
         assert plan["scope"]["document_ids"] == documents
-        assert plan["expected_effects"]["capital_delta_rub"] == "175206.50"
+        assert plan["pre_state"] == "already_current"
+        assert plan["expected_effects"]["selected_document_amount_rub"] == "175206.50"
+        assert plan["expected_effects"]["aggregate_capital_rewrite_rub"] == "0"
+        assert plan["expected_effects"]["aggregate_row_update_count"] == 0
+        assert plan["expected_effects"]["queue_insert_count"] == 5
+        assert plan["expected_effects"]["canonical_publication_required"] is True
+        assert plan["expected_effects"]["already_current_no_op"] is False
         assert plan["expected_effects"]["quantity_delta"] == 0
         assert plan["invariants"]["city_scope"] == {
             "Москва": {"document_count": 4, "amount_rub": "115206.50"},
@@ -289,9 +307,7 @@ def main() -> None:
                 for item in result["readback"]["target_projection"]
                 if int(item["nm_id"]) == 101
             )
-            assert exact_moscow["aggregate_capital_rub"] == (
-                "115306.5000000000000000001"
-            )
+            assert exact_moscow["aggregate_capital_rub"] == before_aggregate[101]
             assert exact_moscow["detail_capital_rub"] == (
                 "115306.5000000000000000001"
             )
@@ -312,6 +328,51 @@ def main() -> None:
             )
             assert repeated["idempotent"] is True
             assert repeated["backup"]["receipt_path"] == result["backup"]["receipt_path"]
+
+            # A fresh dry-run after reconciliation is an explicit proven no-op.
+            repeat_plan = mutation.build_plan()
+            assert repeat_plan["apply_allowed"] is True, repeat_plan["blockers"]
+            assert repeat_plan["pre_state"] == "already_current"
+            assert repeat_plan["expected_effects"]["aggregate_capital_rewrite_rub"] == "0"
+            assert repeat_plan["expected_effects"]["aggregate_row_update_count"] == 0
+            assert repeat_plan["expected_effects"]["queue_insert_count"] == 0
+            assert repeat_plan["expected_effects"]["canonical_publication_required"] is False
+            assert repeat_plan["expected_effects"]["already_current_no_op"] is True
+
+            subject.WarehouseFunctionalBlock = lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("no-op repeat must not run Warehouse")
+            )
+            subject.build_functional_economics_backfill_plan = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("no-op repeat must not run economics")
+                )
+            )
+            subject.block_from_env = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("no-op repeat must not run Finance")
+            )
+            repeat_result = mutation.apply(
+                repeat_plan,
+                fingerprint=str(repeat_plan["fingerprint"]),
+                approval_reference="synthetic-owner-gate-repeat",
+                actor="synthetic",
+                backup_dir=(root / "backups").resolve(),
+                evidence_dir=(root / "evidence").resolve(),
+            )
+            assert repeat_result["status"] == "complete"
+            assert repeat_result["idempotent"] is True
+            assert repeat_result["economics_publication"]["database_written"] is False
+            assert repeat_result["finance_publication"]["database_written"] is False
+            with sqlite3.connect(runtime.db_path) as conn:
+                after_aggregate = {
+                    int(row[0]): str(row[1])
+                    for row in conn.execute(
+                        "SELECT nm_id,capital_rub FROM "
+                        "sheet_vitrina_v1_warehouse_functional_balances "
+                        "WHERE version_id='v1' AND warehouse_key='ff' "
+                        "ORDER BY nm_id"
+                    )
+                }
+            assert after_aggregate == before_aggregate
         finally:
             subject.WarehouseFunctionalBlock = original_warehouse
             subject.build_functional_economics_backfill_plan = original_build_economics
