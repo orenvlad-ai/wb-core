@@ -2625,12 +2625,16 @@ def main() -> None:
                     "blockers": [],
                     "deployed_sha": overhead_sha,
                     "fingerprint": overhead_fingerprint,
+                    "pre_state": "already_current",
                     "scope": {
                         "document_ids": [f"doc-{index}" for index in range(5)],
                         "pool": "FBS",
                     },
                     "expected_effects": {
-                        "capital_delta_rub": "175206.50",
+                        "selected_document_amount_rub": "175206.50",
+                        "aggregate_capital_rewrite_rub": "0",
+                        "capital_delta_rub": "0.00",
+                        "aggregate_row_update_count": 0,
                         "quantity_delta": 0,
                         "business_document_replay_count": 0,
                     },
