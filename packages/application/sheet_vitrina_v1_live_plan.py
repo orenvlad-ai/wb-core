@@ -106,8 +106,10 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     extend_metrics_with_our_wb_cost_metrics,
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
     extend_metrics_with_proxy_v4,
@@ -2996,6 +2998,7 @@ class _MetricEvaluator:
             elif metric.metric_key in {
                 PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
                 PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+                PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
             }:
                 aggregate = self._aggregate_proxy_v4(
                     self.enabled_config,
@@ -3004,7 +3007,11 @@ class _MetricEvaluator:
                 value = (
                     aggregate["proxy_profit_4"]
                     if metric.metric_key == PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY
-                    else aggregate["proxy_margin_4"]
+                    else (
+                        aggregate["proxy_margin_4"]
+                        if metric.metric_key == PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY
+                        else aggregate["proxy_margin_per_unit"]
+                    )
                 )
             elif metric.metric_key == TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY:
                 value = self._aggregate_our_wb_unit_cost(temporal_slot)
@@ -3216,6 +3223,11 @@ class _MetricEvaluator:
                     ),
                     denominator,
                 )
+            elif metric.metric_key == PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY:
+                value = self._aggregate_proxy_v4(
+                    group_items,
+                    temporal_slot,
+                )["proxy_margin_per_unit"]
             elif metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
                 value = self._aggregate_weighted_avg(
                     SEARCH_CTR_SKU_METRIC_KEY,
@@ -3282,9 +3294,12 @@ class _MetricEvaluator:
             return {
                 "proxy_profit_4": None,
                 "expected_buyout_revenue": None,
+                "expected_buyout_qty": None,
                 "proxy_margin_4": None,
+                "proxy_margin_per_unit": None,
             }
         eligible: list[tuple[float, float]] = []
+        unit_eligible: list[tuple[float, float]] = []
         for item in config_items:
             profit = self.resolve_sku(
                 PROXY_V4_PROFIT_RUB_METRIC_KEY,
@@ -3302,7 +3317,9 @@ class _MetricEvaluator:
                     return {
                         "proxy_profit_4": None,
                         "expected_buyout_revenue": None,
+                        "expected_buyout_qty": None,
                         "proxy_margin_4": None,
+                        "proxy_margin_per_unit": None,
                     }
                 continue
             eligible.append(
@@ -3311,18 +3328,27 @@ class _MetricEvaluator:
                     float(inputs["order_sum"]) * float(parameters.buyout_rate),
                 )
             )
+            expected_qty = float(inputs["order_count"]) * float(parameters.buyout_rate)
+            if expected_qty > 0:
+                unit_eligible.append((float(profit), expected_qty))
         if not eligible:
             return {
                 "proxy_profit_4": None,
                 "expected_buyout_revenue": None,
+                "expected_buyout_qty": None,
                 "proxy_margin_4": None,
+                "proxy_margin_per_unit": None,
             }
         profit = sum(item[0] for item in eligible)
         revenue = sum(item[1] for item in eligible)
+        unit_profit = sum(item[0] for item in unit_eligible) if unit_eligible else None
+        quantity = sum(item[1] for item in unit_eligible) if unit_eligible else None
         return {
             "proxy_profit_4": profit,
             "expected_buyout_revenue": revenue,
+            "expected_buyout_qty": quantity,
             "proxy_margin_4": None if revenue == 0 else profit / revenue,
+            "proxy_margin_per_unit": _divide_or_none(unit_profit, quantity),
         }
 
     def _aggregate_covered_order_sum(
@@ -3726,6 +3752,21 @@ class _MetricEvaluator:
                 self.resolve_sku(PROXY_V4_PROFIT_RUB_METRIC_KEY, nm_id, temporal_slot),
                 expected_revenue,
             )
+        if metric_key == PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY:
+            column_date = self._slot_lookups(temporal_slot).column_date
+            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            if inputs is None:
+                return None
+            calculated = calculate_proxy_4(
+                order_sum=inputs["order_sum"],
+                order_count=inputs["order_count"],
+                canonical_wb_wac=inputs["unit_cost"],
+                ads_sum=inputs["ads_sum"],
+                parameters=self._proxy_v4_parameters(temporal_slot),
+                business_date=column_date,
+            )
+            value = calculated["proxy_margin_per_unit"]
+            return None if value is None else float(value)
         if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
             return _divide_or_zero(
                 self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot),

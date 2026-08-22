@@ -225,31 +225,105 @@ def calculate_proxy_4(
         "included_expense_rate": parameters.included_expense_rate,
         "proxy_profit_4": profit,
         "proxy_margin_4": None if expected_revenue == 0 else profit / expected_revenue,
+        "proxy_margin_per_unit": calculate_proxy_v4_margin_per_unit(
+            proxy_profit_4=profit,
+            expected_buyout_qty=expected_qty,
+        ),
     }
+
+
+def calculate_proxy_v4_margin_per_unit(
+    *,
+    proxy_profit_4: Any,
+    expected_buyout_qty: Any,
+) -> Decimal | None:
+    """Divide confirmed V4 profit by the matching positive proxy quantity."""
+
+    profit = _optional_decimal(proxy_profit_4)
+    quantity = _optional_decimal(expected_buyout_qty)
+    if profit is None or quantity is None or quantity <= 0:
+        return None
+    return profit / quantity
 
 
 def aggregate_proxy_4(rows: list[Mapping[str, Any]]) -> dict[str, Decimal | None]:
     """TOTAL sums only eligible SKU results and divides by their revenue."""
 
     eligible: list[tuple[Decimal, Decimal]] = []
+    unit_eligible: list[tuple[Decimal, Decimal]] = []
     for row in rows:
         profit = _optional_decimal(row.get("proxy_profit_4"))
         revenue = _optional_decimal(row.get("expected_buyout_revenue"))
+        quantity = _optional_decimal(row.get("expected_buyout_qty"))
         if profit is not None and revenue is not None:
             eligible.append((profit, revenue))
+        if profit is not None and quantity is not None and quantity > 0:
+            unit_eligible.append((profit, quantity))
     if not eligible:
         return {
             "proxy_profit_4": None,
             "expected_buyout_revenue": None,
+            "expected_buyout_qty": None,
             "proxy_margin_4": None,
+            "proxy_margin_per_unit": None,
         }
     profit = sum((item[0] for item in eligible), Decimal("0"))
     revenue = sum((item[1] for item in eligible), Decimal("0"))
+    unit_profit = (
+        sum((item[0] for item in unit_eligible), Decimal("0"))
+        if unit_eligible
+        else None
+    )
+    quantity = (
+        sum((item[1] for item in unit_eligible), Decimal("0"))
+        if unit_eligible
+        else None
+    )
     return {
         "proxy_profit_4": profit,
         "expected_buyout_revenue": revenue,
+        "expected_buyout_qty": quantity,
         "proxy_margin_4": None if revenue == 0 else profit / revenue,
+        "proxy_margin_per_unit": calculate_proxy_v4_margin_per_unit(
+            proxy_profit_4=unit_profit,
+            expected_buyout_qty=quantity,
+        ),
     }
+
+
+def load_proxy_v4_parameters_for_date(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    effective_date: str,
+) -> ProxyV4Parameters | None:
+    """Read one effective V4 revision without creating or mutating its schema."""
+
+    target = date.fromisoformat(str(effective_date)[:10]).isoformat()
+    if target < PROXY_V4_FIXED_BOUNDARY:
+        return None
+    database_path = runtime.db_path.resolve()
+    with sqlite3.connect(
+        f"file:{database_path.as_posix()}?mode=ro",
+        uri=True,
+        timeout=30.0,
+    ) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        table_exists = conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='sheet_vitrina_v1_proxy_v4_parameter_versions'"""
+        ).fetchone()
+        if table_exists is None:
+            return None
+        row = conn.execute(
+            """
+            SELECT * FROM sheet_vitrina_v1_proxy_v4_parameter_versions
+            WHERE block_key=? AND effective_date<=?
+            ORDER BY effective_date DESC,revision DESC,created_at DESC LIMIT 1
+            """,
+            (PROXY_V4_BLOCK_KEY, target),
+        ).fetchone()
+    return None if row is None else _parameters_from_row(row)
 
 
 def build_confirmed_aligned_window(
@@ -551,19 +625,10 @@ class ProxyV4ParametersBlock:
             conn.commit()
 
     def parameters_for_date(self, effective_date: str) -> ProxyV4Parameters | None:
-        target = date.fromisoformat(str(effective_date)[:10]).isoformat()
-        if target < PROXY_V4_FIXED_BOUNDARY:
-            return None
-        with _connect(self.runtime.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM sheet_vitrina_v1_proxy_v4_parameter_versions
-                WHERE block_key=? AND effective_date<=?
-                ORDER BY effective_date DESC,revision DESC,created_at DESC LIMIT 1
-                """,
-                (PROXY_V4_BLOCK_KEY, target),
-            ).fetchone()
-        return None if row is None else _parameters_from_row(row)
+        return load_proxy_v4_parameters_for_date(
+            runtime=self.runtime,
+            effective_date=effective_date,
+        )
 
     def materialize_latest_confirmed_window(
         self,
@@ -1557,6 +1622,7 @@ def _blank_proxy_4() -> dict[str, Decimal | None]:
         "included_expense_rate": None,
         "proxy_profit_4": None,
         "proxy_margin_4": None,
+        "proxy_margin_per_unit": None,
     }
 
 

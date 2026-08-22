@@ -3,8 +3,8 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать shared channel/location-aware `Себестоимость наша`, Proxy 3/4 и coverage-safe profit semantics поверх canonical functional warehouse/cost engine."
-scope: "Public metric keys, FBS handoff WAC, daily WB/FBO WAC, Proxy profit/margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
+purpose: "Зафиксировать shared channel/location-aware `Себестоимость наша`, Proxy 3/4 и coverage-safe profit/unit-margin semantics поверх canonical functional warehouse/cost engine."
+scope: "Public metric keys, FBS handoff WAC, daily WB/FBO WAC, Proxy profit/margin/unit margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
@@ -36,7 +36,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "One channel/location resolver separates exact FBS handoff WAC from WB/FBO daily WAC; uncovered sales stay visible but are excluded from every profit numerator and profitability denominator."
+update_note: "Proxy V4 exposes paired SKU/TOTAL unit margin as SUM(covered profit) / SUM(the same covered expected-buyout quantity); missing evidence stays blank and historical rows are completed read-side without backfill."
 ---
 
 # 1. Canonical `Себестоимость наша`
@@ -172,9 +172,52 @@ proxy_profit_4          = expected_buyout_revenue × (1 − included_expense_rat
                           − expected_buyout_qty × canonical_WB_WAC
                           − ads_sum
 proxy_margin_4          = proxy_profit_4 / expected_buyout_revenue
+proxy_margin_per_unit   = proxy_profit_4 / expected_buyout_qty
 ```
 
-Любой missing operand оставляет SKU V4 blank; zero expected revenue даёт blank margin. TOTAL profit — сумма только eligible SKU profits, TOTAL expected revenue — сумма соответствующих SKU expected revenues, TOTAL margin — их ratio, никогда не среднее SKU margins. Public pairs `proxy_profit_4_rub`/`total_proxy_profit_4_rub` и `proxy_margin_4_pct`/`proxy_margin_4_pct_total` представлены как два общих picker item без отдельного duplicated TOTAL item. Proxy 3 keys/formula/history остаются полностью прежними.
+Любой missing operand оставляет SKU V4 blank; zero expected revenue
+даёт blank percentage margin, а missing или nonpositive
+`expected_buyout_qty` даёт blank unit margin. Подтверждённая
+отрицательная Proxy profit сохраняет отрицательную unit margin.
+`orderCount`, фактический `buyoutCount`, arithmetic SKU mean и
+seller-price weights не являются denominator этой метрики.
+
+TOTAL и group unit margin считаются только как direct ratio:
+
+```text
+SUM(eligible covered proxy_profit_4)
+------------------------------------
+SUM(the same eligible expected_buyout_qty)
+```
+
+Каждая SKU/date входит либо в обе суммы, либо ни в одну. Uncovered
+sales сохраняются в coverage evidence, но не попадают ни в
+profit numerator, ни в unit denominator. Missing coverage при наличии
+sales fail-closed оставляет aggregate blank. Поэтому 100 orders при
+91% дают 91 expected units, и 9100 ₽ profit / 91 = 100 ₽/шт.
+
+Public pair `proxy_margin_per_unit_rub` /
+`proxy_margin_per_unit_rub_total` имеет единый label
+`Средняя маржа на единицу`, формат `₽/шт` и один common
+picker item. Вместе с парами `proxy_profit_4_rub` /
+`total_proxy_profit_4_rub` и `proxy_margin_4_pct` /
+`proxy_margin_4_pct_total` это три logical V4 item без duplicated TOTAL
+item.
+
+Для уже существующих ready snapshots строка достраивается только
+read-side из уже published Proxy profit, exact-date orders, effective V4
+parameters и canonical cost-coverage evidence. Она не переписывает
+ready snapshots, parameter versions или business data и не запускает
+historical backfill. Дата без полного same-date evidence остаётся
+blank. После обычного refresh тот же registry/evaluator contract
+формирует текущую строку. Существующие Proxy 4 profit,
+percentage margin, seller price, canonical cost, coverage rows и их frozen
+history не меняются.
+
+TOTAL profit — сумма только eligible SKU profits, TOTAL expected revenue
+— сумма соответствующих SKU expected revenues, TOTAL percentage margin —
+их ratio, никогда не среднее SKU margins. Proxy 3 keys/formula/history
+остаются полностью прежними.
 
 ## 3.2 Legacy group COST_PRICE / Proxy 1 boundary
 

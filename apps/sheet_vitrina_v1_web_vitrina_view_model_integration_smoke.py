@@ -13,6 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.contracts.sheet_vitrina_v1 import (
@@ -74,9 +77,17 @@ def main() -> None:
 
         if view_model.meta.source_contract_name != "web_vitrina_contract":
             raise AssertionError(f"source contract identity mismatch, got {view_model.meta}")
-        if view_model.meta.snapshot_id != "web-vitrina-view-model-integration" or view_model.meta.row_count != 4:
+        if (
+            view_model.meta.snapshot_id != "web-vitrina-view-model-integration"
+            or view_model.meta.row_count != 6 + (2 * len(enabled))
+        ):
             raise AssertionError(f"view_model meta mismatch, got {view_model.meta}")
-        if len(view_model.columns) != 11 or len(view_model.groups) != 2 or len(view_model.sections) != 2:
+        expected_group_count = 1 + len({item.group for item in enabled})
+        if (
+            len(view_model.columns) != 11
+            or len(view_model.groups) != expected_group_count
+            or len(view_model.sections) != 3
+        ):
             raise AssertionError(f"view_model schema counts mismatch, got {view_model}")
         column_ids = [column.id for column in view_model.columns]
         if "row_last_updated_at" in column_ids:
@@ -86,12 +97,24 @@ def main() -> None:
         money_row = rows[f"SKU:{enabled[0].nm_id}|price_seller_discounted"]
         percent_row = rows[f"SKU:{enabled[1].nm_id}|avg_addToCartConversion"]
         total_row = rows["TOTAL|total_view_count"]
+        unit_row = rows[
+            f"SKU:{enabled[0].nm_id}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+        ]
         if total_row.group_id != "group:overview" or total_row.row_kind != "total":
             raise AssertionError(f"TOTAL mapping mismatch, got {total_row}")
         if _cell(money_row, "date:2026-04-20").cell_kind != "money":
             raise AssertionError(f"money mapping mismatch, got {money_row}")
         if _cell(percent_row, "date:2026-04-20").cell_kind != "percent":
             raise AssertionError(f"percent mapping mismatch, got {percent_row}")
+        unit_cell = _cell(unit_row, "date:2026-04-20")
+        if (
+            unit_cell.cell_kind != "empty"
+            or unit_cell.display_text != "—"
+        ):
+            raise AssertionError(
+                "unit margin without complete V4 evidence must remain blank while "
+                f"retaining its public row, got {unit_row}"
+            )
         if money_row.filter_tokens["group"] != [enabled[0].group]:
             raise AssertionError(f"group filter tokens mismatch, got {money_row.filter_tokens}")
         if view_model.state_model.current_state != "ready":

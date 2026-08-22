@@ -68,6 +68,14 @@ _FORMATTER_LIBRARY: dict[str, WebVitrinaViewModelFormatter] = {
         thousands_separator=True,
         suffix=" ₽",
     ),
+    "money_rub_per_unit": WebVitrinaViewModelFormatter(
+        formatter_id="money_rub_per_unit",
+        cell_kind="money",
+        rule_kind="money",
+        decimals=0,
+        thousands_separator=True,
+        suffix=" ₽/шт",
+    ),
     "percent_default": WebVitrinaViewModelFormatter(
         formatter_id="percent_default",
         cell_kind="percent",
@@ -553,6 +561,8 @@ def _resolve_cell_kind_and_formatter(
     if column_id.startswith("date:"):
         if row_format == "rub":
             return "money", "money_rub"
+        if row_format == "rub_per_unit":
+            return "money", "money_rub_per_unit"
         if row_format == "percent":
             return "percent", "percent_default"
         return "number", "number_default"

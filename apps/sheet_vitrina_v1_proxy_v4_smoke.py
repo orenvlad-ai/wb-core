@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -10,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +24,7 @@ from packages.application.calculation_parameters import (  # noqa: E402
 )
 from packages.application.calculation_parameters_v4 import (  # noqa: E402
     PROXY_V4_FIXED_BOUNDARY,
+    ProxyV4Parameters,
     ProxyV4ParametersBlock,
     aggregate_proxy_4,
     build_confirmed_aligned_window,
@@ -34,11 +37,26 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
     RegistryUploadDbBackedRuntime,
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
+    PROXY_V4_MARGIN_PER_UNIT_LABEL_RU,
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
     extend_metrics_with_proxy_v4,
+)
+from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
+    SlotLookups,
+    TemporalLiveSources,
+    _MetricEvaluator,
+)
+from packages.application.sheet_vitrina_v1_web_vitrina import (  # noqa: E402
+    _include_proxy_v4_unit_margin_rows,
+)
+from packages.application.web_vitrina_view_model import (  # noqa: E402
+    _FORMATTER_LIBRARY,
+    _resolve_cell_kind_and_formatter,
 )
 from packages.application.wb_finance_weekly import (  # noqa: E402
     CLASSIFIER_VERSION as WB_FINANCE_CLASSIFIER_VERSION,
@@ -49,6 +67,12 @@ from packages.contracts.sales_funnel_history_block import (  # noqa: E402
     SalesFunnelHistoryItem,
     SalesFunnelHistorySuccess,
 )
+from packages.contracts.registry_upload_bundle_v1 import (  # noqa: E402
+    ConfigV2Item,
+    MetricV2Item,
+)
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot  # noqa: E402
+from packages.contracts.web_vitrina_contract import WebVitrinaContractRow  # noqa: E402
 
 
 BUNDLE_FIXTURE = (
@@ -257,6 +281,76 @@ def main() -> None:
             expected_profit + Decimal("100")
         ) / (Decimal("900") + Decimal("200")):
             raise AssertionError("TOTAL margin must divide summed profit by summed expected revenue")
+
+        unit_parameters = _unit_margin_parameters()
+        unit_control = calculate_proxy_4(
+            order_sum=Decimal("11000"),
+            order_count=Decimal("100"),
+            canonical_wb_wac=Decimal("10"),
+            ads_sum=Decimal("0"),
+            parameters=unit_parameters,
+            business_date="2026-08-09",
+        )
+        if (
+            unit_control["expected_buyout_qty"] != Decimal("91")
+            or unit_control["proxy_profit_4"] != Decimal("9100")
+            or unit_control["proxy_margin_per_unit"] != Decimal("100")
+        ):
+            raise AssertionError(
+                "unit margin must use 100 orders × 91% = 91 proxy units and yield 100 ₽/шт: "
+                f"{unit_control}"
+            )
+        weighted_unit = aggregate_proxy_4(
+            [
+                unit_control,
+                {
+                    "proxy_profit_4": Decimal("4550"),
+                    "expected_buyout_revenue": Decimal("4641"),
+                    "expected_buyout_qty": Decimal("9.1"),
+                },
+                {
+                    "proxy_profit_4": None,
+                    "expected_buyout_revenue": None,
+                    "expected_buyout_qty": None,
+                },
+            ]
+        )
+        expected_weighted_unit = Decimal("13650") / Decimal("100.1")
+        if weighted_unit["proxy_margin_per_unit"] != expected_weighted_unit:
+            raise AssertionError(
+                f"TOTAL unit margin must be direct ratio of matched sums: {weighted_unit}"
+            )
+        if weighted_unit["proxy_margin_per_unit"] == Decimal("300"):
+            raise AssertionError("TOTAL unit margin must not average 100 and 500 ₽/шт SKU values")
+        negative_unit = calculate_proxy_4(
+            order_sum=Decimal("1000"),
+            order_count=Decimal("100"),
+            canonical_wb_wac=Decimal("10"),
+            ads_sum=Decimal("910"),
+            parameters=unit_parameters,
+            business_date="2026-08-09",
+        )
+        if negative_unit["proxy_margin_per_unit"] != Decimal("-10"):
+            raise AssertionError(f"negative confirmed profit must remain negative: {negative_unit}")
+        zero_unit = calculate_proxy_4(
+            order_sum=Decimal("0"),
+            order_count=Decimal("0"),
+            canonical_wb_wac=Decimal("10"),
+            ads_sum=Decimal("0"),
+            parameters=unit_parameters,
+            business_date="2026-08-09",
+        )
+        if zero_unit["proxy_margin_per_unit"] is not None:
+            raise AssertionError("nonpositive expected buyout quantity must stay blank")
+        if calculate_proxy_4(
+            order_sum=Decimal("11000"),
+            order_count=None,
+            canonical_wb_wac=Decimal("10"),
+            ads_sum=Decimal("0"),
+            parameters=unit_parameters,
+            business_date="2026-08-09",
+        )["proxy_margin_per_unit"] is not None:
+            raise AssertionError("missing orderCount must stay blank")
 
         preview = block.preview_tax_version({"tax_rate": "0.07"})
         saved = block.create_tax_version(
@@ -472,16 +566,47 @@ def main() -> None:
             PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
             PROXY_V4_MARGIN_PCT_METRIC_KEY,
             PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+            PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+            PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
         }}
         if set(v4) != {
             PROXY_V4_PROFIT_RUB_METRIC_KEY,
             PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
             PROXY_V4_MARGIN_PCT_METRIC_KEY,
             PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+            PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+            PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
         }:
             raise AssertionError("public V4 SKU/TOTAL metric pairs are incomplete")
+        sku_unit_metric = v4[PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY]
+        total_unit_metric = v4[PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY]
+        if (
+            sku_unit_metric.label_ru != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+            or total_unit_metric.label_ru != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+            or sku_unit_metric.format != "rub_per_unit"
+            or total_unit_metric.format != "rub_per_unit"
+            or total_unit_metric.display_order + 1 != sku_unit_metric.display_order
+        ):
+            raise AssertionError(
+                f"unit-margin registry label/format/order drifted: {total_unit_metric}, {sku_unit_metric}"
+            )
+        cell_kind, formatter_id = _resolve_cell_kind_and_formatter(
+            column_id="date:2026-08-09",
+            value=100,
+            row_format="rub_per_unit",
+        )
+        formatter = _FORMATTER_LIBRARY.get(str(formatter_id))
+        if (
+            cell_kind != "money"
+            or formatter_id != "money_rub_per_unit"
+            or formatter is None
+            or formatter.suffix != " ₽/шт"
+        ):
+            raise AssertionError("unit-margin value formatter must render ₽/шт")
         if PROXY_V4_FIXED_BOUNDARY != "2026-08-01":
             raise AssertionError("fixed product boundary drifted")
+
+        _assert_unit_margin_evaluator_and_read_side()
 
         v3 = calculate_proxy_3(
             order_sum=1000,
@@ -539,7 +664,398 @@ def main() -> None:
     print("proxy_v4_as_of_versions_tax_latest_week_rollover_idempotency: ok")
     print("proxy_v4_latest_common_week_no_average_current_day_freeze: ok")
     print("proxy_v4_one_two_three_week_intersection_zero_fallback: ok")
+    print("proxy_v4_unit_margin_weighted_total_read_side_pair: ok")
     print("proxy_v4_public_metric_pairs_v3_unchanged: ok")
+
+
+def _unit_margin_parameters() -> ProxyV4Parameters:
+    return ProxyV4Parameters(
+        effective_date="2026-08-01",
+        buyout_rate=Decimal("0.91"),
+        tax_rate=Decimal("0"),
+        agent_remuneration_rate=Decimal("0"),
+        acquiring_rate=Decimal("0"),
+        wb_logistics_rate=Decimal("0"),
+        wb_storage_rate=Decimal("0"),
+        penalties_adjustments_rate=Decimal("0"),
+        other_expense_rate=Decimal("0"),
+        source_window_from="2026-07-20",
+        source_window_to="2026-07-26",
+        source_window_fingerprint="synthetic-unit-margin",
+        source_week_ranges=(("2026-07-20", "2026-07-26"),),
+        source_slot_from="2026-07-20",
+        source_slot_to="2026-07-26",
+        buyout_order_count_weight=Decimal("130"),
+        finance_net_revenue_weight=Decimal("1"),
+        formula_version="proxy_profit_4_v2_no_transit",
+        version_id="synthetic-unit-margin",
+        revision=1,
+    )
+
+
+def _assert_unit_margin_evaluator_and_read_side() -> None:
+    first_nm_id, second_nm_id, uncovered_nm_id = 900001, 900002, 900003
+    config = [
+        ConfigV2Item(
+            nm_id=first_nm_id,
+            enabled=True,
+            display_name="SKU 100 ₽/шт",
+            group="Контроль",
+            display_order=1,
+        ),
+        ConfigV2Item(
+            nm_id=second_nm_id,
+            enabled=True,
+            display_name="SKU 500 ₽/шт",
+            group="Контроль",
+            display_order=2,
+        ),
+        ConfigV2Item(
+            nm_id=uncovered_nm_id,
+            enabled=True,
+            display_name="SKU без себестоимости",
+            group="Контроль",
+            display_order=3,
+        ),
+    ]
+    base_metrics = [
+        MetricV2Item(
+            metric_key=metric_key,
+            enabled=True,
+            scope="SKU",
+            label_ru=metric_key,
+            calc_type="metric",
+            calc_ref=metric_key,
+            show_in_data=True,
+            format="number",
+            display_order=index,
+            section="Тест",
+        )
+        for index, metric_key in enumerate(("orderSum", "orderCount", "ads_sum"), start=1)
+    ]
+    metrics = extend_metrics_with_proxy_v4(base_metrics)
+    metrics_by_key = {item.metric_key: item for item in metrics}
+    parameters = _unit_margin_parameters()
+    lookups = _unit_margin_slot_lookup(
+        first_nm_id=first_nm_id,
+        second_nm_id=second_nm_id,
+        uncovered_nm_id=uncovered_nm_id,
+    )
+    evaluator = _MetricEvaluator(
+        enabled_config=config,
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(
+                    slot_key="control",
+                    slot_label="control",
+                    column_date="2026-08-09",
+                )
+            ],
+            statuses=[],
+            slot_lookups={"control": lookups},
+            source_temporal_policies={},
+        ),
+        proxy_v4_parameters_resolver=lambda _date: parameters,
+    )
+    first = evaluator.resolve_sku(
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        first_nm_id,
+        "control",
+    )
+    second = evaluator.resolve_sku(
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        second_nm_id,
+        "control",
+    )
+    expected_total = 13650.0 / 100.1
+    if first != 100.0 or second != 500.0:
+        raise AssertionError(f"SKU unit margins must be 100/500 ₽/шт, got {first}/{second}")
+    total = evaluator.resolve_total(
+        PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        "control",
+    )
+    group = evaluator.resolve_group(
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        "Контроль",
+        "control",
+    )
+    if abs(float(total or 0.0) - expected_total) > 0.000001:
+        raise AssertionError(f"TOTAL unit margin must be weighted direct ratio, got {total}")
+    if abs(float(group or 0.0) - expected_total) > 0.000001:
+        raise AssertionError(f"GROUP unit margin must use the same matched ratio, got {group}")
+    if abs(float(total or 0.0) - ((float(first) + float(second)) / 2.0)) < 0.000001:
+        raise AssertionError("TOTAL unit margin became arithmetic mean")
+    if evaluator.resolve_sku(
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        uncovered_nm_id,
+        "control",
+    ) is not None:
+        raise AssertionError("known uncovered sales must stay outside unit margin")
+
+    missing_lookups = deepcopy(lookups)
+    missing_lookups.our_wb_cost_lookup.pop(second_nm_id)
+    missing_evaluator = _MetricEvaluator(
+        enabled_config=config[:2],
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(
+                    slot_key="missing",
+                    slot_label="missing",
+                    column_date="2026-08-09",
+                )
+            ],
+            statuses=[],
+            slot_lookups={"missing": missing_lookups},
+            source_temporal_policies={},
+        ),
+        proxy_v4_parameters_resolver=lambda _date: parameters,
+    )
+    if missing_evaluator.resolve_total(
+        PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        "missing",
+    ) is not None:
+        raise AssertionError("TOTAL unit margin must fail closed on a covered SKU missing evidence")
+
+    date_columns = ["2026-08-09", "2026-08-10"]
+    rows = _unit_margin_contract_rows(
+        config=config,
+        date_columns=date_columns,
+    )
+
+    class FakeRuntime:
+        def load_our_wb_cost_daily_state(self, *, as_of_date: str):
+            if as_of_date not in date_columns:
+                return {}
+            return lookups.our_wb_cost_lookup
+
+    completed = _include_proxy_v4_unit_margin_rows(
+        rows,
+        runtime=FakeRuntime(),  # type: ignore[arg-type]
+        date_columns=date_columns,
+        enabled_config=config,
+        sku_metric=metrics_by_key[PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY],
+        total_metric=metrics_by_key[
+            PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY
+        ],
+        parameters_for_date=lambda _date: parameters,
+    )
+    completed_by_id = {row.row_id: row for row in completed}
+    first_row = completed_by_id[
+        f"SKU:{first_nm_id}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+    ]
+    second_row = completed_by_id[
+        f"SKU:{second_nm_id}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+    ]
+    total_row = completed_by_id[
+        f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+    ]
+    if first_row.values_by_date != {"2026-08-09": 100.0, "2026-08-10": -10.0}:
+        raise AssertionError(f"read-side SKU history/negative semantics drifted: {first_row}")
+    if second_row.values_by_date != {"2026-08-09": 500.0, "2026-08-10": ""}:
+        raise AssertionError(f"read-side missing profit must stay blank: {second_row}")
+    if (
+        abs(float(total_row.values_by_date["2026-08-09"]) - expected_total) > 0.000001
+        or total_row.values_by_date["2026-08-10"] != ""
+    ):
+        raise AssertionError(f"read-side TOTAL must weight and fail closed by date: {total_row}")
+    if (
+        first_row.metric_label != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+        or total_row.metric_label != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+        or first_row.format != "rub_per_unit"
+        or total_row.format != "rub_per_unit"
+    ):
+        raise AssertionError("read-side unit-margin label/format pair drifted")
+    total_index = completed.index(total_row)
+    total_margin_index = next(
+        index
+        for index, row in enumerate(completed)
+        if row.row_id == f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}"
+    )
+    if total_index != total_margin_index + 1:
+        raise AssertionError("TOTAL unit margin must immediately follow V4 margin")
+
+
+def _unit_margin_slot_lookup(
+    *,
+    first_nm_id: int,
+    second_nm_id: int,
+    uncovered_nm_id: int,
+) -> SlotLookups:
+    return SlotLookups(
+        seller_funnel_lookup={},
+        history_lookup={
+            first_nm_id: {"orderSum": 11000.0, "orderCount": 100.0},
+            second_nm_id: {"orderSum": 5100.0, "orderCount": 10.0},
+            uncovered_nm_id: {"orderSum": 2000.0, "orderCount": 20.0},
+        },
+        web_lookup={},
+        prices_lookup={},
+        sf_period_lookup={},
+        spp_lookup={},
+        ads_bids_lookup={},
+        stocks_lookup={},
+        onec_stocks_lookup={},
+        ads_compact_lookup={
+            first_nm_id: SimpleNamespace(ads_sum=0.0),
+            second_nm_id: SimpleNamespace(ads_sum=0.0),
+            uncovered_nm_id: SimpleNamespace(ads_sum=0.0),
+        },
+        fin_lookup={},
+        fin_storage_fee_total=None,
+        cost_price_lookup={},
+        promo_lookup={},
+        our_wb_cost_lookup={
+            first_nm_id: _unit_margin_cost_state(
+                sales_revenue=11000.0,
+                order_count=100.0,
+                cogs=1000.0,
+            ),
+            second_nm_id: _unit_margin_cost_state(
+                sales_revenue=5100.0,
+                order_count=10.0,
+                cogs=100.0,
+            ),
+            uncovered_nm_id: {
+                "our_wb_unit_cost_rub": None,
+                "daily_profit_coverage": {
+                    "sales_revenue_rub": 2000.0,
+                    "covered_sales_revenue_rub": 0.0,
+                    "uncovered_sales_revenue_rub": 2000.0,
+                    "sales_order_count": 20.0,
+                    "covered_sales_order_count": 0.0,
+                    "covered_sales_units": 0.0,
+                    "covered_sales_cogs_rub": 0.0,
+                },
+            },
+        },
+        column_date="2026-08-09",
+    )
+
+
+def _unit_margin_cost_state(
+    *,
+    sales_revenue: float,
+    order_count: float,
+    cogs: float,
+) -> dict[str, object]:
+    return {
+        "our_wb_unit_cost_rub": 10.0,
+        "calculated_at": "2026-08-09T12:00:00Z",
+        "daily_profit_coverage": {
+            "sales_revenue_rub": sales_revenue,
+            "covered_sales_revenue_rub": sales_revenue,
+            "uncovered_sales_revenue_rub": 0.0,
+            "sales_order_count": order_count,
+            "covered_sales_order_count": order_count,
+            "covered_sales_units": order_count,
+            "covered_sales_cogs_rub": cogs,
+        },
+    }
+
+
+def _unit_margin_contract_rows(
+    *,
+    config: list[ConfigV2Item],
+    date_columns: list[str],
+) -> list[WebVitrinaContractRow]:
+    profits_by_nm_id = {
+        config[0].nm_id: [9100.0, -910.0],
+        config[1].nm_id: [4550.0, ""],
+        config[2].nm_id: ["", ""],
+    }
+    order_sums = {
+        config[0].nm_id: 11000.0,
+        config[1].nm_id: 5100.0,
+        config[2].nm_id: 2000.0,
+    }
+    order_counts = {
+        config[0].nm_id: 100.0,
+        config[1].nm_id: 10.0,
+        config[2].nm_id: 20.0,
+    }
+    rows = [
+        WebVitrinaContractRow(
+            row_id=f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}",
+            row_order=1,
+            scope_kind="TOTAL",
+            scope_key="TOTAL",
+            scope_label="ИТОГО",
+            metric_key=PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+            metric_label="Прокси маржинальность 4",
+            row_last_updated_at="2026-08-09T12:00:00Z",
+            section="Экономика",
+            group=None,
+            nm_id=None,
+            format="percent",
+            values_by_date={column_date: 0.1 for column_date in date_columns},
+        )
+    ]
+    for config_item in config:
+        scope_key = f"SKU:{config_item.nm_id}"
+        values = {
+            date_columns[index]: value
+            for index, value in enumerate(profits_by_nm_id[config_item.nm_id])
+        }
+        common = {
+            "scope_kind": "SKU",
+            "scope_key": scope_key,
+            "scope_label": config_item.display_name,
+            "row_last_updated_at": "2026-08-09T12:00:00Z",
+            "section": "Экономика",
+            "group": config_item.group,
+            "nm_id": config_item.nm_id,
+        }
+        rows.extend(
+            [
+                WebVitrinaContractRow(
+                    row_id=f"{scope_key}|{PROXY_V4_PROFIT_RUB_METRIC_KEY}",
+                    row_order=len(rows) + 1,
+                    metric_key=PROXY_V4_PROFIT_RUB_METRIC_KEY,
+                    metric_label="Proxy прибыль 4",
+                    format="rub",
+                    values_by_date=values,
+                    **common,
+                ),
+                WebVitrinaContractRow(
+                    row_id=f"{scope_key}|{PROXY_V4_MARGIN_PCT_METRIC_KEY}",
+                    row_order=len(rows) + 2,
+                    metric_key=PROXY_V4_MARGIN_PCT_METRIC_KEY,
+                    metric_label="Прокси маржинальность 4",
+                    format="percent",
+                    values_by_date={column_date: 0.1 for column_date in date_columns},
+                    **common,
+                ),
+                WebVitrinaContractRow(
+                    row_id=f"{scope_key}|orderSum",
+                    row_order=len(rows) + 3,
+                    metric_key="orderSum",
+                    metric_label="Сумма заказов",
+                    format="rub",
+                    values_by_date={
+                        column_date: order_sums[config_item.nm_id]
+                        for column_date in date_columns
+                    },
+                    **common,
+                ),
+                WebVitrinaContractRow(
+                    row_id=f"{scope_key}|orderCount",
+                    row_order=len(rows) + 4,
+                    metric_key="orderCount",
+                    metric_label="Заказы",
+                    format="integer",
+                    values_by_date={
+                        column_date: order_counts[config_item.nm_id]
+                        for column_date in date_columns
+                    },
+                    **common,
+                ),
+            ]
+        )
+    return rows
 
 
 def _save_buyout_week(
