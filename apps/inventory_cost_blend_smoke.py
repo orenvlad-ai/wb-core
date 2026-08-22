@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -54,6 +55,10 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
     extend_metrics_with_proxy_v4,
 )
+from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
+    _transform_snapshot,
+    build_functional_economics_backfill_plan,
+)
 from packages.contracts.registry_upload_bundle_v1 import (  # noqa: E402
     ConfigV2Item,
     MetricV2Item,
@@ -71,11 +76,250 @@ def main() -> None:
     _test_history_boundary_preserves_compatibility_rows()
     _test_proxy_3_and_4_use_per_sku_blend_not_sale_cogs()
     _test_exact_facility_provenance_and_float_projection_tolerance()
+    _test_ordinary_functional_economics_publication()
     print("inventory_cost_blend_wb_ff_formula: ok")
     print("inventory_cost_blend_location_coverage_fail_closed: ok")
     print("inventory_cost_blend_transfer_reserve_history: ok")
     print("inventory_cost_blend_proxy_3_4_per_sku_total: ok")
     print("inventory_cost_blend_exact_provenance_decimal_tolerance: ok")
+    print("inventory_cost_blend_ordinary_publisher_before_after_noop: ok")
+
+
+def _test_ordinary_functional_economics_publication() -> None:
+    publisher_source = inspect.getsource(build_functional_economics_backfill_plan)
+    _assert(
+        publisher_source.index("warehouse_metrics =")
+        < publisher_source.index("\n    costs = {")
+        and "build_inventory_cost_blend_lookup(" in publisher_source
+        and '"wb_compat_costs": wb_compat_costs' in publisher_source
+        and '"proxy_v4_parameters": {' in publisher_source,
+        "ordinary planning builds exact-date capital before one versioned blend dependency",
+    )
+    dates = ["2026-08-21", INVENTORY_COST_BLEND_EFFECTIVE_DATE]
+    products = {
+        801: _product(
+            wb=("1", "100"),
+            ff=(
+                "9",
+                "90",
+                [_location("fff_moscow", "FBS", "9", "90")],
+            ),
+        ),
+        802: _product(wb=("5", "250")),
+        803: _product(),
+    }
+    wb_compat = {
+        801: {"our_wb_unit_cost_rub": 100.0, "stock_qty": 1.0},
+        802: {"our_wb_unit_cost_rub": 50.0, "stock_qty": 5.0},
+    }
+    blended = build_inventory_cost_blend_lookup(
+        as_of_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+        wb_compat_lookup=wb_compat,
+        product_capital_lookup=products,
+    )
+    v3 = {day: DEFAULT_PROXY_PARAMETERS for day in dates}
+    v4 = {day: _proxy_v4_parameters() for day in dates}
+    snapshot = {
+        "bundle_version": "ordinary-publisher-smoke",
+        "as_of_date": INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+        "refreshed_at": "2026-08-22T06:20:00Z",
+        "plan_json": json.dumps(
+            {
+                "date_columns": dates,
+                "sheets": [
+                    {
+                        "sheet_name": "DATA_VITRINA",
+                        "write_start_cell": "A1",
+                        "header": ["Показатель", "row_id", *dates],
+                        "rows": [
+                            ["SKU 801", "SKU:801|orderSum", 1000, 1000],
+                            ["SKU 801", "SKU:801|orderCount", 10, 10],
+                            ["SKU 801", "SKU:801|ads_sum", 100, 100],
+                            ["SKU 802", "SKU:802|orderSum", 500, 500],
+                            ["SKU 802", "SKU:802|orderCount", 5, 5],
+                            ["SKU 802", "SKU:802|ads_sum", 50, 50],
+                            ["SKU 803", "SKU:803|orderSum", 0, 0],
+                            ["SKU 803", "SKU:803|orderCount", 0, 0],
+                            ["SKU 803", "SKU:803|ads_sum", 0, 0],
+                            ["cost 801", "SKU:801|our_wb_unit_cost_rub", 100, 100],
+                            ["cost 802", "SKU:802|our_wb_unit_cost_rub", 50, 50],
+                            ["TOTAL cost", "TOTAL|total_our_wb_unit_cost_rub", 58.333333333333336, 58.333333333333336],
+                            ["Proxy 4 801", "SKU:801|proxy_profit_4_rub", 111, 111],
+                            ["Proxy 4 802", "SKU:802|proxy_profit_4_rub", 222, 222],
+                            ["Proxy 4 margin 801", "SKU:801|proxy_margin_4_pct", 0.1, 0.1],
+                            ["Proxy 4 margin 802", "SKU:802|proxy_margin_4_pct", 0.2, 0.2],
+                            ["Proxy 4 unit 801", "SKU:801|proxy_margin_per_unit_rub", 11, 11],
+                            ["Proxy 4 unit 802", "SKU:802|proxy_margin_per_unit_rub", 22, 22],
+                            ["TOTAL Proxy 4", "TOTAL|total_proxy_profit_4_rub", 333, 333],
+                            ["TOTAL Proxy 4 margin", "TOTAL|proxy_margin_4_pct_total", 0.15, 0.15],
+                            ["TOTAL Proxy 4 unit", "TOTAL|proxy_margin_per_unit_rub_total", 16.5, 16.5],
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+    }
+    result = _transform_snapshot(
+        snapshot,
+        costs={dates[0]: wb_compat, dates[1]: blended},
+        warehouse_metrics={dates[0]: products, dates[1]: products},
+        warehouse_exact_dates=set(dates),
+        warehouse_covered_nm_ids={day: {801, 802, 803} for day in dates},
+        warehouse_version_ids={day: "whfv_exact_as_of" for day in dates},
+        parameters=v3,
+        proxy_v4_parameters=v4,
+        source_fingerprint="sha256:ordinary-publisher-shared-source",
+        cutover_business_date="2026-07-18",
+        operation_business_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    )
+    payload = json.loads(result["after_plan_json"])
+    rows = {row[1]: row for row in payload["sheets"][0]["rows"]}
+    _equal(
+        rows["SKU:801|our_wb_unit_cost_rub"][3],
+        Decimal("19"),
+        "ordinary publisher replaces WB-only cost with exact WB+FF SKU WAC",
+    )
+    _equal(
+        rows["TOTAL|total_our_wb_unit_cost_rub"][3],
+        Decimal("29.333333333333332"),
+        "ordinary publisher TOTAL is sum capital / sum quantity",
+    )
+    expected_v3 = calculate_proxy_3(
+        order_sum=1000,
+        order_count=10,
+        canonical_wb_wac=19,
+        ads_sum=100,
+        parameters=DEFAULT_PROXY_PARAMETERS,
+    )
+    expected_v4 = calculate_proxy_4(
+        order_sum=1000,
+        order_count=10,
+        canonical_wb_wac=19,
+        ads_sum=100,
+        parameters=_proxy_v4_parameters(),
+        business_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    )
+    _equal(
+        rows["SKU:801|proxy_profit_3_rub"][3],
+        expected_v3["proxy_profit_3"],
+        "ordinary Proxy 3 consumes the same SKU blend",
+    )
+    _equal(
+        rows["SKU:801|proxy_profit_4_rub"][3],
+        expected_v4["proxy_profit_4"],
+        "ordinary Proxy 4 consumes the same SKU blend",
+    )
+    _equal(
+        rows["TOTAL|total_proxy_profit_4_rub"][3],
+        Decimal(str(rows["SKU:801|proxy_profit_4_rub"][3]))
+        + Decimal(str(rows["SKU:802|proxy_profit_4_rub"][3])),
+        "ordinary Proxy 4 TOTAL sums eligible SKU results",
+    )
+    _assert(
+        abs(
+            Decimal(str(rows["TOTAL|proxy_margin_4_pct_total"][3]))
+            - Decimal(str(rows["TOTAL|total_proxy_profit_4_rub"][3]))
+            / Decimal("1500")
+        )
+        < Decimal("0.000000000000001"),
+        "ordinary Proxy 4 TOTAL margin uses summed eligible revenue",
+    )
+    _assert(
+        abs(
+            Decimal(str(rows["TOTAL|proxy_margin_per_unit_rub_total"][3]))
+            - Decimal(str(rows["TOTAL|total_proxy_profit_4_rub"][3]))
+            / Decimal("15")
+        )
+        < Decimal("0.00000000000001"),
+        "ordinary Proxy 4 TOTAL unit margin uses summed eligible quantity",
+    )
+    marker = payload["metadata"]["functional_economics_backfill"]
+    evidence = marker["inventory_cost_publication"]["date_evidence"][dates[1]]
+    _assert(
+        marker["source_fingerprint"]
+        == "sha256:ordinary-publisher-shared-source"
+        and marker["inventory_cost_publication"]["formula_version"]
+        == "our_inventory_wac_wb_ff_v1"
+        and evidence["functional_version_ids"] == ["whfv_exact_as_of"]
+        and Decimal(evidence["capital_rub"]) == Decimal("440")
+        and Decimal(evidence["quantity"]) == Decimal("15"),
+        "cost, Proxy 3 and Proxy 4 publish one versioned dependency evidence",
+    )
+    _assert(
+        rows["SKU:803|our_wb_unit_cost_rub"][3] == ""
+        and rows["SKU:803|proxy_profit_3_rub"][3] == ""
+        and rows["SKU:803|proxy_profit_4_rub"][3] == ""
+        and rows["TOTAL|total_proxy_profit_4_rub"][3] != "",
+        "zero-order/no-inventory SKU remains missing while eligible Proxy totals stay published",
+    )
+    presentation = payload["metadata"]["server_cell_presentation"][
+        "TOTAL|total_our_wb_unit_cost_rub"
+    ][dates[1]]
+    _assert(
+        presentation["source"] == "WebCore · WB+FF"
+        and "version whfv_exact_as_of" in presentation["reason"],
+        "ordinary cost presentation retains exact source version and freshness",
+    )
+    repeated = _transform_snapshot(
+        {**snapshot, "plan_json": result["after_plan_json"]},
+        costs={dates[0]: wb_compat, dates[1]: blended},
+        warehouse_metrics={dates[0]: products, dates[1]: products},
+        warehouse_exact_dates=set(dates),
+        warehouse_covered_nm_ids={day: {801, 802, 803} for day in dates},
+        warehouse_version_ids={day: "whfv_exact_as_of" for day in dates},
+        parameters=v3,
+        proxy_v4_parameters=v4,
+        source_fingerprint="sha256:ordinary-publisher-shared-source",
+        cutover_business_date="2026-07-18",
+        operation_business_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    )
+    _assert(
+        repeated["changed_cells"] == 0
+        and repeated["inserted_rows"] == 0
+        and repeated["presentation_changes"] == 0
+        and repeated["coverage_changes"] == 0,
+        "ordinary publisher exact repeat is a no-op",
+    )
+    missing_positive_payload = json.loads(result["after_plan_json"])
+    missing_positive_rows = {
+        row[1]: row
+        for row in missing_positive_payload["sheets"][0]["rows"]
+    }
+    missing_positive_rows["SKU:803|orderSum"][3] = 100
+    missing_positive = _transform_snapshot(
+        {
+            **snapshot,
+            "plan_json": json.dumps(
+                missing_positive_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
+        costs={dates[0]: wb_compat, dates[1]: blended},
+        warehouse_metrics={dates[0]: products, dates[1]: products},
+        warehouse_exact_dates=set(dates),
+        warehouse_covered_nm_ids={day: {801, 802, 803} for day in dates},
+        warehouse_version_ids={day: "whfv_exact_as_of" for day in dates},
+        parameters=v3,
+        proxy_v4_parameters=v4,
+        source_fingerprint="sha256:ordinary-publisher-missing-positive",
+        cutover_business_date="2026-07-18",
+        operation_business_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    )
+    missing_positive_after = {
+        row[1]: row
+        for row in json.loads(missing_positive["after_plan_json"])["sheets"][0][
+            "rows"
+        ]
+    }
+    _assert(
+        missing_positive_after["TOTAL|total_proxy_profit_3_rub"][3] == ""
+        and missing_positive_after["TOTAL|total_proxy_profit_4_rub"][3] == ""
+        and missing_positive_after["TOTAL|proxy_margin_4_pct_total"][3] == "",
+        "positive orders with missing blended cost fail closed for both Proxy totals",
+    )
 
 
 def _test_wb_only_ff_only_and_mixed_formula() -> None:

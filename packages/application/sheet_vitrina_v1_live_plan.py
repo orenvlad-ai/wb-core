@@ -44,6 +44,7 @@ from packages.application.inventory_cost_blend import (
     INVENTORY_COST_BLEND_EFFECTIVE_DATE,
     aggregate_inventory_cost_evidence,
     build_inventory_cost_blend_lookup,
+    inventory_cost_evidence_reason,
 )
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -5361,51 +5362,7 @@ def _inventory_cost_cell_presentation(
 
 
 def _inventory_cost_evidence_reason(evidence: Mapping[str, Any]) -> str:
-    if str(evidence.get("status") or "") != "resolved":
-        reasons = evidence.get("reason_codes") or [evidence.get("reason")]
-        reason_text = ", ".join(str(item) for item in reasons if item)
-        return (
-            "WB+FF себестоимость недоступна: "
-            f"{reason_text or 'неполная exact location evidence'}; missing не превращён в zero."
-        )
-    wb = evidence.get("wb") if isinstance(evidence.get("wb"), Mapping) else None
-    ff = evidence.get("ff") if isinstance(evidence.get("ff"), Mapping) else None
-    if wb is None or ff is None:
-        by_stage = {
-            str(item.get("warehouse_family") or ""): item
-            for item in evidence.get("stages") or []
-            if isinstance(item, Mapping)
-        }
-        wb = by_stage.get("WB", {})
-        ff = by_stage.get("FF", {})
-    facilities = evidence.get("facility_pools")
-    if not isinstance(facilities, list):
-        facilities = list((ff or {}).get("locations") or [])
-    facility_text = "; ".join(
-        f"{item.get('facility_id')}/{item.get('pool')}: "
-        f"{item.get('quantity')} шт, {item.get('capital_rub')} ₽, "
-        f"WAC {item.get('wac_rub')} ₽/шт"
-        for item in facilities
-        if isinstance(item, Mapping)
-    )
-    versions = evidence.get("functional_version_ids") or [
-        evidence.get("functional_version_id")
-    ]
-    publications = evidence.get("published_at")
-    if not isinstance(publications, list):
-        publications = [publications]
-    version_text = ",".join(str(item) for item in versions if item)
-    publication_text = ",".join(str(item) for item in publications if item)
-    return (
-        f"WB: {(wb or {}).get('quantity', '0')} шт, {(wb or {}).get('capital_rub', '0')} ₽, "
-        f"WAC {(wb or {}).get('wac_rub')} ₽/шт; "
-        f"FF: {(ff or {}).get('quantity', '0')} шт, {(ff or {}).get('capital_rub', '0')} ₽, "
-        f"WAC {(ff or {}).get('wac_rub')} ₽/шт; "
-        f"покрытие {evidence.get('cost_covered_quantity')}/{evidence.get('quantity')} шт; "
-        f"facility/pool: {facility_text or 'нет положительных FF location rows'}; "
-        f"version {version_text or 'missing'}, published {publication_text or 'missing'}; "
-        "quantity basis: physical inventory, reserve не создаёт капитал."
-    )
+    return inventory_cost_evidence_reason(evidence)
 
 
 def _own_product_capital_cell_presentation(
