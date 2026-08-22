@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
+  - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
 related_modules:
   - "packages/contracts/web_vitrina_contract.py"
   - "packages/contracts/web_vitrina_view_model.py"

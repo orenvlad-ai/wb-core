@@ -3,20 +3,22 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать shared channel/location-aware `Себестоимость наша`, Proxy 3/4 и coverage-safe profit semantics поверх canonical functional warehouse/cost engine."
-scope: "Public metric keys, FBS handoff WAC, daily WB/FBO WAC, Proxy profit/margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
+purpose: "Разделить информационную as-of `Себестоимость наша` WB+FF для Витрины/Proxy 3/4 и exact sale-specific COGS для Finance/Partner."
+scope: "Public metric keys, WB+FF inventory WAC, FBS handoff WAC, daily WB/FBO sale cost, Proxy profit/margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
+  - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/calculation_parameters.py"
   - "packages/application/calculation_parameters_v4.py"
   - "packages/application/our_wb_costs.py"
   - "packages/application/canonical_wb_cost_resolver.py"
+  - "packages/application/inventory_cost_blend.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/sheet_vitrina_v1_proxy_v4.py"
   - "packages/application/proxy_v4_historical_projection.py"
@@ -36,35 +38,61 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "One channel/location resolver separates exact FBS handoff WAC from WB/FBO daily WAC; uncovered sales stay visible but are excluded from every profit numerator and profitability denominator."
+update_note: "Vitrina and indicative Proxy 3/4 use an exact as-of WB+FF inventory blend; realized Finance/Partner keep exact channel/location sale COGS and partial-coverage exclusion."
 ---
 
 # 1. Canonical `Себестоимость наша`
 
-The user-facing label is `Себестоимость наша`. One
-`canonical_our_cost_channel_location_v1` resolver serves Vitrina, Finance,
-Partner and Proxy and first classifies channel plus exact location. FBS uses
-only the immutable positive WAC frozen by the lifecycle debit at the durable
-handoff order for exact `facility_id + FBS + nmId`. Missing privacy-safe order
-identity, facility mapping, lifecycle debit or WAC remains unavailable with a
-reason; another facility/SKU, WB/FBO daily cost, average, legacy fallback and
-zero are forbidden. A fulfilled order never changes after later overhead.
+The user-facing label is `Себестоимость наша`. Starting with the forward-only
+business boundary `2026-08-22`, public keys `our_wb_unit_cost_rub` /
+`total_our_wb_unit_cost_rub` are an informational as-of physical-inventory WAC
+over exactly two mutually exclusive functional stages: `WB` plus `FF`.
 
-WB/FBO keep the canonical daily warehouse WAC. Public keys
-`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` retain compatibility but
-render `Себестоимость наша, ₽/шт`. Отдельная formula/baseline в module 40
-запрещена. Единственное data-backed archival исключение для WB/FBO — active
-versioned manifest migration 109: ровно 18 legacy `nmId`, 100 ₽ с effective
-date 01.07.2026 и quality `business_approved_archival_estimate`; Finance не
-содержит веток по этим ID.
+- SKU value = `SUM(exact WB/FF location capital) / SUM(exact physical quantity)`;
+- TOTAL = `SUM(capital for every included SKU/location) / SUM(quantity)` and is
+  never the arithmetic mean of SKU, facility or warehouse WACs;
+- FF evidence retains exact `facility_id + pool(FBS|FBO) + nmId`; facility/pool
+  rows reconcile to the FF aggregate and are disclosure, never additional
+  capital rows;
+- the cell publishes functional version, effective/published timestamps,
+  source watermarks, WB/FF split, facility/pool split and cost coverage;
+- reserve is not subtracted from physical inventory and creates zero capital;
+  a unit transferred FF→WB remains in exactly one included stage, so the blend
+  neither omits nor duplicates it;
+- positive quantity with missing cost, version, facility/pool evidence or
+  coverage leaves the SKU and every dependent positive-order TOTAL blank with
+  reason evidence; cross-SKU/facility fallback and missing→zero are forbidden.
+
+Exact-date functional versions preserve as-of history. Ordinary refresh may
+publish the current business date from its exact latest good version, but a
+later business-date overhead/version never rewrites an earlier ready date.
+Ready dates before `2026-08-22` retain their existing WB compatibility values;
+this repo/live release is not a historical backfill.
+
+This informational blend is deliberately not realized sale COGS. Finance and
+Partner continue to use `canonical_our_cost_channel_location_v1`: FBS uses only
+the immutable positive WAC frozen by the lifecycle debit at durable handoff for
+exact `facility_id + FBS + nmId`; WB/FBO use the exact canonical daily WB WAC.
+Missing privacy-safe order identity, facility mapping, lifecycle debit or cost
+remains uncovered and is excluded from profit numerator and profitability
+revenue denominator. Another facility/SKU, blended inventory WAC, legacy
+fallback and zero are forbidden. A fulfilled order never changes after later
+overhead.
+
+The only data-backed archival exception inside the WB/FBO realized contour is
+the active versioned migration-109 manifest: exactly 18 legacy `nmId`, 100 ₽
+effective 01.07.2026 with quality `business_approved_archival_estimate`;
+Finance contains no ID-specific fallback branch.
 
 WB quantity задаёт только complete official contour snapshot:
 
 `quantity + inWayToClient + inWayFromClient`.
 
-Accepted WB supply добавляет доказанный inbound capital, но не quantity поверх snapshot. Periodic WAC сохраняет last valid cost при zero stock; late cost evidence запускает targeted replay от effective business date. TOTAL cost:
-
-`SUM(WB contour capital) / SUM(WB contour quantity)`.
+Accepted WB supply добавляет доказанный inbound capital, но не quantity поверх
+snapshot. Periodic WAC сохраняет last valid cost при zero stock; late cost
+evidence запускает targeted replay от effective business date. The WB daily
+contour remains a realized-cost input and one operand/disclosure of the
+informational blend; it is no longer the entire visible TOTAL cost.
 
 For WB/FBO and only after channel classification, the temporal branch chooses
 the exact same-`nmId` daily row. Для даты до `2026-07-01` он выбирает exact
@@ -140,14 +168,21 @@ Initial historical materialization — отдельная production-mutation. �
 
 # 3. Proxy 3 formula
 
-Public Proxy 3 contract применяется ко всей активной истории. Для даты до `2026-07-01` canonical cost и versioned calculation parameters, effective на `2026-07-01`, проецируются назад; order/ads operands остаются значениями фактической исторической даты. На/после границы используются exact-date cost и effective settings. Legacy Proxy 2 definitions сохраняются только как technical audit и никогда не подменяют Proxy 3. Для SKU/date:
+Proxy 3 is intentionally indicative, not an actual-report profit surface. For
+dates before `2026-08-22`, the entire previous ready compatibility projection
+remains unchanged, including its covered-sales proxy operands and WB cost. On
+and after that boundary the cost operand is the same visible per-SKU
+informational WB+FF `Себестоимость наша`, while full order/count/ads operands
+remain date-specific and versioned calculation parameters retain their
+effective-date contract. Legacy Proxy 2 definitions are technical audit only
+and never substitute Proxy 3. For a new-boundary SKU/date:
 
 ```text
 expected_buyout_revenue = orderSum × buyout_rate
 expected_buyout_qty     = orderCount × buyout_rate
 included_expense_rate   = SUM(enabled versioned expense rates)
 proxy_profit_3           = expected_buyout_revenue × (1 − included_expense_rate)
-                           − expected_buyout_qty × canonical_WB_WAC
+                           − expected_buyout_qty × blended_inventory_WAC
                            − ads_sum
 proxy_margin_3           = proxy_profit_3 / expected_buyout_revenue
 ```
@@ -163,13 +198,17 @@ Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3
 
 ## 3.1 Proxy 4 formula
 
-Для SKU/date on/after `2026-08-01` используется только effective immutable V4 revision:
+Для SKU/date on/after `2026-08-01` используется только effective immutable V4
+revision. Its operand selection follows the same forward-only historical rule
+as Proxy 3: the entire prior ready proxy projection stays frozen before
+`2026-08-22`; exact as-of WB+FF inventory blend plus full informational
+order/count/ads apply on/after that date.
 
 ```text
 expected_buyout_revenue = orderSum × V4 buyout_rate
 expected_buyout_qty     = orderCount × V4 buyout_rate
 proxy_profit_4          = expected_buyout_revenue × (1 − included_expense_rate)
-                          − expected_buyout_qty × canonical_WB_WAC
+                          − expected_buyout_qty × blended_inventory_WAC
                           − ads_sum
 proxy_margin_4          = proxy_profit_4 / expected_buyout_revenue
 ```
@@ -184,9 +223,26 @@ The complete dependency closure — `cost_price_rub`, `avg_cost_price_rub`, `pro
 
 # 4. Quality and consumers
 
-Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers, `business_approved_archival_estimate`). Vitrina does not invent a value when a required persisted source is truly absent. All active direct consumers, including товарный капитал, его рентабельность, web-vitrina, Finance, Partner, Proxy 3, Proxy 4 and `Управление SKU`, call the same temporal functional projection; independent retro maps and hidden fallback to 1C/legacy cost are prohibited.
+Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`,
+`interpolation`, `extrapolation`, `fallback average`, confirmed downstream
+layers, `business_approved_archival_estimate`). Vitrina does not invent a value
+when a required persisted source is absent. The functional warehouse version
+is the shared physical/capital source, but consumers deliberately split:
+Vitrina and Proxy 3/4 use `our_inventory_wac_wb_ff_v1`; Finance and Partner use
+exact sale-specific `canonical_our_cost_channel_location_v1`. Neither contour
+may fall back to 1C/legacy cost, another SKU/location or zero.
 
-Late transit, FF services, storage, paid WB acceptance, supplier financial rows and bank commissions bind to the originating shipment/supply cost layer. Transit/services/storage allocate over the full corrected sent composition; paid acceptance allocates over accepted quantity. Their business date is source provenance, not upload time. A late component queues one coalesced affected-SKU revision and rebuilds dependent WAC/capital/COGS/Finance/Proxy history without another physical movement. Confirmed zero is distinct from missing/not-requested/updating/not-found/source-error/session-expired; every unknown state stays `null`, never `0 ₽`.
+Late transit, FF services, storage, paid WB acceptance, supplier financial rows
+and bank commissions bind to the originating shipment/supply cost layer.
+Transit/services/storage allocate over the full corrected sent composition;
+paid acceptance allocates over accepted quantity. Their business date is source
+provenance, not upload time. A late component queues one coalesced affected-SKU
+revision and updates current/future inventory WAC plus explicitly dependent
+realized projections without another physical movement. It never rewrites a
+fulfilled FBS frozen WAC or an earlier ready Vitrina/Proxy date through ordinary
+refresh; a bounded historical correction would require its own manifest and
+gate. Confirmed zero is distinct from missing/not-requested/updating/not-found/
+source-error/session-expired; every unknown state stays `null`, never `0 ₽`.
 
 Supplier financial-document exclusion is an active-source correction, not a
 presentation filter. Excluded parent documents and their expense lines are

@@ -19,6 +19,7 @@ source_basis:
   - "migration/115_ads_upstream_shape_evidence.md"
   - "migration/116_ads_http_200_null_sentinel.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
+  - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
 related_modules:
   - "packages/application/partner_report.py"
   - "packages/application/wb_finance_weekly.py"

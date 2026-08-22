@@ -2199,6 +2199,7 @@ class OwnProductCapitalBlock:
             version_candidates = conn.execute(
                 """SELECT version.version_id,version.effective_at,
                           version.business_effective_date,version.published_at,
+                          version.created_at,version.source_watermarks_json,
                           snapshot.requested_nm_ids_json,snapshot.items_json
                    FROM sheet_vitrina_v1_warehouse_functional_versions version
                    JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
@@ -2300,6 +2301,7 @@ class OwnProductCapitalBlock:
             target: dict[str, Any] = {
                 "presentation_reasons": [],
                 "stage_presentation": {},
+                "_inventory_cost_stages": {},
             }
             for public_stage in OWN_PRODUCT_CAPITAL_STAGES:
                 target[own_stage_metric_key(public_stage, "qty")] = 0.0
@@ -2327,7 +2329,11 @@ class OwnProductCapitalBlock:
             certified = bool(row["certified"])
             target = result.setdefault(
                 nm_id,
-                {"presentation_reasons": [], "stage_presentation": {}},
+                {
+                    "presentation_reasons": [],
+                    "stage_presentation": {},
+                    "_inventory_cost_stages": {},
+                },
             )
             target[own_stage_metric_key(public_stage, "qty")] = float(qty)
             target[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = float(qty)
@@ -2356,6 +2362,13 @@ class OwnProductCapitalBlock:
                 "state": "confirmed" if certified or qty <= ZERO else "unconfirmed",
                 "reason": "; ".join(reasons),
             }
+            if public_stage in {"WB", "FF"}:
+                target["_inventory_cost_stages"][public_stage] = (
+                    _inventory_cost_stage_evidence(
+                        row,
+                        public_stage=public_stage,
+                    )
+                )
             # Preserve legacy metric keys as a compatibility projection of the
             # active positive discrepancy warehouse, never of open FF→WB transit.
             if public_stage == "WB_ACCEPTANCE_DISCREPANCY":
@@ -2400,6 +2413,13 @@ class OwnProductCapitalBlock:
             target["_warehouse_version_is_active"] = bool(
                 active is not None
                 and str(active["version_id"]) == str(version["version_id"])
+            )
+            target["_warehouse_effective_at"] = str(version["effective_at"] or "")
+            target["_warehouse_published_at"] = str(
+                version["published_at"] or version["created_at"] or ""
+            )
+            target["_warehouse_source_watermarks"] = _json_loads(
+                version["source_watermarks_json"]
             )
         return result
 
@@ -3509,6 +3529,110 @@ def _json_array(value: Any) -> list[Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     return list(parsed) if isinstance(parsed, list) else []
+
+
+def _inventory_cost_stage_evidence(
+    row: Mapping[str, Any],
+    *,
+    public_stage: str,
+) -> dict[str, Any]:
+    """Expose privacy-safe exact WB/FF operands for the Vitrina blend.
+
+    Functional balances remain the capital/quantity authority.  The FF
+    facility/pool rows embedded in immutable balance provenance are disclosure
+    evidence only; they must reconcile to the aggregate and are never added as
+    a second stage operand.
+    """
+
+    quantity = _decimal(row.get("quantity"))
+    capital = _decimal(row.get("capital_rub"))
+    covered = _decimal(row.get("cost_covered_quantity"))
+    locations: list[dict[str, Any]] = []
+    location_status = "exact"
+    if public_stage == "WB":
+        locations = [
+            {
+                "warehouse_family": "WB",
+                "facility_id": "",
+                "pool": "WB",
+                "quantity": format(quantity, "f"),
+                "capital_rub": format(capital, "f"),
+                "wac_rub": (
+                    format(capital / quantity, "f") if quantity > ZERO else None
+                ),
+            }
+        ]
+    else:
+        provenance = _json_loads(row.get("provenance_json"))
+        candidates: dict[str, list[dict[str, Any]]] = {}
+        for source_record in provenance.get("source_records") or []:
+            if not isinstance(source_record, Mapping):
+                continue
+            raw_locations = source_record.get("locations") or []
+            if not isinstance(raw_locations, list) or not raw_locations:
+                continue
+            parsed: list[dict[str, Any]] = []
+            location_quantity = ZERO
+            location_capital = ZERO
+            valid = True
+            for raw_location in raw_locations:
+                if not isinstance(raw_location, Mapping):
+                    valid = False
+                    break
+                facility_id = str(raw_location.get("facility_id") or "").strip()
+                pool = str(raw_location.get("pool") or "").strip().upper()
+                if not facility_id or pool not in {"FBS", "FBO"}:
+                    valid = False
+                    break
+                item_quantity = _decimal(raw_location.get("quantity"))
+                item_capital = _decimal(raw_location.get("capital_rub"))
+                if item_quantity < ZERO or item_capital < ZERO:
+                    valid = False
+                    break
+                location_quantity += item_quantity
+                location_capital += item_capital
+                parsed.append(
+                    {
+                        "warehouse_family": "FF",
+                        "facility_id": facility_id,
+                        "pool": pool,
+                        "quantity": format(item_quantity, "f"),
+                        "capital_rub": format(item_capital, "f"),
+                        "wac_rub": (
+                            format(item_capital / item_quantity, "f")
+                            if item_quantity > ZERO
+                            else None
+                        ),
+                    }
+                )
+            if (
+                not valid
+                or location_quantity != quantity
+                or abs(location_capital - capital) > MONEY_QUANT
+            ):
+                continue
+            parsed.sort(key=lambda item: (item["facility_id"], item["pool"]))
+            candidates[_json_dumps(parsed)] = parsed
+        if len(candidates) == 1:
+            locations = next(iter(candidates.values()))
+        else:
+            location_status = (
+                "missing_facility_pool_evidence"
+                if not candidates
+                else "ambiguous_facility_pool_evidence"
+            )
+
+    return {
+        "warehouse_family": public_stage,
+        "quantity": format(quantity, "f"),
+        "capital_rub": format(capital, "f"),
+        "cost_covered_quantity": format(covered, "f"),
+        "wac_rub": format(capital / quantity, "f") if quantity > ZERO else None,
+        "quality": str(row.get("quality") or "coverage_gap"),
+        "certified": bool(row.get("certified")),
+        "location_status": location_status,
+        "locations": locations,
+    }
 
 
 def _literal_like_prefix(value: str) -> str:

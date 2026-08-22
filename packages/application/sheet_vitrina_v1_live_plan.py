@@ -40,6 +40,11 @@ from packages.application.calculation_parameters_v4 import (
     calculate_proxy_4,
 )
 from packages.application.fin_report_daily_block import FinReportDailyBlock
+from packages.application.inventory_cost_blend import (
+    INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    aggregate_inventory_cost_evidence,
+    build_inventory_cost_blend_lookup,
+)
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
@@ -1390,6 +1395,12 @@ class SheetVitrinaV1LivePlanBlock:
                     ].incident_projection_quality
                 },
                 "server_cell_presentation": _merge_cell_presentations(
+                    _inventory_cost_cell_presentation(
+                        enabled_config=enabled_config,
+                        displayed_metrics=displayed_metrics,
+                        temporal_slots=temporal_slots,
+                        live_sources=live_sources,
+                    ),
                     _own_product_capital_cell_presentation(
                         enabled_config=enabled_config,
                         displayed_metrics=displayed_metrics,
@@ -1786,6 +1797,11 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             except Exception:
                 current_lookups.own_product_capital_lookup = {}
+            current_lookups.our_wb_cost_lookup = build_inventory_cost_blend_lookup(
+                as_of_date=slot.column_date,
+                wb_compat_lookup=current_lookups.our_wb_cost_lookup,
+                product_capital_lookup=current_lookups.own_product_capital_lookup,
+            )
             try:
                 current_lookups.sku_action_lookup = self.runtime.load_sku_action_daily_metric_lookup(
                     slot.column_date
@@ -2965,20 +2981,20 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY:
-                value = self._aggregate_covered_proxy_profit_sum(
+                value = self._aggregate_proxy_profit_sum(
                     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
                     self.enabled_config,
                     temporal_slot,
                 )
             elif metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY:
                 parameters = self._proxy_parameters(temporal_slot)
-                covered_order_sum = self._aggregate_covered_order_sum(
+                proxy_order_sum = self._aggregate_proxy_order_sum(
                     self.enabled_config, temporal_slot
                 )
                 expected_revenue = (
                     None
-                    if covered_order_sum is None
-                    else float(covered_order_sum) * float(parameters.buyout_rate)
+                    if proxy_order_sum is None
+                    else float(proxy_order_sum) * float(parameters.buyout_rate)
                 )
                 value = _divide_or_none(
                     self.resolve_total(
@@ -3174,7 +3190,7 @@ class _MetricEvaluator:
                 OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
                 PROXY_V4_PROFIT_RUB_METRIC_KEY,
             }:
-                value = self._aggregate_covered_proxy_profit_sum(
+                value = self._aggregate_proxy_profit_sum(
                     metric.metric_key,
                     group_items,
                     temporal_slot,
@@ -3189,7 +3205,7 @@ class _MetricEvaluator:
                 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
                 PROXY_V4_MARGIN_PCT_METRIC_KEY,
             }:
-                covered_order_sum = self._aggregate_covered_order_sum(
+                proxy_order_sum = self._aggregate_proxy_order_sum(
                     group_items, temporal_slot
                 )
                 parameters = (
@@ -3199,12 +3215,12 @@ class _MetricEvaluator:
                 )
                 denominator = (
                     None
-                    if covered_order_sum is None or parameters is None
-                    else float(covered_order_sum)
+                    if proxy_order_sum is None or parameters is None
+                    else float(proxy_order_sum)
                     * float(parameters.buyout_rate)
                 )
                 value = _divide_or_none(
-                    self._aggregate_covered_proxy_profit_sum(
+                    self._aggregate_proxy_profit_sum(
                         (
                             OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY
                             if metric.metric_key
@@ -3291,9 +3307,13 @@ class _MetricEvaluator:
                 item.nm_id,
                 temporal_slot,
             )
-            inputs = self._covered_proxy_inputs(item.nm_id, temporal_slot)
+            inputs = self._proxy_inputs(item.nm_id, temporal_slot)
             if profit is None or inputs is None:
-                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                if (
+                    self._is_pre_blend_slot(temporal_slot)
+                    and self._proxy_coverage_state(item.nm_id, temporal_slot)
+                    == "uncovered"
+                ):
                     continue
                 raw_order_sum = self.resolve_sku(
                     "orderSum", item.nm_id, temporal_slot
@@ -3325,22 +3345,30 @@ class _MetricEvaluator:
             "proxy_margin_4": None if revenue == 0 else profit / revenue,
         }
 
-    def _aggregate_covered_order_sum(
+    def _aggregate_proxy_order_sum(
         self,
         config_items: Iterable[ConfigV2Item],
         temporal_slot: str,
     ) -> float | None:
         values: list[float] = []
         for item in config_items:
-            inputs = self._covered_proxy_inputs(item.nm_id, temporal_slot)
+            inputs = self._proxy_inputs(item.nm_id, temporal_slot)
             if inputs is None:
-                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                if (
+                    self._is_pre_blend_slot(temporal_slot)
+                    and self._proxy_coverage_state(item.nm_id, temporal_slot)
+                    == "uncovered"
+                ):
                     continue
-                return None
+                raw_order_sum = self.resolve_sku("orderSum", item.nm_id, temporal_slot)
+                if raw_order_sum is None or float(raw_order_sum) > 0:
+                    return None
+                if float(raw_order_sum) <= 0:
+                    continue
             values.append(float(inputs["order_sum"]))
         return sum(values) if values else None
 
-    def _aggregate_covered_proxy_profit_sum(
+    def _aggregate_proxy_profit_sum(
         self,
         metric_key: str,
         config_items: Iterable[ConfigV2Item],
@@ -3350,11 +3378,54 @@ class _MetricEvaluator:
         for item in config_items:
             value = self.resolve_sku(metric_key, item.nm_id, temporal_slot)
             if value is None:
-                if self._proxy_coverage_state(item.nm_id, temporal_slot) == "uncovered":
+                if (
+                    self._is_pre_blend_slot(temporal_slot)
+                    and self._proxy_coverage_state(item.nm_id, temporal_slot)
+                    == "uncovered"
+                ):
+                    continue
+                raw_order_sum = self.resolve_sku("orderSum", item.nm_id, temporal_slot)
+                if raw_order_sum is not None and float(raw_order_sum) <= 0:
                     continue
                 return None
             values.append(float(value))
         return sum(values) if values else None
+
+    def _proxy_inputs(
+        self,
+        nm_id: int,
+        temporal_slot: str,
+    ) -> dict[str, float] | None:
+        """Preserve ready history, then use the informational WB+FF WAC."""
+
+        if (
+            self._slot_lookups(temporal_slot).column_date
+            < INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ):
+            return self._covered_proxy_inputs(nm_id, temporal_slot)
+
+        order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+        order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
+        ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
+        unit_cost = _optional_float(
+            self._slot_lookups(temporal_slot)
+            .our_wb_cost_lookup.get(nm_id, {})
+            .get("our_wb_unit_cost_rub")
+        )
+        if None in {order_sum, order_count, ads_sum, unit_cost}:
+            return None
+        return {
+            "order_sum": float(order_sum),
+            "order_count": float(order_count),
+            "ads_sum": float(ads_sum),
+            "unit_cost": float(unit_cost),
+        }
+
+    def _is_pre_blend_slot(self, temporal_slot: str) -> bool:
+        return (
+            self._slot_lookups(temporal_slot).column_date
+            < INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        )
 
     def _proxy_coverage_state(self, nm_id: int, temporal_slot: str) -> str:
         daily = (
@@ -3378,14 +3449,18 @@ class _MetricEvaluator:
             and uncovered_revenue > 0
         ):
             return "uncovered"
-        return "covered" if covered_revenue is not None and covered_revenue > 0 else "unknown"
+        return (
+            "covered"
+            if covered_revenue is not None and covered_revenue > 0
+            else "unknown"
+        )
 
     def _covered_proxy_inputs(
         self,
         nm_id: int,
         temporal_slot: str,
     ) -> dict[str, float] | None:
-        """Restrict every Proxy profit input to Finance cost-covered sales."""
+        """Compatibility projection frozen for dates before 2026-08-22."""
 
         order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
         order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
@@ -3429,7 +3504,6 @@ class _MetricEvaluator:
             "order_count": float(order_count) * order_share,
             "ads_sum": float(ads_sum) * revenue_share,
             "unit_cost": covered_cogs / covered_units,
-            "coverage_share": revenue_share,
         }
 
     def _aggregate_avg(
@@ -3512,6 +3586,12 @@ class _MetricEvaluator:
 
     def _aggregate_our_wb_unit_cost(self, temporal_slot: str) -> float | None:
         lookup = self._slot_lookups(temporal_slot).our_wb_cost_lookup
+        if self._slot_lookups(temporal_slot).column_date >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+            evidence = aggregate_inventory_cost_evidence(
+                lookup,
+                nm_ids=[int(item.nm_id) for item in self.enabled_config],
+            )
+            return _optional_float(evidence.get("wac_rub"))
         weighted_sum = 0.0
         total_stock = 0.0
         for item in self.enabled_config:
@@ -3521,15 +3601,16 @@ class _MetricEvaluator:
             unit_cost = _optional_float(row.get("our_wb_unit_cost_rub"))
             stock_qty = _optional_float(row.get("stock_qty"))
             cost_qty = _optional_float(row.get("cost_covered_qty"))
-            weight_qty = cost_qty if cost_qty is not None else stock_qty
-            if weight_qty is None:
+            if stock_qty is None or cost_qty is None:
                 return None
-            if weight_qty > 0 and unit_cost is None:
+            if stock_qty > 0 and (
+                unit_cost is None or not math.isclose(cost_qty, stock_qty, abs_tol=1e-9)
+            ):
                 return None
-            if unit_cost is None or weight_qty <= 0:
+            if unit_cost is None or stock_qty <= 0:
                 continue
-            weighted_sum += unit_cost * weight_qty
-            total_stock += weight_qty
+            weighted_sum += unit_cost * stock_qty
+            total_stock += stock_qty
         if total_stock <= 0:
             return None
         return weighted_sum / total_stock
@@ -3675,7 +3756,7 @@ class _MetricEvaluator:
                 .get("sales_without_cost_rub")
             )
         if metric_key == OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY:
-            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            inputs = self._proxy_inputs(nm_id, temporal_slot)
             if inputs is None:
                 return None
             calculated = calculate_proxy_3(
@@ -3688,7 +3769,7 @@ class _MetricEvaluator:
             value = calculated["proxy_profit_3"]
             return None if value is None else float(value)
         if metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
-            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            inputs = self._proxy_inputs(nm_id, temporal_slot)
             expected_revenue = (
                 None
                 if inputs is None
@@ -3701,7 +3782,7 @@ class _MetricEvaluator:
             )
         if metric_key == PROXY_V4_PROFIT_RUB_METRIC_KEY:
             column_date = self._slot_lookups(temporal_slot).column_date
-            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            inputs = self._proxy_inputs(nm_id, temporal_slot)
             if inputs is None:
                 return None
             calculated = calculate_proxy_4(
@@ -3716,7 +3797,7 @@ class _MetricEvaluator:
             return None if value is None else float(value)
         if metric_key == PROXY_V4_MARGIN_PCT_METRIC_KEY:
             parameters = self._proxy_v4_parameters(temporal_slot)
-            inputs = self._covered_proxy_inputs(nm_id, temporal_slot)
+            inputs = self._proxy_inputs(nm_id, temporal_slot)
             expected_revenue = (
                 None
                 if parameters is None or inputs is None
@@ -5151,6 +5232,139 @@ def _divide_or_none(numerator: float | None, denominator: float | None) -> float
     if numerator is None or denominator is None or float(denominator) == 0.0:
         return None
     return float(numerator) / float(denominator)
+
+
+def _inventory_cost_cell_presentation(
+    *,
+    enabled_config: Iterable[ConfigV2Item],
+    displayed_metrics: Iterable[MetricV2Item],
+    temporal_slots: Iterable[SheetVitrinaV1TemporalSlot],
+    live_sources: TemporalLiveSources,
+) -> dict[str, dict[str, dict[str, str]]]:
+    available = {item.metric_key for item in displayed_metrics}
+    if not {
+        OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+        TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    } & available:
+        return {}
+    items = list(enabled_config)
+    nm_ids = [int(item.nm_id) for item in items]
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for slot in temporal_slots:
+        if slot.column_date < INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+            continue
+        lookups = live_sources.slot_lookups.get(slot.slot_key)
+        if lookups is None:
+            continue
+        for item in items:
+            row = lookups.our_wb_cost_lookup.get(int(item.nm_id), {})
+            evidence = row.get("inventory_cost_evidence")
+            if not isinstance(evidence, Mapping):
+                presentation = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": "Нет exact as-of WB+FF складской версии; значение не подменено WB-only или нулём.",
+                    "source": "WebCore · WB+FF",
+                }
+            else:
+                resolved = str(evidence.get("status") or "") == "resolved"
+                confirmed = str(evidence.get("quality") or "") == "confirmed"
+                presentation = {
+                    "state": (
+                        "confirmed" if resolved and confirmed
+                        else ("unconfirmed" if resolved else "unavailable")
+                    ),
+                    "tone": (
+                        "green" if resolved and confirmed
+                        else ("yellow" if resolved else "neutral")
+                    ),
+                    "reason": _inventory_cost_evidence_reason(evidence),
+                    "source": "WebCore · WB+FF",
+                }
+            result.setdefault(
+                f"SKU:{item.nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}", {}
+            )[slot.column_date] = presentation
+
+        total = aggregate_inventory_cost_evidence(
+            lookups.our_wb_cost_lookup,
+            nm_ids=nm_ids,
+        )
+        resolved = str(total.get("status") or "") == "resolved"
+        provisional = any(
+            str(
+                (
+                    lookups.our_wb_cost_lookup.get(int(item.nm_id), {}).get(
+                        "source_status"
+                    )
+                    or ""
+                )
+            )
+            == "blended_inventory_wac_provisional"
+            for item in items
+        )
+        result.setdefault(f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}", {})[
+            slot.column_date
+        ] = {
+            "state": (
+                "unconfirmed" if resolved and provisional
+                else ("confirmed" if resolved else "unavailable")
+            ),
+            "tone": (
+                "yellow" if resolved and provisional
+                else ("green" if resolved else "neutral")
+            ),
+            "reason": _inventory_cost_evidence_reason(total),
+            "source": "WebCore · WB+FF",
+        }
+    return result
+
+
+def _inventory_cost_evidence_reason(evidence: Mapping[str, Any]) -> str:
+    if str(evidence.get("status") or "") != "resolved":
+        reasons = evidence.get("reason_codes") or [evidence.get("reason")]
+        reason_text = ", ".join(str(item) for item in reasons if item)
+        return (
+            "WB+FF себестоимость недоступна: "
+            f"{reason_text or 'неполная exact location evidence'}; missing не превращён в zero."
+        )
+    wb = evidence.get("wb") if isinstance(evidence.get("wb"), Mapping) else None
+    ff = evidence.get("ff") if isinstance(evidence.get("ff"), Mapping) else None
+    if wb is None or ff is None:
+        by_stage = {
+            str(item.get("warehouse_family") or ""): item
+            for item in evidence.get("stages") or []
+            if isinstance(item, Mapping)
+        }
+        wb = by_stage.get("WB", {})
+        ff = by_stage.get("FF", {})
+    facilities = evidence.get("facility_pools")
+    if not isinstance(facilities, list):
+        facilities = list((ff or {}).get("locations") or [])
+    facility_text = "; ".join(
+        f"{item.get('facility_id')}/{item.get('pool')}: "
+        f"{item.get('quantity')} шт, {item.get('capital_rub')} ₽, "
+        f"WAC {item.get('wac_rub')} ₽/шт"
+        for item in facilities
+        if isinstance(item, Mapping)
+    )
+    versions = evidence.get("functional_version_ids") or [
+        evidence.get("functional_version_id")
+    ]
+    publications = evidence.get("published_at")
+    if not isinstance(publications, list):
+        publications = [publications]
+    version_text = ",".join(str(item) for item in versions if item)
+    publication_text = ",".join(str(item) for item in publications if item)
+    return (
+        f"WB: {(wb or {}).get('quantity', '0')} шт, {(wb or {}).get('capital_rub', '0')} ₽, "
+        f"WAC {(wb or {}).get('wac_rub')} ₽/шт; "
+        f"FF: {(ff or {}).get('quantity', '0')} шт, {(ff or {}).get('capital_rub', '0')} ₽, "
+        f"WAC {(ff or {}).get('wac_rub')} ₽/шт; "
+        f"покрытие {evidence.get('cost_covered_quantity')}/{evidence.get('quantity')} шт; "
+        f"facility/pool: {facility_text or 'нет положительных FF location rows'}; "
+        f"version {version_text or 'missing'}, published {publication_text or 'missing'}; "
+        "quantity basis: physical inventory, reserve не создаёт капитал."
+    )
 
 
 def _own_product_capital_cell_presentation(

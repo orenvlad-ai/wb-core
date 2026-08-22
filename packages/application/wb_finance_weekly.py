@@ -28,7 +28,14 @@ from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
     CHANNEL_LOCATION_COST_FORMULA_VERSION,
+    FBS_CURRENT_TABLE,
+    FBS_CUTOVER_TABLE,
+    FBS_EVENTS_TABLE,
+    FBS_OBSERVATIONS_TABLE,
+    FUNCTIONAL_CUTOVER_ID,
+    FUNCTIONAL_DAILY_TABLE,
     CanonicalChannelCostSnapshot,
+    canonical_cost_source_date,
     resolve_channel_location_cost,
 )
 from packages.application.warehouse_archival_estimate import (
@@ -5186,7 +5193,7 @@ class WbFinanceWeeklyBlock:
             "weeks": recalculated,
             "target_before_digest": plan["target_before_digest"],
             "target_after_digest": target_after_digest,
-            "non_target_digest_before": plan["non_target_digest"],
+            "non_target_digest_before": non_target_before_apply,
             "non_target_digest_after": non_target_after,
             "non_target_preserved": True,
             "post_apply_target_week_count": 0,
@@ -5367,6 +5374,10 @@ class WbFinanceWeeklyBlock:
             (self.seller_id, str(item["week_start"]), str(item["week_end"]))
             for item in stale
         }
+        source_dependency = self._finance_source_dependency_fingerprint(
+            conn,
+            target_keys=target_keys,
+        )
         plan: dict[str, Any] = {
             "schema_version": "wb_finance_stale_cost_recalculation_v1",
             "status": "dry_run",
@@ -5379,6 +5390,7 @@ class WbFinanceWeeklyBlock:
             "checked_week_count": len(candidates),
             "stale_week_count": len(stale),
             "weeks": stale,
+            "source_dependency": source_dependency,
             "target_before_digest": self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=True
             ),
@@ -5410,7 +5422,6 @@ class WbFinanceWeeklyBlock:
 
         phase_started = datetime.now(timezone.utc)
         with self._connect() as conn:
-            source_data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
             plan = self._plan_stale_cost_weeks_in_connection(
                 conn, date_from=date_from, date_to=date_to
             )
@@ -5482,10 +5493,31 @@ class WbFinanceWeeklyBlock:
             writer_started = datetime.now(timezone.utc)
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if int(conn.execute("PRAGMA data_version").fetchone()[0]) != source_data_version:
+                fresh_source_dependency = self._finance_source_dependency_fingerprint(
+                    conn,
+                    target_keys=target_keys,
+                    force_reload=True,
+                )
+                if (
+                    str(fresh_source_dependency["digest"])
+                    != str(plan["source_dependency"]["digest"])
+                ):
                     raise ValueError(
-                        "Finance source changed after snapshot planning; rebuild the plan"
+                        "Finance exact dependency changed after snapshot planning; rebuild the plan"
                     )
+                if self._finance_state_digest(
+                    conn,
+                    target_keys=target_keys,
+                    target_only=True,
+                ) != str(plan["target_before_digest"]):
+                    raise ValueError(
+                        "Finance target changed after snapshot planning; rebuild the plan"
+                    )
+                non_target_before_apply = self._finance_state_digest(
+                    conn,
+                    target_keys=target_keys,
+                    target_only=False,
+                )
                 self._replace_finance_target_images(
                     conn,
                     target_keys=target_keys,
@@ -5504,12 +5536,21 @@ class WbFinanceWeeklyBlock:
             non_target_after = self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=False
             )
-            if non_target_after != plan["non_target_digest"]:
+            if non_target_after != non_target_before_apply:
                 raise ValueError("non-target Finance state changed during scoped apply")
+            post_source_dependency = self._finance_source_dependency_fingerprint(
+                conn,
+                target_keys=target_keys,
+                force_reload=True,
+            )
             post_verify = self._plan_stale_cost_weeks_in_connection(
                 conn, date_from=date_from, date_to=date_to
             )
-            if int(post_verify["stale_week_count"]) != 0:
+            source_advanced = (
+                str(post_source_dependency["digest"])
+                != str(plan["source_dependency"]["digest"])
+            )
+            if int(post_verify["stale_week_count"]) != 0 and not source_advanced:
                 raise ValueError("post-recalculation verification still contains stale weeks")
         phase_finished = datetime.now(timezone.utc)
         milliseconds = lambda start, end: max(
@@ -5522,10 +5563,14 @@ class WbFinanceWeeklyBlock:
             "checked_week_count": plan["checked_week_count"],
             "recalculated_week_count": len(recalculated),
             "weeks": recalculated,
-            "non_target_digest_before": plan["non_target_digest"],
+            "planned_non_target_digest": plan["non_target_digest"],
+            "non_target_digest_before": non_target_before_apply,
             "non_target_digest_after": non_target_after,
             "non_target_preserved": True,
-            "post_verify_stale_week_count": 0,
+            "post_verify_stale_week_count": int(post_verify["stale_week_count"]),
+            "source_dependency": plan["source_dependency"],
+            "post_source_dependency": post_source_dependency,
+            "source_advanced_after_apply": source_advanced,
             "phase_timings_ms": {
                 "query_plan": milliseconds(
                     phase_started, snapshot_started
@@ -5536,6 +5581,201 @@ class WbFinanceWeeklyBlock:
                 "writer_lock_hold": milliseconds(writer_started, writer_finished),
                 "post_commit_readback": milliseconds(writer_finished, phase_finished),
             },
+        }
+
+    def _finance_source_dependency_fingerprint(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        target_keys: set[tuple[str, str, str]],
+        force_reload: bool = False,
+    ) -> dict[str, Any]:
+        """Fingerprint only inputs that can alter the reviewed target images.
+
+        A global ``PRAGMA data_version`` also changes for unrelated UI/status
+        writers and made every multi-minute query projection lose its CAS.  The
+        exact dependency fingerprint is cheap enough to rebuild under the
+        short writer boundary and covers only canonical WB/FBS rows reachable
+        from the target operations, nomenclature routing, and the raw/report
+        rows of the target weeks.  A new cost for another date/SKU/order is not
+        a target dependency and therefore cannot starve this CAS.
+        """
+
+        if force_reload or self._canonical_cost_snapshot_connection is not conn:
+            snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
+        else:
+            snapshot = self._canonical_cost_snapshot
+            if snapshot is None:
+                snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
+        digest = hashlib.sha256()
+        counts: dict[str, int] = {}
+
+        def add(kind: str, identity: Any, payload: Any) -> None:
+            counts[kind] = counts.get(kind, 0) + 1
+            digest.update(
+                json.dumps(
+                    [kind, identity, payload],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+
+        alias_to_nm, ambiguous_aliases, _groups, _items = (
+            _nomenclature_identity_index(conn)
+        )
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='sheet_vitrina_v1_nomenclature_items'"
+        ).fetchone()
+        if table_exists is not None:
+            for row in conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_nomenclature_items "
+                "ORDER BY nm_id,rowid"
+            ).fetchall():
+                add("nomenclature", str(row["nm_id"] or ""), dict(row))
+
+        relevant_wb_keys: set[tuple[str, str]] = set()
+        relevant_wb_nm_ids: set[int] = set()
+        relevant_identity_hashes: set[str] = set()
+        relevant_fbs_order_ids: set[int] = set()
+        for seller_id, week_start, week_end in sorted(target_keys):
+            raw_rows = conn.execute(
+                "SELECT report_id,rrd_id,row_hash,raw_json "
+                "FROM wb_finance_weekly_raw_rows WHERE seller_id=? "
+                "AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
+                (seller_id, week_start, week_end),
+            ).fetchall()
+            for row in raw_rows:
+                add(
+                    "finance_raw",
+                    [seller_id, week_start, week_end, row["report_id"], row["rrd_id"]],
+                    [
+                        str(row["row_hash"] or ""),
+                        hashlib.sha256(str(row["raw_json"]).encode("utf-8")).hexdigest(),
+                    ],
+                )
+                try:
+                    operation = json.loads(str(row["raw_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if str(operation.get("docTypeName") or "").casefold() not in {
+                    "продажа",
+                    "возврат",
+                }:
+                    continue
+                if int(_decimal(operation.get("quantity"))) == 0:
+                    continue
+                nm_id, _identity_method, _identity_problem = _resolve_finance_nm_id(
+                    operation,
+                    alias_to_nm=alias_to_nm,
+                    ambiguous_aliases=ambiguous_aliases,
+                )
+                operation_date, operation_date_source = _operation_date(
+                    operation, date.fromisoformat(week_start)
+                )
+                if operation_date_source == "week_start_fallback" or not nm_id:
+                    continue
+                identity_hashes = {
+                    "sha256:"
+                    + hashlib.sha256(token.encode("utf-8")).hexdigest()
+                    for token in (
+                        str(operation.get(key) or "").strip()
+                        for key in ("srid", "rid", "orderUid", "order_uid")
+                    )
+                    if token
+                }
+                relevant_identity_hashes.update(identity_hashes)
+                matched_order_ids: set[int] = set()
+                for identity_hash in identity_hashes:
+                    matched_order_ids.update(
+                        snapshot.fbs_order_ids_by_identity_hash.get(identity_hash, ())
+                    )
+                channel_tokens = {
+                    str(operation.get(key) or "").strip().casefold()
+                    for key in (
+                        "deliveryType",
+                        "delivery_type",
+                        "orderType",
+                        "order_type",
+                    )
+                    if str(operation.get(key) or "").strip()
+                }
+                explicit_fbs = any("fbs" in token for token in channel_tokens)
+                if matched_order_ids or explicit_fbs:
+                    relevant_fbs_order_ids.update(matched_order_ids)
+                    continue
+                source_date = canonical_cost_source_date(operation_date).isoformat()
+                relevant_wb_keys.add((source_date, nm_id))
+                if nm_id.isdigit() and int(nm_id) > 0:
+                    relevant_wb_nm_ids.add(int(nm_id))
+
+            for row in conn.execute(
+                "SELECT report_id,report_type,content_hash,row_count "
+                "FROM wb_finance_weekly_reports WHERE seller_id=? "
+                "AND week_start=? AND week_end=? ORDER BY report_id",
+                (seller_id, week_start, week_end),
+            ).fetchall():
+                add(
+                    "finance_report",
+                    [seller_id, week_start, week_end, row["report_id"]],
+                    [row["report_type"], row["content_hash"], row["row_count"]],
+                )
+
+        add(
+            "canonical_table_presence",
+            "channel_location_cost",
+            sorted(
+                name
+                for name in snapshot.wb.table_names
+                if name
+                in {
+                    "sheet_vitrina_v1_warehouse_functional_cutovers",
+                    FUNCTIONAL_DAILY_TABLE,
+                    "sheet_vitrina_v1_warehouse_archival_estimate_rows",
+                    "sheet_vitrina_v1_warehouse_functional_events",
+                    FBS_OBSERVATIONS_TABLE,
+                    FBS_CURRENT_TABLE,
+                    FBS_EVENTS_TABLE,
+                    FBS_CUTOVER_TABLE,
+                }
+            ),
+        )
+        add("wb_cutover", FUNCTIONAL_CUTOVER_ID, dict(snapshot.wb.cutover or {}))
+        for key in sorted(relevant_wb_keys):
+            row = snapshot.wb.daily_rows.get(key)
+            add("wb_daily_cost", list(key), dict(row) if row is not None else None)
+        for nm_id in sorted(relevant_wb_nm_ids):
+            row = snapshot.wb.archival_rows.get(nm_id)
+            add(
+                "wb_archival_cost",
+                nm_id,
+                dict(row) if row is not None else None,
+            )
+            add(
+                "wb_first_factual_date",
+                nm_id,
+                snapshot.wb.archival_first_factual_dates.get(nm_id),
+            )
+        for identity_hash in sorted(relevant_identity_hashes):
+            add(
+                "fbs_identity",
+                identity_hash,
+                list(snapshot.fbs_order_ids_by_identity_hash.get(identity_hash, ())),
+            )
+        for order_id in sorted(relevant_fbs_order_ids):
+            row = snapshot.fbs_cost_by_order_id.get(order_id)
+            add(
+                "fbs_frozen_cost",
+                order_id,
+                dict(row) if row is not None else None,
+            )
+        return {
+            "contract": "wb_finance_exact_target_dependency_v2",
+            "digest": "sha256:" + digest.hexdigest(),
+            "counts": dict(sorted(counts.items())),
         }
 
     @staticmethod

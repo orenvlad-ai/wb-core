@@ -2,8 +2,11 @@
 
 ## Scope
 
-This migration makes `Себестоимость наша` one channel/location-aware contract
-for Vitrina, Finance weekly/per-SKU, Partner and Proxy. It also provides the
+This migration introduced the channel/location-aware realized-cost contract
+for Finance weekly/per-SKU and Partner and initially projected it through the
+then-current Vitrina/Proxy rows. Migration 153 supersedes only that latter
+informational consumer choice with a forward-only WB+FF inventory blend; the
+exact FBS/WB sale COGS contract here remains authoritative. It also provides the
 repo-owned dry-run/apply/readback runner for the five already-posted
 facility/FBS overhead documents dated `2026-08-21`. It does not introduce a
 second ledger, allocator, sales history or Finance raw source.
@@ -50,8 +53,9 @@ Official hourly capture remains hourly. A separate job lock preserves
 hourly/manual single-flight, while the common warehouse writer lock is held only
 by short canonical apply/readback sections. Heavy capture, plan/digest,
 economics and Finance recomputation run outside it. Finance builds exact target
-after-images from a query-only projection, then uses a short
-`PRAGMA data_version` CAS. Phase/lock timing and
+after-images from a query-only projection, then uses the short exact-dependency
+CAS specified by migration 153; unrelated SQLite commits are not source drift.
+Phase/lock timing and
 contention regressions prove interactive FF document/status writes remain
 available while heavy planning is paused.
 
@@ -101,5 +105,6 @@ recovery and Finance acknowledgement, partial profit coverage across all four
 consumers, Vitrina/Partner metrics, warehouse warning/filter, removed incident
 controls, neutral manual evidence and synthetic VTB inline controls. The
 warehouse/Finance contention regression proves heavy work occurs outside the
-common writer section and a concurrent interactive writer commits before the
-stale Finance CAS aborts.
+common writer section, an unrelated interactive writer commits without
+invalidating Finance, and actual canonical-cost drift still aborts before
+target replacement.

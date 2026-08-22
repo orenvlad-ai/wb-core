@@ -42,7 +42,11 @@ transaction. It cannot write across two files.
 
 ## Single canonical COGS contract
 
-Formula version is `canonical_our_cost_channel_location_v1`. Finance calls the same shared channel/location resolver as Vitrina, Partner and Proxy and does not reproduce warehouse cost-engine rules.
+Formula version is `canonical_our_cost_channel_location_v1`. Finance and
+Partner call this shared sale-specific channel/location resolver and do not
+reproduce warehouse cost-engine rules. Vitrina and indicative Proxy 3/4 use the
+separate `our_inventory_wac_wb_ff_v1` informational inventory blend; Finance
+never consumes that average as transaction COGS.
 
 For each sale/return operation the resolver first classifies its channel and
 exact location. FBS requires the privacy-safe exact WB order identity, its
@@ -61,7 +65,17 @@ The resolver accepts the posted functional daily contour and the warehouse-domai
 
 Lineage contains operation date, canonical source date/identity/version/digest, quality, selection method and formula version. Archival-estimate lineage additionally pins owner approval, effective date, 100 ₽, target manifest, production dry-run source SHA, source digest and calculation/row fingerprints. Before 01.07 the UI/tooltips describe the value as a retrospective management projection, not factual historical warehouse capital. A canonical source correction changes the digest and invalidates/rebuilds affected Finance projections automatically.
 
-Within one plan/apply/readback connection the runner loads the small canonical daily-cost surface, active archival overlay and first factual receipt boundary once, then caches canonical resolution by `nmId + operation date`. Nomenclature identities use the same connection-bound cache. No cache survives into a new connection; apply still re-plans under its single `BEGIN IMMEDIATE` transaction and rejects a dry-run fingerprint after any intervening hourly source change. Future factual receipts therefore invalidate the next plan/apply/readback while the 18-SKU overlay cannot amplify into repeated functional-event scans.
+Within one query-plan connection the runner loads the small canonical
+daily-cost surface, exact FBS identity/frozen-cost indexes, active archival
+overlay and first factual receipt boundary once, then caches canonical
+resolution by `nmId + operation date`. Nomenclature identities use the same
+connection-bound cache. Heavy week projection and target after-image assembly
+finish without `BEGIN IMMEDIATE`. The short writer CAS then fingerprints only
+the exact WB/FBS cost snapshot, nomenclature routing, target raw/report rows and
+target-before image; unrelated UI/status commits cannot invalidate it through
+global `PRAGMA data_version`. A real dependency/target change still aborts
+before replacement, and transactional target readback plus non-target digest
+prove publication. No cache survives into a new connection.
 
 Coverage counts gross sale/return units, orders and sale revenue, so a
 symmetric sale/return pair cannot hide missing cost even if net COGS is zero.

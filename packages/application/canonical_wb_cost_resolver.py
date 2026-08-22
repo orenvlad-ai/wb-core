@@ -1,9 +1,12 @@
-"""Shared channel/location-aware consumer for ``Себестоимость наша``.
+"""Shared channel/location-aware resolver for realized sale COGS.
 
-Finance, Partner Report, the Vitrina and Proxy surfaces resolve through this
-module.  FBS uses the exact facility/pool/SKU WAC frozen by the durable handoff
-event; FBO/WB keeps the canonical daily WB WAC.  No consumer may substitute a
-different facility, SKU, average, legacy value, or zero.
+Finance and Partner Report use this contract: FBS resolves the exact
+facility/pool/SKU WAC frozen by the durable handoff event, while FBO/WB keeps
+the canonical daily WB WAC.  The Vitrina ``Себестоимость наша`` and indicative
+Proxy 3/4 deliberately use the separate as-of WB+FF inventory blend; they do
+not turn that informational average into transaction COGS.  No realized-cost
+consumer may substitute a different facility, SKU, average, legacy value, or
+zero.
 """
 
 from __future__ import annotations
