@@ -402,6 +402,20 @@ def _assert_scheduled_parallel_block(entrypoint: RegistryUploadHttpEntrypoint) -
         schedule = entrypoint.sheet_auto_refresh_schedules_block.get_schedule("custom_evening")
         if schedule.get("last_due_at") == "2026-04-20T18:30:00Z" or schedule.get("last_status") == "skipped":
             raise AssertionError(f"blocked scheduled slot must remain due for retry, got {schedule}")
+        experiment_skipped = entrypoint.start_sheet_auto_refresh_job(
+            as_of_date="2026-04-20",
+            trigger_source="night_refresh_experiment",
+        )
+        if (
+            experiment_skipped.get("status") != "skipped"
+            or experiment_skipped.get("already_running_job_id") != active.get("job_id")
+            or experiment_skipped.get("retryable") is not True
+            or experiment_skipped.get("due_preserved") is not True
+        ):
+            raise AssertionError(
+                "night experiment must use the existing job evidence and retain its slot, "
+                f"got {experiment_skipped}"
+            )
     finally:
         release.set()
         _wait_for_job(entrypoint, str(active["job_id"]))

@@ -89,6 +89,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"
+  - "apps/sheet_vitrina_v1_night_refresh_experiment_smoke.py"
   - "apps/sheet_vitrina_v1_popup_outside_click_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_reason_sanitization_smoke.py"
@@ -160,6 +161,14 @@ update_note: "Settings distinguishes the analytical three-slot combined referenc
   - stable `web_vitrina_gravity_table_adapter` v1
   - existing sibling routes `GET /sheet-vitrina-v1/vitrina` + `GET /v1/sheet-vitrina-v1/web-vitrina`
 - Семантика блока: не делать новый frontend platform contour и не переносить business truth в браузер, а materialize-ить repo-owned page-only layer над уже готовыми seams.
+
+### Временный серверный эксперимент закрытия 2026-08-22
+
+- Repo-owned wrapper `sheet_vitrina_v1_night_refresh_experiment` использует тот же canonical async `auto_refresh`, который обслуживает обычные дневные запуски, и не добавляет source formulas, отдельный acquisition contour либо строки в пользовательские `Настройки → Автообновления`.
+- Единственный manifest ограничен `experiment_id=web-vitrina-closed-day-2026-08-22-v1`, `target_date=2026-08-22` и абсолютными слотами `2026-08-23 01:30/03:30/06:30/08:30 Asia/Yekaterinburg`; после последнего late window он terminal/expired и следующей ночью не replay-ится.
+- Existing ten-minute `wb-core-sheet-vitrina-refresh.timer` вызывает wrapper внутри штатного tick. До due source request отсутствует. Active canonical `auto_update`/`refresh`/`refresh_group` возвращает retryable busy evidence, а wrapper повторяет слот только внутри bounded 50-minute window.
+- До canonical refresh request создаётся append-only trigger receipt и exclusive claim. Accepted job ID делает restart recovery query-only; ambiguous launch/claim fail closed и не replay-ится. Terminal result немедленно архивируется через `O_EXCL` в `runtime/experiments/<experiment_id>/<slot>.json` вместе с exact-date `web_vitrina_contract`, current source-status surface, row/source counts, fallback/preservation/latest-confirmed diagnostics и SHA-256 fingerprints. Следующий refresh не может перезаписать этот artifact.
+- После четырёх terminal artifacts wrapper один раз создаёт immutable `comparison.json`; равные fingerprints означают только равенство наблюдённых payload в этом окне и не доказывают абсолютную финальность upstream-данных.
 
 # 3. Target contract и смысл результата
 

@@ -2715,6 +2715,15 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        if _is_night_refresh_experiment_trigger(trigger_source):
+            active_job = self.operator_jobs.active_job(
+                operations=("auto_update", "refresh", "refresh_group"),
+            )
+            if active_job:
+                return self._skip_night_refresh_experiment_for_active_job(
+                    trigger_source=trigger_source,
+                    active_job=active_job,
+                )
         resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
             schedule_id=schedule_id,
             due_at=due_at,
@@ -2726,6 +2735,31 @@ class RegistryUploadHttpEntrypoint:
                 trigger_source=trigger_source or "scheduled",
             )
         return self.start_sheet_refresh_job(as_of_date=as_of_date, auto_load=True)
+
+    def _skip_night_refresh_experiment_for_active_job(
+        self,
+        *,
+        trigger_source: str,
+        active_job: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        active_job_id = str(active_job.get("job_id") or "")
+        staleness = _active_job_staleness_payload(active_job, now=self.activated_at_factory())
+        reason = (
+            "Night experiment slot retained for bounded retry because canonical Web Vitrina "
+            f"job {active_job_id or 'unknown'} is still active."
+        )
+        return {
+            "status": "skipped",
+            "operation": "auto_update",
+            "trigger_source": trigger_source,
+            "reason": reason,
+            "blocker": reason,
+            "already_running_job_id": active_job_id,
+            "retryable": True,
+            "due_preserved": True,
+            **staleness,
+            "active_job": dict(active_job),
+        }
 
     def start_sheet_scheduled_auto_update_job(
         self,
@@ -9412,6 +9446,10 @@ def _auto_update_status_label(value: str | None) -> str:
 
 def _is_scheduled_auto_refresh_trigger(value: str) -> bool:
     return str(value or "scheduled").strip().lower() == "scheduled"
+
+
+def _is_night_refresh_experiment_trigger(value: str) -> bool:
+    return str(value or "").strip().lower() == "night_refresh_experiment"
 
 
 def _parse_job_timestamp(value: str) -> datetime | None:

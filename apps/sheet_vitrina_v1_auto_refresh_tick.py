@@ -24,6 +24,11 @@ if str(ROOT) not in sys.path:
 from packages.application.sheet_vitrina_v1_auto_refresh import (  # noqa: E402
     SheetVitrinaV1AutoRefreshSchedulesBlock,
 )
+from packages.application.sheet_vitrina_v1_night_refresh_experiment import (  # noqa: E402
+    NightRefreshExperimentRunner,
+    TARGET_DATE as NIGHT_EXPERIMENT_TARGET_DATE,
+    TRIGGER_SOURCE as NIGHT_EXPERIMENT_TRIGGER_SOURCE,
+)
 
 
 HOSTED_RUNTIME_APP_DIR = Path("/opt/wb-core-runtime/app")
@@ -32,6 +37,7 @@ DEFAULT_RUNTIME_DIR = HOSTED_RUNTIME_STATE_DIR if ROOT == HOSTED_RUNTIME_APP_DIR
 DEFAULT_ENV_FILE = Path("/opt/wb-ai/.env")
 DEFAULT_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_JOB_PATH = "/v1/sheet-vitrina-v1/job"
+DEFAULT_WEB_VITRINA_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = "8765"
 
@@ -46,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--experiment-status", action="store_true")
     args = parser.parse_args(argv)
 
     env = _read_env_file(Path(args.env_file))
@@ -65,6 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir)
     due = sorted(block.due_schedules(), key=lambda item: str(item[1] or ""))
     missed_due, selected_due = _select_due_for_tick(due)
+    cookie = _build_web_auth_cookie(os.environ, required=False)
+    experiment = _build_night_experiment_runner(
+        runtime_dir=runtime_dir,
+        base_url=base_url,
+        refresh_path=refresh_path,
+        job_path=job_path,
+        cookie=cookie,
+        timeout_seconds=args.timeout_seconds,
+        poll_seconds=args.poll_seconds,
+    )
+    if args.experiment_status:
+        _print(experiment.status())
+        return 0
     if args.dry_run:
         _print(
             {
@@ -77,13 +97,23 @@ def main(argv: list[str] | None = None) -> int:
                 "due_schedules": [_public_due(item) for item in due],
                 "selected_due_schedules": [_public_due(item) for item in selected_due],
                 "missed_due_schedules": [_public_due(item) for item in missed_due],
+                "night_experiment": experiment.status(),
             }
         )
         return 0
+    experiment_result = experiment.tick()
     if not due:
-        _print({"status": "no_due_schedules", "runtime_dir": str(runtime_dir), "base_url": base_url, "due_count": 0})
-        return 0
-    cookie = _build_web_auth_cookie(os.environ)
+        failed = str((experiment_result.get("tick_result") or {}).get("status") or "") == "failed"
+        _print({
+            "status": "error" if failed else "no_due_schedules",
+            "runtime_dir": str(runtime_dir),
+            "base_url": base_url,
+            "due_count": 0,
+            "night_experiment": experiment_result,
+        })
+        return 1 if failed else 0
+    if not cookie:
+        cookie = _build_web_auth_cookie(os.environ, required=True)
     results: list[dict[str, Any]] = []
     exit_code = 0
     missed_due_marked = False
@@ -168,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             "selected_due_count": len(selected_due),
             "missed_due_count": len(missed_due),
             "results": results,
+            "night_experiment": experiment_result,
         }
     )
     return exit_code
@@ -226,14 +257,77 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def _build_web_auth_cookie(env: Mapping[str, str]) -> str:
+def _build_web_auth_cookie(env: Mapping[str, str], *, required: bool = True) -> str:
     username = str(env.get("WB_CORE_WEB_AUTH_USERNAME") or "").strip()
     secret = str(env.get("WB_CORE_WEB_AUTH_SESSION_SECRET") or "").strip()
     if not username or not secret:
-        raise RuntimeError("WB_CORE_WEB_AUTH_USERNAME/WB_CORE_WEB_AUTH_SESSION_SECRET are required for auto refresh tick")
+        if required:
+            raise RuntimeError("WB_CORE_WEB_AUTH_USERNAME/WB_CORE_WEB_AUTH_SESSION_SECRET are required for auto refresh tick")
+        return ""
     payload = _b64(json.dumps({"u": username, "exp": int(time.time()) + 3600}, separators=(",", ":")).encode("utf-8"))
     signature = _b64(hmac.new(secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest())
     return f"wb_core_web_session={payload}.{signature}"
+
+
+def _build_night_experiment_runner(
+    *,
+    runtime_dir: Path,
+    base_url: str,
+    refresh_path: str,
+    job_path: str,
+    cookie: str,
+    timeout_seconds: int,
+    poll_seconds: float,
+) -> NightRefreshExperimentRunner:
+    from urllib.parse import urlencode
+
+    def start_refresh(slot: object, wrapper_run_id: str) -> Mapping[str, Any]:
+        return _post_json(
+            base_url + refresh_path,
+            {
+                "async": True,
+                "auto_refresh": True,
+                "as_of_date": NIGHT_EXPERIMENT_TARGET_DATE,
+                "trigger_source": NIGHT_EXPERIMENT_TRIGGER_SOURCE,
+                "experiment_slot_id": getattr(slot, "slot_id", ""),
+                "experiment_wrapper_run_id": wrapper_run_id,
+            },
+            cookie=cookie,
+            timeout=min(timeout_seconds, 60),
+        )
+
+    def poll_job(job_id: str) -> Mapping[str, Any]:
+        return _poll_job(
+            base_url=base_url,
+            job_path=job_path,
+            job_id=job_id,
+            cookie=cookie,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=poll_seconds,
+        )
+
+    def fetch_contract() -> Mapping[str, Any]:
+        query = urlencode({"as_of_date": NIGHT_EXPERIMENT_TARGET_DATE})
+        return _get_json(f"{base_url}{DEFAULT_WEB_VITRINA_PATH}?{query}", cookie=cookie, timeout=60)
+
+    def fetch_source_status() -> Mapping[str, Any]:
+        query = urlencode(
+            {
+                "surface": "page_composition",
+                "as_of_date": NIGHT_EXPERIMENT_TARGET_DATE,
+                "include_source_status": "1",
+                "include_table_data": "0",
+            }
+        )
+        return _get_json(f"{base_url}{DEFAULT_WEB_VITRINA_PATH}?{query}", cookie=cookie, timeout=60)
+
+    return NightRefreshExperimentRunner(
+        runtime_dir=runtime_dir,
+        start_refresh=start_refresh,
+        poll_job=poll_job,
+        fetch_contract=fetch_contract,
+        fetch_source_status=fetch_source_status,
+    )
 
 
 def _post_json(url: str, payload: Mapping[str, Any], *, cookie: str, timeout: int) -> dict[str, Any]:
