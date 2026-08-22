@@ -9377,6 +9377,18 @@ def _warehouse_sync_error_reason(value: Any) -> str:
         )
     ):
         return "снимок WB не прошёл проверку source-contract; последняя успешная версия сохранена"
+    if any(
+        token in text
+        for token in (
+            "exact dependency changed after snapshot planning",
+            "target changed after snapshot planning",
+            "source changed after snapshot planning",
+        )
+    ):
+        return (
+            "Finance dependency изменилась во время lock-free расчёта; "
+            "публикация отклонена exact CAS, последняя успешная версия сохранена"
+        )
     if any(token in text for token in ("drifted", "fingerprint mismatch", "source digest")):
         return "источники изменились после dry-run; требуется новый согласованный план"
     if any(token in text for token in ("negative", "cost gap", "invariant")):

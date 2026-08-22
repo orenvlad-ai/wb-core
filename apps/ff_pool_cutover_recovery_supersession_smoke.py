@@ -107,6 +107,11 @@ def main() -> int:
             "coverage is incomplete: missing_nm_ids=[1]; sqlite_busy_timeout_ms=30000"
         )
         assert "неполный снимок" in pagination_reason
+        finance_cas_reason = _warehouse_sync_error_reason(
+            "Finance exact dependency changed after snapshot planning; rebuild the plan; "
+            "sqlite_busy_timeout_ms=120000"
+        )
+        assert "exact CAS" in finance_cas_reason and "ошибка хранилища" not in finance_cas_reason
 
         result = runner.apply(
             plan,

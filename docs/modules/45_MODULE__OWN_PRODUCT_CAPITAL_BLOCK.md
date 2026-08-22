@@ -116,7 +116,16 @@ Legacy `paid_equivalent_qty`, cost coverage/confirmation, old `Недоприн�
 
 На производстве capital включает factual CNY supplier payments по weighted RUB cost списанного CNY и относящиеся direct bank fees ровно один раз. В China → FF добавляются confirmed logistics/customs components с canonical allocation rules. FF receipt переносит exact supplier-flow capital. FF → WB добавляет confirmed FF services, storage и transit по packed quantity. Paid WB acceptance относится только к actually accepted units и не входит в discrepancy cost.
 
-WB использует periodic/snapshot WAC: official snapshot задаёт quantity, accepted supplies добавляют доказанный inbound capital, current day provisional, closed days versioned. Zero-stock SKU сохраняет last valid WAC. WB/FBO-контур единой `Себестоимость наша` является direct read projection этого canonical WB WAC.
+WB использует periodic/snapshot WAC: official snapshot задаёт quantity, accepted
+supplies добавляют доказанный inbound capital, current day provisional, closed
+days versioned. Zero-stock SKU сохраняет last valid WAC. Для информационной
+`Себестоимость наша` с `2026-08-22` этот WB stage и FF stage являются двумя
+mutually exclusive operands: per SKU и TOTAL складывают их exact capital и
+physical quantity до деления. FF immutable provenance дополнительно раскрывает
+reconciled `facility_id + pool(FBS|FBO)` rows; эти rows не суммируются второй
+раз с FF aggregate. Production, China→FF, FF→WB и discrepancy не входят в
+inventory WAC, но остаются самостоятельными стадиями `Общего товарного
+капитала`. Finance/Partner sale COGS не читает этот blend.
 
 # 5. Historical and migration boundary
 

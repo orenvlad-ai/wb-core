@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
+  - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -254,7 +255,17 @@ Weekly Finance uses one channel/location resolver. FBS requires the exact privac
 
 Новая warehouse history начинается functional cutover timestamp; текущий snapshot не размножается назад. Старые warehouse values остаются audit/empty.
 
-Ready snapshots с 01.07 очищаются от несогласованных legacy warehouse stage/total cells. Для дня, где отсутствует полный доказанный шестиступенчатый functional state, canonical warehouse cells остаются пустыми, а `warehouse_history_coverage` и cell presentation показывают `Исторические данные отсутствуют` с source-level причиной; это неизвестность, не доказанный ноль. Дни с точной functional version публикуют quantity/capital и WAC из version, выбранной по `snapshot_date`. Отдельные доказанные `our_wb_unit_cost_rub` и Proxy 3 сохраняются по их daily projection и не зависят от доступности полного warehouse history.
+Ready snapshots с 01.07 очищаются от несогласованных legacy warehouse
+stage/total cells. Для дня, где отсутствует полный доказанный шестиступенчатый
+functional state, canonical warehouse cells остаются пустыми, а
+`warehouse_history_coverage` и cell presentation показывают `Исторические
+данные отсутствуют` с source-level причиной; это неизвестность, не доказанный
+ноль. Дни с точной functional version публикуют quantity/capital и WAC из
+version, выбранной по `snapshot_date`. До `2026-08-22` доказанные
+`our_wb_unit_cost_rub` и Proxy 3 сохраняют frozen WB compatibility projection.
+С этой даты current exact-day rows используют WB+FF inventory blend только при
+полном WB/FF stage и FF facility/pool evidence; последующая business date не
+переписывает более ранний ready snapshot.
 
 Period-read объединяет не только значения exact-date snapshots, но и их `server_cell_presentation`; отсутствующая materialized business date получает явный `unavailable` reason вместо безымянного прочерка. Revalidation открытого дня использует SKU scope, замороженный в строках самого ready snapshot, а не более поздний current config: удалённая SKU не теряет warning, добавленная позже SKU не делает старый total частичным задним числом.
 
@@ -297,7 +308,11 @@ uses a separate `.warehouse-functional-job.lock` only for single-flight. It does
 not hold `.warehouse-functional-sync.lock` across upstream capture, heavy
 plan/digest, economics or Finance work. Canonical writers keep their own short
 optimistic write/CAS sections; Finance builds target after-images from a
-query-only projection and applies only after `data_version` equality. Phase,
+query-only projection and then revalidates only its exact canonical WB/FBS
+cost, nomenclature, target raw/report and target-before fingerprints under
+`BEGIN IMMEDIATE`. Unrelated UI/status commits no longer invalidate Finance by
+global `PRAGMA data_version`; an actual dependency or target change still
+fails closed before replacement. Phase,
 job-lock and writer-lock
 timings are durable evidence. Interactive FF preview/confirm/status can commit
 while the heavy job is planning, and source drift leaves last-good active for a

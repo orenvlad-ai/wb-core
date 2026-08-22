@@ -10,6 +10,9 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from packages.application.own_product_capital import OwnProductCapitalBlock
+from packages.application.inventory_cost_blend import (
+    INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+)
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.calculation_parameters_v4 import (
@@ -1328,6 +1331,7 @@ def _include_proxy_v4_unit_margin_rows(
                 else None
             )
             state, expected_qty = _proxy_v4_unit_margin_expected_qty(
+                business_date=column_date,
                 raw_order_count=raw_order_count,
                 coverage=coverage,
                 parameters=parameters_by_date[column_date],
@@ -1353,7 +1357,7 @@ def _include_proxy_v4_unit_margin_rows(
                 if isinstance(daily_state, Mapping)
                 else ""
             )
-            if calculated_at:
+            if calculated_at and column_date < INVENTORY_COST_BLEND_EFFECTIVE_DATE:
                 updated_at_values.append(calculated_at)
 
         sku_row = (
@@ -1452,11 +1456,19 @@ def _include_proxy_v4_unit_margin_rows(
 
 def _proxy_v4_unit_margin_expected_qty(
     *,
+    business_date: str,
     raw_order_count: float | None,
     coverage: Any,
     parameters: ProxyV4Parameters | None,
 ) -> tuple[str, float | None]:
-    if parameters is None or not isinstance(coverage, Mapping):
+    if parameters is None or raw_order_count is None:
+        return "missing", None
+    if business_date >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+        expected_qty = float(raw_order_count) * float(parameters.buyout_rate)
+        if not math.isfinite(expected_qty) or expected_qty <= 0:
+            return "nonpositive", None
+        return "eligible", expected_qty
+    if not isinstance(coverage, Mapping):
         return "missing", None
     sales_revenue = _numeric_value(coverage.get("sales_revenue_rub"))
     covered_revenue = _numeric_value(coverage.get("covered_sales_revenue_rub"))
@@ -1485,8 +1497,6 @@ def _proxy_v4_unit_margin_expected_qty(
     if any(value is None for value in required) or any(
         value <= 0 for value in required if value is not None
     ):
-        return "missing", None
-    if raw_order_count is None:
         return "missing", None
     order_share = min(max(float(covered_orders) / float(sales_orders), 0.0), 1.0)
     expected_qty = (

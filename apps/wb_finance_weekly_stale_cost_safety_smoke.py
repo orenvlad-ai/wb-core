@@ -12,6 +12,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -159,10 +160,9 @@ def main() -> None:
             _metrics(block, "2026-07-20") == late_before, "second week escaped rollback"
         )
 
-        # Recalculation builds target after-images from a query projection
-        # before BEGIN IMMEDIATE. A concurrent interactive writer therefore
-        # commits promptly; the stale background plan then fails its optimistic
-        # CAS without replacing any Finance target image.
+        # Recalculation builds target after-images before BEGIN IMMEDIATE.  An
+        # unrelated interactive writer commits promptly and no longer defeats
+        # the exact Finance dependency CAS merely by changing data_version.
         with sqlite3.connect(block.db_path) as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS ff_interactive_status_probe("
@@ -206,24 +206,85 @@ def main() -> None:
             recalculation_entered.wait(timeout=5),
             "Finance snapshot recalculation did not start",
         )
+        interactive_started = time.monotonic()
         with sqlite3.connect(block.db_path, timeout=2) as interactive:
             interactive.execute(
                 "INSERT INTO ff_interactive_status_probe(probe_id,created_at) VALUES(?,?)",
                 ("ff-document-status", "2026-07-27T00:00:00Z"),
             )
+            interactive.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+                "SET wac_rub='51',fingerprint='unrelated-nm-103' "
+                "WHERE as_of_date='2026-07-01' AND nm_id=103"
+            )
             interactive.commit()
+        interactive_ms = int((time.monotonic() - interactive_started) * 1000)
         release_recalculation.set()
         background.join(timeout=5)
         block._build_week_target_projection = original  # type: ignore[method-assign]
         _assert(not background.is_alive(), "stale Finance CAS did not terminate")
         _assert(
-            background_errors
-            and "changed after snapshot planning" in str(background_errors[0]),
-            f"concurrent writer must invalidate snapshot CAS: {background_errors}",
+            not background_errors,
+            "unrelated status and canonical other-SKU writers must not "
+            f"invalidate exact Finance CAS: {background_errors}",
         )
         _assert(
-            _metrics(block, "2026-06-29") == mixed_before,
-            "stale snapshot replaced a Finance target",
+            interactive_ms < 1_500,
+            f"interactive document/status writer waited {interactive_ms}ms",
+        )
+
+        # A change to an actual canonical cost dependency during the same
+        # lock-free projection still fails closed before target replacement.
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+                "SET wac_rub='204',fingerprint='exact-dependency-before' "
+                "WHERE as_of_date='2026-07-01' AND nm_id=101"
+            )
+            conn.commit()
+        plan = block.plan_stale_cost_weeks(
+            date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
+        )
+        exact_entered = threading.Event()
+        release_exact = threading.Event()
+        calls = 0
+
+        def pause_exact_dependency(
+            conn: sqlite3.Connection, *, week_start: date, week_end: date
+        ) -> dict:
+            nonlocal calls
+            calls += 1
+            result = original(conn, week_start=week_start, week_end=week_end)
+            if calls == 1:
+                exact_entered.set()
+                if not release_exact.wait(timeout=5):
+                    raise AssertionError("Finance exact dependency probe timed out")
+            return result
+
+        background_errors = []
+        block._build_week_target_projection = pause_exact_dependency  # type: ignore[method-assign]
+        background = threading.Thread(target=apply_in_background, daemon=True)
+        background.start()
+        _assert(exact_entered.wait(timeout=5), "exact dependency projection did not start")
+        with sqlite3.connect(block.db_path) as concurrent_source:
+            concurrent_source.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+                "SET wac_rub='205',fingerprint='exact-dependency-drift' "
+                "WHERE as_of_date='2026-07-01' AND nm_id=101"
+            )
+            concurrent_source.commit()
+        release_exact.set()
+        background.join(timeout=5)
+        block._build_week_target_projection = original  # type: ignore[method-assign]
+        _assert(not background.is_alive(), "exact dependency CAS did not terminate")
+        _assert(
+            background_errors
+            and "exact dependency changed after snapshot planning"
+            in str(background_errors[0]),
+            f"canonical source drift must fail closed: {background_errors}",
+        )
+        plan = block.plan_stale_cost_weeks(
+            date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
         )
 
         backup = _create_sqlite_backup(
@@ -243,9 +304,20 @@ def main() -> None:
         )
         _assert(applied["status"] == "applied", f"apply status mismatch: {applied}")
         _assert(
-            applied["recalculated_week_count"] == 2, f"apply scope mismatch: {applied}"
+            applied["recalculated_week_count"] == plan["stale_week_count"],
+            f"apply scope mismatch: {applied}",
         )
         _assert(applied["non_target_preserved"], f"non-target mismatch: {applied}")
+        _assert(
+            applied["non_target_digest_before"]
+            == applied["non_target_digest_after"],
+            f"apply-time non-target digest evidence mismatch: {applied}",
+        )
+        _assert(
+            applied["source_dependency"]["contract"]
+            == "wb_finance_exact_target_dependency_v2",
+            f"target dependency contract mismatch: {applied}",
+        )
         timings = applied["phase_timings_ms"]
         _assert(
             set(timings)
@@ -256,6 +328,10 @@ def main() -> None:
                 "post_commit_readback",
             },
             f"phase timing evidence missing: {timings}",
+        )
+        _assert(
+            float(timings["writer_lock_hold"]) < 1_500,
+            f"Finance writer section includes heavy projection: {timings}",
         )
         _assert(_metrics(block, "2026-06-22") == control_before, "control week changed")
 
