@@ -1319,7 +1319,9 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
         or default_state["skuMetricToggleBackground"] in white_backgrounds
         or default_state["skuMetricPanelBackground"] in white_backgrounds
         or float(default_state["separatorRowHeight"]) <= separator_line_height
-        or float(default_state["separatorRowHeight"]) > 36
+        or float(default_state["separatorRowHeight"]) > (
+            separator_line_height * 3 + separator_padding[0] + separator_padding[2] + 2
+        )
         or default_state["separatorCellPaddingTop"] != "0px"
         or default_state["separatorCellPaddingBottom"] != "0px"
         or any(value <= 0 for value in separator_padding)
@@ -4552,8 +4554,23 @@ def _check_sku_separators(page: object) -> dict[str, object]:
           const originalTitle = label.getAttribute('title') || '';
           label.textContent = 'SKU ' + 'длинное название '.repeat(12).trim();
           label.title = label.textContent;
+          const longStyles = getComputedStyle(label);
+          const longLineHeight = parseFloat(longStyles.lineHeight) || 0;
+          const longPaddingTop = parseFloat(longStyles.paddingTop) || 0;
+          const longPaddingBottom = parseFloat(longStyles.paddingBottom) || 0;
           const longClientWidth = label.clientWidth;
           const longScrollWidth = label.scrollWidth;
+          const longClientHeight = label.clientHeight;
+          const longScrollHeight = label.scrollHeight;
+          const longRowHeight = separator.getBoundingClientRect().height;
+          const longLineCount = longLineHeight > 0
+            ? Math.round((longClientHeight - longPaddingTop - longPaddingBottom) / longLineHeight)
+            : 0;
+          const longRect = label.getBoundingClientRect();
+          const nextRect = separator.nextElementSibling
+            ? separator.nextElementSibling.getBoundingClientRect()
+            : null;
+          const longRowBottom = separator.getBoundingClientRect().bottom;
           const longTitle = label.getAttribute('title') || '';
           label.textContent = originalText;
           label.title = originalTitle;
@@ -4571,7 +4588,18 @@ def _check_sku_separators(page: object) -> dict[str, object]:
             metricWidth: Math.round(metricAfter.width),
             longClientWidth: Math.round(longClientWidth),
             longScrollWidth: Math.round(longScrollWidth),
+            longClientHeight: Math.round(longClientHeight),
+            longScrollHeight: Math.round(longScrollHeight),
+            longRowHeight: Math.round(longRowHeight),
+            longLineCount,
+            longRight: Math.round(longRect.right),
+            nextTop: nextRect ? Math.round(nextRect.top) : 0,
+            rowBottom: Math.round(longRowBottom),
             longTitle,
+            longOverflow: longStyles.overflow,
+            longOverflowWrap: longStyles.overflowWrap,
+            longTextOverflow: longStyles.textOverflow,
+            longWhiteSpace: longStyles.whiteSpace,
             stickyPosition: getComputedStyle(label).position,
             beforeMetricLeft: Math.round(metricBefore.left)
           };
@@ -4584,10 +4612,19 @@ def _check_sku_separators(page: object) -> dict[str, object]:
         or abs(int(sticky_state["beforeLeft"]) - int(sticky_state["afterLeft"])) > 2
         or int(sticky_state["afterLeft"]) < int(sticky_state["metricLeft"]) - 1
         or int(sticky_state["afterRight"]) > int(sticky_state["metricRight"]) + 2
-        or int(sticky_state["longScrollWidth"]) <= int(sticky_state["longClientWidth"]) + 2
+        or int(sticky_state["longScrollWidth"]) > int(sticky_state["longClientWidth"]) + 1
+        or int(sticky_state["longScrollHeight"]) > int(sticky_state["longClientHeight"]) + 1
+        or int(sticky_state["longLineCount"]) < 2
+        or int(sticky_state["longRowHeight"]) <= int(state["separatorLineHeight"])
+        or int(sticky_state["longRight"]) > int(sticky_state["metricRight"]) + 2
+        or int(sticky_state["nextTop"]) < int(sticky_state["rowBottom"]) - 1
+        or sticky_state["longOverflow"] != "visible"
+        or sticky_state["longOverflowWrap"] != "anywhere"
+        or sticky_state["longTextOverflow"] != "clip"
+        or sticky_state["longWhiteSpace"] != "normal"
         or not str(sticky_state["longTitle"]).startswith("SKU ")
     ):
-        raise AssertionError(f"SKU separator label must stay sticky inside the metric column and truncate long text, got {sticky_state}")
+        raise AssertionError(f"SKU separator label must stay sticky inside the metric column and fully wrap long text, got {sticky_state}")
     page.evaluate("() => { const scroll = document.querySelector('[data-table-scroll]'); if (scroll) { scroll.scrollTop = 0; scroll.scrollLeft = 0; scroll.dispatchEvent(new Event('scroll')); } }")
     return {
         "separator_count": int(state["count"]),
