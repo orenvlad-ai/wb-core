@@ -13,6 +13,7 @@ source_basis:
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
+  - "migration/155_functional_economics_inventory_blend_publication.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -287,6 +288,18 @@ Dry-run до публикации сравнивает projection с полны�
 
 Targeted economics publication проверяет, что `DATA_VITRINA.header[2:]` точно совпадает с versioned `date_columns`, и изменяет только строки со стабильным projection key `scope|metric`. Сохранённые legacy presentation-only rows без такого ключа не участвуют в расчёте и остаются byte-for-byte неизменными; duplicate stable projection key или неоднозначный header блокируют весь dry-run с identity конкретного ready snapshot. Это compatibility read/write boundary, а не второй источник себестоимости.
 
+Обычная functional-economics публикация на/после `2026-08-22` сначала
+материализует exact-date product-capital lookup из той же functional version и
+лишь затем строит единый `our_inventory_wac_wb_ff_v1` через
+`build_inventory_cost_blend_lookup`. Per-SKU `Себестоимость наша`, Proxy 3 и
+Proxy 4 используют ровно этот lookup; TOTAL cost использует только
+`aggregate_inventory_cost_evidence`, а Proxy totals — суммы eligible SKU и
+соответствующие revenue/quantity denominators. WB compatibility, exact
+capital/location evidence, version/freshness/coverage и обе parameter versions
+входят в один optimistic dependency fingerprint. Исторический boundary,
+Finance/Partner realized COGS, capital stages и ledger/queue остаются
+non-target; повторная публикация exact image является no-op.
+
 Изменение только служебного marker/timestamp при `changed_cells=inserted_rows=archived_rows=0` не считается mutation: plan возвращает zero updates, apply является idempotent no-op и не создаёт многогигабайтный backup. Реальное изменение warehouse/economics cells по-прежнему требует exact fingerprint, coherent backup и atomic apply. Dry-run до и после расчёта, а apply повторно уже под `BEGIN IMMEDIATE` сверяют один manifest functional versions/snapshots/balances, version-scoped supplier cost states, active version, текущих supplier/CNY/financial source rows, daily WB costs и effective parameter versions; почасовая публикация или cost-source mutation во время длительного backup поэтому останавливает stale backfill до изменения ready snapshot. Для active exact-date rows backfill повторяет source/calculation fingerprint revalidation и публикует жёлтый `source_changed_provisional`, пока targeted replay не выпустил новую согласованную версию.
 
 Dry-run фиксирует одну canonical business date в fingerprint на всю операцию. Apply требует ту же дату перед fresh recheck, после backup, под write lock и непосредственно перед commit; переход бизнес-полуночи до commit откатывает транзакцию. Live/closed coverage поэтому не смешивает две даты внутри одного плана.
@@ -468,6 +481,7 @@ Targeted verification:
 - `python3 apps/stocks_block_smoke.py`;
 - `python3 apps/warehouse_stocks_smoke.py` (immutable legacy opening regression);
 - `python3 apps/our_wb_costs_smoke.py`;
+- `python3 apps/inventory_cost_blend_smoke.py` (ordinary publisher before/after, shared cost/Proxy 3/4 source and repeat no-op);
 - `python3 apps/own_product_capital_smoke.py`;
 - `python3 apps/canonical_cost_engine_smoke.py` (exact period-column selection; no current-value backfill);
 - `python3 apps/cny_ledger_smoke.py`;

@@ -16,7 +16,19 @@ from packages.application.calculation_parameters import (
     CalculationParametersBlock,
     calculate_proxy_3,
 )
+from packages.application.calculation_parameters_v4 import (
+    aggregate_proxy_4,
+    calculate_proxy_4,
+    load_proxy_v4_parameters_for_date,
+)
 from packages.application.canonical_wb_cost_resolver import CANONICAL_COST_POLICY_DATE
+from packages.application.inventory_cost_blend import (
+    INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+    INVENTORY_COST_BLEND_FORMULA_VERSION,
+    aggregate_inventory_cost_evidence,
+    build_inventory_cost_blend_lookup,
+    inventory_cost_evidence_reason,
+)
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
@@ -31,6 +43,19 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_UNIT_COST_RUB_LABEL,
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+)
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_LABEL_RU,
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_MARGIN_LABEL_RU,
+    PROXY_V4_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_PROFIT_LABEL_RU,
+    PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_SKU_METRIC_KEYS,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_TOTAL_METRIC_KEYS,
+    PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
 )
 from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_PUBLIC_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_own_product_capital import (
@@ -77,6 +102,14 @@ WAREHOUSE_TARGET_KEYS = set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS) | set(
     OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS
 )
 TARGET_KEYS.update(WAREHOUSE_TARGET_KEYS)
+PROXY_V4_TARGET_KEYS = set(PROXY_V4_SKU_METRIC_KEYS) | set(
+    PROXY_V4_TOTAL_METRIC_KEYS
+)
+TARGET_KEYS.update(PROXY_V4_TARGET_KEYS)
+PRESENTATION_TARGET_KEYS = WAREHOUSE_TARGET_KEYS | {
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+}
 ARCHIVED_READY_METRIC_KEYS = ARCHIVED_PUBLIC_METRIC_KEYS
 MUTATED_READY_METRIC_KEYS = frozenset(TARGET_KEYS | set(ARCHIVED_READY_METRIC_KEYS))
 ZERO = Decimal("0")
@@ -165,7 +198,6 @@ def build_functional_economics_backfill_plan(
         runtime,
         dates=dates,
     )
-    costs = {day: runtime.load_our_wb_cost_daily_state(as_of_date=day) for day in dates}
     capital = OwnProductCapitalBlock(runtime=runtime)
     warehouse_context = _exact_functional_snapshot_context(runtime, warehouse_dates)
     warehouse_covered_nm_ids = {
@@ -187,10 +219,33 @@ def build_functional_economics_backfill_plan(
         else {}
         for day in dates
     }
+    # The ordinary publisher must resolve the exact-date physical capital
+    # image before it derives the informational WAC consumed by the visible
+    # cost and both Proxy versions.  WB compatibility remains an input, never
+    # the post-boundary public result by itself.
+    wb_compat_costs = {
+        day: runtime.load_our_wb_cost_daily_state(as_of_date=day)
+        for day in dates
+    }
+    costs = {
+        day: build_inventory_cost_blend_lookup(
+            as_of_date=day,
+            wb_compat_lookup=wb_compat_costs[day],
+            product_capital_lookup=warehouse_metrics[day],
+        )
+        for day in dates
+    }
     parameters = CalculationParametersBlock(runtime=runtime)
     parameter_by_date = {
         day: parameters.parameters_for_date(
             max(day, CANONICAL_COST_POLICY_DATE.isoformat())
+        )
+        for day in dates
+    }
+    proxy_v4_parameter_by_date = {
+        day: load_proxy_v4_parameters_for_date(
+            runtime=runtime,
+            effective_date=day,
         )
         for day in dates
     }
@@ -202,6 +257,7 @@ def build_functional_economics_backfill_plan(
         {
             "cutover_fingerprint": str(cutover["plan_fingerprint"]),
             "costs": costs,
+            "wb_compat_costs": wb_compat_costs,
             "warehouse_metrics": warehouse_metrics,
             "warehouse_exact_dates": sorted(warehouse_exact_dates),
             "warehouse_covered_nm_ids": {
@@ -210,6 +266,10 @@ def build_functional_economics_backfill_plan(
             },
             "warehouse_version_ids": warehouse_version_ids,
             "parameters": {day: item.public() for day, item in parameter_by_date.items()},
+            "proxy_v4_parameters": {
+                day: item.public() if item is not None else None
+                for day, item in proxy_v4_parameter_by_date.items()
+            },
             "target_scope": (
                 {
                     "affected_nm_ids": target_nm_ids,
@@ -240,6 +300,7 @@ def build_functional_economics_backfill_plan(
                 warehouse_covered_nm_ids=warehouse_covered_nm_ids,
                 warehouse_version_ids=warehouse_version_ids,
                 parameters=parameter_by_date,
+                proxy_v4_parameters=proxy_v4_parameter_by_date,
                 source_fingerprint=source_fingerprint,
                 cutover_business_date=cutover_business_date,
                 operation_business_date=operation_business_date,
@@ -1061,6 +1122,12 @@ def _warehouse_input_manifest_digest(
                 """SELECT * FROM sheet_vitrina_v1_calculation_parameter_versions
                    ORDER BY block_key,effective_date,revision,created_at,version_id""",
             )
+        if "sheet_vitrina_v1_proxy_v4_parameter_versions" in table_names:
+            manifest["proxy_v4_parameters"] = _query_manifest_rows(
+                conn,
+                """SELECT * FROM sheet_vitrina_v1_proxy_v4_parameter_versions
+                   ORDER BY effective_date,revision,created_at,version_id""",
+            )
         return "sha256:" + _hash(manifest)
     finally:
         if own_connection:
@@ -1084,6 +1151,7 @@ def _transform_snapshot(
     warehouse_covered_nm_ids: Mapping[str, set[int]],
     warehouse_version_ids: Mapping[str, str],
     parameters: Mapping[str, Any],
+    proxy_v4_parameters: Mapping[str, Any] | None = None,
     source_fingerprint: str,
     cutover_business_date: str,
     operation_business_date: str | None = None,
@@ -1123,11 +1191,16 @@ def _transform_snapshot(
     include_warehouse_rows = any(
         day >= CANONICAL_COST_POLICY_DATE.isoformat() for day in dates
     )
+    include_proxy_v4_rows = any(
+        day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE for day in dates
+    )
     active_target_keys = (
         set(TARGET_KEYS)
         if include_warehouse_rows
         else set(TARGET_KEYS) - WAREHOUSE_TARGET_KEYS
     )
+    if not include_proxy_v4_rows:
+        active_target_keys -= PROXY_V4_TARGET_KEYS
     before_digest = (
         _targeted_non_target_digest(
             original,
@@ -1197,6 +1270,7 @@ def _transform_snapshot(
         scopes=target_scopes if targeted else scopes,
         date_count=len(dates),
         include_warehouse=include_warehouse_rows,
+        include_proxy_v4=include_proxy_v4_rows,
     )
     if targeted and inserted:
         raise FunctionalEconomicsBackfillError(
@@ -1206,6 +1280,7 @@ def _transform_snapshot(
     changed = 0
     presentation_changes = 0
     sku_result: dict[tuple[str, int], dict[str, Decimal | None]] = {}
+    sku_v4_result: dict[tuple[str, int], dict[str, Decimal | None]] = {}
     existing_coverage = metadata.get("warehouse_history_coverage")
     warehouse_coverage: dict[str, dict[str, Any]] = (
         deepcopy(existing_coverage)
@@ -1320,6 +1395,29 @@ def _transform_snapshot(
                 OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY: calculated["proxy_profit_3"],
                 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY: calculated["proxy_margin_3"],
             }
+            if day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+                calculated_v4 = calculate_proxy_4(
+                    order_sum=order_sum,
+                    order_count=order_count,
+                    canonical_wb_wac=cost,
+                    ads_sum=ads_sum,
+                    parameters=(proxy_v4_parameters or {}).get(day),
+                    business_date=day,
+                )
+                sku_v4_result[(scope, index)] = calculated_v4
+                values.update(
+                    {
+                        PROXY_V4_PROFIT_RUB_METRIC_KEY: calculated_v4[
+                            "proxy_profit_4"
+                        ],
+                        PROXY_V4_MARGIN_PCT_METRIC_KEY: calculated_v4[
+                            "proxy_margin_4"
+                        ],
+                        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY: calculated_v4[
+                            "proxy_margin_per_unit"
+                        ],
+                    }
+                )
             sku_result[(scope, index)] = calculated
             if mutate_sku:
                 for metric_key, value in values.items():
@@ -1337,45 +1435,143 @@ def _transform_snapshot(
                         row_id=f"{scope}|{metric_key}",
                         day=day,
                     )
+            if day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE and mutate_sku:
+                presentation_changes += _set_inventory_cost_cell_presentation(
+                    metadata,
+                    row_id=f"{scope}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
+                    day=day,
+                    evidence=(cost_state or {}).get("inventory_cost_evidence"),
+                    source_status=str(
+                        (cost_state or {}).get("source_status") or ""
+                    ),
+                )
 
-        complete = [sku_result[(scope, index)] for scope in scopes]
-        profits = [item["proxy_profit_3"] for item in complete]
-        revenues = [item["expected_buyout_revenue"] for item in complete]
-        total_profit = None if any(value is None for value in profits) else sum((value for value in profits if value is not None), ZERO)
-        total_revenue = None if any(value is None for value in revenues) else sum((value for value in revenues if value is not None), ZERO)
+        eligible_proxy_3: list[dict[str, Decimal | None]] = []
+        proxy_3_blocked = False
+        for scope in scopes:
+            item = sku_result[(scope, index)]
+            if item["proxy_profit_3"] is None:
+                raw_order_sum = _cell_decimal(
+                    by_id.get(f"{scope}|orderSum"), index
+                )
+                if raw_order_sum is None or raw_order_sum > ZERO:
+                    proxy_3_blocked = True
+                    break
+                continue
+            eligible_proxy_3.append(item)
+        profits = [item["proxy_profit_3"] for item in eligible_proxy_3]
+        revenues = [item["expected_buyout_revenue"] for item in eligible_proxy_3]
+        total_profit = (
+            None
+            if proxy_3_blocked or not profits
+            else sum((value for value in profits if value is not None), ZERO)
+        )
+        total_revenue = (
+            None
+            if proxy_3_blocked or not revenues
+            else sum((value for value in revenues if value is not None), ZERO)
+        )
         total_margin = None if total_revenue in (None, ZERO) or total_profit is None else total_profit / total_revenue
-        # Public TOTAL WB cost is the whole official contour, not merely the
-        # configured/visible SKU subset used for Proxy row aggregation.
         day_costs = costs.get(day, {})
-        cost_states = list(day_costs.values())
-        quantity_cost_pairs = [
-            (
-                _optional_decimal((item or {}).get("stock_qty")) or ZERO,
-                _optional_decimal((item or {}).get("our_wb_unit_cost_rub")),
+        total_cost_evidence: Mapping[str, Any] | None = None
+        if day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+            total_cost_evidence = aggregate_inventory_cost_evidence(
+                day_costs,
+                nm_ids=sorted(scope_nm_ids),
             )
-            for item in cost_states
-        ]
-        total_qty = sum((quantity for quantity, _ in quantity_cost_pairs), ZERO)
-        missing_visible_cost_row = any(nm_id not in day_costs for nm_id in scope_nm_ids)
-        missing_positive_cost = any(quantity > ZERO and cost is None for quantity, cost in quantity_cost_pairs)
-        total_capital = sum(
-            (quantity * cost for quantity, cost in quantity_cost_pairs if cost is not None),
-            ZERO,
-        )
-        total_cost = (
-            total_capital / total_qty
-            if total_qty > ZERO
-            and not missing_visible_cost_row
-            and not missing_positive_cost
-            else None
-        )
+            total_cost = _optional_decimal(total_cost_evidence.get("wac_rub"))
+        else:
+            cost_states = list(day_costs.values())
+            quantity_cost_pairs = [
+                (
+                    _optional_decimal((item or {}).get("stock_qty")) or ZERO,
+                    _optional_decimal((item or {}).get("our_wb_unit_cost_rub")),
+                )
+                for item in cost_states
+            ]
+            total_qty = sum((quantity for quantity, _ in quantity_cost_pairs), ZERO)
+            missing_visible_cost_row = any(
+                nm_id not in day_costs for nm_id in scope_nm_ids
+            )
+            missing_positive_cost = any(
+                quantity > ZERO and cost is None
+                for quantity, cost in quantity_cost_pairs
+            )
+            total_capital = sum(
+                (
+                    quantity * cost
+                    for quantity, cost in quantity_cost_pairs
+                    if cost is not None
+                ),
+                ZERO,
+            )
+            total_cost = (
+                total_capital / total_qty
+                if total_qty > ZERO
+                and not missing_visible_cost_row
+                and not missing_positive_cost
+                else None
+            )
         total_values = {
             TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY: total_cost,
             OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY: total_profit,
             OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY: total_margin,
         }
+        if day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+            v4_rows = [sku_v4_result[(scope, index)] for scope in scopes]
+            v4_blocked = False
+            for scope, item in zip(scopes, v4_rows):
+                if item["proxy_profit_4"] is not None:
+                    continue
+                raw_order_sum = _cell_decimal(
+                    by_id.get(f"{scope}|orderSum"), index
+                )
+                if raw_order_sum is None or raw_order_sum > ZERO:
+                    v4_blocked = True
+                    break
+            v4_aggregate = (
+                {
+                    "proxy_profit_4": None,
+                    "proxy_margin_4": None,
+                    "proxy_margin_per_unit": None,
+                }
+                if v4_blocked
+                else aggregate_proxy_4(v4_rows)
+            )
+            total_values.update(
+                {
+                    PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY: v4_aggregate[
+                        "proxy_profit_4"
+                    ],
+                    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY: v4_aggregate[
+                        "proxy_margin_4"
+                    ],
+                    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY: v4_aggregate[
+                        "proxy_margin_per_unit"
+                    ],
+                }
+            )
         for metric_key, value in total_values.items():
             changed += _set_cell(by_id[f"TOTAL|{metric_key}"], index, value)
+        if total_cost_evidence is not None:
+            presentation_changes += _set_inventory_cost_cell_presentation(
+                metadata,
+                row_id=f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
+                day=day,
+                evidence=total_cost_evidence,
+                source_status=(
+                    "blended_inventory_wac_provisional"
+                    if any(
+                        str(
+                            (day_costs.get(nm_id) or {}).get("source_status")
+                            or ""
+                        )
+                        == "blended_inventory_wac_provisional"
+                        for nm_id in scope_nm_ids
+                    )
+                    else "blended_inventory_wac_confirmed"
+                ),
+            )
         if warehouse_applicable:
             visible_warehouse_states = {
                 nm_id: state
@@ -1424,6 +1620,27 @@ def _transform_snapshot(
         "date_to": dates[relevant_indices[-1]],
         "target_metric_keys": sorted(active_target_keys),
         "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
+        "inventory_cost_publication": {
+            "formula_version": INVENTORY_COST_BLEND_FORMULA_VERSION,
+            "effective_date": INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+            "consumer_metric_keys": sorted(
+                {
+                    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+                    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+                    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+                    *PROXY_V4_TARGET_KEYS,
+                }
+            ),
+            "date_evidence": {
+                dates[index]: aggregate_inventory_cost_evidence(
+                    costs.get(dates[index], {}),
+                    nm_ids=sorted(scope_nm_ids),
+                )
+                for index in relevant_indices
+                if dates[index] >= INVENTORY_COST_BLEND_EFFECTIVE_DATE
+            },
+        },
     }
     marker_key = (
         "functional_economics_targeted_replay"
@@ -1560,6 +1777,53 @@ def _set_warehouse_cell_presentation(
     if not raw:
         metadata.pop("server_cell_presentation", None)
     return 0
+
+
+def _set_inventory_cost_cell_presentation(
+    metadata: dict[str, Any],
+    *,
+    row_id: str,
+    day: str,
+    evidence: Any,
+    source_status: str,
+) -> int:
+    """Publish exact WB+FF source/version evidence for one visible cost cell."""
+
+    resolved = (
+        isinstance(evidence, Mapping)
+        and str(evidence.get("status") or "") == "resolved"
+    )
+    provisional = source_status == "blended_inventory_wac_provisional"
+    expected = {
+        "state": (
+            "unconfirmed"
+            if resolved and provisional
+            else ("confirmed" if resolved else "unavailable")
+        ),
+        "tone": (
+            "yellow"
+            if resolved and provisional
+            else ("green" if resolved else "neutral")
+        ),
+        "reason": inventory_cost_evidence_reason(
+            evidence if isinstance(evidence, Mapping) else {}
+        ),
+        "source": "WebCore · WB+FF",
+    }
+    raw = metadata.setdefault("server_cell_presentation", {})
+    if not isinstance(raw, dict):
+        raise FunctionalEconomicsBackfillError(
+            "ready snapshot server_cell_presentation must be an object"
+        )
+    by_date = raw.setdefault(row_id, {})
+    if not isinstance(by_date, dict):
+        raise FunctionalEconomicsBackfillError(
+            f"ready snapshot presentation for {row_id} must be an object"
+        )
+    if by_date.get(day) == expected:
+        return 0
+    by_date[day] = expected
+    return 1
 
 
 def _warehouse_sku_quality_presentation(
@@ -1821,12 +2085,33 @@ def _ensure_target_rows(
     scopes: list[str],
     date_count: int,
     include_warehouse: bool,
+    include_proxy_v4: bool,
 ) -> int:
     specs = [
         ("TOTAL", TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY, OUR_WB_UNIT_COST_RUB_LABEL),
         ("TOTAL", OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, OUR_WB_PROXY_PROFIT_3_RUB_LABEL),
         ("TOTAL", OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_LABEL),
     ]
+    if include_proxy_v4:
+        specs.extend(
+            [
+                (
+                    "TOTAL",
+                    PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
+                    PROXY_V4_PROFIT_LABEL_RU,
+                ),
+                (
+                    "TOTAL",
+                    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+                    PROXY_V4_MARGIN_LABEL_RU,
+                ),
+                (
+                    "TOTAL",
+                    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+                    PROXY_V4_MARGIN_PER_UNIT_LABEL_RU,
+                ),
+            ]
+        )
     warehouse_catalog = {
         (item.scope, item.metric_key): item.label_ru
         for item in build_own_product_capital_metric_items()
@@ -1847,6 +2132,26 @@ def _ensure_target_rows(
                 (scope, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, f"{prefix}: {OUR_WB_PROXY_MARGIN_3_PCT_LABEL}"),
             ]
         )
+        if include_proxy_v4:
+            specs.extend(
+                [
+                    (
+                        scope,
+                        PROXY_V4_PROFIT_RUB_METRIC_KEY,
+                        f"{prefix}: {PROXY_V4_PROFIT_LABEL_RU}",
+                    ),
+                    (
+                        scope,
+                        PROXY_V4_MARGIN_PCT_METRIC_KEY,
+                        f"{prefix}: {PROXY_V4_MARGIN_LABEL_RU}",
+                    ),
+                    (
+                        scope,
+                        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+                        f"{prefix}: {PROXY_V4_MARGIN_PER_UNIT_LABEL_RU}",
+                    ),
+                ]
+            )
         if include_warehouse:
             specs.extend(
                 (scope, metric_key, f"{prefix}: {label}")
@@ -2098,7 +2403,7 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
         presentation = metadata.get("server_cell_presentation")
         if isinstance(presentation, dict):
             for row_id in list(presentation):
-                if "|" in row_id and row_id.split("|", 1)[1] in WAREHOUSE_TARGET_KEYS:
+                if "|" in row_id and row_id.split("|", 1)[1] in PRESENTATION_TARGET_KEYS:
                     presentation.pop(row_id, None)
             if not presentation:
                 metadata.pop("server_cell_presentation", None)

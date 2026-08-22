@@ -12,6 +12,7 @@ source_basis:
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
+  - "migration/155_functional_economics_inventory_blend_publication.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/calculation_parameters.py"
@@ -68,6 +69,15 @@ publish the current business date from its exact latest good version, but a
 later business-date overhead/version never rewrites an earlier ready date.
 Ready dates before `2026-08-22` retain their existing WB compatibility values;
 this repo/live release is not a historical backfill.
+
+The ordinary functional-economics publisher must first load the exact-date
+product-capital image and only then build the shared WB-compatibility + WB/FF
+blend. That one lookup supplies the visible per-SKU cost, Proxy 3 and Proxy 4;
+its functional version, publication freshness, location coverage and both
+effective parameter versions enter one dependency fingerprint. The persisted
+publication marker names all three consumers and retains the same aggregate
+evidence rendered by the cost cell. A mixed-version or WB-only current
+publication is rejected by source/CAS readback rather than exposed as ready.
 
 This informational blend is deliberately not realized sale COGS. Finance and
 Partner continue to use `canonical_our_cost_channel_location_v1`: FBS uses only

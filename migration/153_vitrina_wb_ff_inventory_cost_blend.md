@@ -9,6 +9,10 @@ production data backfill. Earlier ready dates keep their persisted WB
 compatibility values and later overhead/current stock cannot rewrite them
 through ordinary refresh.
 
+Migration 155 closes the ordinary functional-economics consumer gap: that
+publisher builds exact-date product capital before the shared blend and
+publishes visible cost plus Proxy 3/4 from one versioned dependency image.
+
 Finance weekly/per-SKU and Partner Report are non-target consumers. They retain
 `canonical_our_cost_channel_location_v1`: FBS exact facility frozen WAC at
 durable handoff, WB/FBO exact daily WB WAC, uncovered revenue excluded with
