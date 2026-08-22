@@ -51,8 +51,11 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: 
     INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
+    PROXY_V4_MARGIN_PER_UNIT_LABEL_RU,
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
 )
@@ -73,6 +76,7 @@ BUYOUT_LOGICAL_METRIC_ID = (
 PROXY_V4_LOGICAL_METRIC_IDS = (
     f"pair::{PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY}::{PROXY_V4_PROFIT_RUB_METRIC_KEY}",
     f"pair::{PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY}::{PROXY_V4_MARGIN_PCT_METRIC_KEY}",
+    f"pair::{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}::{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}",
 )
 LEGACY_SELLER_PRICE_LOGICAL_ID = (
     f"pair::{LEGACY_AVG_SELLER_PRICE_DISCOUNTED_METRIC_KEY}::{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"
@@ -118,6 +122,7 @@ def main() -> None:
                 "buyout_total_sku_logical_pair",
                 "buyout_saved_preset_compatibility",
                 "buyout_shared_display_control",
+                "proxy_v4_unit_margin_pair_blank_period_render",
                 "local_migration_total_basis",
                 "local_migration_scope_only_preserved",
                 "local_migration_related_preferences_preserved",
@@ -471,9 +476,46 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
         raise AssertionError("SKU picker must contain exactly one logical buyoutPercent option")
     if page.locator(f'[data-sku-metric-option="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
         raise AssertionError("legacy TOTAL average must not duplicate the SKU picker item")
-    for metric_key in (PROXY_V4_PROFIT_RUB_METRIC_KEY, PROXY_V4_MARGIN_PCT_METRIC_KEY):
+    for metric_key in (
+        PROXY_V4_PROFIT_RUB_METRIC_KEY,
+        PROXY_V4_MARGIN_PCT_METRIC_KEY,
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    ):
         if page.locator(f'[data-sku-metric-option="{metric_key}"]').count() != 1:
             raise AssertionError(f"SKU picker must contain one V4 metric item: {metric_key}")
+
+    unit_rows = [
+        row
+        for row in server.composition["table_surface"]["rows"]
+        if row["row_id"] == f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+        or row["row_id"].endswith(f"|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}")
+    ]
+    unit_total_rows = [row for row in unit_rows if row["row_kind"] == "total"]
+    unit_sku_rows = [row for row in unit_rows if row["row_kind"] == "sku"]
+    if (
+        len(unit_total_rows) != 1
+        or len(unit_sku_rows) < 2
+        or any(
+            row["values"]["metric_label"]["display_text"]
+            != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+            for row in unit_rows
+        )
+    ):
+        raise AssertionError(
+            "unit margin must enter the unfiltered composition as one TOTAL row "
+            "and current SKU rows with the exact label"
+        )
+    unit_value_cells = [
+        cell["display_text"]
+        for row in unit_rows
+        for column_id, cell in row["values"].items()
+        if column_id.startswith("date:")
+    ]
+    if not unit_value_cells or any(value.strip() != "—" for value in unit_value_cells):
+        raise AssertionError(
+            "unit-margin dates without complete V4 evidence must stay blank in the "
+            f"unfiltered period composition, got {unit_value_cells}"
+        )
 
     _open_metrics(page)
     pair_row = page.locator(
@@ -501,6 +543,17 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
             or v4_pair.locator(".metrics-config-scope-badge").count()
         ):
             raise AssertionError(f"V4 SKU/TOTAL metrics must be one common logical item: {logical_id}")
+    unit_logical_id = (
+        f"pair::{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}::"
+        f"{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+    )
+    if (
+        page.locator(f'[data-metric-config-row="{unit_logical_id}"] .metrics-config-label')
+        .inner_text()
+        .strip()
+        != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+    ):
+        raise AssertionError("unit-margin common picker item must keep its exact Russian label")
 
     display_select = pair_row.locator("[data-metric-display-select]")
     save_before = server.save_count

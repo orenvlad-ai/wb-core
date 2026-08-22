@@ -47,7 +47,9 @@ from packages.application.own_product_capital import (  # noqa: E402
     _inventory_cost_stage_evidence,
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
     extend_metrics_with_proxy_v4,
@@ -157,17 +159,19 @@ def _test_missing_location_cost_and_zero_quantity_fail_closed() -> None:
     incomplete_cost = _product(wb=("5", "50"))
     incomplete_cost[own_stage_metric_key("WB", "cost_covered_qty")] = 4.0
     incomplete_cost["_inventory_cost_stages"]["WB"]["cost_covered_quantity"] = "4"
+    zero_cost = _product(wb=("2", "0"))
     products = {
         301: missing_location,
         302: incomplete_cost,
         303: _product(),
+        304: zero_cost,
     }
     rows = build_inventory_cost_blend_lookup(
         as_of_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
         wb_compat_lookup={},
         product_capital_lookup=products,
     )
-    for nm_id in (301, 302, 303):
+    for nm_id in (301, 302, 303, 304):
         _assert(
             rows[nm_id]["our_wb_unit_cost_rub"] is None,
             f"uncovered SKU {nm_id} is absent rather than zero",
@@ -182,9 +186,17 @@ def _test_missing_location_cost_and_zero_quantity_fail_closed() -> None:
         in rows[302]["inventory_cost_evidence"]["reason_codes"],
         "partial WB cost coverage is explicit",
     )
-    total = aggregate_inventory_cost_evidence(rows, nm_ids=[301, 302, 303])
+    _assert(
+        "wb_capital_nonpositive"
+        in rows[304]["inventory_cost_evidence"]["reason_codes"],
+        "positive physical inventory cannot resolve through zero capital",
+    )
+    total = aggregate_inventory_cost_evidence(rows, nm_ids=[301, 302, 303, 304])
     _assert(total["status"] == "unresolved", "TOTAL rejects positive uncovered rows")
-    _assert(total["missing_nm_ids"] == [301, 302], "zero inventory is not false missing")
+    _assert(
+        total["missing_nm_ids"] == [301, 302, 304],
+        "zero inventory is not false missing and zero cost is not covered",
+    )
 
 
 def _test_transfer_and_reserve_do_not_create_capital() -> None:
@@ -382,6 +394,14 @@ def _test_proxy_3_and_4_use_per_sku_blend_not_sale_cogs() -> None:
             expected_v4[nm_id],
             f"Proxy 4 SKU {nm_id} uses blended WAC",
         )
+        expected_qty = Decimal("1") if nm_id == 601 else Decimal("2")
+        _equal(
+            evaluator.resolve_sku(
+                PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY, nm_id, "current"
+            ),
+            expected_v4[nm_id] / expected_qty,
+            f"Proxy 4 unit margin SKU {nm_id} uses the same informational scope",
+        )
     _equal(
         evaluator.resolve_total(TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY, "current"),
         Decimal("19"),
@@ -408,6 +428,13 @@ def _test_proxy_3_and_4_use_per_sku_blend_not_sale_cogs() -> None:
         evaluator.resolve_total(PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY, "current"),
         expected_total_v4 / Decimal("3000"),
         "Proxy 4 TOTAL margin divides summed profit by summed proxy revenue",
+    )
+    _equal(
+        evaluator.resolve_total(
+            PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY, "current"
+        ),
+        expected_total_v4 / Decimal("3"),
+        "Proxy 4 TOTAL unit margin divides the same SKU profits by summed expected units",
     )
 
 

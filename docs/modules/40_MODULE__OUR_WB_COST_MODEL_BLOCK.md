@@ -3,8 +3,8 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Разделить информационную as-of `Себестоимость наша` WB+FF для Витрины/Proxy 3/4 и exact sale-specific COGS для Finance/Partner."
-scope: "Public metric keys, WB+FF inventory WAC, FBS handoff WAC, daily WB/FBO sale cost, Proxy profit/margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
+purpose: "Разделить информационную as-of `Себестоимость наша` WB+FF и Proxy 3/4 от exact sale-specific Finance/Partner COGS, включая согласованные profit/margin/unit-margin ratios."
+scope: "Public metric keys, WB+FF inventory WAC, FBS handoff WAC, daily WB/FBO sale cost, Proxy profit/margin/unit margin 3 and 4, coverage evidence, calculation parameters and legacy audit boundary."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
@@ -38,7 +38,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters-v4/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "Vitrina and indicative Proxy 3/4 use an exact as-of WB+FF inventory blend; realized Finance/Partner keep exact channel/location sale COGS and partial-coverage exclusion."
+update_note: "Vitrina and indicative Proxy 3/4 use an exact as-of WB+FF inventory blend with ratio-of-eligible-aggregates margins; realized Finance/Partner keep exact channel/location sale COGS and partial-coverage exclusion."
 ---
 
 # 1. Canonical `Себестоимость наша`
@@ -59,8 +59,8 @@ over exactly two mutually exclusive functional stages: `WB` plus `FF`.
 - reserve is not subtracted from physical inventory and creates zero capital;
   a unit transferred FF→WB remains in exactly one included stage, so the blend
   neither omits nor duplicates it;
-- positive quantity with missing cost, version, facility/pool evidence or
-  coverage leaves the SKU and every dependent positive-order TOTAL blank with
+- positive quantity with missing or nonpositive capital, missing version,
+  facility/pool evidence or coverage leaves the SKU and every dependent positive-order TOTAL blank with
   reason evidence; cross-SKU/facility fallback and missing→zero are forbidden.
 
 Exact-date functional versions preserve as-of history. Ordinary refresh may
@@ -211,9 +211,56 @@ proxy_profit_4          = expected_buyout_revenue × (1 − included_expense_rat
                           − expected_buyout_qty × blended_inventory_WAC
                           − ads_sum
 proxy_margin_4          = proxy_profit_4 / expected_buyout_revenue
+proxy_margin_per_unit   = proxy_profit_4 / expected_buyout_qty
 ```
 
-Любой missing operand оставляет SKU V4 blank; zero expected revenue даёт blank margin. TOTAL profit — сумма только eligible SKU profits, TOTAL expected revenue — сумма соответствующих SKU expected revenues, TOTAL margin — их ratio, никогда не среднее SKU margins. Public pairs `proxy_profit_4_rub`/`total_proxy_profit_4_rub` и `proxy_margin_4_pct`/`proxy_margin_4_pct_total` представлены как два общих picker item без отдельного duplicated TOTAL item. Proxy 3 keys/formula/history остаются полностью прежними.
+Любой missing operand оставляет SKU V4 blank; zero expected revenue
+даёт blank percentage margin, а missing или nonpositive
+`expected_buyout_qty` даёт blank unit margin. Подтверждённая
+отрицательная Proxy profit сохраняет отрицательную unit margin.
+`orderCount`, фактический `buyoutCount`, arithmetic SKU mean и
+seller-price weights не являются denominator этой метрики.
+
+TOTAL и group unit margin считаются только как direct ratio:
+
+```text
+SUM(eligible proxy_profit_4)
+----------------------------
+SUM(the same eligible expected_buyout_qty)
+```
+
+Каждая SKU/date входит либо в обе суммы, либо ни в одну. До `2026-08-22`
+frozen ready compatibility продолжает использовать прежние covered-sale
+operands. С границы numerator — полный informational Proxy 4 profit на
+WB+FF WAC, denominator — соответствующий полный
+`orderCount × buyout_rate`; realized Finance coverage не режет ни одну из
+этих сумм. Missing informational operand при positive orders fail-closed
+оставляет aggregate blank. Поэтому 100 eligible orders при 91% дают 91
+expected units, и 9100 ₽ profit / 91 = 100 ₽/шт.
+
+Public pair `proxy_margin_per_unit_rub` /
+`proxy_margin_per_unit_rub_total` имеет единый label
+`Средняя маржа на единицу`, формат `₽/шт` и один common
+picker item. Вместе с парами `proxy_profit_4_rub` /
+`total_proxy_profit_4_rub` и `proxy_margin_4_pct` /
+`proxy_margin_4_pct_total` это три logical V4 item без duplicated TOTAL
+item.
+
+Для уже существующих ready snapshots строка достраивается только
+read-side из уже published Proxy profit, exact-date orders, effective V4
+parameters и boundary-specific operand evidence: прежний cost-coverage
+contract до `2026-08-22`, полный raw order count на/после. Она не переписывает
+ready snapshots, parameter versions или business data и не запускает
+historical backfill. Дата без полного same-date evidence остаётся blank.
+После обычного refresh тот же registry/evaluator contract формирует текущую
+строку. Существующие Proxy 4 profit,
+percentage margin, seller price, canonical cost, coverage rows и их frozen
+history не меняются.
+
+TOTAL profit — сумма только eligible SKU profits, TOTAL expected revenue
+— сумма соответствующих SKU expected revenues, TOTAL percentage margin —
+их ratio, никогда не среднее SKU margins. Proxy 3 keys/formula/history
+остаются полностью прежними.
 
 ## 3.2 Legacy group COST_PRICE / Proxy 1 boundary
 

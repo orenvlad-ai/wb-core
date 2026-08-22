@@ -10,8 +10,16 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from packages.application.own_product_capital import OwnProductCapitalBlock
+from packages.application.inventory_cost_blend import (
+    INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+)
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.calculation_parameters_v4 import (
+    ProxyV4Parameters,
+    calculate_proxy_v4_margin_per_unit,
+    load_proxy_v4_parameters_for_date,
+)
 from packages.application.sheet_vitrina_v1_archived_metrics import (
     ARCHIVED_ONLY_SOURCE_KEYS,
     ARCHIVED_PUBLIC_METRIC_KEYS,
@@ -33,7 +41,14 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (
     extend_rows_with_inventory_planning,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
-from packages.application.sheet_vitrina_v1_proxy_v4 import extend_metrics_with_proxy_v4
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_MARGIN_PCT_METRIC_KEY,
+    PROXY_V4_PROFIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+    extend_metrics_with_proxy_v4,
+)
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_METRIC_KEYS,
     OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS,
@@ -117,9 +132,16 @@ class SheetVitrinaV1WebVitrinaBlock:
         *,
         runtime: RegistryUploadDbBackedRuntime,
         now_factory: Callable[[], datetime] | None = None,
+        proxy_v4_parameters_resolver: Callable[[str], ProxyV4Parameters | None] | None = None,
     ) -> None:
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+        self.proxy_v4_parameters_resolver = proxy_v4_parameters_resolver or (
+            lambda business_date: load_proxy_v4_parameters_for_date(
+                runtime=self.runtime,
+                effective_date=business_date,
+            )
+        )
 
     def list_readable_dates(
         self,
@@ -286,6 +308,17 @@ class SheetVitrinaV1WebVitrinaBlock:
                 fallback_updated_at=refreshed_at,
             ),
             server_cell_presentation=server_cell_presentation,
+        )
+        rows = _include_proxy_v4_unit_margin_rows(
+            rows,
+            runtime=self.runtime,
+            date_columns=snapshot.date_columns,
+            enabled_config=[item for item in current_state.config_v2 if item.enabled],
+            sku_metric=metrics_by_key[PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY],
+            total_metric=metrics_by_key[
+                PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY
+            ],
+            parameters_for_date=self.proxy_v4_parameters_resolver,
         )
         rows = _include_buyout_percent_rows(
             rows,
@@ -1212,6 +1245,289 @@ def _normalize_rows(
             )
         )
     return normalized
+
+
+def _include_proxy_v4_unit_margin_rows(
+    rows: list[WebVitrinaContractRow],
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_columns: list[str],
+    enabled_config: list[ConfigV2Item],
+    sku_metric: MetricV2Item,
+    total_metric: MetricV2Item,
+    parameters_for_date: Callable[[str], ProxyV4Parameters | None],
+) -> list[WebVitrinaContractRow]:
+    """Complete the additive V4 unit-margin pair from exact read-side operands."""
+
+    target_keys = {
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+        PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    }
+    original_by_id = {row.row_id: row for row in rows}
+    result = [row for row in rows if row.metric_key not in target_keys]
+    source_by_scope_metric = {
+        (row.scope_key, row.metric_key): row
+        for row in result
+    }
+    daily_cost_by_date: dict[str, dict[int, dict[str, Any]]] = {}
+    parameters_by_date: dict[str, ProxyV4Parameters | None] = {}
+    for column_date in date_columns:
+        try:
+            daily_cost_by_date[column_date] = runtime.load_our_wb_cost_daily_state(
+                as_of_date=column_date
+            )
+        except Exception:
+            daily_cost_by_date[column_date] = {}
+        try:
+            parameters_by_date[column_date] = parameters_for_date(column_date)
+        except Exception:
+            parameters_by_date[column_date] = None
+
+    aggregate_inputs_by_date: dict[str, list[tuple[float, float]]] = {
+        column_date: [] for column_date in date_columns
+    }
+    aggregate_invalid_by_date = {column_date: False for column_date in date_columns}
+    sku_rows: list[WebVitrinaContractRow] = []
+    for config in sorted(enabled_config, key=lambda item: item.display_order):
+        scope_key = f"SKU:{config.nm_id}"
+        profit_row = source_by_scope_metric.get(
+            (scope_key, PROXY_V4_PROFIT_RUB_METRIC_KEY)
+        )
+        order_count_row = source_by_scope_metric.get((scope_key, "orderCount"))
+        order_sum_row = source_by_scope_metric.get((scope_key, "orderSum"))
+        existing = original_by_id.get(
+            f"{scope_key}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+        )
+        values_by_date: dict[str, Any] = {}
+        updated_at_values = [
+            value
+            for value in (
+                existing.row_last_updated_at if existing is not None else "",
+                profit_row.row_last_updated_at if profit_row is not None else "",
+                order_count_row.row_last_updated_at if order_count_row is not None else "",
+            )
+            if value
+        ]
+        for column_date in date_columns:
+            profit = _numeric_value(
+                profit_row.values_by_date.get(column_date)
+                if profit_row is not None
+                else None
+            )
+            raw_order_count = _numeric_value(
+                order_count_row.values_by_date.get(column_date)
+                if order_count_row is not None
+                else None
+            )
+            raw_order_sum = _numeric_value(
+                order_sum_row.values_by_date.get(column_date)
+                if order_sum_row is not None
+                else None
+            )
+            daily_state = daily_cost_by_date[column_date].get(int(config.nm_id), {})
+            coverage = (
+                daily_state.get("daily_profit_coverage")
+                if isinstance(daily_state, Mapping)
+                else None
+            )
+            state, expected_qty = _proxy_v4_unit_margin_expected_qty(
+                business_date=column_date,
+                raw_order_count=raw_order_count,
+                coverage=coverage,
+                parameters=parameters_by_date[column_date],
+            )
+            margin = (
+                calculate_proxy_v4_margin_per_unit(
+                    proxy_profit_4=profit,
+                    expected_buyout_qty=expected_qty,
+                )
+                if state == "eligible"
+                else None
+            )
+            values_by_date[column_date] = "" if margin is None else float(margin)
+            if margin is not None and profit is not None and expected_qty is not None:
+                aggregate_inputs_by_date[column_date].append((profit, expected_qty))
+            elif state not in {"uncovered", "nonpositive"} and any(
+                value is not None and value > 0
+                for value in (raw_order_sum, raw_order_count, profit)
+            ):
+                aggregate_invalid_by_date[column_date] = True
+            calculated_at = (
+                str(daily_state.get("calculated_at") or "")
+                if isinstance(daily_state, Mapping)
+                else ""
+            )
+            if calculated_at and column_date < INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+                updated_at_values.append(calculated_at)
+
+        sku_row = (
+            replace(
+                existing,
+                metric_label=sku_metric.label_ru,
+                row_last_updated_at=max(updated_at_values, default=""),
+                section=sku_metric.section,
+                group=config.group,
+                nm_id=config.nm_id,
+                format=sku_metric.format,
+                values_by_date=values_by_date,
+            )
+            if existing is not None
+            else WebVitrinaContractRow(
+                row_id=f"{scope_key}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}",
+                row_order=len(result) + len(sku_rows) + 2,
+                scope_kind="SKU",
+                scope_key=scope_key,
+                scope_label=config.display_name,
+                metric_key=PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+                metric_label=sku_metric.label_ru,
+                row_last_updated_at=max(updated_at_values, default=""),
+                section=sku_metric.section,
+                group=config.group,
+                nm_id=config.nm_id,
+                format=sku_metric.format,
+                values_by_date=values_by_date,
+            )
+        )
+        sku_rows.append(sku_row)
+
+    total_values_by_date: dict[str, Any] = {}
+    for column_date in date_columns:
+        if aggregate_invalid_by_date[column_date]:
+            total_values_by_date[column_date] = ""
+            continue
+        eligible = aggregate_inputs_by_date[column_date]
+        margin = calculate_proxy_v4_margin_per_unit(
+            proxy_profit_4=(sum(item[0] for item in eligible) if eligible else None),
+            expected_buyout_qty=(sum(item[1] for item in eligible) if eligible else None),
+        )
+        total_values_by_date[column_date] = "" if margin is None else float(margin)
+
+    total_row_id = f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+    existing_total = original_by_id.get(total_row_id)
+    total_updated_at = max(
+        (
+            row.row_last_updated_at
+            for row in sku_rows
+            if row.row_last_updated_at
+        ),
+        default=(existing_total.row_last_updated_at if existing_total is not None else ""),
+    )
+    total_row = (
+        replace(
+            existing_total,
+            metric_label=total_metric.label_ru,
+            row_last_updated_at=total_updated_at,
+            section=total_metric.section,
+            format=total_metric.format,
+            values_by_date=total_values_by_date,
+        )
+        if existing_total is not None
+        else WebVitrinaContractRow(
+            row_id=total_row_id,
+            row_order=len(result) + 1,
+            scope_kind="TOTAL",
+            scope_key="TOTAL",
+            scope_label="ИТОГО",
+            metric_key=PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+            metric_label=total_metric.label_ru,
+            row_last_updated_at=total_updated_at,
+            section=total_metric.section,
+            group=None,
+            nm_id=None,
+            format=total_metric.format,
+            values_by_date=total_values_by_date,
+        )
+    )
+    _insert_metric_row_after(
+        result,
+        total_row,
+        scope_key="TOTAL",
+        metric_key=PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
+    )
+    for sku_row in sku_rows:
+        _insert_metric_row_after(
+            result,
+            sku_row,
+            scope_key=sku_row.scope_key,
+            metric_key=PROXY_V4_MARGIN_PCT_METRIC_KEY,
+        )
+    return result
+
+
+def _proxy_v4_unit_margin_expected_qty(
+    *,
+    business_date: str,
+    raw_order_count: float | None,
+    coverage: Any,
+    parameters: ProxyV4Parameters | None,
+) -> tuple[str, float | None]:
+    if parameters is None or raw_order_count is None:
+        return "missing", None
+    if business_date >= INVENTORY_COST_BLEND_EFFECTIVE_DATE:
+        expected_qty = float(raw_order_count) * float(parameters.buyout_rate)
+        if not math.isfinite(expected_qty) or expected_qty <= 0:
+            return "nonpositive", None
+        return "eligible", expected_qty
+    if not isinstance(coverage, Mapping):
+        return "missing", None
+    sales_revenue = _numeric_value(coverage.get("sales_revenue_rub"))
+    covered_revenue = _numeric_value(coverage.get("covered_sales_revenue_rub"))
+    uncovered_revenue = _numeric_value(coverage.get("uncovered_sales_revenue_rub"))
+    if (
+        sales_revenue is not None
+        and sales_revenue > 0
+        and covered_revenue is not None
+        and covered_revenue <= 0
+        and uncovered_revenue is not None
+        and uncovered_revenue > 0
+    ):
+        return "uncovered", None
+    sales_orders = _numeric_value(coverage.get("sales_order_count"))
+    covered_orders = _numeric_value(coverage.get("covered_sales_order_count"))
+    covered_units = _numeric_value(coverage.get("covered_sales_units"))
+    covered_cogs = _numeric_value(coverage.get("covered_sales_cogs_rub"))
+    required = (
+        sales_revenue,
+        covered_revenue,
+        sales_orders,
+        covered_orders,
+        covered_units,
+        covered_cogs,
+    )
+    if any(value is None for value in required) or any(
+        value <= 0 for value in required if value is not None
+    ):
+        return "missing", None
+    order_share = min(max(float(covered_orders) / float(sales_orders), 0.0), 1.0)
+    expected_qty = (
+        float(raw_order_count)
+        * order_share
+        * float(parameters.buyout_rate)
+    )
+    if not math.isfinite(expected_qty) or expected_qty <= 0:
+        return "nonpositive", None
+    return "eligible", expected_qty
+
+
+def _insert_metric_row_after(
+    rows: list[WebVitrinaContractRow],
+    row: WebVitrinaContractRow,
+    *,
+    scope_key: str,
+    metric_key: str,
+) -> None:
+    indexes = [
+        index
+        for index, item in enumerate(rows)
+        if item.scope_key == scope_key and item.metric_key == metric_key
+    ]
+    if indexes:
+        rows.insert(indexes[-1] + 1, row)
+        return
+    scope_indexes = [
+        index for index, item in enumerate(rows) if item.scope_key == scope_key
+    ]
+    rows.insert(scope_indexes[-1] + 1 if scope_indexes else len(rows), row)
 
 
 def _include_buyout_percent_rows(

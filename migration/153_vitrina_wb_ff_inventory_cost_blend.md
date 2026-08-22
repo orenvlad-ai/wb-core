@@ -36,8 +36,9 @@ the FF aggregate and are disclosure only. WB/FF split, every positive FF
 facility/pool, functional version, effective/published timestamps, source
 watermarks and cost coverage are retained in server cell evidence.
 
-Positive quantity with missing version, cost coverage, FF facility mapping or
-pool evidence produces no WAC and explicit reason codes. Another SKU/facility,
+Positive quantity with missing version, missing/nonpositive capital, cost
+coverage, FF facility mapping or pool evidence produces no WAC and explicit
+reason codes. Another SKU/facility,
 FBO/WB realized cost fallback, arithmetic mean, legacy value and zero are
 forbidden. Reservations use physical inventory before reservation and create
 zero capital. FF→WB movement preserves aggregate quantity/capital while placing
@@ -54,6 +55,10 @@ reinterpret them. SKU missing new informational cost with positive order
 revenue makes its Proxy row and aggregate blank. TOTAL proxy profit sums
 complete SKU calculations; TOTAL proxy margin divides summed profit by summed
 expected revenue. It never multiplies a global WAC shortcut.
+The paired Proxy 4 unit margin follows the same boundary: prior ready dates
+retain covered compatibility operands; new dates divide the same eligible
+informational SKU profits by summed `orderCount × buyout_rate`, never by
+realized Finance coverage or an arithmetic SKU mean.
 
 The six-stage `Общий товарный капитал` contract is unchanged: production,
 China→FF, FF, FF→WB, WB and acceptance discrepancy remain mutually exclusive.

@@ -271,6 +271,10 @@ def _inventory_cost_evidence(
             or abs(stage_covered - public_covered) > PUBLIC_PROJECTION_TOLERANCE
         ):
             blockers.append(f"{stage_name.lower()}_stage_evidence_mismatch")
+        if stage_quantity < ZERO or stage_covered < ZERO or stage_capital < ZERO:
+            blockers.append(f"{stage_name.lower()}_stage_negative_operand")
+        if stage_quantity > ZERO and stage_capital <= ZERO:
+            blockers.append(f"{stage_name.lower()}_capital_nonpositive")
         if stage_quantity > ZERO and stage_covered != stage_quantity:
             blockers.append(f"{stage_name.lower()}_cost_coverage_incomplete")
         if stage_name == "FF" and stage_quantity > ZERO:

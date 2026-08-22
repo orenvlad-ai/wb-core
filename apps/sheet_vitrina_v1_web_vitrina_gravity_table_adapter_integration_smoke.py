@@ -13,6 +13,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -84,14 +88,28 @@ def main() -> None:
             raise AssertionError(f"useTable options mismatch, got {adapter.use_table_options}")
 
         row_ids = [row.row_id for row in adapter.rows]
-        expected_row_ids = [
+        required_row_ids = [
             "TOTAL|total_view_count",
             f"GROUP:{enabled[0].group}|view_count",
             f"SKU:{enabled[0].nm_id}|price_seller_discounted",
             f"SKU:{enabled[1].nm_id}|avg_addToCartConversion",
         ]
-        if row_ids != expected_row_ids:
+        if any(row_id not in row_ids for row_id in required_row_ids) or [
+            row_ids.index(row_id) for row_id in required_row_ids
+        ] != sorted(row_ids.index(row_id) for row_id in required_row_ids):
             raise AssertionError(f"adapter row order mismatch, got {row_ids}")
+        unit_total_id = f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+        unit_sku_ids = [
+            f"SKU:{item.nm_id}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+            for item in enabled
+        ]
+        if row_ids.count(unit_total_id) != 1 or any(
+            row_ids.count(row_id) != 1 for row_id in unit_sku_ids
+        ):
+            raise AssertionError(
+                "adapter must retain exactly one additive unit-margin TOTAL row and "
+                "one row per enabled SKU"
+            )
 
         columns = {column.id: column for column in adapter.columns}
         group_row = next(row for row in adapter.rows if row.row_id == f"GROUP:{enabled[0].group}|view_count")

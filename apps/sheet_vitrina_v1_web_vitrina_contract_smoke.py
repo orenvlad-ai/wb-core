@@ -29,6 +29,11 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     incident_stock_metric_key,
 )
+from packages.application.sheet_vitrina_v1_proxy_v4 import (
+    PROXY_V4_MARGIN_PER_UNIT_LABEL_RU,
+    PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_sku_actions import (
     ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
     BUYER_PRICE_RUB_METRIC_KEY,
@@ -109,7 +114,7 @@ def main() -> None:
 
         if (
             payload.meta.snapshot_id != "web-vitrina-v1-fixture"
-            or payload.meta.row_count != 14 + len(enabled)
+            or payload.meta.row_count != 15 + (2 * len(enabled))
         ):
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
@@ -247,6 +252,30 @@ def main() -> None:
             for row in buyout_sku_rows
         ):
             raise AssertionError("every immature enabled-SKU buyoutPercent row must be blank")
+        unit_total = rows_by_id[
+            f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+        ]
+        unit_sku_rows = [
+            rows_by_id[
+                f"SKU:{item.nm_id}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
+            ]
+            for item in enabled
+        ]
+        if (
+            unit_total.metric_label != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+            or unit_total.format != "rub_per_unit"
+            or unit_total.values_by_date != {"2026-04-19": "", "2026-04-20": ""}
+            or any(
+                row.metric_label != PROXY_V4_MARGIN_PER_UNIT_LABEL_RU
+                or row.format != "rub_per_unit"
+                or row.values_by_date != {"2026-04-19": "", "2026-04-20": ""}
+                for row in unit_sku_rows
+            )
+        ):
+            raise AssertionError(
+                "unit-margin schema evolution must expose one blank TOTAL row and "
+                "one blank row per enabled SKU without inventing missing V4 evidence"
+            )
         total_cost_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
         total_proxy3_row = rows_by_id[f"TOTAL|{OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
         total_margin3_row = rows_by_id[f"TOTAL|{OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY}"]
