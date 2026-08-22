@@ -308,11 +308,13 @@ uses a separate `.warehouse-functional-job.lock` only for single-flight. It does
 not hold `.warehouse-functional-sync.lock` across upstream capture, heavy
 plan/digest, economics or Finance work. Canonical writers keep their own short
 optimistic write/CAS sections; Finance builds target after-images from a
-query-only projection and then revalidates only its exact canonical WB/FBS
-cost, nomenclature, target raw/report and target-before fingerprints under
-`BEGIN IMMEDIATE`. Unrelated UI/status commits no longer invalidate Finance by
-global `PRAGMA data_version`; an actual dependency or target change still
-fails closed before replacement. Phase,
+query-only projection and revalidates its exact canonical WB/FBS cost,
+nomenclature and target raw/report dependency before `BEGIN IMMEDIATE`.
+The writer boundary contains only the read-only observer's per-database
+handoff token, an indexed target-before CAS, deterministic target replacement
+and exact normalized readback. Unrelated UI/status commits during the long
+projection remain admissible; an actual dependency, handoff or target change
+still fails closed before replacement. Phase,
 job-lock and writer-lock
 timings are durable evidence. Interactive FF preview/confirm/status can commit
 while the heavy job is planning, and source drift leaves last-good active for a

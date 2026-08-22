@@ -177,6 +177,11 @@ def main() -> None:
             conn: sqlite3.Connection, *, week_start: date, week_end: date
         ) -> dict:
             nonlocal calls
+            _assert(
+                int(conn.execute("PRAGMA query_only").fetchone()[0]) == 1
+                and not conn.in_transaction,
+                "heavy Finance projection must use an autocommit query-only connection",
+            )
             calls += 1
             result = original(
                 conn, week_start=week_start, week_end=week_end
@@ -324,6 +329,7 @@ def main() -> None:
             == {
                 "query_plan",
                 "query_projection",
+                "dependency_verify",
                 "writer_lock_hold",
                 "post_commit_readback",
             },
