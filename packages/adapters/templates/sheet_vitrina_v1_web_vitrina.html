@@ -3740,7 +3740,7 @@
     }
 
     .sku-separator-row td {
-      height: calc(var(--table-font-size) * 2.75);
+      height: auto;
       padding: 0;
       background: rgba(25, 29, 36, 0.96);
       border-top: 1px solid rgba(255, 255, 255, 0.045);
@@ -3759,6 +3759,7 @@
       width: max-content;
       max-width: min(calc(var(--sku-separator-metric-width, 180px) - 18px), calc(100vw - 48px));
       min-height: calc(var(--table-font-size) * 2.75);
+      height: auto;
       margin-left: 0;
       border: 0;
       border-radius: 0;
@@ -3768,9 +3769,11 @@
       font-size: calc(var(--table-font-size) * 2);
       font-weight: 800;
       line-height: 1.15;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+      word-break: normal;
     }
     button.sku-separator-label { cursor: pointer; text-align: left; }
     button.sku-separator-label:hover { color: #a99cfb; text-decoration: underline; text-underline-offset: 2px; }
