@@ -42,6 +42,8 @@ jobs:
 
       - name: Validate public metric retirement
         run: |
+          python3 apps/sheet_vitrina_v1_night_refresh_experiment_smoke.py
+          python3 apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py
           python3 apps/sheet_vitrina_v1_metric_retirement_smoke.py
           python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
           python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
