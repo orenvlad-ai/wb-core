@@ -53,9 +53,9 @@ Official hourly capture remains hourly. A separate job lock preserves
 hourly/manual single-flight, while the common warehouse writer lock is held only
 by short canonical apply/readback sections. Heavy capture, plan/digest,
 economics and Finance recomputation run outside it. Finance builds exact target
-after-images from a query-only projection, then uses the short exact-dependency
-CAS specified by migration 153; unrelated SQLite commits are not source drift.
-Phase/lock timing and
+after-images from a query-only projection, normalizes the target image and uses
+the short snapshot-handoff/target CAS specified by migrations 153 and 154;
+unrelated SQLite commits during long planning are not source drift. Phase/lock timing and
 contention regressions prove interactive FF document/status writes remain
 available while heavy planning is paused.
 

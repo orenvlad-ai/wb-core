@@ -150,6 +150,7 @@ jobs:
           python3 apps/finance_storage_post_manifest_recovery_smoke.py
           python3 apps/wb_finance_weekly_smoke.py
           python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py
+          python3 apps/wb_finance_weekly_stale_cost_scale_smoke.py
           python3 apps/wb_finance_weekly_browser_smoke.py
           python3 apps/partner_report_smoke.py
           python3 apps/partner_finance_production_diagnostic_smoke.py

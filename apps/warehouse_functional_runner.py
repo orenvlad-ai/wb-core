@@ -908,9 +908,9 @@ def _recalculate_downstream_finance_cost(
     """Publish Finance from a fingerprinted snapshot after warehouse commit.
 
     Planning and recalculation stay outside the shared warehouse writer lock;
-    ``apply_stale_cost_weeks`` uses a short data-version CAS and aborts on any
-    intervening source change. The July boundary includes the week that starts
-    on 2026-06-29.
+    ``apply_stale_cost_weeks`` builds exact dependencies and after-images on a
+    query-only connection, then uses a short observer-handoff/target CAS. The
+    July boundary includes the week that starts on 2026-06-29.
     """
 
     return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks(

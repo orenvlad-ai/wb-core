@@ -70,12 +70,15 @@ capital twice and transfer/discrepancy stages cannot leak into inventory WAC.
 Heavy Finance week planning and after-image construction remain outside
 `BEGIN IMMEDIATE`. The prior global `PRAGMA data_version` CAS was too broad: an
 unrelated interactive document/status commit invalidated a correct multi-minute
-projection and produced repeated hourly failures. The writer boundary now
-recomputes a bounded exact dependency fingerprint over canonical WB/FBS cost
-identities, nomenclature routing, target raw/report rows and the target-before
-image. Actual dependency drift fails closed before replacement; unrelated
-SQLite writes are admitted. Target readback and non-target digest remain
-transactional. Phase timings prove the writer section excludes heavy planning.
+projection and produced repeated hourly failures. Migration 154 corrects the
+remaining production-scale defect in the first implementation: exact
+dependency calculation also moves to a true query-only connection before the
+writer boundary, while after-images are normalized to SQLite affinity and
+primary-key order. `BEGIN IMMEDIATE` keeps only the snapshot handoff token,
+indexed target CAS, replacement and exact readback. Actual dependency drift
+fails closed before replacement; unrelated SQLite writes during the long
+projection are admitted. Phase timings prove the writer section excludes
+planning, dependency scans and after-image construction.
 
 The warehouse UI error classifier recognizes exact Finance dependency/target
 CAS drift before generic SQLite timeout metadata, so it no longer reports a

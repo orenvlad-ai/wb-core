@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Any, Callable, Iterable, Mapping
@@ -5248,14 +5249,11 @@ class WbFinanceWeeklyBlock:
             raise ValueError(f"Finance runtime SQLite does not exist: {self.db_path}")
         if date_to is not None and date_to < date_from:
             raise ValueError("date_to must not be earlier than date_from")
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            try:
-                return self._plan_stale_cost_weeks_in_connection(
-                    conn, date_from=date_from, date_to=date_to
-                )
-            finally:
-                conn.rollback()
+        with self._connect_stale_cost_plan() as conn:
+            self._assert_readonly_plan_connection(conn)
+            return self._plan_stale_cost_weeks_in_connection(
+                conn, date_from=date_from, date_to=date_to
+            )
 
     def _plan_stale_cost_weeks_in_connection(
         self,
@@ -5394,6 +5392,9 @@ class WbFinanceWeeklyBlock:
             "target_before_digest": self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=True
             ),
+            "target_before_image_digest": self._json_digest(
+                self._finance_target_images(conn, target_keys)
+            ),
             "non_target_digest": self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=False
             ),
@@ -5418,12 +5419,13 @@ class WbFinanceWeeklyBlock:
         date_from: date = date.min,
         date_to: date | None = None,
     ) -> dict[str, Any]:
-        """Build on an immutable snapshot, then perform one short CAS apply."""
+        """Build and verify a query-only projection, then run one short CAS."""
 
         phase_started = datetime.now(timezone.utc)
-        with self._connect() as conn:
+        with self._connect_stale_cost_plan() as plan_conn:
+            self._assert_readonly_plan_connection(plan_conn)
             plan = self._plan_stale_cost_weeks_in_connection(
-                conn, date_from=date_from, date_to=date_to
+                plan_conn, date_from=date_from, date_to=date_to
             )
             if str(plan["fingerprint"]) != expected_fingerprint:
                 raise ValueError("stale Finance cost plan fingerprint changed before apply")
@@ -5432,6 +5434,13 @@ class WbFinanceWeeklyBlock:
                 for item in plan["weeks"]
             }
             if not target_keys:
+                query_plan_ms = max(
+                    0.0,
+                    (
+                        datetime.now(timezone.utc) - phase_started
+                    ).total_seconds()
+                    * 1000,
+                )
                 return {
                     "status": "already_current",
                     "runtime_mutation": False,
@@ -5444,8 +5453,9 @@ class WbFinanceWeeklyBlock:
                     "non_target_preserved": True,
                     "post_verify_stale_week_count": 0,
                     "phase_timings_ms": {
-                        "query_plan": 0,
+                        "query_plan": query_plan_ms,
                         "query_projection": 0,
+                        "dependency_verify": 0,
                         "writer_lock_hold": 0,
                         "post_commit_readback": 0,
                     },
@@ -5457,7 +5467,7 @@ class WbFinanceWeeklyBlock:
                 start = date.fromisoformat(str(item["week_start"]))
                 end = date.fromisoformat(str(item["week_end"]))
                 projection = self._build_week_target_projection(
-                    conn,
+                    plan_conn,
                     week_start=start,
                     week_end=end,
                 )
@@ -5488,51 +5498,78 @@ class WbFinanceWeeklyBlock:
                         "cogs": metrics["cogs"],
                     }
                 )
+            after_images = self._canonicalize_finance_target_images(
+                plan_conn, after_images
+            )
             snapshot_finished = datetime.now(timezone.utc)
 
-            writer_started = datetime.now(timezone.utc)
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                fresh_source_dependency = self._finance_source_dependency_fingerprint(
-                    conn,
-                    target_keys=target_keys,
-                    force_reload=True,
+            dependency_started = datetime.now(timezone.utc)
+            fresh_source_dependency = self._finance_source_dependency_fingerprint(
+                plan_conn,
+                target_keys=target_keys,
+                force_reload=True,
+            )
+            if (
+                str(fresh_source_dependency["digest"])
+                != str(plan["source_dependency"]["digest"])
+            ):
+                raise ValueError(
+                    "Finance exact dependency changed after snapshot planning; rebuild the plan"
                 )
-                if (
-                    str(fresh_source_dependency["digest"])
-                    != str(plan["source_dependency"]["digest"])
-                ):
-                    raise ValueError(
-                        "Finance exact dependency changed after snapshot planning; rebuild the plan"
-                    )
-                if self._finance_state_digest(
-                    conn,
-                    target_keys=target_keys,
-                    target_only=True,
-                ) != str(plan["target_before_digest"]):
-                    raise ValueError(
-                        "Finance target changed after snapshot planning; rebuild the plan"
-                    )
-                non_target_before_apply = self._finance_state_digest(
-                    conn,
-                    target_keys=target_keys,
-                    target_only=False,
+            if self._json_digest(
+                self._finance_target_images(plan_conn, target_keys)
+            ) != str(plan["target_before_image_digest"]):
+                raise ValueError(
+                    "Finance target changed after snapshot planning; rebuild the plan"
                 )
-                self._replace_finance_target_images(
-                    conn,
-                    target_keys=target_keys,
-                    images=after_images,
-                )
-                applied_images = self._finance_target_images(conn, target_keys)
-                if self._json_digest(applied_images) != self._json_digest(after_images):
-                    raise ValueError("Finance target CAS readback differs from snapshot")
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            writer_finished = datetime.now(timezone.utc)
+            non_target_before_apply = self._finance_state_digest(
+                plan_conn,
+                target_keys=target_keys,
+                target_only=False,
+            )
+            handoff_data_version = self._sqlite_data_version_token(plan_conn)
+            dependency_finished = datetime.now(timezone.utc)
 
-        with self._connect() as conn:
+            with self._connect() as writer_conn:
+                writer_started = datetime.now(timezone.utc)
+                writer_conn.execute("BEGIN IMMEDIATE")
+                try:
+                    # The exact dependency digest above is deliberately built
+                    # on the query-only connection.  Once the writer lock is
+                    # held, a data-version handshake on that same observer
+                    # closes the small handoff race without repeating any
+                    # source scan inside the blocking transaction.
+                    if self._sqlite_data_version_token(plan_conn) != handoff_data_version:
+                        raise ValueError(
+                            "Finance SQLite source changed during snapshot-to-writer handoff; rebuild the plan"
+                        )
+                    if self._json_digest(
+                        self._finance_target_images(writer_conn, target_keys)
+                    ) != str(plan["target_before_image_digest"]):
+                        raise ValueError(
+                            "Finance target changed after snapshot planning; rebuild the plan"
+                        )
+                    self._replace_finance_target_images(
+                        writer_conn,
+                        target_keys=target_keys,
+                        images=after_images,
+                    )
+                    applied_images = self._finance_target_images(
+                        writer_conn, target_keys
+                    )
+                    target_image_digest = self._json_digest(after_images)
+                    if self._json_digest(applied_images) != target_image_digest:
+                        raise ValueError(
+                            "Finance target CAS readback differs from snapshot"
+                        )
+                    writer_conn.commit()
+                except Exception:
+                    writer_conn.rollback()
+                    raise
+                writer_finished = datetime.now(timezone.utc)
+
+        with self._connect_stale_cost_plan() as conn:
+            self._assert_readonly_plan_connection(conn)
             non_target_after = self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=False
             )
@@ -5571,12 +5608,16 @@ class WbFinanceWeeklyBlock:
             "source_dependency": plan["source_dependency"],
             "post_source_dependency": post_source_dependency,
             "source_advanced_after_apply": source_advanced,
+            "target_image_digest": target_image_digest,
             "phase_timings_ms": {
                 "query_plan": milliseconds(
                     phase_started, snapshot_started
                 ),
                 "query_projection": milliseconds(
                     snapshot_started, snapshot_finished
+                ),
+                "dependency_verify": milliseconds(
+                    dependency_started, dependency_finished
                 ),
                 "writer_lock_hold": milliseconds(writer_started, writer_finished),
                 "post_commit_readback": milliseconds(writer_finished, phase_finished),
@@ -5593,12 +5634,13 @@ class WbFinanceWeeklyBlock:
         """Fingerprint only inputs that can alter the reviewed target images.
 
         A global ``PRAGMA data_version`` also changes for unrelated UI/status
-        writers and made every multi-minute query projection lose its CAS.  The
-        exact dependency fingerprint is cheap enough to rebuild under the
-        short writer boundary and covers only canonical WB/FBS rows reachable
-        from the target operations, nomenclature routing, and the raw/report
-        rows of the target weeks.  A new cost for another date/SKU/order is not
-        a target dependency and therefore cannot starve this CAS.
+        writers and made every multi-minute query projection lose its CAS. The
+        exact dependency fingerprint covers only canonical WB/FBS rows
+        reachable from the target operations, nomenclature routing, and the
+        raw/report rows of the target weeks. It is built and rechecked on the
+        query-only connection before the short writer boundary. A new cost for
+        another date/SKU/order is not a target dependency and therefore cannot
+        starve this CAS.
         """
 
         if force_reload or self._canonical_cost_snapshot_connection is not conn:
@@ -5809,7 +5851,102 @@ class WbFinanceWeeklyBlock:
                 ).fetchall()
                 rows.extend([[row[column] for column in columns] for row in selected])
             images[table] = {"columns": columns, "rows": rows}
-        return images
+        return WbFinanceWeeklyBlock._canonicalize_finance_target_images(
+            conn, images
+        )
+
+    @staticmethod
+    def _canonicalize_finance_target_images(
+        conn: sqlite3.Connection,
+        images: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return the exact SQLite storage image in deterministic PK order.
+
+        Query projection order follows the nomenclature source, while the
+        target readback is ordered by the persisted primary key.  Comparing
+        those two incidental orders made a correct multi-SKU production image
+        fail its CAS.  Canonicalization also applies the declared SQLite
+        affinity before hashing so textual numeric scale cannot create a
+        false target mismatch after an insert/readback round trip.
+        """
+
+        canonical: dict[str, Any] = {}
+        for table, image in images.items():
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", str(table)) is None:
+                raise ValueError("Finance target image table identity is invalid")
+            table_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            expected_columns = [str(row["name"]) for row in table_info]
+            columns = [str(item) for item in image["columns"]]
+            if columns != expected_columns:
+                raise ValueError("Finance target image schema drifted")
+            declared_types = {
+                str(row["name"]): str(row["type"] or "") for row in table_info
+            }
+            primary_key = [
+                str(row["name"])
+                for row in sorted(
+                    (row for row in table_info if int(row["pk"] or 0) > 0),
+                    key=lambda row: int(row["pk"]),
+                )
+            ]
+            if not primary_key:
+                raise ValueError("Finance target image table has no primary key")
+            column_index = {name: index for index, name in enumerate(columns)}
+            normalized_rows: list[list[Any]] = []
+            identities: set[tuple[Any, ...]] = set()
+            for source_row in image["rows"]:
+                if len(source_row) != len(columns):
+                    raise ValueError("Finance target image row width drifted")
+                row = [
+                    WbFinanceWeeklyBlock._sqlite_affinity_value(
+                        value,
+                        declared_type=declared_types[column],
+                    )
+                    for column, value in zip(columns, source_row, strict=True)
+                ]
+                identity = tuple(row[column_index[name]] for name in primary_key)
+                if identity in identities:
+                    raise ValueError("Finance target image contains duplicate identity")
+                identities.add(identity)
+                normalized_rows.append(row)
+            normalized_rows.sort(
+                key=lambda row: tuple(
+                    WbFinanceWeeklyBlock._sqlite_sort_token(
+                        row[column_index[name]]
+                    )
+                    for name in primary_key
+                )
+            )
+            canonical[str(table)] = {
+                "columns": columns,
+                "rows": normalized_rows,
+            }
+        return canonical
+
+    @staticmethod
+    def _sqlite_affinity_value(value: Any, *, declared_type: str) -> Any:
+        if value is None:
+            return None
+        normalized_type = declared_type.upper()
+        if "INT" in normalized_type:
+            try:
+                number = Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Finance INTEGER target value is not numeric"
+                ) from exc
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError("Finance INTEGER target value is not integral")
+            return int(number)
+        if any(token in normalized_type for token in ("CHAR", "CLOB", "TEXT")):
+            return str(value)
+        if any(token in normalized_type for token in ("REAL", "FLOA", "DOUB")):
+            return float(value)
+        return value
+
+    @staticmethod
+    def _sqlite_sort_token(value: Any) -> tuple[int, str]:
+        return (0, "") if value is None else (1, str(value))
 
     @staticmethod
     def _replace_finance_target_images(
@@ -6032,6 +6169,52 @@ class WbFinanceWeeklyBlock:
             conn.close()
             raise
         return conn
+
+    def _connect_stale_cost_plan(self) -> sqlite3.Connection:
+        manifest = self.store_registry.load()
+        conn = self.store_registry.connect(
+            "operational",
+            mode="ro",
+            operation="finance_stale_cost_query_plan",
+            manifest=manifest,
+            timeout_ms=60_000,
+        )
+        try:
+            self._attach_split_raw_read_view(
+                conn,
+                manifest=manifest,
+                query_only_primary=True,
+            )
+            self._assert_readonly_plan_connection(conn)
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    @staticmethod
+    def _assert_readonly_plan_connection(conn: sqlite3.Connection) -> None:
+        if conn.in_transaction:
+            raise ValueError("Finance query plan opened an implicit transaction")
+        if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+            raise ValueError("Finance query plan requires query_only")
+
+    @staticmethod
+    def _sqlite_data_version_token(conn: sqlite3.Connection) -> dict[str, int]:
+        """Observe commits to every persistent database used by the plan."""
+
+        versions: dict[str, int] = {}
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            schema = str(row[1])
+            if schema == "temp":
+                continue
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", schema) is None:
+                raise ValueError("Finance SQLite schema identity is invalid")
+            versions[schema] = int(
+                conn.execute(f"PRAGMA {schema}.data_version").fetchone()[0]
+            )
+        if "main" not in versions:
+            raise ValueError("Finance SQLite main data version is unavailable")
+        return versions
 
     def _connect(self) -> sqlite3.Connection:
         manifest = self.store_registry.load()

@@ -70,12 +70,18 @@ daily-cost surface, exact FBS identity/frozen-cost indexes, active archival
 overlay and first factual receipt boundary once, then caches canonical
 resolution by `nmId + operation date`. Nomenclature identities use the same
 connection-bound cache. Heavy week projection and target after-image assembly
-finish without `BEGIN IMMEDIATE`. The short writer CAS then fingerprints only
-the exact WB/FBS cost snapshot, nomenclature routing, target raw/report rows and
-target-before image; unrelated UI/status commits cannot invalidate it through
-global `PRAGMA data_version`. A real dependency/target change still aborts
-before replacement, and transactional target readback plus non-target digest
-prove publication. No cache survives into a new connection.
+run on a registry-selected SQLite `mode=ro`, `query_only=ON` connection without
+an explicit or implicit data transaction. The exact WB/FBS cost,
+nomenclature and target raw/report dependency fingerprint is computed and
+rechecked there, before the writer boundary. A per-database `data_version`
+handoff observed by that same read-only connection closes only the millisecond
+gap while `BEGIN IMMEDIATE` is acquired; the writer transaction performs no
+source scan. It compares an indexed target-before image, replaces only exact
+week identities and verifies a primary-key-ordered, SQLite-affinity-normalized
+target digest before commit. A real dependency/target change still aborts;
+unrelated commits during the long projection remain admissible. Non-target
+evidence and post-commit dependency/readback are also query-only. No cache
+survives into a new connection. See migration 154.
 
 Coverage counts gross sale/return units, orders and sale revenue, so a
 symmetric sale/return pair cannot hide missing cost even if net COGS is zero.
