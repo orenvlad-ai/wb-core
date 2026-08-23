@@ -1,0 +1,11 @@
+[Unit]
+Description=WB Core Sheet Vitrina Control Canary Restore Watchdog
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/sheet_vitrina_v1_auto_refresh_tick.py --env-file /opt/wb-ai/.env --runtime-dir /opt/wb-core-runtime/state --restore-expired-control-canary-pauses
+TimeoutStartSec=2m
+User=root
+Group=root

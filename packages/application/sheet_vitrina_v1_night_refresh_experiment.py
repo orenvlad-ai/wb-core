@@ -152,6 +152,13 @@ class NightRefreshExperimentRunner:
             try:
                 terminal = dict(self.poll_job(job_id))
             except Exception as exc:  # noqa: BLE001 - evidence must terminalize conservatively.
+                if bool(getattr(exc, "retryable", False)) and _aware_utc(self.now_factory()) < _aware_utc(slot.deadline):
+                    return {
+                        "status": "poll_retry_pending",
+                        "slot_id": slot.slot_id,
+                        "job_id": job_id,
+                        "retry_deadline": slot.deadline.isoformat(),
+                    }
                 self._write_failure_artifact(
                     slot,
                     wrapper_run_id=run_id,
@@ -221,6 +228,13 @@ class NightRefreshExperimentRunner:
         try:
             terminal = dict(self.poll_job(job_id)) if job_id else start_payload
         except Exception as exc:  # noqa: BLE001 - preserve an explicit terminal observation failure.
+            if bool(getattr(exc, "retryable", False)) and _aware_utc(self.now_factory()) < _aware_utc(slot.deadline):
+                return {
+                    "status": "poll_retry_pending",
+                    "slot_id": slot.slot_id,
+                    "job_id": job_id,
+                    "retry_deadline": slot.deadline.isoformat(),
+                }
             self._write_failure_artifact(
                 slot,
                 wrapper_run_id=wrapper_run_id,

@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
+import random
 import shlex
 import sys
 import time
@@ -29,6 +32,13 @@ from packages.application.sheet_vitrina_v1_night_refresh_experiment import (  # 
     TARGET_DATE as NIGHT_EXPERIMENT_TARGET_DATE,
     TRIGGER_SOURCE as NIGHT_EXPERIMENT_TRIGGER_SOURCE,
 )
+from packages.application.sheet_vitrina_v1_control_refresh_canary import (  # noqa: E402
+    ControlRefreshCanaryRunner,
+    SystemdTimerCoordinator,
+    arm_control_canary_manifest,
+    control_canary_status,
+)
+from packages.application.storage_registry import StoreRegistry  # noqa: E402
 
 
 HOSTED_RUNTIME_APP_DIR = Path("/opt/wb-core-runtime/app")
@@ -53,6 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--experiment-status", action="store_true")
+    parser.add_argument("--control-canary-status", action="store_true")
+    parser.add_argument("--arm-control-canary", action="store_true")
+    parser.add_argument("--control-canary-id", default="")
+    parser.add_argument("--control-canary-due-at", default="")
+    parser.add_argument("--control-canary-deadline", default="")
+    parser.add_argument("--expected-deployed-sha", default="")
+    parser.add_argument("--pause-unit", action="append", default=[])
+    parser.add_argument("--restore-expired-control-canary-pauses", action="store_true")
     args = parser.parse_args(argv)
 
     env = _read_env_file(Path(args.env_file))
@@ -69,6 +87,40 @@ def main(argv: list[str] | None = None) -> int:
     ).rstrip("/")
     refresh_path = args.refresh_path or os.environ.get("SHEET_VITRINA_REFRESH_HTTP_PATH") or DEFAULT_REFRESH_PATH
     job_path = args.job_path or os.environ.get("SHEET_VITRINA_JOB_HTTP_PATH") or DEFAULT_JOB_PATH
+    timer_coordinator = SystemdTimerCoordinator()
+    if args.arm_control_canary:
+        deployed_sha = _read_deployed_sha()
+        if not args.expected_deployed_sha or deployed_sha != str(args.expected_deployed_sha).strip().lower():
+            raise RuntimeError(
+                "control canary exact deployed SHA mismatch: "
+                f"expected={str(args.expected_deployed_sha).strip().lower()} actual={deployed_sha}"
+            )
+        _print(
+            arm_control_canary_manifest(
+                runtime_dir=runtime_dir,
+                experiment_id=args.control_canary_id,
+                due_at=args.control_canary_due_at,
+                deadline=args.control_canary_deadline,
+                expected_deployed_sha=deployed_sha,
+                pause_units=args.pause_unit,
+                now=datetime.now(timezone.utc),
+            )
+        )
+        return 0
+    if args.restore_expired_control_canary_pauses:
+        _print(
+            {
+                "status": "restore_watchdog_complete",
+                "restored": timer_coordinator.restore_orphans(
+                    control_root=runtime_dir / "experiments" / "sheet-vitrina-control-canaries",
+                    now=datetime.now(timezone.utc),
+                ),
+            }
+        )
+        return 0
+    if args.control_canary_status:
+        _print(control_canary_status(runtime_dir=runtime_dir, now=datetime.now(timezone.utc)))
+        return 0
     block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir)
     due = sorted(block.due_schedules(), key=lambda item: str(item[1] or ""))
     missed_due, selected_due = _select_due_for_tick(due)
@@ -81,6 +133,16 @@ def main(argv: list[str] | None = None) -> int:
         cookie=cookie,
         timeout_seconds=args.timeout_seconds,
         poll_seconds=args.poll_seconds,
+    )
+    control_canary = _build_control_canary_runner(
+        runtime_dir=runtime_dir,
+        base_url=base_url,
+        refresh_path=refresh_path,
+        job_path=job_path,
+        cookie=cookie,
+        timeout_seconds=args.timeout_seconds,
+        poll_seconds=args.poll_seconds,
+        timer_coordinator=timer_coordinator,
     )
     if args.experiment_status:
         _print(experiment.status())
@@ -98,10 +160,33 @@ def main(argv: list[str] | None = None) -> int:
                 "selected_due_schedules": [_public_due(item) for item in selected_due],
                 "missed_due_schedules": [_public_due(item) for item in missed_due],
                 "night_experiment": experiment.status(),
+                "control_canary": control_canary_status(
+                    runtime_dir=runtime_dir,
+                    now=datetime.now(timezone.utc),
+                ),
             }
         )
         return 0
     experiment_result = experiment.tick()
+    control_canary_result = control_canary.tick()
+    canary_blocks_ordinary = str(control_canary_result.get("status") or "") not in {
+        "no_due_canary",
+        "armed",
+        "terminal",
+    }
+    if canary_blocks_ordinary:
+        _print(
+            {
+                "status": "control_canary_owned_tick",
+                "runtime_dir": str(runtime_dir),
+                "base_url": base_url,
+                "due_count": len(due),
+                "ordinary_due_launch_suppressed": True,
+                "night_experiment": experiment_result,
+                "control_canary": control_canary_result,
+            }
+        )
+        return 0 if str(control_canary_result.get("status") or "") in {"accepted", "accepted_with_warning"} else 1
     if not due:
         failed = str((experiment_result.get("tick_result") or {}).get("status") or "") == "failed"
         _print({
@@ -110,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             "base_url": base_url,
             "due_count": 0,
             "night_experiment": experiment_result,
+            "control_canary": control_canary_result,
         })
         return 1 if failed else 0
     if not cookie:
@@ -199,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             "missed_due_count": len(missed_due),
             "results": results,
             "night_experiment": experiment_result,
+            "control_canary": control_canary_result,
         }
     )
     return exit_code
@@ -330,6 +417,89 @@ def _build_night_experiment_runner(
     )
 
 
+def _build_control_canary_runner(
+    *,
+    runtime_dir: Path,
+    base_url: str,
+    refresh_path: str,
+    job_path: str,
+    cookie: str,
+    timeout_seconds: int,
+    poll_seconds: float,
+    timer_coordinator: SystemdTimerCoordinator,
+) -> ControlRefreshCanaryRunner:
+    from urllib.parse import urlencode
+
+    def start_refresh(manifest: object, attempt_id: str) -> Mapping[str, Any]:
+        return _post_json(
+            base_url + refresh_path,
+            {
+                "async": True,
+                "auto_refresh": True,
+                "as_of_date": getattr(manifest, "target_date", ""),
+                "trigger_source": NIGHT_EXPERIMENT_TRIGGER_SOURCE,
+                "experiment_id": getattr(manifest, "experiment_id", ""),
+                "experiment_slot_id": getattr(manifest, "slot_id", ""),
+                "experiment_wrapper_run_id": attempt_id,
+            },
+            cookie=cookie,
+            timeout=min(timeout_seconds, 60),
+        )
+
+    def poll_job(job_id: str, deadline: datetime) -> Mapping[str, Any]:
+        remaining = max(1, int((deadline - datetime.now(timezone.utc)).total_seconds()))
+        return _poll_job(
+            base_url=base_url,
+            job_path=job_path,
+            job_id=job_id,
+            cookie=cookie,
+            timeout_seconds=min(timeout_seconds, remaining),
+            poll_seconds=poll_seconds,
+        )
+
+    def fetch_contract(target_date: str) -> Mapping[str, Any]:
+        query = urlencode({"as_of_date": target_date})
+        return _get_json(f"{base_url}{DEFAULT_WEB_VITRINA_PATH}?{query}", cookie=cookie, timeout=60)
+
+    def fetch_source_status(target_date: str) -> Mapping[str, Any]:
+        query = urlencode(
+            {
+                "surface": "page_composition",
+                "as_of_date": target_date,
+                "include_source_status": "1",
+                "include_table_data": "0",
+            }
+        )
+        return _get_json(f"{base_url}{DEFAULT_WEB_VITRINA_PATH}?{query}", cookie=cookie, timeout=60)
+
+    def fetch_ready_snapshot(target_date: str) -> Mapping[str, Any]:
+        registry = StoreRegistry(runtime_dir)
+        with registry.session(
+            "operational",
+            mode="ro",
+            operation="sheet_vitrina_control_canary_ready_snapshot_readback",
+            timeout_ms=10_000,
+        ) as conn:
+            row = conn.execute(
+                """SELECT as_of_date,snapshot_id,refreshed_at
+                   FROM sheet_vitrina_v1_ready_snapshots
+                   WHERE as_of_date=?""",
+                (target_date,),
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    return ControlRefreshCanaryRunner(
+        runtime_dir=runtime_dir,
+        start_refresh=start_refresh,
+        poll_job=poll_job,
+        fetch_contract=fetch_contract,
+        fetch_source_status=fetch_source_status,
+        fetch_ready_snapshot=fetch_ready_snapshot,
+        timer_coordinator=timer_coordinator,
+        read_deployed_sha=_read_deployed_sha,
+    )
+
+
 def _post_json(url: str, payload: Mapping[str, Any], *, cookie: str, timeout: int) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
@@ -346,6 +516,24 @@ def _get_json(url: str, *, cookie: str, timeout: int) -> dict[str, Any]:
     return _open_json(request, timeout=timeout)
 
 
+class HTTPJSONError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        status: int,
+        payload: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self.status = int(status)
+        self.payload = dict(payload)
+        self.headers = {str(key): str(value) for key, value in dict(headers or {}).items()}
+        super().__init__(f"HTTP {self.status}: {self.payload.get('error') or self.payload}")
+
+
+class JobPollDeadlineError(RuntimeError):
+    retryable = True
+
+
 def _open_json(request: urllib.request.Request, *, timeout: int) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -354,12 +542,21 @@ def _open_json(request: urllib.request.Request, *, timeout: int) -> dict[str, An
     except urllib.error.HTTPError as exc:
         body = exc.read()
         status = exc.code
+        headers = dict(exc.headers.items()) if exc.headers is not None else {}
+    else:
+        headers = dict(response.headers.items()) if response.headers is not None else {}
     try:
         payload = json.loads(body.decode("utf-8"))
     except Exception as exc:
+        if status >= 400:
+            raise HTTPJSONError(
+                status=status,
+                payload={"error": "non_json_response"},
+                headers=headers,
+            ) from exc
         raise RuntimeError(f"HTTP {status}: non-JSON response") from exc
     if status >= 400:
-        raise RuntimeError(f"HTTP {status}: {payload.get('error') or payload}")
+        raise HTTPJSONError(status=status, payload=payload, headers=headers)
     if isinstance(payload, dict):
         return payload
     raise RuntimeError("JSON response must be an object")
@@ -373,17 +570,107 @@ def _poll_job(
     cookie: str,
     timeout_seconds: int,
     poll_seconds: float,
+    get_json: Any = None,
+    monotonic_factory: Any = None,
+    sleep: Any = None,
+    jitter_factory: Any = None,
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + max(1, timeout_seconds)
+    getter = get_json or _get_json
+    monotonic = monotonic_factory or time.monotonic
+    sleeper = sleep or time.sleep
+    jitter = jitter_factory or (lambda upper: random.uniform(0.0, upper))
+    deadline = monotonic() + max(1, timeout_seconds)
     url = f"{base_url}{job_path}?job_id={urllib_parse_quote(job_id)}"
     last_payload: dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        last_payload = _get_json(url, cookie=cookie, timeout=30)
+    last_retry_reason = "job remained queued/running"
+    retry_count = 0
+    while monotonic() < deadline:
+        try:
+            last_payload = getter(url, cookie=cookie, timeout=30)
+        except HTTPJSONError as exc:
+            if not _retryable_poll_http_error(exc):
+                raise
+            retry_count += 1
+            last_retry_reason = f"HTTP {exc.status} retryable"
+            delay = _poll_retry_delay(exc, retry_count=retry_count, poll_seconds=poll_seconds)
+            remaining = max(0.0, deadline - monotonic())
+            if remaining <= 0:
+                break
+            sleeper(min(delay + jitter(min(0.5, delay * 0.1)), remaining))
+            continue
+        except (TimeoutError, urllib.error.URLError) as exc:
+            retry_count += 1
+            last_retry_reason = f"transport timeout/retry: {type(exc).__name__}"
+            delay = min(30.0, max(0.1, poll_seconds) * (2 ** min(retry_count - 1, 4)))
+            remaining = max(0.0, deadline - monotonic())
+            if remaining <= 0:
+                break
+            sleeper(min(delay + jitter(min(0.5, delay * 0.1)), remaining))
+            continue
         status = str(last_payload.get("status") or "").lower()
         if status not in {"", "queued", "running"}:
             return last_payload
-        time.sleep(max(0.1, poll_seconds))
-    raise RuntimeError(f"auto refresh job timed out: {job_id}")
+        remaining = max(0.0, deadline - monotonic())
+        sleeper(min(max(0.1, poll_seconds), remaining))
+    raise JobPollDeadlineError(
+        f"auto refresh job observation deadline elapsed: {job_id}; last={last_retry_reason}"
+    )
+
+
+def _retryable_poll_http_error(error: HTTPJSONError) -> bool:
+    payload = error.payload
+    typed_contention = (
+        error.status == 503
+        and str(payload.get("contract_name") or "") == "wb_core_sqlite_contention_v1"
+        and str(payload.get("code") or "") == "sqlite_write_busy"
+        and payload.get("retryable") is True
+    )
+    return typed_contention or error.status in {429, 502, 503, 504}
+
+
+def _poll_retry_delay(error: HTTPJSONError, *, retry_count: int, poll_seconds: float) -> float:
+    payload_delay = error.payload.get("retry_after_ms")
+    try:
+        if payload_delay is not None:
+            base = max(0.1, float(payload_delay) / 1000.0)
+        else:
+            raise ValueError
+    except (TypeError, ValueError):
+        retry_after = next(
+            (value for key, value in error.headers.items() if key.lower() == "retry-after"),
+            "",
+        )
+        base = _retry_after_header_seconds(retry_after)
+        if base is None:
+            base = max(0.1, poll_seconds)
+    return min(30.0, base * (2 ** min(max(0, retry_count - 1), 4)))
+
+
+def _retry_after_header_seconds(value: str) -> float | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        return max(0.0, float(normalized))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(normalized)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+def _read_deployed_sha() -> str:
+    path = HOSTED_RUNTIME_APP_DIR / ".wb-core-runtime-sha"
+    try:
+        value = path.read_text(encoding="utf-8").strip().lower()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read canonical deployed SHA: {path}") from exc
+    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+        raise RuntimeError(f"invalid canonical deployed SHA marker: {path}")
+    return value
 
 
 def urllib_parse_quote(value: str) -> str:

@@ -26,6 +26,7 @@ class FakeContour:
         self.start_calls: list[str] = []
         self.poll_calls: list[str] = []
         self.busy_once = False
+        self.poll_retry_once = False
         self.payload_revision = 1
 
     def start(self, slot: object, wrapper_run_id: str) -> Mapping[str, Any]:
@@ -44,6 +45,11 @@ class FakeContour:
 
     def poll(self, job_id: str) -> Mapping[str, Any]:
         self.poll_calls.append(job_id)
+        if self.poll_retry_once:
+            self.poll_retry_once = False
+            error = RuntimeError("typed retryable sqlite contention poll")
+            error.retryable = True  # type: ignore[attr-defined]
+            raise error
         return {
             "job_id": job_id,
             "operation": "auto_update",
@@ -144,6 +150,19 @@ def main() -> None:
         attempts = list((runtime_dir / "experiments" / EXPERIMENT_ID / "attempts" / SLOTS[0].slot_id).glob("*.json"))
         if len(attempts) < 4:
             raise AssertionError(f"trigger/busy/retry/accepted evidence must remain append-only: {attempts}")
+
+    with TemporaryDirectory(prefix="night-refresh-poll-retry-") as tmp:
+        runtime_dir = Path(tmp)
+        contour = FakeContour()
+        contour.poll_retry_once = True
+        runner = _runner(runtime_dir, contour, SLOTS[0].due_datetime)
+        pending = runner.tick(now=SLOTS[0].due_datetime)
+        artifact_path = runtime_dir / "experiments" / EXPERIMENT_ID / f"{SLOTS[0].slot_id}.json"
+        if pending["tick_result"]["status"] != "poll_retry_pending" or artifact_path.exists():
+            raise AssertionError(f"retryable poll response must not terminalize before deadline: {pending}")
+        recovered = runner.tick(now=SLOTS[0].due_datetime + timedelta(minutes=10))
+        if recovered["tick_result"]["status"] != "valid" or len(contour.start_calls) != 1:
+            raise AssertionError(f"accepted job must recover without duplicate launch: {recovered}")
 
     with TemporaryDirectory(prefix="night-refresh-expiry-") as tmp:
         runtime_dir = Path(tmp)

@@ -827,6 +827,8 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-canary-restore.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-canary-restore.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-feedbacks-auto-complaints-tick.service`
@@ -858,6 +860,8 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-canary-restore.service`
+  - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-canary-restore.timer`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
   - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - parity:
@@ -945,6 +949,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - server contour materialize-ит ready snapshot тем же heavy refresh path;
   - former `auto_load=true` / load bridge / live Google Sheets write step is archived and rejected;
   - runtime/status surface не должна маскировать refresh-only или semantic warning/error под sheet-complete/green success.
+- Corrective one-slot control canary is armed only after exact-SHA deploy with an immutable runtime manifest. Its polling honors typed SQLite contention and bounded transient HTTP/transport retry contracts; a terminal contention error may advance only to the next bounded attempt through the backend single-flight barrier. The owning refresh tick remains active while a manifest-selected allowlist of idle repo-owned SQLite-writing timers is stopped without disabling or killing services. Exact before-state is restored in `finally` and by the independent canary-restore watchdog after crash/restart or hard expiry; a terminal artifact additionally verifies ready-snapshot, exact-date payload fingerprint and restore readback before reporting acceptance.
 - Existing live contour также допускает отдельный bounded retry timer `wb-core-sheet-vitrina-closure-retry.timer`, который вызывает repo-owned runner `apps/sheet_vitrina_v1_temporal_closure_retry_live.py`:
   - oneshot ограничен `TimeoutStartSec=1800`; Finance migration может
     остановить только доказанно stale exact generation через отдельный

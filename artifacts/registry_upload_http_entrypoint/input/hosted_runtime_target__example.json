@@ -36,6 +36,16 @@
       "restart": true
     },
     {
+      "name": "wb-core-sheet-vitrina-canary-restore.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-sheet-vitrina-canary-restore.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-sheet-vitrina-closure-retry.service",
       "enable": false,
       "restart": false
