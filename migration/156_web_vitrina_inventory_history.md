@@ -16,7 +16,10 @@ The deploy is additive:
 - capture wiring inside the existing ready-snapshot transaction;
 - bounded date-window read materialization;
 - the existing `stock_total / total_stock_total` public identities relabelled
-  and ordered as `Остатки общие`, `Остатки WB`, then user-enabled FBS facilities;
+  and ordered as `Остатки общие`, `Остатки WB`, `Остатки FBS Москва`,
+  `Остатки FBS Оренбург`, then later user-enabled FBS facilities in their
+  persisted order; an existing leading `FF`/`FBS` source-name prefix is not
+  repeated in the public label;
 - a versioned dry-run-first historical runner.
 
 Deployment may create empty schema and begin capturing new accepted refreshes.

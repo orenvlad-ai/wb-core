@@ -42,7 +42,9 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: 
     INVENTORY_PLANNING_LEGACY_METRIC_KEYS,
     INVENTORY_WB_EFFECTIVE_KEY,
     INVENTORY_WB_TOTAL_KEY,
+    _public_metric_specs,
     inventory_planning_facility_metric_key,
+    inventory_planning_sku_metric_keys,
     inventory_planning_total_metric_key,
     is_inventory_planning_presentation_metric_key,
 )
@@ -95,6 +97,39 @@ def main() -> int:
             if is_inventory_planning_presentation_metric_key(row.metric_key)
         }
         assert logical_labels == set(sku_specs), logical_labels
+        prefixed_facility_planning = {
+            "fbs": {
+                "facilities": [
+                    {
+                        "facility_id": "orenburg",
+                        "code": "FF-ORENBURG",
+                        "name": "FF Оренбург",
+                        "display_order": 0,
+                    },
+                    {
+                        "facility_id": "moscow",
+                        "code": "FF-MOSCOW",
+                        "name": "FF Москва",
+                        "display_order": 99,
+                    },
+                ]
+            }
+        }
+        assert inventory_planning_sku_metric_keys(prefixed_facility_planning) == [
+            COMBINED_TOTAL_ALIAS_KEY,
+            INVENTORY_WB_TOTAL_KEY,
+            inventory_planning_facility_metric_key("moscow"),
+            inventory_planning_facility_metric_key("orenburg"),
+        ]
+        assert [
+            spec.label_ru
+            for spec in _public_metric_specs(prefixed_facility_planning)
+        ] == [
+            "Остатки общие",
+            "Остатки WB",
+            "Остатки FBS Москва",
+            "Остатки FBS Оренбург",
+        ]
 
         assert _value(rows, f"SKU:{first_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 10
         assert _value(rows, f"SKU:{second_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 20

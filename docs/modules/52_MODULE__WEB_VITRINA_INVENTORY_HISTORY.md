@@ -39,7 +39,15 @@ update_note: "Введены compact typed component history, latest closed-day 
 
 1. `stock_total` / `total_stock_total` — `Остатки общие`;
 2. canonical WB planning key — `Остатки WB`;
-3. facility keys — `Остатки FBS <facility name>` в server roster order.
+3. `Остатки FBS Москва`;
+4. `Остатки FBS Оренбург`;
+5. следующие facility keys — `Остатки FBS <facility name>` в сохранённом
+   пользовательском порядке.
+
+Source names могут уже содержать технический префикс `FF`/`FBS`; presentation
+нормализует ровно один такой начальный префикс, поэтому он не дублируется в
+публичной подписи. Logical metric key и исходное server-owned facility name
+при этом не меняются.
 
 `Остатки общие = Остатки WB + available всех applicable FBS facilities`.
 WB остаётся одним typed operand со своей действующей reserve semantics. FBS
