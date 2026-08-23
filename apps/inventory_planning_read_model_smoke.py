@@ -59,27 +59,29 @@ def main() -> int:
             "reason_ru": "Недоступно: WB временно не передаёт распределение",
             "historical_values_preserved": True,
         }
-        assert _metric(missing, "fbs_total") == -3
-        assert _metric(missing, "total") == 27
-        assert missing["fbs"]["physical"] == 5
+        assert _metric(missing, "fbs_total") == 97
+        assert _metric(missing, "total") == 127
+        assert missing["fbs"]["physical"] == 105
         assert missing["fbs"]["reserved"] == 8
-        assert missing["fbs"]["available"] == -3
-        assert len(missing["fbs"]["facilities"]) == 1
+        assert missing["fbs"]["available"] == 97
+        assert len(missing["fbs"]["facilities"]) == 2
         assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] == 1
         missing_skus = {item["nm_id"]: item for item in missing["skus"]}
         assert missing_skus[1]["wb_total"] == 10
-        assert missing_skus[1]["fbs_physical"] == 5
+        assert missing_skus[1]["fbs_physical"] == 105
         assert missing_skus[1]["fbs_reserved"] == 8
-        assert missing_skus[1]["fbs_total"] == -3
-        assert missing_skus[1]["total"] == 7
+        assert missing_skus[1]["fbs_total"] == 97
+        assert missing_skus[1]["total"] == 107
         assert missing_skus[1]["wb_effective_total"] is None
         assert missing_skus[1]["fbs_facilities"][0]["seller_stock"] == {
             "quantity": 6,
             "delta_to_ledger_physical": 1,
             "role": "reconciliation_only",
         }
-        assert missing_skus[2]["fbs_total"] is None
-        assert "exact physical FBS ledger row" in missing_skus[2]["quality"][
+        assert missing_skus[2]["fbs_total"] == 0
+        assert missing_skus[2]["total"] == 20
+        assert missing_skus[2]["quality"]["total"] == "partial"
+        assert "Частичные данные" in missing_skus[2]["quality"][
             "fbs_total_reason_ru"
         ]
         assert missing["formula"]["version"] == FORMULA_VERSION
@@ -123,12 +125,12 @@ def main() -> int:
         exact = model.current()
         assert exact["wb"]["incident_quantity"] == 35
         assert _metric(exact, "wb_effective_total") == -5
-        assert _metric(exact, "effective_total") == -8
+        assert _metric(exact, "effective_total") == 92
         assert exact["wb"]["incident_evidence"]["synthetic_cap_applied"] is False
         exact_skus = {item["nm_id"]: item for item in exact["skus"]}
         assert exact_skus[1]["incident_quantity"] == 35
         assert exact_skus[1]["wb_effective_total"] == -25
-        assert exact_skus[1]["effective_total"] == -28
+        assert exact_skus[1]["effective_total"] == 72
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(
@@ -148,11 +150,12 @@ def main() -> int:
             )
             conn.commit()
         deactivated = model.current()
-        assert _metric(deactivated, "fbs_total") == 100
-        assert all(
-            metric["metric_key"] != "fbs_facility:moscow"
-            for metric in deactivated["metrics"]
-        )
+        assert _metric(deactivated, "fbs_total") == 97
+        assert _metric(deactivated, "fbs_facility:moscow") == -3
+        assert next(
+            item for item in deactivated["fbs"]["facilities"]
+            if item["facility_id"] == "moscow"
+        )["applicable"] is True
         assert deactivated["fbs"]["inactive_history_rewritten"] is False
 
         with sqlite3.connect(db_path) as conn:
@@ -167,9 +170,15 @@ def main() -> int:
             conn.commit()
         unavailable = model.current()
         assert _metric(unavailable, "fbs_facility:empty") is None
-        assert _metric(unavailable, "fbs_total") is None
-        assert _metric(unavailable, "total") is None
-        assert unavailable["quality"]["fbs"] == "unavailable_fbs_physical"
+        assert _metric(unavailable, "fbs_total") == 97
+        assert _metric(unavailable, "total") == 127
+        assert unavailable["quality"]["fbs"] == "exact_ledger"
+        empty = next(
+            item for item in unavailable["fbs"]["facilities"]
+            if item["facility_id"] == "empty"
+        )
+        assert empty["applicable"] is False
+        assert empty["state"] == "inapplicable"
 
     print("inventory_planning_read_model_smoke: OK")
     return 0

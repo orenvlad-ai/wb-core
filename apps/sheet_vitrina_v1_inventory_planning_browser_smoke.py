@@ -36,7 +36,6 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: 
 from packages.application.sheet_vitrina_v1_incident_stocks import (  # noqa: E402
     INCIDENT_STOCK_METRIC_KEYS,
 )
-from packages.application.ff_pool_foundation import FACILITIES_TABLE  # noqa: E402
 
 
 STORAGE_KEY = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:metric-presentation:v1"
@@ -50,6 +49,13 @@ def main() -> int:
         enabled = [item for item in runtime.load_current_state().config_v2 if item.enabled]
         first_nm_id, second_nm_id = int(enabled[0].nm_id), int(enabled[1].nm_id)
         _seed_inventory_planning(runtime.db_path, nm_ids=(first_nm_id, second_nm_id))
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_ff_pool_balances "
+                "WHERE facility_id='orenburg' AND pool='FBS' AND nm_id=?",
+                (second_nm_id,),
+            )
+            conn.commit()
 
         console_errors: list[str] = []
         page_errors: list[str] = []
@@ -133,10 +139,8 @@ def main() -> int:
             active_tab = page.locator('[data-unified-tab-button="vitrina"]')
             expect(active_tab).to_have_attribute("aria-selected", "true")
             planning_keys = [
-                INVENTORY_WB_TOTAL_KEY,
-                INVENTORY_FBS_TOTAL_KEY,
-                inventory_planning_facility_metric_key("moscow"),
                 COMBINED_TOTAL_ALIAS_KEY,
+                INVENTORY_WB_TOTAL_KEY,
             ]
             for metric_key in planning_keys:
                 if page.locator(f'td[data-metric-key="{metric_key}"]').count() < 2:
@@ -146,16 +150,28 @@ def main() -> int:
 
             expect(
                 page.locator(
-                    f'td[data-row-id="SKU:{first_nm_id}|{INVENTORY_FBS_TOTAL_KEY}"]'
-                    f'[data-cell-date="{CURRENT_DATE}"]'
-                )
-            ).to_have_text("-3")
-            expect(
-                page.locator(
                     f'td[data-row-id="SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
                     f'[data-cell-date="{CURRENT_DATE}"]'
                 )
-            ).to_have_text("30")
+            ).to_have_text("30◐")
+            partial_cell = page.locator(
+                f'td[data-row-id="SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
+                f'[data-cell-date="{CURRENT_DATE}"]'
+            )
+            expect(partial_cell.locator(".inventory-partial-marker")).to_have_count(1)
+            if "Оренбург" not in (partial_cell.get_attribute("title") or ""):
+                raise AssertionError("partial total tooltip must name the missing facility")
+            expect(
+                page.locator(
+                    f'td[data-row-id="SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
+                    f'[data-cell-date="{CURRENT_DATE}"] .inventory-partial-marker'
+                )
+            ).to_have_count(0)
+            moscow_key = inventory_planning_facility_metric_key("moscow")
+            orenburg_key = inventory_planning_facility_metric_key("orenburg")
+            expect(page.locator(f'td[data-metric-key="{INVENTORY_FBS_TOTAL_KEY}"]')).to_have_count(0)
+            expect(page.locator(f'td[data-metric-key="{moscow_key}"]')).to_have_count(0)
+            expect(page.locator(f'td[data-metric-key="{orenburg_key}"]')).to_have_count(0)
             hidden_keys = {
                 INVENTORY_WB_EFFECTIVE_KEY,
                 "total_" + INVENTORY_WB_EFFECTIVE_KEY,
@@ -177,10 +193,10 @@ def main() -> int:
             page.locator("[data-metrics-settings-open]").click()
             page.wait_for_selector("[data-metrics-presentation]:not([hidden])")
             expected_labels = (
-                "Остаток WB: всего",
-                "Остаток FBS: всего",
-                "Остаток FBS: Москва",
-                "Остаток: всего",
+                "Остатки общие",
+                "Остатки WB",
+                "Остатки FBS Москва",
+                "Остатки FBS Оренбург",
             )
             config_labels = page.locator("[data-metric-config-row] .metrics-config-label").all_inner_texts()
             for label in expected_labels:
@@ -190,17 +206,21 @@ def main() -> int:
                     )
 
             fbs_config = page.locator(
-                f'[data-metric-config-row][data-sku-metric-key="{INVENTORY_FBS_TOTAL_KEY}"]'
+                f'[data-metric-config-row][data-sku-metric-key="{moscow_key}"]'
             )
             display_select = fbs_config.locator("[data-metric-display-select]")
-            display_select.select_option("hidden")
-            expect(page.locator(f'td[data-metric-key="{INVENTORY_FBS_TOTAL_KEY}"]')).to_have_count(0)
             display_select.select_option("shown")
             page.locator("[data-metrics-settings-close]").last.click()
             page.wait_for_selector(
-                f'td[data-metric-key="{INVENTORY_FBS_TOTAL_KEY}"]',
+                f'td[data-metric-key="{moscow_key}"]',
                 timeout=5000,
             )
+            expect(
+                page.locator(
+                    f'td[data-row-id="SKU:{first_nm_id}|{moscow_key}"]'
+                    f'[data-cell-date="{CURRENT_DATE}"]'
+                )
+            ).to_have_text("-3")
 
             persisted = page.evaluate(
                 "storageKey => JSON.parse(localStorage.getItem(storageKey) || '{}')",
@@ -213,29 +233,21 @@ def main() -> int:
                         f"existing preset must receive newly seen planning metric {metric_key}"
                     )
             migrated_keys = persisted["migrations"]["inventory_planning_metric_keys_v1"]
-            if not set(planning_keys).issubset(set(migrated_keys)):
+            catalog_keys = {*planning_keys, moscow_key, orenburg_key}
+            if not catalog_keys.issubset(set(migrated_keys)):
                 raise AssertionError(f"planning-key migration evidence missing: {persisted}")
+            if moscow_key in preset_keys or orenburg_key in preset_keys:
+                raise AssertionError("facility rows must enter user presets only after explicit configuration")
             if hidden_keys & set(preset_keys) or hidden_keys & set(migrated_keys):
                 raise AssertionError("legacy incident planning keys survived public preference sanitation")
 
-            with sqlite3.connect(runtime.db_path) as conn:
-                conn.execute(
-                    f"UPDATE {FACILITIES_TABLE} SET active=1,updated_at=? WHERE facility_id='orenburg'",
-                    ("2026-04-21T13:00:00Z",),
-                )
-                conn.commit()
-            page.reload(wait_until="domcontentloaded")
-            orenburg_key = inventory_planning_facility_metric_key("orenburg")
-            page.wait_for_selector(
-                f'td[data-metric-key="{orenburg_key}"]',
-                timeout=30000,
-            )
+            expect(page.locator(f'td[data-metric-key="{orenburg_key}"]')).to_have_count(0)
             reloaded_persisted = page.evaluate(
                 "storageKey => JSON.parse(localStorage.getItem(storageKey) || '{}')",
                 STORAGE_KEY,
             )
-            if orenburg_key not in reloaded_persisted["sku_presets"][0]["metric_keys"]:
-                raise AssertionError("new active facility must become default-visible once")
+            if orenburg_key in reloaded_persisted["sku_presets"][0]["metric_keys"]:
+                raise AssertionError("new facility became visible without explicit user opt-in")
 
             page.locator('[data-unified-tab-button="warehouses"]').click()
             page.wait_for_selector(

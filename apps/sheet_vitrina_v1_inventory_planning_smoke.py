@@ -78,10 +78,10 @@ def main() -> int:
 
         rows = {row.row_id: row for row in contract.rows}
         sku_specs = (
-            (INVENTORY_WB_TOTAL_KEY, "Остаток WB: всего"),
-            (INVENTORY_FBS_TOTAL_KEY, "Остаток FBS: всего"),
-            (inventory_planning_facility_metric_key("moscow"), "Остаток FBS: Москва"),
-            (COMBINED_TOTAL_ALIAS_KEY, "Остаток: всего"),
+            (COMBINED_TOTAL_ALIAS_KEY, "Остатки общие"),
+            (INVENTORY_WB_TOTAL_KEY, "Остатки WB"),
+            (inventory_planning_facility_metric_key("moscow"), "Остатки FBS Москва"),
+            (inventory_planning_facility_metric_key("orenburg"), "Остатки FBS Оренбург"),
         )
         for sku_key, label in sku_specs:
             total_key = inventory_planning_total_metric_key(sku_key)
@@ -98,13 +98,14 @@ def main() -> int:
 
         assert _value(rows, f"SKU:{first_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 10
         assert _value(rows, f"SKU:{second_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 20
-        assert _value(rows, f"SKU:{first_nm_id}|{INVENTORY_FBS_TOTAL_KEY}") == -3
-        assert _value(rows, f"SKU:{second_nm_id}|{INVENTORY_FBS_TOTAL_KEY}") == 10
-        assert _value(rows, f"SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 7
-        assert _value(rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 30
-        assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(INVENTORY_FBS_TOTAL_KEY)}") == 7
-        assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}") == 37
-        assert 37 == 7 + 30, "TOTAL must equal WB + FBS once, without FF/FBS double count"
+        assert not any(
+            row.metric_key.removeprefix("total_") == INVENTORY_FBS_TOTAL_KEY
+            for row in contract.rows
+        ), "ordinary UI must not duplicate the facility sum with an FBS aggregate row"
+        assert _value(rows, f"SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 107
+        assert _value(rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 130
+        assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}") == 237
+        assert 237 == 107 + 130, "TOTAL must equal WB + all FBS facilities once"
 
         hidden_metric_keys = {
             *INCIDENT_STOCK_METRIC_KEYS,
@@ -128,8 +129,8 @@ def main() -> int:
         }
         assert internal_by_nm_id[first_nm_id]["wb_effective_total"] == 6
         assert internal_by_nm_id[second_nm_id]["wb_effective_total"] == 19
-        assert internal_by_nm_id[first_nm_id]["effective_total"] == 3
-        assert internal_by_nm_id[second_nm_id]["effective_total"] == 29
+        assert internal_by_nm_id[first_nm_id]["effective_total"] == 103
+        assert internal_by_nm_id[second_nm_id]["effective_total"] == 129
         assert internal["formula"]["stock_total"] == "Остаток WB: всего + Остаток FBS: всего"
         exact_contract = fixture.entrypoint.web_vitrina_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
@@ -140,7 +141,7 @@ def main() -> int:
         exact_rows = {row.row_id: row for row in exact_contract.rows}
         assert not ({row.metric_key for row in exact_contract.rows} & hidden_metric_keys)
         assert _value(exact_rows, f"SKU:{first_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 10
-        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 30
+        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 130
 
         assert STAGES == (
             "production",
@@ -175,8 +176,8 @@ def main() -> int:
         assert inventory_planning_facility_metric_key("orenburg") in activated_keys
         assert _value(
             {row.row_id: row for row in activated.rows},
-            f"TOTAL|{inventory_planning_total_metric_key(INVENTORY_FBS_TOTAL_KEY)}",
-        ) == 207
+            f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}",
+        ) == 237
 
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
@@ -191,7 +192,7 @@ def main() -> int:
             date_to=CURRENT_DATE,
         )
         deactivated_keys = {row.metric_key for row in deactivated.rows}
-        assert inventory_planning_facility_metric_key("moscow") not in deactivated_keys
+        assert inventory_planning_facility_metric_key("moscow") in deactivated_keys
         assert inventory_planning_facility_metric_key("orenburg") in deactivated_keys
 
         historical = fixture.entrypoint.web_vitrina_block.build(
@@ -200,6 +201,10 @@ def main() -> int:
             as_of_date="2026-04-20",
         )
         assert not ({row.metric_key for row in historical.rows} & hidden_metric_keys)
+        assert not any(
+            is_inventory_planning_presentation_metric_key(row.metric_key)
+            for row in historical.rows
+        ), "an evidence-free historical window must not gain synthetic inventory rows"
         persisted_after = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
         assert persisted_after == before, "hidden legacy rows must remain byte-for-byte in ready history"
     finally:

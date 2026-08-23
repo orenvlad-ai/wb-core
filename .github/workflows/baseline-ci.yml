@@ -90,6 +90,8 @@ jobs:
           python3 apps/wb_fbs_orders_collector_smoke.py
           python3 apps/wb_fbs_orders_http_smoke.py
           python3 apps/inventory_planning_read_model_smoke.py
+          python3 apps/sheet_vitrina_v1_inventory_history_smoke.py
+          python3 apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py
           python3 apps/fbs_fulfillment_order_supply_smoke.py
           python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py

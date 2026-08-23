@@ -1,0 +1,88 @@
+# Migration 156 — Web Vitrina inventory history
+
+## Purpose
+
+Replace the main Web Vitrina current-only inventory overlay with compact,
+server-owned, date-aware history for TOTAL and every evidenced SKU. Preserve
+legacy historical `stock_total` as WB-only source evidence and derive the
+unified total without rewriting ready snapshots or introducing a second
+general-stock metric.
+
+## Repository and deploy phase
+
+The deploy is additive:
+
+- four empty append-only inventory-history tables and integrity triggers;
+- capture wiring inside the existing ready-snapshot transaction;
+- bounded date-window read materialization;
+- the existing `stock_total / total_stock_total` public identities relabelled
+  and ordered as `Остатки общие`, `Остатки WB`, then user-enabled FBS facilities;
+- a versioned dry-run-first historical runner.
+
+Deployment may create empty schema and begin capturing new accepted refreshes.
+It does not authorize or perform historical production population. It adds no
+schedule, no separate button, no WB/FBS source mutation and no rendered-plan
+snapshot store.
+
+## Historical evidence rules
+
+For each proven ready date, persisted `stock_total` is retained with provenance
+as WB-only. FBS components are reconstructed only from exact facility opening
+allocations and later immutable physical/reservation movements. A facility is
+`inapplicable` before independently evidenced activity. Applicability before an
+exact opening is `missing`, not zero. No current balance, sales, orders, FBO,
+aggregate FF, transit or seller-stock readback may fill a gap.
+
+The desired dry-run window starts at the earliest proven ready date and ends at
+the last closed business day. Its actual dates and partitions come solely from
+the deployed store. No Moscow/Orenburg date from an audit prompt is hardcoded.
+
+## Dry-run gate
+
+The deployed runner defaults to query-only dry-run. It pins the exact deployed
+SHA marker, schema/generation, cutoff/finalization identity, all consumed
+source watermarks and the current target-history digest. It produces a private
+mode-`0600` JSON manifest outside the repository and proves the canonical DB
+byte digest unchanged.
+
+New facilities, multiple/ambiguous openings, source/schema/formula drift or an
+invalid target window make the manifest `blocked`. Expected evidence gaps stay
+explicit `partial`/`unavailable`; they are not silently converted to blockers
+or values.
+
+The owner callback contains only a path-safe summary plus exact manifest hash,
+PR/head/merge/deployed SHA, target counts, full/partial/unavailable/inapplicable
+partitions, gaps, non-target invariants, recovery/readback contract and the
+exact proposed effect. The current release/deploy/dry-run authorization cannot
+be broadened into apply authorization.
+
+## Separate apply gate and recovery
+
+Apply is permitted once, only after a separate exact owner authorization bound
+to the reviewed manifest and deployed SHA under the repository production-
+mutation contract. The runner then requires:
+
+- trusted-main exact deployed SHA;
+- exact manifest SHA-256 and non-empty approval reference;
+- unchanged schema/generation, source watermarks and target-history digest;
+- canonical warehouse writer lock;
+- coherent target-scoped private before-image with a forward-restoration plan;
+- no full-store/T3 backup for this bounded append-only closure;
+- one `BEGIN IMMEDIATE` transaction;
+- exact inserted capture/component/finalization count reconciliation;
+- append/supersede-only writes to the four inventory-history tables;
+- query-only post-commit readback and source/non-target reconciliation.
+
+The manifest hash is the durable idempotency key. If transport is ambiguous,
+the applies row and finalization readback determine the outcome; the caller
+must not replay blindly. Restore is only through the canonical maintenance and
+write-barrier procedure using the verified before-image.
+
+## Acceptance
+
+Repository acceptance requires the inventory history, planning, browser and
+backfill smokes plus the exact-head baseline. Production acceptance requires
+Release Train deploy of the exact merge SHA, isolated UI verification and a
+production dry-run while no foreign control canary/timer pause is active and
+ordinary schedules are restored. Historical apply and final reconciliation
+remain pending until the separate owner gate.

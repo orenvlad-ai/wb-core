@@ -30,7 +30,7 @@ from packages.application.wb_incident_policy import canonical_seller_id
 
 
 CONTRACT_NAME = "inventory_planning_read_model"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 FORMULA_VERSION = "inventory_planning_v1"
 INCIDENT_MANIFESTS_TABLE = "sheet_vitrina_v1_wb_incident_quantity_evidence"
 INCIDENT_LINES_TABLE = "sheet_vitrina_v1_wb_incident_quantity_evidence_lines"
@@ -243,7 +243,7 @@ class InventoryPlanningReadModel:
                 if incident["quantity"] is None
                 else wb_total - int(incident["quantity"])
             )
-            total = None if fbs_total is None else wb_total + int(fbs_total)
+            total = wb_total + int(fbs_total or 0)
             effective_total = (
                 None
                 if fbs_total is None or wb_effective is None
@@ -271,11 +271,11 @@ class InventoryPlanningReadModel:
                     f"fbs_facility:{item['facility_id']}",
                     f"Остаток FBS: {item['name']}",
                     item["available"],
-                    "exact_ledger" if item["available"] is not None else "unavailable",
+                    str(item.get("state") or "missing"),
                     reason_ru=(
                         ""
-                        if item["available"] is not None
-                        else "Недоступно: для active facility нет строки physical FBS ledger."
+                        if item["available"] is not None or not item.get("applicable")
+                        else "Отсутствует exact physical FBS component."
                     ),
                 )
                 for item in fbs["facilities"]
@@ -293,8 +293,8 @@ class InventoryPlanningReadModel:
                         "total",
                         "Остаток: всего",
                         total,
-                        "exact" if total is not None else "unavailable",
-                        reason_ru=str(fbs["reason_ru"] if total is None else ""),
+                        "partial" if str(fbs["quality"]) == "partial" else "exact",
+                        reason_ru=str(fbs["reason_ru"]),
                     ),
                 )
             )
@@ -353,8 +353,13 @@ class InventoryPlanningReadModel:
                     "reserved": fbs["reserved_total"],
                     "available": fbs_total,
                     "facilities": fbs["facilities"],
+                    "missing_components": fbs["missing_components"],
                     "inactive_facility_count": fbs["inactive_facility_count"],
-                    "current_total_uses_active_facilities_only": True,
+                    "current_total_uses_active_facilities_only": False,
+                    "applicability_rule": (
+                        "active facility with exact FBS projection or inactive facility "
+                        "with residual physical/reserved stock"
+                    ),
                     "inactive_history_rewritten": False,
                     "seller_stock_role": "timestamped_reconciliation_only",
                     "seller_stock_reconciliation": fbs["seller_stock_reconciliation"],
@@ -586,7 +591,8 @@ def _fbs_facilities(
     include_seller_stock_reconciliation: bool = True,
 ) -> dict[str, Any]:
     manifest = conn.execute(
-        f"""SELECT cutover_id,business_date,feature_epoch,cutover_at
+        f"""SELECT cutover_id,business_date,feature_epoch,cutover_at,
+                   manifest_digest,observation_watermark_digest
             FROM {MANIFESTS_TABLE} ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"""
     ).fetchone()
     feature = conn.execute(
@@ -677,7 +683,8 @@ def _fbs_facilities(
     sku_scope = {int(nm_id) for nm_id in requested_nm_ids if int(nm_id) > 0}
     if epoch_ready:
         for balance in conn.execute(
-            f"""SELECT facility_id,nm_id,SUM(quantity) quantity,MAX(updated_at) updated_at
+            f"""SELECT facility_id,nm_id,SUM(quantity) quantity,
+                       MAX(updated_at) updated_at,MAX(source_watermark) source_watermark
                 FROM {BALANCES_TABLE}
                 WHERE pool='FBS' AND projection_epoch=?
                 GROUP BY facility_id,nm_id""",
@@ -687,6 +694,7 @@ def _fbs_facilities(
             balance_by_facility_nm_id[key] = {
                 "quantity": int(balance["quantity"]),
                 "updated_at": str(balance["updated_at"] or ""),
+                "source_watermark": str(balance["source_watermark"] or ""),
             }
             sku_scope.add(int(balance["nm_id"]))
         for reservation in conn.execute(
@@ -708,12 +716,15 @@ def _fbs_facilities(
     reserved_total = 0
     latest_updates: list[str] = []
     active_count = 0
-    active_missing_physical = 0
+    applicable_count = 0
+    missing_facilities: list[str] = []
     for facility in facilities:
         facility_id = str(facility["facility_id"])
         physical = reserved = None
         updated_at = ""
         sku_values: list[dict[str, Any]] = []
+        facility_balances: dict[int, dict[str, Any]] = {}
+        facility_reservations: dict[int, dict[str, Any]] = {}
         if epoch_ready:
             facility_balances = {
                 nm_id: value
@@ -725,13 +736,24 @@ def _fbs_facilities(
                 for (row_facility_id, nm_id), value in reservation_by_facility_nm_id.items()
                 if row_facility_id == facility_id
             }
+            has_residual_quantity = any(
+                int(value["quantity"]) != 0
+                for value in (*facility_balances.values(), *facility_reservations.values())
+            )
+            has_exact_projection = bool(facility_balances or facility_reservations)
+            applicable = bool(
+                has_exact_projection
+                and (bool(facility["active"]) or has_residual_quantity)
+            )
             physical = (
                 sum(int(value["quantity"]) for value in facility_balances.values())
-                if facility_balances
+                if applicable and facility_balances
                 else None
             )
-            reserved = sum(
-                int(value["quantity"]) for value in facility_reservations.values()
+            reserved = (
+                sum(int(value["quantity"]) for value in facility_reservations.values())
+                if applicable
+                else None
             )
             updated_at = max(
                 [
@@ -750,7 +772,9 @@ def _fbs_facilities(
                 )
                 sku_reserved = int(reservation_value["quantity"]) if reservation_value else 0
                 sku_available = (
-                    None if sku_physical is None else sku_physical - sku_reserved
+                    None
+                    if not applicable or sku_physical is None
+                    else sku_physical - sku_reserved
                 )
                 official_sku = readback_by_facility_nm_id.get((facility_id, nm_id))
                 sku_values.append(
@@ -760,11 +784,26 @@ def _fbs_facilities(
                         "reserved": sku_reserved,
                         "available": sku_available,
                         "available_is_signed": True,
-                        "quality": "exact_ledger" if sku_available is not None else "unavailable",
+                        "state": (
+                            "inapplicable"
+                            if not applicable
+                            else "exact_zero"
+                            if sku_available == 0
+                            else "exact"
+                            if sku_available is not None
+                            else "missing"
+                        ),
+                        "quality": (
+                            "inapplicable"
+                            if not applicable
+                            else "exact_ledger"
+                            if sku_available is not None
+                            else "missing"
+                        ),
                         "reason_ru": (
                             ""
-                            if sku_available is not None
-                            else "Недоступно: для SKU нет exact physical FBS ledger row."
+                            if sku_available is not None or not applicable
+                            else "Отсутствует exact physical FBS component для SKU."
                         ),
                         "seller_stock": {
                             "quantity": official_sku,
@@ -777,47 +816,79 @@ def _fbs_facilities(
                         },
                     }
                 )
+        else:
+            applicable = False
         available = None if physical is None or reserved is None else physical - reserved
         official = readback_by_facility.get(facility_id) if readback is not None else None
         if bool(facility["active"]):
             active_count += 1
+        if applicable:
+            applicable_count += 1
             if physical is None:
-                active_missing_physical += 1
-            if physical is not None:
+                missing_facilities.append(str(facility["name"] or facility_id))
+            else:
                 physical_total += physical
                 reserved_total += int(reserved or 0)
             if updated_at:
                 latest_updates.append(updated_at)
-            rows.append(
-                {
-                    "facility_id": facility_id,
-                    "code": str(facility["code"]),
-                    "name": str(facility["name"]),
-                    "city": str(facility["city"] or ""),
-                    "active": True,
-                    "physical": physical,
-                    "reserved": reserved,
-                    "available": available,
-                    "available_is_signed": True,
-                    "sku_values": sku_values,
-                    "seller_stock": {
-                        "quantity": official,
-                        "captured_at": str(readback["captured_at"]) if readback is not None else "",
-                        "mapped_seller_warehouse_ids": sorted(mapped_ids_by_facility.get(facility_id, [])),
-                        "mapping_method": "exact_sellerWarehouseId",
-                        "mapping_quality": "exact" if official is not None else "not_mapped",
-                        "delta_to_ledger_physical": (
-                            None if official is None or physical is None else official - physical
+        rows.append(
+            {
+                "facility_id": facility_id,
+                "code": str(facility["code"]),
+                "name": str(facility["name"]),
+                "city": str(facility["city"] or ""),
+                "active": bool(facility["active"]),
+                "applicable": applicable,
+                "state": (
+                    "inapplicable"
+                    if not applicable
+                    else "exact_zero"
+                    if available == 0
+                    else "exact"
+                    if available is not None
+                    else "missing"
+                ),
+                "physical": physical,
+                "reserved": reserved,
+                "available": available,
+                "available_is_signed": True,
+                "sku_values": sku_values,
+                "seller_stock": {
+                    "quantity": official,
+                    "captured_at": str(readback["captured_at"]) if readback is not None else "",
+                    "mapped_seller_warehouse_ids": sorted(mapped_ids_by_facility.get(facility_id, [])),
+                    "mapping_method": "exact_sellerWarehouseId",
+                    "mapping_quality": "exact" if official is not None else "not_mapped",
+                    "delta_to_ledger_physical": (
+                        None if official is None or physical is None else official - physical
+                    ),
+                    "role": "reconciliation_only",
+                },
+                "fbs_orders_filter": {"facility_id": facility_id},
+                "updated_at": updated_at,
+                "source_revision": str(manifest["cutover_id"]) if manifest else "",
+                "source_digest": str(manifest["manifest_digest"]) if manifest else "",
+                "source_watermark": max(
+                    (
+                        *(
+                            str(value.get("source_watermark") or "")
+                            for value in facility_balances.values()
                         ),
-                        "role": "reconciliation_only",
-                    },
-                    "fbs_orders_filter": {"facility_id": facility_id},
-                    "updated_at": updated_at,
-                }
-            )
-    totals_ready = epoch_ready and active_missing_physical == 0
-    available_total = None if not totals_ready else physical_total - reserved_total
-    active_rows = [row for row in rows if row["active"]]
+                        *(
+                            str(value.get("updated_at") or "")
+                            for value in facility_reservations.values()
+                        ),
+                        str(manifest["observation_watermark_digest"])
+                        if manifest
+                        else "",
+                    ),
+                    default="",
+                ),
+            }
+        )
+    available_total = physical_total - reserved_total
+    totals_quality = "partial" if missing_facilities else "exact_ledger"
+    applicable_rows = [row for row in rows if row["applicable"]]
     sku_values: list[dict[str, Any]] = []
     for nm_id in sorted(sku_scope):
         facility_values = [
@@ -829,63 +900,55 @@ def _fbs_facilities(
                 ),
                 None,
             )
-            for row in active_rows
+            for row in applicable_rows
         ]
-        exact = epoch_ready and all(
+        missing = [
+            str(row["name"] or row["facility_id"])
+            for row, value in zip(applicable_rows, facility_values)
+            if value is None or value["available"] is None
+        ]
+        exact = all(
             value is not None and value["available"] is not None
             for value in facility_values
         )
+        known_values = [
+            value
+            for value in facility_values
+            if value is not None and value["available"] is not None
+        ]
         sku_values.append(
             {
                 "nm_id": nm_id,
-                "physical": (
-                    sum(int(value["physical"]) for value in facility_values if value is not None)
-                    if exact
-                    else None
-                ),
-                "reserved": (
-                    sum(int(value["reserved"]) for value in facility_values if value is not None)
-                    if exact
-                    else None
-                ),
-                "available": (
-                    sum(int(value["available"]) for value in facility_values if value is not None)
-                    if exact
-                    else None
-                ),
+                "physical": sum(int(value["physical"]) for value in known_values),
+                "reserved": sum(int(value["reserved"]) for value in known_values),
+                "available": sum(int(value["available"]) for value in known_values),
                 "available_is_signed": True,
-                "quality": "exact_ledger" if exact else "unavailable",
+                "quality": "exact_ledger" if exact else "partial",
+                "missing_components": missing,
                 "reason_ru": (
                     ""
                     if exact
-                    else (
-                        "Недоступно: для SKU нет exact physical FBS ledger row по всем active facility."
-                        if epoch_ready
-                        else "Недоступно: active FBS reader epoch не подтверждён."
-                    )
+                    else "Частичные данные: отсутствуют компоненты FBS: " + ", ".join(missing)
                 ),
             }
         )
     return {
         "facilities": rows,
-        "physical_total": None if not totals_ready else physical_total,
-        "reserved_total": None if not totals_ready else reserved_total,
+        "physical_total": physical_total,
+        "reserved_total": reserved_total,
         "available_total": available_total,
         "sku_values": sku_values,
-        "quality": "exact_ledger" if totals_ready else (
-            "unavailable_fbs_physical" if epoch_ready else "unavailable_fbs_epoch"
-        ),
+        "quality": totals_quality,
+        "missing_components": missing_facilities,
         "reason_ru": (
             ""
-            if totals_ready
-            else (
-                "Недоступно: для active facility нет строки physical FBS ledger."
-                if epoch_ready
-                else "Недоступно: active FBS reader epoch не подтверждён."
-            )
+            if not missing_facilities
+            else "Частичные данные: отсутствуют компоненты FBS: "
+            + ", ".join(missing_facilities)
         ),
         "inactive_facility_count": sum(1 for row in facilities if not bool(row["active"])),
         "active_facility_count": active_count,
+        "applicable_facility_count": applicable_count,
         "updated_at": max(latest_updates, default=""),
         "seller_stock_captured_at": str(readback["captured_at"]) if readback is not None else "",
         "seller_stock_reconciliation": {
@@ -938,6 +1001,9 @@ def _sku_planning_rows(
                 {
                     "facility_id": str(facility["facility_id"]),
                     "name": str(facility["name"]),
+                    "active": bool(facility.get("active")),
+                    "applicable": bool(facility.get("applicable")),
+                    "state": str(item.get("state") or "missing"),
                     "physical": item.get("physical"),
                     "reserved": item.get("reserved"),
                     "available": item.get("available"),
@@ -994,6 +1060,7 @@ def _sku_planning_rows(
                 "total": total,
                 "effective_total": effective_total,
                 "quality": {
+                    "missing_components": list(fbs_row.get("missing_components") or []),
                     "wb_total": "exact" if wb_total is not None else "unavailable",
                     "wb_total_reason_ru": wb_reason,
                     "wb_effective_total": (
@@ -1004,7 +1071,13 @@ def _sku_planning_rows(
                     "wb_effective_total_reason_ru": wb_reason or incident_reason,
                     "fbs_total": str(fbs_row.get("quality") or "unavailable"),
                     "fbs_total_reason_ru": fbs_reason,
-                    "total": "exact" if total is not None else "unavailable",
+                    "total": (
+                        "partial"
+                        if total is not None and str(fbs_row.get("quality")) == "partial"
+                        else "exact"
+                        if total is not None
+                        else "unavailable"
+                    ),
                     "total_reason_ru": wb_reason or fbs_reason,
                     "effective_total": (
                         "exact" if effective_total is not None else "unavailable"
@@ -1031,7 +1104,7 @@ def _metric(
         "unit": "шт",
         "quality": quality,
         "available": value is not None,
-        "reason_ru": reason_ru if value is None else "",
+        "reason_ru": reason_ru,
         "independently_hideable": True,
     }
 
