@@ -576,11 +576,20 @@ provisional, incomplete or error state. A status/read failure leaves the
 last-good table rendered and exposes the exact retry warning instead of
 clearing data.
 
-The warehouse header exposes a bright unresolved-cost warning whenever exact
-FBS order coverage is non-zero: uncovered sales amount, order count and a
-button that opens the existing list with the exact `cost_unresolved` filter.
-Only a proven zero renders the green/OK state. The list and warning use
-privacy-safe hashes and aggregate evidence, never customer PII. In the FF
+The warehouse FBS-orders header exposes two independent coverage panels. The
+Finance panel reads every published non-account SKU-week from
+`wb_finance_weekly_sku_aggregates` and shows uncovered realized-sales amount,
+exact order/unit counts, published week range/count and latest calculation
+time. The lifecycle panel uses only current orders matching the page's
+`source_created_at` date and other filters; it shows the exact
+`cost_unresolved` order count plus status/reason/facility evidence and owns the
+button that opens that filtered list. The Finance amount is never paired with
+or compared to the lifecycle order count. Each panel is green only for its own
+proven zero; missing/invalid Finance evidence remains unavailable instead of
+zero. A separate lifecycle badge publishes cutover cursor, latest status
+sequence, lag, pending-identity count and both timestamps independently of the
+collector's last successful poll. All list and warning evidence is aggregate
+and contains no customer PII. In the FF
 overhead modal, manual mode renders only neutral `основание: ручной ввод`; the
 PDF evidence block exists only for `source_mode=payment_order_pdf`, so an empty
 parser object cannot leak a red technical panel into manual entry.

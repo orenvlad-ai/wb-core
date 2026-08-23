@@ -783,7 +783,9 @@ lost/double-counted around its short commit window.
 
 An otherwise valid post-T status whose exact order revision still has
 unmatched or drifted identity evidence cannot pin that global cursor. The same
-transaction appends its exact status sequence to
+rule covers `order_sku_unmapped`: an exact matched order for a known facility
+whose nmId/chrtId is absent from the immutable cutover SKU manifest is not a
+batch-fatal exception. The same transaction appends its exact status sequence to
 `sheet_vitrina_v1_ff_pool_fbs_identity_pending`, advances only the source
 cursor, applies no reservation/debit/capital delta for that order and continues
 later matched statuses in sequence. Every later pass retries a bounded pending
@@ -794,6 +796,35 @@ and records one `...identity_pending_resolutions` row atomically with its normal
 idempotent lifecycle event. No facility/SKU mapping is guessed or changed, an
 unresolved row stays visible as `caught_up_identity_pending`, and an exact retry
 cannot duplicate a physical delta or WB action.
+
+The read-only FBS-orders contract reports the drain independently of collector
+poll health: latest source status sequence/time, durable cursor sequence/time,
+lag and unresolved identity-pending count. The generic pending envelope keeps
+its existing append-only reason contract; the exact operator reason is derived
+from immutable order/mapping/manifest evidence and remains
+`sku_mapping_missing_or_ambiguous` for a missing known-facility SKU. Collector
+success cannot make a lagging lifecycle cursor green.
+
+### Bounded current-only backlog recovery design
+
+No backlog runner or production apply is authorized by this contract change.
+A future canonical runner must be dry-run/readback by default and may apply
+only after a separately reviewed exact manifest and production gate. Its
+external private manifest binds deployed SHA, active cutover, frozen compound
+watermarks, current drain cursor/source maximum, every unresolved pending
+identity/status revision, exact facility/nmId/chrtId mapping outcome, target and
+non-target digests, a coherent before-image backup and one fingerprint.
+
+Planning classifies each row as `identity_quarantine`, `current_actionable` or
+`already_current`; ambiguity blocks the whole plan. Apply may consume only the
+exact current suffix and exact newly evidenced mappings through existing
+mapping-extension/lifecycle identities. It cannot rewrite the cutover manifest,
+fulfilled history, historical Finance/Partner rows or a frozen WAC; cannot
+invent an alias; and cannot create debit/capital/WAC for quarantine rows.
+Quantity/capital conservation, cursor monotonicity, later-valid-row progress,
+pending-resolution uniqueness, target/non-target equality and exact repeat
+no-op are mandatory post-readback invariants. Drift requires a new dry-run and
+new human gate, never a retry of the old manifest.
 
 Migration 150 adds one supported post-cutover mapping-extension path without
 rewriting the immutable Stage 7C manifest/checkpoint. The canonical warehouse

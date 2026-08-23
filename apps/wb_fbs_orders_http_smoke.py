@@ -35,10 +35,17 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypoint,
 )
 from packages.application.wb_fbs_orders import (  # noqa: E402
+    CUTOVER_MANIFESTS_TABLE,
     IDENTITY_MAPPINGS_TABLE,
+    LIFECYCLE_DRAIN_STATE_TABLE,
+    LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    LIFECYCLE_IDENTITY_PENDING_TABLE,
     OBSERVATIONS_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
     WAREHOUSE_MAPPINGS_TABLE,
     WbFbsOrdersCollector,
+    _finance_sales_without_cost,
+    _lifecycle_processor_status,
 )
 from packages.contracts.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypointConfig,
@@ -58,7 +65,7 @@ class _Source:
         orders = [
             _order(55000001, 507, 140557512),
             _order(55000002, 507, 140557513),
-            _order(55000003, 507, 140557514),
+            _order(55000003, 507, 140557514, created_at="2026-08-11T08:00:00Z"),
             _order(55000004, 507, 140557515),
             _order(55000005, 507, 140557516),
             _order(55000006, 999, 140557517),
@@ -103,13 +110,14 @@ def _order(
     nm_id: int,
     *,
     complete_identity: bool = True,
+    created_at: str = "2026-08-12T08:00:00Z",
 ) -> dict[str, object]:
     barcode = str(10_000_000_000_000 + nm_id)
     return {
         "id": order_id,
         "supplyId": f"WB-GI-{order_id}",
         "deliveryType": "fbs",
-        "createdAt": "2026-08-12T08:00:00Z",
+        "createdAt": created_at,
         "warehouseId": warehouse_id,
         "officeId": 123,
         "nmId": nm_id,
@@ -246,14 +254,67 @@ def main() -> None:
             }, payload["counters"]
             assert payload["cost_coverage_warning"] == {
                 "status": "error",
-                "unresolved_fbs_order_count": 2,
-                "sales_without_cost_rub": "900.00",
-                "sales_without_cost_order_count": 2,
-                "sales_without_cost_units": 2,
-                "finance_coverage_row_count": 1,
-                "finance_uncovered_order_count_matches_list": True,
-                "reason_counts": {"fbs_handoff_cost_event_missing": 2},
-                "filtered_status_category": "cost_unresolved",
+                "finance_sales_without_cost": {
+                    "status": "error",
+                    "amount_rub": "900.00",
+                    "order_count": 2,
+                    "units": 2,
+                    "reason": "uncovered_realized_fbs_sales",
+                    "source": {
+                        "table": "wb_finance_weekly_sku_aggregates",
+                        "scope": "all_published_non_account_sku_weeks",
+                        "row_count": 1,
+                        "invalid_row_count": 0,
+                        "published_week_count": 1,
+                        "period_start": "2026-08-10",
+                        "period_end": "2026-08-16",
+                        "latest_calculated_at": "2026-08-12T09:00:00Z",
+                    },
+                    "weeks": [
+                        {
+                            "week_start": "2026-08-10",
+                            "week_end": "2026-08-16",
+                            "amount_rub": "900.00",
+                            "order_count": 2,
+                            "units": 2,
+                            "row_count": 1,
+                            "seller_scope_count": 1,
+                            "calculated_at": "2026-08-12T09:00:00Z",
+                        }
+                    ],
+                    "reason_counts": {"fbs_handoff_cost_event_missing": 2},
+                },
+                "lifecycle_unresolved": {
+                    "status": "error",
+                    "order_count": 2,
+                    "reason": "current_lifecycle_cost_unresolved",
+                    "status_counts": {"handed_over": 1, "sold_closed": 1},
+                    "reason_counts": {"fbs_handoff_cost_event_missing": 2},
+                    "facility_counts": {"moscow": 2},
+                    "source": {
+                        "scope": "current_fbs_orders_matching_page_filters",
+                        "date_field": "source_created_at",
+                        "date_from": None,
+                        "date_to": None,
+                        "first_created_at": "2026-08-11T08:00:00Z",
+                        "last_created_at": "2026-08-12T08:00:00Z",
+                        "filtered_list_status_category": "cost_unresolved",
+                    },
+                },
+                "scopes_are_independent": True,
+                "contains_pii": False,
+            }
+            assert payload["lifecycle_processor"] == {
+                "status": "disabled",
+                "reason": "cutover_not_applied",
+                "cutover_id": None,
+                "cursor_sequence": None,
+                "latest_status_sequence": None,
+                "lag_observation_count": None,
+                "pending_identity_count": 0,
+                "pending_reason_counts": {},
+                "cursor_updated_at": None,
+                "latest_status_observed_at": None,
                 "contains_pii": False,
             }
             assert payload["policy"]["upstream_get_only"] is False
@@ -290,6 +351,26 @@ def main() -> None:
                 f"{root}?nm_id=140557512&supply_id=WB-GI-55000001&facility_id=moscow&supplier_status=confirm&wb_status=waiting&status_category=active&date_from=2026-08-12&date_to=2026-08-12&limit=1"
             )
             assert filtered_code == 200 and filtered["page"]["total"] == 1
+            date_code, date_filtered, _ = _json_request(
+                f"{root}?date_from=2026-08-12&date_to=2026-08-12&limit=10"
+            )
+            assert date_code == 200
+            assert date_filtered["counters"]["cost_unresolved"] == 1
+            date_warning = date_filtered["cost_coverage_warning"]
+            assert date_warning["lifecycle_unresolved"]["order_count"] == 1
+            assert date_warning["lifecycle_unresolved"]["status_counts"] == {
+                "handed_over": 1
+            }
+            assert date_warning["lifecycle_unresolved"]["source"]["date_from"] == (
+                "2026-08-12"
+            )
+            assert date_warning["lifecycle_unresolved"]["source"]["date_to"] == (
+                "2026-08-12"
+            )
+            assert date_warning["finance_sales_without_cost"]["amount_rub"] == (
+                "900.00"
+            )
+            assert date_warning["finance_sales_without_cost"]["order_count"] == 2
             for category in (
                 "handed_over",
                 "sold_closed",
@@ -330,7 +411,100 @@ def main() -> None:
             server.server_close()
             thread.join(timeout=5)
         assert _target_counts(runtime.db_path) == before
+    _assert_lifecycle_cursor_freshness()
+    _assert_finance_missing_is_not_zero()
+    template = (
+        ROOT / "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+    ).read_text(encoding="utf-8")
+    warning_renderer = template.split("function renderFbsCostWarning", 1)[1].split(
+        "function renderFbsLifecycleStatus", 1
+    )[0]
+    assert "Продажи без себестоимости: ' + escapeHtml(amountText)" not in template
+    assert "unresolved_fbs_order_count" not in warning_renderer
+    assert "finance_sales_without_cost" in warning_renderer
+    assert "lifecycle_unresolved" in warning_renderer
+    assert "Finance · продажи без себестоимости" in template
+    assert "Текущие FBS-заказы без lifecycle-себестоимости" in template
+    assert "data-fbs-lifecycle-status" in template
     print("wb_fbs_orders_http_smoke: OK")
+
+
+def _assert_lifecycle_cursor_freshness() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            f"CREATE TABLE {CUTOVER_MANIFESTS_TABLE}(cutover_id TEXT,cutover_at TEXT)"
+        )
+        conn.execute(
+            f"CREATE TABLE {STATUS_OBSERVATIONS_TABLE}(observation_sequence INTEGER,observed_at TEXT)"
+        )
+        conn.execute(
+            f"CREATE TABLE {LIFECYCLE_DRAIN_STATE_TABLE}(cutover_id TEXT,last_status_observation_sequence INTEGER,updated_at TEXT)"
+        )
+        conn.execute(
+            f"CREATE TABLE {LIFECYCLE_IDENTITY_PENDING_TABLE}(pending_id TEXT,cutover_id TEXT,reason_detail_code TEXT)"
+        )
+        conn.execute(
+            f"CREATE TABLE {LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE}(pending_id TEXT)"
+        )
+        conn.execute(
+            f"INSERT INTO {CUTOVER_MANIFESTS_TABLE} VALUES('cutover-smoke','2026-08-12T08:00:00Z')"
+        )
+        conn.executemany(
+            f"INSERT INTO {STATUS_OBSERVATIONS_TABLE} VALUES(?,?)",
+            ((1, "2026-08-12T08:01:00Z"), (2, "2026-08-12T08:02:00Z")),
+        )
+        conn.execute(
+            f"INSERT INTO {LIFECYCLE_DRAIN_STATE_TABLE} VALUES('cutover-smoke',1,'2026-08-12T08:01:30Z')"
+        )
+        conn.execute(
+            f"INSERT INTO {LIFECYCLE_IDENTITY_PENDING_TABLE} VALUES('pending-smoke','cutover-smoke','order_sku_unmapped')"
+        )
+        lagging = _lifecycle_processor_status(conn)
+        assert lagging["status"] == "lagging"
+        assert lagging["cursor_sequence"] == 1
+        assert lagging["latest_status_sequence"] == 2
+        assert lagging["lag_observation_count"] == 1
+        assert lagging["pending_identity_count"] == 1
+        assert lagging["pending_reason_counts"] == {"order_sku_unmapped": 1}
+        assert lagging["latest_status_observed_at"] == "2026-08-12T08:02:00Z"
+        conn.execute(
+            f"UPDATE {LIFECYCLE_DRAIN_STATE_TABLE} SET last_status_observation_sequence=2,updated_at='2026-08-12T08:02:30Z'"
+        )
+        quarantined = _lifecycle_processor_status(conn)
+        assert quarantined["status"] == "current_with_quarantine"
+        assert quarantined["lag_observation_count"] == 0
+        conn.execute(
+            f"INSERT INTO {LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE} VALUES('pending-smoke')"
+        )
+        current = _lifecycle_processor_status(conn)
+        assert current["status"] == "current"
+        assert current["pending_identity_count"] == 0
+
+
+def _assert_finance_missing_is_not_zero() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        missing = _finance_sales_without_cost(conn)
+        assert missing["status"] == "unavailable"
+        assert missing["amount_rub"] is None
+        assert missing["order_count"] is None
+        assert missing["units"] is None
+        conn.execute(
+            "CREATE TABLE wb_finance_weekly_sku_aggregates("
+            "seller_id TEXT,week_start TEXT,week_end TEXT,nm_id TEXT,"
+            "coverage_json TEXT,calculated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO wb_finance_weekly_sku_aggregates VALUES("
+            "'smoke','2026-08-10','2026-08-16','101','not-json',"
+            "'2026-08-12T09:00:00Z')"
+        )
+        invalid = _finance_sales_without_cost(conn)
+        assert invalid["status"] == "error"
+        assert invalid["reason"] == "finance_coverage_rows_invalid"
+        assert invalid["amount_rub"] is None
+        assert invalid["order_count"] is None
+        assert invalid["units"] is None
+        assert invalid["source"]["invalid_row_count"] == 1
 
 
 def _target_counts(db_path: Path) -> tuple[int, int, int, int, int]:

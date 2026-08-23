@@ -34,10 +34,15 @@ numerator nor the profitability-revenue denominator. Profit and margin are
 marked partial and use only covered revenue plus covered signed COGS. Every
 consumer carries reason/coverage evidence. Vitrina adds
 `Продажи без себестоимости, ₽`; Partner adds that row plus
-`Заказы без себестоимости, шт.` and evidence-backed units. Warehouse UI shows a
-bright unresolved-cost amount/count warning and opens the exact
-`cost_unresolved` list; green means a proven zero only. Identifiers exposed by
-this surface are hashed and contain no customer PII.
+`Заказы без себестоимости, шт.` and evidence-backed units. Warehouse UI keeps
+that published Finance amount/order/unit/week scope separate from the current
+FBS lifecycle unresolved-order scope. The latter follows the selected order
+date/filter set, carries status/reason evidence and alone opens the exact
+`cost_unresolved` list. Neither counter is used as the denominator or label for
+the other, and each scope is green only for its own proven zero. Lifecycle
+cursor/source sequence, lag and pending identity evidence are also published
+separately from collector poll success. Identifiers exposed by this surface are
+hashed and contain no customer PII.
 
 ## Overhead publication and contention
 

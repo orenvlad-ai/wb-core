@@ -226,6 +226,11 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
                       AND deferred_identity_evidence_sequence>=0),
             reason_code TEXT NOT NULL
                 CHECK(reason_code='identity_evidence_missing_or_drifted'),
+            reason_detail_code TEXT NOT NULL DEFAULT
+                'identity_evidence_missing_or_drifted'
+                CHECK(reason_detail_code IN(
+                    'identity_evidence_missing_or_drifted','order_sku_unmapped'
+                )),
             evidence_digest TEXT NOT NULL,
             created_at TEXT NOT NULL
                 CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
@@ -347,6 +352,16 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         table=EVENTS_TABLE,
         column="source_order_observation_sequence",
         declaration="INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        table=IDENTITY_PENDING_TABLE,
+        column="reason_detail_code",
+        declaration=(
+            "TEXT NOT NULL DEFAULT 'identity_evidence_missing_or_drifted' "
+            "CHECK(reason_detail_code IN("
+            "'identity_evidence_missing_or_drifted','order_sku_unmapped'))"
+        ),
     )
     _ensure_column(
         conn,
@@ -842,7 +857,10 @@ def drain_post_checkpoint_fbs_lifecycle(
                 ),
             )
         except FfPoolFbsLifecycleError as exc:
-            if exc.code != "order_identity_evidence_missing_or_drifted":
+            if exc.code not in {
+                "order_identity_evidence_missing_or_drifted",
+                "order_sku_unmapped",
+            }:
                 raise
             if not is_pending_retry:
                 _persist_identity_pending(
@@ -850,6 +868,11 @@ def drain_post_checkpoint_fbs_lifecycle(
                     manifest=manifest,
                     row=row,
                     created_at=now,
+                    reason_detail_code=(
+                        "identity_evidence_missing_or_drifted"
+                        if exc.code == "order_identity_evidence_missing_or_drifted"
+                        else exc.code
+                    ),
                 )
                 last_sequence = max(last_sequence, status_sequence)
             summary["identity_pending"] += 1
@@ -1544,7 +1567,8 @@ def _map_order(
         }
     if mapping is None:
         raise FfPoolFbsLifecycleError(
-            "order_sku_unmapped", f"Order {int(row[1])} identity is unmapped"
+            "order_sku_unmapped",
+            f"Order {int(row[1])} exact known-facility SKU is unmapped",
         )
     return {
         "facility_id": facility_id,
@@ -1761,7 +1785,17 @@ def _persist_identity_pending(
     manifest: Mapping[str, Any],
     row: sqlite3.Row | tuple[Any, ...],
     created_at: str,
+    reason_detail_code: str,
 ) -> bool:
+    detail_code = str(reason_detail_code)
+    if detail_code not in {
+        "identity_evidence_missing_or_drifted",
+        "order_sku_unmapped",
+    }:
+        raise FfPoolFbsLifecycleError(
+            "identity_pending_reason_invalid",
+            "Identity pending reason is outside the durable quarantine contract",
+        )
     evidence = {
         "cutover_id": str(manifest["cutover_id"]),
         "order_id": int(row[1]),
@@ -1769,6 +1803,7 @@ def _persist_identity_pending(
         "order_revision": str(row[2]),
         "status_digest": str(row[3]),
         "reason_code": "identity_evidence_missing_or_drifted",
+        "reason_detail_code": detail_code,
     }
     digest = _fingerprint(evidence)
     pending_id = "ffidp_" + digest.removeprefix("sha256:")[:28]
@@ -1785,8 +1820,8 @@ def _persist_identity_pending(
                     pending_id,cutover_id,order_id,
                     source_status_observation_sequence,order_revision,
                     status_digest,deferred_identity_evidence_sequence,
-                    reason_code,evidence_digest,created_at
-                ) VALUES(?,?,?,?,?,?,?,'identity_evidence_missing_or_drifted',?,?)""",
+                    reason_code,reason_detail_code,evidence_digest,created_at
+                ) VALUES(?,?,?,?,?,?,?,'identity_evidence_missing_or_drifted',?,?,?)""",
             (
                 pending_id,
                 str(manifest["cutover_id"]),
@@ -1795,6 +1830,7 @@ def _persist_identity_pending(
                 str(row[2]),
                 str(row[3]),
                 deferred_identity_evidence_sequence,
+                detail_code,
                 digest,
                 created_at,
             ),

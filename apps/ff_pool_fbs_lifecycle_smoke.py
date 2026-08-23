@@ -30,6 +30,7 @@ from packages.application.ff_pool_cutover_production import (  # noqa: E402
     FfPoolCutoverProductionMutation,
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
+    DRAIN_STATE_TABLE,
     EVENTS_TABLE,
     IDENTITY_PENDING_RESOLUTIONS_TABLE,
     IDENTITY_PENDING_TABLE,
@@ -54,7 +55,10 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.warehouse_functional import (  # noqa: E402
     ensure_warehouse_functional_schema,
 )
-from packages.application.wb_fbs_orders import WbFbsOrdersCollector  # noqa: E402
+from packages.application.wb_fbs_orders import (  # noqa: E402
+    WbFbsOrdersCollector,
+    _current_cte,
+)
 
 
 def main() -> int:
@@ -1535,6 +1539,124 @@ def main() -> int:
             "guided_recovery_dependent_state_drift",
             "guided_recovery_projection_drift",
         }
+
+        # A matched order for a known facility can still reference a SKU that
+        # is absent from the immutable cutover manifest.  It is quarantined in
+        # the existing identity-pending lane, while the later valid row in the
+        # same suffix is processed and the durable cursor advances.
+        with sqlite3.connect(runtime.db_path) as conn:
+            _insert_post_t_order(
+                conn,
+                order_id=9440,
+                supplier="complete",
+                wb="sorted",
+                observed_at="2026-08-15T08:40:00Z",
+                source_nm_id=999,
+                source_chrt_id=1999,
+                seller_sku="seller-999",
+                barcode="sku-999",
+            )
+            _insert_post_t_order(
+                conn,
+                order_id=9441,
+                supplier="new",
+                wb="waiting",
+                observed_at="2026-08-15T08:40:01Z",
+            )
+            expected_cursor = int(
+                conn.execute(
+                    "SELECT MAX(observation_sequence) FROM "
+                    "sheet_vitrina_v1_wb_supplies_fbs_status_observations"
+                ).fetchone()[0]
+            )
+            pool_before = conn.execute(
+                "SELECT facility_id,pool,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_ff_pool_balances "
+                "ORDER BY facility_id,pool,nm_id"
+            ).fetchall()
+            aggregate_before = conn.execute(
+                "SELECT version_id,warehouse_key,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_warehouse_functional_balances "
+                "ORDER BY version_id,warehouse_key,nm_id"
+            ).fetchall()
+            conn.commit()
+
+        quarantined_sku = _process(runtime.db_path, "2026-08-15T08:40:10Z")
+        assert quarantined_sku["status"] == "caught_up_identity_pending"
+        assert quarantined_sku["processed_count"] == 2
+        assert quarantined_sku["pending_count"] == 0
+        assert quarantined_sku["identity_pending_count"] == 1
+        assert quarantined_sku["summary"]["identity_pending"] == 1
+        assert quarantined_sku["summary"]["reserved"] == 1
+        assert quarantined_sku["last_status_observation_sequence"] == expected_cursor
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT reason_code,reason_detail_code FROM {IDENTITY_PENDING_TABLE} "
+                "WHERE order_id=9440"
+            ).fetchone() == (
+                "identity_evidence_missing_or_drifted",
+                "order_sku_unmapped",
+            )
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9440"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9441 "
+                "AND event_type='reserve'"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {RECONCILIATION_TABLE} WHERE order_id=9440"
+            ).fetchone()[0] == 0
+            unresolved_reason = conn.execute(
+                _current_cte(lifecycle_available=True)
+                + " SELECT cost_status,cost_reason,lifecycle_reason "
+                "FROM current_order WHERE order_id=9440"
+            ).fetchone()
+            assert unresolved_reason == (
+                "cost_unresolved",
+                "sku_mapping_missing_or_ambiguous",
+                "order_sku_unmapped",
+            )
+            assert int(
+                conn.execute(
+                    f"SELECT last_status_observation_sequence FROM {DRAIN_STATE_TABLE}"
+                ).fetchone()[0]
+            ) == expected_cursor
+            assert conn.execute(
+                "SELECT facility_id,pool,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_ff_pool_balances "
+                "ORDER BY facility_id,pool,nm_id"
+            ).fetchall() == pool_before
+            assert conn.execute(
+                "SELECT version_id,warehouse_key,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_warehouse_functional_balances "
+                "ORDER BY version_id,warehouse_key,nm_id"
+            ).fetchall() == aggregate_before
+
+        repeated_quarantine = _process(runtime.db_path, "2026-08-15T08:40:20Z")
+        assert repeated_quarantine["processed_count"] == 0
+        assert repeated_quarantine["pending_count"] == 0
+        assert repeated_quarantine["identity_retry_count"] == 1
+        assert repeated_quarantine["identity_pending_count"] == 1
+        assert repeated_quarantine["summary"]["identity_pending"] == 1
+        assert repeated_quarantine["last_status_observation_sequence"] == expected_cursor
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {IDENTITY_PENDING_TABLE} WHERE order_id=9440"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id IN (9440,9441)"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT facility_id,pool,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_ff_pool_balances "
+                "ORDER BY facility_id,pool,nm_id"
+            ).fetchall() == pool_before
+            assert conn.execute(
+                "SELECT version_id,warehouse_key,nm_id,quantity,capital_rub FROM "
+                "sheet_vitrina_v1_warehouse_functional_balances "
+                "ORDER BY version_id,warehouse_key,nm_id"
+            ).fetchall() == aggregate_before
     print("ff_pool_fbs_lifecycle_smoke: OK")
     return 0
 
@@ -1549,6 +1671,10 @@ def _insert_post_t_order(
     observed_at: str = "2026-08-14T06:01:00Z",
     quantity: int = 1,
     identity_outcome: str = "matched",
+    source_nm_id: int = 101,
+    source_chrt_id: int = 201,
+    seller_sku: str = "seller-101",
+    barcode: str = "sku-101",
 ) -> None:
     revision = f"post_revision_{order_id}_v1"
     conn.execute(
@@ -1559,7 +1685,8 @@ def _insert_post_t_order(
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             f"post_observation_{order_id}", order_id, revision, "post-supply", "fbs",
-            source_created_at, 501, 601, 101, 201, "seller-101", '["sku-101"]',
+            source_created_at, 501, 601, source_nm_id, source_chrt_id,
+            seller_sku, json.dumps([barcode]),
             observed_at, 1, 2, 0,
         ),
     )
@@ -1570,8 +1697,8 @@ def _insert_post_t_order(
                evidence_digest,observed_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            f"post_identity_evidence_{order_id}", order_id, revision, 501, 101, 201,
-            "sku-101", "seller-101", identity_outcome,
+            f"post_identity_evidence_{order_id}", order_id, revision, 501,
+            source_nm_id, source_chrt_id, barcode, seller_sku, identity_outcome,
             "warehouse_mapping_1",
             "identity_mapping_1" if identity_outcome == "matched" else "",
             "sha256:" + hashlib.sha256(f"identity:{order_id}".encode()).hexdigest(),
