@@ -71,6 +71,13 @@ LIFECYCLE_RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_la
 LIFECYCLE_LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
 CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
 LIFECYCLE_DRAIN_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_drain_state"
+LIFECYCLE_FORWARD_GENERATIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_forward_generations"
+)
+LIFECYCLE_FORWARD_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_forward_state"
+LIFECYCLE_BACKLOG_RECOVERY_RUNS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
+)
 LIFECYCLE_IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
 LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE = (
     "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
@@ -2013,6 +2020,25 @@ def _lifecycle_processor_status(conn: sqlite3.Connection) -> dict[str, Any]:
         f"FROM {LIFECYCLE_DRAIN_STATE_TABLE} WHERE cutover_id=?",
         (cutover_id,),
     ).fetchone()
+    forward = None
+    if {
+        LIFECYCLE_FORWARD_GENERATIONS_TABLE,
+        LIFECYCLE_FORWARD_STATE_TABLE,
+    }.issubset(tables):
+        forward = conn.execute(
+            f"""SELECT generation.generation_id,
+                       generation.cutoff_status_observation_sequence,
+                       generation.old_cursor_status_observation_sequence,
+                       state.last_status_observation_sequence,state.updated_at,
+                       recovery.status
+                FROM {LIFECYCLE_FORWARD_GENERATIONS_TABLE} AS generation
+                JOIN {LIFECYCLE_FORWARD_STATE_TABLE} AS state
+                  ON state.generation_id=generation.generation_id
+                LEFT JOIN {LIFECYCLE_BACKLOG_RECOVERY_RUNS_TABLE} AS recovery
+                  ON recovery.generation_id=generation.generation_id
+                WHERE generation.cutover_id=?""",
+            (cutover_id,),
+        ).fetchone()
     source = conn.execute(
         f"SELECT COALESCE(MAX(observation_sequence),0),MAX(observed_at) "
         f"FROM {STATUS_OBSERVATIONS_TABLE}"
@@ -2056,7 +2082,8 @@ def _lifecycle_processor_status(conn: sqlite3.Connection) -> dict[str, Any]:
             "latest_status_observed_at": latest_observed_at,
             "contains_pii": False,
         }
-    cursor = int(drain[0])
+    cursor = int(forward[3]) if forward is not None else int(drain[0])
+    cursor_updated_at = str(forward[4]) if forward is not None else str(drain[1])
     lag = latest_sequence - cursor
     if lag < 0:
         status = "error"
@@ -2075,12 +2102,19 @@ def _lifecycle_processor_status(conn: sqlite3.Connection) -> dict[str, Any]:
         "reason": reason,
         "cutover_id": cutover_id,
         "cutover_at": str(manifest[1]),
+        "processor_lane": "forward" if forward is not None else "ordinary",
+        "forward_generation_id": str(forward[0]) if forward is not None else None,
+        "forward_cutoff_sequence": int(forward[1]) if forward is not None else None,
+        "backlog_old_cursor_sequence": int(forward[2]) if forward is not None else None,
+        "backlog_recovery_status": (
+            str(forward[5] or "pending") if forward is not None else None
+        ),
         "cursor_sequence": cursor,
         "latest_status_sequence": latest_sequence,
         "lag_observation_count": max(lag, 0),
         "pending_identity_count": pending_count,
         "pending_reason_counts": pending_reason_counts,
-        "cursor_updated_at": str(drain[1]),
+        "cursor_updated_at": cursor_updated_at,
         "latest_status_observed_at": latest_observed_at,
         "contains_pii": False,
     }

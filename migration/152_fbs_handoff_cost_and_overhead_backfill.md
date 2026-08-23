@@ -44,6 +44,14 @@ cursor/source sequence, lag and pending identity evidence are also published
 separately from collector poll success. Identifiers exposed by this surface are
 hashed and contain no customer PII.
 
+Migration 157 additionally splits a separately gated historical lifecycle
+suffix from continuous ingress. Its query-only manifest pins stable rows through
+`C`; an explicit apply starts a durable forward generation at `C+1` and reuses
+the exact lifecycle cost/debit implementation for only the reviewed `<=C`
+identities. New rows above `C` cannot change that fingerprint, while target WAC
+or business-evidence drift fails closed. This mechanism does not rewrite any
+fulfilled sale or realized Finance/Partner row.
+
 ## Overhead publication and contention
 
 `pool_overhead` confirm atomically writes its document/ledger effects, updates

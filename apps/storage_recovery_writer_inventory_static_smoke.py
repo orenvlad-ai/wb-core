@@ -146,6 +146,18 @@ WRITERS = [
         "lifecycle": "private manifest-bound evidence retained through reconciliation",
     },
     {
+        "owner": "ff_pool_fbs_forward_recovery_preview",
+        "source": "packages/application/ff_pool_fbs_forward_recovery.py",
+        "cadence": "human_gated_one_shot",
+        "artifact": "temporary in-memory query-only planning copy",
+        "full_monolith": True,
+        "guard": (
+            "mode=ro/query_only source + disposable memory after-image + "
+            "exact C target manifest"
+        ),
+        "lifecycle": "process-local only; never persisted as a runtime backup",
+    },
+    {
         "owner": "supplier_factual_date_correction",
         "source": "packages/application/supplier_shipment_factual_correction.py",
         "cadence": "human_gated_one_shot",
