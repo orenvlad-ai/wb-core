@@ -33,6 +33,10 @@ CONTRACT_VERSION = "v2"
 TRIGGER_SOURCE = "night_refresh_experiment"
 CONTROL_ROOT_NAME = "sheet-vitrina-control-canaries"
 TARGET_DATE = "2026-08-22"
+NIGHT_PLAN_CONTRACT_NAME = "sheet_vitrina_v1_night_refresh_plan"
+NIGHT_PLAN_CONTRACT_VERSION = "v1"
+NIGHT_PLAN_TARGET_DATE = "2026-08-23"
+NIGHT_PLAN_TIMEZONE = "Asia/Yekaterinburg"
 MIN_LEAD_MINUTES = 10
 MAX_SLOT_WINDOW_MINUTES = 50
 HARD_MAX_PAUSE_MINUTES = 25
@@ -47,6 +51,13 @@ ALLOWED_PAUSE_UNITS: dict[str, str] = {
     "wb-core-warehouse-functional-sync.timer": "wb-core-warehouse-functional-sync.service",
     "wb-core-fbs-shadow-collector.timer": "wb-core-fbs-shadow-collector.service",
 }
+
+NIGHT_PLAN_SLOTS: tuple[tuple[str, str, str], ...] = (
+    ("20260824T0130EKT", "2026-08-24T01:30:00+05:00", "2026-08-24T02:20:00+05:00"),
+    ("20260824T0330EKT", "2026-08-24T03:30:00+05:00", "2026-08-24T04:20:00+05:00"),
+    ("20260824T0630EKT", "2026-08-24T06:30:00+05:00", "2026-08-24T07:20:00+05:00"),
+    ("20260824T0830EKT", "2026-08-24T08:30:00+05:00", "2026-08-24T09:20:00+05:00"),
+)
 
 
 class ControlCanaryError(RuntimeError):
@@ -76,6 +87,8 @@ class ControlCanaryManifest:
     max_attempts: int
     created_at: str
     manifest_sha256: str
+    parent_plan_id: str = ""
+    parent_plan_manifest_sha256: str = ""
 
     @property
     def due_datetime(self) -> datetime:
@@ -103,6 +116,71 @@ class ControlCanaryManifest:
         }
         if include_digest:
             payload["manifest_sha256"] = self.manifest_sha256
+        if self.parent_plan_id:
+            payload["parent_plan_id"] = self.parent_plan_id
+            payload["parent_plan_manifest_sha256"] = self.parent_plan_manifest_sha256
+        return payload
+
+
+@dataclass(frozen=True)
+class NightRefreshPlanSlot:
+    slot_id: str
+    due_at: str
+    deadline: str
+    child_experiment_id: str
+
+    @property
+    def due_datetime(self) -> datetime:
+        return _parse_datetime(self.due_at)
+
+    @property
+    def deadline_datetime(self) -> datetime:
+        return _parse_datetime(self.deadline)
+
+    def payload(self) -> dict[str, str]:
+        return {
+            "slot_id": self.slot_id,
+            "due_at": self.due_at,
+            "deadline": self.deadline,
+            "child_experiment_id": self.child_experiment_id,
+        }
+
+
+@dataclass(frozen=True)
+class NightRefreshPlanManifest:
+    experiment_id: str
+    target_date: str
+    timezone: str
+    expected_deployed_sha: str
+    pause_units: tuple[str, ...]
+    max_attempts_per_slot: int
+    slots: tuple[NightRefreshPlanSlot, ...]
+    created_at: str
+    manifest_sha256: str
+
+    def payload(self, *, include_digest: bool = True) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "contract_name": NIGHT_PLAN_CONTRACT_NAME,
+            "contract_version": NIGHT_PLAN_CONTRACT_VERSION,
+            "experiment_id": self.experiment_id,
+            "target_date": self.target_date,
+            "timezone": self.timezone,
+            "expected_deployed_sha": self.expected_deployed_sha,
+            "trigger_source": TRIGGER_SOURCE,
+            "pause_units": list(self.pause_units),
+            "max_attempts_per_slot": self.max_attempts_per_slot,
+            "slots": [slot.payload() for slot in self.slots],
+            "ordinary_schedule_modified": False,
+            "automatic_terminal_expiry": True,
+            "no_next_day_replay": True,
+            "manual_comparison_volatile_exclusions": [
+                "meta.generated_at",
+                "status_summary.business_now",
+            ],
+            "created_at": self.created_at,
+        }
+        if include_digest:
+            payload["manifest_sha256"] = self.manifest_sha256
         return payload
 
 
@@ -120,10 +198,11 @@ def arm_control_canary_manifest(
 ) -> dict[str, Any]:
     instant = _aware_utc(now)
     normalized_id = str(experiment_id or "").strip()
-    if re.fullmatch(r"web-vitrina-closed-day-2026-08-22-canary-[A-Za-z0-9_.-]+", normalized_id) is None:
-        raise ValueError("experiment_id must be a new bounded 2026-08-22 control-canary id")
-    if target_date != TARGET_DATE:
-        raise ValueError(f"control canary target_date must remain {TARGET_DATE}")
+    _validate_target_date(target_date)
+    if target_date not in {TARGET_DATE, NIGHT_PLAN_TARGET_DATE}:
+        raise ValueError("control canary target_date is outside the two released bounded dates")
+    if not _valid_control_experiment_id(normalized_id, target_date):
+        raise ValueError("experiment_id must be a new date-bound control-canary id")
     normalized_sha = str(expected_deployed_sha or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
         raise ValueError("expected_deployed_sha must be an exact 40-character SHA")
@@ -143,7 +222,11 @@ def arm_control_canary_manifest(
     control_root = _control_root(runtime_dir)
     for existing_path in sorted(control_root.glob("*/manifest.json")):
         existing = _load_manifest(existing_path)
-        if not _artifact_path(control_root / existing.experiment_id).exists() and instant <= existing.deadline_datetime:
+        if (
+            not _control_manifest_superseded(existing_path, existing)
+            and not _artifact_path(control_root / existing.experiment_id).exists()
+            and instant <= existing.deadline_datetime
+        ):
             raise ControlCanaryError(f"another control canary is still non-terminal: {existing.experiment_id}")
 
     created_at = _iso_utc(instant)
@@ -172,6 +255,297 @@ def arm_control_canary_manifest(
     }
 
 
+def arm_night_refresh_plan_manifest(
+    *,
+    runtime_dir: Path,
+    experiment_id: str,
+    expected_deployed_sha: str,
+    pause_units: Sequence[str],
+    now: datetime,
+    max_attempts_per_slot: int = DEFAULT_MAX_ATTEMPTS,
+) -> dict[str, Any]:
+    """Arm the exact owner-authorized four-slot night plan.
+
+    One immutable parent manifest owns all four exact slots.  Date-bound child
+    manifests reuse the released per-slot pause/restore runner and are
+    cryptographically bound back to that parent.
+    """
+
+    instant = _aware_utc(now)
+    normalized_id = str(experiment_id or "").strip()
+    if re.fullmatch(r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+", normalized_id) is None:
+        raise ValueError("experiment_id must be a new bounded 2026-08-23 night-plan id")
+    normalized_sha = str(expected_deployed_sha or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
+        raise ValueError("expected_deployed_sha must be an exact 40-character SHA")
+    if max_attempts_per_slot < 1 or max_attempts_per_slot > DEFAULT_MAX_ATTEMPTS:
+        raise ValueError(f"max_attempts_per_slot must be between 1 and {DEFAULT_MAX_ATTEMPTS}")
+    normalized_units = tuple(dict.fromkeys(str(value or "").strip() for value in pause_units if str(value or "").strip()))
+    if set(normalized_units) != set(ALLOWED_PAUSE_UNITS) or len(normalized_units) != len(ALLOWED_PAUSE_UNITS):
+        raise ValueError("night plan must contain the exact fresh-read SQLite conflict timer allowlist")
+
+    slots = tuple(
+        NightRefreshPlanSlot(
+            slot_id=slot_id,
+            due_at=due_at,
+            deadline=deadline,
+            child_experiment_id=(
+                f"web-vitrina-closed-day-{NIGHT_PLAN_TARGET_DATE}-canary-"
+                f"{normalized_id.removeprefix('web-vitrina-closed-day-2026-08-23-night-')}-{slot_id}"
+            ),
+        )
+        for slot_id, due_at, deadline in NIGHT_PLAN_SLOTS
+    )
+    if slots[0].due_datetime < instant + timedelta(minutes=MIN_LEAD_MINUTES):
+        raise ValueError(f"first night-plan slot must be at least {MIN_LEAD_MINUTES} minutes in the future")
+
+    control_root = _control_root(runtime_dir)
+    for existing_path in sorted(control_root.glob("*/manifest.json")):
+        existing = _load_manifest(existing_path)
+        if (
+            not _control_manifest_superseded(existing_path, existing)
+            and not _artifact_path(existing_path.parent).exists()
+            and instant <= existing.deadline_datetime
+        ):
+            raise ControlCanaryError(f"another control canary is still non-terminal: {existing.experiment_id}")
+    for existing_path in sorted(control_root.glob("*/plan.json")):
+        existing = _load_night_refresh_plan(existing_path)
+        existing_status = _night_plan_row(control_root, existing, instant)
+        if existing_status["state"] not in {"terminal", "expired", "superseded"}:
+            raise ControlCanaryError(f"another night plan is still non-terminal: {existing.experiment_id}")
+
+    created_at = _iso_utc(instant)
+    draft = NightRefreshPlanManifest(
+        experiment_id=normalized_id,
+        target_date=NIGHT_PLAN_TARGET_DATE,
+        timezone=NIGHT_PLAN_TIMEZONE,
+        expected_deployed_sha=normalized_sha,
+        pause_units=normalized_units,
+        max_attempts_per_slot=max_attempts_per_slot,
+        slots=slots,
+        created_at=created_at,
+        manifest_sha256="",
+    )
+    digest = _fingerprint(draft.payload(include_digest=False))
+    plan = NightRefreshPlanManifest(**{**draft.__dict__, "manifest_sha256": digest})
+    plan_root = control_root / normalized_id
+    _write_json_idempotent_exclusive(plan_root / "plan.json", plan.payload())
+
+    child_paths: list[str] = []
+    for slot in plan.slots:
+        child_draft = ControlCanaryManifest(
+            experiment_id=slot.child_experiment_id,
+            target_date=plan.target_date,
+            slot_id=slot.slot_id,
+            due_at=slot.due_at,
+            deadline=slot.deadline,
+            expected_deployed_sha=plan.expected_deployed_sha,
+            pause_units=plan.pause_units,
+            max_attempts=plan.max_attempts_per_slot,
+            created_at=plan.created_at,
+            manifest_sha256="",
+            parent_plan_id=plan.experiment_id,
+            parent_plan_manifest_sha256=plan.manifest_sha256,
+        )
+        child_digest = _fingerprint(child_draft.payload(include_digest=False))
+        child = ControlCanaryManifest(**{**child_draft.__dict__, "manifest_sha256": child_digest})
+        child_path = control_root / child.experiment_id / "manifest.json"
+        _write_json_idempotent_exclusive(child_path, child.payload())
+        child_paths.append(str(child_path))
+
+    status = night_refresh_plan_status(runtime_dir=runtime_dir, now=instant)
+    return {
+        "status": "armed",
+        "manifest": plan.payload(),
+        "manifest_path": str(plan_root / "plan.json"),
+        "child_manifest_paths": child_paths,
+        "readback": next(
+            row for row in status["plans"] if row.get("experiment_id") == plan.experiment_id
+        ),
+    }
+
+
+def rebind_night_refresh_plan_manifest(
+    *,
+    runtime_dir: Path,
+    current_experiment_id: str,
+    replacement_experiment_id: str,
+    expected_deployed_sha: str,
+    pause_units: Sequence[str],
+    now: datetime,
+) -> dict[str, Any]:
+    """Supersede an untouched pre-due plan, then arm the same slots to a new SHA."""
+
+    instant = _aware_utc(now)
+    control_root = _control_root(runtime_dir)
+    current_path = control_root / str(current_experiment_id or "").strip() / "plan.json"
+    current = _load_night_refresh_plan(current_path)
+    if instant >= current.slots[0].due_datetime:
+        raise ControlCanaryError("night plan cannot be rebound at or after the first due slot")
+    current_status = _night_plan_row(control_root, current, instant)
+    if current_status.get("state") != "armed" or current_status.get("no_early_action") is not True:
+        raise ControlCanaryError("night plan rebind requires an untouched pre-due armed plan")
+    if any(
+        row.get("artifact_exists")
+        or int(row.get("attempt_receipt_count") or 0) > 0
+        or int(row.get("pause_intent_count") or 0) > 0
+        for row in current_status["slots"]
+    ):
+        raise ControlCanaryError("night plan rebind requires zero artifact/attempt/pause state")
+    normalized_replacement = str(replacement_experiment_id or "").strip()
+    normalized_sha = str(expected_deployed_sha or "").strip().lower()
+    normalized_units = tuple(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in pause_units
+            if str(value or "").strip()
+        )
+    )
+    if normalized_replacement == current.experiment_id:
+        raise ControlCanaryError("night plan rebind requires a new replacement experiment id")
+    if re.fullmatch(
+        r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+",
+        normalized_replacement,
+    ) is None:
+        raise ValueError("replacement experiment_id must be a new bounded 2026-08-23 night-plan id")
+    if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
+        raise ValueError("replacement expected_deployed_sha must be an exact 40-character SHA")
+    if normalized_sha == current.expected_deployed_sha:
+        raise ControlCanaryError("night plan rebind requires actual deployed SHA drift")
+    if normalized_units != current.pause_units:
+        raise ControlCanaryError("night plan rebind must preserve the exact timer order and set")
+    if (control_root / normalized_replacement).exists():
+        raise ControlCanaryError("night plan replacement path already exists")
+    superseded = {
+        "contract_name": f"{NIGHT_PLAN_CONTRACT_NAME}_superseded",
+        "contract_version": NIGHT_PLAN_CONTRACT_VERSION,
+        "experiment_id": current.experiment_id,
+        "manifest_sha256": current.manifest_sha256,
+        "previous_expected_deployed_sha": current.expected_deployed_sha,
+        "replacement_experiment_id": normalized_replacement,
+        "replacement_expected_deployed_sha": normalized_sha,
+        "reason": "pre-due exact deployed SHA drift; same four slots rebound without replay",
+        "superseded_at": _iso_utc(instant),
+    }
+    superseded["superseded_sha256"] = _fingerprint(superseded)
+    _write_json_idempotent_exclusive(current_path.parent / "superseded.json", superseded)
+    replacement = arm_night_refresh_plan_manifest(
+        runtime_dir=runtime_dir,
+        experiment_id=normalized_replacement,
+        expected_deployed_sha=normalized_sha,
+        pause_units=normalized_units,
+        now=instant,
+        max_attempts_per_slot=current.max_attempts_per_slot,
+    )
+    return {
+        "status": "rebound",
+        "superseded": superseded,
+        "replacement": replacement,
+    }
+
+
+def night_refresh_plan_status(*, runtime_dir: Path, now: datetime) -> dict[str, Any]:
+    instant = _aware_utc(now)
+    control_root = _control_root(runtime_dir)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(control_root.glob("*/plan.json")):
+        try:
+            plan = _load_night_refresh_plan(path)
+            rows.append(_night_plan_row(control_root, plan, instant))
+        except Exception as exc:  # noqa: BLE001 - status must expose corrupt state.
+            rows.append({"manifest_path": str(path), "state": "invalid_manifest", "error": str(exc)})
+    return {
+        "contract_name": f"{NIGHT_PLAN_CONTRACT_NAME}_status",
+        "contract_version": NIGHT_PLAN_CONTRACT_VERSION,
+        "observed_at": _iso_utc(instant),
+        "plans": rows,
+    }
+
+
+def finalize_night_refresh_plans(*, runtime_dir: Path, now: datetime) -> list[dict[str, Any]]:
+    """Write the immutable four-slot comparison after every child is terminal."""
+
+    instant = _aware_utc(now)
+    control_root = _control_root(runtime_dir)
+    finalized: list[dict[str, Any]] = []
+    for path in sorted(control_root.glob("*/plan.json")):
+        plan = _load_night_refresh_plan(path)
+        if _night_plan_superseded(path.parent):
+            continue
+        comparison_path = path.parent / "comparison.json"
+        if comparison_path.exists():
+            continue
+        artifacts: list[dict[str, Any]] = []
+        artifact_paths: list[Path] = []
+        for slot in plan.slots:
+            artifact_path = _artifact_path(control_root / slot.child_experiment_id)
+            if not artifact_path.exists():
+                break
+            artifact_paths.append(artifact_path)
+            artifacts.append(_read_json(artifact_path))
+        if len(artifacts) != len(plan.slots):
+            continue
+        slot_rows: list[dict[str, Any]] = []
+        for slot, artifact, artifact_path in zip(plan.slots, artifacts, artifact_paths):
+            slot_rows.append(
+                {
+                    **slot.payload(),
+                    "artifact_path": str(artifact_path),
+                    "artifact_sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                    "canary_status": artifact.get("canary_status"),
+                    "acceptance_passed": artifact.get("acceptance_passed"),
+                    "technical_status": artifact.get("technical_status"),
+                    "semantic_status": artifact.get("semantic_status"),
+                    "observation_status": artifact.get("observation_status"),
+                    "job_id": artifact.get("job_id"),
+                    "canonical_payload_sha256": (artifact.get("fingerprints") or {}).get("canonical_payload_sha256"),
+                    "source_or_group_sha256": (artifact.get("fingerprints") or {}).get("source_or_group_sha256") or {},
+                    "ready_snapshot": artifact.get("ready_snapshot") or {},
+                    "row_counts": artifact.get("row_counts") or {},
+                }
+            )
+        comparisons = []
+        for previous, current in zip(slot_rows, slot_rows[1:]):
+            previous_hash = str(previous.get("canonical_payload_sha256") or "")
+            current_hash = str(current.get("canonical_payload_sha256") or "")
+            comparisons.append(
+                {
+                    "from_slot": previous["slot_id"],
+                    "to_slot": current["slot_id"],
+                    "comparable": bool(previous_hash and current_hash),
+                    "raw_payload_fingerprints_equal": bool(
+                        previous_hash and current_hash and previous_hash == current_hash
+                    ),
+                    "manual_volatile_exclusions": [
+                        "meta.generated_at",
+                        "status_summary.business_now",
+                    ],
+                }
+            )
+        comparison = {
+            "contract_name": f"{NIGHT_PLAN_CONTRACT_NAME}_comparison",
+            "contract_version": NIGHT_PLAN_CONTRACT_VERSION,
+            "experiment_id": plan.experiment_id,
+            "target_date": plan.target_date,
+            "timezone": plan.timezone,
+            "expected_deployed_sha": plan.expected_deployed_sha,
+            "manifest_sha256": plan.manifest_sha256,
+            "created_at": _iso_utc(instant),
+            "terminal": True,
+            "slot_count": len(slot_rows),
+            "slots": slot_rows,
+            "comparisons": comparisons,
+            "manual_interpretation_guard": (
+                "Raw equality is not finality. Exclude only meta.generated_at and "
+                "status_summary.business_now, then verify source freshness/fallback evidence "
+                "before comparing closed-day financial metrics; state metrics remain timestamped observations."
+            ),
+        }
+        _write_json_exclusive(comparison_path, comparison)
+        finalized.append({"experiment_id": plan.experiment_id, "comparison_path": str(comparison_path)})
+    return finalized
+
+
 def control_canary_status(*, runtime_dir: Path, now: datetime) -> dict[str, Any]:
     instant = _aware_utc(now)
     rows: list[dict[str, Any]] = []
@@ -183,7 +557,9 @@ def control_canary_status(*, runtime_dir: Path, now: datetime) -> dict[str, Any]
             continue
         root = path.parent
         artifact_exists = _artifact_path(root).exists()
-        if artifact_exists:
+        if _control_manifest_superseded(path, manifest):
+            state = "superseded"
+        elif artifact_exists:
             state = "terminal"
         elif instant > manifest.deadline_datetime:
             state = "expired_pending_terminalization"
@@ -512,6 +888,7 @@ class ControlRefreshCanaryRunner:
         fetch_ready_snapshot: Callable[[str], Mapping[str, Any]],
         timer_coordinator: SystemdTimerCoordinator,
         read_deployed_sha: Callable[[], str],
+        read_business_data_barrier: Callable[[], Mapping[str, Any]] | None = None,
         now_factory: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -524,6 +901,7 @@ class ControlRefreshCanaryRunner:
         self.fetch_ready_snapshot = fetch_ready_snapshot
         self.timer_coordinator = timer_coordinator
         self.read_deployed_sha = read_deployed_sha
+        self.read_business_data_barrier = read_business_data_barrier
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         if sleep is None:
             import time
@@ -567,6 +945,30 @@ class ControlRefreshCanaryRunner:
                 )
                 return {"status": "failed", "artifact": artifact}
 
+            barrier_readback: dict[str, Any] = {
+                "status": "not_configured",
+                "active": False,
+            }
+            if self.read_business_data_barrier is not None:
+                try:
+                    barrier_readback = dict(self.read_business_data_barrier())
+                except Exception as exc:  # noqa: BLE001 - ambiguous barrier state is fail closed.
+                    return {
+                        "status": "waiting_for_business_data_barrier",
+                        "experiment_id": manifest.experiment_id,
+                        "barrier": {
+                            "status": "readback_failed",
+                            "active": True,
+                            "error": str(exc),
+                        },
+                    }
+                if barrier_readback.get("active") is not False:
+                    return {
+                        "status": "waiting_for_business_data_barrier",
+                        "experiment_id": manifest.experiment_id,
+                        "barrier": barrier_readback,
+                    }
+
             try:
                 pause_intent = self.timer_coordinator.pause(
                     experiment_root=root,
@@ -593,6 +995,7 @@ class ControlRefreshCanaryRunner:
                     )
                 except Exception as exc:  # noqa: BLE001 - artifact must expose material failure.
                     restore_error = str(exc)
+            outcome["business_data_barrier_preflight"] = barrier_readback
             if not bool(outcome.get("terminal")) and not restore_error:
                 return {
                     "status": str(outcome.get("status") or "retry_pending"),
@@ -603,11 +1006,15 @@ class ControlRefreshCanaryRunner:
             return {"status": str(artifact.get("canary_status") or "failed"), "artifact": artifact}
 
     def _selected_manifest(self, instant: datetime) -> ControlCanaryManifest | None:
-        candidates = [_load_manifest(path) for path in sorted(self.control_root.glob("*/manifest.json"))]
+        candidates = [
+            (path, _load_manifest(path))
+            for path in sorted(self.control_root.glob("*/manifest.json"))
+        ]
         candidates = [
             item
-            for item in candidates
-            if not _artifact_path(self.control_root / item.experiment_id).exists()
+            for path, item in candidates
+            if not _control_manifest_superseded(path, item)
+            and not _artifact_path(self.control_root / item.experiment_id).exists()
             and instant >= item.due_datetime
         ]
         return min(candidates, key=lambda item: item.due_datetime) if candidates else None
@@ -792,6 +1199,11 @@ class ControlRefreshCanaryRunner:
         archived_at = _aware_utc(self.now_factory())
         fingerprint = _fingerprint(contract) if contract else ""
         fresh_fingerprint = _fingerprint(fresh_contract) if fresh_contract else ""
+        fresh_diff_paths = _recursive_diff_paths(contract, fresh_contract)
+        known_volatile_difference = set(fresh_diff_paths) == {
+            "meta.generated_at",
+            "status_summary.business_now",
+        }
         attempts = self._attempt_lineage(root)
         pauses, restores = self._pause_lineage(root)
         accepted = [row for row in attempts if row.get("event") == "refresh_accepted"]
@@ -810,6 +1222,11 @@ class ControlRefreshCanaryRunner:
             "row_counts_nonempty": bool(_row_counts(contract, terminal_job)),
             "fingerprints_nonempty": bool(fingerprint and fresh_fingerprint),
             "fresh_exact_date_fingerprint_match": bool(fingerprint and fingerprint == fresh_fingerprint),
+            "fresh_fingerprint_difference_classified": bool(
+                fingerprint
+                and fresh_fingerprint
+                and (fingerprint == fresh_fingerprint or known_volatile_difference)
+            ),
             "bounded_attempts": 0 < len(accepted) <= manifest.max_attempts,
             "exactly_one_accepted_success": len(successful) == 1,
             "all_pauses_restored": bool(pauses) and len(restores) == len(pauses) and all(bool(row.get("restore_complete")) for row in restores),
@@ -849,6 +1266,8 @@ class ControlRefreshCanaryRunner:
                 "canonical_payload_sha256": fingerprint,
                 "fresh_readback_payload_sha256": fresh_fingerprint,
                 "payloads_equal": bool(fingerprint and fingerprint == fresh_fingerprint),
+                "fresh_readback_diff_paths": fresh_diff_paths,
+                "known_volatile_only_difference": known_volatile_difference,
                 "source_or_group_sha256": _source_fingerprints(result),
             },
             "ready_snapshot": ready_snapshot,
@@ -856,6 +1275,9 @@ class ControlRefreshCanaryRunner:
             "fresh_canonical_contract": fresh_contract,
             "source_status": source_status,
             "job": _without_log_lines(terminal_job),
+            "business_data_barrier_preflight": dict(
+                outcome.get("business_data_barrier_preflight") or {}
+            ),
         }
         _write_json_exclusive(_artifact_path(root), artifact)
         comparison = {
@@ -947,11 +1369,14 @@ def _load_manifest(path: Path) -> ControlCanaryManifest:
         max_attempts=int(payload.get("max_attempts") or 0),
         created_at=str(payload.get("created_at") or ""),
         manifest_sha256=expected,
+        parent_plan_id=str(payload.get("parent_plan_id") or ""),
+        parent_plan_manifest_sha256=str(payload.get("parent_plan_manifest_sha256") or ""),
     )
-    if re.fullmatch(r"web-vitrina-closed-day-2026-08-22-canary-[A-Za-z0-9_.-]+", manifest.experiment_id) is None:
+    _validate_target_date(manifest.target_date)
+    if manifest.target_date not in {TARGET_DATE, NIGHT_PLAN_TARGET_DATE}:
+        raise ValueError(f"control canary target date is outside the released bounded dates: {path}")
+    if not _valid_control_experiment_id(manifest.experiment_id, manifest.target_date):
         raise ValueError(f"invalid control canary experiment id: {path}")
-    if manifest.target_date != TARGET_DATE:
-        raise ValueError(f"invalid control canary target date: {path}")
     if re.fullmatch(r"[0-9a-f]{40}", manifest.expected_deployed_sha) is None:
         raise ValueError(f"invalid control canary deployed SHA: {path}")
     if manifest.max_attempts < 1 or manifest.max_attempts > DEFAULT_MAX_ATTEMPTS:
@@ -961,7 +1386,157 @@ def _load_manifest(path: Path) -> ControlCanaryManifest:
         or manifest.deadline_datetime > manifest.due_datetime + timedelta(minutes=MAX_SLOT_WINDOW_MINUTES)
     ):
         raise ValueError(f"invalid control canary time window: {path}")
+    if bool(manifest.parent_plan_id) != bool(manifest.parent_plan_manifest_sha256):
+        raise ValueError(f"incomplete parent night-plan binding: {path}")
+    if manifest.parent_plan_id:
+        plan_path = path.parent.parent / manifest.parent_plan_id / "plan.json"
+        plan = _load_night_refresh_plan(plan_path)
+        if plan.manifest_sha256 != manifest.parent_plan_manifest_sha256:
+            raise ValueError(f"parent night-plan digest mismatch: {path}")
+        slot = next(
+            (item for item in plan.slots if item.child_experiment_id == manifest.experiment_id),
+            None,
+        )
+        if slot is None:
+            raise ValueError(f"child manifest is absent from parent night plan: {path}")
+        if (
+            manifest.target_date != plan.target_date
+            or manifest.expected_deployed_sha != plan.expected_deployed_sha
+            or manifest.pause_units != plan.pause_units
+            or manifest.max_attempts != plan.max_attempts_per_slot
+            or manifest.slot_id != slot.slot_id
+            or manifest.due_at != slot.due_at
+            or manifest.deadline != slot.deadline
+        ):
+            raise ValueError(f"child manifest drifted from parent night plan: {path}")
     return manifest
+
+
+def _load_night_refresh_plan(path: Path) -> NightRefreshPlanManifest:
+    payload = _read_json(path)
+    if (
+        payload.get("contract_name") != NIGHT_PLAN_CONTRACT_NAME
+        or payload.get("contract_version") != NIGHT_PLAN_CONTRACT_VERSION
+    ):
+        raise ValueError(f"invalid night refresh plan contract: {path}")
+    expected = str(payload.get("manifest_sha256") or "")
+    actual = _fingerprint({key: value for key, value in payload.items() if key != "manifest_sha256"})
+    if not expected or expected != actual:
+        raise ValueError(f"night refresh plan digest mismatch: {path}")
+    experiment_id = str(payload.get("experiment_id") or "")
+    if re.fullmatch(r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+", experiment_id) is None:
+        raise ValueError(f"invalid night refresh plan id: {path}")
+    slots = tuple(
+        NightRefreshPlanSlot(
+            slot_id=str(item.get("slot_id") or ""),
+            due_at=str(item.get("due_at") or ""),
+            deadline=str(item.get("deadline") or ""),
+            child_experiment_id=str(item.get("child_experiment_id") or ""),
+        )
+        for item in (payload.get("slots") or [])
+        if isinstance(item, Mapping)
+    )
+    expected_slots = tuple((slot_id, due_at, deadline) for slot_id, due_at, deadline in NIGHT_PLAN_SLOTS)
+    actual_slots = tuple((slot.slot_id, slot.due_at, slot.deadline) for slot in slots)
+    if len(slots) != 4 or actual_slots != expected_slots:
+        raise ValueError(f"night refresh plan must retain the four exact owner-authorized slots: {path}")
+    units = tuple(str(value or "") for value in (payload.get("pause_units") or []))
+    if set(units) != set(ALLOWED_PAUSE_UNITS) or len(units) != len(ALLOWED_PAUSE_UNITS):
+        raise ValueError(f"night refresh plan conflict timer set drifted: {path}")
+    plan = NightRefreshPlanManifest(
+        experiment_id=experiment_id,
+        target_date=str(payload.get("target_date") or ""),
+        timezone=str(payload.get("timezone") or ""),
+        expected_deployed_sha=str(payload.get("expected_deployed_sha") or ""),
+        pause_units=units,
+        max_attempts_per_slot=int(payload.get("max_attempts_per_slot") or 0),
+        slots=slots,
+        created_at=str(payload.get("created_at") or ""),
+        manifest_sha256=expected,
+    )
+    if plan.target_date != NIGHT_PLAN_TARGET_DATE or plan.timezone != NIGHT_PLAN_TIMEZONE:
+        raise ValueError(f"night refresh plan date/timezone drifted: {path}")
+    if re.fullmatch(r"[0-9a-f]{40}", plan.expected_deployed_sha) is None:
+        raise ValueError(f"invalid night refresh plan deployed SHA: {path}")
+    if plan.max_attempts_per_slot < 1 or plan.max_attempts_per_slot > DEFAULT_MAX_ATTEMPTS:
+        raise ValueError(f"invalid night refresh plan max attempts: {path}")
+    if payload.get("ordinary_schedule_modified") is not False:
+        raise ValueError(f"night refresh plan must not modify ordinary schedules: {path}")
+    if payload.get("automatic_terminal_expiry") is not True or payload.get("no_next_day_replay") is not True:
+        raise ValueError(f"night refresh plan expiry contract is invalid: {path}")
+    if payload.get("manual_comparison_volatile_exclusions") != [
+        "meta.generated_at",
+        "status_summary.business_now",
+    ]:
+        raise ValueError(f"night refresh plan manual comparison exclusions drifted: {path}")
+    return plan
+
+
+def _night_plan_row(
+    control_root: Path,
+    plan: NightRefreshPlanManifest,
+    instant: datetime,
+) -> dict[str, Any]:
+    superseded = _night_plan_superseded(control_root / plan.experiment_id)
+    slot_rows: list[dict[str, Any]] = []
+    for slot in plan.slots:
+        child_root = control_root / slot.child_experiment_id
+        child_path = child_root / "manifest.json"
+        child = _load_manifest(child_path)
+        artifact_exists = _artifact_path(child_root).exists()
+        attempt_count = len(list((child_root / "attempts").glob("*.json")))
+        pause_count = len(list((child_root / "pauses").glob("*-intent.json")))
+        if superseded:
+            state = "superseded"
+        elif artifact_exists:
+            state = "terminal"
+        elif instant > slot.deadline_datetime:
+            state = "expired_pending_terminalization"
+        elif instant < slot.due_datetime:
+            state = "pending"
+        else:
+            state = "active"
+        slot_rows.append(
+            {
+                **slot.payload(),
+                "state": state,
+                "artifact_exists": artifact_exists,
+                "attempt_receipt_count": attempt_count,
+                "pause_intent_count": pause_count,
+                "child_manifest_sha256": child.manifest_sha256,
+            }
+        )
+    if superseded:
+        state = "superseded"
+    elif all(row["artifact_exists"] for row in slot_rows):
+        state = "terminal"
+    elif instant > plan.slots[-1].deadline_datetime:
+        state = "expired"
+    elif instant < plan.slots[0].due_datetime:
+        state = "armed"
+    else:
+        state = "active"
+    return {
+        "experiment_id": plan.experiment_id,
+        "target_date": plan.target_date,
+        "timezone": plan.timezone,
+        "state": state,
+        "expected_deployed_sha": plan.expected_deployed_sha,
+        "manifest_sha256": plan.manifest_sha256,
+        "pause_units": list(plan.pause_units),
+        "slot_count": len(slot_rows),
+        "slots": slot_rows,
+        "ordinary_schedule_modified": False,
+        "automatic_terminal_expiry": True,
+        "no_next_day_replay": True,
+        "superseded": superseded,
+        "comparison_exists": (control_root / plan.experiment_id / "comparison.json").exists(),
+        "no_early_action": bool(
+            instant < plan.slots[0].due_datetime
+            and all(row["attempt_receipt_count"] == 0 and row["pause_intent_count"] == 0 for row in slot_rows)
+        ),
+        "manifest_path": str(control_root / plan.experiment_id / "plan.json"),
+    }
 
 
 def _retryable_terminal_contention(payload: Mapping[str, Any]) -> bool:
@@ -1044,12 +1619,57 @@ def _diagnostic_flags(payload: Any) -> list[dict[str, Any]]:
     return found
 
 
+def _recursive_diff_paths(previous: Any, current: Any) -> list[str]:
+    paths: list[str] = []
+    missing = object()
+
+    def walk(left: Any, right: Any, path: str, depth: int) -> None:
+        if depth > 16 or len(paths) >= 500:
+            return
+        if isinstance(left, Mapping) and isinstance(right, Mapping):
+            for key in sorted(set(left) | set(right), key=str):
+                child = f"{path}.{key}" if path else str(key)
+                walk(left.get(key, missing), right.get(key, missing), child, depth + 1)
+            return
+        if isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                paths.append(f"{path}.__length__")
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                walk(left_item, right_item, f"{path}[{index}]", depth + 1)
+            return
+        if left is missing or right is missing or left != right:
+            paths.append(path or "$")
+
+    walk(previous, current, "", 0)
+    return paths
+
+
 def _without_log_lines(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key not in {"log_lines"}}
 
 
 def _control_root(runtime_dir: Path) -> Path:
     return runtime_dir / "experiments" / CONTROL_ROOT_NAME
+
+
+def _night_plan_superseded(plan_root: Path) -> bool:
+    path = plan_root / "superseded.json"
+    if not path.exists():
+        return False
+    payload = _read_json(path)
+    expected = str(payload.get("superseded_sha256") or "")
+    actual = _fingerprint({key: value for key, value in payload.items() if key != "superseded_sha256"})
+    if not expected or expected != actual:
+        raise ValueError(f"night refresh plan superseded receipt digest mismatch: {path}")
+    if payload.get("contract_name") != f"{NIGHT_PLAN_CONTRACT_NAME}_superseded":
+        raise ValueError(f"invalid night refresh plan superseded receipt: {path}")
+    return True
+
+
+def _control_manifest_superseded(path: Path, manifest: ControlCanaryManifest) -> bool:
+    if not manifest.parent_plan_id:
+        return False
+    return _night_plan_superseded(path.parent.parent / manifest.parent_plan_id)
 
 
 def _artifact_path(root: Path) -> Path:
@@ -1131,6 +1751,14 @@ def _write_json_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _write_json_idempotent_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.exists():
+        if _read_json(path) != dict(payload):
+            raise ControlCanaryError(f"immutable manifest already exists with different bytes: {path}")
+        return
+    _write_json_exclusive(path, payload)
+
+
 @contextmanager
 def _file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1147,6 +1775,23 @@ def _file_lock(path: Path):
 def _fingerprint(payload: Any) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_target_date(value: str) -> None:
+    normalized = str(value or "")
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("control canary target_date must be YYYY-MM-DD") from exc
+    if parsed.strftime("%Y-%m-%d") != normalized:
+        raise ValueError("control canary target_date must be canonical YYYY-MM-DD")
+
+
+def _valid_control_experiment_id(experiment_id: str, target_date: str) -> bool:
+    return re.fullmatch(
+        rf"web-vitrina-closed-day-{re.escape(target_date)}-canary-[A-Za-z0-9_.-]+",
+        str(experiment_id or ""),
+    ) is not None
 
 
 def _parse_datetime(value: str) -> datetime:

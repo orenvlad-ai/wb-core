@@ -17,14 +17,20 @@ if str(ROOT) not in sys.path:
 from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
     HTTPJSONError,
     JobPollDeadlineError,
+    _control_canary_tick_exit_success,
     _poll_job,
 )
 from packages.application.sheet_vitrina_v1_control_refresh_canary import (  # noqa: E402
     ALLOWED_PAUSE_UNITS,
+    ControlCanaryError,
     ControlRefreshCanaryRunner,
     SystemdTimerCoordinator,
     arm_control_canary_manifest,
+    arm_night_refresh_plan_manifest,
     control_canary_status,
+    finalize_night_refresh_plans,
+    night_refresh_plan_status,
+    rebind_night_refresh_plan_manifest,
 )
 
 
@@ -185,6 +191,27 @@ class FakeContour:
         }
 
 
+class VolatileFingerprintContour(FakeContour):
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.contract_reads = 0
+
+    def contract(self, target_date: str) -> Mapping[str, Any]:
+        self.contract_reads += 1
+        return {
+            "contract_name": "web_vitrina_contract",
+            "contract_version": "v1",
+            "meta": {
+                "as_of_date": target_date,
+                "generated_at": f"2026-08-24T00:00:{self.contract_reads:02d}Z",
+            },
+            "status_summary": {
+                "business_now": f"2026-08-24T05:00:{self.contract_reads:02d}+05:00",
+            },
+            "rows": [{"metric": "orders", "value": 7}],
+        }
+
+
 def _arm(runtime_dir: Path, clock: FakeClock, units: Sequence[str], suffix: str = "main") -> tuple[str, datetime]:
     due = clock.datetime() + timedelta(minutes=10)
     experiment_id = f"web-vitrina-closed-day-2026-08-22-canary-{suffix}"
@@ -207,6 +234,8 @@ def _runner(
     systemd: FakeSystemd,
     *,
     boot_id: str = "boot-1",
+    barrier_state: Mapping[str, Any] | None = None,
+    deployed_sha: str = "a" * 40,
 ) -> ControlRefreshCanaryRunner:
     coordinator = SystemdTimerCoordinator(
         command_runner=systemd,
@@ -225,7 +254,10 @@ def _runner(
         fetch_source_status=contour.source_status,
         fetch_ready_snapshot=contour.ready,
         timer_coordinator=coordinator,
-        read_deployed_sha=lambda: "a" * 40,
+        read_deployed_sha=lambda: deployed_sha,
+        read_business_data_barrier=(
+            (lambda: dict(barrier_state)) if barrier_state is not None else (lambda: {"status": "inactive", "active": False})
+        ),
         now_factory=clock.datetime,
         sleep=clock.sleep,
     )
@@ -504,10 +536,155 @@ def _successful_canary_checks() -> None:
             raise AssertionError("exact canary deadline must create explicit immutable failure")
 
 
+def _night_plan_checks() -> None:
+    units = list(ALLOWED_PAUSE_UNITS)
+    with TemporaryDirectory(prefix="control-canary-night-plan-") as tmp:
+        runtime_dir = Path(tmp)
+        clock = FakeClock(datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc))
+        plan_id = "web-vitrina-closed-day-2026-08-23-night-v1"
+        armed = arm_night_refresh_plan_manifest(
+            runtime_dir=runtime_dir,
+            experiment_id=plan_id,
+            expected_deployed_sha="a" * 40,
+            pause_units=units,
+            now=clock.datetime(),
+        )
+        readback = armed["readback"]
+        exact_due = [
+            "2026-08-24T01:30:00+05:00",
+            "2026-08-24T03:30:00+05:00",
+            "2026-08-24T06:30:00+05:00",
+            "2026-08-24T08:30:00+05:00",
+        ]
+        if (
+            readback["state"] != "armed"
+            or readback["slot_count"] != 4
+            or [row["due_at"] for row in readback["slots"]] != exact_due
+            or [row["state"] for row in readback["slots"]] != ["pending"] * 4
+            or readback["no_early_action"] is not True
+        ):
+            raise AssertionError(f"four-slot plan did not arm exactly: {readback}")
+        control_root = runtime_dir / "experiments" / "sheet-vitrina-control-canaries"
+        if any((control_root / row["child_experiment_id"] / "attempts").exists() for row in readback["slots"]):
+            raise AssertionError("arming must not create an early attempt, pause, or source action")
+
+        systemd = FakeSystemd(units)
+        contour = VolatileFingerprintContour(clock)
+        barrier = {"status": "active", "active": True, "phase": "held", "window_id": "fbs-apply-window"}
+        runner = _runner(runtime_dir, clock, contour, systemd, barrier_state=barrier)
+        first_due = datetime.fromisoformat(exact_due[0]).astimezone(timezone.utc)
+        clock.now = first_due
+        waiting = runner.tick(now=clock.datetime())
+        if waiting["status"] != "waiting_for_business_data_barrier" or contour.start_calls or systemd.actions:
+            raise AssertionError("active FBS/business-data mutation barrier must cause a zero-action bounded wait")
+
+        barrier["status"] = "inactive"
+        barrier["active"] = False
+        barrier["phase"] = "released"
+        slot_results: list[dict[str, Any]] = []
+        for due_at in exact_due:
+            clock.now = datetime.fromisoformat(due_at).astimezone(timezone.utc)
+            result = runner.tick(now=clock.datetime())
+            slot_results.append(result)
+            finalize_night_refresh_plans(runtime_dir=runtime_dir, now=clock.datetime())
+        if any(result["status"] != "failed" for result in slot_results):
+            raise AssertionError("known volatile fields must remain visible as formal acceptance failures")
+        if any(not _control_canary_tick_exit_success(result) for result in slot_results):
+            raise AssertionError("the exact known fingerprint-only false failure must not stop later authorized slots")
+        materially_drifted = json.loads(json.dumps(slot_results[0]))
+        materially_drifted["artifact"]["fingerprints"]["fresh_readback_diff_paths"].append("rows[0].value")
+        materially_drifted["artifact"]["fingerprints"]["known_volatile_only_difference"] = False
+        if _control_canary_tick_exit_success(materially_drifted):
+            raise AssertionError("a new data-bearing fingerprint difference must remain a true failed tick")
+
+        status = night_refresh_plan_status(runtime_dir=runtime_dir, now=clock.datetime())
+        plan = status["plans"][0]
+        if (
+            plan["state"] != "terminal"
+            or [row["state"] for row in plan["slots"]] != ["terminal"] * 4
+            or not plan["comparison_exists"]
+        ):
+            raise AssertionError(f"four-slot plan did not terminalize without replay: {plan}")
+        comparison = json.loads((control_root / plan_id / "comparison.json").read_text(encoding="utf-8"))
+        if comparison["slot_count"] != 4 or len(comparison["comparisons"]) != 3:
+            raise AssertionError("morning comparison must retain all four raw artifacts and three adjacent comparisons")
+        for row in plan["slots"]:
+            artifact = json.loads(
+                (control_root / row["child_experiment_id"] / "artifact.json").read_text(encoding="utf-8")
+            )
+            if (
+                artifact["technical_status"] != "success"
+                or artifact["acceptance_checks"]["fresh_exact_date_fingerprint_match"] is not False
+                or artifact["fingerprints"]["fresh_readback_diff_paths"]
+                != ["meta.generated_at", "status_summary.business_now"]
+                or artifact["fingerprints"]["known_volatile_only_difference"] is not True
+                or artifact["business_data_barrier_preflight"]["active"] is not False
+                or len(artifact["pause_intents"]) != len(artifact["restore_receipts"])
+            ):
+                raise AssertionError("slot artifact lost technical/raw/barrier/pause-restore evidence")
+        calls_before = list(contour.start_calls)
+        replay = runner.tick(now=clock.datetime() + timedelta(days=1))
+        if replay["status"] != "no_due_canary" or contour.start_calls != calls_before:
+            raise AssertionError("terminal four-slot plan must not replay on the next day")
+
+    with TemporaryDirectory(prefix="control-canary-night-rebind-") as tmp:
+        runtime_dir = Path(tmp)
+        clock = FakeClock(datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc))
+        first_id = "web-vitrina-closed-day-2026-08-23-night-v1"
+        replacement_id = "web-vitrina-closed-day-2026-08-23-night-v2"
+        arm_night_refresh_plan_manifest(
+            runtime_dir=runtime_dir,
+            experiment_id=first_id,
+            expected_deployed_sha="a" * 40,
+            pause_units=units,
+            now=clock.datetime(),
+        )
+        try:
+            rebind_night_refresh_plan_manifest(
+                runtime_dir=runtime_dir,
+                current_experiment_id=first_id,
+                replacement_experiment_id=first_id,
+                expected_deployed_sha="b" * 40,
+                pause_units=units,
+                now=clock.datetime() + timedelta(seconds=30),
+            )
+        except ControlCanaryError:
+            pass
+        else:
+            raise AssertionError("invalid replacement identity must fail before superseding the current plan")
+        if (runtime_dir / "experiments" / "sheet-vitrina-control-canaries" / first_id / "superseded.json").exists():
+            raise AssertionError("failed rebind validation must leave the current armed plan untouched")
+        rebound = rebind_night_refresh_plan_manifest(
+            runtime_dir=runtime_dir,
+            current_experiment_id=first_id,
+            replacement_experiment_id=replacement_id,
+            expected_deployed_sha="b" * 40,
+            pause_units=units,
+            now=clock.datetime() + timedelta(minutes=1),
+        )
+        if rebound["status"] != "rebound":
+            raise AssertionError("pre-due exact-SHA rebind did not produce a replacement plan")
+        plans = night_refresh_plan_status(
+            runtime_dir=runtime_dir,
+            now=clock.datetime() + timedelta(minutes=1),
+        )["plans"]
+        states = {row["experiment_id"]: row["state"] for row in plans}
+        if states != {first_id: "superseded", replacement_id: "armed"}:
+            raise AssertionError(f"rebind must leave one superseded and one armed plan: {states}")
+        clock.now = datetime.fromisoformat("2026-08-24T01:30:00+05:00").astimezone(timezone.utc)
+        systemd = FakeSystemd(units)
+        contour = FakeContour(clock)
+        runner = _runner(runtime_dir, clock, contour, systemd, deployed_sha="b" * 40)
+        result = runner.tick(now=clock.datetime())
+        if result["status"] != "accepted" or len(contour.start_calls) != 2:
+            raise AssertionError("runner must skip all superseded children and execute only the replacement slot")
+
+
 def main() -> None:
     _polling_checks()
     _pause_restore_checks()
     _successful_canary_checks()
+    _night_plan_checks()
     print("sheet_vitrina_v1_control_refresh_canary: ok")
 
 
