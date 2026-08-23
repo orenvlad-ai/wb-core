@@ -45,6 +45,13 @@ source watermarks and the current target-history digest. It produces a private
 mode-`0600` JSON manifest outside the repository and proves the canonical DB
 byte digest unchanged.
 
+The canonical database is resolved through `StoreRegistry` and the current
+validated `storage_generation_manifest.json`, never by assuming the retained
+legacy monolith filename. The manifest CAS includes the selected operational
+generation id/path revision/watermark, storage-manifest digest and the exact
+required source/history schema digest. Missing deployed history tables fail
+closed before a dry-run manifest can be published.
+
 New facilities, multiple/ambiguous openings, source/schema/formula drift or an
 invalid target window make the manifest `blocked`. Expected evidence gaps stay
 explicit `partial`/`unavailable`; they are not silently converted to blockers
