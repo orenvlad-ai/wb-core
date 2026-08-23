@@ -9,6 +9,7 @@ been materialized.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -312,11 +313,7 @@ def _public_metric_specs(
             facilities_by_id.setdefault(facility_id, raw)
     ordered_facilities = sorted(
         facilities_by_id.values(),
-        key=lambda item: (
-            int(item.get("display_order") or 0),
-            str(item.get("code") or ""),
-            str(item.get("facility_id") or ""),
-        ),
+        key=_public_facility_order_key,
     )
     facility_specs = [
         _MetricSpec(
@@ -324,7 +321,7 @@ def _public_metric_specs(
             total_key=inventory_planning_total_metric_key(
                 inventory_planning_facility_metric_key(str(item["facility_id"]))
             ),
-            label_ru=f"Остатки FBS {str(item.get('name') or item['facility_id']).strip()}",
+            label_ru=f"Остатки FBS {_public_facility_name(item)}",
             value_field="facility_available",
             reason_field="facility_available_reason_ru",
             facility_id=str(item["facility_id"]),
@@ -333,6 +330,35 @@ def _public_metric_specs(
         if include_facilities
     ]
     return [combined, wb, *facility_specs]
+
+
+def _public_facility_name(facility: Mapping[str, Any]) -> str:
+    """Return a public name without repeating an existing facility-type prefix."""
+
+    raw_name = str(facility.get("name") or facility.get("facility_id") or "").strip()
+    public_name = re.sub(
+        r"^(?:FBS|FF|ФБС|ФФ)(?=$|[\s:·-])[\s:·-]*",
+        "",
+        raw_name,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    return public_name or raw_name
+
+
+def _public_facility_order_key(facility: Mapping[str, Any]) -> tuple[int, int, str, str]:
+    """Pin the approved Moscow/Orenburg lead rows, then retain roster order."""
+
+    priority = {
+        "москва": 0,
+        "оренбург": 1,
+    }.get(_public_facility_name(facility).casefold(), 2)
+    return (
+        priority,
+        int(facility.get("display_order") or 0),
+        str(facility.get("code") or ""),
+        str(facility.get("facility_id") or ""),
+    )
 
 
 def _planning_applies(planning: Mapping[str, Any], *, date_columns: list[str]) -> bool:
