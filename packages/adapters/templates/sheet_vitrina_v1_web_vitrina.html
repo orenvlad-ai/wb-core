@@ -5386,9 +5386,14 @@
     .ff-pool-alert { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted-strong); background: var(--panel-subtle); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .ff-pool-alert[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
     .ff-pool-alert[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
-    .fbs-cost-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 0; padding: 12px 14px; border: 2px solid var(--warning-text); border-radius: 9px; background: var(--warning-bg); color: var(--warning-text); font-weight: 700; }
-    .fbs-cost-warning[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
-    .fbs-cost-warning[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
+    .fbs-status-stack { display: grid; justify-items: end; gap: 6px; }
+    .fbs-cost-warning { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 0; }
+    .fbs-cost-warning-panel { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 12px 14px; border: 2px solid var(--warning-text); border-radius: 9px; background: var(--warning-bg); color: var(--warning-text); }
+    .fbs-cost-warning-panel[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
+    .fbs-cost-warning-panel[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
+    .fbs-cost-warning-panel strong { overflow-wrap: anywhere; }
+    .fbs-cost-warning-panel small { color: currentColor; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+    .fbs-cost-warning-panel .button { justify-self: start; margin-top: 3px; }
     .ff-pool-list { display: grid; gap: 8px; }
     .ff-pool-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-subtle); }
     .ff-pool-list-item strong, .ff-pool-list-item span { overflow-wrap: anywhere; }
@@ -5481,6 +5486,8 @@
       .warehouse-switch { flex: 1 1 130px; min-width: 0; }
       .warehouse-table { font-size: 11px; }
       .warehouse-table th, .warehouse-table td { padding: 6px 4px; white-space: normal; }
+      .fbs-cost-warning { grid-template-columns: minmax(0, 1fr); }
+      .fbs-status-stack { justify-items: start; }
     }
     @media (max-width: 620px) {
       .warehouse-incident-options-grid { grid-template-columns: minmax(0, 1fr); }
@@ -6012,9 +6019,15 @@
             <h1 class="warehouse-title" id="fbs-orders-title">FBS-заказы</h1>
             <p class="warehouse-meta">Только чтение локального append-only кэша: статусы, reservation и lifecycle evidence без PII и без записей в WB.</p>
           </div>
-          <span class="warehouse-status" data-tone="neutral" data-fbs-orders-status>Не загружено</span>
+          <div class="fbs-status-stack">
+            <span class="warehouse-status" data-tone="neutral" data-fbs-orders-status>Сборщик: не загружено</span>
+            <span class="warehouse-status" data-tone="neutral" data-fbs-lifecycle-status>Lifecycle: не загружено</span>
+          </div>
         </div>
-        <div class="fbs-cost-warning" data-tone="warning" data-fbs-cost-warning>Проверяем покрытие себестоимости…</div>
+        <div class="fbs-cost-warning" data-fbs-cost-warning>
+          <div class="fbs-cost-warning-panel" data-tone="warning">Проверяем Finance coverage…</div>
+          <div class="fbs-cost-warning-panel" data-tone="warning">Проверяем lifecycle coverage…</div>
+        </div>
         <form class="fbs-orders-filters" data-fbs-orders-filters>
           <label>Дата с<input class="input" type="date" data-fbs-orders-date-from></label>
           <label>Дата по<input class="input" type="date" data-fbs-orders-date-to></label>
@@ -6899,6 +6912,7 @@
     const inventoryPlanningDisclosure = document.querySelector("[data-inventory-planning-disclosure]");
     const inventoryPlanningRefresh = document.querySelector("[data-inventory-planning-refresh]");
     const fbsOrdersStatus = document.querySelector("[data-fbs-orders-status]");
+    const fbsLifecycleStatus = document.querySelector("[data-fbs-lifecycle-status]");
     const fbsCostWarning = document.querySelector("[data-fbs-cost-warning]");
     const fbsOrdersFilters = document.querySelector("[data-fbs-orders-filters]");
     const fbsOrdersRows = document.querySelector("[data-fbs-orders-rows]");
@@ -10537,20 +10551,73 @@
 
     const fbsCounterLabels = {total:"Все",active:"Reserved / до передачи",handed_over:"Переданы complete+sorted",sold_closed:"Проданы / закрыты",canceled:"Отменены",reconciliation:"Сверка / неизвестный возврат",cost_unresolved:"Без себестоимости",unmatched:"Не сопоставлены",deferred:"Отложены",ambiguous:"Неоднозначны"};
 
+    function fbsEvidenceCounts(counts) {
+      const rows = Object.entries(counts || {}).filter(function(item) { return Number(item[1] || 0) > 0; });
+      return rows.length ? rows.map(function(item) { return item[0] + ": " + warehouseNumber(item[1]); }).join(", ") : "нет";
+    }
+
     function renderFbsCostWarning(warning) {
       if (!fbsCostWarning) return;
-      const state = warning || {};
-      const count = Number(state.unresolved_fbs_order_count || 0);
-      const amount = state.sales_without_cost_rub;
-      const amountText = amount == null ? "сумма недоступна" : warehouseMoney(amount);
-      const tone = state.status === "ok" ? "success" : (state.status === "error" ? "error" : "warning");
-      fbsCostWarning.setAttribute("data-tone", tone);
-      if (state.status === "ok") {
-        fbsCostWarning.textContent = "OK: заказов и продаж без подтверждённой себестоимости нет.";
-        return;
+      const coverage = warning || {};
+      const finance = coverage.finance_sales_without_cost || {};
+      const lifecycle = coverage.lifecycle_unresolved || {};
+      const financeSource = finance.source || {};
+      const lifecycleSource = lifecycle.source || {};
+      const financeTone = finance.status === "ok" ? "success" : (finance.status === "error" ? "error" : "warning");
+      const lifecycleTone = lifecycle.status === "ok" ? "success" : (lifecycle.status === "error" ? "error" : "warning");
+      const financeAmount = finance.amount_rub == null ? "—" : warehouseMoney(finance.amount_rub);
+      const financeOrders = finance.order_count == null ? "—" : warehouseNumber(finance.order_count);
+      const financeUnits = finance.units == null ? "—" : warehouseNumber(finance.units);
+      const financePeriod = financeSource.period_start && financeSource.period_end
+        ? financeSource.period_start + " — " + financeSource.period_end
+        : "период не опубликован";
+      const financeWeekCount = financeSource.published_week_count == null ? "—" : warehouseNumber(financeSource.published_week_count);
+      const financeScope = "Finance SKU-недели: " + financePeriod + " · недель: " + financeWeekCount + " · опубликовано: " + warehouseDate(financeSource.latest_calculated_at);
+      const financeReasons = finance.amount_rub == null ? "недоступны" : fbsEvidenceCounts(finance.reason_counts);
+      const dateFilter = lifecycleSource.date_from || lifecycleSource.date_to
+        ? "Дата создания: " + (lifecycleSource.date_from || "…") + " — " + (lifecycleSource.date_to || "…")
+        : "Дата создания: все даты";
+      const lifecycleCount = lifecycle.order_count == null ? "—" : warehouseNumber(lifecycle.order_count);
+      const lifecycleReasons = lifecycle.order_count == null ? "недоступны" : fbsEvidenceCounts(lifecycle.reason_counts);
+      fbsCostWarning.innerHTML =
+        '<section class="fbs-cost-warning-panel" data-tone="' + financeTone + '"><strong>Finance · продажи без себестоимости</strong>' +
+          '<span>' + escapeHtml(financeAmount) + ' · заказов: ' + escapeHtml(financeOrders) + ' · единиц: ' + escapeHtml(financeUnits) + '</span>' +
+          '<small>' + escapeHtml(financeScope) + '</small>' +
+          '<small>Причины: ' + escapeHtml(financeReasons) + '</small></section>' +
+        '<section class="fbs-cost-warning-panel" data-tone="' + lifecycleTone + '"><strong>Текущие FBS-заказы без lifecycle-себестоимости</strong>' +
+          '<span>Заказов: ' + escapeHtml(lifecycleCount) + '</span>' +
+          '<small>' + escapeHtml(dateFilter) + ' · статусы: ' + escapeHtml(fbsEvidenceCounts(lifecycle.status_counts)) + '</small>' +
+          '<small>Причины: ' + escapeHtml(lifecycleReasons) + '</small>' +
+          '<button class="button secondary" type="button" data-open-unresolved-cost-orders>Открыть точный список</button></section>';
+    }
+
+    function renderFbsLifecycleStatus(processor) {
+      if (!fbsLifecycleStatus) return;
+      const lifecycle = processor || {};
+      const cursor = lifecycle.cursor_sequence;
+      const latest = lifecycle.latest_status_sequence;
+      const lag = lifecycle.lag_observation_count;
+      const pending = Number(lifecycle.pending_identity_count || 0);
+      let tone = "warning";
+      let text = "Lifecycle: недоступен";
+      if (lifecycle.status === "current") {
+        tone = "success";
+        text = "Lifecycle: актуально · cursor " + String(cursor == null ? "—" : cursor);
+      } else if (lifecycle.status === "current_with_quarantine") {
+        text = "Lifecycle: cursor актуален · quarantine " + warehouseNumber(pending);
+      } else if (lifecycle.status === "lagging") {
+        tone = "error";
+        text = "Lifecycle: отставание " + warehouseNumber(lag || 0) + " · cursor " + String(cursor == null ? "—" : cursor) + "/" + String(latest == null ? "—" : latest);
+      } else if (lifecycle.status === "error") {
+        tone = "error";
+        text = "Lifecycle: ошибка cursor";
+      } else if (lifecycle.status === "disabled") {
+        tone = "neutral";
+        text = "Lifecycle: cutover не применён";
       }
-      fbsCostWarning.innerHTML = '<span>Продажи без себестоимости: ' + escapeHtml(amountText) + ' · FBS-заказов: ' + escapeHtml(warehouseNumber(count)) + '</span>' +
-        '<button class="button secondary" type="button" data-open-unresolved-cost-orders>Открыть точный список</button>';
+      fbsLifecycleStatus.textContent = text;
+      fbsLifecycleStatus.setAttribute("data-tone", tone);
+      fbsLifecycleStatus.title = "Источник статусов: " + String(lifecycle.latest_status_observed_at || "—") + "; cursor обновлён: " + String(lifecycle.cursor_updated_at || "—") + "; причина: " + String(lifecycle.reason || "—") + "; quarantine: " + fbsEvidenceCounts(lifecycle.pending_reason_counts);
     }
 
     function renderFbsOrderCounters(counters) {
@@ -10566,6 +10633,7 @@
       const rows = Array.isArray(payload.rows) ? payload.rows : [];
       renderFbsOrderCounters(payload.counters || {});
       renderFbsCostWarning(payload.cost_coverage_warning || {});
+      renderFbsLifecycleStatus(payload.lifecycle_processor || {});
       if (fbsOrdersRows) fbsOrdersRows.innerHTML = rows.length ? rows.map(function(order) {
         const reservation = order.reservation || {};
         const evidence = order.debit_close_evidence || {};
@@ -10582,13 +10650,19 @@
       if (fbsOrdersPage) fbsOrdersPage.textContent = "Страница " + String(page.number || 1) + " · " + String(page.total || 0) + " заказов";
       if (fbsOrdersPrev) fbsOrdersPrev.disabled = !page.has_previous;
       if (fbsOrdersNext) fbsOrdersNext.disabled = !page.has_next;
-      if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Актуально: " + warehouseDate((((payload.collector || {}).last_run || {}).success_at)); fbsOrdersStatus.setAttribute("data-tone", "success"); }
+      if (fbsOrdersStatus) {
+        const collector = (payload.collector || {}).last_run || {};
+        const successAt = collector.success_at;
+        fbsOrdersStatus.textContent = successAt ? "Сборщик: " + warehouseDate(successAt) : "Сборщик: нет успешного опроса";
+        fbsOrdersStatus.setAttribute("data-tone", successAt ? "success" : "warning");
+      }
     }
 
     async function loadFbsOrders(page) {
       if (state.warehouses.fbsOrders.loading) return;
       state.warehouses.fbsOrders.loading = true;
-      if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Загрузка…"; fbsOrdersStatus.setAttribute("data-tone", "neutral"); }
+      if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Сборщик: загрузка…"; fbsOrdersStatus.setAttribute("data-tone", "neutral"); }
+      if (fbsLifecycleStatus) { fbsLifecycleStatus.textContent = "Lifecycle: загрузка…"; fbsLifecycleStatus.setAttribute("data-tone", "neutral"); }
       const query = new URLSearchParams({page: String(page || 1), limit: "25", status_category: state.warehouses.fbsOrders.category});
       if (fbsOrdersFilters) {
         [["date_from","[data-fbs-orders-date-from]"],["date_to","[data-fbs-orders-date-to]"],["search","[data-fbs-orders-search]"],["facility_id","[data-fbs-orders-facility]"],["supplier_status","[data-fbs-orders-supplier-status]"],["wb_status","[data-fbs-orders-wb-status]"]].forEach(function(spec) {
@@ -10604,7 +10678,8 @@
         renderFbsOrders(payload);
       } catch (error) {
         if (fbsOrdersRows) fbsOrdersRows.innerHTML = '<tr><td colspan="7"><p class="warehouse-empty">' + escapeHtml(error.message || error) + '</p></td></tr>';
-        if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Ошибка чтения"; fbsOrdersStatus.setAttribute("data-tone", "error"); }
+        if (fbsOrdersStatus) { fbsOrdersStatus.textContent = "Сборщик: ошибка чтения"; fbsOrdersStatus.setAttribute("data-tone", "error"); }
+        if (fbsLifecycleStatus) { fbsLifecycleStatus.textContent = "Lifecycle: ошибка чтения"; fbsLifecycleStatus.setAttribute("data-tone", "error"); }
       } finally { state.warehouses.fbsOrders.loading = false; }
     }
 

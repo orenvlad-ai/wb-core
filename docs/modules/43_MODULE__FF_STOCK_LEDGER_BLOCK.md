@@ -11,12 +11,14 @@ source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
+  - "migration/157_fbs_lifecycle_forward_recovery.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_fbs_lifecycle.py"
+  - "packages/application/ff_pool_fbs_forward_recovery.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/russian_payment_orders.py"
   - "packages/application/ff_pool_zero_physical_production.py"
@@ -80,6 +82,10 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
   - "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
   - "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
+  - "sheet_vitrina_v1_ff_pool_fbs_forward_generations"
+  - "sheet_vitrina_v1_ff_pool_fbs_forward_state"
+  - "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
+  - "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_targets"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -112,6 +118,8 @@ related_runners:
   - "apps/ff_pool_zero_physical_production_smoke.py"
   - "apps/ff_fbs_mapping_extension_production.py"
   - "apps/ff_fbs_mapping_extension_production_smoke.py"
+  - "apps/ff_pool_fbs_forward_recovery.py"
+  - "apps/ff_pool_fbs_forward_recovery_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -783,7 +791,9 @@ lost/double-counted around its short commit window.
 
 An otherwise valid post-T status whose exact order revision still has
 unmatched or drifted identity evidence cannot pin that global cursor. The same
-transaction appends its exact status sequence to
+rule covers `order_sku_unmapped`: an exact matched order for a known facility
+whose nmId/chrtId is absent from the immutable cutover SKU manifest is not a
+batch-fatal exception. The same transaction appends its exact status sequence to
 `sheet_vitrina_v1_ff_pool_fbs_identity_pending`, advances only the source
 cursor, applies no reservation/debit/capital delta for that order and continues
 later matched statuses in sequence. Every later pass retries a bounded pending
@@ -794,6 +804,44 @@ and records one `...identity_pending_resolutions` row atomically with its normal
 idempotent lifecycle event. No facility/SKU mapping is guessed or changed, an
 unresolved row stays visible as `caught_up_identity_pending`, and an exact retry
 cannot duplicate a physical delta or WB action.
+
+The read-only FBS-orders contract reports the drain independently of collector
+poll health: latest source status sequence/time, durable cursor sequence/time,
+lag and unresolved identity-pending count. The generic pending envelope keeps
+its existing append-only reason contract; the exact operator reason is derived
+from immutable order/mapping/manifest evidence and remains
+`sku_mapping_missing_or_ambiguous` for a missing known-facility SKU. Collector
+success cannot make a lagging lifecycle cursor green.
+
+### Bounded dual-lane backlog recovery
+
+Migration 157 provides the versioned repo-owned runner
+`apps/ff_pool_fbs_forward_recovery.py`. Deploy is inert and creates no business
+boundary. The normal runtime initializer installs only empty
+generation/recovery tables; before a generation exists, a missing-SKU row
+retains the legacy fail-closed suffix rollback and cannot consume the backlog
+ahead of its owner gate. After exact-SHA deploy the default query-only T0
+dry-run pins active
+storage generation/schema, Stage 7C cutover, old lifecycle cursor, source
+status maximum `C`, exact stable business identities in `(cursor,C]`, target
+WAC/after-images, past fulfilled evidence, backup/recovery and one fingerprint.
+Dynamic `generated_at`/refresh/poll timestamps and global maxima above `C` are
+excluded; exact target revision/status/mapping/WAC drift remains blocking.
+
+A separately owner-gated explicit apply atomically appends one immutable
+generation at `C`, initializes the forward cursor at `C` and processes only the
+pinned `<=C` rows through this same lifecycle implementation. Ordinary
+processing then starts at `C+1`; the recovery call updates neither the old nor
+forward cursor. Thus continuous ingress never joins the recovery manifest and
+does not wait for historical identity quarantine. Missing mapping/SKU evidence
+stays pending with no debit/capital/WAC/fallback, while later valid forward rows
+continue. Target results and non-target changes inside the short writer
+transaction are reconciled exactly; past fulfilled/frozen events stay
+immutable. After the single authorized apply, query-only `verify-noop` binds
+the reviewed plan to completed durable readback and proves a repeat would write
+nothing without issuing another submit. Ambiguous post-commit transport
+requires query-only readback before any retry. See migration 157 for the exact
+schema, gate and smoke contract.
 
 Migration 150 adds one supported post-cutover mapping-extension path without
 rewriting the immutable Stage 7C manifest/checkpoint. The canonical warehouse

@@ -30,6 +30,7 @@ from packages.application.ff_pool_cutover_production import (  # noqa: E402
     FfPoolCutoverProductionMutation,
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
+    DRAIN_STATE_TABLE,
     EVENTS_TABLE,
     IDENTITY_PENDING_RESOLUTIONS_TABLE,
     IDENTITY_PENDING_TABLE,
@@ -54,7 +55,10 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.warehouse_functional import (  # noqa: E402
     ensure_warehouse_functional_schema,
 )
-from packages.application.wb_fbs_orders import WbFbsOrdersCollector  # noqa: E402
+from packages.application.wb_fbs_orders import (  # noqa: E402
+    WbFbsOrdersCollector,
+    _current_cte,
+)
 
 
 def main() -> int:
@@ -1535,6 +1539,11 @@ def main() -> int:
             "guided_recovery_dependent_state_drift",
             "guided_recovery_projection_drift",
         }
+
+        # Missing-SKU quarantine is covered in the forward/recovery smoke.  A
+        # pre-generation ordinary lane intentionally keeps its legacy
+        # fail-closed behavior so deploy cannot consume the backlog before the
+        # exact C/C+1 production-mutation gate.
     print("ff_pool_fbs_lifecycle_smoke: OK")
     return 0
 
@@ -1549,6 +1558,10 @@ def _insert_post_t_order(
     observed_at: str = "2026-08-14T06:01:00Z",
     quantity: int = 1,
     identity_outcome: str = "matched",
+    source_nm_id: int = 101,
+    source_chrt_id: int = 201,
+    seller_sku: str = "seller-101",
+    barcode: str = "sku-101",
 ) -> None:
     revision = f"post_revision_{order_id}_v1"
     conn.execute(
@@ -1559,7 +1572,8 @@ def _insert_post_t_order(
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             f"post_observation_{order_id}", order_id, revision, "post-supply", "fbs",
-            source_created_at, 501, 601, 101, 201, "seller-101", '["sku-101"]',
+            source_created_at, 501, 601, source_nm_id, source_chrt_id,
+            seller_sku, json.dumps([barcode]),
             observed_at, 1, 2, 0,
         ),
     )
@@ -1570,8 +1584,8 @@ def _insert_post_t_order(
                evidence_digest,observed_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            f"post_identity_evidence_{order_id}", order_id, revision, 501, 101, 201,
-            "sku-101", "seller-101", identity_outcome,
+            f"post_identity_evidence_{order_id}", order_id, revision, 501,
+            source_nm_id, source_chrt_id, barcode, seller_sku, identity_outcome,
             "warehouse_mapping_1",
             "identity_mapping_1" if identity_outcome == "matched" else "",
             "sha256:" + hashlib.sha256(f"identity:{order_id}".encode()).hexdigest(),

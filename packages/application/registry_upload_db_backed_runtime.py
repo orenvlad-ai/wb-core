@@ -24,6 +24,7 @@ from packages.application.cost_price_upload import CostPriceUploadBlock, parse_c
 from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
 from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_schema
 from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
+from packages.application.ff_pool_fbs_lifecycle import ensure_ff_pool_fbs_lifecycle_schema
 from packages.application.ff_wb_supply_origins import ensure_ff_wb_supply_origin_schema
 from packages.application.inventory_planning_read_model import ensure_inventory_planning_schema
 from packages.application.sheet_vitrina_v1_inventory_history import (
@@ -12229,6 +12230,11 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     ensure_ff_wb_supply_origin_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
     ensure_ff_pool_cutover_schema(conn)
+    # This is schema-only and intentionally does not arm a forward generation
+    # or process lifecycle observations.  It makes the post-deploy T0 plan a
+    # genuinely query-only operation while the production mutation remains
+    # behind its exact manifest gate.
+    ensure_ff_pool_fbs_lifecycle_schema(conn)
     ensure_inventory_planning_schema(conn)
     ensure_inventory_history_schema(conn)
     ambiguous_bank_assignment = conn.execute(

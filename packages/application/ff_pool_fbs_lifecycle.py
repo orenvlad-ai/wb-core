@@ -50,6 +50,12 @@ MAPPING_EXTENSIONS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
 MAPPING_EXTENSION_ALLOCATIONS_TABLE = (
     "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
 )
+FORWARD_GENERATIONS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_forward_generations"
+FORWARD_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_forward_state"
+BACKLOG_RECOVERY_RUNS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
+BACKLOG_RECOVERY_TARGETS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_targets"
+)
 
 HANDOFF_SUPPLIER_STATUS = "complete"
 HANDOFF_WB_STATUS = "sorted"
@@ -226,6 +232,11 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
                       AND deferred_identity_evidence_sequence>=0),
             reason_code TEXT NOT NULL
                 CHECK(reason_code='identity_evidence_missing_or_drifted'),
+            reason_detail_code TEXT NOT NULL DEFAULT
+                'identity_evidence_missing_or_drifted'
+                CHECK(reason_detail_code IN(
+                    'identity_evidence_missing_or_drifted','order_sku_unmapped'
+                )),
             evidence_digest TEXT NOT NULL,
             created_at TEXT NOT NULL
                 CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
@@ -298,6 +309,80 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(extension_id,nm_id)
         );
 
+        CREATE TABLE IF NOT EXISTS {FORWARD_GENERATIONS_TABLE}(
+            generation_id TEXT PRIMARY KEY,
+            cutover_id TEXT NOT NULL UNIQUE REFERENCES
+                sheet_vitrina_v1_ff_pool_cutover_manifests(cutover_id),
+            contract_version INTEGER NOT NULL CHECK(contract_version=1),
+            deployed_sha TEXT NOT NULL CHECK(length(deployed_sha)=40),
+            storage_generation_id TEXT NOT NULL,
+            storage_schema_revision TEXT NOT NULL,
+            sqlite_schema_version INTEGER NOT NULL
+                CHECK(typeof(sqlite_schema_version)='integer'
+                      AND sqlite_schema_version>0),
+            cutoff_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(cutoff_status_observation_sequence)='integer'
+                      AND cutoff_status_observation_sequence>=0),
+            forward_start_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(forward_start_status_observation_sequence)='integer'
+                      AND forward_start_status_observation_sequence=
+                          cutoff_status_observation_sequence+1),
+            old_cursor_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(old_cursor_status_observation_sequence)='integer'
+                      AND old_cursor_status_observation_sequence>=0
+                      AND old_cursor_status_observation_sequence<=
+                          cutoff_status_observation_sequence),
+            manifest_fingerprint TEXT NOT NULL UNIQUE,
+            stable_target_digest TEXT NOT NULL,
+            approval_reference TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {FORWARD_STATE_TABLE}(
+            generation_id TEXT PRIMARY KEY REFERENCES {FORWARD_GENERATIONS_TABLE}(generation_id),
+            last_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(last_status_observation_sequence)='integer'
+                      AND last_status_observation_sequence>=0),
+            run_count INTEGER NOT NULL DEFAULT 0
+                CHECK(typeof(run_count)='integer' AND run_count>=0),
+            last_result_digest TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+                CHECK(substr(updated_at,-1,1)='Z' AND julianday(updated_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {BACKLOG_RECOVERY_RUNS_TABLE}(
+            recovery_id TEXT PRIMARY KEY,
+            generation_id TEXT NOT NULL UNIQUE REFERENCES
+                {FORWARD_GENERATIONS_TABLE}(generation_id),
+            cutover_id TEXT NOT NULL,
+            manifest_fingerprint TEXT NOT NULL UNIQUE,
+            stable_target_digest TEXT NOT NULL,
+            result_digest TEXT NOT NULL,
+            summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+            target_count INTEGER NOT NULL
+                CHECK(typeof(target_count)='integer' AND target_count>=0),
+            status TEXT NOT NULL CHECK(status='completed'),
+            applied_at TEXT NOT NULL
+                CHECK(substr(applied_at,-1,1)='Z' AND julianday(applied_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {BACKLOG_RECOVERY_TARGETS_TABLE}(
+            recovery_id TEXT NOT NULL REFERENCES {BACKLOG_RECOVERY_RUNS_TABLE}(recovery_id),
+            source_status_observation_sequence INTEGER NOT NULL
+                CHECK(typeof(source_status_observation_sequence)='integer'
+                      AND source_status_observation_sequence>0),
+            order_id INTEGER NOT NULL CHECK(typeof(order_id)='integer' AND order_id>0),
+            stable_business_digest TEXT NOT NULL,
+            before_state_digest TEXT NOT NULL,
+            after_state_digest TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN(
+                'event_applied','identity_quarantine','already_current','audit_noop'
+            )),
+            PRIMARY KEY(recovery_id,source_status_observation_sequence)
+        );
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_events_no_update
         BEFORE UPDATE ON {EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS lifecycle evidence is immutable'); END;
@@ -340,6 +425,24 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_extension_allocation_no_delete
         BEFORE DELETE ON {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS mapping extension allocations are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_forward_generation_no_update
+        BEFORE UPDATE ON {FORWARD_GENERATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS forward generation is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_forward_generation_no_delete
+        BEFORE DELETE ON {FORWARD_GENERATIONS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS forward generations are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_recovery_run_no_update
+        BEFORE UPDATE ON {BACKLOG_RECOVERY_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS backlog recovery result is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_recovery_run_no_delete
+        BEFORE DELETE ON {BACKLOG_RECOVERY_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS backlog recovery results are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_recovery_target_no_update
+        BEFORE UPDATE ON {BACKLOG_RECOVERY_TARGETS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS backlog recovery target is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_recovery_target_no_delete
+        BEFORE DELETE ON {BACKLOG_RECOVERY_TARGETS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS backlog recovery targets are append-only'); END;
         """
     )
     _ensure_column(
@@ -347,6 +450,16 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         table=EVENTS_TABLE,
         column="source_order_observation_sequence",
         declaration="INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        table=IDENTITY_PENDING_TABLE,
+        column="reason_detail_code",
+        declaration=(
+            "TEXT NOT NULL DEFAULT 'identity_evidence_missing_or_drifted' "
+            "CHECK(reason_detail_code IN("
+            "'identity_evidence_missing_or_drifted','order_sku_unmapped'))"
+        ),
     )
     _ensure_column(
         conn,
@@ -668,6 +781,7 @@ def drain_post_checkpoint_fbs_lifecycle(
     manifest: Mapping[str, Any],
     occurred_at: str,
     limit: int = 500,
+    pinned_status_observation_sequences: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Drain immutable status observations above frozen ``W`` exactly once.
 
@@ -699,77 +813,191 @@ def drain_post_checkpoint_fbs_lifecycle(
     )
     boundary_at = str(boundary.get("local_boundary_at") or manifest["cutover_at"])
     _require_utc(boundary_at)
-    conn.execute(
-        f"""INSERT OR IGNORE INTO {DRAIN_STATE_TABLE}(
-                cutover_id,frozen_order_observation_sequence,
-                frozen_status_observation_sequence,
-                frozen_status_transition_sequence,last_status_observation_sequence,
-                drain_run_count,last_result_digest,updated_at
-            ) VALUES(?,?,?,?,?,0,'',?)""",
-        (cutover_id, order_w, status_w, transition_w, status_w, now),
-    )
-    state = conn.execute(
-        f"""SELECT frozen_order_observation_sequence,
-                   frozen_status_observation_sequence,
-                   frozen_status_transition_sequence,last_status_observation_sequence
-            FROM {DRAIN_STATE_TABLE} WHERE cutover_id=?""",
-        (cutover_id,),
-    ).fetchone()
-    if state is None or tuple(map(int, state[:3])) != (order_w, status_w, transition_w):
-        raise FfPoolFbsLifecycleError(
-            "drain_checkpoint_conflict",
-            "Persisted FBS drain checkpoint differs from the immutable manifest",
+    pinned_sequences = (
+        tuple(
+            sorted(
+                {
+                    _exact_int(value, "pinned_status_observation_sequence")
+                    for value in pinned_status_observation_sequences
+                }
+            )
         )
-    last_sequence = int(state[3])
-    starting_sequence = last_sequence
+        if pinned_status_observation_sequences is not None
+        else None
+    )
+    if pinned_sequences is not None and len(pinned_sequences) > bound:
+        raise FfPoolFbsLifecycleError(
+            "recovery_target_too_large",
+            f"Pinned recovery target exceeds the bounded limit {bound}",
+        )
+    forward_generation = None
+    if pinned_sequences is None:
+        forward_generation = conn.execute(
+            f"""SELECT generation_id,cutoff_status_observation_sequence,
+                       forward_start_status_observation_sequence,
+                       old_cursor_status_observation_sequence
+                FROM {FORWARD_GENERATIONS_TABLE}
+                WHERE cutover_id=?""",
+            (cutover_id,),
+        ).fetchone()
+    lane = "backlog_recovery" if pinned_sequences is not None else "ordinary"
+    generation_id = ""
+    cutoff_sequence = 0
+    if pinned_sequences is not None:
+        if any(value <= status_w for value in pinned_sequences):
+            raise FfPoolFbsLifecycleError(
+                "recovery_target_before_frozen_boundary",
+                "Pinned recovery statuses must be above the immutable Stage 7C watermark",
+            )
+        last_sequence = min(pinned_sequences, default=status_w) - 1
+        starting_sequence = last_sequence
+    elif forward_generation is not None:
+        generation_id = str(forward_generation[0])
+        cutoff_sequence = int(forward_generation[1])
+        if int(forward_generation[2]) != cutoff_sequence + 1:
+            raise FfPoolFbsLifecycleError(
+                "forward_generation_boundary_drift",
+                "Forward generation start is not the exact C+1 boundary",
+            )
+        state = conn.execute(
+            f"""SELECT last_status_observation_sequence
+                FROM {FORWARD_STATE_TABLE} WHERE generation_id=?""",
+            (generation_id,),
+        ).fetchone()
+        if state is None or int(state[0]) < cutoff_sequence:
+            raise FfPoolFbsLifecycleError(
+                "forward_generation_state_missing",
+                "Forward generation has no valid durable C+1 cursor",
+            )
+        lane = "forward"
+        last_sequence = int(state[0])
+        starting_sequence = last_sequence
+    else:
+        conn.execute(
+            f"""INSERT OR IGNORE INTO {DRAIN_STATE_TABLE}(
+                    cutover_id,frozen_order_observation_sequence,
+                    frozen_status_observation_sequence,
+                    frozen_status_transition_sequence,last_status_observation_sequence,
+                    drain_run_count,last_result_digest,updated_at
+                ) VALUES(?,?,?,?,?,0,'',?)""",
+            (cutover_id, order_w, status_w, transition_w, status_w, now),
+        )
+        state = conn.execute(
+            f"""SELECT frozen_order_observation_sequence,
+                       frozen_status_observation_sequence,
+                       frozen_status_transition_sequence,last_status_observation_sequence
+                FROM {DRAIN_STATE_TABLE} WHERE cutover_id=?""",
+            (cutover_id,),
+        ).fetchone()
+        if state is None or tuple(map(int, state[:3])) != (order_w, status_w, transition_w):
+            raise FfPoolFbsLifecycleError(
+                "drain_checkpoint_conflict",
+                "Persisted FBS drain checkpoint differs from the immutable manifest",
+            )
+        last_sequence = int(state[3])
+        starting_sequence = last_sequence
     pending_retry_limit = min(bound, 500)
-    pending_rows = conn.execute(
-        f"""SELECT status.observation_sequence,status.order_id,
-                   status.order_revision,status.status_digest,
-                   status.supplier_status,status.wb_status,
-                   status.positive_quantity,status.observed_at,
-                   source.observation_sequence,source.observation_id,
-                   source.source_revision,source.source_created_at,
-                   source.observed_at,source.warehouse_id,source.nm_id,
-                   source.chrt_id,source.skus_json,source.office_id,
-                   pending.deferred_identity_evidence_sequence
-            FROM {IDENTITY_PENDING_TABLE} AS pending
-            JOIN {STATUS_OBSERVATIONS_TABLE} AS status
-              ON status.observation_sequence=pending.source_status_observation_sequence
-            LEFT JOIN {OBSERVATIONS_TABLE} AS source
-              ON source.order_id=status.order_id
-             AND source.source_revision=status.order_revision
-            LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
-              ON resolution.pending_id=pending.pending_id
-            WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
-            ORDER BY EXISTS(
-                SELECT 1 FROM {IDENTITY_EVIDENCE_TABLE} AS later_identity
-                WHERE later_identity.order_id=pending.order_id
-                  AND later_identity.evidence_sequence>
-                      pending.deferred_identity_evidence_sequence
-                  AND later_identity.outcome='matched'
-            ) DESC,pending.source_status_observation_sequence
-            LIMIT ?""",
-        (cutover_id, pending_retry_limit),
-    ).fetchall()
-    new_rows = conn.execute(
-        f"""SELECT status.observation_sequence,status.order_id,
-                   status.order_revision,status.status_digest,
-                   status.supplier_status,status.wb_status,
-                   status.positive_quantity,status.observed_at,
-                   source.observation_sequence,source.observation_id,
-                   source.source_revision,source.source_created_at,
-                   source.observed_at,source.warehouse_id,source.nm_id,
-                   source.chrt_id,source.skus_json,source.office_id
-            FROM {STATUS_OBSERVATIONS_TABLE} AS status
-            LEFT JOIN {OBSERVATIONS_TABLE} AS source
-              ON source.order_id=status.order_id
-             AND source.source_revision=status.order_revision
-            WHERE status.observation_sequence>?
-            ORDER BY status.observation_sequence
-            LIMIT ?""",
-        (last_sequence, bound),
-    ).fetchall()
+    if pinned_sequences is not None:
+        placeholders = ",".join("?" for _ in pinned_sequences)
+        pinned_rows = (
+            conn.execute(
+                f"""SELECT status.observation_sequence,status.order_id,
+                           status.order_revision,status.status_digest,
+                           status.supplier_status,status.wb_status,
+                           status.positive_quantity,status.observed_at,
+                           source.observation_sequence,source.observation_id,
+                           source.source_revision,source.source_created_at,
+                           source.observed_at,source.warehouse_id,source.nm_id,
+                           source.chrt_id,source.skus_json,source.office_id,
+                           pending.deferred_identity_evidence_sequence
+                    FROM {STATUS_OBSERVATIONS_TABLE} AS status
+                    LEFT JOIN {OBSERVATIONS_TABLE} AS source
+                      ON source.order_id=status.order_id
+                     AND source.source_revision=status.order_revision
+                    LEFT JOIN {IDENTITY_PENDING_TABLE} AS pending
+                      ON pending.cutover_id=?
+                     AND pending.source_status_observation_sequence=
+                         status.observation_sequence
+                    LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                      ON resolution.pending_id=pending.pending_id
+                    WHERE status.observation_sequence IN ({placeholders})
+                      AND resolution.pending_id IS NULL
+                    ORDER BY status.observation_sequence""",
+                (cutover_id, *pinned_sequences),
+            ).fetchall()
+            if pinned_sequences
+            else []
+        )
+        if len(pinned_rows) != len(pinned_sequences):
+            raise FfPoolFbsLifecycleError(
+                "recovery_target_status_drift",
+                "One or more pinned recovery status identities are unavailable or resolved",
+            )
+        pending_rows = []
+        new_rows = []
+        rows = [(row, row[18] is not None) for row in pinned_rows]
+    else:
+        pending_floor_sql = (
+            " AND pending.source_status_observation_sequence>?"
+            if lane == "forward"
+            else ""
+        )
+        pending_parameters: tuple[Any, ...] = (
+            (cutover_id, cutoff_sequence, pending_retry_limit)
+            if lane == "forward"
+            else (cutover_id, pending_retry_limit)
+        )
+        pending_rows = conn.execute(
+            f"""SELECT status.observation_sequence,status.order_id,
+                       status.order_revision,status.status_digest,
+                       status.supplier_status,status.wb_status,
+                       status.positive_quantity,status.observed_at,
+                       source.observation_sequence,source.observation_id,
+                       source.source_revision,source.source_created_at,
+                       source.observed_at,source.warehouse_id,source.nm_id,
+                       source.chrt_id,source.skus_json,source.office_id,
+                       pending.deferred_identity_evidence_sequence
+                FROM {IDENTITY_PENDING_TABLE} AS pending
+                JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+                  ON status.observation_sequence=pending.source_status_observation_sequence
+                LEFT JOIN {OBSERVATIONS_TABLE} AS source
+                  ON source.order_id=status.order_id
+                 AND source.source_revision=status.order_revision
+                LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                  ON resolution.pending_id=pending.pending_id
+                WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+                      {pending_floor_sql}
+                ORDER BY EXISTS(
+                    SELECT 1 FROM {IDENTITY_EVIDENCE_TABLE} AS later_identity
+                    WHERE later_identity.order_id=pending.order_id
+                      AND later_identity.evidence_sequence>
+                          pending.deferred_identity_evidence_sequence
+                      AND later_identity.outcome='matched'
+                ) DESC,pending.source_status_observation_sequence
+                LIMIT ?""",
+            pending_parameters,
+        ).fetchall()
+        new_rows = conn.execute(
+            f"""SELECT status.observation_sequence,status.order_id,
+                       status.order_revision,status.status_digest,
+                       status.supplier_status,status.wb_status,
+                       status.positive_quantity,status.observed_at,
+                       source.observation_sequence,source.observation_id,
+                       source.source_revision,source.source_created_at,
+                       source.observed_at,source.warehouse_id,source.nm_id,
+                       source.chrt_id,source.skus_json,source.office_id
+                FROM {STATUS_OBSERVATIONS_TABLE} AS status
+                LEFT JOIN {OBSERVATIONS_TABLE} AS source
+                  ON source.order_id=status.order_id
+                 AND source.source_revision=status.order_revision
+                WHERE status.observation_sequence>?
+                ORDER BY status.observation_sequence
+                LIMIT ?""",
+            (last_sequence, bound),
+        ).fetchall()
+        rows = [(row, True) for row in pending_rows] + [
+            (row, False) for row in new_rows
+        ]
     summary = {
         "reserved": 0,
         "reservation_refreshed": 0,
@@ -783,9 +1011,6 @@ def drain_post_checkpoint_fbs_lifecycle(
         "identity_pending": 0,
         "identity_resolved": 0,
     }
-    rows = [(row, True) for row in pending_rows] + [
-        (row, False) for row in new_rows
-    ]
     for row, is_pending_retry in rows:
         status_sequence = int(row[0])
         order_id = int(row[1])
@@ -842,7 +1067,19 @@ def drain_post_checkpoint_fbs_lifecycle(
                 ),
             )
         except FfPoolFbsLifecycleError as exc:
-            if exc.code != "order_identity_evidence_missing_or_drifted":
+            if exc.code not in {
+                "order_identity_evidence_missing_or_drifted",
+                "order_sku_unmapped",
+            }:
+                raise
+            # Installing the inert forward-recovery schema during deploy must
+            # not silently drain the pre-existing suffix before its exact C
+            # manifest has received the separate production-mutation gate.
+            # The legacy lane therefore preserves its fail-closed rollback for
+            # a known-facility/missing-SKU row.  Quarantine-and-continue is
+            # activated only by the durable forward generation or by the
+            # explicitly pinned recovery lane created in the same apply.
+            if exc.code == "order_sku_unmapped" and lane == "ordinary":
                 raise
             if not is_pending_retry:
                 _persist_identity_pending(
@@ -850,6 +1087,11 @@ def drain_post_checkpoint_fbs_lifecycle(
                     manifest=manifest,
                     row=row,
                     created_at=now,
+                    reason_detail_code=(
+                        "identity_evidence_missing_or_drifted"
+                        if exc.code == "order_identity_evidence_missing_or_drifted"
+                        else exc.code
+                    ),
                 )
                 last_sequence = max(last_sequence, status_sequence)
             summary["identity_pending"] += 1
@@ -1019,46 +1261,97 @@ def drain_post_checkpoint_fbs_lifecycle(
             )
         last_sequence = max(last_sequence, status_sequence)
 
-    pending = int(
-        conn.execute(
-            f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE} WHERE observation_sequence>?",
-            (last_sequence,),
-        ).fetchone()[0]
-    )
-    identity_pending = int(
-        conn.execute(
-            f"""SELECT COUNT(*)
-                FROM {IDENTITY_PENDING_TABLE} AS pending
-                LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
-                  ON resolution.pending_id=pending.pending_id
-                WHERE pending.cutover_id=? AND resolution.pending_id IS NULL""",
-            (cutover_id,),
-        ).fetchone()[0]
-    )
+    if pinned_sequences is not None:
+        pending = 0
+        identity_pending = int(
+            conn.execute(
+                f"""SELECT COUNT(*)
+                    FROM {IDENTITY_PENDING_TABLE} AS pending
+                    LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                      ON resolution.pending_id=pending.pending_id
+                    WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+                      AND pending.source_status_observation_sequence IN (
+                          {','.join('?' for _ in pinned_sequences)}
+                      )""",
+                (cutover_id, *pinned_sequences),
+            ).fetchone()[0]
+            if pinned_sequences
+            else 0
+        )
+        processed_count = len(pinned_rows)
+    else:
+        pending = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {STATUS_OBSERVATIONS_TABLE} WHERE observation_sequence>?",
+                (last_sequence,),
+            ).fetchone()[0]
+        )
+        pending_floor_sql = (
+            " AND pending.source_status_observation_sequence>?"
+            if lane == "forward"
+            else ""
+        )
+        pending_parameters = (
+            (cutover_id, cutoff_sequence)
+            if lane == "forward"
+            else (cutover_id,)
+        )
+        identity_pending = int(
+            conn.execute(
+                f"""SELECT COUNT(*)
+                    FROM {IDENTITY_PENDING_TABLE} AS pending
+                    LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                      ON resolution.pending_id=pending.pending_id
+                    WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+                          {pending_floor_sql}""",
+                pending_parameters,
+            ).fetchone()[0]
+        )
+        processed_count = len(new_rows)
     result_material = {
         "cutover_id": cutover_id,
+        "lane": lane,
+        "forward_generation_id": generation_id,
+        "cutoff_status_observation_sequence": cutoff_sequence,
         "from_status_observation_sequence": starting_sequence,
         "last_status_observation_sequence": last_sequence,
-        "processed_count": len(new_rows),
+        "processed_count": processed_count,
         "pending_count": pending,
-        "identity_retry_count": len(pending_rows),
+        "identity_retry_count": (
+            sum(1 for row in pinned_rows if row[18] is not None)
+            if pinned_sequences is not None
+            else len(pending_rows)
+        ),
         "identity_pending_count": identity_pending,
         "summary": summary,
     }
     result_digest = _fingerprint(result_material)
-    conn.execute(
-        f"""UPDATE {DRAIN_STATE_TABLE}
-            SET last_status_observation_sequence=?,drain_run_count=drain_run_count+1,
-                last_result_digest=?,updated_at=?
-            WHERE cutover_id=?""",
-        (last_sequence, result_digest, now, cutover_id),
-    )
+    if pinned_sequences is None and lane == "forward":
+        conn.execute(
+            f"""UPDATE {FORWARD_STATE_TABLE}
+                SET last_status_observation_sequence=?,run_count=run_count+1,
+                    last_result_digest=?,updated_at=?
+                WHERE generation_id=?""",
+            (last_sequence, result_digest, now, generation_id),
+        )
+    elif pinned_sequences is None:
+        conn.execute(
+            f"""UPDATE {DRAIN_STATE_TABLE}
+                SET last_status_observation_sequence=?,drain_run_count=drain_run_count+1,
+                    last_result_digest=?,updated_at=?
+                WHERE cutover_id=?""",
+            (last_sequence, result_digest, now, cutover_id),
+        )
     if summary["fulfilled"]:
         _record_current_parity(conn, manifest=manifest, checked_at=now)
     return {
         "contract_name": CONTRACT_NAME,
         "status": (
-            "caught_up"
+            "recovered"
+            if pinned_sequences is not None and identity_pending == 0
+            else "recovered_identity_pending"
+            if pinned_sequences is not None
+            else "caught_up"
             if pending == 0 and identity_pending == 0
             else "caught_up_identity_pending"
             if pending == 0
@@ -1068,6 +1361,25 @@ def drain_post_checkpoint_fbs_lifecycle(
         "result_digest": result_digest,
         "mutates_wb": False,
     }
+
+
+def recover_pinned_fbs_lifecycle(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    status_observation_sequences: tuple[int, ...],
+    occurred_at: str,
+) -> dict[str, Any]:
+    """Apply one immutable ``<= C`` target without touching either live cursor."""
+
+    sequences = tuple(status_observation_sequences)
+    return drain_post_checkpoint_fbs_lifecycle(
+        conn,
+        manifest=manifest,
+        occurred_at=occurred_at,
+        limit=max(1, len(sequences)),
+        pinned_status_observation_sequences=sequences,
+    )
 
 
 def available_quantity(
@@ -1544,7 +1856,8 @@ def _map_order(
         }
     if mapping is None:
         raise FfPoolFbsLifecycleError(
-            "order_sku_unmapped", f"Order {int(row[1])} identity is unmapped"
+            "order_sku_unmapped",
+            f"Order {int(row[1])} exact known-facility SKU is unmapped",
         )
     return {
         "facility_id": facility_id,
@@ -1761,7 +2074,17 @@ def _persist_identity_pending(
     manifest: Mapping[str, Any],
     row: sqlite3.Row | tuple[Any, ...],
     created_at: str,
+    reason_detail_code: str,
 ) -> bool:
+    detail_code = str(reason_detail_code)
+    if detail_code not in {
+        "identity_evidence_missing_or_drifted",
+        "order_sku_unmapped",
+    }:
+        raise FfPoolFbsLifecycleError(
+            "identity_pending_reason_invalid",
+            "Identity pending reason is outside the durable quarantine contract",
+        )
     evidence = {
         "cutover_id": str(manifest["cutover_id"]),
         "order_id": int(row[1]),
@@ -1769,6 +2092,7 @@ def _persist_identity_pending(
         "order_revision": str(row[2]),
         "status_digest": str(row[3]),
         "reason_code": "identity_evidence_missing_or_drifted",
+        "reason_detail_code": detail_code,
     }
     digest = _fingerprint(evidence)
     pending_id = "ffidp_" + digest.removeprefix("sha256:")[:28]
@@ -1785,8 +2109,8 @@ def _persist_identity_pending(
                     pending_id,cutover_id,order_id,
                     source_status_observation_sequence,order_revision,
                     status_digest,deferred_identity_evidence_sequence,
-                    reason_code,evidence_digest,created_at
-                ) VALUES(?,?,?,?,?,?,?,'identity_evidence_missing_or_drifted',?,?)""",
+                    reason_code,reason_detail_code,evidence_digest,created_at
+                ) VALUES(?,?,?,?,?,?,?,'identity_evidence_missing_or_drifted',?,?,?)""",
             (
                 pending_id,
                 str(manifest["cutover_id"]),
@@ -1795,6 +2119,7 @@ def _persist_identity_pending(
                 str(row[2]),
                 str(row[3]),
                 deferred_identity_evidence_sequence,
+                detail_code,
                 digest,
                 created_at,
             ),

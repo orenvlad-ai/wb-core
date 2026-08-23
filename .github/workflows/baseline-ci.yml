@@ -102,6 +102,7 @@ jobs:
           python3 apps/ff_pool_cutover_production_smoke.py
           python3 apps/ff_pool_cutover_recovery_supersession_smoke.py
           python3 apps/ff_pool_fbs_lifecycle_smoke.py
+          python3 apps/ff_pool_fbs_forward_recovery_smoke.py
           python3 apps/russian_payment_orders_smoke.py
           python3 apps/ff_pool_overhead_backfill_smoke.py
           python3 apps/ff_fbs_mapping_extension_production_smoke.py

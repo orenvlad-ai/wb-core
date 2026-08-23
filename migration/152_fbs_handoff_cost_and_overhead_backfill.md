@@ -34,10 +34,23 @@ numerator nor the profitability-revenue denominator. Profit and margin are
 marked partial and use only covered revenue plus covered signed COGS. Every
 consumer carries reason/coverage evidence. Vitrina adds
 `Продажи без себестоимости, ₽`; Partner adds that row plus
-`Заказы без себестоимости, шт.` and evidence-backed units. Warehouse UI shows a
-bright unresolved-cost amount/count warning and opens the exact
-`cost_unresolved` list; green means a proven zero only. Identifiers exposed by
-this surface are hashed and contain no customer PII.
+`Заказы без себестоимости, шт.` and evidence-backed units. Warehouse UI keeps
+that published Finance amount/order/unit/week scope separate from the current
+FBS lifecycle unresolved-order scope. The latter follows the selected order
+date/filter set, carries status/reason evidence and alone opens the exact
+`cost_unresolved` list. Neither counter is used as the denominator or label for
+the other, and each scope is green only for its own proven zero. Lifecycle
+cursor/source sequence, lag and pending identity evidence are also published
+separately from collector poll success. Identifiers exposed by this surface are
+hashed and contain no customer PII.
+
+Migration 157 additionally splits a separately gated historical lifecycle
+suffix from continuous ingress. Its query-only manifest pins stable rows through
+`C`; an explicit apply starts a durable forward generation at `C+1` and reuses
+the exact lifecycle cost/debit implementation for only the reviewed `<=C`
+identities. New rows above `C` cannot change that fingerprint, while target WAC
+or business-evidence drift fails closed. This mechanism does not rewrite any
+fulfilled sale or realized Finance/Partner row.
 
 ## Overhead publication and contention
 

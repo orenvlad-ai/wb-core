@@ -29,7 +29,7 @@ from packages.adapters.wb_fbs_orders import (
 
 
 CONTRACT_NAME = "wb_fbs_orders_readonly_shadow_v1"
-CONTRACT_VERSION = 4
+CONTRACT_VERSION = 5
 COLLECTOR_ENABLED_ENV = "WB_FBS_COLLECTOR_ENABLED"
 OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
 STATE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_collector_state"
@@ -70,6 +70,18 @@ LIFECYCLE_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
 LIFECYCLE_RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
 LIFECYCLE_LATE_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_late_evidence"
 CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
+LIFECYCLE_DRAIN_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_drain_state"
+LIFECYCLE_FORWARD_GENERATIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_forward_generations"
+)
+LIFECYCLE_FORWARD_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_forward_state"
+LIFECYCLE_BACKLOG_RECOVERY_RUNS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
+)
+LIFECYCLE_IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+)
 STATUS_CATEGORIES = frozenset(
     {
         "all",
@@ -778,7 +790,16 @@ class WbFbsOrdersCollector:
                     "ambiguous",
                 )
             }
-            cost_warning = _cost_coverage_warning(conn, counters=counters)
+            cost_warning = _cost_coverage_warning(
+                conn,
+                current_cte=current_cte,
+                base_where=base_where,
+                base_params=base_params,
+                counters=counters,
+                date_from=date_from_value,
+                date_to=date_to_value,
+            )
+            lifecycle_processor = _lifecycle_processor_status(conn)
             offset = (page_number - 1) * page_size
             rows = conn.execute(
                 current_cte
@@ -809,6 +830,7 @@ class WbFbsOrdersCollector:
             },
             "counters": counters,
             "cost_coverage_warning": cost_warning,
+            "lifecycle_processor": lifecycle_processor,
             "page": _page(page_number, page_size, total),
             "rows": [_public_order(row, enriched=lifecycle_available) for row in rows],
         }
@@ -1474,7 +1496,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
         NULL AS lifecycle_frozen_wac_rub,
         NULL AS debit_event_id,NULL AS lifecycle_updated_at,NULL AS lifecycle_event_type,
         NULL AS lifecycle_event_digest,NULL AS lifecycle_event_at,NULL AS reconciliation_reason,
-        NULL AS reconciliation_digest,NULL AS late_reason,NULL AS late_digest,"""
+        NULL AS reconciliation_digest,NULL AS late_reason,NULL AS late_digest,
+        NULL AS lifecycle_pending_reason,"""
     lifecycle_reconciliation_category = ""
     lifecycle_state_category = ""
     lifecycle_reason = "COALESCE(evidence.outcome,'status_only')"
@@ -1499,6 +1522,20 @@ def _current_cte(*, lifecycle_available: bool) -> str:
         SELECT late.order_id,late.reason_code,late.evidence_digest
         FROM {LIFECYCLE_LATE_EVIDENCE_TABLE} late
         JOIN latest_manifest manifest ON manifest.cutover_id=late.cutover_id
+    ), identity_pending_ranked AS (
+        SELECT pending.order_id,pending.reason_detail_code,
+               ROW_NUMBER() OVER(
+                   PARTITION BY pending.order_id
+                   ORDER BY pending.source_status_observation_sequence DESC
+               ) AS pending_rank
+        FROM {LIFECYCLE_IDENTITY_PENDING_TABLE} pending
+        JOIN latest_manifest manifest ON manifest.cutover_id=pending.cutover_id
+        LEFT JOIN {LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE} resolution
+          ON resolution.pending_id=pending.pending_id
+        WHERE resolution.pending_id IS NULL
+    ), identity_pending AS (
+        SELECT order_id,reason_detail_code
+        FROM identity_pending_ranked WHERE pending_rank=1
     )"""
         lifecycle_joins = f"""
         LEFT JOIN latest_manifest manifest ON 1=1
@@ -1506,7 +1543,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
           ON lifecycle.cutover_id=manifest.cutover_id AND lifecycle.order_id=base.order_id
         LEFT JOIN latest_event event ON event.order_id=base.order_id
         LEFT JOIN reconciliation ON reconciliation.order_id=base.order_id
-        LEFT JOIN late_evidence ON late_evidence.order_id=base.order_id"""
+        LEFT JOIN late_evidence ON late_evidence.order_id=base.order_id
+        LEFT JOIN identity_pending ON identity_pending.order_id=base.order_id"""
         lifecycle_columns = """
         lifecycle.state AS lifecycle_state,lifecycle.quantity AS lifecycle_quantity,
         lifecycle.facility_id AS lifecycle_facility_id,
@@ -1515,7 +1553,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
         event.evidence_digest AS lifecycle_event_digest,event.occurred_at AS lifecycle_event_at,
         reconciliation.reason_code AS reconciliation_reason,
         reconciliation.evidence_digest AS reconciliation_digest,
-        late_evidence.reason_code AS late_reason,late_evidence.evidence_digest AS late_digest,"""
+        late_evidence.reason_code AS late_reason,late_evidence.evidence_digest AS late_digest,
+        identity_pending.reason_detail_code AS lifecycle_pending_reason,"""
         lifecycle_reconciliation_category = """
             WHEN reconciliation.order_id IS NOT NULL OR late_evidence.order_id IS NOT NULL
                  OR lifecycle.state IN ('fulfilled_reconciliation','late_pre_t_isolated')
@@ -1525,7 +1564,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
             WHEN lifecycle.state='fulfilled' THEN 'handed_over'"""
         lifecycle_reason = (
             "COALESCE(reconciliation.reason_code,late_evidence.reason_code,"
-            "event.event_type,lifecycle.state,evidence.outcome,'status_only')"
+            "identity_pending.reason_detail_code,event.event_type,lifecycle.state,"
+            "evidence.outcome,'status_only')"
         )
         lifecycle_debit_expr = "lifecycle.debit_event_id"
         lifecycle_wac_expr = "lifecycle.frozen_wac_rub"
@@ -1625,6 +1665,8 @@ def _current_cte(*, lifecycle_available: bool) -> str:
         CASE
             WHEN warehouse_candidates.candidate_count IS NULL
               OR warehouse_candidates.candidate_count<>1 THEN 'facility_mapping_missing_or_ambiguous'
+            WHEN identity_pending.reason_detail_code='order_sku_unmapped'
+              THEN 'sku_mapping_missing_or_ambiguous'
             WHEN identity_candidates.candidate_count IS NULL
               OR identity_candidates.candidate_count<>1 THEN 'sku_mapping_missing_or_ambiguous'
             WHEN {lifecycle_debit_expr} IS NULL OR {lifecycle_debit_expr}=''
@@ -1652,75 +1694,428 @@ def _current_cte(*, lifecycle_available: bool) -> str:
 def _cost_coverage_warning(
     conn: sqlite3.Connection,
     *,
+    current_cte: str,
+    base_where: str,
+    base_params: tuple[Any, ...],
     counters: Mapping[str, int],
+    date_from: str,
+    date_to: str,
 ) -> dict[str, Any]:
-    """Combine exact unresolved FBS count with Finance uncovered-sale evidence."""
+    """Publish Finance and lifecycle coverage as independent scoped evidence."""
 
+    finance = _finance_sales_without_cost(conn)
+    lifecycle = _lifecycle_unresolved_evidence(
+        conn,
+        current_cte=current_cte,
+        base_where=base_where,
+        base_params=base_params,
+        counters=counters,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    statuses = {str(finance["status"]), str(lifecycle["status"])}
+    if "error" in statuses:
+        status = "error"
+    elif statuses == {"ok"}:
+        status = "ok"
+    else:
+        status = "warning"
+    return {
+        "status": status,
+        "finance_sales_without_cost": finance,
+        "lifecycle_unresolved": lifecycle,
+        "scopes_are_independent": True,
+        "contains_pii": False,
+    }
+
+
+def _finance_sales_without_cost(conn: sqlite3.Connection) -> dict[str, Any]:
     table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='wb_finance_weekly_sku_aggregates'"
     ).fetchone()
-    evidence_rows = 0
+    if table is None:
+        return {
+            "status": "unavailable",
+            "amount_rub": None,
+            "order_count": None,
+            "units": None,
+            "reason": "finance_sku_coverage_table_missing",
+            "source": {
+                "table": "wb_finance_weekly_sku_aggregates",
+                "scope": "all_published_non_account_sku_weeks",
+                "row_count": None,
+                "published_week_count": None,
+                "period_start": None,
+                "period_end": None,
+                "latest_calculated_at": None,
+            },
+            "weeks": [],
+            "reason_counts": {},
+        }
+
+    rows = conn.execute(
+        "SELECT seller_id,week_start,week_end,coverage_json,calculated_at "
+        "FROM wb_finance_weekly_sku_aggregates "
+        "WHERE nm_id<>'__account__' ORDER BY week_start,week_end,seller_id,nm_id"
+    ).fetchall()
+    if not rows:
+        return {
+            "status": "unavailable",
+            "amount_rub": None,
+            "order_count": None,
+            "units": None,
+            "reason": "finance_sku_coverage_not_published",
+            "source": {
+                "table": "wb_finance_weekly_sku_aggregates",
+                "scope": "all_published_non_account_sku_weeks",
+                "row_count": 0,
+                "published_week_count": 0,
+                "period_start": None,
+                "period_end": None,
+                "latest_calculated_at": None,
+            },
+            "weeks": [],
+            "reason_counts": {},
+        }
+
     sales_without_cost = Decimal("0")
     orders_without_cost = 0
     units_without_cost = 0
     reason_counts: dict[str, int] = {}
-    if table is not None:
-        for row in conn.execute(
-            "SELECT coverage_json FROM wb_finance_weekly_sku_aggregates "
-            "WHERE nm_id<>'__account__' ORDER BY seller_id,week_start,nm_id"
-        ).fetchall():
-            try:
-                coverage = json.loads(str(row[0] or "{}"))
-            except json.JSONDecodeError:
-                continue
-            evidence_rows += 1
-            try:
-                sales_without_cost += Decimal(
-                    str(
-                        coverage.get("uncovered_fbs_sales_revenue_rub")
-                        or "0"
-                    )
-                )
-            except (InvalidOperation, ValueError):
-                evidence_rows -= 1
-                continue
-            orders_without_cost += int(
+    week_evidence: dict[tuple[str, str], dict[str, Any]] = {}
+    invalid_rows = 0
+    latest_calculated_at = ""
+    for row in rows:
+        week_key = (str(row[1]), str(row[2]))
+        week = week_evidence.setdefault(
+            week_key,
+            {
+                "week_start": week_key[0],
+                "week_end": week_key[1],
+                "amount_rub": Decimal("0"),
+                "order_count": 0,
+                "units": 0,
+                "row_count": 0,
+                "seller_ids": set(),
+                "calculated_at": "",
+            },
+        )
+        try:
+            coverage = json.loads(str(row[3] or "{}"))
+            if not isinstance(coverage, Mapping):
+                raise ValueError("Finance coverage must be an object")
+            amount = Decimal(
+                str(coverage.get("uncovered_fbs_sales_revenue_rub") or "0")
+            )
+            order_count = int(
                 coverage.get("uncovered_fbs_sales_order_count") or 0
             )
-            units_without_cost += int(
-                coverage.get("uncovered_fbs_sales_units") or 0
-            )
-            for problem in coverage.get("problem_skus") or []:
+            units = int(coverage.get("uncovered_fbs_sales_units") or 0)
+            if not amount.is_finite() or amount < 0 or order_count < 0 or units < 0:
+                raise ValueError("negative Finance uncovered evidence")
+            problem_rows = coverage.get("problem_skus") or []
+            if not isinstance(problem_rows, list):
+                raise ValueError("Finance problem_skus must be an array")
+            row_reason_counts: dict[str, int] = {}
+            for problem in problem_rows:
+                if not isinstance(problem, Mapping):
+                    raise ValueError("Finance problem SKU evidence must be an object")
                 if str(problem.get("channel") or "") != "FBS":
                     continue
                 reason = str(problem.get("reason") or "canonical_cost_missing")
-                reason_counts[reason] = reason_counts.get(reason, 0) + int(
-                    problem.get("operation_count") or 1
+                operation_count = int(problem.get("operation_count") or 1)
+                if operation_count < 0:
+                    raise ValueError("negative Finance problem operation count")
+                row_reason_counts[reason] = (
+                    row_reason_counts.get(reason, 0) + operation_count
                 )
-    unresolved_fbs = int(counters.get("cost_unresolved") or 0)
-    if evidence_rows == 0:
-        status = "unavailable"
-    elif unresolved_fbs > 0 or sales_without_cost > 0:
+        except (json.JSONDecodeError, InvalidOperation, TypeError, ValueError):
+            invalid_rows += 1
+            continue
+        sales_without_cost += amount
+        orders_without_cost += order_count
+        units_without_cost += units
+        week["amount_rub"] += amount
+        week["order_count"] += order_count
+        week["units"] += units
+        week["row_count"] += 1
+        week["seller_ids"].add(str(row[0]))
+        calculated_at = str(row[4] or "")
+        week["calculated_at"] = max(str(week["calculated_at"]), calculated_at)
+        latest_calculated_at = max(latest_calculated_at, calculated_at)
+        for reason, operation_count in row_reason_counts.items():
+            reason_counts[reason] = reason_counts.get(reason, 0) + operation_count
+
+    public_weeks = [
+        {
+            "week_start": week["week_start"],
+            "week_end": week["week_end"],
+            "amount_rub": format(week["amount_rub"], "f"),
+            "order_count": int(week["order_count"]),
+            "units": int(week["units"]),
+            "row_count": int(week["row_count"]),
+            "seller_scope_count": len(week["seller_ids"]),
+            "calculated_at": str(week["calculated_at"]),
+        }
+        for week in week_evidence.values()
+    ]
+    if invalid_rows:
         status = "error"
+        reason = "finance_coverage_rows_invalid"
+        amount_value: str | None = None
+        order_value: int | None = None
+        units_value: int | None = None
     else:
-        status = "ok"
+        status = (
+            "error"
+            if sales_without_cost > 0 or orders_without_cost > 0 or units_without_cost > 0
+            else "ok"
+        )
+        reason = "uncovered_realized_fbs_sales" if status == "error" else "covered"
+        amount_value = format(sales_without_cost, "f")
+        order_value = orders_without_cost
+        units_value = units_without_cost
     return {
         "status": status,
-        "unresolved_fbs_order_count": unresolved_fbs,
-        "sales_without_cost_rub": (
-            format(sales_without_cost, "f") if evidence_rows else None
-        ),
-        "sales_without_cost_order_count": (
-            orders_without_cost if evidence_rows else None
-        ),
-        "sales_without_cost_units": units_without_cost if evidence_rows else None,
-        "finance_coverage_row_count": evidence_rows,
-        "finance_uncovered_order_count_matches_list": (
-            orders_without_cost == unresolved_fbs if evidence_rows else None
-        ),
+        "amount_rub": amount_value,
+        "order_count": order_value,
+        "units": units_value,
+        "reason": reason,
+        "source": {
+            "table": "wb_finance_weekly_sku_aggregates",
+            "scope": "all_published_non_account_sku_weeks",
+            "row_count": len(rows),
+            "invalid_row_count": invalid_rows,
+            "published_week_count": len(week_evidence),
+            "period_start": min((key[0] for key in week_evidence), default=None),
+            "period_end": max((key[1] for key in week_evidence), default=None),
+            "latest_calculated_at": latest_calculated_at or None,
+        },
+        "weeks": public_weeks,
         "reason_counts": dict(sorted(reason_counts.items())),
-        "filtered_status_category": "cost_unresolved",
+    }
+
+
+def _lifecycle_unresolved_evidence(
+    conn: sqlite3.Connection,
+    *,
+    current_cte: str,
+    base_where: str,
+    base_params: tuple[Any, ...],
+    counters: Mapping[str, int],
+    date_from: str,
+    date_to: str,
+) -> dict[str, Any]:
+    rows = conn.execute(
+        current_cte
+        + f""" SELECT cost_reason,status_category,
+                        COALESCE(mapped_facility_id,''),COUNT(*) AS order_count,
+                        MIN(source_created_at) AS first_created_at,
+                        MAX(source_created_at) AS last_created_at
+                 FROM current_order
+                 WHERE {base_where} AND cost_status='cost_unresolved'
+                 GROUP BY cost_reason,status_category,COALESCE(mapped_facility_id,'')
+                 ORDER BY cost_reason,status_category,COALESCE(mapped_facility_id,'')""",
+        base_params,
+    ).fetchall()
+    reason_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    facility_counts: dict[str, int] = {}
+    first_created_at = ""
+    last_created_at = ""
+    evidence_count = 0
+    for row in rows:
+        reason = str(row[0] or "canonical_cost_missing")
+        status_category = str(row[1] or "reconciliation")
+        facility_id = str(row[2] or "unmapped")
+        count = int(row[3] or 0)
+        evidence_count += count
+        reason_counts[reason] = reason_counts.get(reason, 0) + count
+        status_counts[status_category] = status_counts.get(status_category, 0) + count
+        facility_counts[facility_id] = facility_counts.get(facility_id, 0) + count
+        first_value = str(row[4] or "")
+        last_value = str(row[5] or "")
+        if first_value and (not first_created_at or first_value < first_created_at):
+            first_created_at = first_value
+        if last_value > last_created_at:
+            last_created_at = last_value
+    unresolved = int(counters.get("cost_unresolved") or 0)
+    if evidence_count != unresolved:
+        status = "error"
+        reason = "unresolved_evidence_count_mismatch"
+    elif unresolved:
+        status = "error"
+        reason = "current_lifecycle_cost_unresolved"
+    else:
+        status = "ok"
+        reason = "covered_or_cost_not_due"
+    return {
+        "status": status,
+        "order_count": unresolved,
+        "reason": reason,
+        "status_counts": dict(sorted(status_counts.items())),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "facility_counts": dict(sorted(facility_counts.items())),
+        "source": {
+            "scope": "current_fbs_orders_matching_page_filters",
+            "date_field": "source_created_at",
+            "date_from": date_from or None,
+            "date_to": date_to or None,
+            "first_created_at": first_created_at or None,
+            "last_created_at": last_created_at or None,
+            "filtered_list_status_category": "cost_unresolved",
+        },
+    }
+
+
+def _lifecycle_processor_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    required = {
+        CUTOVER_MANIFESTS_TABLE,
+        LIFECYCLE_DRAIN_STATE_TABLE,
+        LIFECYCLE_IDENTITY_PENDING_TABLE,
+        LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    }
+    if not required.issubset(tables):
+        return {
+            "status": "unavailable",
+            "reason": "lifecycle_processor_schema_missing",
+            "cutover_id": None,
+            "cursor_sequence": None,
+            "latest_status_sequence": None,
+            "lag_observation_count": None,
+            "pending_identity_count": None,
+            "pending_reason_counts": {},
+            "cursor_updated_at": None,
+            "latest_status_observed_at": None,
+            "contains_pii": False,
+        }
+    manifest = conn.execute(
+        f"SELECT cutover_id,cutover_at FROM {CUTOVER_MANIFESTS_TABLE} "
+        "ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"
+    ).fetchone()
+    if manifest is None:
+        return {
+            "status": "disabled",
+            "reason": "cutover_not_applied",
+            "cutover_id": None,
+            "cursor_sequence": None,
+            "latest_status_sequence": None,
+            "lag_observation_count": None,
+            "pending_identity_count": 0,
+            "pending_reason_counts": {},
+            "cursor_updated_at": None,
+            "latest_status_observed_at": None,
+            "contains_pii": False,
+        }
+    cutover_id = str(manifest[0])
+    drain = conn.execute(
+        f"SELECT last_status_observation_sequence,updated_at "
+        f"FROM {LIFECYCLE_DRAIN_STATE_TABLE} WHERE cutover_id=?",
+        (cutover_id,),
+    ).fetchone()
+    forward = None
+    if {
+        LIFECYCLE_FORWARD_GENERATIONS_TABLE,
+        LIFECYCLE_FORWARD_STATE_TABLE,
+    }.issubset(tables):
+        forward = conn.execute(
+            f"""SELECT generation.generation_id,
+                       generation.cutoff_status_observation_sequence,
+                       generation.old_cursor_status_observation_sequence,
+                       state.last_status_observation_sequence,state.updated_at,
+                       recovery.status
+                FROM {LIFECYCLE_FORWARD_GENERATIONS_TABLE} AS generation
+                JOIN {LIFECYCLE_FORWARD_STATE_TABLE} AS state
+                  ON state.generation_id=generation.generation_id
+                LEFT JOIN {LIFECYCLE_BACKLOG_RECOVERY_RUNS_TABLE} AS recovery
+                  ON recovery.generation_id=generation.generation_id
+                WHERE generation.cutover_id=?""",
+            (cutover_id,),
+        ).fetchone()
+    source = conn.execute(
+        f"SELECT COALESCE(MAX(observation_sequence),0),MAX(observed_at) "
+        f"FROM {STATUS_OBSERVATIONS_TABLE}"
+    ).fetchone()
+    latest_sequence = int(source[0] or 0)
+    latest_observed_at = str(source[1] or "") or None
+    pending_count = int(
+        conn.execute(
+            f"""SELECT COUNT(*)
+                FROM {LIFECYCLE_IDENTITY_PENDING_TABLE} AS pending
+                LEFT JOIN {LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                  ON resolution.pending_id=pending.pending_id
+                WHERE pending.cutover_id=? AND resolution.pending_id IS NULL""",
+            (cutover_id,),
+        ).fetchone()[0]
+    )
+    pending_reason_counts = {
+        str(row[0]): int(row[1])
+        for row in conn.execute(
+            f"""SELECT pending.reason_detail_code,COUNT(*)
+                FROM {LIFECYCLE_IDENTITY_PENDING_TABLE} AS pending
+                LEFT JOIN {LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+                  ON resolution.pending_id=pending.pending_id
+                WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+                GROUP BY pending.reason_detail_code ORDER BY pending.reason_detail_code""",
+            (cutover_id,),
+        ).fetchall()
+    }
+    if drain is None:
+        return {
+            "status": "unavailable",
+            "reason": "drain_state_missing",
+            "cutover_id": cutover_id,
+            "cutover_at": str(manifest[1]),
+            "cursor_sequence": None,
+            "latest_status_sequence": latest_sequence,
+            "lag_observation_count": None,
+            "pending_identity_count": pending_count,
+            "pending_reason_counts": pending_reason_counts,
+            "cursor_updated_at": None,
+            "latest_status_observed_at": latest_observed_at,
+            "contains_pii": False,
+        }
+    cursor = int(forward[3]) if forward is not None else int(drain[0])
+    cursor_updated_at = str(forward[4]) if forward is not None else str(drain[1])
+    lag = latest_sequence - cursor
+    if lag < 0:
+        status = "error"
+        reason = "cursor_ahead_of_status_source"
+    elif lag > 0:
+        status = "lagging"
+        reason = "status_suffix_not_processed"
+    elif pending_count:
+        status = "current_with_quarantine"
+        reason = "cursor_current_identity_quarantine_open"
+    else:
+        status = "current"
+        reason = "cursor_current"
+    return {
+        "status": status,
+        "reason": reason,
+        "cutover_id": cutover_id,
+        "cutover_at": str(manifest[1]),
+        "processor_lane": "forward" if forward is not None else "ordinary",
+        "forward_generation_id": str(forward[0]) if forward is not None else None,
+        "forward_cutoff_sequence": int(forward[1]) if forward is not None else None,
+        "backlog_old_cursor_sequence": int(forward[2]) if forward is not None else None,
+        "backlog_recovery_status": (
+            str(forward[5] or "pending") if forward is not None else None
+        ),
+        "cursor_sequence": cursor,
+        "latest_status_sequence": latest_sequence,
+        "lag_observation_count": max(lag, 0),
+        "pending_identity_count": pending_count,
+        "pending_reason_counts": pending_reason_counts,
+        "cursor_updated_at": cursor_updated_at,
+        "latest_status_observed_at": latest_observed_at,
         "contains_pii": False,
     }
 
@@ -1944,6 +2339,8 @@ def _lifecycle_available(conn: sqlite3.Connection) -> bool:
         LIFECYCLE_RECONCILIATION_TABLE,
         LIFECYCLE_LATE_EVIDENCE_TABLE,
         CUTOVER_MANIFESTS_TABLE,
+        LIFECYCLE_IDENTITY_PENDING_TABLE,
+        LIFECYCLE_IDENTITY_PENDING_RESOLUTIONS_TABLE,
     }.issubset(tables)
 
 

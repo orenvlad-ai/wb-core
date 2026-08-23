@@ -139,6 +139,13 @@ profit_after_cogs = covered_net_revenue − profit_period_expenses
 The display retains full `net_revenue`; `sales_without_cost_rub` and the
 coverage order/unit counters explain the excluded sales scope. Period expenses
 remain explicit period facts and are not hidden by incomplete COGS coverage.
+The warehouse FBS-orders read model may aggregate these values across all
+published non-account SKU-weeks only when it also publishes the exact week
+range/count and latest calculation timestamp. Those Finance amount/order/unit
+figures are one realized-sales scope and are never compared with the current
+lifecycle `cost_unresolved` order counter or narrowed by that page's order-date
+filter. This presentation rule changes none of the covered COGS, profit,
+margin, Finance or Partner calculations.
 
 Every expense money cell shows amount plus `%` and a semantic color, without visible or accessible arrow glyphs. An increased expense share is deterioration and uses red/pink; a decreased share is improvement and uses green; effectively unchanged uses neutral/yellow. The first week or a missing comparison base uses a muted neutral state and must not imply improvement or deterioration. `aria-label` and `title` state the share and meaning in words without `↑`, `↓` or `→`. Numeric deltas and `п.п.` are forbidden.
 
