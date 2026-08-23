@@ -821,12 +821,20 @@ boundary. The normal runtime initializer installs only empty
 generation/recovery tables; before a generation exists, a missing-SKU row
 retains the legacy fail-closed suffix rollback and cannot consume the backlog
 ahead of its owner gate. After exact-SHA deploy the default query-only T0
-dry-run pins active
-storage generation/schema, Stage 7C cutover, old lifecycle cursor, source
+dry-run opens the operational store as `mode=ro` with SQLite `query_only=ON`.
+It does not clone the operational database. A bounded, chunked target-only
+in-memory projection contains exact target orders/statuses/evidence, their
+required mappings/events and current FF balance/aggregate dependencies; row,
+payload, target-manifest and scratch-size ceilings fail closed. Unrelated
+operational history is not materialized. T0 pins active storage
+generation/schema, Stage 7C cutover, old lifecycle cursor, source
 status maximum `C`, exact stable business identities in `(cursor,C]`, target
 WAC/after-images, past fulfilled evidence, backup/recovery and one fingerprint.
 Dynamic `generated_at`/refresh/poll timestamps and global maxima above `C` are
 excluded; exact target revision/status/mapping/WAC drift remains blocking.
+Target and past-fulfilled digests are canonical length-delimited streams and
+therefore do not depend on fetch chunk size. Planner evidence exposes copied
+table/row/payload/scratch counts and confirms `whole_database_backup=false`.
 
 A separately owner-gated explicit apply atomically appends one immutable
 generation at `C`, initializes the forward cursor at `C` and processes only the

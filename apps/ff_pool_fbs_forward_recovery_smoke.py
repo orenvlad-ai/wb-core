@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import resource
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import sys
@@ -31,6 +34,7 @@ from packages.application.ff_pool_fbs_forward_recovery import (  # noqa: E402
     FfPoolFbsForwardRecoveryError,
     FfPoolFbsForwardRecoveryMutation,
 )
+from packages.application import ff_pool_fbs_forward_recovery as recovery_module  # noqa: E402
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     BACKLOG_RECOVERY_TARGETS_TABLE,
     DRAIN_STATE_TABLE,
@@ -293,6 +297,8 @@ def main() -> int:
             "status"
         ] == "not_applied"
 
+        _assert_production_scale_projection(root / "scale")
+
     print("ff_pool_fbs_forward_recovery_smoke: OK")
     return 0
 
@@ -369,6 +375,91 @@ def _insert_backlog(path: Path) -> None:
             observed_at="2026-08-16T00:03:00Z",
         )
         conn.commit()
+
+
+def _assert_production_scale_projection(root: Path) -> None:
+    target_count = 5_600
+    unrelated_bytes = 192 * 1024 * 1024
+    max_rss_growth_bytes = 128 * 1024 * 1024
+    runtime = _prepared_runtime(root)
+    start = datetime(2026, 8, 16, 1, 0, tzinfo=timezone.utc)
+    with sqlite3.connect(runtime.db_path) as conn:
+        for index in range(target_count):
+            _insert_post_t_order(
+                conn,
+                order_id=20_000 + index,
+                supplier="new",
+                wb="waiting",
+                observed_at=(start + timedelta(seconds=index)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            )
+        # This payload models unrelated production-scale operational history.
+        # A whole-database backup would materialize it; target projection must
+        # never read or copy it.
+        conn.execute(
+            "CREATE TABLE synthetic_unrelated_operational_payload("
+            "row_id INTEGER PRIMARY KEY,payload BLOB NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO synthetic_unrelated_operational_payload(row_id,payload) "
+            "VALUES(1,zeroblob(?))",
+            (unrelated_bytes,),
+        )
+        conn.commit()
+
+    gc.collect()
+    before_rss = _peak_rss_bytes()
+    runner = FfPoolFbsForwardRecoveryMutation(
+        runtime_dir=runtime.runtime_dir,
+        deployed_sha=SHA,
+        timestamp_factory=_RecoveryClock(),
+    )
+    plan = runner.build_plan()
+    after_rss = _peak_rss_bytes()
+    planner = dict(plan["planner"])
+    assert plan["target"]["count"] == target_count
+    assert plan["predicted_effects"]["outcome_counts"] == {
+        "event_applied": target_count
+    }
+    assert planner["source_query_only"] is True
+    assert planner["whole_database_backup"] is False
+    assert planner["scratch_backend"] == "bounded_target_only_memory"
+    assert "synthetic_unrelated_operational_payload" not in planner["table_row_counts"]
+    assert int(planner["copied_payload_bytes"]) < 64 * 1024 * 1024
+    assert int(planner["scratch_bytes"]) < 64 * 1024 * 1024
+    assert max(0, after_rss - before_rss) < max_rss_growth_bytes
+    assert runtime.db_path.stat().st_size > unrelated_bytes
+    with sqlite3.connect(runtime.db_path) as conn:
+        assert conn.execute(
+            "SELECT length(payload) FROM synthetic_unrelated_operational_payload "
+            "WHERE row_id=1"
+        ).fetchone()[0] == unrelated_bytes
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id>=20000"
+        ).fetchone()[0] == 0
+
+    original_chunk_size = recovery_module.PROJECTION_CHUNK_SIZE
+    try:
+        recovery_module.PROJECTION_CHUNK_SIZE = 97
+        repeated = runner.build_plan()
+    finally:
+        recovery_module.PROJECTION_CHUNK_SIZE = original_chunk_size
+    assert repeated["planner"]["chunk_size"] == 97
+    assert repeated["target"]["stable_business_digest"] == (
+        plan["target"]["stable_business_digest"]
+    )
+    assert repeated["past_fulfilled_invariant"] == plan["past_fulfilled_invariant"]
+    assert repeated["predicted_effects"] == plan["predicted_effects"]
+    production_source = (
+        ROOT / "packages/application/ff_pool_fbs_forward_recovery.py"
+    ).read_text(encoding="utf-8")
+    assert ".backup(" not in production_source
+
+
+def _peak_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
 
 
 def _balance_rows(path: Path) -> dict[int, tuple[int, Decimal]]:
