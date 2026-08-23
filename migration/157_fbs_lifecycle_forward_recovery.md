@@ -16,7 +16,16 @@ commits only the inert tables, so the subsequent T0 planner stays query-only.
 
 `apps/ff_pool_fbs_forward_recovery.py` defaults to `dry-run`. The production
 source is opened with SQLite `mode=ro` and `PRAGMA query_only=ON`; planning may
-apply the canonical lifecycle function only to a disposable in-memory copy.
+apply the canonical lifecycle function only to a disposable in-memory
+target projection. The planner never invokes a whole-database SQLite backup:
+it creates schemas without triggers, streams exact target/dependency rows in
+bounded chunks, preserves required source row identities and copies only the
+pinned order graph plus current FF balance/mapping/aggregate evidence used by
+the canonical lifecycle function. Unrelated operational history is neither
+read into Python nor materialized in scratch. Explicit row, payload, target-
+manifest and scratch-size ceilings fail closed before memory can grow without
+bound. The manifest publishes these planner bounds and measured projection
+counts/bytes as read-only evidence.
 The resulting machine-readable manifest binds:
 
 - exact deployed SHA, active storage generation/schema and active Stage 7C
@@ -36,6 +45,9 @@ material. Stable business dates/revisions/status digests and exact pinned
 identity evidence are fingerprint material. Thus append-only observations
 `C+1..N` do not change the reviewed manifest, while a changed target row,
 mapping/cutover identity, target WAC or storage generation fails closed.
+Stable target and past-fulfilled digests use canonical length-delimited
+streaming payloads, so fetch chunk boundaries and volatile timestamps cannot
+alter their value.
 
 ## Gated apply and two lanes
 
@@ -86,3 +98,8 @@ debit/capital across lanes; post-cutoff exclusion; freshness-insensitive stable
 digests; inert pre-gate rollback; target-WAC CAS failure; query-only repeat
 no-op proof without a second submit; ambiguous-transport readback;
 past fulfilled immutability; and exact quantity/capital/non-target invariants.
+Its production-scale case plans 5,600 target rows beside a 192 MiB unrelated
+operational payload, proves that payload is excluded, keeps measured RSS and
+scratch below explicit bounds, and obtains identical business/after-image
+digests with a different fetch chunk size. The static recovery-writer inventory
+also no longer classifies this planner as a coherent full-store backup writer.

@@ -14,12 +14,13 @@ from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 import hashlib
+from itertools import chain
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from packages.application.ff_pool_cutover import MANIFESTS_TABLE
 from packages.application.ff_pool_fbs_lifecycle import (
@@ -33,10 +34,21 @@ from packages.application.ff_pool_fbs_lifecycle import (
     IDENTITY_PENDING_RESOLUTIONS_TABLE,
     IDENTITY_PENDING_TABLE,
     LATE_EVIDENCE_TABLE,
+    MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+    MAPPING_EXTENSIONS_TABLE,
+    RECONCILIATION_TABLE,
     ensure_ff_pool_fbs_lifecycle_schema,
     recover_pinned_fbs_lifecycle,
 )
-from packages.application.ff_pool_foundation import BALANCES_TABLE, canonical_decimal_text
+from packages.application.ff_pool_foundation import (
+    BALANCES_TABLE,
+    FACILITIES_TABLE,
+    FEATURE_EPOCHS_TABLE,
+    LINES_TABLE,
+    OPERATIONS_TABLE,
+    PARITY_TABLE,
+    canonical_decimal_text,
+)
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
@@ -44,8 +56,10 @@ from packages.application.storage_registry import manifest_payload
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 from packages.application.wb_fbs_orders import (
     IDENTITY_EVIDENCE_TABLE,
+    IDENTITY_MAPPINGS_TABLE,
     OBSERVATIONS_TABLE,
     STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE,
 )
 
 
@@ -53,6 +67,43 @@ CONTRACT_NAME = "ff_pool_fbs_forward_recovery_v1"
 CONTRACT_VERSION = 1
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_TARGET_COUNT = 100_000
+PROJECTION_CHUNK_SIZE = 256
+PROJECTION_MAX_ROW_COUNT = 500_000
+PROJECTION_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
+PROJECTION_MAX_SCRATCH_BYTES = 384 * 1024 * 1024
+TARGET_MANIFEST_MAX_PAYLOAD_BYTES = 128 * 1024 * 1024
+
+CUTOVER_ORDERS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_order_classifications"
+CUTOVER_LATE_CASES_TABLE = "sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases"
+FUNCTIONAL_ACTIVE_TABLE = "sheet_vitrina_v1_warehouse_functional_active"
+FUNCTIONAL_BALANCES_TABLE = "sheet_vitrina_v1_warehouse_functional_balances"
+
+PREVIEW_SCHEMA_TABLES = (
+    MANIFESTS_TABLE,
+    CUTOVER_ORDERS_TABLE,
+    CUTOVER_LATE_CASES_TABLE,
+    FACILITIES_TABLE,
+    FEATURE_EPOCHS_TABLE,
+    OPERATIONS_TABLE,
+    LINES_TABLE,
+    BALANCES_TABLE,
+    PARITY_TABLE,
+    OBSERVATIONS_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE,
+    IDENTITY_MAPPINGS_TABLE,
+    IDENTITY_EVIDENCE_TABLE,
+    EVENTS_TABLE,
+    CURRENT_TABLE,
+    RECONCILIATION_TABLE,
+    LATE_EVIDENCE_TABLE,
+    IDENTITY_PENDING_TABLE,
+    IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    MAPPING_EXTENSIONS_TABLE,
+    MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+    FUNCTIONAL_ACTIVE_TABLE,
+    FUNCTIONAL_BALANCES_TABLE,
+)
 
 
 class FfPoolFbsForwardRecoveryError(RuntimeError):
@@ -90,7 +141,11 @@ class FfPoolFbsForwardRecoveryMutation:
                 deployed_sha=self.deployed_sha,
                 storage_identity=storage,
             )
-            preview = _preview_recovery(conn, source=source, occurred_at=generated_at)
+            preview, projection = _preview_recovery(
+                conn,
+                source=source,
+                occurred_at=generated_at,
+            )
         blockers = list(source["blockers"])
         plan: dict[str, Any] = {
             "contract_name": CONTRACT_NAME,
@@ -116,6 +171,16 @@ class FfPoolFbsForwardRecoveryMutation:
             },
             "past_fulfilled_invariant": source["past_fulfilled_invariant"],
             "predicted_effects": preview,
+            "planner": {
+                **projection,
+                "stable_digest_contract": "canonical_length_delimited_stream_v1",
+                "target_manifest_payload_bytes": source[
+                    "target_manifest_payload_bytes"
+                ],
+                "max_target_manifest_payload_bytes": (
+                    TARGET_MANIFEST_MAX_PAYLOAD_BYTES
+                ),
+            },
             "recovery": {
                 "writer_lock": "warehouse_functional_write_lock",
                 "before_image": "private_mode_0600_exact_target",
@@ -571,25 +636,56 @@ def _build_source_snapshot(
     cutoff = live_max if pinned_cutoff is None else int(pinned_cutoff)
     if cutoff < old_cursor:
         blockers.append("cutoff_before_old_cursor")
-    rows = conn.execute(
+    cursor = conn.execute(
         f"""SELECT observation_sequence FROM {STATUS_OBSERVATIONS_TABLE}
             WHERE observation_sequence>? AND observation_sequence<=?
             ORDER BY observation_sequence""",
         (old_cursor, cutoff),
-    ).fetchall()
-    sequences = [int(row[0]) for row in rows]
+    )
+    sequences: list[int] = []
+    while True:
+        rows = cursor.fetchmany(PROJECTION_CHUNK_SIZE)
+        if not rows:
+            break
+        sequences.extend(int(row[0]) for row in rows)
+        if len(sequences) > MAX_TARGET_COUNT:
+            raise FfPoolFbsForwardRecoveryError(
+                "target_count_exceeds_bound",
+                "Pinned recovery target exceeds its deterministic row bound",
+                details={"target_count": len(sequences), "max_target_count": MAX_TARGET_COUNT},
+            )
     if len(sequences) > MAX_TARGET_COUNT:
         blockers.append("target_count_exceeds_bound")
-    target_rows = [_stable_target_row(conn, sequence, cutoff=cutoff) for sequence in sequences]
+    target_rows: list[dict[str, Any]] = []
+    target_manifest_payload_bytes = 0
+    for sequence in sequences:
+        target_row = _stable_target_row(conn, sequence, cutoff=cutoff)
+        target_manifest_payload_bytes += len(_json(target_row).encode("utf-8"))
+        if target_manifest_payload_bytes > TARGET_MANIFEST_MAX_PAYLOAD_BYTES:
+            raise FfPoolFbsForwardRecoveryError(
+                "target_manifest_memory_bound_exceeded",
+                "Pinned recovery target payload exceeds its bounded-memory contract",
+                details={
+                    "payload_bytes": target_manifest_payload_bytes,
+                    "max_payload_bytes": TARGET_MANIFEST_MAX_PAYLOAD_BYTES,
+                },
+            )
+        target_rows.append(target_row)
     location_wac = _target_location_wac_evidence(conn, target_rows)
-    stable_target_digest = _fingerprint(
-        {
-            "cutover_id": cutover_id,
-            "cutoff_sequence": cutoff,
-            "old_cursor_sequence": old_cursor,
-            "target_rows": target_rows,
-            "location_wac_evidence": location_wac,
-        }
+    stable_target_digest = _streaming_fingerprint(
+        chain(
+            ({
+                "contract": "ff_pool_fbs_stable_target_stream_v1",
+                "cutover_id": cutover_id,
+                "cutoff_sequence": cutoff,
+                "old_cursor_sequence": old_cursor,
+            },),
+            target_rows,
+            ({
+                "contract": "ff_pool_fbs_location_wac_evidence_v1",
+                "rows": location_wac,
+            },),
+        )
     )
     return {
         "deployed_sha": deployed_sha,
@@ -600,6 +696,7 @@ def _build_source_snapshot(
         "old_cursor_sequence": old_cursor,
         "target_sequences": sequences,
         "target_rows": target_rows,
+        "target_manifest_payload_bytes": target_manifest_payload_bytes,
         "stable_target_digest": stable_target_digest,
         "location_wac_evidence": location_wac,
         "past_fulfilled_invariant": _past_fulfilled_invariant(
@@ -762,29 +859,56 @@ def _past_fulfilled_invariant(
             ).fetchone()[0]
         )
     )
-    rows = [
-        dict(row)
-        for row in conn.execute(
-            f"""SELECT event_sequence,event_id,cutover_id,order_id,
-                       source_status_observation_sequence,facility_id,pool,nm_id,
-                       quantity,physical_quantity_delta,capital_delta_rub,
-                       frozen_wac_rub,evidence_digest
-                FROM {EVENTS_TABLE}
-                WHERE event_type IN ('opening_handoff_debit','handoff_debit')
-                  AND event_sequence<=? ORDER BY event_sequence""",
-            (maximum,),
-        ).fetchall()
-    ]
-    return {"pinned_event_sequence_max": maximum, "count": len(rows), "digest": _fingerprint(rows)}
+    cursor = conn.execute(
+        f"""SELECT event_sequence,event_id,cutover_id,order_id,
+                   source_status_observation_sequence,facility_id,pool,nm_id,
+                   quantity,physical_quantity_delta,capital_delta_rub,
+                   frozen_wac_rub,evidence_digest
+            FROM {EVENTS_TABLE}
+            WHERE event_type IN ('opening_handoff_debit','handoff_debit')
+              AND event_sequence<=? ORDER BY event_sequence""",
+        (maximum,),
+    )
+    digest = hashlib.sha256()
+    _update_streaming_digest(
+        digest,
+        {
+            "contract": "ff_pool_fbs_past_fulfilled_stream_v1",
+            "pinned_event_sequence_max": maximum,
+        },
+    )
+    count = 0
+    while True:
+        rows = cursor.fetchmany(PROJECTION_CHUNK_SIZE)
+        if not rows:
+            break
+        for row in rows:
+            _update_streaming_digest(digest, dict(row))
+            count += 1
+    return {
+        "pinned_event_sequence_max": maximum,
+        "count": count,
+        "digest": "sha256:" + digest.hexdigest(),
+        "digest_contract": "canonical_length_delimited_stream_v1",
+    }
 
 
 def _preview_recovery(
     query: sqlite3.Connection, *, source: Mapping[str, Any], occurred_at: str
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if int(query.execute("PRAGMA query_only").fetchone()[0]) != 1:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_source_not_query_only",
+            "Recovery preview source must remain SQLite query-only",
+        )
     sandbox = sqlite3.connect(":memory:")
     sandbox.row_factory = sqlite3.Row
-    query.backup(sandbox)
     try:
+        projection = _build_preview_projection(
+            query,
+            sandbox,
+            source=source,
+        )
         before_balances = _balance_payload(sandbox)
         recovery = recover_pinned_fbs_lifecycle(
             sandbox,
@@ -796,14 +920,352 @@ def _preview_recovery(
         result = _target_result_payload(
             sandbox, tuple(int(value) for value in source["target_sequences"])
         )
-        return _preview_payload(
-            recovery=recovery,
-            before_balances=before_balances,
-            after_balances=after_balances,
-            target_result=result,
+        return (
+            _preview_payload(
+                recovery=recovery,
+                before_balances=before_balances,
+                after_balances=after_balances,
+                target_result=result,
+            ),
+            projection,
         )
     finally:
         sandbox.close()
+
+
+def _build_preview_projection(
+    source_conn: sqlite3.Connection,
+    scratch: sqlite3.Connection,
+    *,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy only the pinned lifecycle dependency graph into bounded scratch.
+
+    The production connection remains ``mode=ro``/``query_only``.  Scratch is
+    private and in-memory, but unlike the former whole-store SQLite backup it
+    contains only the exact ``<= C`` order identities plus the small current
+    facility/aggregate state needed by the canonical lifecycle function.
+    """
+
+    tracker = _ProjectionTracker()
+    for table in PREVIEW_SCHEMA_TABLES:
+        _create_projection_table(source_conn, scratch, table)
+
+    cutover_id = str(source["cutover_id"])
+    target_rows = [dict(row) for row in source["target_rows"]]
+    sequences = tuple(int(value) for value in source["target_sequences"])
+    order_ids = tuple(sorted({int(row["order_id"]) for row in target_rows}))
+
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        MANIFESTS_TABLE,
+        tracker,
+        where="cutover_id=?",
+        parameters=(cutover_id,),
+    )
+    _copy_projection_rows(source_conn, scratch, FACILITIES_TABLE, tracker)
+    _copy_projection_rows(source_conn, scratch, FEATURE_EPOCHS_TABLE, tracker)
+    _copy_projection_rows(source_conn, scratch, BALANCES_TABLE, tracker)
+    _copy_projection_rows(source_conn, scratch, WAREHOUSE_MAPPINGS_TABLE, tracker)
+    _copy_projection_rows(source_conn, scratch, IDENTITY_MAPPINGS_TABLE, tracker)
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        MAPPING_EXTENSIONS_TABLE,
+        tracker,
+        where="cutover_id=?",
+        parameters=(cutover_id,),
+    )
+    extension_ids = tuple(
+        str(row[0])
+        for row in source_conn.execute(
+            f"SELECT extension_id FROM {MAPPING_EXTENSIONS_TABLE} "
+            "WHERE cutover_id=? ORDER BY extension_id",
+            (cutover_id,),
+        ).fetchall()
+    )
+    _copy_projection_in(
+        source_conn,
+        scratch,
+        MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+        "extension_id",
+        extension_ids,
+        tracker,
+    )
+
+    _copy_projection_in(
+        source_conn,
+        scratch,
+        STATUS_OBSERVATIONS_TABLE,
+        "observation_sequence",
+        sequences,
+        tracker,
+    )
+    for table in (
+        OBSERVATIONS_TABLE,
+        IDENTITY_EVIDENCE_TABLE,
+        EVENTS_TABLE,
+        CURRENT_TABLE,
+        RECONCILIATION_TABLE,
+        LATE_EVIDENCE_TABLE,
+        CUTOVER_ORDERS_TABLE,
+        CUTOVER_LATE_CASES_TABLE,
+    ):
+        _copy_projection_in(
+            source_conn,
+            scratch,
+            table,
+            "order_id",
+            order_ids,
+            tracker,
+        )
+    for table in (IDENTITY_PENDING_TABLE, IDENTITY_PENDING_RESOLUTIONS_TABLE):
+        _copy_projection_in(
+            source_conn,
+            scratch,
+            table,
+            "source_status_observation_sequence",
+            sequences,
+            tracker,
+        )
+
+    active = source_conn.execute(
+        f"SELECT version_id FROM {FUNCTIONAL_ACTIVE_TABLE} WHERE slot=1"
+    ).fetchone()
+    if active is None:
+        raise FfPoolFbsForwardRecoveryError(
+            "aggregate_active_missing",
+            "Aggregate FF version is missing from the preview source",
+        )
+    active_version = str(active[0])
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        FUNCTIONAL_ACTIVE_TABLE,
+        tracker,
+        where="slot=1",
+    )
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        FUNCTIONAL_BALANCES_TABLE,
+        tracker,
+        where="version_id=? AND warehouse_key='ff'",
+        parameters=(active_version,),
+    )
+
+    watermarks = tuple(
+        sorted(
+            {
+                str(row[0])
+                for row in source_conn.execute(
+                    f"SELECT source_watermark FROM {BALANCES_TABLE} "
+                    "WHERE length(trim(source_watermark))>0"
+                ).fetchall()
+            }
+        )
+    )
+    operation_rowids: set[int] = set()
+    for batch in _chunks(watermarks, PROJECTION_CHUNK_SIZE):
+        placeholders = ",".join("?" for _ in batch)
+        operation_rowids.update(
+            int(row[0])
+            for row in source_conn.execute(
+                f"SELECT rowid FROM {OPERATIONS_TABLE} WHERE "
+                f"operation_id IN ({placeholders}) OR "
+                f"source_revision IN ({placeholders})",
+                (*batch, *batch),
+            ).fetchall()
+        )
+    _copy_projection_in(
+        source_conn,
+        scratch,
+        OPERATIONS_TABLE,
+        "rowid",
+        tuple(sorted(operation_rowids)),
+        tracker,
+    )
+
+    scratch.commit()
+    scratch_bytes = int(scratch.execute("PRAGMA page_count").fetchone()[0]) * int(
+        scratch.execute("PRAGMA page_size").fetchone()[0]
+    )
+    if scratch_bytes > PROJECTION_MAX_SCRATCH_BYTES:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_memory_bound_exceeded",
+            "Pinned recovery scratch exceeds the bounded-memory contract",
+            details={
+                "scratch_bytes": scratch_bytes,
+                "max_scratch_bytes": PROJECTION_MAX_SCRATCH_BYTES,
+            },
+        )
+    return {
+        "contract": "ff_pool_fbs_target_projection_v2",
+        "source_open_mode": "ro",
+        "source_query_only": True,
+        "scratch_backend": "bounded_target_only_memory",
+        "whole_database_backup": False,
+        "chunk_size": PROJECTION_CHUNK_SIZE,
+        "copied_table_count": len(tracker.table_rows),
+        "copied_row_count": tracker.row_count,
+        "copied_payload_bytes": tracker.payload_bytes,
+        "scratch_bytes": scratch_bytes,
+        "max_row_count": PROJECTION_MAX_ROW_COUNT,
+        "max_payload_bytes": PROJECTION_MAX_PAYLOAD_BYTES,
+        "max_scratch_bytes": PROJECTION_MAX_SCRATCH_BYTES,
+        "table_row_counts": dict(sorted(tracker.table_rows.items())),
+    }
+
+
+class _ProjectionTracker:
+    def __init__(self) -> None:
+        self.row_count = 0
+        self.payload_bytes = 0
+        self.table_rows: dict[str, int] = {}
+
+    def add(self, table: str, rows: Sequence[Sequence[Any]]) -> None:
+        row_count = len(rows)
+        payload_bytes = sum(
+            sum(_projection_cell_size(value) for value in row) for row in rows
+        )
+        next_rows = self.row_count + row_count
+        next_bytes = self.payload_bytes + payload_bytes
+        if (
+            next_rows > PROJECTION_MAX_ROW_COUNT
+            or next_bytes > PROJECTION_MAX_PAYLOAD_BYTES
+        ):
+            raise FfPoolFbsForwardRecoveryError(
+                "preview_projection_memory_bound_exceeded",
+                "Pinned recovery projection exceeds its row/payload bound",
+                details={
+                    "row_count": next_rows,
+                    "max_row_count": PROJECTION_MAX_ROW_COUNT,
+                    "payload_bytes": next_bytes,
+                    "max_payload_bytes": PROJECTION_MAX_PAYLOAD_BYTES,
+                },
+            )
+        self.row_count = next_rows
+        self.payload_bytes = next_bytes
+        self.table_rows[table] = self.table_rows.get(table, 0) + row_count
+
+
+def _create_projection_table(
+    source: sqlite3.Connection,
+    scratch: sqlite3.Connection,
+    table: str,
+) -> None:
+    row = source.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_schema_missing",
+            f"Required preview table schema is missing: {table}",
+        )
+    scratch.execute(str(row[0]))
+
+
+def _copy_projection_in(
+    source: sqlite3.Connection,
+    scratch: sqlite3.Connection,
+    table: str,
+    column: str,
+    values: Iterable[Any],
+    tracker: _ProjectionTracker,
+) -> None:
+    ordered = tuple(dict.fromkeys(values))
+    for batch in _chunks(ordered, PROJECTION_CHUNK_SIZE):
+        placeholders = ",".join("?" for _ in batch)
+        _copy_projection_rows(
+            source,
+            scratch,
+            table,
+            tracker,
+            where=f'{_quote_identifier(column)} IN ({placeholders})',
+            parameters=tuple(batch),
+        )
+
+
+def _copy_projection_rows(
+    source: sqlite3.Connection,
+    scratch: sqlite3.Connection,
+    table: str,
+    tracker: _ProjectionTracker,
+    *,
+    where: str = "",
+    parameters: Sequence[Any] = (),
+) -> None:
+    table_sql_row = source.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if table_sql_row is None:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_schema_missing",
+            f"Required preview table schema is missing: {table}",
+        )
+    table_sql = str(table_sql_row[0] or "")
+    info = source.execute(f"PRAGMA table_info({_quote_identifier(table)})").fetchall()
+    columns = tuple(str(row[1]) for row in info)
+    if not columns:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_schema_missing",
+            f"Required preview table has no columns: {table}",
+        )
+    without_rowid = "WITHOUT ROWID" in table_sql.upper()
+    selected_columns = tuple(_quote_identifier(column) for column in columns)
+    select_prefix = "" if without_rowid else "rowid AS __projection_rowid__,"
+    pk_columns = tuple(
+        str(row[1])
+        for row in sorted(info, key=lambda item: int(item[5] or 0))
+        if int(row[5] or 0)
+    )
+    order_by = ",".join(_quote_identifier(value) for value in pk_columns)
+    if not order_by and not without_rowid:
+        order_by = "rowid"
+    sql = (
+        f"SELECT {select_prefix}{','.join(selected_columns)} "
+        f"FROM {_quote_identifier(table)}"
+    )
+    if where:
+        sql += f" WHERE {where}"
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    cursor = source.execute(sql, tuple(parameters))
+    insert_columns = columns if without_rowid else ("rowid", *columns)
+    insert_sql = (
+        f"INSERT INTO {_quote_identifier(table)}("
+        + ",".join(_quote_identifier(value) for value in insert_columns)
+        + ") VALUES("
+        + ",".join("?" for _ in insert_columns)
+        + ")"
+    )
+    while True:
+        rows = cursor.fetchmany(PROJECTION_CHUNK_SIZE)
+        if not rows:
+            break
+        material = [tuple(row) for row in rows]
+        tracker.add(table, material)
+        scratch.executemany(insert_sql, material)
+
+
+def _chunks(values: Sequence[Any], size: int) -> Iterable[tuple[Any, ...]]:
+    for offset in range(0, len(values), int(size)):
+        yield tuple(values[offset : offset + int(size)])
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _projection_cell_size(value: Any) -> int:
+    if value is None:
+        return 1
+    if isinstance(value, bytes):
+        return len(value)
+    return len(str(value).encode("utf-8"))
 
 
 def _preview_payload(
@@ -1053,6 +1515,19 @@ def _sha256_file(path: Path) -> str:
 
 def _fingerprint(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _streaming_fingerprint(values: Iterable[Any]) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        _update_streaming_digest(digest, value)
+    return "sha256:" + digest.hexdigest()
+
+
+def _update_streaming_digest(digest: Any, value: Any) -> None:
+    payload = _json(value).encode("utf-8")
+    digest.update(len(payload).to_bytes(8, byteorder="big", signed=False))
+    digest.update(payload)
 
 
 def _json(value: Any) -> str:
