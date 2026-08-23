@@ -36,8 +36,13 @@ from packages.application.sheet_vitrina_v1_control_refresh_canary import (  # no
     ControlRefreshCanaryRunner,
     SystemdTimerCoordinator,
     arm_control_canary_manifest,
+    arm_night_refresh_plan_manifest,
     control_canary_status,
+    finalize_night_refresh_plans,
+    night_refresh_plan_status,
+    rebind_night_refresh_plan_manifest,
 )
+from packages.application.business_data_write_barrier import barrier_status  # noqa: E402
 from packages.application.storage_registry import StoreRegistry  # noqa: E402
 
 
@@ -65,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--experiment-status", action="store_true")
     parser.add_argument("--control-canary-status", action="store_true")
     parser.add_argument("--arm-control-canary", action="store_true")
+    parser.add_argument("--night-refresh-plan-status", action="store_true")
+    parser.add_argument("--arm-night-refresh-plan", action="store_true")
+    parser.add_argument("--rebind-night-refresh-plan", action="store_true")
+    parser.add_argument("--night-refresh-plan-id", default="")
+    parser.add_argument("--previous-night-refresh-plan-id", default="")
     parser.add_argument("--control-canary-id", default="")
     parser.add_argument("--control-canary-due-at", default="")
     parser.add_argument("--control-canary-deadline", default="")
@@ -88,6 +98,41 @@ def main(argv: list[str] | None = None) -> int:
     refresh_path = args.refresh_path or os.environ.get("SHEET_VITRINA_REFRESH_HTTP_PATH") or DEFAULT_REFRESH_PATH
     job_path = args.job_path or os.environ.get("SHEET_VITRINA_JOB_HTTP_PATH") or DEFAULT_JOB_PATH
     timer_coordinator = SystemdTimerCoordinator()
+    if args.rebind_night_refresh_plan:
+        deployed_sha = _read_deployed_sha()
+        if not args.expected_deployed_sha or deployed_sha != str(args.expected_deployed_sha).strip().lower():
+            raise RuntimeError(
+                "night refresh plan rebind exact deployed SHA mismatch: "
+                f"expected={str(args.expected_deployed_sha).strip().lower()} actual={deployed_sha}"
+            )
+        _print(
+            rebind_night_refresh_plan_manifest(
+                runtime_dir=runtime_dir,
+                current_experiment_id=args.previous_night_refresh_plan_id,
+                replacement_experiment_id=args.night_refresh_plan_id,
+                expected_deployed_sha=deployed_sha,
+                pause_units=args.pause_unit,
+                now=datetime.now(timezone.utc),
+            )
+        )
+        return 0
+    if args.arm_night_refresh_plan:
+        deployed_sha = _read_deployed_sha()
+        if not args.expected_deployed_sha or deployed_sha != str(args.expected_deployed_sha).strip().lower():
+            raise RuntimeError(
+                "night refresh plan exact deployed SHA mismatch: "
+                f"expected={str(args.expected_deployed_sha).strip().lower()} actual={deployed_sha}"
+            )
+        _print(
+            arm_night_refresh_plan_manifest(
+                runtime_dir=runtime_dir,
+                experiment_id=args.night_refresh_plan_id,
+                expected_deployed_sha=deployed_sha,
+                pause_units=args.pause_unit,
+                now=datetime.now(timezone.utc),
+            )
+        )
+        return 0
     if args.arm_control_canary:
         deployed_sha = _read_deployed_sha()
         if not args.expected_deployed_sha or deployed_sha != str(args.expected_deployed_sha).strip().lower():
@@ -120,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.control_canary_status:
         _print(control_canary_status(runtime_dir=runtime_dir, now=datetime.now(timezone.utc)))
+        return 0
+    if args.night_refresh_plan_status:
+        _print(night_refresh_plan_status(runtime_dir=runtime_dir, now=datetime.now(timezone.utc)))
         return 0
     block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir)
     due = sorted(block.due_schedules(), key=lambda item: str(item[1] or ""))
@@ -164,11 +212,23 @@ def main(argv: list[str] | None = None) -> int:
                     runtime_dir=runtime_dir,
                     now=datetime.now(timezone.utc),
                 ),
+                "night_refresh_plan": night_refresh_plan_status(
+                    runtime_dir=runtime_dir,
+                    now=datetime.now(timezone.utc),
+                ),
             }
         )
         return 0
     experiment_result = experiment.tick()
     control_canary_result = control_canary.tick()
+    finalized_night_plans = finalize_night_refresh_plans(
+        runtime_dir=runtime_dir,
+        now=datetime.now(timezone.utc),
+    )
+    night_plan_result = night_refresh_plan_status(
+        runtime_dir=runtime_dir,
+        now=datetime.now(timezone.utc),
+    )
     canary_blocks_ordinary = str(control_canary_result.get("status") or "") not in {
         "no_due_canary",
         "armed",
@@ -184,9 +244,11 @@ def main(argv: list[str] | None = None) -> int:
                 "ordinary_due_launch_suppressed": True,
                 "night_experiment": experiment_result,
                 "control_canary": control_canary_result,
+                "night_refresh_plan": night_plan_result,
+                "finalized_night_plans": finalized_night_plans,
             }
         )
-        return 0 if str(control_canary_result.get("status") or "") in {"accepted", "accepted_with_warning"} else 1
+        return 0 if _control_canary_tick_exit_success(control_canary_result) else 1
     if not due:
         failed = str((experiment_result.get("tick_result") or {}).get("status") or "") == "failed"
         _print({
@@ -196,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
             "due_count": 0,
             "night_experiment": experiment_result,
             "control_canary": control_canary_result,
+            "night_refresh_plan": night_plan_result,
+            "finalized_night_plans": finalized_night_plans,
         })
         return 1 if failed else 0
     if not cookie:
@@ -286,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
             "results": results,
             "night_experiment": experiment_result,
             "control_canary": control_canary_result,
+            "night_refresh_plan": night_plan_result,
+            "finalized_night_plans": finalized_night_plans,
         }
     )
     return exit_code
@@ -497,6 +563,7 @@ def _build_control_canary_runner(
         fetch_ready_snapshot=fetch_ready_snapshot,
         timer_coordinator=timer_coordinator,
         read_deployed_sha=_read_deployed_sha,
+        read_business_data_barrier=lambda: barrier_status(runtime_dir),
     )
 
 
@@ -705,6 +772,25 @@ def _is_active_job_skip(payload: Mapping[str, Any]) -> bool:
 
 def _is_stale_active_job_skip(payload: Mapping[str, Any]) -> bool:
     return _is_active_job_skip(payload) and bool(payload.get("active_job_stale"))
+
+
+def _control_canary_tick_exit_success(payload: Mapping[str, Any]) -> bool:
+    if str(payload.get("status") or "") in {"accepted", "accepted_with_warning"}:
+        return True
+    artifact = payload.get("artifact") if isinstance(payload.get("artifact"), Mapping) else {}
+    if not artifact.get("parent_plan_id"):
+        return False
+    checks = artifact.get("acceptance_checks") if isinstance(artifact.get("acceptance_checks"), Mapping) else {}
+    failed_checks = {str(key) for key, value in checks.items() if value is not True}
+    fingerprints = artifact.get("fingerprints") if isinstance(artifact.get("fingerprints"), Mapping) else {}
+    return bool(
+        str(artifact.get("technical_status") or "").lower() == "success"
+        and str(artifact.get("semantic_status") or "").lower() in {"success", "warning"}
+        and failed_checks == {"fresh_exact_date_fingerprint_match"}
+        and fingerprints.get("known_volatile_only_difference") is True
+        and fingerprints.get("fresh_readback_diff_paths")
+        == ["meta.generated_at", "status_summary.business_now"]
+    )
 
 
 def _print(payload: Mapping[str, Any]) -> None:
