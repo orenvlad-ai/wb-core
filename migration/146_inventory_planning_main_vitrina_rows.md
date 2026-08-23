@@ -6,6 +6,13 @@
 > rows/catalog/settings/picker. The active public subset is now only WB total,
 > FBS total, dynamic active FBS facility and raw combined total.
 
+> Superseded history/presentation note (Migration 156, 2026-08-23): the active
+> main-table contract now reuses `stock_total / total_stock_total` as
+> `Остатки общие`, shows WB and user-enabled facility rows in exact public
+> order, and reads compact typed current/closed-day component history. The old
+> current-only and automatic-new-facility visibility rules below are retained
+> only as migration evidence.
+
 ## Correction boundary
 
 Migration 145 introduced the query-only `inventory_planning_v1` endpoint and

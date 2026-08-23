@@ -40,6 +40,9 @@ from packages.application.sheet_vitrina_v1_incident_stocks import (
 from packages.application.sheet_vitrina_v1_inventory_planning import (
     extend_rows_with_inventory_planning,
 )
+from packages.application.sheet_vitrina_v1_inventory_history import (
+    read_inventory_history_window,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_proxy_v4 import (
     PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
@@ -329,9 +332,20 @@ class SheetVitrinaV1WebVitrinaBlock:
             metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
             current_business_date=date.fromisoformat(current_business_date_iso(now)),
         )
+        inventory_planning = InventoryPlanningReadModel(
+            db_path=self.runtime.db_path
+        ).current()
+        inventory_current_date = str(
+            (inventory_planning.get("wb") or {}).get("snapshot_date") or ""
+        )
         rows = extend_rows_with_inventory_planning(
             rows,
-            planning=InventoryPlanningReadModel(db_path=self.runtime.db_path).current(),
+            planning=inventory_planning,
+            history=read_inventory_history_window(
+                self.runtime.db_path,
+                dates=snapshot.date_columns,
+                current_date=inventory_current_date,
+            ),
             date_columns=list(snapshot.date_columns),
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
         )

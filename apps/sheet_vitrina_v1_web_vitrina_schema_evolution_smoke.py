@@ -22,6 +22,9 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
+from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: E402
+    INVENTORY_WB_TOTAL_KEY,
+)
 from packages.application.sheet_vitrina_v1_weighted_seller_price import (  # noqa: E402
     WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
 )
@@ -140,8 +143,13 @@ def main() -> None:
         )
         _assert_values(
             rows[f"SKU:{nm_id}|stock_total"].values_by_date,
+            {OLD_DATE: "", NEW_DATE: ""},
+            "the unified stock row must not silently relabel legacy WB-only facts",
+        )
+        _assert_values(
+            rows[f"SKU:{nm_id}|{INVENTORY_WB_TOTAL_KEY}"].values_by_date,
             {OLD_DATE: 5.0, NEW_DATE: 7.0},
-            "stocks must remain readable after new registry metric",
+            "legacy WB-only stocks must remain readable after schema evolution",
         )
         _assert_values(
             rows[f"SKU:{nm_id}|spp"].values_by_date,

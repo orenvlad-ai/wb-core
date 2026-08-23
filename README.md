@@ -1,5 +1,13 @@
 # wb-core
 
+Main Web Vitrina inventory now uses compact server-owned typed history for
+TOTAL and every evidenced SKU. The existing `stock_total / total_stock_total`
+pair is `Остатки общие`; WB and user-enabled FBS facility rows are date-aware,
+missing operands remain distinct from zero, and historical population is
+guarded by a dry-run manifest plus a separate owner apply gate. See
+[`docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md`](docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md)
+and [`migration/156_web_vitrina_inventory_history.md`](migration/156_web_vitrina_inventory_history.md).
+
 Warehouse/cost recovery is governed by the centralized T0/T1/T2/T3 policy in
 [`docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md`](docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md):
 bounded writes use exact undo journals, wide publications use a Finance-raw-free
@@ -191,6 +199,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md](docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md) — active six-warehouse quantity/WAC/capital engine, official WB contour snapshot, guarded functional cutover, targeted `2026-07-01+` WB cost/Proxy publication and canonical hosted dry-run/apply/readback/rollback commands.
 - [docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md](docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md) — server-native WB feedback sync, five-state feature-owned lifecycle, content rating priority `1→2→3→4→5` before rating-only, frozen v1.4.2 guards, conservative budget reconciliation and durable readback-confirmed publication.
 - [docs/modules/50_MODULE__PARTNER_REPORT_BLOCK.md](docs/modules/50_MODULE__PARTNER_REPORT_BLOCK.md) — server-owned one-card profitability with indexed UI preview, explicit blockers and source-digest-bound light XLSX; no active finalization/ZIP/raw export.
+- [docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md](docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md) — compact typed TOTAL/SKU WB+FBS history, closed-day supersession, partial numeric totals and exact-manifest historical backfill.
 - [migration/102_warehouse_opening_snapshot.md](migration/102_warehouse_opening_snapshot.md) — bounded production initialization scope, schema, gates, reconciliation and recovery protocol.
 - [migration/103_warehouse_functional_cutover.md](migration/103_warehouse_functional_cutover.md) — guarded six-stage functional apply, economics publication, hourly sync and production UI gate.
 - [migration/104_warehouse_chain_audit_recovery.md](migration/104_warehouse_chain_audit_recovery.md) — exact-date historical recovery, archived metric cutover, nomenclature identity and UI acceptance contract.
@@ -214,5 +223,6 @@ Legacy-репозитории остаются рабочими, но счита
 - [migration/146_inventory_planning_main_vitrina_rows.md](migration/146_inventory_planning_main_vitrina_rows.md) — presentation correction that materializes `inventory_planning_v1` as default-visible, hideable SKU/TOTAL rows in the main Web Vitrina without switching legacy consumers or rewriting history.
 - [migration/147_legacy_incident_presentation.md](migration/147_legacy_incident_presentation.md) — hidden-not-deleted incident/effective presentation and default-collapsed legacy audit disclosure with production policy/data left unchanged.
 - [migration/150_fbs_orenburg_mapping_extension.md](migration/150_fbs_orenburg_mapping_extension.md) — exact official warehouse 854205 to FF Orenburg append-only Stage 7C extension, frozen backlog drain and two-gate production-mutation contract.
+- [migration/156_web_vitrina_inventory_history.md](migration/156_web_vitrina_inventory_history.md) — additive history/read-model release and dry-run-first, separately owner-gated production backfill.
 - [migration/124_finance_raw_storage_split_design.md](migration/124_finance_raw_storage_split_design.md) — measured staged Finance-raw/operational-store split, transactional outbox, backfill/cutover/rollback gates and ready production-mutation prompt.
 - [migration/128_finance_backup_rotation.md](migration/128_finance_backup_rotation.md) — post-cutover one-current Finance restore-set, atomic replacement, bounded schedule and exact legacy snapshot cleanup.

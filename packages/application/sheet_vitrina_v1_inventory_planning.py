@@ -1,15 +1,16 @@
-"""Read-time inventory_planning_v1 rows for the main Web Vitrina table.
+"""Date-aware inventory rows for the main Web Vitrina table.
 
-The overlay is deliberately presentation-only.  It never mutates ready
-snapshots and reuses the two familiar legacy row identities only as current
-display aliases, so downstream calculation contracts keep their persisted
-semantics.
+The overlay never mutates ready snapshots.  It reads compact server-owned
+component revisions and reuses the canonical ``stock_total`` row identity for
+the unified total.  Legacy historical ``stock_total`` facts remain WB evidence
+and are exposed only through the explicit WB row until a unified revision has
+been materialized.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from packages.application.inventory_planning_read_model import FORMULA_VERSION
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item
@@ -24,8 +25,7 @@ INVENTORY_FBS_FACILITY_PREFIX = "inventory_fbs_facility_available_qty_v1:"
 COMBINED_EFFECTIVE_ALIAS_KEY = "wb_stock_effective_qty"
 COMBINED_TOTAL_ALIAS_KEY = "stock_total"
 INVENTORY_PLANNING_HISTORY_REASON_RU = (
-    "Недоступно: inventory_planning_v1 не переписывает исторические даты "
-    "без exact persisted evidence."
+    "История общей формулы ещё не материализована из exact persisted components."
 )
 INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU = (
     "Историческое значение сохранено по прежней формуле; "
@@ -82,17 +82,29 @@ def extend_rows_with_inventory_planning(
     rows: Iterable[WebVitrinaContractRow],
     *,
     planning: Mapping[str, Any],
+    history: Mapping[str, Any] | None = None,
     date_columns: list[str],
     enabled_config: list[ConfigV2Item],
 ) -> list[WebVitrinaContractRow]:
     """Materialize current planning rows while preserving exact-date history."""
 
     source_rows = list(rows)
-    if not _planning_applies(planning, date_columns=date_columns):
+    history_payload = dict(history or {})
+    current_applies = _planning_applies(planning, date_columns=date_columns)
+    history_applies = bool(dict(history_payload.get("dates") or {}))
+    legacy_wb_applies = _has_legacy_wb_history(
+        source_rows,
+        date_columns=date_columns,
+    )
+    if not current_applies and not history_applies and not legacy_wb_applies:
         return source_rows
 
     current_date = str((planning.get("wb") or {}).get("snapshot_date") or "")
-    specs = _public_metric_specs(planning)
+    specs = _public_metric_specs(
+        planning,
+        history=history_payload,
+        include_facilities=current_applies or history_applies,
+    )
     planning_keys = {
         key
         for spec in specs
@@ -144,6 +156,10 @@ def extend_rows_with_inventory_planning(
                     group=None,
                     nm_id=None,
                     value_source=_aggregate_value_source(planning),
+                    history_by_date=_history_scopes(
+                        history_payload,
+                        scope_key="TOTAL",
+                    ),
                     row_updated_at=_planning_updated_at(planning),
                 )
             )
@@ -173,6 +189,10 @@ def extend_rows_with_inventory_planning(
                     value_source=_sku_value_source(
                         planning_by_nm_id.get(nm_id),
                         planning=planning,
+                    ),
+                    history_by_date=_history_scopes(
+                        history_payload,
+                        scope_key=scope_id,
                     ),
                     row_updated_at=_planning_updated_at(planning),
                 )
@@ -258,14 +278,61 @@ def _metric_specs(planning: Mapping[str, Any]) -> list[_MetricSpec]:
     return specs
 
 
-def _public_metric_specs(planning: Mapping[str, Any]) -> list[_MetricSpec]:
-    """Return the ordinary-table profile without legacy incident-aware rows."""
+def _public_metric_specs(
+    planning: Mapping[str, Any],
+    *,
+    history: Mapping[str, Any] | None = None,
+    include_facilities: bool = True,
+) -> list[_MetricSpec]:
+    """Return the approved public order without a duplicate FBS aggregate row."""
 
-    return [
-        spec
-        for spec in _metric_specs(planning)
-        if spec.sku_key not in INVENTORY_PLANNING_LEGACY_SKU_METRIC_KEYS
+    combined = _MetricSpec(
+        sku_key=COMBINED_TOTAL_ALIAS_KEY,
+        total_key=inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY),
+        label_ru="Остатки общие",
+        value_field="total",
+        reason_field="total_reason_ru",
+    )
+    wb = _MetricSpec(
+        sku_key=INVENTORY_WB_TOTAL_KEY,
+        total_key=inventory_planning_total_metric_key(INVENTORY_WB_TOTAL_KEY),
+        label_ru="Остатки WB",
+        value_field="wb_total",
+        reason_field="wb_total_reason_ru",
+    )
+    facilities_by_id: dict[str, Mapping[str, Any]] = {}
+    for raw in [
+        *list((planning.get("fbs") or {}).get("facilities") or []),
+        *list((history or {}).get("facilities") or []),
+    ]:
+        if not isinstance(raw, Mapping):
+            continue
+        facility_id = str(raw.get("facility_id") or "").strip()
+        if facility_id:
+            facilities_by_id.setdefault(facility_id, raw)
+    ordered_facilities = sorted(
+        facilities_by_id.values(),
+        key=lambda item: (
+            int(item.get("display_order") or 0),
+            str(item.get("code") or ""),
+            str(item.get("facility_id") or ""),
+        ),
+    )
+    facility_specs = [
+        _MetricSpec(
+            sku_key=inventory_planning_facility_metric_key(str(item["facility_id"])),
+            total_key=inventory_planning_total_metric_key(
+                inventory_planning_facility_metric_key(str(item["facility_id"]))
+            ),
+            label_ru=f"Остатки FBS {str(item.get('name') or item['facility_id']).strip()}",
+            value_field="facility_available",
+            reason_field="facility_available_reason_ru",
+            facility_id=str(item["facility_id"]),
+        )
+        for item in ordered_facilities
+        if include_facilities
     ]
+    return [combined, wb, *facility_specs]
 
 
 def _planning_applies(planning: Mapping[str, Any], *, date_columns: list[str]) -> bool:
@@ -276,15 +343,23 @@ def _planning_applies(planning: Mapping[str, Any], *, date_columns: list[str]) -
         return False
     snapshot_date = str((planning.get("wb") or {}).get("snapshot_date") or "")
     effective_from = str(formula.get("effective_from") or "")
-    source_cutover_id = str(formula.get("source_cutover_id") or "")
-    feature_epoch = formula.get("feature_epoch")
     return bool(
         snapshot_date
-        and effective_from
-        and source_cutover_id
-        and feature_epoch is not None
         and snapshot_date in set(date_columns)
-        and snapshot_date >= effective_from
+        and (not effective_from or snapshot_date >= effective_from)
+    )
+
+
+def _has_legacy_wb_history(
+    rows: Sequence[WebVitrinaContractRow],
+    *,
+    date_columns: Sequence[str],
+) -> bool:
+    legacy_keys = {COMBINED_TOTAL_ALIAS_KEY, f"total_{COMBINED_TOTAL_ALIAS_KEY}"}
+    return any(
+        row.metric_key in legacy_keys
+        and any(row.values_by_date.get(column_date) not in {None, ""} for column_date in date_columns)
+        for row in rows
     )
 
 
@@ -301,11 +376,18 @@ def _replace_planning_cluster(
     group: str | None,
     nm_id: int | None,
     value_source: Mapping[str, Any],
+    history_by_date: Mapping[str, Mapping[str, Any]],
     row_updated_at: str,
 ) -> list[WebVitrinaContractRow]:
     existing_by_key = {
         row.metric_key: row for row in cluster if row.metric_key in planning_keys
     }
+    legacy_combined_key = (
+        inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)
+        if scope_kind == "TOTAL"
+        else COMBINED_TOTAL_ALIAS_KEY
+    )
+    legacy_wb_row = existing_by_key.get(legacy_combined_key)
     insert_at = min(
         (
             index
@@ -331,6 +413,8 @@ def _replace_planning_cluster(
             group=group,
             nm_id=nm_id,
             value_source=value_source,
+            history_by_date=history_by_date,
+            legacy_wb_row=legacy_wb_row,
             row_updated_at=row_updated_at,
         )
         for spec in specs
@@ -351,37 +435,41 @@ def _planning_row(
     group: str | None,
     nm_id: int | None,
     value_source: Mapping[str, Any],
+    history_by_date: Mapping[str, Mapping[str, Any]],
+    legacy_wb_row: WebVitrinaContractRow | None,
     row_updated_at: str,
 ) -> WebVitrinaContractRow:
-    values = (
-        dict(existing.values_by_date)
-        if existing is not None
-        else {column_date: "" for column_date in date_columns}
-    )
-    presentation = (
-        {key: dict(value) for key, value in existing.presentation_by_date.items()}
-        if existing is not None
-        else {
-            column_date: _history_unavailable_presentation()
-            for column_date in date_columns
-            if column_date != current_date
-        }
-    )
-    if existing is not None:
-        for column_date in date_columns:
-            historical_value = values.get(column_date)
-            if column_date == current_date or historical_value is None or historical_value == "":
-                continue
-            historical = presentation.setdefault(column_date, {})
-            historical.setdefault("quality_state", "inventory_planning_legacy_history")
-            historical.setdefault("quality_label", "Историческая формула")
-            historical.setdefault(
-                "quality_reason",
-                INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU,
+    values = {column_date: "" for column_date in date_columns}
+    presentation = {
+        column_date: _history_unavailable_presentation()
+        for column_date in date_columns
+        if column_date != current_date
+    }
+    for column_date in date_columns:
+        if column_date == current_date:
+            continue
+        historical_scope = history_by_date.get(column_date)
+        if historical_scope is not None:
+            historical_value, historical_presentation = _historical_metric_value(
+                spec,
+                historical_scope,
             )
-    value, reason = _metric_value(spec, value_source)
-    values[current_date] = value if value is not None else ""
-    presentation[current_date] = _current_presentation(reason=reason if value is None else "")
+            values[column_date] = "" if historical_value is None else historical_value
+            presentation[column_date] = historical_presentation
+            continue
+        if spec.sku_key == INVENTORY_WB_TOTAL_KEY and legacy_wb_row is not None:
+            legacy_value = legacy_wb_row.values_by_date.get(column_date)
+            if legacy_value is not None and legacy_value != "":
+                values[column_date] = legacy_value
+                presentation[column_date] = _legacy_wb_presentation()
+    if current_date in date_columns:
+        value, reason, quality, missing_components = _metric_value(spec, value_source)
+        values[current_date] = value if value is not None else ""
+        presentation[current_date] = _current_presentation(
+            reason=reason,
+            quality=quality,
+            missing_components=missing_components,
+        )
     return WebVitrinaContractRow(
         row_id=f"{scope_key}|{metric_key}",
         row_order=existing.row_order if existing is not None else 0,
@@ -402,7 +490,10 @@ def _planning_row(
     )
 
 
-def _metric_value(spec: _MetricSpec, source: Mapping[str, Any]) -> tuple[int | None, str]:
+def _metric_value(
+    spec: _MetricSpec,
+    source: Mapping[str, Any],
+) -> tuple[int | None, str, str, list[str]]:
     if spec.facility_id:
         facility = next(
             (
@@ -413,16 +504,22 @@ def _metric_value(spec: _MetricSpec, source: Mapping[str, Any]) -> tuple[int | N
             None,
         )
         if facility is None:
-            return None, "Недоступно: для SKU нет exact physical FBS ledger row."
+            return None, "", "inapplicable", []
         value = facility.get("available")
         return (
             None if value is None else int(value),
             str(facility.get("reason_ru") or ""),
+            str(facility.get("state") or facility.get("quality") or "missing"),
+            [str(facility.get("name") or spec.facility_id)]
+            if facility.get("applicable") and value is None
+            else [],
         )
     value = source.get(spec.value_field)
     return (
         None if value is None else int(value),
         str((source.get("quality") or {}).get(spec.reason_field) or ""),
+        str((source.get("quality") or {}).get(spec.value_field) or "exact"),
+        list((source.get("quality") or {}).get("missing_components") or []),
     )
 
 
@@ -436,6 +533,10 @@ def _aggregate_value_source(planning: Mapping[str, Any]) -> dict[str, Any]:
         {
             "facility_id": str(item.get("facility_id") or ""),
             "available": item.get("available"),
+            "active": bool(item.get("active")),
+            "applicable": bool(item.get("applicable")),
+            "state": str(item.get("state") or "missing"),
+            "name": str(item.get("name") or item.get("facility_id") or ""),
             "reason_ru": (
                 ""
                 if item.get("available") is not None
@@ -462,6 +563,8 @@ def _aggregate_value_source(planning: Mapping[str, Any]) -> dict[str, Any]:
                 (metrics.get("effective_total") or {}).get("reason_ru") or ""
             ),
             "total_reason_ru": str((metrics.get("total") or {}).get("reason_ru") or ""),
+            "total": str((metrics.get("total") or {}).get("quality") or "exact"),
+            "missing_components": list((planning.get("fbs") or {}).get("missing_components") or []),
         },
     }
 
@@ -491,8 +594,38 @@ def _sku_value_source(
     }
 
 
-def _current_presentation(*, reason: str) -> dict[str, str]:
-    if reason:
+def _current_presentation(
+    *,
+    reason: str,
+    quality: str,
+    missing_components: list[str],
+) -> dict[str, str]:
+    if quality == "inapplicable":
+        return _inapplicable_presentation()
+    if quality == "partial":
+        missing = ", ".join(missing_components)
+        quality_reason = reason or f"Отсутствуют компоненты: {missing}"
+        return {
+            "state": "",
+            "tone": "neutral",
+            "reason": quality_reason,
+            "source": FORMULA_VERSION,
+            "quality_state": "inventory_history_partial",
+            "quality_label": "Частичные данные",
+            "quality_reason": quality_reason,
+            "missing_components": missing,
+        }
+    if quality == "missing":
+        return {
+            "state": "unavailable",
+            "tone": "warning",
+            "reason": reason,
+            "source": FORMULA_VERSION,
+            "quality_state": "inventory_history_component_missing",
+            "quality_label": "Компонент отсутствует",
+            "quality_reason": reason,
+        }
+    if reason and quality == "unavailable":
         return {
             "state": "unavailable",
             "tone": "warning",
@@ -509,7 +642,108 @@ def _current_presentation(*, reason: str) -> dict[str, str]:
         "source": FORMULA_VERSION,
         "quality_state": FORMULA_VERSION,
         "quality_label": "Точное значение",
-        "quality_reason": "inventory_planning_v1: exact persisted operands",
+        "quality_reason": f"{FORMULA_VERSION}: exact persisted operands",
+    }
+
+
+def _history_scopes(
+    history: Mapping[str, Any],
+    *,
+    scope_key: str,
+) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for business_date, raw_date in dict(history.get("dates") or {}).items():
+        if not isinstance(raw_date, Mapping):
+            continue
+        scope = dict(raw_date.get("scopes") or {}).get(scope_key)
+        if isinstance(scope, Mapping):
+            result[str(business_date)] = scope
+    return result
+
+
+def _historical_metric_value(
+    spec: _MetricSpec,
+    scope: Mapping[str, Any],
+) -> tuple[int | None, dict[str, Any]]:
+    if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY:
+        value = scope.get("total")
+        quality = str(scope.get("quality") or "unavailable")
+        missing = [str(item) for item in list(scope.get("missing_components") or [])]
+        if quality == "partial" and value is not None:
+            reason = "Отсутствуют компоненты: " + ", ".join(missing)
+            return int(value), {
+                "state": "",
+                "tone": "neutral",
+                "reason": reason,
+                "source": FORMULA_VERSION,
+                "quality_state": "inventory_history_partial",
+                "quality_label": "Частичные данные",
+                "quality_reason": reason,
+                "missing_components": ", ".join(missing),
+            }
+        if value is None:
+            return None, _history_unavailable_presentation()
+        return int(value), _exact_history_presentation()
+    if spec.sku_key == INVENTORY_WB_TOTAL_KEY:
+        component = scope.get("wb") or {}
+    elif spec.facility_id:
+        component = dict(scope.get("facilities") or {}).get(spec.facility_id) or {
+            "state": "inapplicable",
+            "value": None,
+        }
+    else:
+        return None, _history_unavailable_presentation()
+    state = str(component.get("state") or "missing")
+    value = component.get("value")
+    if state == "inapplicable":
+        return None, _inapplicable_presentation()
+    if state == "missing":
+        reason = f"Отсутствует exact component: {spec.label_ru}."
+        return None, {
+            "state": "unavailable",
+            "tone": "warning",
+            "reason": reason,
+            "source": FORMULA_VERSION,
+            "quality_state": "inventory_history_component_missing",
+            "quality_label": "Компонент отсутствует",
+            "quality_reason": reason,
+        }
+    return int(value), _exact_history_presentation()
+
+
+def _exact_history_presentation() -> dict[str, str]:
+    return {
+        "state": "",
+        "tone": "success",
+        "reason": "",
+        "source": FORMULA_VERSION,
+        "quality_state": "inventory_history_full",
+        "quality_label": "Точное значение",
+        "quality_reason": "Exact finalized component revision.",
+    }
+
+
+def _inapplicable_presentation() -> dict[str, str]:
+    return {
+        "state": "unavailable",
+        "tone": "neutral",
+        "reason": "",
+        "source": FORMULA_VERSION,
+        "quality_state": "inventory_history_inapplicable",
+        "quality_label": "Не применимо",
+        "quality_reason": "",
+    }
+
+
+def _legacy_wb_presentation() -> dict[str, str]:
+    return {
+        "state": "",
+        "tone": "success",
+        "reason": "",
+        "source": "ready_snapshot.stock_total.wb_only",
+        "quality_state": "inventory_history_legacy_wb_exact",
+        "quality_label": "Остатки WB",
+        "quality_reason": INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU,
     }
 
 

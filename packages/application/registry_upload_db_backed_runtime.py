@@ -26,6 +26,10 @@ from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_sc
 from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
 from packages.application.ff_wb_supply_origins import ensure_ff_wb_supply_origin_schema
 from packages.application.inventory_planning_read_model import ensure_inventory_planning_schema
+from packages.application.sheet_vitrina_v1_inventory_history import (
+    capture_inventory_history_from_ready_plan,
+    ensure_inventory_history_schema,
+)
 from packages.application.wb_fbs_orders import ensure_wb_fbs_orders_schema
 from packages.application.registry_upload_bundle_v1 import (
     RegistryUploadBundleV1Block,
@@ -404,6 +408,13 @@ class RegistryUploadDbBackedRuntime:
                     refreshed_at,
                     _serialize_sheet_vitrina_plan(plan),
                 ),
+            )
+            capture_inventory_history_from_ready_plan(
+                conn,
+                plan=plan,
+                bundle_version=current_state.bundle_version,
+                refreshed_at=refreshed_at,
+                generation_identity=current_state.bundle_version,
             )
             conn.commit()
 
@@ -12219,6 +12230,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     ensure_wb_fbs_orders_schema(conn)
     ensure_ff_pool_cutover_schema(conn)
     ensure_inventory_planning_schema(conn)
+    ensure_inventory_history_schema(conn)
     ambiguous_bank_assignment = conn.execute(
         """
         SELECT 1

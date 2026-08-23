@@ -173,18 +173,19 @@ The same section exposes canonical six-stage quantity/capital/coverage fields. O
 
 The WebCore source group is additive and adjacent to the existing 1C capital group. SKU/TOTAL values, weighted confirmed share and ratio-of-aggregates profitability are computed before the view-model boundary; the mapper only preserves and renders them.
 
-# 10. Current inventory planning rows
+# 10. Date-aware inventory planning rows
 
-For a window containing the exact current WB snapshot date, the upstream
-contract adds six logical `inventory_planning_v1` metric pairs: raw WB,
-incident-effective WB, signed FBS available total, dynamic active-facility FBS
-available, combined effective stock and combined raw stock. The mapper does not
-recalculate them; it preserves per-date value, formula provenance and quality
-reason. The familiar combined keys are current presentation aliases, not a
-change to persisted ready-snapshot or downstream calculator semantics.
+The upstream contract materializes one canonical inventory family for every
+requested date from the compact server-owned component history documented in
+Module 52. Public order is `Остатки общие`, `Остатки WB`, then FBS facilities;
+the existing `stock_total / total_stock_total` identities remain the sole
+general-stock pair. Internal incident/effective and aggregate-FBS diagnostics
+remain outside the ordinary main table.
 
-An unavailable current planning cell carries
-`quality_state=inventory_planning_unavailable`. This is a first-class N/A
-value, not numeric zero. Historical exact-date contracts are left untouched;
-new rows inside a current multi-date window expose older unmaterialized cells
-only as explicit non-rewritten history.
+The mapper never recalculates history. It preserves the server value, formula,
+quality reason and missing-component list. `full` values have no marker;
+`partial` totals stay numeric and carry a neutral marker with tooltip/ARIA;
+missing facility and inapplicable pre-launch cells render as `—`, while exact
+zero renders as `0`. Current date uses the latest accepted capture and a closed
+date uses its latest immutable finalization. Older revisions remain stored but
+are not simultaneously rendered.

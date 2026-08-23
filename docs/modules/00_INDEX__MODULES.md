@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–50`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–52`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -56,6 +56,8 @@ source_basis:
   - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md"
   - "docs/modules/50_MODULE__PARTNER_REPORT_BLOCK.md"
+  - "docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md"
+  - "docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -111,8 +113,10 @@ related_docs:
   - "48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
   - "49_MODULE__WB_AUTOANSWERS_SERVER.md"
   - "50_MODULE__PARTNER_REPORT_BLOCK.md"
+  - "51_MODULE__WAREHOUSE_RECOVERY_POLICY.md"
+  - "52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 50: Partner Report использует UI-first indexed preview и digest-bound XLSX; Finance использует единый canonical Our WB Cost resolver."
+update_note: "Обновлён through module 52: compact typed inventory history extends the main Web Vitrina without a duplicate general-stock metric."
 ---
 
 # 1. Назначение индекса
@@ -129,7 +133,7 @@ update_note: "Обновлён through module 50: Partner Report использ�
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–50`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `44` consumes that same cost truth across all Finance history without an independent retro-cost value. Module `46` adds an operator action/read model without parallel metric truth; module `47` is the protected internal knowledge base; module `48` owns active warehouse/cost state; module `49` owns server-native WB autoanswers. Module `50` owns server-versioned Partner settings, indexed UI preview and digest-bound XLSX; finalization/ZIP/raw Finance export are outside its active V2 scope.
+Канонический индекс охватывает modules `01–52`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `44` consumes that same cost truth across all Finance history without an independent retro-cost value. Module `46` adds an operator action/read model without parallel metric truth; module `47` is the protected internal knowledge base; module `48` owns active warehouse/cost state; module `49` owns server-native WB autoanswers. Module `50` owns server-versioned Partner settings, indexed UI preview and digest-bound XLSX. Module `51` owns centralized warehouse recovery. Module `52` owns compact typed Web Vitrina inventory history and its separately gated backfill.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -265,6 +269,8 @@ update_note: "Обновлён through module 50: Partner Report использ�
 | `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal engine with exact-date history, stable nomenclature identity, versioned unmatched audit, localized evidence UI, hourly bounded sync, Proxy 3 and guarded atomic cutover |
 | `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production contour with canonical content/media classification, strict content rating `1→2→3→4→5` processing/publication priority before rating-only, bounded immutable runs, frozen v1.4.2 Node pipeline, durable readback and split all/content progress UI |
 | `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/ui-first-xlsx` | Single-SKU Decimal profitability report with versioned server-owned settings, indexed Finance projection, root/nested accepted ads, on-screen preview and source-digest-bound light XLSX; no active finalization/ZIP/raw export |
+| `51_MODULE__WAREHOUSE_RECOVERY_POLICY.md` | `warehouse_recovery_policy` | `warehouse/recovery/control-plane` | Central T0/T1/T2/T3 recovery, capacity, retention and query-only operator status contract |
+| `52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md` | `web_vitrina_inventory_history` | `web-vitrina/runtime-history` | Compact typed TOTAL/SKU WB+FBS history, closed-day supersession, partial numeric totals and owner-gated historical backfill |
 
 # 5. Как эта папка используется дальше
 
