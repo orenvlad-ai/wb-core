@@ -40,9 +40,6 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     LINES_TABLE,
     OPERATIONS_TABLE,
 )
-from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
-    DB_FILENAME,
-)
 from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E402
     APPLIES_TABLE,
     CAPTURES_TABLE,
@@ -50,8 +47,11 @@ from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E
     FINALIZATIONS_TABLE,
     append_inventory_history_capture,
     append_inventory_history_finalization,
-    ensure_inventory_history_schema,
     preview_inventory_history_capture,
+)
+from packages.application.storage_registry import (  # noqa: E402
+    GenerationManifest,
+    StoreRegistry,
 )
 from packages.application.warehouse_sync_lock import (  # noqa: E402
     WarehouseSyncBusyError,
@@ -83,6 +83,9 @@ REQUIRED_SOURCE_TABLES = frozenset(
         WAREHOUSE_MAPPINGS_TABLE,
     }
 )
+REQUIRED_HISTORY_TABLES = frozenset(
+    {CAPTURES_TABLE, COMPONENTS_TABLE, FINALIZATIONS_TABLE, APPLIES_TABLE}
+)
 
 
 class InventoryHistoryBackfillError(RuntimeError):
@@ -105,7 +108,9 @@ def run_backfill(
 ) -> dict[str, Any]:
     runtime_dir = runtime_dir.expanduser().resolve()
     evidence_dir = evidence_dir.expanduser().resolve()
-    db_path = runtime_dir / DB_FILENAME
+    store_registry = StoreRegistry(runtime_dir)
+    storage_manifest = store_registry.load(require_files=True)
+    db_path = store_registry.resolve("operational", manifest=storage_manifest)
     if not db_path.is_file():
         raise InventoryHistoryBackfillError("canonical runtime SQLite DB is missing")
     _require_evidence_outside_repo(evidence_dir)
@@ -127,6 +132,7 @@ def run_backfill(
         return _dry_run(
             db_path=db_path,
             evidence_dir=evidence_dir,
+            storage_manifest=storage_manifest,
             deployed_sha=exact_deployed_sha,
             date_from=date_from,
             date_to=min(date_to or last_closed, last_closed),
@@ -140,6 +146,7 @@ def run_backfill(
         with warehouse_sync_lock(runtime_dir, blocking=False):
             return _apply_manifest(
                 db_path=db_path,
+                store_registry=store_registry,
                 evidence_dir=evidence_dir,
                 manifest_path=manifest_path.expanduser().resolve(),
                 expected_manifest_sha256=str(expected_manifest_sha256),
@@ -158,6 +165,7 @@ def _dry_run(
     *,
     db_path: Path,
     evidence_dir: Path,
+    storage_manifest: GenerationManifest,
     deployed_sha: str,
     date_from: str | None,
     date_to: str,
@@ -167,6 +175,7 @@ def _dry_run(
     with _query_only_connection(db_path) as conn:
         plan = _build_manifest(
             conn,
+            storage_manifest=storage_manifest,
             deployed_sha=deployed_sha,
             date_from=date_from,
             date_to=date_to,
@@ -225,6 +234,7 @@ def _dry_run(
 def _build_manifest(
     conn: sqlite3.Connection,
     *,
+    storage_manifest: GenerationManifest,
     deployed_sha: str,
     date_from: str | None,
     date_to: str,
@@ -235,6 +245,12 @@ def _build_manifest(
     if missing_tables:
         raise InventoryHistoryBackfillError(
             "required source tables are missing: " + ", ".join(missing_tables)
+        )
+    missing_history_tables = sorted(REQUIRED_HISTORY_TABLES - tables)
+    if missing_history_tables:
+        raise InventoryHistoryBackfillError(
+            "deployed inventory history schema is missing: "
+            + ", ".join(missing_history_tables)
         )
     wb_history, wb_sources, wb_blockers = _ready_wb_history(conn, date_to=date_to)
     if not wb_history:
@@ -266,7 +282,11 @@ def _build_manifest(
         date_from=effective_from,
         date_to=date_to,
     )
-    generation = _schema_generation(conn, deployed_sha=deployed_sha)
+    generation = _schema_generation(
+        conn,
+        deployed_sha=deployed_sha,
+        storage_manifest=storage_manifest,
+    )
     roster = facility_history["roster"]
     captures: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
@@ -533,6 +553,7 @@ def _build_manifest(
 def _apply_manifest(
     *,
     db_path: Path,
+    store_registry: StoreRegistry,
     evidence_dir: Path,
     manifest_path: Path,
     expected_manifest_sha256: str,
@@ -561,13 +582,15 @@ def _apply_manifest(
         expected_deployed_sha=deployed_sha,
         deployed_sha_file=deployed_sha_file,
     )
-    with sqlite3.connect(db_path, timeout=60.0) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_inventory_history_schema(conn)
-        already = conn.execute(
-            f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
-            (actual_manifest_sha256,),
-        ).fetchone()
+    with _query_only_connection(db_path) as conn:
+        already = (
+            conn.execute(
+                f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
+                (actual_manifest_sha256,),
+            ).fetchone()
+            if APPLIES_TABLE in _tables(conn)
+            else None
+        )
         if already is not None:
             return {
                 **json.loads(str(already[0])),
@@ -577,8 +600,15 @@ def _apply_manifest(
                 "idempotent_noop": True,
             }
     scope = dict(manifest["scope"])
+    storage_manifest = store_registry.load(require_files=True)
+    if store_registry.resolve("operational", manifest=storage_manifest) != db_path:
+        raise InventoryHistoryBackfillError("canonical operational generation changed after dry-run")
     with _query_only_connection(db_path) as conn:
-        generation = _schema_generation(conn, deployed_sha=deployed_sha)
+        generation = _schema_generation(
+            conn,
+            deployed_sha=deployed_sha,
+            storage_manifest=storage_manifest,
+        )
         if generation != dict(manifest["schema_generation"]):
             raise InventoryHistoryBackfillError("schema/generation changed after dry-run")
         watermarks = _source_watermarks(
@@ -623,16 +653,36 @@ def _apply_manifest(
     if json.loads(recovery_path.read_text(encoding="utf-8")) != recovery_evidence:
         raise InventoryHistoryBackfillError("target before-image readback mismatch")
     capture_count = component_count = finalization_count = 0
+    locked_storage_manifest = store_registry.load(require_files=True)
+    if store_registry.resolve("operational", manifest=locked_storage_manifest) != db_path:
+        raise InventoryHistoryBackfillError("canonical operational generation changed before apply")
     conn = sqlite3.connect(db_path, timeout=60.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=60000")
         conn.execute("BEGIN IMMEDIATE")
+        transaction_storage_manifest = store_registry.load(require_files=True)
+        if (
+            transaction_storage_manifest.manifest_sha256
+            != locked_storage_manifest.manifest_sha256
+            or store_registry.resolve(
+                "operational",
+                manifest=transaction_storage_manifest,
+            )
+            != db_path
+        ):
+            raise InventoryHistoryBackfillError(
+                "canonical operational generation changed before the write transaction"
+            )
         _validate_exact_deployment(
             expected_deployed_sha=deployed_sha,
             deployed_sha_file=deployed_sha_file,
         )
-        locked_generation = _schema_generation(conn, deployed_sha=deployed_sha)
+        locked_generation = _schema_generation(
+            conn,
+            deployed_sha=deployed_sha,
+            storage_manifest=transaction_storage_manifest,
+        )
         locked_watermarks = _source_watermarks(
             conn,
             date_from=str(scope["date_from"]),
@@ -756,7 +806,17 @@ def _apply_manifest(
         raise
     finally:
         conn.close()
+    readback_storage_manifest = store_registry.load(require_files=True)
+    if store_registry.resolve("operational", manifest=readback_storage_manifest) != db_path:
+        raise InventoryHistoryBackfillError("canonical operational generation changed after apply")
     with _query_only_connection(db_path) as readback:
+        readback_generation = _schema_generation(
+            readback,
+            deployed_sha=deployed_sha,
+            storage_manifest=readback_storage_manifest,
+        )
+        if readback_generation != dict(manifest["schema_generation"]):
+            raise InventoryHistoryBackfillError("schema/generation changed after apply")
         audit = readback.execute(
             f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
             (actual_manifest_sha256,),
@@ -1367,16 +1427,63 @@ def _summarize_components(
     return result
 
 
-def _schema_generation(conn: sqlite3.Connection, *, deployed_sha: str) -> dict[str, Any]:
+def _schema_generation(
+    conn: sqlite3.Connection,
+    *,
+    deployed_sha: str,
+    storage_manifest: GenerationManifest,
+) -> dict[str, Any]:
+    operational = storage_manifest.operational
+    if not storage_manifest.implicit and storage_manifest.state != "monolith":
+        identity = conn.execute(
+            """SELECT schema_revision,logical_store,generation_id,
+                      generation_epoch,source_fingerprint
+                 FROM finance_operational_schema_meta WHERE singleton=1"""
+        ).fetchone()
+        expected_identity = (
+            operational.schema_revision,
+            "operational",
+            operational.generation_id,
+            operational.generation_epoch,
+            storage_manifest.source_fingerprint,
+        )
+        if identity is None or tuple(identity) != expected_identity:
+            raise InventoryHistoryBackfillError(
+                "canonical operational file identity does not match the storage generation"
+            )
     bundle = conn.execute(
         "SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1"
     ).fetchone()
+    schema_tables = sorted(REQUIRED_SOURCE_TABLES | REQUIRED_HISTORY_TABLES)
+    placeholders = ",".join("?" for _ in schema_tables)
+    schema_material = [
+        [str(value or "") for value in row]
+        for row in conn.execute(
+            f"""SELECT type,name,tbl_name,sql FROM sqlite_master
+                 WHERE name IN ({placeholders}) OR tbl_name IN ({placeholders})
+                 ORDER BY type,name""",
+            (*schema_tables, *schema_tables),
+        ).fetchall()
+    ]
     return {
         "deployed_sha": deployed_sha,
-        "sqlite_schema_version": int(conn.execute("PRAGMA schema_version").fetchone()[0]),
         "sqlite_user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
         "bundle_version": str(bundle[0]) if bundle else "",
         "bundle_activated_at": str(bundle[1]) if bundle else "",
+        "storage_generation": {
+            "contract_version": storage_manifest.contract_version,
+            "state": storage_manifest.state,
+            "canonical_source": storage_manifest.canonical_source,
+            "generation_epoch": storage_manifest.generation_epoch,
+            "manifest_sha256": storage_manifest.manifest_sha256,
+            "operational": {
+                "generation_id": operational.generation_id,
+                "relative_path": operational.relative_path,
+                "schema_revision": operational.schema_revision,
+                "watermark": operational.watermark,
+            },
+        },
+        "required_schema_digest": _digest(schema_material),
         "history_schema": SCHEMA_VERSION,
     }
 

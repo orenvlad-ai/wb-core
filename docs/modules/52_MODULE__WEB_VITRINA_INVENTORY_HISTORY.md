@@ -119,6 +119,11 @@ identity, cutoff, source revisions/digests/watermarks, roster/effective dates,
 target dates/SKU/components, typed before и proposed values/quality/missing
 lists, ожидаемые row counts, source gaps и non-target/recovery contract.
 Dry-run проверяет byte-identical canonical DB before/after.
+Canonical DB выбирается только через validated `StoreRegistry` generation
+manifest: retained legacy monolith не является fallback после split cutover.
+CAS связывает exact operational generation identity и digest required
+source/history schema; отсутствующая deployed history schema блокирует dry-run
+до публикации manifest.
 
 Apply не наследует разрешение на deploy/dry-run. Он требует отдельный exact
 human gate, trusted-main deployed runner, reviewed manifest SHA-256, deployed

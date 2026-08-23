@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
@@ -33,8 +34,11 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     FACILITY_PROFILES_TABLE,
     FEATURE_EPOCHS_TABLE,
 )
+from packages.application.finance_raw_storage import (  # noqa: E402
+    bind_generation_identity,
+    ensure_operational_schema,
+)
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
-    DB_FILENAME,
     RegistryUploadDbBackedRuntime,
 )
 from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E402
@@ -49,6 +53,11 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (  # noqa: 
     extend_rows_with_inventory_planning,
     inventory_planning_facility_metric_key,
     inventory_planning_total_metric_key,
+)
+from packages.application.storage_registry import (  # noqa: E402
+    StoreRegistry,
+    atomic_write_manifest,
+    build_manifest,
 )
 from packages.application.wb_fbs_orders import (  # noqa: E402
     OBSERVATIONS_TABLE,
@@ -103,6 +112,14 @@ def main() -> int:
             first_nm_id=first_nm_id,
             second_nm_id=second_nm_id,
         )
+        monolith_path = runtime.db_path
+        _activate_split_generation(
+            runtime_dir=runtime_dir,
+            monolith_path=monolith_path,
+        )
+        monolith_digest = _file_digest(monolith_path)
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        assert runtime.db_path != monolith_path
         original_digest = _file_digest(runtime.db_path)
         dry_run = run_backfill(
             runtime_dir=runtime_dir,
@@ -142,6 +159,48 @@ def main() -> int:
         assert _combined(by_date["2026-08-14"], "TOTAL") == (35, "full")
         assert _combined(by_date["2026-08-19"], "TOTAL") == (35, "partial")
         assert _combined(by_date["2026-08-20"], "TOTAL") == (42, "full")
+
+        reviewed_storage = StoreRegistry(runtime_dir).load(require_files=True)
+        drifted_storage = build_manifest(
+            state=reviewed_storage.state,
+            canonical_source=reviewed_storage.canonical_source,
+            generation_epoch=reviewed_storage.generation_epoch,
+            raw_generation_id=reviewed_storage.raw.generation_id,
+            raw_relative_path=reviewed_storage.raw.relative_path,
+            raw_watermark=reviewed_storage.raw.watermark,
+            operational_generation_id=reviewed_storage.operational.generation_id,
+            operational_relative_path=reviewed_storage.operational.relative_path,
+            operational_watermark="sha256:" + "5" * 64,
+            rollback_generation_id=reviewed_storage.rollback_generation_id,
+            source_fingerprint=reviewed_storage.source_fingerprint,
+            created_at=reviewed_storage.created_at,
+        )
+        atomic_write_manifest(
+            runtime_dir / "storage_generation_manifest.json",
+            drifted_storage,
+        )
+        try:
+            run_backfill(
+                runtime_dir=runtime_dir,
+                evidence_dir=evidence_dir,
+                apply=True,
+                deployed_sha=DEPLOYED_SHA,
+                manifest_path=Path(dry_run["manifest_path"]),
+                expected_manifest_sha256=dry_run["manifest_sha256"],
+                approval_reference="synthetic-smoke-owner-gate",
+                deployed_sha_file=sha_file,
+                now=datetime(2026, 8, 22, 12, 2, tzinfo=timezone.utc),
+            )
+        except InventoryHistoryBackfillError as exc:
+            assert "schema/generation changed after dry-run" in str(exc)
+        else:
+            raise AssertionError("storage generation drift must block apply")
+        finally:
+            atomic_write_manifest(
+                runtime_dir / "storage_generation_manifest.json",
+                reviewed_storage,
+            )
+        assert _file_digest(runtime.db_path) == original_digest
 
         tampered = dict(manifest)
         tampered["expected_effect"] = dict(manifest["expected_effect"])
@@ -224,6 +283,7 @@ def main() -> int:
         )
         assert replay["status"] == "already_applied"
         assert replay["database_written"] is False
+        assert _file_digest(monolith_path) == monolith_digest
     print("sheet_vitrina_v1_inventory_history_backfill_smoke: OK")
     return 0
 
@@ -267,6 +327,42 @@ def _ready_plan(
             )
         ],
     )
+
+
+def _activate_split_generation(*, runtime_dir: Path, monolith_path: Path) -> None:
+    generation_epoch = "1" * 20
+    generation_root = runtime_dir / "generations" / generation_epoch
+    generation_root.mkdir(parents=True)
+    raw_path = generation_root / "finance-raw.sqlite3"
+    operational_path = generation_root / "operational.sqlite3"
+    with sqlite3.connect(raw_path):
+        pass
+    shutil.copy2(monolith_path, operational_path)
+    manifest = build_manifest(
+        state="cutover",
+        canonical_source="split",
+        generation_epoch=generation_epoch,
+        raw_generation_id="finance-raw-" + generation_epoch,
+        raw_relative_path=str(raw_path.relative_to(runtime_dir)),
+        raw_watermark="sha256:" + "2" * 64,
+        operational_generation_id="operational-" + generation_epoch,
+        operational_relative_path=str(operational_path.relative_to(runtime_dir)),
+        operational_watermark="sha256:" + "3" * 64,
+        rollback_generation_id="monolith",
+        source_fingerprint="sha256:" + "4" * 64,
+        created_at="2026-08-22T11:59:00Z",
+    )
+    with sqlite3.connect(operational_path) as conn:
+        ensure_operational_schema(conn)
+        bind_generation_identity(
+            conn,
+            logical_store="operational",
+            generation_id=manifest.operational.generation_id,
+            generation_epoch=manifest.generation_epoch,
+            source_fingerprint=manifest.source_fingerprint,
+        )
+        conn.commit()
+    atomic_write_manifest(runtime_dir / "storage_generation_manifest.json", manifest)
 
 
 def _seed_fbs_sources(db_path: Path, *, first_nm_id: int, second_nm_id: int) -> None:
