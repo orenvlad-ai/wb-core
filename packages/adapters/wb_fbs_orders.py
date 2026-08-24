@@ -409,7 +409,7 @@ class HttpBackedWbFbsOrdersSource:
                 item.get("chrtId"), "stock chrt_id", minimum=1, maximum=2**63 - 1
             )
             amount = _bounded_int(
-                item.get("stock"), "stock amount", minimum=0, maximum=2**63 - 1
+                item.get("amount"), "stock amount", minimum=0, maximum=2**63 - 1
             )
             if chrt_id not in requested:
                 raise WbFbsOrdersTransportError(
