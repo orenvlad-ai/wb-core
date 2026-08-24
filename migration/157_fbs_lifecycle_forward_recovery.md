@@ -16,16 +16,21 @@ commits only the inert tables, so the subsequent T0 planner stays query-only.
 
 `apps/ff_pool_fbs_forward_recovery.py` defaults to `dry-run`. The production
 source is opened with SQLite `mode=ro` and `PRAGMA query_only=ON`; planning may
-apply the canonical lifecycle function only to a disposable in-memory
-target projection. The planner never invokes a whole-database SQLite backup:
-it creates schemas without triggers, streams exact target/dependency rows in
-bounded chunks, preserves required source row identities and copies only the
-pinned order graph plus current FF balance/mapping/aggregate evidence used by
-the canonical lifecycle function. Unrelated operational history is neither
-read into Python nor materialized in scratch. Explicit row, payload, target-
-manifest and scratch-size ceilings fail closed before memory can grow without
-bound. The manifest publishes these planner bounds and measured projection
-counts/bytes as read-only evidence.
+apply the canonical lifecycle function only to a disposable private file-
+backed coherent dependency snapshot. One explicit query-only read transaction
+pins all source reads. The planner never invokes a whole-database SQLite
+backup: after a disk-capacity preflight it creates a mode-`0600` scratch file,
+clones the exact production table/index/trigger definitions for the complete
+lifecycle dependency set, streams only pinned target/dependency rows in
+bounded chunks and verifies the schema digest plus `foreign_key_check`. It
+also pins the lifecycle AUTOINCREMENT value and the warehouse-operation
+`rowid` maximum used by canonical handoff evidence. This prevents a second
+same-SKU handoff in the batch from receiving a different technical ordering
+identity in preview and live apply. Unrelated operational history is neither
+read into Python nor materialized in scratch, and the scratch database and
+sidecars are removed after preview. Explicit row, payload, target-manifest,
+disk and scratch-size ceilings fail closed. The manifest publishes these
+planner bounds and measured projection counts/bytes as read-only evidence.
 The resulting machine-readable manifest binds:
 
 - exact deployed SHA, active storage generation/schema and active Stage 7C
@@ -47,7 +52,13 @@ identity evidence are fingerprint material. Thus append-only observations
 mapping/cutover identity, target WAC or storage generation fails closed.
 Stable target and past-fulfilled digests use canonical length-delimited
 streaming payloads, so fetch chunk boundaries and volatile timestamps cannot
-alter their value.
+alter their value. Stable-effect comparison canonicalizes only exact Decimal
+text scale; it does not omit or tolerate facility/SKU/status classification,
+quantity, WAC/capital, event/debit identity, past-fulfilled or non-target
+drift. For consecutive debits inside one recovery transaction,
+`balance_updated_at` and `source_operation_posted_at` remain in event details
+but are explicitly excluded from event identity; canonical operation `rowid`,
+operation/revision, quantity, capital and WAC remain identity material.
 
 ## Gated apply and two lanes
 
@@ -79,7 +90,14 @@ next action is query-only `readback` and then `verify-noop`; no second submit is
 inferred from transport state.
 Past fulfilled events/frozen WAC remain append-only. Apply reconciliation
 proves exact target quantity/capital deltas and that rows outside the target
-were unchanged inside the serialized transaction.
+were unchanged inside the serialized transaction. The expensive coherent
+preview revalidation remains outside the warehouse writer lock and
+`BEGIN IMMEDIATE`; only the target CAS and canonical writes occupy the short
+writer section. If the canonical live after-image still differs, apply fsyncs
+a private privacy-safe field-level diff (hashed target identity, safe
+facility/SKU/status/quantity/WAC/capital/evidence fields, no order ID or PII)
+before rollback and returns its exact path/hash instead of an opaque drift
+code.
 
 ## Production boundary
 
@@ -98,8 +116,15 @@ debit/capital across lanes; post-cutoff exclusion; freshness-insensitive stable
 digests; inert pre-gate rollback; target-WAC CAS failure; query-only repeat
 no-op proof without a second submit; ambiguous-transport readback;
 past fulfilled immutability; and exact quantity/capital/non-target invariants.
-Its production-scale case plans 5,600 target rows beside a 192 MiB unrelated
+Its production-scale case plans 40,000 target rows beside a 192 MiB unrelated
 operational payload, proves that payload is excluded, keeps measured RSS and
-scratch below explicit bounds, and obtains identical business/after-image
-digests with a different fetch chunk size. The static recovery-writer inventory
-also no longer classifies this planner as a coherent full-store backup writer.
+file-backed scratch below explicit bounds, verifies exact table/index/trigger
+and foreign-key equivalence, proves unchanged source DB bytes/mtime and obtains
+identical business/after-image digests with a different fetch chunk size. The
+canonical pinned selector uses a connection-local TEMP identity table rather
+than one unbounded SQL `IN` parameter list, so the released 100,000-row limit
+is portable across SQLite builds. The smoke also proves two consecutive
+same-SKU handoffs use the exact cloned rowid/AUTOINCREMENT seeds and that a
+forced after-image mismatch preserves private field-level evidence before
+atomic rollback. The static recovery-writer inventory still does not classify
+this planner as a coherent full-store backup writer.

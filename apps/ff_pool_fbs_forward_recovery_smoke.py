@@ -111,13 +111,13 @@ def main() -> int:
         old_cursor = int(boundary["old_lifecycle_cursor_sequence"])
         assert cutoff > old_cursor
         assert boundary["forward_start_status_observation_sequence"] == cutoff + 1
-        assert plan["target"]["count"] == 3
+        assert plan["target"]["count"] == 4
         assert plan["predicted_effects"]["outcome_counts"] == {
-            "event_applied": 2,
+            "event_applied": 3,
             "identity_quarantine": 1,
         }
-        assert plan["predicted_effects"]["total_quantity_delta"] == -1
-        assert plan["predicted_effects"]["total_capital_delta_rub"] == "-10"
+        assert plan["predicted_effects"]["total_quantity_delta"] == -2
+        assert plan["predicted_effects"]["total_capital_delta_rub"] == "-20"
 
         # Freshness-only timestamps and continuous source ingress are not part
         # of target equality.  The original reviewed fingerprint remains valid.
@@ -169,7 +169,7 @@ def main() -> int:
         assert readback["status"] == "completed"
         assert readback["cutoff_sequence"] == cutoff
         assert readback["forward_cursor_sequence"] == cutoff
-        assert readback["target_count"] == 3
+        assert readback["target_count"] == 4
         repeated = runner.verify_noop(
             plan,
             fingerprint=plan["fingerprint"],
@@ -189,7 +189,7 @@ def main() -> int:
             assert old_cursor_after == old_cursor
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {BACKLOG_RECOVERY_TARGETS_TABLE}"
-            ).fetchone()[0] == 3
+            ).fetchone()[0] == 4
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {BACKLOG_RECOVERY_TARGETS_TABLE} "
                 "WHERE source_status_observation_sequence>?",
@@ -237,8 +237,8 @@ def main() -> int:
         assert processor["pending_reason_counts"] == {"order_sku_unmapped": 1}
 
         balance_after = _balance_rows(runtime.db_path)
-        assert _quantity(balance_after, 101) == _quantity(balance_before, 101) - 2
-        assert _capital(balance_after, 101) == _capital(balance_before, 101) - Decimal("20")
+        assert _quantity(balance_after, 101) == _quantity(balance_before, 101) - 3
+        assert _capital(balance_after, 101) == _capital(balance_before, 101) - Decimal("30")
         assert {
             key: value for key, value in balance_after.items() if key != 101
         } == {key: value for key, value in balance_before.items() if key != 101}
@@ -246,8 +246,8 @@ def main() -> int:
         with sqlite3.connect(runtime.db_path) as conn:
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {EVENTS_TABLE} "
-                "WHERE order_id IN (9601,9700) AND event_type='handoff_debit'"
-            ).fetchone()[0] == 2
+                "WHERE order_id IN (9601,9603,9700) AND event_type='handoff_debit'"
+            ).fetchone()[0] == 3
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {EVENTS_TABLE} WHERE order_id=9600"
             ).fetchone()[0] == 0
@@ -262,8 +262,8 @@ def main() -> int:
             assert noop["processed_count"] == 0
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {EVENTS_TABLE} "
-                "WHERE order_id IN (9601,9700) AND event_type='handoff_debit'"
-            ).fetchone()[0] == 2
+                "WHERE order_id IN (9601,9603,9700) AND event_type='handoff_debit'"
+            ).fetchone()[0] == 3
 
         # Exact business evidence, unlike freshness, is target-scoped CAS.
         drift_runtime = _prepared_runtime(root / "drift")
@@ -296,6 +296,50 @@ def main() -> int:
         assert drift_runner.readback(fingerprint=drift_plan["fingerprint"])[
             "status"
         ] == "not_applied"
+
+        # A canonical after-image mismatch must preserve a private, field-level
+        # privacy-safe diff before the writer transaction rolls back.
+        after_image_runtime = _prepared_runtime(root / "after-image-drift")
+        _insert_backlog(after_image_runtime.db_path)
+        after_image_runner = FfPoolFbsForwardRecoveryMutation(
+            runtime_dir=after_image_runtime.runtime_dir,
+            deployed_sha=SHA,
+            timestamp_factory=_RecoveryClock(),
+        )
+        after_image_plan = after_image_runner.build_plan()
+        after_image_evidence = root / "after-image-drift-evidence"
+        try:
+            after_image_runner.apply(
+                after_image_plan,
+                fingerprint=after_image_plan["fingerprint"],
+                approval_reference="synthetic-owner-gate",
+                actor="smoke",
+                evidence_dir=after_image_evidence,
+                crash="simulate_after_image_drift",
+            )
+        except FfPoolFbsForwardRecoveryError as exc:
+            assert exc.code == "target_after_image_drift"
+            evidence_path = Path(str(exc.details["evidence_path"]))
+            assert evidence_path.is_file()
+            assert evidence_path.stat().st_mode & 0o077 == 0
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            assert evidence["phase"] == "inside_writer_before_rollback"
+            assert evidence["privacy"] == {
+                "order_ids_included": False,
+                "status_sequences_included": False,
+                "pii_included": False,
+                "target_identity": "sha256_digest_only",
+            }
+            assert any(
+                row["path"] == "$.effect.total_quantity_delta"
+                for row in evidence["diffs"]
+            )
+            assert "9601" not in evidence_path.read_text(encoding="utf-8")
+        else:
+            raise AssertionError("canonical after-image drift must fail closed")
+        assert after_image_runner.readback(
+            fingerprint=after_image_plan["fingerprint"]
+        )["status"] == "not_applied"
 
         _assert_production_scale_projection(root / "scale")
 
@@ -374,13 +418,20 @@ def _insert_backlog(path: Path) -> None:
             wb="waiting",
             observed_at="2026-08-16T00:03:00Z",
         )
+        _insert_post_t_order(
+            conn,
+            order_id=9603,
+            supplier="complete",
+            wb="sorted",
+            observed_at="2026-08-16T00:04:00Z",
+        )
         conn.commit()
 
 
 def _assert_production_scale_projection(root: Path) -> None:
-    target_count = 5_600
+    target_count = 40_000
     unrelated_bytes = 192 * 1024 * 1024
-    max_rss_growth_bytes = 128 * 1024 * 1024
+    max_rss_growth_bytes = 512 * 1024 * 1024
     runtime = _prepared_runtime(root)
     start = datetime(2026, 8, 16, 1, 0, tzinfo=timezone.utc)
     with sqlite3.connect(runtime.db_path) as conn:
@@ -410,6 +461,7 @@ def _assert_production_scale_projection(root: Path) -> None:
 
     gc.collect()
     before_rss = _peak_rss_bytes()
+    source_stat_before = runtime.db_path.stat()
     runner = FfPoolFbsForwardRecoveryMutation(
         runtime_dir=runtime.runtime_dir,
         deployed_sha=SHA,
@@ -423,13 +475,27 @@ def _assert_production_scale_projection(root: Path) -> None:
         "event_applied": target_count
     }
     assert planner["source_query_only"] is True
+    assert planner["source_explicit_read_transaction"] is True
     assert planner["whole_database_backup"] is False
-    assert planner["scratch_backend"] == "bounded_target_only_memory"
+    assert planner["scratch_backend"] == (
+        "private_file_backed_coherent_dependency_snapshot"
+    )
+    assert planner["scratch_file_mode"] == "0600"
+    assert planner["scratch_temp_store"] == "file"
+    assert planner["scratch_removed_after_preview"] is True
+    assert planner["full_relevant_schema_cloned"] is True
+    assert planner["schema_digest_equal"] is True
+    assert planner["schema_evidence"]["trigger_count"] >= 20
+    assert planner["foreign_key_check"] == "pass"
     assert "synthetic_unrelated_operational_payload" not in planner["table_row_counts"]
-    assert int(planner["copied_payload_bytes"]) < 64 * 1024 * 1024
-    assert int(planner["scratch_bytes"]) < 64 * 1024 * 1024
+    assert int(planner["copied_payload_bytes"]) < 256 * 1024 * 1024
+    assert int(planner["scratch_bytes"]) < 384 * 1024 * 1024
     assert max(0, after_rss - before_rss) < max_rss_growth_bytes
     assert runtime.db_path.stat().st_size > unrelated_bytes
+    source_stat_after = runtime.db_path.stat()
+    assert source_stat_after.st_size == source_stat_before.st_size
+    assert source_stat_after.st_mtime_ns == source_stat_before.st_mtime_ns
+    assert not list(runner.scratch_dir.glob("coherent-preview-*.sqlite3*"))
     with sqlite3.connect(runtime.db_path) as conn:
         assert conn.execute(
             "SELECT length(payload) FROM synthetic_unrelated_operational_payload "
@@ -451,10 +517,16 @@ def _assert_production_scale_projection(root: Path) -> None:
     )
     assert repeated["past_fulfilled_invariant"] == plan["past_fulfilled_invariant"]
     assert repeated["predicted_effects"] == plan["predicted_effects"]
+    assert repeated["planner"]["schema_evidence"] == planner["schema_evidence"]
+    assert repeated["planner"]["canonical_write_seeds"] == (
+        planner["canonical_write_seeds"]
+    )
+    assert not list(runner.scratch_dir.glob("coherent-preview-*.sqlite3*"))
     production_source = (
         ROOT / "packages/application/ff_pool_fbs_forward_recovery.py"
     ).read_text(encoding="utf-8")
     assert ".backup(" not in production_source
+    assert 'sqlite3.connect(":memory:")' not in production_source
 
 
 def _peak_rss_bytes() -> int:
