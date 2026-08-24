@@ -794,6 +794,18 @@ def _comment_identity(
     return actor, association
 
 
+def _comment_declares_owner_authorization(body: str) -> bool:
+    folded = str(body or "").casefold()
+    return "wb-core.owner-authorization/v1" in folded or any(
+        phrase in folded
+        for phrase in (
+            "human authorization",
+            "owner authorization",
+            "user authorizes",
+        )
+    )
+
+
 def parse_production_mutation_terminalization_command(
     command: str,
 ) -> ProductionMutationTerminalizationCommand:
@@ -5404,14 +5416,9 @@ def production_mutation_terminalization_preflight(
         release_gate_time is None
         or release_gate_time >= merged_at
         or command.head_sha not in release_gate_body.lower()
-        or not any(
-            phrase in release_gate_folded
-            for phrase in (
-                "human gate",
-                "human authorization",
-                "owner authorization",
-                "user authorizes",
-            )
+        or not (
+            "human gate" in release_gate_folded
+            or _comment_declares_owner_authorization(release_gate_body)
         )
         or "merge" not in release_gate_folded
         or "deploy" not in release_gate_folded
@@ -5443,14 +5450,7 @@ def production_mutation_terminalization_preflight(
         or command.deployed_sha not in apply_gate_body.lower()
         or command.manifest_fingerprint not in apply_gate_body.lower()
         or "production apply" not in apply_gate_folded
-        or not any(
-            phrase in apply_gate_folded
-            for phrase in (
-                "human authorization",
-                "owner authorization",
-                "user authorizes",
-            )
-        )
+        or not _comment_declares_owner_authorization(apply_gate_body)
     ):
         raise ReleaseBlocked(
             "apply gate must be a post-merge OWNER/MEMBER production-apply "
