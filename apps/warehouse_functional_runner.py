@@ -910,12 +910,11 @@ def _recalculate_downstream_finance_cost(
     Planning and recalculation stay outside the shared warehouse writer lock;
     ``apply_stale_cost_weeks`` builds exact dependencies and after-images on a
     query-only connection, then uses a short observer-handoff/target CAS. The
-    July boundary includes the week that starts on 2026-06-29.
+    automatic contour is pinned to forward ingress after the frozen historical
+    FBS cutoff.
     """
 
-    return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks(
-        date_from=date(2026, 7, 1)
-    )
+    return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
 
 
 def _verify_cutover_external_recheck(

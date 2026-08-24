@@ -200,9 +200,13 @@ python3 apps/wb_finance_weekly.py canonical-cost-backfill \
   --runtime-dir /canonical/runtime
 ```
 
-Dry-run is default and read-only. With no date bounds it freezes cutoff `C` at
-the latest fully closed stored Finance week; rows after `C` are forward ingress
-and never rebuild or invalidate that historical plan. It emits:
+Dry-run is default and read-only. With no date bounds it uses the task-frozen
+cutoff `C = 2026-08-23`; it first proves that canonical raw Finance has reached
+that fully closed week. Rows from `2026-08-24` are forward ingress and never
+rebuild or invalidate that historical plan. Ordinary stale-cost refresh is
+hard-pinned to that forward boundary and accepts no historical date override;
+the separate fingerprinted plan/apply API can receive an explicit bounded
+historical date only from its repo-owned, owner-gated contour. It emits:
 
 - date/week/raw-row/nmId scope;
 - Finance, ads and canonical-cost manifests/digests;
@@ -217,7 +221,7 @@ and never rebuild or invalidate that historical plan. It emits:
 - the exact target before-image and fixed-cutoff forward boundary;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
-The fixed-cutoff evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Privacy-safe order identities are classified per row but the resolver cache is bounded by `nmId × business date × channel classification`, never by order count; exact identity-to-FBS evidence remains inside the streaming source dependency. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. Expected and persisted per-SKU readback rows use the same canonical numeric-nmID/non-numeric ordering, so mixed 9- and 10-digit catalogues cannot create a false digest mismatch from SQLite TEXT ordering. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows with unique privacy-safe identities across certified/archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or excessive peak RSS.
+The fixed-cutoff evidence path is week-scoped bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as one whole-history Python list, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Privacy-safe order identities are classified per row but the resolver cache is bounded by `nmId × business date × channel classification`, never by order count; exact identity-to-FBS evidence remains inside the streaming source dependency. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. Expected and persisted per-SKU readback rows use the same canonical numeric-nmID/non-numeric ordering, so mixed 9- and 10-digit catalogues cannot create a false digest mismatch from SQLite TEXT ordering. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows with unique privacy-safe identities across certified/archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or its fixture-specific peak-RSS ceiling. Production evidence must additionally report observed duration and peak working set rather than extrapolating that synthetic ceiling.
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 
