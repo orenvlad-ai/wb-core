@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / HOSTED RUNTIME / CHANNEL-LOCATION COST V1 / STORAGE PRE-CUTOVER`
+`ACTIVE / HOSTED RUNTIME / CHANNEL-LOCATION COST V2 / STORAGE PRE-CUTOVER`
 
 ## Purpose and source boundary
 
@@ -28,7 +28,7 @@ The current canonical runtime SQLite owns:
 - indexed `wb_finance_weekly_sku_aggregates` keyed by `seller + week + nmId + formula version`;
 - `wb_finance_projection_audit` for reviewed canonical applies.
 
-The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v5`; its cost dependency is `canonical_our_cost_channel_location_v1`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
+The per-SKU projection stores metrics, source digest, weekly raw content hash, canonical-cost dependency hash, coverage and formula version. Active aggregate contract is `wb_finance_weekly_sku_aggregate_v5`; its cost dependency is `canonical_our_cost_channel_location_v2`. It is fully rebuildable from immutable Finance rows and canonical sources. Preview consumers reject a stale raw hash, aggregate/cost formula version or canonical cost digest.
 
 The staged split adds `finance_raw_ingest_batches`, immutable
 `finance_raw_rows`, transactional `finance_raw_outbox` and raw consumer
@@ -42,18 +42,27 @@ transaction. It cannot write across two files.
 
 ## Single canonical COGS contract
 
-Formula version is `canonical_our_cost_channel_location_v1`. Finance and
-Partner call this shared sale-specific channel/location resolver and do not
-reproduce warehouse cost-engine rules. Vitrina and indicative Proxy 3/4 use the
-separate `our_inventory_wac_wb_ff_v1` informational inventory blend; Finance
-never consumes that average as transaction COGS.
+Formula version is `canonical_our_cost_channel_location_v2`. Finance and
+Partner call one shared resolver and consume the same reason/coverage evidence.
+For an FBS sale/return on business date `D`, the primary unit cost is exact
+pooled physical WAC across every active `facility × FBS` balance for that
+`nmId`: `SUM(capital_rub) / SUM(quantity)`. This is never an arithmetic mean of
+facility WAC and never depends on the order's routed facility or frozen
+lifecycle debit. The balance-as-of lookup uses only physical operations at or
+before `D`; an explicit zero/depleted state stops older positive cost from
+carrying forward.
 
-For each sale/return operation the resolver first classifies its channel and
-exact location. FBS requires the privacy-safe exact WB order identity, its
-resolved `facility_id + FBS + nmId` lifecycle row and the immutable positive
-handoff/debit `frozen_wac_rub`. Ambiguous/missing FBS identity, mapping,
-handoff or WAC is an uncovered reason and never falls through to WB/FBO cost.
-FBO/WB then follows the same-`nmId` daily policy:
+Only when that pooled physical source is absent may FBS use the exact same-
+`nmId`, same-day common inventory cell published under
+`our_inventory_wac_wb_ff_v1`. There is no future lookahead, another-SKU or
+cross-channel substitution, guessed alias, legacy value or silent zero. If
+both sources are absent the sale remains explicit uncovered evidence and is
+excluded from both covered-profit numerator and profitability denominator.
+Order identity still classifies the channel and supports audit, but lifecycle
+mapping, debit and quarantine do not own Finance value and Finance never
+changes those physical records.
+
+FBO/WB follows the same-`nmId` daily policy:
 
 - operation date is `rrDate → saleDt → orderDt`; a missing operation date is a blocker;
 - before `2026-07-01`, the WB/FBO contour of the canonical `Себестоимость наша` uses the exact daily row of that `nmId` on `2026-07-01` as a business-approved retrospective projection across all loaded Finance history;
@@ -65,11 +74,12 @@ The resolver accepts the posted functional daily contour and the warehouse-domai
 
 Lineage contains operation date, canonical source date/identity/version/digest, quality, selection method and formula version. Archival-estimate lineage additionally pins owner approval, effective date, 100 ₽, target manifest, production dry-run source SHA, source digest and calculation/row fingerprints. Before 01.07 the UI/tooltips describe the value as a retrospective management projection, not factual historical warehouse capital. A canonical source correction changes the digest and invalidates/rebuilds affected Finance projections automatically.
 
-Within one query-plan connection the runner loads the small canonical
-daily-cost surface, exact FBS identity/frozen-cost indexes, active archival
-overlay and first factual receipt boundary once, then caches canonical
-resolution by `nmId + operation date`. Nomenclature identities use the same
-connection-bound cache. Heavy week projection and target after-image assembly
+Within one query-plan connection the runner loads the canonical daily-cost
+surface, privacy-safe FBS channel identities, ordered active-facility FBS
+physical deltas, same-day common inventory cells, active archival overlay and
+first factual receipt boundary once, then caches canonical resolution by
+`nmId + operation date`. Nomenclature identities use the same connection-bound
+cache. Heavy week projection and target after-image assembly
 run on a registry-selected SQLite `mode=ro`, `query_only=ON` connection without
 an explicit or implicit data transaction. The exact WB/FBS cost,
 nomenclature and target raw/report dependency fingerprint is computed and
@@ -120,8 +130,8 @@ Paid acceptance/transit addback is allowed only when exact Finance `giId/supplyI
 Global capitalization allocations are built once for the coherent SQLite connection used by one plan/apply/readback pass and then reused by the global and every per-SKU aggregate. A new connection always rebuilds the raw/supply-layer manifest and allocations, so a later Finance sync or canonical layer correction invalidates the cache. This avoids the accidental `weeks × SKUs × all cost layers` re-hashing path without weakening source drift detection.
 
 The existing stale-derived hook now checks every loaded week, including the
-backward historical projection. Planning and expensive recalculation run on an
-immutable in-memory SQLite snapshot outside the shared warehouse writer lock.
+backward historical projection. Planning and expensive recalculation run on a
+registry-selected query-only SQLite connection outside the shared warehouse writer lock.
 Apply uses one short `BEGIN IMMEDIATE` data-version CAS to replace only exact
 target images; any intervening source commit aborts before publication. The
 originating targeted queue receives the Finance fingerprint only after
@@ -190,7 +200,9 @@ python3 apps/wb_finance_weekly.py canonical-cost-backfill \
   --runtime-dir /canonical/runtime
 ```
 
-Dry-run is default and read-only. With no date bounds it covers all loaded Finance history and emits:
+Dry-run is default and read-only. With no date bounds it freezes cutoff `C` at
+the latest fully closed stored Finance week; rows after `C` are forward ingress
+and never rebuild or invalidate that historical plan. It emits:
 
 - date/week/raw-row/nmId scope;
 - Finance, ads and canonical-cost manifests/digests;
@@ -200,9 +212,12 @@ Dry-run is default and read-only. With no date bounds it covers all loaded Finan
 - agent/acquiring reconciliation and capitalization lineage;
 - before state and expected readback of every indexed per-SKU weekly projection consumed by Partner Report;
 - target/non-target digests, write set, blockers, backup/recovery plan and exact fingerprint;
+- FBS primary pooled/fallback/remaining order, unit and RUB coverage with
+  privacy-safe order digests and exact reason counts;
+- the exact target before-image and fixed-cutoff forward boundary;
 - explicit invariants: no fallback average, silent zero, legacy cost or retro-map read/write; raw Finance, ads and canonical cost are non-target.
 
-The all-history evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. Expected and persisted per-SKU readback rows use the same canonical numeric-nmID/non-numeric ordering, so mixed 9- and 10-digit catalogues cannot create a false digest mismatch from SQLite TEXT ordering. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows across certified/archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or excessive peak RSS.
+The fixed-cutoff evidence path is bounded-memory: ordered raw and non-target identities are fed into streaming JSON-array digests instead of being retained as Python lists, and expected target evidence contains only the persisted aggregate/coverage/per-SKU state that apply reads back. Privacy-safe order identities are classified per row but the resolver cache is bounded by `nmId × business date × channel classification`, never by order count; exact identity-to-FBS evidence remains inside the streaming source dependency. Each week calculates canonical COGS details once, reuses that coverage for the global metrics, and reuses the already parsed rows for its per-SKU projections; details are then released after collapse into the required operation-date matrix. Expected and persisted per-SKU readback rows use the same canonical numeric-nmID/non-numeric ordering, so mixed 9- and 10-digit catalogues cannot create a false digest mismatch from SQLite TEXT ordering. This changes neither formulas nor evidence scope. `apps/wb_finance_weekly_canonical_scale_smoke.py` exercises 295,919 sale rows with unique privacy-safe identities across certified/archival-estimate and deliberately missing cost states plus 50,000 functional events and 50,000 supply cost layers, and fails on row/quantity/layer loss, archival-quality rejection, duplicated gap evidence, excessive runtime or excessive peak RSS.
 
 The former `business-approved-backfill` runner and every former fingerprint are permanently revoked.
 
@@ -276,30 +291,31 @@ never recreates `wb_finance_weekly_raw_rows`. Repeated unchanged source
 snapshots are no-ops, changed snapshots retain history without duplicating the
 current view, and every raw attach is generation-identity checked and observed.
 
-Apply requires a newly reviewed exact fingerprint, external plan file, approval
-reference and the retained compatibility backup-directory argument. That
-argument cannot redirect recovery artifacts or regain a full-store backup. The
-runner holds the canonical `.warehouse-functional-sync.lock` from its
-current-plan recheck through central T2 warehouse/cost/derived-Finance
-checkpoint, `BEGIN IMMEDIATE` apply and transactional readback, so
-hourly/manual warehouse sync, replay, downstream cost-layer materialization and
-economics publication cannot change the canonical cost inputs inside that
-interval. Finance raw is read only as calculation input and is excluded from
-the checkpoint. For a long production apply the separate repo-owned
-`warehouse-functional-maintenance status|hold|restore` lifecycle stops only the
-hourly timer, waits for an already-running service without killing it, persists
-the exact mode-`0600` timer/service baseline and later restores its
-enabled/active state; an explicitly authorized broader quiet window uses
-`business-data-maintenance hold`, whose durable warehouse sub-mode retains that
-restorable baseline while leaving the timer disabled and inactive. Neither path
-weakens or normalizes the reviewed fingerprint. The runner rejects
-drift/blockers, writes only derived Finance/audit rows, verifies global and
-per-SKU target readback/non-target digest, and rolls back on any mismatch. It
-persists a separate post-apply fingerprint: an unchanged exact repeat returns
-an audited T0 no-op without a second checkpoint, while any later
-raw/ads/cost/target drift invalidates the old approval.
+Apply requires a newly reviewed exact fingerprint, external plan file, the
+exact plan `date_from/date_to` and a separate owner approval reference. Deploy,
+dry-run and merge are not apply authorization. Recovery is T1 exact before-
+images of only the selected Finance aggregate/coverage/reconciliation/per-SKU/
+sync rows; no whole-store SQLite copy, multi-GB in-memory backup, warehouse-
+domain T2 checkpoint, global maintenance hold or timer stop is used. Heavy
+source verification and complete after-image construction stay query-only
+outside the writer transaction; exact target before-images and target-reachable
+source dependencies are read both before and after long planning so unrelated
+commits remain admissible while an internally mixed plan fails closed. A short
+`BEGIN IMMEDIATE` checks the exact
+target before-image, replaces only reviewed week identities and verifies the
+target readback before commit. The same transaction appends the immutable
+fingerprint/apply identity, closing the commit-before-audit crash window; a
+later reconciliation audit remains separate and query-only. A data-version
+change in the small handoff gap
+requires query-only revalidation of the same fixed-cutoff plan, not a broadened
+or automatically replayed apply. Post-commit non-target and zero-delta
+reconciliation are query-only. The durable hosted operation identity owns
+status/result/stderr evidence, so ambiguous transport is reconciled by that
+identity and is never resubmitted. Successful exact repeat is an audited T0
+no-op.
 
-Production apply is not implied by merge/deploy and remains forbidden until the new all-history dry-run receives explicit human approval.
+Production apply is not implied by merge/deploy and remains forbidden until the
+new fixed-cutoff manifest receives its separate exact owner gate.
 
 ## UI and verification
 
@@ -344,10 +360,10 @@ Authenticated production acceptance uses `finance-ui-flow` in a fresh isolated C
 ## Unified recovery-policy boundary
 
 The weekly Finance source table remains Finance raw and is never recoverable
-through T1/T2 warehouse artifacts. A bounded stale-cost correction uses T1
-exact derived-row before images; a wide canonical derived publication uses T2
-and checkpoints only the warehouse/cost/derived-Finance domain. The reviewed
-raw Finance input is read for calculation only and cannot enter the checkpoint.
-T0 repeats create no recovery bytes. Earlier full/coherent-backup wording for
-these publication paths is superseded by module 51; T3 remains available only
-to explicit allowlisted schema/store migrations.
+through T1/T2 warehouse artifacts. Both bounded stale-cost correction and the
+fixed-cutoff canonical publication use T1 exact target-row before images. The
+reviewed raw Finance, warehouse capital/quantity and common inventory inputs
+are query-only sources and cannot enter a checkpoint. T0 repeats create no
+recovery bytes. Whole-store/full-domain backup wording is superseded for these
+publication paths; T3 remains available only to explicit allowlisted
+schema/store migrations.

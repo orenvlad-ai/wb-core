@@ -30,6 +30,8 @@ related_modules:
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/ff_stage_7a_production.py"
   - "packages/application/wb_fbs_shadow_polling.py"
+  - "packages/application/wb_fbs_warehouse_registry.py"
+  - "apps/wb_fbs_warehouse_registry.py"
   - "apps/warehouse_functional_runner.py"
   - "apps/ff_pool_overhead_backfill.py"
   - "apps/warehouse_cost_queue_replay.py"
@@ -248,7 +250,17 @@ Web Vitrina retains the historical information-only incident adapter and its evi
 
 Periodic WB WAC получает accepted inbound capital, но quantity всегда заменяется official contour snapshot. Каждый hourly apply переигрывает versioned daily WAC от functional cutover: closed days фиксируются отдельными daily rows, current day остаётся provisional, zero-stock SKU retains last valid WAC. Если точная историческая колонка объявляет более поздний SKU с нулевым остатком, которого не было в frozen opening, projection сохраняет его как нулевой капитал со статусом `zero_quantity_without_cost_basis`, а Registry/Proxy и weekly Finance consumers возвращают неизвестную, не нулевую себестоимость; положительный остаток без cost seed остаётся блокирующей ошибкой. Late expense/accepted correction публикует signed event с исходной business date и атомарно перестраивает только derived daily cost history от этой границы; positive pool и cost не могут стать negative/zero. Direct consumers сначала читают эту daily projection, поэтому WB/FBO-контур единой `Себестоимость наша` не имеет независимого baseline.
 
-Weekly Finance uses one channel/location resolver. FBS requires the exact privacy-safe order identity and immutable facility/FBS handoff WAC; no FBS row may inherit WB/FBO daily cost. WB/FBO continue through the warehouse-domain daily resolver. Usually this is exact row `sheet_vitrina_v1_warehouse_wb_daily_cost`; for the exact 18-SKU manifest migration 109 allows active versioned `business_approved_archival_estimate` 100 ₽ effective 01.07. Missing required evidence is unknown and cannot inherit another facility/SKU, average, legacy cost or zero.
+Weekly Finance and Partner use one v2 resolver that is separate from physical
+lifecycle. FBS primary is exact pooled active-facility FBS capital divided by
+quantity as of the operation business date; only an absent primary may fall
+back to the exact same-`nmId`, same-day published common WB+FF inventory cost.
+The pooled value is never a facility mean or order/facility dependency, while
+the lifecycle continues to own its immutable handoff WAC. WB/FBO continue
+through the warehouse-domain daily resolver. Usually this is exact row
+`sheet_vitrina_v1_warehouse_wb_daily_cost`; for the exact 18-SKU manifest
+migration 109 allows active versioned `business_approved_archival_estimate`
+100 ₽ effective 01.07. Missing required evidence is unknown and cannot inherit
+another SKU/date, future value, legacy cost or zero.
 
 Проекция до 01.07 — только Finance management metadata, не warehouse history. Она не создаёт backdated balances/events и не меняет functional rows. Отдельная фиксированная Finance value/map запрещена; позднее исправление canonical row меняет digest и заставляет derived Finance projection перестроиться. Acceptance/transit может быть исключён из Finance period expenses только через exact `supplyId + nmId` lineage к текущему cost layer и не выше капитализированной суммы.
 

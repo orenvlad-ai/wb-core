@@ -903,7 +903,7 @@ def _seed_canonical_cost(db_path: Path) -> None:
 
 
 def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
-    """One resolver keeps exact FBS facilities separate and missing fail closed."""
+    """Finance pools FBS facilities while an absent pooled/fallback cost stays missing."""
 
     def identity_hash(value: str) -> str:
         return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -932,6 +932,17 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
                 occurred_at TEXT NOT NULL,details_json TEXT NOT NULL,
                 source_observed_at TEXT NOT NULL
             );
+            CREATE TABLE sheet_vitrina_v1_ff_facilities(
+                facility_id TEXT PRIMARY KEY,active INTEGER NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_warehouse_business_operations(
+                operation_id TEXT PRIMARY KEY,business_date TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_ff_pool_movement_lines(
+                operation_id TEXT NOT NULL,line_no INTEGER NOT NULL,
+                facility_id TEXT NOT NULL,pool TEXT NOT NULL,nm_id INTEGER NOT NULL,
+                quantity_delta INTEGER NOT NULL,capital_delta_rub TEXT NOT NULL
+            );
             INSERT INTO sheet_vitrina_v1_ff_pool_cutover_manifests
             VALUES('cutover-channel-cost','2026-07-15T08:00:00Z');
             INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events VALUES
@@ -940,6 +951,13 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
             INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_current VALUES
             ('cutover-channel-cost',71001,'fac_moscow','FBS',101,1,'80','event-msk'),
             ('cutover-channel-cost',71002,'fac_orenburg','FBS',101,1,'120','event-orenburg');
+            INSERT INTO sheet_vitrina_v1_ff_facilities VALUES
+            ('fac_moscow',1),('fac_orenburg',1);
+            INSERT INTO sheet_vitrina_v1_warehouse_business_operations VALUES
+            ('pool-msk','2026-07-15'),('pool-orenburg','2026-07-15');
+            INSERT INTO sheet_vitrina_v1_ff_pool_movement_lines VALUES
+            ('pool-msk',1,'fac_moscow','FBS',101,1,'80'),
+            ('pool-orenburg',1,'fac_orenburg','FBS',101,3,'360');
             """
         )
         conn.executemany(
@@ -1001,6 +1019,9 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
             "rrdId": 7134,
             "retailPriceWithDisc": "400",
             "forPay": "400",
+            "nmId": 102,
+            "vendorCode": "ANTI102",
+            "sku": "4600000000102",
             "rid": "synthetic-no-handoff-order",
             "deliveryType": "fbs",
         },
@@ -1016,14 +1037,14 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
     metrics = result["aggregate"]
     expected = {
         "net_revenue": "2400.0000",
-        "profit_revenue_covered": "1500.0000",
-        "profit_revenue_uncovered": "900.0000",
-        "sales_without_cost_rub": "900.0000",
-        "orders_without_cost": 2,
-        "units_without_cost": 2,
-        "cogs": "300.0000",
-        "profit_after_cogs": "1200.0000",
-        "final_margin_pct": "80.0000",
+        "profit_revenue_covered": "2000.0000",
+        "profit_revenue_uncovered": "400.0000",
+        "sales_without_cost_rub": "400.0000",
+        "orders_without_cost": 1,
+        "units_without_cost": 1,
+        "cogs": "430.0000",
+        "profit_after_cogs": "1570.0000",
+        "final_margin_pct": "78.5000",
         "profit_coverage_status": "partial",
     }
     for key, value in expected.items():
@@ -1036,35 +1057,66 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
     )
     coverage = payload_week["cost_coverage"]
     if (
-        coverage["uncovered_fbs_sales_revenue_rub"] != "900.0000"
-        or coverage["uncovered_fbs_sales_order_count"] != 2
-        or coverage["uncovered_fbs_sales_units"] != 2
+        coverage["uncovered_fbs_sales_revenue_rub"] != "400.0000"
+        or coverage["uncovered_fbs_sales_order_count"] != 1
+        or coverage["uncovered_fbs_sales_units"] != 1
     ):
         raise AssertionError(f"FBS warning evidence is not exact: {coverage}")
     if coverage["quality"]["source_units"] != {
         "projected_from_2026_07_01": 0,
         "canonical_exact_date": 1,
-        "fbs_exact_handoff": 2,
+        "fbs_pooled_physical": 3,
+        "fbs_same_day_common_inventory_fallback": 0,
     }:
         raise AssertionError(f"channel source split mismatch: {coverage}")
     reasons = {
         item["reason"] for item in coverage["problem_skus"]
     }
-    if reasons != {"fbs_order_identity_missing", "fbs_handoff_cost_missing"}:
+    if reasons != {"fbs_pooled_and_common_inventory_cost_missing"}:
         raise AssertionError(f"FBS missing reason evidence mismatch: {coverage}")
+    with block._connect() as conn:
+        unresolved_identity = block._calculate_cogs(
+            conn,
+            [
+                {
+                    **base,
+                    "rrdId": 7199,
+                    "nmId": "",
+                    "vendorCode": "",
+                    "sku": "",
+                    "rid": "synthetic-unresolved-fbs-order",
+                    "deliveryType": "fbs",
+                    "retailPriceWithDisc": "321",
+                }
+            ],
+            date(2026, 7, 13),
+        )
+    if (
+        unresolved_identity["uncovered_fbs_sales_revenue_rub"] != "321.0000"
+        or unresolved_identity["uncovered_fbs_sales_order_count"] != 1
+        or unresolved_identity["uncovered_fbs_sales_units"] != 1
+        or unresolved_identity["problem_skus"][0]["channel"] != "FBS"
+    ):
+        raise AssertionError(
+            "unresolved FBS identity disappeared from channel coverage evidence: "
+            f"{unresolved_identity}"
+        )
     with sqlite3.connect(block.db_path) as conn:
         sku_row = conn.execute(
             """SELECT coverage_json FROM wb_finance_weekly_sku_aggregates
                WHERE seller_id='seller-1' AND week_start='2026-07-13' AND nm_id='101'"""
         ).fetchone()
     sku_coverage = json.loads(str(sku_row[0]))
-    facilities = {
-        str(item["facility_id"])
-        for item in sku_coverage["detail_rows"]
-        if item["channel"] == "FBS"
-    }
-    if facilities != {"fac_moscow", "fac_orenburg"}:
-        raise AssertionError(f"FBS facilities were mixed or lost: {sku_coverage}")
+    pooled_rows = [
+        item for item in sku_coverage["detail_rows"] if item["channel"] == "FBS"
+    ]
+    if not pooled_rows or any(
+        item.get("facility_id") != ""
+        or item.get("selection_method")
+        != "sum_fbs_physical_capital_divided_by_quantity"
+        for item in pooled_rows
+    ):
+        raise AssertionError(f"Finance leaked a per-facility FBS dependency: {sku_coverage}")
 
 
 def _fixture_rows() -> list[dict]:

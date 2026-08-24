@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -19,9 +20,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_finance_weekly import WbFinanceApiClient, block_from_env  # noqa: E402
-from packages.application.warehouse_functional_lock import (  # noqa: E402
-    warehouse_functional_write_lock,
-)
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     BeforeImageQuery,
     RecoveryState,
@@ -176,20 +174,16 @@ def main(argv: list[str] | None = None) -> int:
                 date_to=date_to,
             )
         else:
-            # The same process-wide/file lock used by hourly/manual warehouse
-            # writers covers the complete Finance plan -> backup -> apply ->
-            # transactional readback interval. The maintenance hold stops only
-            # the timer; this lock is the serialization boundary for every
-            # other warehouse writer.
-            with warehouse_functional_write_lock(Path(args.runtime_dir)):
+            # Planning is query-only and intentionally does not hold the global
+            # warehouse writer lock. The application method rechecks the exact
+            # target fingerprint and holds only its short target CAS write.
+            with nullcontext():
                 plan = block.plan_canonical_finance_backfill(
                     date_from=date_from,
                     date_to=date_to,
                 )
                 if not args.confirm_fingerprint:
                     parser.error("--apply requires --confirm-fingerprint from the new dry-run")
-                if not args.backup_dir:
-                    parser.error("--apply requires an explicit --backup-dir")
                 if not args.approval_reference:
                     parser.error("--apply requires --approval-reference for the new human gate")
                 already_applied = block.canonical_finance_fingerprint_applied(
@@ -207,44 +201,27 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if already_applied:
                     recovery = registry.plan_noop(
-                        mutation_kind="canonical_cost_wide_publication",
-                        closure_kind="warehouse_domain",
+                        mutation_kind="canonical_cost_bounded_publication",
+                        closure_kind="sku_date",
                         plan_fingerprint=args.confirm_fingerprint,
                         scope={
                             "date_from": plan_date_from,
                             "date_to": plan_date_to,
-                            "consumer": "wb_finance_weekly",
+                            "weeks": [],
                         },
                     )
                 else:
-                    source_digest = _json_digest(plan.get("source_manifests") or {})
-                    recovery = registry.prepare_t2(
-                        mutation_kind="canonical_cost_wide_publication",
-                        plan_fingerprint=args.confirm_fingerprint,
-                        scope={
-                            "date_from": plan_date_from,
-                            "date_to": plan_date_to,
-                            "consumer": "wb_finance_weekly",
-                        },
-                        source_digest=source_digest,
-                        non_target_digest=str(
-                            plan.get("non_target_digest") or ""
-                        ),
-                        source_watermarks={
-                            "week_count": int(plan.get("week_count") or 0),
-                            "finance_row_count": int(
-                                plan.get("finance_row_count") or 0
-                            ),
-                            "target_before_digest": str(
-                                plan.get("target_before_digest") or ""
-                            ),
-                        },
-                        schema_revision=str(plan.get("schema_version") or "finance-v1"),
+                    recovery = _prepare_bounded_finance_recovery(
+                        registry,
+                        block.db_path,
+                        plan,
                     )
                     if recovery["lifecycle"] == RecoveryState.VERIFIED.value:
                         recovery = registry.begin_mutation(
                             recovery["operation_id"],
-                            expected_source_digest=source_digest,
+                            expected_source_digest=str(
+                                plan["backup_recovery_plan"]["before_image_digest"]
+                            ),
                         )
                 try:
                     result = block.apply_canonical_finance_backfill(
@@ -276,7 +253,11 @@ def main(argv: list[str] | None = None) -> int:
                 result["backup"] = (
                     None
                     if recovery["tier"] == "T0"
-                    else recovery
+                    else {
+                        "kind": "target_scoped_before_image",
+                        "operation_id": recovery["operation_id"],
+                        "copy_bytes": 0,
+                    }
                 )
                 result["recovery_policy"] = recovery
     elif args.command == "business-approved-backfill":
@@ -366,6 +347,14 @@ def _prepare_bounded_finance_recovery(
     db_path: Path,
     plan: dict[str, object],
 ) -> dict[str, object]:
+    canonical_recovery = plan.get("backup_recovery_plan")
+    source_digest = (
+        str(canonical_recovery.get("before_image_digest") or "")
+        if isinstance(canonical_recovery, dict)
+        else str(plan.get("target_before_digest") or "")
+    )
+    if not source_digest:
+        raise ValueError("bounded Finance recovery source digest is missing")
     weeks = [
         (str(item["week_start"]), str(item["week_end"]))
         for item in plan.get("weeks", [])
@@ -431,8 +420,8 @@ def _prepare_bounded_finance_recovery(
             for item in plan.get("weeks", [])
             if isinstance(item, dict)
         ],
-        source_digest=str(plan["target_before_digest"]),
-        non_target_digest=str(plan["non_target_digest"]),
+        source_digest=source_digest,
+        non_target_digest=str(plan.get("non_target_digest") or ""),
     )
 
 

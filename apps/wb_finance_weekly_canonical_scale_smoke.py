@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_finance_weekly import (  # noqa: E402
+    COST_METHOD_VERSION,
     WbFinanceWeeklyBlock,
     _StreamingCostDependencyDigest,
     _StreamingJsonArrayDigest,
@@ -171,7 +172,7 @@ def _assert_streaming_digest_equivalence() -> None:
     expected_cost = hashlib.sha256(
         json.dumps(
             {
-                "formula_version": "canonical_our_wb_cost_temporal_policy_v4",
+                "formula_version": COST_METHOD_VERSION,
                 "dependencies": dependencies,
             },
             ensure_ascii=False,
@@ -305,6 +306,7 @@ def _seed_raw_history(db_path: Path) -> None:
                       'sha256:scale-' || n,
                       json_object(
                           'reportId','scale-' || n,'rrdId','scale-' || n,'nmId',nm_id,
+                          'srid','scale-srid-' || n,
                           'vendorCode',CASE nm_id WHEN 101 THEN 'VC101' WHEN 202 THEN 'VC202' ELSE 'VC303' END,
                           'sku',CASE nm_id WHEN 101 THEN 'BAR101' WHEN 202 THEN 'BAR202' ELSE 'BAR303' END,
                           'rrDate',week_start,

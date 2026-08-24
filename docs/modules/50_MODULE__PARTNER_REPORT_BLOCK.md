@@ -76,11 +76,14 @@ logical raw store in its ordinary preview/XLSX path.
 The aggregate is rebuildable from raw Finance rows and shares module 44
 classifier/profit/cost services. Preview fails stale when formula version,
 weekly raw `content_hash`, or canonical channel/location cost source digest
-changed. FBS cost comes only from exact facility/order handoff evidence;
-WB/FBO keep daily warehouse WAC, including migration-109 lineage for its exact
-18 legacy `nmId`. Partner never resolves either source independently. Source
-correction therefore requires projection rebuild and cannot silently reuse old
-values.
+changed. FBS cost comes from the same Finance v2 resolver and coverage: pooled
+active-facility FBS physical capital/quantity as of the business date, then
+only the exact same-`nmId`, same-day common inventory fallback. WB/FBO keep
+daily warehouse WAC, including migration-109 lineage for its exact 18 legacy
+`nmId`. Partner never resolves either source independently, never imports an
+order/facility lifecycle WAC and never converts missing coverage to zero.
+Source correction therefore requires projection rebuild and cannot silently
+reuse old values.
 
 Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections, review points and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
 

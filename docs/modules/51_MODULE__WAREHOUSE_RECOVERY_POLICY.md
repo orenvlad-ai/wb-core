@@ -96,9 +96,15 @@ The central policy is used by exact supplier-cost queue replay (including
 commission regression), supplier factual correction and targeted warehouse
 replay, FF manual/targeted operation closure, calculation parameters and
 targeted economics, warehouse archival estimate and supplier certification,
-bounded and wide canonical-cost/weekly-Finance publication, warehouse opening,
+bounded stale-cost and fixed-cutoff canonical weekly-Finance publication, warehouse opening,
 hourly/manual publication, emergency rebuild and rollback, and the allowlisted
 functional schema cutover.
+
+Both active Finance publication contours select T1 exact target-row before
+images. Finance raw, pooled FBS physical sources and common inventory cells are
+query-only dependencies; they are never copied into T1/T2. The former wide
+canonical Finance T2 checkpoint is inactive and cannot be recovered by a
+backup-directory argument.
 
 Supplier-document and WB-supply source writes keep their existing transactional
 run evidence. Every supplier/CNY/cost source revision enters the targeted

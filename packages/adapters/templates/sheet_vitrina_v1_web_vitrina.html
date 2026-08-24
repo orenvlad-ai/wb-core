@@ -5860,6 +5860,11 @@
             </div>
             <div class="ff-pool-list" data-ff-pool-facilities><p class="warehouse-empty">Откройте раздел, чтобы загрузить склады.</p></div>
             <div class="ff-pool-details" data-ff-pool-facility-detail hidden></div>
+            <div class="ff-pool-toolbar">
+              <div class="grow"><strong>Официальные склады продавца WB</strong><p class="warehouse-meta">Остаток WB показан только для сверки и не меняет физический остаток или капитал.</p></div>
+              <button class="button secondary" type="button" data-ff-pool-wb-warehouse-refresh>Обновить readback</button>
+            </div>
+            <div class="ff-pool-list" data-ff-pool-wb-warehouses><p class="warehouse-empty">Официальный реестр ещё не загружен.</p></div>
           </div>
           <div class="ff-pool-pane" data-ff-pool-pane="documents" hidden>
             <div class="ff-pool-toolbar">
@@ -24180,6 +24185,7 @@
       facilityActive: modal.querySelector("[data-ff-pool-facility-active]"),
       facilities: modal.querySelector("[data-ff-pool-facilities]"),
       facilityDetail: modal.querySelector("[data-ff-pool-facility-detail]"),
+      wbWarehouses: modal.querySelector("[data-ff-pool-wb-warehouses]"),
       documentSearch: modal.querySelector("[data-ff-pool-document-search]"),
       documentKind: modal.querySelector("[data-ff-pool-document-kind]"),
       documentState: modal.querySelector("[data-ff-pool-document-state]"),
@@ -24214,7 +24220,7 @@
       requestId: modal.querySelector("[data-ff-pool-request-id]"),
       workflow: modal.querySelector("[data-ff-pool-workflow-detail]")
     };
-    const state = { loaded: false, capabilities: null, facilities: [], opener: null, busy: false, currentAction: "" };
+    const state = { loaded: false, capabilities: null, facilities: [], wbWarehouses: null, opener: null, busy: false, currentAction: "" };
     const requestStorageKey = "wb.ffPool.lastRequestId.v1";
     const actions = {
       china_acceptance: { label: "Приёмка Китай → FF", fields: ["facility", "shipment", "workbook", "expenses"], workbook: true, help: "Скачайте шаблон для выбранной поставки, распределите принятое количество между FBO и FBS и загрузите файл." },
@@ -24301,6 +24307,7 @@
         });
         updateActionFields();
         await loadFacilities();
+        await loadWbWarehouses();
         if (saved) loadWorkflow();
       } catch (error) {
         state.loaded = false;
@@ -24420,19 +24427,113 @@
       const form = make("form", "ff-pool-form");
       const nameLabel = make("label", "wide", "Название"); const name = make("input", "input"); name.required = true; name.maxLength = 200; name.value = facility ? facility.name : ""; nameLabel.appendChild(name);
       const tzLabel = make("label", "", "Часовой пояс"); const tz = make("input", "input"); tz.required = true; tz.value = facility ? facility.display_timezone : "Asia/Yekaterinburg"; tzLabel.appendChild(tz);
-      const activeLabel = make("label", "", "Статус"); const active = make("select", "input"); [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : true); activeLabel.appendChild(active);
-      const submit = make("button", "button primary", facility ? "Сохранить" : "Создать"); submit.type = "submit";
+      const activeLabel = make("label", "", "Статус"); const active = make("select", "input"); [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : false); active.disabled = !facility; activeLabel.appendChild(active);
+      const cityLabel = make("label", "", "Город"); const city = make("input", "input"); city.maxLength = 120; city.value = facility ? (facility.city || "") : ""; city.disabled = Boolean(facility); cityLabel.appendChild(city);
+      const submit = make("button", "button primary", facility ? "Сохранить" : "Проверить создание"); submit.type = "submit";
       const result = make("div", "ff-pool-alert"); result.hidden = true;
-      form.append(nameLabel, tzLabel, activeLabel, submit, result);
+      form.append(nameLabel, cityLabel, tzLabel, activeLabel, submit, result);
+      let pendingPreview = null;
       form.addEventListener("submit", async function (event) {
         event.preventDefault(); submit.disabled = true;
         const requestId = "fffui_" + Date.now() + "_" + Math.random().toString(16).slice(2, 10);
-        const body = { request_id: requestId, name: name.value, display_timezone: tz.value, active: active.value === "true" };
+        const body = { request_id: requestId, name: name.value, city: city.value, display_timezone: tz.value, active: active.value === "true" };
         if (facility) body.expected_updated_at = facility.updated_at;
-        try { await jsonPost(facility ? ("/facilities/" + encodeURIComponent(facility.facility_id)) : "/facilities", body); setAlert(result, "Изменение подтверждено чтением с сервера.", "success"); await loadFacilities(); }
+        try {
+          if (facility) {
+            await jsonPost("/facilities/" + encodeURIComponent(facility.facility_id), body);
+            setAlert(result, "Изменение подтверждено чтением с сервера.", "success");
+          } else if (!pendingPreview) {
+            pendingPreview = await jsonPost("/facilities/preview", body);
+            setAlert(result, "Предпросмотр: будет создан пустой неактивный склад «" + name.value + "». Остаток, капитал, документы и WB не изменятся.", "neutral");
+            submit.textContent = "Подтвердить создание";
+            name.disabled = true;
+            city.disabled = true;
+            tz.disabled = true;
+          } else {
+            await jsonPost("/facilities/onboarding/" + encodeURIComponent(pendingPreview.request_id) + "/confirm", {confirm:true, preview_fingerprint:pendingPreview.preview_fingerprint});
+            setAlert(result, "Пустой неактивный склад создан и ожидает привязки к WB.", "success");
+            pendingPreview = null;
+            submit.textContent = "Проверить создание";
+            await loadFacilities();
+            await loadWbWarehouses();
+          }
+        }
         catch (error) { setAlert(result, error.message, "error"); }
         finally { submit.disabled = false; }
       });
+      nodes.facilityDetail.appendChild(form);
+    }
+    async function loadWbWarehouses() {
+      if (!nodes.wbWarehouses) return;
+      clear(nodes.wbWarehouses);
+      nodes.wbWarehouses.appendChild(make("p", "warehouse-empty", "Загрузка официального реестра…"));
+      try {
+        const payload = await api("/wb-warehouses");
+        state.wbWarehouses = payload;
+        clear(nodes.wbWarehouses);
+        if (!(payload.warehouses || []).length) {
+          nodes.wbWarehouses.appendChild(make("p", "warehouse-empty", "Официальные склады ещё не получены. Заказы продолжают собираться независимо."));
+        }
+        (payload.warehouses || []).forEach(function(warehouse) {
+          const item = make("article", "ff-pool-list-item");
+          const copy = make("div");
+          copy.appendChild(make("strong", "", warehouse.name + " · WB ID " + warehouse.seller_warehouse_id));
+          copy.appendChild(make("small", "", warehouse.binding_status + " · " + ((warehouse.office || {}).name || "office ID " + ((warehouse.office || {}).id || "—")) + " · " + ((warehouse.office || {}).city || "город не указан")));
+          const readback = warehouse.stock_readback || {};
+          copy.appendChild(make("small", "", "WB readback: " + (readback.status || "unavailable") + " · freshness " + (readback.freshness || "unavailable") + " · " + (readback.snapshot_at || "нет снимка") + " · completeness " + String(Boolean(readback.complete))));
+          copy.appendChild(make("small", "", "source digest " + (readback.source_digest || "—") + " · identity scope " + (((readback.identity_scope || {}).status) || "unavailable")));
+          (readback.rows || []).slice(0, 20).forEach(function(row) {
+            copy.appendChild(make("small", "", "nmID " + row.nm_id + " · internal physical " + (row.internal_physical_quantity == null ? "н/д" : row.internal_physical_quantity) + " · WB declared " + (row.wb_declared_quantity == null ? "н/д" : row.wb_declared_quantity) + " · delta " + (row.delta_quantity == null ? "н/д" : row.delta_quantity)));
+          });
+          const button = make("button", "button secondary", warehouse.facility ? "Привязан" : "Привязать");
+          button.type = "button";
+          button.disabled = Boolean(warehouse.facility) || !(state.capabilities.feature || {}).writer_effective;
+          button.addEventListener("click", function(){ showBindingEditor({warehouse:warehouse}); });
+          item.append(copy, button);
+          nodes.wbWarehouses.appendChild(item);
+        });
+        (payload.waiting_facilities || []).forEach(function(facility) {
+          const item = make("article", "ff-pool-list-item");
+          const copy = make("div");
+          copy.appendChild(make("strong", "", facility.name));
+          copy.appendChild(make("small", "", facility.binding_status + " · " + (facility.active ? "активен" : "неактивен")));
+          const button = make("button", "button secondary", "Выбрать склад WB");
+          button.type = "button";
+          button.disabled = !(state.capabilities.feature || {}).writer_effective;
+          button.addEventListener("click", function(){ showBindingEditor({facility:facility}); });
+          item.append(copy, button);
+          nodes.wbWarehouses.appendChild(item);
+        });
+      } catch (error) {
+        clear(nodes.wbWarehouses);
+        nodes.wbWarehouses.appendChild(make("p", "ff-pool-alert", error.message));
+      }
+    }
+    function showBindingEditor(selection) {
+      nodes.facilityDetail.hidden = false;
+      clear(nodes.facilityDetail);
+      nodes.facilityDetail.appendChild(make("h3", "", "Точная привязка склада WB"));
+      const form = make("form", "ff-pool-form");
+      const warehouseLabel = make("label", "wide", "Официальный склад продавца WB");
+      const warehouseSelect = make("select", "input");
+      (state.wbWarehouses.warehouses || []).filter(function(item){return !item.facility;}).forEach(function(item){const option=make("option","",item.name+" · ID "+item.seller_warehouse_id);option.value=String(item.seller_warehouse_id);warehouseSelect.appendChild(option);});
+      if (selection.warehouse) warehouseSelect.value = String(selection.warehouse.seller_warehouse_id);
+      warehouseSelect.disabled = Boolean(selection.warehouse);
+      warehouseLabel.appendChild(warehouseSelect);
+      const facilityLabel = make("label", "wide", "Внутренний склад FF");
+      const facilitySelect = make("select", "input");
+      (state.wbWarehouses.waiting_facilities || []).forEach(function(item){const option=make("option","",item.name+(item.active?" · активен":" · неактивен"));option.value=item.facility_id;facilitySelect.appendChild(option);});
+      if (selection.facility) facilitySelect.value = selection.facility.facility_id;
+      facilitySelect.disabled = Boolean(selection.facility);
+      facilityLabel.appendChild(facilitySelect);
+      const submit = make("button", "button primary", "Проверить привязку"); submit.type="submit";
+      const result = make("div", "ff-pool-alert"); result.hidden=true;
+      let preview=null;
+      form.append(warehouseLabel,facilityLabel,submit,result);
+      form.addEventListener("submit",async function(event){event.preventDefault();submit.disabled=true;try{
+        if(!preview){preview=await jsonPost("/wb-warehouses/binding/preview",{request_id:"fbsbindui_"+Date.now()+"_"+Math.random().toString(16).slice(2,10),seller_warehouse_id:Number(warehouseSelect.value),facility_id:facilitySelect.value});setAlert(result,"Предпросмотр готов: создаётся только точная связь ID↔ID. Склад, остатки и перемещения не создаются.","neutral");submit.textContent="Подтвердить привязку";warehouseSelect.disabled=true;facilitySelect.disabled=true;}
+        else{await jsonPost("/wb-warehouses/binding/"+encodeURIComponent(preview.request_id)+"/confirm",{confirm:true,preview_fingerprint:preview.preview_fingerprint});setAlert(result,"Привязка подтверждена. Глобальное восстановление backlog не запускалось.","success");submit.textContent="Привязано";await loadWbWarehouses();await loadFacilities();}
+      }catch(error){setAlert(result,error.message,"error");}finally{submit.disabled=false;}});
       nodes.facilityDetail.appendChild(form);
     }
     async function loadDocuments() {
@@ -24700,6 +24801,7 @@
     document.addEventListener("keydown",function(event){if(!modal.hidden&&event.key==="Escape")closeModal();});
     nodes.tabs.forEach(function(tab){tab.addEventListener("click",function(){activateTab(tab.dataset.ffPoolTab);});});
     modal.querySelector("[data-ff-pool-facility-refresh]").addEventListener("click",loadFacilities);
+    modal.querySelector("[data-ff-pool-wb-warehouse-refresh]").addEventListener("click",loadWbWarehouses);
     modal.querySelector("[data-ff-pool-facility-new]").addEventListener("click",function(){showFacilityEditor(null);});
     modal.querySelector("[data-ff-pool-document-refresh]").addEventListener("click",loadDocuments);
     modal.querySelector("[data-ff-pool-request-load]").addEventListener("click",loadWorkflow);

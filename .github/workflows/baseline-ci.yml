@@ -89,6 +89,7 @@ jobs:
           python3 apps/ff_wb_supply_origins_http_smoke.py
           python3 apps/wb_fbs_orders_collector_smoke.py
           python3 apps/wb_fbs_orders_http_smoke.py
+          python3 apps/wb_fbs_warehouse_registry_smoke.py
           python3 apps/inventory_planning_read_model_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_history_smoke.py
           python3 apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py
@@ -155,6 +156,9 @@ jobs:
           python3 apps/finance_storage_transport_job_smoke.py
           python3 apps/finance_storage_post_manifest_recovery_smoke.py
           python3 apps/wb_finance_weekly_smoke.py
+          python3 apps/wb_finance_fbs_pooled_cost_smoke.py
+          python3 apps/wb_finance_weekly_business_approved_backfill_smoke.py
+          python3 apps/wb_finance_weekly_canonical_scale_smoke.py
           python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py
           python3 apps/wb_finance_weekly_stale_cost_scale_smoke.py
           python3 apps/wb_finance_weekly_browser_smoke.py

@@ -35,6 +35,13 @@ from packages.application.ff_pool_foundation import FEATURE_EPOCHS_TABLE  # noqa
 from packages.application.ff_pool_surfaces import FfPoolSurface  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.wb_fbs_warehouse_registry import (  # noqa: E402
+    REGISTRY_ROWS_TABLE,
+    REGISTRY_RUNS_TABLE,
+    STOCK_ROWS_TABLE,
+    STOCK_RUNS_TABLE,
+    ensure_wb_fbs_warehouse_registry_schema,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -125,6 +132,40 @@ def _seed(runtime: RegistryUploadDbBackedRuntime, clock: Clock) -> None:
             },
             actor="browser-fixture",
         )
+    with sqlite3.connect(runtime.db_path) as conn:
+        ensure_wb_fbs_warehouse_registry_schema(conn)
+        conn.execute(
+            f"""INSERT INTO {REGISTRY_RUNS_TABLE}(
+                   run_id,status,complete,started_at,completed_at,warehouse_count,
+                   office_count,source_digest,error
+               ) VALUES('browser-registry','success',1,?,?,2,1,'sha256:browser-registry','')""",
+            (clock(), clock()),
+        )
+        conn.executemany(
+            f"""INSERT INTO {REGISTRY_ROWS_TABLE}(
+                   run_id,seller_warehouse_id,office_id,warehouse_name,office_name,
+                   office_city,office_federal_district,cargo_type,delivery_type,
+                   is_deleting,is_processing,evidence_digest
+               ) VALUES('browser-registry',?,?,?,?,?,?,?,?,0,0,?)""",
+            (
+                (71001, 81, "WB Север", "Офис WB", "Москва", "ЦФО", 1, 1, "sha256:wb-71001"),
+                (71002, 81, "WB Восток", "Офис WB", "Москва", "ЦФО", 1, 1, "sha256:wb-71002"),
+            ),
+        )
+        conn.execute(
+            f"""INSERT INTO {STOCK_RUNS_TABLE}(
+                   run_id,registry_run_id,seller_warehouse_id,status,complete,
+                   snapshot_at,requested_chrt_count,returned_chrt_count,
+                   identity_scope_json,source_digest,error
+               ) VALUES('browser-stock-71001','browser-registry',71001,'success',1,?,1,1,'{{\"complete\":true}}','sha256:stock-71001','')""",
+            (clock(),),
+        )
+        conn.execute(
+            f"""INSERT INTO {STOCK_ROWS_TABLE}(
+                   run_id,seller_warehouse_id,chrt_id,nm_id,amount,evidence_digest
+               ) VALUES('browser-stock-71001',71001,99101,101,7,'sha256:stock-row')"""
+        )
+        conn.commit()
 
 
 def _seed_guided_supplier_shipment(runtime: RegistryUploadDbBackedRuntime) -> None:
@@ -332,6 +373,66 @@ def _run(
     assert page.locator("[data-ff-pool-facilities] .ff-pool-list-item").count() == 3
     assert page.locator("[data-ff-pool-facilities] img").count() == 0
     assert page.evaluate("window.__ffPoolXss") is None
+    wb_registry = page.locator("[data-ff-pool-wb-warehouses]")
+    wb_registry.locator(".ff-pool-list-item", has_text="WB Север").wait_for(
+        state="visible"
+    )
+    wb_north = wb_registry.locator(".ff-pool-list-item", has_text="WB Север")
+    assert "Не привязан" in wb_north.inner_text()
+    assert "WB ID 71001" in wb_north.inner_text()
+    assert "WB declared 7" in wb_north.inner_text()
+    assert "internal physical н/д" in wb_north.inner_text()
+    wb_north.get_by_role("button", name="Привязать").click()
+    binding_form = page.locator("[data-ff-pool-facility-detail] form")
+    binding_form.get_by_label("Внутренний склад FF").select_option(
+        label="Москва Север · активен"
+    )
+    binding_form.get_by_role("button", name="Проверить привязку").click()
+    binding_form.get_by_role("button", name="Подтвердить привязку").wait_for(
+        state="visible"
+    )
+    assert binding_form.get_by_label("Официальный склад продавца WB").is_disabled()
+    assert binding_form.get_by_label("Внутренний склад FF").is_disabled()
+    binding_form.get_by_role("button", name="Подтвердить привязку").click()
+    wb_registry.locator(".ff-pool-list-item", has_text="WB Север").get_by_role(
+        "button", name="Привязан"
+    ).wait_for(state="visible")
+    waiting_orenburg = wb_registry.locator(".ff-pool-list-item", has_text="Оренбург")
+    waiting_orenburg.get_by_role("button", name="Выбрать склад WB").click()
+    reverse_form = page.locator("[data-ff-pool-facility-detail] form")
+    assert reverse_form.get_by_label("Внутренний склад FF").is_disabled()
+    assert reverse_form.get_by_label("Официальный склад продавца WB").input_value() == "71002"
+    reverse_form.get_by_role("button", name="Проверить привязку").click()
+    reverse_form.get_by_role("button", name="Подтвердить привязку").wait_for(
+        state="visible"
+    )
+    reverse_form.get_by_role("button", name="Подтвердить привязку").click()
+    wb_registry.locator(".ff-pool-list-item", has_text="WB Восток").get_by_role(
+        "button", name="Привязан"
+    ).wait_for(state="visible")
+
+    page.locator("[data-ff-pool-facility-new]").click()
+    onboarding_form = page.locator("[data-ff-pool-facility-detail] form")
+    onboarding_form.get_by_label("Название").fill("Синтетический новый FF")
+    onboarding_form.get_by_label("Город").fill("Тестовый город")
+    assert onboarding_form.get_by_label("Статус").is_disabled()
+    assert onboarding_form.get_by_label("Статус").input_value() == "false"
+    onboarding_form.get_by_role("button", name="Проверить создание").click()
+    onboarding_form.get_by_role("button", name="Подтвердить создание").wait_for(
+        state="visible"
+    )
+    assert onboarding_form.get_by_label("Название").is_disabled()
+    assert onboarding_form.get_by_label("Город").is_disabled()
+    assert onboarding_form.get_by_label("Часовой пояс").is_disabled()
+    assert "Остаток, капитал, документы и WB не изменятся" in onboarding_form.inner_text()
+    onboarding_form.get_by_role("button", name="Подтвердить создание").click()
+    page.locator(
+        "[data-ff-pool-facilities] .ff-pool-list-item",
+        has_text="Синтетический новый FF",
+    ).wait_for(state="visible")
+    assert "Ожидает привязки к WB" in wb_registry.locator(
+        ".ff-pool-list-item", has_text="Синтетический новый FF"
+    ).inner_text()
     page.locator("[data-ff-pool-facilities] .ff-pool-list-item", has_text="Москва Север").get_by_role("button", name="Открыть").click()
     page.locator("[data-ff-pool-facility-detail] h3").wait_for(state="visible")
     assert "Москва Север" in page.locator("[data-ff-pool-facility-detail]").inner_text()
@@ -461,7 +562,7 @@ def _run(
     assert response is not None and response.status == 200
     page.get_by_role("button", name="Склады").click()
     page.locator("[data-facility-id]").first.wait_for(state="visible")
-    assert page.locator("[data-facility-id]").count() == 3
+    assert page.locator("[data-facility-id]").count() == 4
     settings_text = page.locator("#warehousesGroupPanel").inner_text()
     assert "Системные пулы: FBS · FBO" in settings_text
     assert "Review range начинается с 2026-08-01" in settings_text
