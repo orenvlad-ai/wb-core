@@ -569,7 +569,9 @@ def _assert_split_storage_contract() -> None:
                 )
         raw_before_plan = _file_sha256(raw_path)
         operational_before_plan = _file_sha256(operational_path)
-        canonical_plan = block.plan_canonical_finance_backfill()
+        canonical_plan = block.plan_canonical_finance_backfill(
+            date_to=date(2026, 7, 5)
+        )
         expected_current_rows = len(rows[:-1]) + len(recovery_rows)
         if (
             canonical_plan["finance_row_count"] != expected_current_rows
