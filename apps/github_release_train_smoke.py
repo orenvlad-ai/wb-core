@@ -1612,6 +1612,7 @@ def _assert_blocked_halted_and_production_mutation() -> None:
 def _production_mutation_terminal_fixture(
     *,
     number: int = 120,
+    typed_authorization: bool = False,
 ) -> tuple[FakeApi, str, dict[str, Any]]:
     api = FakeApi()
     pull = _pull(
@@ -1644,8 +1645,16 @@ def _production_mutation_terminal_fixture(
         raise AssertionError("production mutation fixture auto-released unexpectedly")
     set_release_state(api, number, BLOCKED_LABEL)
     release_gate_body = (
-        f"OWNER AUTHORIZATION — exact release gate for PR #{number} head `{SHA_A}`; "
-        "the owner authorizes merge and deploy only, stale on any head or semantic change."
+        "wb-core.owner-authorization/v1\n"
+        "gate: release\n"
+        f"pr: {number}\n"
+        f"head: {SHA_A}\n"
+        f"authorized_effect: merge PR #{number} at exact head {SHA_A} and deploy it"
+        if typed_authorization
+        else (
+            f"OWNER AUTHORIZATION — exact release gate for PR #{number} head `{SHA_A}`; "
+            "the owner authorizes merge and deploy only, stale on any head or semantic change."
+        )
     )
     release_gate_id = api.add_external_comment(
         number,
@@ -1659,8 +1668,16 @@ def _production_mutation_terminal_fixture(
         merged_at="2026-07-21T02:00:00Z",
     )
     apply_gate_body = (
-        f"OWNER AUTHORIZATION — production apply for PR #{number} on deployed SHA "
-        f"`{SHA_C}` and exact manifest `{MANIFEST}`."
+        "wb-core.owner-authorization/v1\n"
+        "gate: apply\n"
+        f"pr: {number}\n"
+        f"authorized_effect: production apply for PR #{number} on deployed SHA "
+        f"{SHA_C} and exact manifest {MANIFEST}"
+        if typed_authorization
+        else (
+            f"OWNER AUTHORIZATION — production apply for PR #{number} on deployed SHA "
+            f"`{SHA_C}` and exact manifest `{MANIFEST}`."
+        )
     )
     apply_gate_id = api.add_external_comment(
         number,
@@ -2101,8 +2118,23 @@ def _assert_production_mutation_terminalization() -> None:
     assert "/wb-core production-mutation complete" in action.allowed_next_action
     completed.append("10_shepherd_prefers_repo_owned_terminalization")
 
-    assert len(completed) == 10, completed
-    print(f"production_mutation_terminalization: {len(completed)}/10 ok")
+    typed_api, typed_text, _ = _production_mutation_terminal_fixture(
+        number=140,
+        typed_authorization=True,
+    )
+    typed_command = parse_production_mutation_terminalization_command(typed_text)
+    typed_plan = production_mutation_terminalization_preflight(
+        typed_api,
+        typed_command.pr,
+        typed_command,
+        actor="orenvlad-ai",
+        association="OWNER",
+    )
+    assert typed_plan["status"] == "ready"
+    completed.append("11_typed_owner_authorization_envelope")
+
+    assert len(completed) == 11, completed
+    print(f"production_mutation_terminalization: {len(completed)}/11 ok")
 
 
 def _assert_finance_global_deploy_lease() -> None:

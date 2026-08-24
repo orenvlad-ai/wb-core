@@ -287,6 +287,12 @@ bounded reconciliation `task:standard + scope:production-mutation` закрыв�
 
 Two-gate workflow разделяет authority:
 
+Versioned relay `wb-core.owner-authorization/v1` является явным typed
+эквивалентом prose-маркера `OWNER AUTHORIZATION` для обоих gate comments.
+Terminalization всё равно независимо проверяет `OWNER`/`MEMBER`, exact
+head/deployed SHA/manifest, временной порядок и immutable body digest; одно
+имя envelope без этих semantic bindings authority не создаёт.
+
 1. Trusted-main preflight без production environment требует actor
    `OWNER`/`MEMBER`, current merged PR, exact retained pre-merge head,
    `task:standard + scope:production-mutation`, successful `baseline` exact
