@@ -37,6 +37,8 @@ NIGHT_PLAN_CONTRACT_NAME = "sheet_vitrina_v1_night_refresh_plan"
 NIGHT_PLAN_CONTRACT_VERSION = "v1"
 NIGHT_PLAN_TARGET_DATE = "2026-08-23"
 NIGHT_PLAN_TIMEZONE = "Asia/Yekaterinburg"
+NEXT_NIGHT_PLAN_EXPERIMENT_ID = "web-vitrina-closed-day-2026-08-24-night-v1"
+NEXT_NIGHT_PLAN_TARGET_DATE = "2026-08-24"
 MIN_LEAD_MINUTES = 10
 MAX_SLOT_WINDOW_MINUTES = 50
 HARD_MAX_PAUSE_MINUTES = 25
@@ -57,6 +59,17 @@ NIGHT_PLAN_SLOTS: tuple[tuple[str, str, str], ...] = (
     ("20260824T0330EKT", "2026-08-24T03:30:00+05:00", "2026-08-24T04:20:00+05:00"),
     ("20260824T0630EKT", "2026-08-24T06:30:00+05:00", "2026-08-24T07:20:00+05:00"),
     ("20260824T0830EKT", "2026-08-24T08:30:00+05:00", "2026-08-24T09:20:00+05:00"),
+)
+
+NEXT_NIGHT_PLAN_SLOTS: tuple[tuple[str, str, str], ...] = (
+    ("20260825T0130EKT", "2026-08-25T01:30:00+05:00", "2026-08-25T02:20:00+05:00"),
+    ("20260825T0330EKT", "2026-08-25T03:30:00+05:00", "2026-08-25T04:20:00+05:00"),
+    ("20260825T0630EKT", "2026-08-25T06:30:00+05:00", "2026-08-25T07:20:00+05:00"),
+    ("20260825T0830EKT", "2026-08-25T08:30:00+05:00", "2026-08-25T09:20:00+05:00"),
+)
+
+RELEASED_CONTROL_TARGET_DATES = frozenset(
+    {TARGET_DATE, NIGHT_PLAN_TARGET_DATE, NEXT_NIGHT_PLAN_TARGET_DATE}
 )
 
 
@@ -184,6 +197,32 @@ class NightRefreshPlanManifest:
         return payload
 
 
+def _night_plan_definition(
+    experiment_id: str,
+) -> tuple[str, str, tuple[tuple[str, str, str], ...]]:
+    normalized_id = str(experiment_id or "").strip()
+    if re.fullmatch(
+        r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+",
+        normalized_id,
+    ) is not None:
+        return NIGHT_PLAN_TARGET_DATE, NIGHT_PLAN_TIMEZONE, NIGHT_PLAN_SLOTS
+    if normalized_id == NEXT_NIGHT_PLAN_EXPERIMENT_ID:
+        return NEXT_NIGHT_PLAN_TARGET_DATE, NIGHT_PLAN_TIMEZONE, NEXT_NIGHT_PLAN_SLOTS
+    raise ValueError("experiment_id is outside the exact released bounded night plans")
+
+
+def _night_plan_child_experiment_id(
+    plan_experiment_id: str,
+    target_date: str,
+    slot_id: str,
+) -> str:
+    prefix = f"web-vitrina-closed-day-{target_date}-night-"
+    suffix = str(plan_experiment_id or "").removeprefix(prefix)
+    if not suffix or suffix == plan_experiment_id:
+        raise ValueError("night plan identity does not match its target date")
+    return f"web-vitrina-closed-day-{target_date}-canary-{suffix}-{slot_id}"
+
+
 def arm_control_canary_manifest(
     *,
     runtime_dir: Path,
@@ -199,8 +238,8 @@ def arm_control_canary_manifest(
     instant = _aware_utc(now)
     normalized_id = str(experiment_id or "").strip()
     _validate_target_date(target_date)
-    if target_date not in {TARGET_DATE, NIGHT_PLAN_TARGET_DATE}:
-        raise ValueError("control canary target_date is outside the two released bounded dates")
+    if target_date not in RELEASED_CONTROL_TARGET_DATES:
+        raise ValueError("control canary target_date is outside the released bounded dates")
     if not _valid_control_experiment_id(normalized_id, target_date):
         raise ValueError("experiment_id must be a new date-bound control-canary id")
     normalized_sha = str(expected_deployed_sha or "").strip().lower()
@@ -273,8 +312,7 @@ def arm_night_refresh_plan_manifest(
 
     instant = _aware_utc(now)
     normalized_id = str(experiment_id or "").strip()
-    if re.fullmatch(r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+", normalized_id) is None:
-        raise ValueError("experiment_id must be a new bounded 2026-08-23 night-plan id")
+    plan_target_date, plan_timezone, plan_slots = _night_plan_definition(normalized_id)
     normalized_sha = str(expected_deployed_sha or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
         raise ValueError("expected_deployed_sha must be an exact 40-character SHA")
@@ -289,12 +327,13 @@ def arm_night_refresh_plan_manifest(
             slot_id=slot_id,
             due_at=due_at,
             deadline=deadline,
-            child_experiment_id=(
-                f"web-vitrina-closed-day-{NIGHT_PLAN_TARGET_DATE}-canary-"
-                f"{normalized_id.removeprefix('web-vitrina-closed-day-2026-08-23-night-')}-{slot_id}"
+            child_experiment_id=_night_plan_child_experiment_id(
+                normalized_id,
+                plan_target_date,
+                slot_id,
             ),
         )
-        for slot_id, due_at, deadline in NIGHT_PLAN_SLOTS
+        for slot_id, due_at, deadline in plan_slots
     )
     if slots[0].due_datetime < instant + timedelta(minutes=MIN_LEAD_MINUTES):
         raise ValueError(f"first night-plan slot must be at least {MIN_LEAD_MINUTES} minutes in the future")
@@ -317,8 +356,8 @@ def arm_night_refresh_plan_manifest(
     created_at = _iso_utc(instant)
     draft = NightRefreshPlanManifest(
         experiment_id=normalized_id,
-        target_date=NIGHT_PLAN_TARGET_DATE,
-        timezone=NIGHT_PLAN_TIMEZONE,
+        target_date=plan_target_date,
+        timezone=plan_timezone,
         expected_deployed_sha=normalized_sha,
         pause_units=normalized_units,
         max_attempts_per_slot=max_attempts_per_slot,
@@ -1373,7 +1412,7 @@ def _load_manifest(path: Path) -> ControlCanaryManifest:
         parent_plan_manifest_sha256=str(payload.get("parent_plan_manifest_sha256") or ""),
     )
     _validate_target_date(manifest.target_date)
-    if manifest.target_date not in {TARGET_DATE, NIGHT_PLAN_TARGET_DATE}:
+    if manifest.target_date not in RELEASED_CONTROL_TARGET_DATES:
         raise ValueError(f"control canary target date is outside the released bounded dates: {path}")
     if not _valid_control_experiment_id(manifest.experiment_id, manifest.target_date):
         raise ValueError(f"invalid control canary experiment id: {path}")
@@ -1424,8 +1463,10 @@ def _load_night_refresh_plan(path: Path) -> NightRefreshPlanManifest:
     if not expected or expected != actual:
         raise ValueError(f"night refresh plan digest mismatch: {path}")
     experiment_id = str(payload.get("experiment_id") or "")
-    if re.fullmatch(r"web-vitrina-closed-day-2026-08-23-night-[A-Za-z0-9_.-]+", experiment_id) is None:
-        raise ValueError(f"invalid night refresh plan id: {path}")
+    try:
+        plan_target_date, plan_timezone, plan_slots = _night_plan_definition(experiment_id)
+    except ValueError as exc:
+        raise ValueError(f"invalid night refresh plan id: {path}") from exc
     slots = tuple(
         NightRefreshPlanSlot(
             slot_id=str(item.get("slot_id") or ""),
@@ -1436,8 +1477,19 @@ def _load_night_refresh_plan(path: Path) -> NightRefreshPlanManifest:
         for item in (payload.get("slots") or [])
         if isinstance(item, Mapping)
     )
-    expected_slots = tuple((slot_id, due_at, deadline) for slot_id, due_at, deadline in NIGHT_PLAN_SLOTS)
-    actual_slots = tuple((slot.slot_id, slot.due_at, slot.deadline) for slot in slots)
+    expected_slots = tuple(
+        (
+            slot_id,
+            due_at,
+            deadline,
+            _night_plan_child_experiment_id(experiment_id, plan_target_date, slot_id),
+        )
+        for slot_id, due_at, deadline in plan_slots
+    )
+    actual_slots = tuple(
+        (slot.slot_id, slot.due_at, slot.deadline, slot.child_experiment_id)
+        for slot in slots
+    )
     if len(slots) != 4 or actual_slots != expected_slots:
         raise ValueError(f"night refresh plan must retain the four exact owner-authorized slots: {path}")
     units = tuple(str(value or "") for value in (payload.get("pause_units") or []))
@@ -1454,7 +1506,7 @@ def _load_night_refresh_plan(path: Path) -> NightRefreshPlanManifest:
         created_at=str(payload.get("created_at") or ""),
         manifest_sha256=expected,
     )
-    if plan.target_date != NIGHT_PLAN_TARGET_DATE or plan.timezone != NIGHT_PLAN_TIMEZONE:
+    if plan.target_date != plan_target_date or plan.timezone != plan_timezone:
         raise ValueError(f"night refresh plan date/timezone drifted: {path}")
     if re.fullmatch(r"[0-9a-f]{40}", plan.expected_deployed_sha) is None:
         raise ValueError(f"invalid night refresh plan deployed SHA: {path}")

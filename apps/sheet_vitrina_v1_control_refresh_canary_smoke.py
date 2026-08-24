@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -536,12 +537,18 @@ def _successful_canary_checks() -> None:
             raise AssertionError("exact canary deadline must create explicit immutable failure")
 
 
-def _night_plan_checks() -> None:
+def _exercise_night_plan(
+    *,
+    plan_id: str,
+    target_date: str,
+    started_at: datetime,
+    exact_due: list[str],
+    exact_deadlines: list[str],
+) -> None:
     units = list(ALLOWED_PAUSE_UNITS)
     with TemporaryDirectory(prefix="control-canary-night-plan-") as tmp:
         runtime_dir = Path(tmp)
-        clock = FakeClock(datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc))
-        plan_id = "web-vitrina-closed-day-2026-08-23-night-v1"
+        clock = FakeClock(started_at)
         armed = arm_night_refresh_plan_manifest(
             runtime_dir=runtime_dir,
             experiment_id=plan_id,
@@ -550,23 +557,52 @@ def _night_plan_checks() -> None:
             now=clock.datetime(),
         )
         readback = armed["readback"]
-        exact_due = [
-            "2026-08-24T01:30:00+05:00",
-            "2026-08-24T03:30:00+05:00",
-            "2026-08-24T06:30:00+05:00",
-            "2026-08-24T08:30:00+05:00",
+        child_suffix = plan_id.split("-night-", 1)[1]
+        exact_child_ids = [
+            f"web-vitrina-closed-day-{target_date}-canary-{child_suffix}-{datetime.fromisoformat(value).strftime('%Y%m%dT%H%MEKT')}"
+            for value in exact_due
         ]
         if (
             readback["state"] != "armed"
+            or readback["target_date"] != target_date
+            or readback["timezone"] != "Asia/Yekaterinburg"
             or readback["slot_count"] != 4
             or [row["due_at"] for row in readback["slots"]] != exact_due
+            or [row["deadline"] for row in readback["slots"]] != exact_deadlines
+            or [row["child_experiment_id"] for row in readback["slots"]] != exact_child_ids
             or [row["state"] for row in readback["slots"]] != ["pending"] * 4
+            or any(row["artifact_exists"] for row in readback["slots"])
+            or any(row["attempt_receipt_count"] for row in readback["slots"])
+            or any(row["pause_intent_count"] for row in readback["slots"])
             or readback["no_early_action"] is not True
+            or readback["ordinary_schedule_modified"] is not False
+            or readback["automatic_terminal_expiry"] is not True
+            or readback["no_next_day_replay"] is not True
         ):
             raise AssertionError(f"four-slot plan did not arm exactly: {readback}")
         control_root = runtime_dir / "experiments" / "sheet-vitrina-control-canaries"
-        if any((control_root / row["child_experiment_id"] / "attempts").exists() for row in readback["slots"]):
+        if any(
+            (control_root / row["child_experiment_id"] / name).exists()
+            for row in readback["slots"]
+            for name in ("attempts", "pauses", "artifact.json", "comparison.json")
+        ):
             raise AssertionError("arming must not create an early attempt, pause, or source action")
+        parent_path = Path(armed["manifest_path"])
+        parent_bytes = parent_path.read_bytes()
+        try:
+            arm_night_refresh_plan_manifest(
+                runtime_dir=runtime_dir,
+                experiment_id=plan_id,
+                expected_deployed_sha="a" * 40,
+                pause_units=units,
+                now=clock.datetime() + timedelta(seconds=1),
+            )
+        except ControlCanaryError:
+            pass
+        else:
+            raise AssertionError("an armed plan must reject a duplicate arm")
+        if parent_path.read_bytes() != parent_bytes:
+            raise AssertionError("duplicate arm rejection must preserve the immutable parent")
 
         systemd = FakeSystemd(units)
         contour = VolatileFingerprintContour(clock)
@@ -598,7 +634,7 @@ def _night_plan_checks() -> None:
             raise AssertionError("a new data-bearing fingerprint difference must remain a true failed tick")
 
         status = night_refresh_plan_status(runtime_dir=runtime_dir, now=clock.datetime())
-        plan = status["plans"][0]
+        plan = next(row for row in status["plans"] if row.get("experiment_id") == plan_id)
         if (
             plan["state"] != "terminal"
             or [row["state"] for row in plan["slots"]] != ["terminal"] * 4
@@ -619,6 +655,7 @@ def _night_plan_checks() -> None:
                 != ["meta.generated_at", "status_summary.business_now"]
                 or artifact["fingerprints"]["known_volatile_only_difference"] is not True
                 or artifact["business_data_barrier_preflight"]["active"] is not False
+                or not artifact["pause_intents"]
                 or len(artifact["pause_intents"]) != len(artifact["restore_receipts"])
             ):
                 raise AssertionError("slot artifact lost technical/raw/barrier/pause-restore evidence")
@@ -626,6 +663,104 @@ def _night_plan_checks() -> None:
         replay = runner.tick(now=clock.datetime() + timedelta(days=1))
         if replay["status"] != "no_due_canary" or contour.start_calls != calls_before:
             raise AssertionError("terminal four-slot plan must not replay on the next day")
+
+
+def _night_plan_allowlist_checks() -> None:
+    units = list(ALLOWED_PAUSE_UNITS)
+    invalid_ids = [
+        "web-vitrina-closed-day-2026-08-24-night-v2",
+        "web-vitrina-closed-day-2026-08-25-night-v1",
+        "web-vitrina-closed-day-2026-08-24-night-v1-extra",
+    ]
+    for invalid_id in invalid_ids:
+        with TemporaryDirectory(prefix="control-canary-night-invalid-id-") as tmp:
+            runtime_dir = Path(tmp)
+            try:
+                arm_night_refresh_plan_manifest(
+                    runtime_dir=runtime_dir,
+                    experiment_id=invalid_id,
+                    expected_deployed_sha="a" * 40,
+                    pause_units=units,
+                    now=datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc),
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"unreleased night plan id was accepted: {invalid_id}")
+            if any(runtime_dir.rglob("*.json")):
+                raise AssertionError("invalid night plan identity must fail before any runtime write")
+
+    mutations = {
+        "target_date": lambda payload: payload.__setitem__("target_date", "2026-08-25"),
+        "timezone": lambda payload: payload.__setitem__("timezone", "UTC"),
+        "slot_count": lambda payload: payload.__setitem__("slots", payload["slots"][:3]),
+        "due_at": lambda payload: payload["slots"][0].__setitem__("due_at", "2026-08-25T01:31:00+05:00"),
+        "deadline": lambda payload: payload["slots"][0].__setitem__("deadline", "2026-08-25T02:21:00+05:00"),
+        "child_id": lambda payload: payload["slots"][0].__setitem__("child_experiment_id", "wrong-child"),
+    }
+    for label, mutate in mutations.items():
+        with TemporaryDirectory(prefix=f"control-canary-night-invalid-{label}-") as tmp:
+            runtime_dir = Path(tmp)
+            armed = arm_night_refresh_plan_manifest(
+                runtime_dir=runtime_dir,
+                experiment_id="web-vitrina-closed-day-2026-08-24-night-v1",
+                expected_deployed_sha="a" * 40,
+                pause_units=units,
+                now=datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc),
+            )
+            path = Path(armed["manifest_path"])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            mutate(payload)
+            unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+            payload["manifest_sha256"] = hashlib.sha256(
+                json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            status = night_refresh_plan_status(
+                runtime_dir=runtime_dir,
+                now=datetime(2026, 8, 24, 17, 1, tzinfo=timezone.utc),
+            )["plans"]
+            if len(status) != 1 or status[0].get("state") != "invalid_manifest":
+                raise AssertionError(f"night plan {label} drift was not rejected: {status}")
+
+
+def _night_plan_checks() -> None:
+    units = list(ALLOWED_PAUSE_UNITS)
+    _night_plan_allowlist_checks()
+    _exercise_night_plan(
+        plan_id="web-vitrina-closed-day-2026-08-23-night-v1",
+        target_date="2026-08-23",
+        started_at=datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc),
+        exact_due=[
+            "2026-08-24T01:30:00+05:00",
+            "2026-08-24T03:30:00+05:00",
+            "2026-08-24T06:30:00+05:00",
+            "2026-08-24T08:30:00+05:00",
+        ],
+        exact_deadlines=[
+            "2026-08-24T02:20:00+05:00",
+            "2026-08-24T04:20:00+05:00",
+            "2026-08-24T07:20:00+05:00",
+            "2026-08-24T09:20:00+05:00",
+        ],
+    )
+    _exercise_night_plan(
+        plan_id="web-vitrina-closed-day-2026-08-24-night-v1",
+        target_date="2026-08-24",
+        started_at=datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc),
+        exact_due=[
+            "2026-08-25T01:30:00+05:00",
+            "2026-08-25T03:30:00+05:00",
+            "2026-08-25T06:30:00+05:00",
+            "2026-08-25T08:30:00+05:00",
+        ],
+        exact_deadlines=[
+            "2026-08-25T02:20:00+05:00",
+            "2026-08-25T04:20:00+05:00",
+            "2026-08-25T07:20:00+05:00",
+            "2026-08-25T09:20:00+05:00",
+        ],
+    )
 
     with TemporaryDirectory(prefix="control-canary-night-rebind-") as tmp:
         runtime_dir = Path(tmp)
