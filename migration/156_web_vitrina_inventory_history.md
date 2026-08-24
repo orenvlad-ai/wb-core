@@ -27,6 +27,15 @@ It does not authorize or perform historical production population. It adds no
 schedule, no separate button, no WB/FBS source mutation and no rendered-plan
 snapshot store.
 
+For an accepted ready snapshot that contains a later exact WB column for the
+date being closed, the writer first appends a new same-date capture and points
+the superseding finalization to it. The WB operand comes from that exact dated
+column; every FBS operand is preserved only from an earlier immutable capture
+of the same business date. Current FBS balances are never copied backward. An
+identical ready source revision is idempotent independent of writer time, while
+a distinct proven ready revision is recorded as append-only supersession with
+its own provenance.
+
 ## Historical evidence rules
 
 For each proven ready date, persisted `stock_total` is retained with provenance

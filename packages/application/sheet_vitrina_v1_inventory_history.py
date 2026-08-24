@@ -168,10 +168,17 @@ def capture_inventory_history_from_ready_plan(
         "status": "skipped",
         "capture_id": "",
         "capture_inserted": False,
+        "closed_capture_id": "",
+        "closed_capture_inserted": False,
         "finalization_inserted": False,
     }
     if current_date:
-        wb_by_scope = _ready_wb_components(plan, current_date=current_date)
+        wb_evidence = _canonical_current_wb_evidence(
+            conn,
+            plan=plan,
+            business_date=current_date,
+        )
+        wb_by_scope = dict(wb_evidence.get("values") or {})
         if wb_by_scope:
             fbs = _fbs_facilities(
                 conn,
@@ -186,8 +193,8 @@ def capture_inventory_history_from_ready_plan(
             roster = _facility_roster(fbs)
             components = _current_components(
                 wb_by_scope=wb_by_scope,
+                wb_component_sources=dict(wb_evidence.get("component_sources") or {}),
                 fbs=fbs,
-                captured_at=refreshed_at,
             )
             source_manifest = {
                 "contract": "accepted_ready_inventory_capture_v1",
@@ -195,7 +202,7 @@ def capture_inventory_history_from_ready_plan(
                 "ready_plan_version": plan.plan_version,
                 "bundle_version": bundle_version,
                 "business_date": current_date,
-                "wb": _current_wb_source(conn),
+                "wb": dict(wb_evidence.get("source_manifest") or {}),
                 "fbs": _current_fbs_source(conn, fbs=fbs),
             }
             capture = append_inventory_history_capture(
@@ -218,7 +225,22 @@ def capture_inventory_history_from_ready_plan(
                 capture_inserted=bool(capture["inserted"]),
             )
     if closed_date:
-        candidate = _latest_capture_id(conn, business_date=closed_date)
+        closed_capture = _append_closed_date_ready_capture(
+            conn,
+            plan=plan,
+            bundle_version=bundle_version,
+            business_date=closed_date,
+            refreshed_at=refreshed_at,
+            generation_identity=generation_identity,
+        )
+        if closed_capture:
+            result["closed_capture_id"] = str(closed_capture["capture_id"])
+            result["closed_capture_inserted"] = bool(closed_capture["inserted"])
+        candidate = (
+            str(closed_capture["capture_id"])
+            if closed_capture
+            else _latest_capture_id(conn, business_date=closed_date)
+        )
         if candidate:
             finalization = append_inventory_history_finalization(
                 conn,
@@ -361,7 +383,13 @@ def preview_inventory_history_capture(
             "formula_version": formula_version,
             "facility_roster_revision": roster_revision,
             "source_manifest": source_payload,
-            "components": normalized_components,
+            # Observation time is append metadata, not source evidence.  A
+            # retry of the same accepted revision at a later writer timestamp
+            # must resolve to the same immutable capture.
+            "components": [
+                {key: value for key, value in item.items() if key != "captured_at"}
+                for item in normalized_components
+            ],
         }
     )
     identity = {
@@ -596,11 +624,335 @@ def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any
     }
 
 
+def _append_closed_date_ready_capture(
+    conn: sqlite3.Connection,
+    *,
+    plan: SheetVitrinaV1Envelope,
+    bundle_version: str,
+    business_date: str,
+    refreshed_at: str,
+    generation_identity: str,
+) -> dict[str, Any] | None:
+    """Append a late closed-date WB revision without copying current FBS.
+
+    The accepted ready column is date-bound WB evidence.  FBS is deliberately
+    inherited only from the latest immutable capture for that exact business
+    date.  If no same-date capture exists, the normal finalization path remains
+    fail-closed instead of manufacturing historical FBS from current balances.
+    """
+
+    ready_wb = _ready_wb_components(plan, business_date=business_date)
+    if not ready_wb:
+        return None
+    base = conn.execute(
+        f"""SELECT capture_id,facility_roster_json
+            FROM {CAPTURES_TABLE} WHERE business_date=?
+            ORDER BY capture_sequence DESC LIMIT 1""",
+        (business_date,),
+    ).fetchone()
+    if base is None:
+        return None
+    base_capture_id = str(base[0])
+    roster = _loads(base[1], [])
+    if not isinstance(roster, list):
+        roster = []
+    stored = conn.execute(
+        f"""SELECT scope_kind,scope_key,nm_id,component_kind,component_id,
+                   component_label,state,quantity,source_revision,source_digest,
+                   source_watermark,provenance_json
+            FROM {COMPONENTS_TABLE} WHERE capture_id=?
+            ORDER BY scope_kind,scope_key,component_kind,component_id""",
+        (base_capture_id,),
+    ).fetchall()
+    previous_components = [_stored_component(row) for row in stored]
+    previous_wb = {
+        str(item["scope_key"]): item
+        for item in previous_components
+        if str(item["component_kind"]) == "WB"
+    }
+    previous_fbs = {
+        (str(item["scope_key"]), str(item["component_id"])): item
+        for item in previous_components
+        if str(item["component_kind"]) == "FBS_FACILITY"
+    }
+    scope_keys = set(previous_wb) | set(ready_wb)
+    if not scope_keys:
+        return None
+    column_digest = _fingerprint(
+        {
+            "business_date": business_date,
+            "values": {key: ready_wb[key] for key in sorted(ready_wb, key=_scope_sort_key)},
+        }
+    )
+    ready_revision = f"ready:{bundle_version}:{plan.snapshot_id}:{business_date}"
+    components: list[dict[str, Any]] = []
+    normalized_roster = [dict(item) for item in roster if isinstance(item, Mapping)]
+    for scope_key in sorted(scope_keys, key=_scope_sort_key):
+        scope_kind = "TOTAL" if scope_key == "TOTAL" else "SKU"
+        nm_id = None if scope_kind == "TOTAL" else int(scope_key.split(":", 1)[1])
+        if scope_key in ready_wb:
+            wb_value = ready_wb[scope_key]
+            components.append(
+                _component(
+                    scope_kind=scope_kind,
+                    scope_key=scope_key,
+                    nm_id=nm_id,
+                    component_kind="WB",
+                    component_id="WB",
+                    component_label="WB",
+                    value=wb_value,
+                    state=_value_state(wb_value),
+                    source_revision=ready_revision,
+                    source_digest=column_digest,
+                    source_watermark=str(plan.snapshot_id),
+                    provenance={
+                        "source": "accepted_ready_snapshot.exact_date_stock_total",
+                        "business_date": business_date,
+                        "ready_snapshot_id": plan.snapshot_id,
+                        "ready_plan_version": plan.plan_version,
+                    },
+                )
+            )
+        elif scope_key in previous_wb:
+            components.append(dict(previous_wb[scope_key]))
+        for facility in normalized_roster:
+            facility_id = str(facility.get("facility_id") or "")
+            if not facility_id:
+                continue
+            prior = previous_fbs.get((scope_key, facility_id))
+            if prior is not None:
+                components.append(dict(prior))
+                continue
+            applicable = bool(facility.get("applicable"))
+            components.append(
+                _component(
+                    scope_kind=scope_kind,
+                    scope_key=scope_key,
+                    nm_id=nm_id,
+                    component_kind="FBS_FACILITY",
+                    component_id=facility_id,
+                    component_label=str(facility.get("name") or facility_id),
+                    value=None,
+                    state="missing" if applicable else "inapplicable",
+                    source_revision="",
+                    source_digest="",
+                    source_watermark="",
+                    provenance={
+                        "source": "prior_same_date_capture.roster_without_scope_component",
+                        "business_date": business_date,
+                    },
+                )
+            )
+    fbs_evidence_digest = _fingerprint(
+        {
+            "business_date": business_date,
+            "facility_roster": normalized_roster,
+            "components": [
+                item
+                for item in components
+                if str(item.get("component_kind") or "") == "FBS_FACILITY"
+            ],
+        }
+    )
+    return append_inventory_history_capture(
+        conn,
+        business_date=business_date,
+        capture_kind="accepted_refresh",
+        formula_version=FORMULA_VERSION,
+        bundle_version=bundle_version,
+        ready_snapshot_id=plan.snapshot_id,
+        ready_plan_version=plan.plan_version,
+        generation_identity=generation_identity,
+        facility_roster=normalized_roster,
+        source_manifest={
+            "contract": "accepted_ready_closed_inventory_revision_v2",
+            "business_date": business_date,
+            "ready_snapshot_id": plan.snapshot_id,
+            "ready_plan_version": plan.plan_version,
+            "bundle_version": bundle_version,
+            "wb": {
+                "source_revision": ready_revision,
+                "column_digest": column_digest,
+                "scope_count": len(ready_wb),
+                "exact_scope_count": sum(value is not None for value in ready_wb.values()),
+            },
+            "fbs": {
+                "source": "prior_same_date_capture_only",
+                "business_date": business_date,
+                "component_digest": fbs_evidence_digest,
+                "current_balance_read": False,
+            },
+        },
+        components=components,
+        captured_at=refreshed_at,
+    )
+
+
+def _canonical_current_wb_evidence(
+    conn: sqlite3.Connection,
+    *,
+    plan: SheetVitrinaV1Envelope,
+    business_date: str,
+) -> dict[str, Any]:
+    """Resolve the WB operand used by the current Web Vitrina projection."""
+
+    ready = _ready_wb_components(plan, business_date=business_date)
+    ready_digest = _fingerprint(
+        {
+            "business_date": business_date,
+            "values": {key: ready[key] for key in sorted(ready, key=_scope_sort_key)},
+        }
+    )
+    active_values, active_source = _active_wb_components(
+        conn,
+        business_date=business_date,
+    )
+    values: dict[str, int | None] = {}
+    component_sources: dict[str, dict[str, Any]] = {}
+    if active_values:
+        for scope_key in sorted(set(active_values) | set(ready), key=_scope_sort_key):
+            if scope_key in active_values:
+                values[scope_key] = active_values[scope_key]
+                component_sources[scope_key] = {
+                    "source_revision": "wb_snapshot:" + str(active_source["snapshot_id"]),
+                    "source_digest": str(active_source["snapshot_digest"]),
+                    "source_watermark": str(active_source["fetched_at"]),
+                    "provenance": {
+                        "source": "active_wb_snapshot.current_ui_operand",
+                        "snapshot_id": str(active_source["snapshot_id"]),
+                        "snapshot_date": business_date,
+                    },
+                }
+            else:
+                values[scope_key] = ready[scope_key]
+                component_sources[scope_key] = _ready_wb_component_source(
+                    plan=plan,
+                    business_date=business_date,
+                    column_digest=ready_digest,
+                    role="accepted_current_column_extra_scope",
+                )
+        overlap = set(active_values) & set(ready)
+        source_manifest = {
+            **active_source,
+            "contract": "active_wb_snapshot_current_ui_v1",
+            "accepted_current_column_digest": ready_digest,
+            "accepted_overlap_equivalent": all(
+                active_values[key] == ready[key] for key in overlap
+            ),
+            "accepted_overlap_scope_count": len(overlap),
+        }
+    else:
+        values = dict(ready)
+        component_sources = {
+            scope_key: _ready_wb_component_source(
+                plan=plan,
+                business_date=business_date,
+                column_digest=ready_digest,
+                role="accepted_current_column",
+            )
+            for scope_key in ready
+        }
+        source_manifest = {
+            "contract": "accepted_ready_current_column_v1",
+            "business_date": business_date,
+            "ready_snapshot_id": plan.snapshot_id,
+            "ready_plan_version": plan.plan_version,
+            "column_digest": ready_digest,
+        }
+    return {
+        "values": values,
+        "component_sources": component_sources,
+        "source_manifest": source_manifest,
+    }
+
+
+def _active_wb_components(
+    conn: sqlite3.Connection,
+    *,
+    business_date: str,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    if not _table_exists(conn, "sheet_vitrina_v1_warehouse_functional_active"):
+        return {}, {}
+    if not _table_exists(conn, "sheet_vitrina_v1_warehouse_wb_snapshots"):
+        return {}, {}
+    row = conn.execute(
+        """SELECT snapshot.snapshot_id,snapshot.raw_rows_digest,snapshot.snapshot_date,
+                  snapshot.fetched_at,snapshot.version_id,snapshot.items_json
+             FROM sheet_vitrina_v1_warehouse_functional_active active
+             JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+               ON snapshot.version_id=active.version_id
+            WHERE active.slot=1
+            ORDER BY snapshot.created_at DESC,snapshot.snapshot_id DESC LIMIT 1"""
+    ).fetchone()
+    if row is None or str(row[2]) != business_date:
+        return {}, {}
+    items = _loads(row[5], [])
+    by_scope: dict[str, int] = {}
+    seen: set[int] = set()
+    for raw in items if isinstance(items, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            nm_id = int(raw.get("nm_id"))
+        except (TypeError, ValueError):
+            continue
+        quantity = _optional_integer(raw.get("quantity"))
+        if nm_id <= 0 or quantity is None or nm_id in seen:
+            continue
+        seen.add(nm_id)
+        by_scope[f"SKU:{nm_id}"] = quantity
+    by_scope["TOTAL"] = sum(by_scope.values())
+    return by_scope, {
+        "snapshot_id": str(row[0]),
+        "snapshot_digest": str(row[1]),
+        "snapshot_date": str(row[2]),
+        "fetched_at": str(row[3]),
+        "version_id": str(row[4]),
+    }
+
+
+def _ready_wb_component_source(
+    *,
+    plan: SheetVitrinaV1Envelope,
+    business_date: str,
+    column_digest: str,
+    role: str,
+) -> dict[str, Any]:
+    return {
+        "source_revision": f"ready:{plan.snapshot_id}:{business_date}",
+        "source_digest": column_digest,
+        "source_watermark": str(plan.snapshot_id),
+        "provenance": {
+            "source": role,
+            "business_date": business_date,
+            "ready_snapshot_id": plan.snapshot_id,
+            "ready_plan_version": plan.plan_version,
+        },
+    }
+
+
+def _stored_component(row: Sequence[Any]) -> dict[str, Any]:
+    return {
+        "scope_kind": str(row[0]),
+        "scope_key": str(row[1]),
+        "nm_id": row[2],
+        "component_kind": str(row[3]),
+        "component_id": str(row[4]),
+        "component_label": str(row[5]),
+        "state": str(row[6]),
+        "quantity": row[7],
+        "source_revision": str(row[8]),
+        "source_digest": str(row[9]),
+        "source_watermark": str(row[10]),
+        "provenance": _loads(row[11], {}),
+    }
+
+
 def _current_components(
     *,
     wb_by_scope: Mapping[str, int | None],
+    wb_component_sources: Mapping[str, Mapping[str, Any]],
     fbs: Mapping[str, Any],
-    captured_at: str,
 ) -> list[dict[str, Any]]:
     facility_rows = [
         dict(item) for item in list(fbs.get("facilities") or []) if isinstance(item, Mapping)
@@ -617,6 +969,7 @@ def _current_components(
         scope_kind = "TOTAL" if scope_key == "TOTAL" else "SKU"
         nm_id = None if scope_kind == "TOTAL" else int(scope_key.split(":", 1)[1])
         wb_value = wb_by_scope.get(scope_key)
+        wb_source = dict(wb_component_sources.get(scope_key) or {})
         components.append(
             _component(
                 scope_kind=scope_kind,
@@ -627,10 +980,10 @@ def _current_components(
                 component_label="WB",
                 value=wb_value,
                 state=_value_state(wb_value),
-                source_revision="ready_stock_total",
-                source_digest="",
-                source_watermark="",
-                provenance={"source": "ready_snapshot.stock_total", "captured_at": captured_at},
+                source_revision=str(wb_source.get("source_revision") or ""),
+                source_digest=str(wb_source.get("source_digest") or ""),
+                source_watermark=str(wb_source.get("source_watermark") or ""),
+                provenance=dict(wb_source.get("provenance") or {}),
             )
         )
         for facility in facility_rows:
@@ -724,15 +1077,15 @@ def _facility_roster(fbs: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _ready_wb_components(
     plan: SheetVitrinaV1Envelope,
     *,
-    current_date: str,
+    business_date: str,
 ) -> dict[str, int | None]:
     sheet = next(
         (item for item in plan.sheets if str(item.sheet_name) == "DATA_VITRINA"),
         None,
     )
-    if sheet is None or current_date not in list(sheet.header):
+    if sheet is None or business_date not in list(sheet.header):
         return {}
-    column_index = list(sheet.header).index(current_date)
+    column_index = list(sheet.header).index(business_date)
     result: dict[str, int | None] = {}
     for row in sheet.rows:
         if len(row) <= max(1, column_index):
@@ -748,29 +1101,6 @@ def _ready_wb_components(
                 continue
             result[scope_key] = _optional_integer(row[column_index])
     return result
-
-
-def _current_wb_source(conn: sqlite3.Connection) -> dict[str, Any]:
-    if not _table_exists(conn, "sheet_vitrina_v1_warehouse_functional_active"):
-        return {}
-    row = conn.execute(
-        """SELECT snapshot.snapshot_id,snapshot.raw_rows_digest,snapshot.snapshot_date,
-                  snapshot.fetched_at,snapshot.version_id
-             FROM sheet_vitrina_v1_warehouse_functional_active active
-             JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
-               ON snapshot.version_id=active.version_id
-            WHERE active.slot=1
-            ORDER BY snapshot.created_at DESC,snapshot.snapshot_id DESC LIMIT 1"""
-    ).fetchone()
-    if row is None:
-        return {}
-    return {
-        "snapshot_id": str(row[0]),
-        "snapshot_digest": str(row[1]),
-        "snapshot_date": str(row[2]),
-        "fetched_at": str(row[3]),
-        "version_id": str(row[4]),
-    }
 
 
 def _current_fbs_source(conn: sqlite3.Connection, *, fbs: Mapping[str, Any]) -> dict[str, Any]:
@@ -808,7 +1138,10 @@ def _normalize_roster(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
                 "display_order": int(raw.get("display_order") or index),
             }
         )
-    return sorted(result, key=lambda item: (item["display_order"], item["code"], item["facility_id"]))
+    return sorted(
+        result,
+        key=lambda item: (item["display_order"], item["code"], item["facility_id"]),
+    )
 
 
 def _normalize_components(
