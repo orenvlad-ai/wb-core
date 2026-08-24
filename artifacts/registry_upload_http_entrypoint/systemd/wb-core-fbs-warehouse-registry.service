@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core independent official FBS warehouse and stock readback
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/wb_fbs_warehouse_registry.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env collect
+TimeoutStartSec=4m
+User=root
+Group=root

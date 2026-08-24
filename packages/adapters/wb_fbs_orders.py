@@ -20,6 +20,7 @@ from packages.adapters.official_api_runtime import (
 DEFAULT_WB_FBS_API_BASE_URL = "https://marketplace-api.wildberries.ru"
 DEFAULT_WB_FBS_API_BASE_URL_ENV = "WB_FBS_API_BASE_URL"
 MAX_PAGE_LIMIT = 1000
+MAX_STOCK_CHRT_IDS = 1000
 MAX_WINDOW_SECONDS = 30 * 24 * 60 * 60
 
 
@@ -87,6 +88,14 @@ class WbFbsOffice:
     name: str
     city: str
     federal_district: str
+
+
+@dataclass(frozen=True)
+class WbFbsStock:
+    """One explicit WB-declared stock value; never physical inventory truth."""
+
+    chrt_id: int
+    amount: int
 
 
 class HttpBackedWbFbsOrdersSource:
@@ -330,6 +339,89 @@ class HttpBackedWbFbsOrdersSource:
                 )
             )
         return sorted(result, key=lambda item: item.office_id)
+
+    def list_stocks(
+        self, *, warehouse_id: int, chrt_ids: list[int]
+    ) -> list[WbFbsStock]:
+        """Read seller-warehouse stock without invoking any WB mutation API."""
+
+        normalized_warehouse_id = _bounded_int(
+            warehouse_id, "warehouse_id", minimum=1, maximum=2**63 - 1
+        )
+        if not chrt_ids or len(chrt_ids) > MAX_STOCK_CHRT_IDS:
+            raise ValueError(
+                f"chrt_ids must contain 1..{MAX_STOCK_CHRT_IDS} identities"
+            )
+        normalized_chrt_ids = sorted(
+            {
+                _bounded_int(item, "chrt_id", minimum=1, maximum=2**63 - 1)
+                for item in chrt_ids
+            }
+        )
+        if len(normalized_chrt_ids) != len(chrt_ids):
+            raise ValueError("chrt_ids must not contain duplicates")
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        request_body = json.dumps(
+            {"chrtIds": normalized_chrt_ids}, separators=(",", ":")
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            url=f"{runtime.base_url}/api/v3/stocks/{normalized_warehouse_id}",
+            data=request_body,
+            headers={
+                "Authorization": runtime.token,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        status_code, content_type, raw_body = self._open_with_retry(
+            request,
+            timeout_seconds=runtime.timeout_seconds,
+            transport_label="WB FBS stock readback API transport failed",
+        )
+        if status_code is not None and not 200 <= status_code < 300:
+            raise WbFbsOrdersHttpStatusError(
+                status_code, raw_body, content_type=content_type
+            )
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise WbFbsOrdersTransportError(
+                "WB FBS stock readback API returned invalid JSON"
+            ) from exc
+        stocks = payload.get("stocks") if isinstance(payload, Mapping) else None
+        if not isinstance(stocks, list):
+            raise WbFbsOrdersTransportError(
+                "WB FBS stock readback API returned an invalid stock list"
+            )
+        result: list[WbFbsStock] = []
+        seen: set[int] = set()
+        requested = set(normalized_chrt_ids)
+        for item in stocks:
+            if not isinstance(item, Mapping):
+                continue
+            chrt_id = _bounded_int(
+                item.get("chrtId"), "stock chrt_id", minimum=1, maximum=2**63 - 1
+            )
+            amount = _bounded_int(
+                item.get("stock"), "stock amount", minimum=0, maximum=2**63 - 1
+            )
+            if chrt_id not in requested:
+                raise WbFbsOrdersTransportError(
+                    "WB FBS stock readback returned an unrequested chrtId"
+                )
+            if chrt_id in seen:
+                raise WbFbsOrdersTransportError(
+                    "WB FBS stock readback returned a duplicate chrtId"
+                )
+            seen.add(chrt_id)
+            result.append(WbFbsStock(chrt_id=chrt_id, amount=amount))
+        return sorted(result, key=lambda item: item.chrt_id)
 
     def list_statuses(self, order_ids: list[int]) -> list[WbFbsOrderStatus]:
         normalized = sorted({_bounded_int(item, "order_id", minimum=1, maximum=2**63 - 1) for item in order_ids})

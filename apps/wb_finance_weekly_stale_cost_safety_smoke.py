@@ -377,22 +377,26 @@ def main() -> None:
             ).stdout
         )
         _assert(dry_run["stale_week_count"] == 1, f"CLI dry-run mismatch: {dry_run}")
-        cli_apply = json.loads(
-            subprocess.run(
-                [
-                    *cli_base,
-                    "--apply",
-                    "--confirm-fingerprint",
-                    dry_run["fingerprint"],
-                    "--backup-dir",
-                    str(root / "cli-backups"),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
-            ).stdout
+        cli_apply_process = subprocess.run(
+            [
+                *cli_base,
+                "--apply",
+                "--confirm-fingerprint",
+                dry_run["fingerprint"],
+                "--backup-dir",
+                str(root / "cli-backups"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
         )
+        _assert(
+            cli_apply_process.returncode == 0,
+            "CLI apply failed: "
+            + (cli_apply_process.stderr or cli_apply_process.stdout),
+        )
+        cli_apply = json.loads(cli_apply_process.stdout)
         _assert(
             cli_apply["recalculated_week_count"] == 1,
             f"CLI apply mismatch: {cli_apply}",

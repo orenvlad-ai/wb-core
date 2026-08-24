@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-import stat
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -72,6 +71,33 @@ def main() -> None:
         result = json.loads(applied.stdout)
         _assert_apply_result(block, result, backups)
 
+        # Simulate an acknowledged SQLite commit followed by lost transport
+        # before the second, query-only reconciliation audit was persisted.
+        reconciliation_audit_id = hashlib.sha256(
+            f"{block.seller_id}|canonical-reconciliation|{fingerprint}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                "DELETE FROM wb_finance_projection_audit WHERE audit_id=?",
+                (reconciliation_audit_id,),
+            )
+            conn.commit()
+        target_before_recovery = _canonical_target_digest(block, plan)
+        recovered = block.apply_canonical_finance_backfill(
+            expected_fingerprint=fingerprint,
+            approval_reference="fixture-human-approval",
+        )
+        if (
+            recovered["status"] != "applied_reconciled_from_atomic_audit"
+            or not recovered["idempotent"]
+            or _canonical_target_digest(block, plan) != target_before_recovery
+        ):
+            raise AssertionError(
+                f"commit-before-readback recovery rewrote its target: {recovered}"
+            )
+
         repeated = _run_cli(
             runtime,
             "--apply",
@@ -89,7 +115,7 @@ def main() -> None:
             repeat_result["status"] != "no_op_already_applied"
             or not repeat_result["idempotent"]
             or repeat_result["backup"] is not None
-            or len(list(backups.glob("*.sqlite3"))) != 1
+            or list(backups.glob("*.sqlite3"))
         ):
             raise AssertionError(f"repeat exact apply was not a true no-op: {repeat_result}")
         with sqlite3.connect(block.db_path) as conn:
@@ -112,10 +138,25 @@ def main() -> None:
     _assert_partial_schema_returns_blocker()
 
     print(
-        "wb_finance_business_approved_backfill: ok -> read-only all-history manifests, "
-        "reconciliation deltas, new fingerprint gate, 0600 backup, atomic apply, "
-        "non-target invariants, repeat no-op, revoked plan rejection"
+        "wb_finance_business_approved_backfill: ok -> read-only fixed-cutoff manifests, "
+        "reconciliation deltas, new fingerprint gate, target-only recovery, short CAS, "
+        "atomic commit readback, non-target invariants, repeat no-op, revoked plan rejection"
     )
+
+
+def _canonical_target_digest(
+    block: WbFinanceWeeklyBlock, plan: dict[str, object]
+) -> str:
+    target_keys = {
+        (
+            block.seller_id,
+            str(item["week_start"]),
+            str(item["week_end"]),
+        )
+        for item in plan["weeks"]
+    }
+    with block._connect_canonical_plan() as conn:
+        return block._json_digest(block._finance_target_images(conn, target_keys))
 
 
 def _assert_partial_schema_returns_blocker() -> None:
@@ -323,16 +364,14 @@ def _assert_apply_result(
         or not result["idempotent"]
     ):
         raise AssertionError(f"canonical apply reconciliation mismatch: {result}")
-    backup_files = list(backups.glob("*.sqlite3"))
-    if len(backup_files) != 1:
-        raise AssertionError(f"expected exactly one coherent backup: {backup_files}")
     backup = result["backup"]
     if (
-        backup["integrity_check"] != "ok"
-        or not str(backup["sha256"]).startswith("sha256:")
-        or stat.S_IMODE(backup_files[0].stat().st_mode) != 0o600
+        backup["kind"] != "target_scoped_before_image"
+        or int(backup["copy_bytes"]) != 0
+        or not str(backup["operation_id"])
+        or list(backups.glob("*.sqlite3"))
     ):
-        raise AssertionError(f"backup evidence mismatch: {backup}")
+        raise AssertionError(f"target-scoped recovery evidence mismatch: {backup}")
     with sqlite3.connect(block.db_path) as conn:
         retro_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_finance_retro_cost_map'"

@@ -26,6 +26,7 @@ related_modules:
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_wb_supply_origins.py"
   - "packages/application/wb_fbs_orders.py"
+  - "packages/application/wb_fbs_warehouse_registry.py"
   - "packages/application/wb_fbs_shadow_polling.py"
   - "packages/application/ff_stage_7a_production.py"
   - "packages/contracts/ff_pool_documents.py"
@@ -76,6 +77,12 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_fbs_status_current"
   - "sheet_vitrina_v1_wb_supplies_fbs_status_transitions"
   - "sheet_vitrina_v1_wb_supplies_fbs_poll_runs"
+  - "sheet_vitrina_v1_wb_fbs_warehouse_registry_runs"
+  - "sheet_vitrina_v1_wb_fbs_warehouse_registry_rows"
+  - "sheet_vitrina_v1_wb_fbs_stock_snapshot_runs"
+  - "sheet_vitrina_v1_wb_fbs_stock_snapshot_rows"
+  - "sheet_vitrina_v1_wb_fbs_binding_requests"
+  - "sheet_vitrina_v1_wb_fbs_binding_confirmations"
   - "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
   - "sheet_vitrina_v1_ff_pool_fbs_drain_state"
   - "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
@@ -107,6 +114,11 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/status"
   - "POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate"
   - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/fbs-orders[/{order_id}]"
+  - "GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-warehouses"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-warehouses/binding/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/wb-warehouses/binding/{request_id}/confirm"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/facilities/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/facilities/onboarding/{request_id}/confirm"
 related_runners:
   - "apps/warehouse_cost_unified_recovery.py"
   - "apps/ff_stock_targeted_reconciliation.py"
@@ -136,6 +148,8 @@ related_runners:
   - "apps/ff_wb_supply_origins_browser_smoke.py"
   - "apps/wb_fbs_orders_collector_smoke.py"
   - "apps/wb_fbs_orders_http_smoke.py"
+  - "apps/wb_fbs_warehouse_registry.py"
+  - "apps/wb_fbs_warehouse_registry_smoke.py"
   - "apps/wb_fbs_shadow.py"
   - "apps/wb_fbs_shadow_polling_smoke.py"
   - "apps/ff_stage_7a_production.py"
@@ -722,6 +736,51 @@ quantity/capital or create a ledger/reservation/movement. Exact target/env
 before-images and post-apply invariants make this activation evidence-bearing,
 but it is not permission to run the later physical opening/cutover stage.
 
+### Official seller warehouses, stock readback and generic onboarding
+
+`wb-core-fbs-warehouse-registry.timer` runs every 15 minutes independently of
+the five-minute order collector. It reads the official seller warehouse and
+office registries, then uses official read-only `POST /api/v3/stocks/{id}` for
+timestamped `seller warehouse × chrtId` stock evidence. A registry or stock
+failure is append-only status evidence and never blocks order ingestion,
+lifecycle or Finance. Missing returned `chrtId` is partial coverage, not zero.
+The exact `chrtId → nmId` scope currently comes from observed orders and active
+exact identity mappings; even when it covers every active known `nmId`, it is
+reported as `observed_identity_scope_only` and `complete=false` because those
+sources do not prove the full official WB size/chrt catalog.
+
+The latest official warehouse remains visible by stable positive WB ID, name,
+office ID/name/city and evidence digest even when unbound; orders likewise
+remain visible. There is no fuzzy/name/city auto-link and no user-facing
+virtual-warehouse entity. The generic operator flow supports both exact
+directions over current entities: official unbound WB warehouse to an existing
+or newly created internal facility, and an internal facility in
+`Ожидает привязки к WB` state to a later discovered unbound warehouse. New
+confirmed bindings enforce one active official warehouse to one internal FBS
+facility without rewriting historical/legacy mappings. Each preview pins the
+latest official evidence, facility revision and exact IDs; confirm appends one
+mapping plus audit only. Its recovery scope names that warehouse's unresolved
+identities and never automatically starts a global backlog replay.
+
+Creating an internal facility is also audited preview/confirm. Confirm creates
+only an empty inactive facility with zero quantity/capital, no inventory
+document, no mapping and no WB mutation. A later ordinary transfer continues
+to use the existing document preview/confirm ledger: every SKU conserves exact
+quantity and Decimal capital/WAC, aggregate FF remains the sum of detail and
+duplicate capital is forbidden. Activation, binding and transfer are distinct
+operator decisions; safe activation of an empty/waiting facility cannot make
+the global FBS aggregate unavailable.
+
+WB-declared stock is reconciliation-only. The UI shows internal physical,
+official declared, delta, timestamp, completeness and source digest. For an
+unbound warehouse internal quantity/capital is unavailable and excluded from
+physical/capital totals. The readback never creates receipt, movement,
+inventory, quantity, capital, WAC or implicit zero, and stale/unavailable
+evidence is non-blocking. Synthetic API/browser/mobile coverage proves both
+binding directions, inactive facility onboarding and zero physical/capital
+effect; production creation/binding/transfer requires a later explicit
+operator preview and confirm.
+
 ### Stage 7C exact opening and FBS lifecycle
 
 Migration 145 exposes the applied lifecycle through query-only planning and
@@ -733,7 +792,9 @@ zero. Inactive facilities leave the current FBS
 total without rewriting history. Official seller-warehouse stock is a
 timestamped reconciliation/readback only and reaches a facility through exact
 `sellerWarehouseId` mapping; multiple active target facilities are ambiguous
-and therefore excluded rather than guessed. It is never a second physical operand.
+and therefore excluded rather than guessed. The new exact binding workflow
+prevents creating that ambiguity while preserving older mappings as audit. It
+is never a second physical operand.
 
 The FBS order list/detail surface is server-paginated and filterable by date,
 status, SKU and facility. It exposes safe order identity, status/lifecycle,

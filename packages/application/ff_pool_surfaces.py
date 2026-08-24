@@ -84,6 +84,12 @@ VISIBLE_DOCUMENT_KINDS = tuple(
 )
 FBS_LIFECYCLE_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
 FBS_CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
+FACILITY_ONBOARDING_REQUESTS_TABLE = (
+    "sheet_vitrina_v1_ff_facility_onboarding_requests"
+)
+FACILITY_ONBOARDING_CONFIRMATIONS_TABLE = (
+    "sheet_vitrina_v1_ff_facility_onboarding_confirmations"
+)
 DOCUMENT_LABELS_RU = {
     "china_acceptance": "Приёмка Китай → FF",
     "transfer_root": "Перемещение между складами",
@@ -182,6 +188,9 @@ class FfPoolSurface:
                 "address_supported": False,
                 "fixed_system_pools": list(POOLS),
                 "multiple_facilities_per_city": True,
+                "creation_workflow": "audited_preview_then_confirm_inactive_empty",
+                "wb_binding_workflow": "exact_official_id_preview_then_confirm",
+                "new_facility_default_state": "Ожидает привязки к WB",
             },
             "reviewed_initial_setup": [
                 {
@@ -1168,6 +1177,201 @@ class FfPoolSurface:
             )
             conn.commit()
         return {**self.facility_detail(facility_id), "idempotent": False}
+
+    def preview_facility_create(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        """Persist an audited no-effect preview for an empty inactive facility."""
+
+        request_id = _request_id(payload.get("request_id"))
+        name = _text(payload.get("name"), field="name", maximum=200)
+        city_raw = str(payload.get("city") or "").strip()
+        city = _text(city_raw, field="city", maximum=120) if city_raw else ""
+        display_timezone = _timezone(
+            payload.get("display_timezone") or "Asia/Yekaterinburg"
+        )
+        manifest = {
+            "action": "create_internal_ff_facility",
+            "facility": {
+                "name": name,
+                "city": city,
+                "display_timezone": display_timezone,
+                "active": False,
+                "binding_status": "Ожидает привязки к WB",
+            },
+            "effects": {
+                "physical_quantity_delta": 0,
+                "capital_delta_rub": "0",
+                "inventory_document_created": False,
+                "wb_warehouse_created_or_changed": False,
+                "binding_created": False,
+            },
+        }
+        preview_fingerprint = _fingerprint(manifest)
+        request_identity = _fingerprint(
+            {"request_id": request_id, "preview_fingerprint": preview_fingerprint}
+        )
+        now = self._now()
+        with _connect_write(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_facility_onboarding_schema(conn)
+            existing = conn.execute(
+                f"SELECT * FROM {FACILITY_ONBOARDING_REQUESTS_TABLE} WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_identity"]) != request_identity:
+                    raise FfPoolSurfaceError(
+                        "request_id_identity_conflict",
+                        "request_id was already used for another facility preview",
+                        http_status=409,
+                    )
+                conn.rollback()
+            else:
+                conn.execute(
+                    f"""INSERT INTO {FACILITY_ONBOARDING_REQUESTS_TABLE}(
+                           request_id,request_identity,preview_fingerprint,manifest_json,
+                           actor,previewed_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        request_id,
+                        request_identity,
+                        preview_fingerprint,
+                        _json(manifest),
+                        _identity_token(actor, field="actor"),
+                        now,
+                    ),
+                )
+                conn.commit()
+        feature = self.capabilities().get("feature") or {}
+        return {
+            "contract": "ff_facility_onboarding_preview_v1",
+            "request_id": request_id,
+            "preview_fingerprint": preview_fingerprint,
+            "confirm_required": True,
+            "confirm_allowed": bool(feature.get("writer_effective")),
+            "manifest": manifest,
+        }
+
+    def confirm_facility_create(
+        self,
+        request_id: str,
+        *,
+        preview_fingerprint: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Create only the exact previewed empty inactive facility, idempotently."""
+
+        selected = _request_id(request_id)
+        self._require_writer()
+        with _connect_write(self.db_path) as conn:
+            self._ensure_facility_onboarding_schema(conn)
+            request = conn.execute(
+                f"SELECT * FROM {FACILITY_ONBOARDING_REQUESTS_TABLE} WHERE request_id=?",
+                (selected,),
+            ).fetchone()
+            if request is None:
+                raise FfPoolSurfaceError(
+                    "facility_preview_not_found",
+                    "Facility preview was not found",
+                    http_status=404,
+                )
+            if str(request["preview_fingerprint"]) != str(
+                preview_fingerprint or ""
+            ):
+                raise FfPoolSurfaceError(
+                    "facility_preview_fingerprint_mismatch",
+                    "Facility preview fingerprint does not match",
+                    http_status=409,
+                )
+            confirmation = conn.execute(
+                f"SELECT * FROM {FACILITY_ONBOARDING_CONFIRMATIONS_TABLE} WHERE request_id=?",
+                (selected,),
+            ).fetchone()
+            if confirmation is not None:
+                return {
+                    "contract": "ff_facility_onboarding_result_v1",
+                    **self.facility_detail(str(confirmation["facility_id"])),
+                    "idempotent": True,
+                }
+            manifest = _json_object(request["manifest_json"])
+        facility = dict(manifest.get("facility") or {})
+        result = self.create_facility(
+            {
+                "request_id": selected,
+                "name": facility.get("name"),
+                "city": facility.get("city"),
+                "display_timezone": facility.get("display_timezone"),
+                "active": False,
+            },
+            actor=actor,
+        )
+        facility_id = str((result.get("facility") or {}).get("facility_id") or result.get("facility_id") or "")
+        if not facility_id:
+            raise FfPoolSurfaceError(
+                "facility_confirm_readback_missing",
+                "Created facility readback is missing its identity",
+                http_status=409,
+            )
+        now = self._now()
+        with _connect_write(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_facility_onboarding_schema(conn)
+            conn.execute(
+                f"""INSERT OR IGNORE INTO {FACILITY_ONBOARDING_CONFIRMATIONS_TABLE}(
+                       confirmation_id,request_id,facility_id,actor,confirmed_at,result_digest
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    "fffc_" + _fingerprint({"request_id": selected}).removeprefix("sha256:")[:28],
+                    selected,
+                    facility_id,
+                    _identity_token(actor, field="actor"),
+                    now,
+                    _fingerprint(result),
+                ),
+            )
+            conn.commit()
+        return {
+            "contract": "ff_facility_onboarding_result_v1",
+            **result,
+            "idempotent": bool(result.get("idempotent")),
+        }
+
+    @staticmethod
+    def _ensure_facility_onboarding_schema(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            f"""
+            CREATE TABLE IF NOT EXISTS {FACILITY_ONBOARDING_REQUESTS_TABLE}(
+                request_id TEXT PRIMARY KEY,
+                request_identity TEXT NOT NULL UNIQUE,
+                preview_fingerprint TEXT NOT NULL,
+                manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),
+                actor TEXT NOT NULL,
+                previewed_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS ff_facility_onboarding_request_no_update
+            BEFORE UPDATE ON {FACILITY_ONBOARDING_REQUESTS_TABLE}
+            BEGIN SELECT RAISE(ABORT,'Facility onboarding previews are immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS ff_facility_onboarding_request_no_delete
+            BEFORE DELETE ON {FACILITY_ONBOARDING_REQUESTS_TABLE}
+            BEGIN SELECT RAISE(ABORT,'Facility onboarding previews are append-only'); END;
+            CREATE TABLE IF NOT EXISTS {FACILITY_ONBOARDING_CONFIRMATIONS_TABLE}(
+                confirmation_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL UNIQUE
+                    REFERENCES {FACILITY_ONBOARDING_REQUESTS_TABLE}(request_id),
+                facility_id TEXT NOT NULL UNIQUE REFERENCES {FACILITIES_TABLE}(facility_id),
+                actor TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL,
+                result_digest TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS ff_facility_onboarding_confirmation_no_update
+            BEFORE UPDATE ON {FACILITY_ONBOARDING_CONFIRMATIONS_TABLE}
+            BEGIN SELECT RAISE(ABORT,'Facility onboarding confirmations are immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS ff_facility_onboarding_confirmation_no_delete
+            BEFORE DELETE ON {FACILITY_ONBOARDING_CONFIRMATIONS_TABLE}
+            BEGIN SELECT RAISE(ABORT,'Facility onboarding confirmations are append-only'); END;
+            """
+        )
 
     def update_facility(self, facility_id: str, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         selected = _identity_token(facility_id, field="facility_id")

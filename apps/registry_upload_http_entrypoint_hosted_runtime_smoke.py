@@ -608,7 +608,7 @@ def main() -> None:
             json.dumps(
                 {
                     "fingerprint": "sha256:finance-reviewed",
-                    "schema_version": "wb_finance_canonical_cost_backfill_v2",
+                    "schema_version": "wb_finance_canonical_cost_backfill_v3",
                     "dry_run": True,
                     "apply_allowed": True,
                     "date_from": "2026-04-27",
@@ -724,12 +724,17 @@ def main() -> None:
                     "--apply",
                     "--confirm-fingerprint",
                     "sha256:finance-reviewed",
+                    "--date-from",
+                    "2026-04-27",
+                    "--date-to",
+                    "2026-07-19",
                     "--approval-reference",
                     "human-gate-123",
-                    "/opt/wb-core-runtime/backups/wb-finance-canonical",
                 )
             ):
-                raise AssertionError("Finance canonical apply lost fingerprint, backup, or human gate")
+                raise AssertionError(
+                    "Finance canonical apply lost fingerprint, fixed cutoff, or human gate"
+                )
             if action != "apply" and "--apply" in remote_command:
                 raise AssertionError("Finance canonical read-only command unexpectedly enables mutation")
             if action == "readback" and not payload.get("readback"):

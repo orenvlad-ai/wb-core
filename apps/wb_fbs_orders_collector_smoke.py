@@ -177,6 +177,8 @@ def _adapter_contract() -> None:
     def opener(request: object, *, timeout: float) -> _Response:
         calls.append((request, timeout))
         path = urllib_parse.urlparse(request.full_url).path
+        if path == "/api/v3/stocks/507":
+            return _Response({"stocks": [{"chrtId": 9001, "stock": 7}]})
         if request.get_method() == "POST":
             return _Response({"orders": [{"id": 42, "supplierStatus": "complete", "wbStatus": "waiting"}]})
         if path == "/api/v3/warehouses":
@@ -244,12 +246,18 @@ def _adapter_contract() -> None:
         office_request, _timeout = calls[3]
         assert office_request.get_method() == "GET"
         assert urllib_parse.urlparse(office_request.full_url).path == "/api/v3/offices"
+        stocks = source.list_stocks(warehouse_id=507, chrt_ids=[9001])
+        assert len(stocks) == 1 and stocks[0].chrt_id == 9001 and stocks[0].amount == 7
+        stock_request, _timeout = calls[4]
+        assert stock_request.get_method() == "POST"
+        assert urllib_parse.urlparse(stock_request.full_url).path == "/api/v3/stocks/507"
+        assert json.loads(stock_request.data) == {"chrtIds": [9001]}
         try:
             source.list_orders(date_from=1, date_to=31 * 24 * 60 * 60 + 2)
             raise AssertionError("wide FBS window must fail")
         except ValueError as exc:
             assert "30 calendar days" in str(exc)
-        assert len(calls) == 4
+        assert len(calls) == 5
     finally:
         _restore_env("WB_API_TOKEN", prior_token)
         _restore_env("WB_FBS_API_BASE_URL", prior_base)

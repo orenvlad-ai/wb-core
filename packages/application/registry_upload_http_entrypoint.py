@@ -34,6 +34,7 @@ from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.wb_fbs_orders import WbFbsOrdersCollector
+from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -1204,6 +1205,18 @@ class RegistryUploadHttpEntrypoint:
         self.wb_fbs_orders = WbFbsOrdersCollector(
             db_path=self.runtime.db_path,
             timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_fbs_warehouse_registry = WbFbsWarehouseRegistry(
+            db_path=self.runtime.db_path,
+            timestamp_factory=self.activated_at_factory,
+            writer_enabled=lambda: bool(
+                (
+                    self.ff_pool_surface.capabilities(aggregate_revision="").get(
+                        "feature"
+                    )
+                    or {}
+                ).get("writer_effective")
+            ),
         )
         self.inventory_planning = InventoryPlanningReadModel(db_path=self.runtime.db_path)
         self.warehouse_stocks_block = WarehouseStocksBlock(
@@ -5743,6 +5756,27 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_fbs_order_detail_request(self, order_id: str) -> dict[str, Any]:
         return self.wb_fbs_orders.order_detail(order_id)
 
+    def handle_wb_fbs_warehouses_request(self) -> dict[str, Any]:
+        return self.wb_fbs_warehouse_registry.read_model()
+
+    def handle_wb_fbs_binding_preview_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.wb_fbs_warehouse_registry.preview_binding(payload, actor=actor)
+
+    def handle_wb_fbs_binding_confirm_request(
+        self,
+        request_id: str,
+        *,
+        preview_fingerprint: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.wb_fbs_warehouse_registry.confirm_binding(
+            request_id,
+            preview_fingerprint=preview_fingerprint,
+            actor=actor,
+        )
+
     def handle_ff_pool_facilities_request(self, **filters: Any) -> dict[str, Any]:
         return self.ff_pool_surface.facilities_page(
             aggregate_revision=self._ff_aggregate_revision(), **filters
@@ -5800,6 +5834,24 @@ class RegistryUploadHttpEntrypoint:
         self, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
         return self.ff_pool_surface.create_facility(payload, actor=actor)
+
+    def handle_ff_pool_facility_create_preview_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.preview_facility_create(payload, actor=actor)
+
+    def handle_ff_pool_facility_create_confirm_request(
+        self,
+        request_id: str,
+        *,
+        preview_fingerprint: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.ff_pool_surface.confirm_facility_create(
+            request_id,
+            preview_fingerprint=preview_fingerprint,
+            actor=actor,
+        )
 
     def handle_ff_pool_facility_update_request(
         self, facility_id: str, payload: Mapping[str, Any], *, actor: str

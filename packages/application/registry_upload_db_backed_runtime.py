@@ -32,6 +32,9 @@ from packages.application.sheet_vitrina_v1_inventory_history import (
     ensure_inventory_history_schema,
 )
 from packages.application.wb_fbs_orders import ensure_wb_fbs_orders_schema
+from packages.application.wb_fbs_warehouse_registry import (
+    ensure_wb_fbs_warehouse_registry_schema,
+)
 from packages.application.registry_upload_bundle_v1 import (
     RegistryUploadBundleV1Block,
     load_registry_upload_bundle_v1_from_path,
@@ -12229,6 +12232,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     ensure_ff_pool_document_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
+    ensure_wb_fbs_warehouse_registry_schema(conn)
     ensure_ff_pool_cutover_schema(conn)
     # This is schema-only and intentionally does not arm a forward generation
     # or process lifecycle observations.  It makes the post-deploy T0 plan a

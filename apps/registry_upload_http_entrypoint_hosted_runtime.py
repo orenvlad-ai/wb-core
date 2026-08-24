@@ -4528,7 +4528,7 @@ def _run_remote_finance_canonical_action(
         if not isinstance(plan, dict) or str(plan.get("fingerprint") or "") != fingerprint:
             raise ValueError("Finance canonical plan and --fingerprint do not match")
         if (
-            str(plan.get("schema_version") or "") != "wb_finance_canonical_cost_backfill_v2"
+            str(plan.get("schema_version") or "") != "wb_finance_canonical_cost_backfill_v3"
             or plan.get("dry_run") is not True
             or not bool(plan.get("apply_allowed"))
         ):
@@ -4540,8 +4540,10 @@ def _run_remote_finance_canonical_action(
                 "--apply",
                 "--confirm-fingerprint",
                 fingerprint,
-                "--backup-dir",
-                "/opt/wb-core-runtime/backups/wb-finance-canonical",
+                "--date-from",
+                str(plan["date_from"]),
+                "--date-to",
+                str(plan["date_to"]),
                 "--approval-reference",
                 approval_reference.strip(),
             ]
@@ -10907,7 +10909,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     finance_canonical_dry_run = subparsers.add_parser(
         "finance-canonical-dry-run",
-        help="Build the read-only all-history Finance/ads/canonical-cost plan.",
+        help="Build the read-only fixed-cutoff Finance/ads/canonical-cost plan.",
     )
     finance_canonical_dry_run.add_argument("--output", default="")
     finance_canonical_dry_run.add_argument("--operation-id", default="")
@@ -10918,7 +10920,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     finance_canonical_apply = subparsers.add_parser(
         "finance-canonical-apply",
-        help="Apply one exact reviewed all-history canonical Finance plan.",
+        help="Apply one exact reviewed fixed-cutoff canonical Finance plan.",
     )
     finance_canonical_apply.add_argument("--plan-file", required=True)
     finance_canonical_apply.add_argument("--fingerprint", required=True)
@@ -10931,7 +10933,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     finance_canonical_readback = subparsers.add_parser(
         "finance-canonical-readback",
-        help="Prove zero all-history Finance deltas/blockers after canonical apply.",
+        help="Prove zero fixed-cutoff Finance deltas/blockers after canonical apply.",
     )
     finance_canonical_readback.add_argument("--operation-id", default="")
     finance_canonical_readback.set_defaults(

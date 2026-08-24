@@ -79,15 +79,17 @@ publication marker names all three consumers and retains the same aggregate
 evidence rendered by the cost cell. A mixed-version or WB-only current
 publication is rejected by source/CAS readback rather than exposed as ready.
 
-This informational blend is deliberately not realized sale COGS. Finance and
-Partner continue to use `canonical_our_cost_channel_location_v1`: FBS uses only
-the immutable positive WAC frozen by the lifecycle debit at durable handoff for
-exact `facility_id + FBS + nmId`; WB/FBO use the exact canonical daily WB WAC.
-Missing privacy-safe order identity, facility mapping, lifecycle debit or cost
-remains uncovered and is excluded from profit numerator and profitability
-revenue denominator. Another facility/SKU, blended inventory WAC, legacy
-fallback and zero are forbidden. A fulfilled order never changes after later
-overhead.
+This informational blend is deliberately not itself realized sale COGS.
+Finance and Partner use `canonical_our_cost_channel_location_v2`: FBS primary
+is exact pooled `SUM(active facility × FBS capital) / SUM(quantity)` as of the
+operation business date, and only an absent primary may use the same-`nmId`,
+same-day `our_inventory_wac_wb_ff_v1` value. It is never an arithmetic facility
+mean or a per-order/per-facility Finance dependency. WB/FBO retain the exact
+canonical daily WB WAC. Missing after both FBS steps remains uncovered and is
+excluded from profit numerator and profitability revenue denominator; future
+lookahead, another SKU, guessed alias, legacy fallback and zero are forbidden.
+The lifecycle debit keeps its frozen WAC independently and is never rewritten
+by Finance.
 
 The only data-backed archival exception inside the WB/FBO realized contour is
 the active versioned migration-109 manifest: exactly 18 legacy `nmId`, 100 ₽
@@ -286,7 +288,7 @@ layers, `business_approved_archival_estimate`). Vitrina does not invent a value
 when a required persisted source is absent. The functional warehouse version
 is the shared physical/capital source, but consumers deliberately split:
 Vitrina and Proxy 3/4 use `our_inventory_wac_wb_ff_v1`; Finance and Partner use
-exact sale-specific `canonical_our_cost_channel_location_v1`. Neither contour
+sale-specific `canonical_our_cost_channel_location_v2`. Neither contour
 may fall back to 1C/legacy cost, another SKU/location or zero.
 
 Late transit, FF services, storage, paid WB acceptance, supplier financial rows

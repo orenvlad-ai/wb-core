@@ -127,6 +127,16 @@
       "restart": true
     },
     {
+      "name": "wb-core-fbs-warehouse-registry.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-fbs-warehouse-registry.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-storage-recovery-sanitation@.service",
       "enable": false,
       "restart": false

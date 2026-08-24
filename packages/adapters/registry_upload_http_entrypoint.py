@@ -87,6 +87,9 @@ from packages.application.ff_pool_documents_xlsx import (
 )
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginError
 from packages.application.wb_fbs_orders import WbFbsOrdersError
+from packages.application.wb_fbs_warehouse_registry import (
+    WbFbsWarehouseRegistryError,
+)
 from packages.application.ff_warehouse_documents import FfWarehouseDocumentsError
 from packages.application.warehouse_sync_lock import WarehouseSyncBusyError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
@@ -396,11 +399,16 @@ DEFAULT_FF_OVERHEAD_REVERSAL_CONFIRM_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/overh
 DEFAULT_FF_POOL_PATH = f"{DEFAULT_WAREHOUSES_PATH}/ff/facility-pools"
 DEFAULT_FF_POOL_PREFIX = f"{DEFAULT_FF_POOL_PATH}/"
 DEFAULT_FF_POOL_FACILITIES_PATH = f"{DEFAULT_FF_POOL_PATH}/facilities"
+DEFAULT_FF_POOL_FACILITY_PREVIEW_PATH = f"{DEFAULT_FF_POOL_FACILITIES_PATH}/preview"
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
 DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
 DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
 DEFAULT_FF_POOL_FBS_ORDERS_PATH = f"{DEFAULT_FF_POOL_PATH}/fbs-orders"
+DEFAULT_FF_POOL_WB_WAREHOUSES_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-warehouses"
+DEFAULT_FF_POOL_WB_BINDING_PREVIEW_PATH = (
+    f"{DEFAULT_FF_POOL_WB_WAREHOUSES_PATH}/binding/preview"
+)
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -630,7 +638,12 @@ def _build_handler(
                         path=parsed.path,
                         actor=_current_web_user_actor(self),
                     )
-                except (FfPoolSurfaceError, FfPoolXlsxError, FfWbSupplyOriginError) as exc:
+                except (
+                    FfPoolSurfaceError,
+                    FfPoolXlsxError,
+                    FfWbSupplyOriginError,
+                    WbFbsWarehouseRegistryError,
+                ) as exc:
                     status = int(getattr(exc, "http_status", HTTPStatus.UNPROCESSABLE_ENTITY))
                     _write_json_response(
                         self,
@@ -4296,7 +4309,12 @@ def _build_handler(
                         path=parsed.path,
                         query=parsed.query,
                     )
-                except (FfPoolSurfaceError, FfWbSupplyOriginError, WbFbsOrdersError) as exc:
+                except (
+                    FfPoolSurfaceError,
+                    FfWbSupplyOriginError,
+                    WbFbsOrdersError,
+                    WbFbsWarehouseRegistryError,
+                ) as exc:
                     _write_json_response(
                         self,
                         HTTPStatus(exc.http_status),
@@ -5875,10 +5893,12 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
     normalized = str(path or "").rstrip("/")
     if normalized in {
         DEFAULT_FF_POOL_FACILITIES_PATH,
+        DEFAULT_FF_POOL_FACILITY_PREVIEW_PATH,
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
         DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
+        DEFAULT_FF_POOL_WB_BINDING_PREVIEW_PATH,
     }:
         return True
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
@@ -5886,9 +5906,19 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
     return (
         len(parts) == 2 and parts[0] == "facilities"
     ) or (
+        len(parts) == 4
+        and parts[0] == "facilities"
+        and parts[1] == "onboarding"
+        and parts[3] == "confirm"
+    ) or (
         len(parts) == 2 and parts[0] == "wb-supply-origins"
     ) or (
         len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm"
+    ) or (
+        len(parts) == 4
+        and parts[0] == "wb-warehouses"
+        and parts[1] == "binding"
+        and parts[3] == "confirm"
     )
 
 
@@ -5905,6 +5935,20 @@ def _handle_ff_pool_post(
             _load_request_payload(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ), actor=actor
+        )
+    if normalized == DEFAULT_FF_POOL_FACILITY_PREVIEW_PATH:
+        return entrypoint.handle_ff_pool_facility_create_preview_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
+        )
+    if normalized == DEFAULT_FF_POOL_WB_BINDING_PREVIEW_PATH:
+        return entrypoint.handle_wb_fbs_binding_preview_request(
+            _load_request_payload(
+                handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+            ),
+            actor=actor,
         )
     if normalized == f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview":
         return entrypoint.handle_ff_pool_document_preview_request(
@@ -5990,6 +6034,24 @@ def _handle_ff_pool_post(
             ),
             actor=actor,
         )
+    if (
+        len(parts) == 4
+        and parts[0] == "facilities"
+        and parts[1] == "onboarding"
+        and parts[3] == "confirm"
+    ):
+        body = _load_request_payload(
+            handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+        )
+        if body.get("confirm") is not True:
+            raise FfPoolSurfaceError(
+                "explicit_confirmation_required", "Explicit confirm=true is required"
+            )
+        return entrypoint.handle_ff_pool_facility_create_confirm_request(
+            parts[2],
+            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
+            actor=actor,
+        )
     if len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm":
         body = _load_request_payload(
             handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
@@ -5999,6 +6061,24 @@ def _handle_ff_pool_post(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
         return entrypoint.handle_ff_pool_confirm_request(parts[1])
+    if (
+        len(parts) == 4
+        and parts[0] == "wb-warehouses"
+        and parts[1] == "binding"
+        and parts[3] == "confirm"
+    ):
+        body = _load_request_payload(
+            handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
+        )
+        if body.get("confirm") is not True:
+            raise WbFbsWarehouseRegistryError(
+                "explicit_confirmation_required", "Explicit confirm=true is required"
+            )
+        return entrypoint.handle_wb_fbs_binding_confirm_request(
+            parts[2],
+            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
+            actor=actor,
+        )
     raise FfPoolSurfaceError("invalid_ff_pool_path", "Invalid FF facility/pool mutation path", http_status=404)
 
 
@@ -6058,6 +6138,8 @@ def _handle_ff_pool_get(
             date_from=str(params.get("date_from") or ""),
             date_to=str(params.get("date_to") or ""),
         )
+    if normalized == DEFAULT_FF_POOL_WB_WAREHOUSES_PATH:
+        return entrypoint.handle_wb_fbs_warehouses_request()
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
     if len(parts) == 2 and parts == ["documents", "china-template.xlsx"]:

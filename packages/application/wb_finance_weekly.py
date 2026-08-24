@@ -29,14 +29,13 @@ from packages.application.canonical_wb_cost_resolver import (
     CANONICAL_COST_FORMULA_VERSION,
     CANONICAL_COST_POLICY_DATE,
     CHANNEL_LOCATION_COST_FORMULA_VERSION,
-    FBS_CURRENT_TABLE,
-    FBS_CUTOVER_TABLE,
-    FBS_EVENTS_TABLE,
     FBS_OBSERVATIONS_TABLE,
     FUNCTIONAL_CUTOVER_ID,
     FUNCTIONAL_DAILY_TABLE,
     CanonicalChannelCostSnapshot,
     canonical_cost_source_date,
+    classify_finance_channel,
+    pooled_fbs_state_as_of,
     resolve_channel_location_cost,
 )
 from packages.application.warehouse_archival_estimate import (
@@ -2732,6 +2731,8 @@ class WbFinanceWeeklyBlock:
                     {
                         "report_id": str(row.get("reportId") or ""),
                         "rrd_id": str(row.get("rrdId") or ""),
+                        "order_identity_digest": "sha256:"
+                        + hashlib.sha256(order_identity.encode("utf-8")).hexdigest(),
                         "nm_id": internal_nm,
                         "operation_date": operation_date.isoformat(),
                         "operation_date_source": operation_date_source,
@@ -2841,34 +2842,17 @@ class WbFinanceWeeklyBlock:
         operation_date: date,
         operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if self._canonical_cost_snapshot_connection is not conn:
-            self._canonical_cost_snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
-            self._canonical_cost_snapshot_connection = conn
-            self._canonical_cost_resolution_cache = {}
+        snapshot = self._canonical_channel_snapshot(conn)
         raw = dict(operation or {})
-        identity_material = {
-            key: str(raw.get(key) or "")
-            for key in (
-                "srid",
-                "rid",
-                "orderUid",
-                "order_uid",
-                "deliveryType",
-                "delivery_type",
-                "orderType",
-                "order_type",
-            )
-            if str(raw.get(key) or "")
-        }
-        identity_digest = hashlib.sha256(
-            json.dumps(
-                identity_material,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        cache_key = (str(nm_id), operation_date.isoformat(), identity_digest)
+        channel_classification = classify_finance_channel(
+            snapshot,
+            operation=raw,
+        )
+        cache_key = (
+            str(nm_id),
+            operation_date.isoformat(),
+            channel_classification,
+        )
         cached = self._canonical_cost_resolution_cache.get(cache_key)
         if cached is None:
             cached = resolve_channel_location_cost(
@@ -2876,10 +2860,21 @@ class WbFinanceWeeklyBlock:
                 nm_id=nm_id,
                 operation_date=operation_date,
                 operation=raw,
-                snapshot=self._canonical_cost_snapshot,
+                snapshot=snapshot,
             )
             self._canonical_cost_resolution_cache[cache_key] = cached
         return cached
+
+    def _canonical_channel_snapshot(
+        self, conn: sqlite3.Connection
+    ) -> CanonicalChannelCostSnapshot:
+        if self._canonical_cost_snapshot_connection is not conn:
+            self._canonical_cost_snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
+            self._canonical_cost_snapshot_connection = conn
+            self._canonical_cost_resolution_cache = {}
+        if self._canonical_cost_snapshot is None:
+            raise RuntimeError("canonical channel cost snapshot did not initialize")
+        return self._canonical_cost_snapshot
 
     def _calculate_cogs(
         self,
@@ -2903,7 +2898,8 @@ class WbFinanceWeeklyBlock:
         source_units = {
             "projected_from_2026_07_01": 0,
             "canonical_exact_date": 0,
-            "fbs_exact_handoff": 0,
+            "fbs_pooled_physical": 0,
+            "fbs_same_day_common_inventory_fallback": 0,
         }
         covered_sales_rub = ZERO
         uncovered_sales_rub = ZERO
@@ -2944,6 +2940,13 @@ class WbFinanceWeeklyBlock:
             )
             revenue = _decimal(row.get("retailPriceWithDisc"))
             order_identity = _finance_sale_identity(row)
+            channel_classification = classify_finance_channel(
+                self._canonical_channel_snapshot(conn),
+                operation=row,
+            )
+            classified_channel = (
+                "FBS" if channel_classification.startswith("fbs_") else "WB"
+            )
             daily = daily_coverage.setdefault(
                 operation_day,
                 {
@@ -2982,6 +2985,10 @@ class WbFinanceWeeklyBlock:
                     "canonical_source_date": "",
                     "selection_method": "",
                     "formula_version": COST_METHOD_VERSION,
+                    "channel": classified_channel,
+                    "pool": "FBS" if classified_channel == "FBS" else "FBO",
+                    "facility_id": "",
+                    "channel_classification": channel_classification,
                 }
             elif not nm_id:
                 resolution = {
@@ -2996,6 +3003,10 @@ class WbFinanceWeeklyBlock:
                     "canonical_source_date": "",
                     "selection_method": "",
                     "formula_version": COST_METHOD_VERSION,
+                    "channel": classified_channel,
+                    "pool": "FBS" if classified_channel == "FBS" else "FBO",
+                    "facility_id": "",
+                    "channel_classification": channel_classification,
                 }
             else:
                 resolution = self._resolve_canonical_cost(
@@ -3121,7 +3132,12 @@ class WbFinanceWeeklyBlock:
                 daily["covered_returns_revenue_rub"] += revenue
                 daily["covered_returns_cogs_rub"] += abs(signed_cogs)
             source_key = (
-                "fbs_exact_handoff"
+                (
+                    "fbs_same_day_common_inventory_fallback"
+                    if str(resolution.get("quality") or "")
+                    == "same_day_common_inventory_fallback"
+                    else "fbs_pooled_physical"
+                )
                 if str(resolution.get("channel") or "") == "FBS"
                 else "projected_from_2026_07_01"
                 if operation_date < CANONICAL_COST_POLICY_DATE
@@ -3133,6 +3149,8 @@ class WbFinanceWeeklyBlock:
                     {
                         "report_id": str(row.get("reportId") or ""),
                         "rrd_id": str(row.get("rrdId") or ""),
+                        "order_identity_digest": "sha256:"
+                        + hashlib.sha256(order_identity.encode("utf-8")).hexdigest(),
                         "nm_id": nm_id,
                         "operation_date": operation_date.isoformat(),
                         "operation_date_source": operation_date_source,
@@ -3153,6 +3171,9 @@ class WbFinanceWeeklyBlock:
                         "selection_method": str(resolution["selection_method"]),
                         "formula_version": COST_METHOD_VERSION,
                         "signed_cogs_rub": _money_text(signed_cogs),
+                        "sales_revenue_rub": (
+                            _money_text(revenue) if sign > 0 else "0.0000"
+                        ),
                     }
                 )
         total_units = matched_units + unmatched_units
@@ -3230,8 +3251,13 @@ class WbFinanceWeeklyBlock:
             "source_units": source_units,
             "projected_units": source_units["projected_from_2026_07_01"],
             "exact_units": source_units["canonical_exact_date"],
-            "fbs_exact_handoff_units": source_units["fbs_exact_handoff"],
-            "fallback_units": "0.0000",
+            "fbs_pooled_physical_units": source_units["fbs_pooled_physical"],
+            "fbs_same_day_common_inventory_fallback_units": source_units[
+                "fbs_same_day_common_inventory_fallback"
+            ],
+            "fallback_units": source_units[
+                "fbs_same_day_common_inventory_fallback"
+            ],
             "fallback_average_created": False,
             "silent_zero_created": False,
             "operation_date_fallback_rows": operation_date_fallback_rows,
@@ -4211,7 +4237,10 @@ class WbFinanceWeeklyBlock:
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> dict[str, Any]:
-        """Read-only all-history Finance preflight bound to canonical cost truth."""
+        """Read-only fixed-cutoff Finance preflight bound to canonical cost truth."""
+
+        if date_to is None:
+            date_to = self.canonical_finance_historical_cutoff()
 
         conn = self._connect_canonical_plan()
         try:
@@ -4222,6 +4251,20 @@ class WbFinanceWeeklyBlock:
             )
         finally:
             conn.close()
+
+    def canonical_finance_historical_cutoff(self) -> date:
+        """Freeze the latest fully closed stored Finance week as cutoff C."""
+
+        today = self.now_factory().date()
+        with self._connect_canonical_plan() as conn:
+            row = conn.execute(
+                """SELECT MAX(week_end) FROM wb_finance_weekly_raw_rows
+                   WHERE seller_id=? AND week_end<?""",
+                (self.seller_id, today.isoformat()),
+            ).fetchone()
+        if row is None or not row[0]:
+            raise ValueError("Finance has no fully closed week for a historical cutoff")
+        return date.fromisoformat(str(row[0]))
 
     def _plan_canonical_finance_backfill_in_connection(
         self,
@@ -4267,10 +4310,27 @@ class WbFinanceWeeklyBlock:
         scope_to = date_to or date.fromisoformat(str(bounds["last_week"]))
         week_rows = conn.execute(
             """SELECT DISTINCT week_start,week_end FROM wb_finance_weekly_raw_rows
-               WHERE seller_id=? AND week_end>=? AND week_start<=?
+               WHERE seller_id=? AND week_end>=? AND week_end<=?
                ORDER BY week_start""",
             (self.seller_id, scope_from.isoformat(), scope_to.isoformat()),
         ).fetchall()
+        target_keys = {
+            (self.seller_id, str(item["week_start"]), str(item["week_end"]))
+            for item in week_rows
+        }
+        initial_target_before_image = self._finance_target_images(conn, target_keys)
+        initial_target_before_image_digest = self._json_digest(
+            initial_target_before_image
+        )
+        initial_source_dependency = (
+            None
+            if missing_schema
+            else self._finance_source_dependency_fingerprint(
+                conn,
+                target_keys=target_keys,
+                force_reload=True,
+            )
+        )
         weeks: list[dict[str, Any]] = []
         matrix: list[dict[str, Any]] = []
         blockers: list[dict[str, Any]] = [
@@ -4282,6 +4342,16 @@ class WbFinanceWeeklyBlock:
         target_before_digest = _StreamingJsonArrayDigest()
         target_after_digest = _StreamingJsonArrayDigest()
         expected_sku_projection_row_count = 0
+        fbs_primary_order_digests: set[str] = set()
+        fbs_fallback_order_digests: set[str] = set()
+        fbs_primary_units = 0
+        fbs_fallback_units = 0
+        fbs_primary_revenue = ZERO
+        fbs_fallback_revenue = ZERO
+        fbs_remaining_orders = 0
+        fbs_remaining_units = 0
+        fbs_remaining_revenue = ZERO
+        fbs_remaining_reasons: dict[str, int] = {}
         for week in week_rows:
             start = date.fromisoformat(str(week["week_start"]))
             end = date.fromisoformat(str(week["week_end"]))
@@ -4303,6 +4373,37 @@ class WbFinanceWeeklyBlock:
                     ]
                 )
             detailed = self._calculate_cogs(conn, parsed, start, include_details=True)
+            for detail in detailed["detail_rows"]:
+                if detail.get("movement") != "sale" or detail.get("channel") != "FBS":
+                    continue
+                order_digest = str(detail.get("order_identity_digest") or "")
+                units = int(detail.get("quantity") or 0)
+                revenue = _decimal(detail.get("sales_revenue_rub"))
+                if detail.get("source_quality") == "pooled_fbs_physical_exact":
+                    fbs_primary_order_digests.add(order_digest)
+                    fbs_primary_units += units
+                    fbs_primary_revenue += revenue
+                elif detail.get("source_quality") == "same_day_common_inventory_fallback":
+                    fbs_fallback_order_digests.add(order_digest)
+                    fbs_fallback_units += units
+                    fbs_fallback_revenue += revenue
+            fbs_remaining_orders += int(
+                detailed.get("uncovered_fbs_sales_order_count") or 0
+            )
+            fbs_remaining_units += int(
+                detailed.get("uncovered_fbs_sales_units") or 0
+            )
+            fbs_remaining_revenue += _decimal(
+                detailed.get("uncovered_fbs_sales_revenue_rub")
+            )
+            for problem in detailed.get("problem_skus") or []:
+                if str(problem.get("channel") or "") != "FBS":
+                    continue
+                reason = str(problem.get("reason") or "canonical_cost_missing")
+                fbs_remaining_reasons[reason] = (
+                    fbs_remaining_reasons.get(reason, 0)
+                    + int(problem.get("operation_count") or 0)
+                )
             new_metrics, new_coverage, unknown = self._aggregate_rows(
                 conn,
                 parsed,
@@ -4661,18 +4762,70 @@ class WbFinanceWeeklyBlock:
             date_from=scope_from,
             date_to=scope_to,
         )
+        target_before_image = self._finance_target_images(conn, target_keys)
+        if self._json_digest(target_before_image) != initial_target_before_image_digest:
+            raise ValueError(
+                "canonical Finance target changed during query-only planning; "
+                "rerun the same fixed-cutoff plan"
+            )
+        final_source_dependency = (
+            None
+            if initial_source_dependency is None
+            else self._finance_source_dependency_fingerprint(
+                conn,
+                target_keys=target_keys,
+                force_reload=True,
+            )
+        )
+        if (
+            initial_source_dependency is not None
+            and str(initial_source_dependency["digest"])
+            != str(final_source_dependency["digest"])
+        ):
+            raise ValueError(
+                "canonical Finance source dependency changed during query-only "
+                "planning; rerun the same fixed-cutoff plan"
+            )
+        fbs_historical_correction = {
+            "cutoff_date": scope_to.isoformat(),
+            "primary": {
+                "reason": "pooled_fbs_physical_wac",
+                "order_count": len(fbs_primary_order_digests),
+                "unit_count": fbs_primary_units,
+                "sales_revenue_rub": _money_text(fbs_primary_revenue),
+            },
+            "fallback": {
+                "reason": "same_nm_same_day_common_inventory_cost",
+                "order_count": len(fbs_fallback_order_digests),
+                "unit_count": fbs_fallback_units,
+                "sales_revenue_rub": _money_text(fbs_fallback_revenue),
+            },
+            "remaining": {
+                "order_count": fbs_remaining_orders,
+                "unit_count": fbs_remaining_units,
+                "sales_revenue_rub": _money_text(fbs_remaining_revenue),
+                "reason_counts": dict(sorted(fbs_remaining_reasons.items())),
+            },
+        }
         plan: dict[str, Any] = {
             "status": "blocked" if blockers else "ready",
-            "schema_version": "wb_finance_canonical_cost_backfill_v2",
+            "schema_version": "wb_finance_canonical_cost_backfill_v3",
             "dry_run": True,
             "seller_id": self.seller_id,
             "date_from": scope_from.isoformat(),
             "date_to": scope_to.isoformat(),
+            "historical_cutoff": {
+                "cutoff_date": scope_to.isoformat(),
+                "forward_ingress_from": (scope_to + timedelta(days=1)).isoformat(),
+                "frozen": True,
+                "source_rows_after_cutoff_excluded": True,
+            },
             "week_count": len(weeks),
             "finance_row_count": finance_manifest_digest.count,
             "finance_nm_id_count": len(union_nm_ids),
             "weeks": weeks,
             "week_nm_operation_date_matrix": matrix,
+            "fbs_historical_correction": fbs_historical_correction,
             "source_manifests": {
                 "finance": {"row_count": finance_manifest_digest.count, "digest": finance_digest},
                 "cost": {
@@ -4705,7 +4858,9 @@ class WbFinanceWeeklyBlock:
                 },
                 "ads": ads_manifest,
             },
+            "source_dependency": final_source_dependency,
             "target_before_digest": target_before_digest.finish(),
+            "target_before_image": target_before_image,
             "expected_target_after_digest": target_after_digest.finish(),
             "non_target_manifest": non_target_manifest,
             "non_target_digest": self._json_digest(non_target_manifest),
@@ -4740,11 +4895,11 @@ class WbFinanceWeeklyBlock:
             },
             "backup_recovery_plan": {
                 "required_before_apply": True,
-                "coherent_sqlite_backup": True,
-                "integrity_check": "ok required",
-                "permissions": "0600",
-                "sha256": "required",
-                "transaction": "single BEGIN IMMEDIATE with rollback on drift/error",
+                "kind": "target_scoped_exact_before_image",
+                "whole_store_copy": False,
+                "bounded_by_fixed_cutoff": True,
+                "before_image_digest": self._json_digest(target_before_image),
+                "transaction": "short target CAS in BEGIN IMMEDIATE",
             },
             "blockers": blockers,
             "apply_allowed": not blockers,
@@ -4796,7 +4951,7 @@ class WbFinanceWeeklyBlock:
         }
         queries = {
             "finance_raw": (
-                "SELECT report_id,rrd_id,row_hash FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND week_start<=? ORDER BY report_id,rrd_id",
+                "SELECT report_id,rrd_id,row_hash FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND week_end<=? ORDER BY report_id,rrd_id",
                 (self.seller_id, date_from.isoformat(), date_to.isoformat()),
             ),
         }
@@ -4837,22 +4992,32 @@ class WbFinanceWeeklyBlock:
         date_to: date | None = None,
     ) -> dict[str, Any]:
         revoked = "sha256:621323d6f03759cb8685dfffe20639fa18a16c7b5f6a5b1685205a579c6bbf2d"
+        if date_to is None:
+            date_to = self.canonical_finance_historical_cutoff()
         if expected_fingerprint == revoked:
             raise ValueError("the former Finance plan fingerprint is permanently revoked")
         if not str(approval_reference or "").strip():
             raise ValueError("canonical Finance apply requires approval_reference")
-        with self._connect() as conn:
-            existing = conn.execute(
+        phase_started = datetime.now(timezone.utc)
+        with self._connect_canonical_plan() as plan_conn:
+            self._assert_readonly_plan_connection(plan_conn)
+            existing = plan_conn.execute(
                 """SELECT scope_json,result_json FROM wb_finance_projection_audit
                    WHERE seller_id=? AND action='apply_canonical_finance_backfill'
-                     AND fingerprint=? ORDER BY created_at DESC LIMIT 1""",
+                     AND fingerprint=?
+                   ORDER BY CASE
+                              WHEN instr(result_json,'\"post_apply_fingerprint\"')>0
+                              THEN 1 ELSE 0
+                            END DESC,
+                            rowid DESC
+                   LIMIT 1""",
                 (self.seller_id, expected_fingerprint),
             ).fetchone()
             if existing is not None:
                 result = json.loads(str(existing["result_json"] or "{}"))
                 prior_scope = json.loads(str(existing["scope_json"] or "{}"))
                 current = self._plan_canonical_finance_backfill_in_connection(
-                    conn,
+                    plan_conn,
                     date_from=date_from,
                     date_to=date_to,
                 )
@@ -4865,6 +5030,100 @@ class WbFinanceWeeklyBlock:
                         "previously applied canonical Finance fingerprint belongs to a different scope"
                     )
                 if (
+                    str(result.get("status") or "")
+                    == "applied_pending_query_only_reconciliation"
+                    and not result.get("post_apply_fingerprint")
+                ):
+                    target_keys = {
+                        (
+                            self.seller_id,
+                            str(item["week_start"]),
+                            str(item["week_end"]),
+                        )
+                        for item in current["weeks"]
+                    }
+                    if self._json_digest(
+                        self._finance_target_images(plan_conn, target_keys)
+                    ) != str(result.get("target_digest") or ""):
+                        raise ValueError(
+                            "committed canonical Finance target no longer matches its "
+                            "atomic apply audit"
+                        )
+                    non_target_after = self._json_digest(
+                        self._canonical_non_target_manifest(
+                            plan_conn,
+                            date_from=date.fromisoformat(current_scope["date_from"]),
+                            date_to=date.fromisoformat(current_scope["date_to"]),
+                        )
+                    )
+                    if non_target_after != str(
+                        result.get("non_target_digest_before") or ""
+                    ):
+                        raise ValueError(
+                            "non-target Finance/ads/cost state changed after the "
+                            "atomically recorded apply"
+                        )
+                    if current["blockers"] or any(
+                        any(
+                            value not in {None, "0.0000"}
+                            for value in week["delta"].values()
+                        )
+                        for week in current["weeks"]
+                    ):
+                        raise ValueError(
+                            "atomically recorded canonical Finance apply does not "
+                            "reconcile to zero"
+                        )
+                    reconciled_at = (
+                        self.now_factory()
+                        .astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    result = {
+                        **result,
+                        "status": "applied_reconciled_from_atomic_audit",
+                        "non_target_digest_after": non_target_after,
+                        "post_apply_fingerprint": current["fingerprint"],
+                        "reconciled_at": reconciled_at,
+                        "idempotent": True,
+                    }
+                    audit_id = hashlib.sha256(
+                        f"{self.seller_id}|canonical-reconciliation|{expected_fingerprint}".encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()
+                    with self._connect() as audit_conn:
+                        audit_conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            audit_conn.execute(
+                                """INSERT OR IGNORE INTO wb_finance_projection_audit(
+                                   audit_id,seller_id,action,fingerprint,scope_json,
+                                   result_json,created_at
+                                   ) VALUES(?,?,?,?,?,?,?)""",
+                                (
+                                    audit_id,
+                                    self.seller_id,
+                                    "apply_canonical_finance_backfill",
+                                    expected_fingerprint,
+                                    json.dumps(
+                                        current_scope, separators=(",", ":")
+                                    ),
+                                    json.dumps(
+                                        result,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                    reconciled_at,
+                                ),
+                            )
+                            audit_conn.commit()
+                        except Exception:
+                            audit_conn.rollback()
+                            raise
+                    return result
+                if (
                     not result.get("post_apply_fingerprint")
                     or str(current["fingerprint"]) != str(result["post_apply_fingerprint"])
                 ):
@@ -4872,118 +5131,196 @@ class WbFinanceWeeklyBlock:
                         "previously applied canonical Finance state has drifted; a new dry-run and approval are required"
                     )
                 return {**result, "status": "no_op_already_applied", "idempotent": True}
-            conn.execute("BEGIN IMMEDIATE")
+            plan = self._plan_canonical_finance_backfill_in_connection(
+                plan_conn,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            if str(plan["fingerprint"]) != expected_fingerprint:
+                raise ValueError("canonical Finance plan fingerprint drifted before apply")
+            if not bool(plan["apply_allowed"]):
+                raise ValueError("canonical Finance plan contains blockers")
+            target_keys = {
+                (self.seller_id, str(item["week_start"]), str(item["week_end"]))
+                for item in plan["weeks"]
+            }
+            if not target_keys:
+                raise ValueError("canonical Finance reviewed plan has no target weeks")
+            after_images: dict[str, Any] = {}
+            for item in plan["weeks"]:
+                projection = self._build_week_target_projection(
+                    plan_conn,
+                    week_start=date.fromisoformat(str(item["week_start"])),
+                    week_end=date.fromisoformat(str(item["week_end"])),
+                )
+                for table, image in dict(projection["images"]).items():
+                    selected = after_images.setdefault(
+                        table,
+                        {"columns": list(image["columns"]), "rows": []},
+                    )
+                    if list(selected["columns"]) != list(image["columns"]):
+                        raise ValueError("Finance query projection schema drifted")
+                    selected["rows"].extend(list(image["rows"]))
+            after_images = self._canonicalize_finance_target_images(
+                plan_conn, after_images
+            )
+            current_before = self._finance_target_images(plan_conn, target_keys)
+            before_digest = self._json_digest(current_before)
+            if before_digest != str(
+                plan["backup_recovery_plan"]["before_image_digest"]
+            ):
+                raise ValueError("canonical Finance target before-image drifted")
+            non_target_before = str(plan["non_target_digest"])
+            handoff_data_version = self._sqlite_data_version_token(plan_conn)
+            plan_finished = datetime.now(timezone.utc)
+            committed_at = (
+                self.now_factory()
+                .astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            committed_target_digest = self._json_digest(after_images)
+            commit_audit_id = hashlib.sha256(
+                f"{self.seller_id}|canonical-commit|{expected_fingerprint}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            committed_result = {
+                "status": "applied_pending_query_only_reconciliation",
+                "runtime_mutation": True,
+                "fingerprint": expected_fingerprint,
+                "approval_reference": str(approval_reference),
+                "historical_cutoff": dict(plan["historical_cutoff"]),
+                "fbs_historical_correction": dict(
+                    plan["fbs_historical_correction"]
+                ),
+                "week_count": int(plan["week_count"]),
+                "non_target_digest_before": non_target_before,
+                "target_digest": committed_target_digest,
+                "idempotent": True,
+                "retro_cost_map_rows_written": 0,
+                "applied_at": committed_at,
+            }
+
+            with self._connect() as writer_conn:
+                writer_started = datetime.now(timezone.utc)
+                writer_conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if self._sqlite_data_version_token(plan_conn) != handoff_data_version:
+                        raise ValueError(
+                            "Finance SQLite changed during the pre-commit handoff; "
+                            "the same fixed-cutoff plan must be query-only revalidated"
+                        )
+                    if self._json_digest(
+                        self._finance_target_images(writer_conn, target_keys)
+                    ) != before_digest:
+                        raise ValueError("canonical Finance target changed before CAS")
+                    self._replace_finance_target_images(
+                        writer_conn,
+                        target_keys=target_keys,
+                        images=after_images,
+                    )
+                    applied_images = self._finance_target_images(
+                        writer_conn, target_keys
+                    )
+                    if self._json_digest(applied_images) != self._json_digest(after_images):
+                        raise ValueError("canonical Finance target CAS readback differs")
+                    # Commit the exact-target image and its immutable apply
+                    # identity atomically.  If transport or post-commit
+                    # reconciliation later fails, query-only readback can
+                    # prove this one apply and callers must never resubmit it.
+                    writer_conn.execute(
+                        """INSERT INTO wb_finance_projection_audit(
+                           audit_id,seller_id,action,fingerprint,scope_json,
+                           result_json,created_at
+                           ) VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            commit_audit_id,
+                            self.seller_id,
+                            "apply_canonical_finance_backfill",
+                            expected_fingerprint,
+                            json.dumps(
+                                {
+                                    "date_from": plan["date_from"],
+                                    "date_to": plan["date_to"],
+                                },
+                                separators=(",", ":"),
+                            ),
+                            json.dumps(
+                                committed_result,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            committed_at,
+                        ),
+                    )
+                    writer_conn.commit()
+                except Exception:
+                    writer_conn.rollback()
+                    raise
+                writer_finished = datetime.now(timezone.utc)
+
+        readback_started = datetime.now(timezone.utc)
+        with self._connect_canonical_plan() as readback_conn:
+            self._assert_readonly_plan_connection(readback_conn)
+            non_target_after = self._json_digest(
+                self._canonical_non_target_manifest(
+                    readback_conn,
+                    date_from=date.fromisoformat(str(plan["date_from"])),
+                    date_to=date.fromisoformat(str(plan["date_to"])),
+                )
+            )
+            if non_target_after != non_target_before:
+                raise ValueError("non-target Finance/ads/cost invariants changed during apply")
+            post_apply_plan = self._plan_canonical_finance_backfill_in_connection(
+                readback_conn,
+                date_from=date.fromisoformat(str(plan["date_from"])),
+                date_to=date.fromisoformat(str(plan["date_to"])),
+            )
+            if post_apply_plan["blockers"] or any(
+                any(value not in {None, "0.0000"} for value in week["delta"].values())
+                for week in post_apply_plan["weeks"]
+            ):
+                raise ValueError("post-apply canonical Finance plan is not reconciled to zero")
+        readback_finished = datetime.now(timezone.utc)
+        now = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        result = {
+            "status": "applied",
+            "runtime_mutation": True,
+            "fingerprint": expected_fingerprint,
+            "approval_reference": str(approval_reference),
+            "historical_cutoff": dict(plan["historical_cutoff"]),
+            "fbs_historical_correction": dict(plan["fbs_historical_correction"]),
+            "week_count": int(plan["week_count"]),
+            "non_target_digest_before": non_target_before,
+            "non_target_digest_after": non_target_after,
+            "target_digest": committed_target_digest,
+            "post_apply_fingerprint": post_apply_plan["fingerprint"],
+            "idempotent": True,
+            "retro_cost_map_rows_written": 0,
+            "applied_at": now,
+            "phase_timings_ms": {
+                "query_plan_and_projection": max(
+                    0.0, (plan_finished - phase_started).total_seconds() * 1000
+                ),
+                "writer_lock_hold": max(
+                    0.0, (writer_finished - writer_started).total_seconds() * 1000
+                ),
+                "post_commit_readback": max(
+                    0.0, (readback_finished - readback_started).total_seconds() * 1000
+                ),
+            },
+        }
+        audit_id = hashlib.sha256(
+            f"{self.seller_id}|canonical-reconciliation|{expected_fingerprint}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with self._connect() as audit_conn:
+            audit_conn.execute("BEGIN IMMEDIATE")
             try:
-                plan = self._plan_canonical_finance_backfill_in_connection(
-                    conn,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-                if str(plan["fingerprint"]) != expected_fingerprint:
-                    raise ValueError("canonical Finance plan fingerprint drifted before apply")
-                if not bool(plan["apply_allowed"]):
-                    raise ValueError("canonical Finance plan contains blockers")
-                non_target_before = str(plan["non_target_digest"])
-                for week in plan["weeks"]:
-                    self._recalculate_week_in_connection(
-                        conn,
-                        date.fromisoformat(str(week["week_start"])),
-                        date.fromisoformat(str(week["week_end"])),
-                    )
-                target_readback_digest = _StreamingJsonArrayDigest()
-                for week in plan["weeks"]:
-                    start = date.fromisoformat(str(week["week_start"]))
-                    end = date.fromisoformat(str(week["week_end"]))
-                    aggregate_row = conn.execute(
-                        """SELECT metrics_json,unknown_reasons_json FROM wb_finance_weekly_aggregates
-                           WHERE seller_id=? AND week_start=? AND week_end=?""",
-                        (self.seller_id, start.isoformat(), end.isoformat()),
-                    ).fetchone()
-                    raw = [
-                        json.loads(str(row["raw_json"]))
-                        for row in conn.execute(
-                            """SELECT raw_json FROM wb_finance_weekly_raw_rows
-                               WHERE seller_id=? AND week_start=? AND week_end=?
-                               ORDER BY report_id,rrd_id""",
-                            (self.seller_id, start.isoformat(), end.isoformat()),
-                        ).fetchall()
-                    ]
-                    sku_aggregates = [
-                        dict(row)
-                        for row in conn.execute(
-                            """SELECT seller_id,week_start,week_end,nm_id,formula_version,
-                                      metrics_json,coverage_json,raw_source_digest,
-                                      week_content_hash,cost_state_hash,raw_row_count
-                               FROM wb_finance_weekly_sku_aggregates
-                               WHERE seller_id=? AND week_start=? AND week_end=?
-                               ORDER BY nm_id""",
-                            (self.seller_id, start.isoformat(), end.isoformat()),
-                        ).fetchall()
-                    ]
-                    # The reviewed target digest is built in canonical numeric
-                    # nmID order by ``_rebuild_sku_week_aggregates``. SQLite
-                    # TEXT ordering differs when the catalogue contains both
-                    # 9- and 10-digit nmIDs, so normalize readback with the
-                    # exact same key before hashing. This changes no rows and
-                    # preserves the already reviewed plan fingerprint.
-                    sku_aggregates.sort(
-                        key=lambda item: _finance_nm_id_sort_key(item["nm_id"])
-                    )
-                    target_readback_digest.add(
-                        {
-                            "week_start": start.isoformat(),
-                            "metrics": json.loads(str(aggregate_row["metrics_json"] or "{}")),
-                            "coverage": self._calculate_cogs(
-                                conn, raw, start
-                            ),
-                            "unknown": json.loads(
-                                str(aggregate_row["unknown_reasons_json"] or "[]")
-                            ),
-                            "sku_aggregates": sku_aggregates,
-                        }
-                    )
-                target_after_digest = target_readback_digest.finish()
-                if target_after_digest != str(plan["expected_target_after_digest"]):
-                    raise ValueError("target Finance readback digest differs from reviewed plan")
-                non_target_after_manifest = self._canonical_non_target_manifest(
-                    conn,
-                    date_from=date.fromisoformat(str(plan["date_from"])),
-                    date_to=date.fromisoformat(str(plan["date_to"])),
-                )
-                non_target_after = self._json_digest(non_target_after_manifest)
-                if non_target_after != non_target_before:
-                    raise ValueError("non-target Finance/ads/cost invariants changed during apply")
-                post_apply_plan = self._plan_canonical_finance_backfill_in_connection(
-                    conn,
-                    date_from=date.fromisoformat(str(plan["date_from"])),
-                    date_to=date.fromisoformat(str(plan["date_to"])),
-                )
-                if post_apply_plan["blockers"] or any(
-                    any(
-                        value not in {None, "0.0000"}
-                        for value in week["delta"].values()
-                    )
-                    for week in post_apply_plan["weeks"]
-                ):
-                    raise ValueError("post-apply canonical Finance plan is not reconciled to zero")
-                now = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                result = {
-                    "status": "applied",
-                    "fingerprint": expected_fingerprint,
-                    "approval_reference": str(approval_reference),
-                    "week_count": int(plan["week_count"]),
-                    "non_target_digest_before": non_target_before,
-                    "non_target_digest_after": non_target_after,
-                    "target_digest": target_after_digest,
-                    "post_apply_fingerprint": post_apply_plan["fingerprint"],
-                    "idempotent": True,
-                    "retro_cost_map_rows_written": 0,
-                    "applied_at": now,
-                }
-                audit_id = hashlib.sha256(
-                    f"{self.seller_id}|canonical|{expected_fingerprint}|{now}".encode("utf-8")
-                ).hexdigest()
-                conn.execute(
+                audit_conn.execute(
                     """INSERT INTO wb_finance_projection_audit(
                        audit_id,seller_id,action,fingerprint,scope_json,result_json,created_at
                        ) VALUES(?,?,?,?,?,?,?)""",
@@ -5000,11 +5337,11 @@ class WbFinanceWeeklyBlock:
                         now,
                     ),
                 )
-                conn.commit()
-                return result
+                audit_conn.commit()
             except Exception:
-                conn.rollback()
+                audit_conn.rollback()
                 raise
+        return result
 
     def canonical_finance_fingerprint_applied(self, *, fingerprint: str) -> bool:
         """Return whether this exact reviewed canonical plan already committed."""
@@ -5681,8 +6018,7 @@ class WbFinanceWeeklyBlock:
 
         relevant_wb_keys: set[tuple[str, str]] = set()
         relevant_wb_nm_ids: set[int] = set()
-        relevant_identity_hashes: set[str] = set()
-        relevant_fbs_order_ids: set[int] = set()
+        relevant_fbs_cost_keys: set[tuple[str, str]] = set()
         for seller_id, week_start, week_end in sorted(target_keys):
             raw_rows = conn.execute(
                 "SELECT report_id,rrd_id,row_hash,raw_json "
@@ -5691,17 +6027,44 @@ class WbFinanceWeeklyBlock:
                 (seller_id, week_start, week_end),
             ).fetchall()
             for row in raw_rows:
+                raw_json = str(row["raw_json"] or "{}")
+                try:
+                    operation = json.loads(raw_json)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    operation = None
+                identity_hashes = (
+                    {
+                        "sha256:"
+                        + hashlib.sha256(token.encode("utf-8")).hexdigest()
+                        for token in (
+                            str(operation.get(key) or "").strip()
+                            for key in ("srid", "rid", "orderUid", "order_uid")
+                        )
+                        if token
+                    }
+                    if isinstance(operation, Mapping)
+                    else set()
+                )
                 add(
                     "finance_raw",
                     [seller_id, week_start, week_end, row["report_id"], row["rrd_id"]],
                     [
                         str(row["row_hash"] or ""),
-                        hashlib.sha256(str(row["raw_json"]).encode("utf-8")).hexdigest(),
+                        hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+                        [
+                            [
+                                identity_hash,
+                                list(
+                                    snapshot.fbs_order_ids_by_identity_hash.get(
+                                        identity_hash, ()
+                                    )
+                                ),
+                            ]
+                            for identity_hash in sorted(identity_hashes)
+                        ],
                     ],
                 )
-                try:
-                    operation = json.loads(str(row["raw_json"] or "{}"))
-                except (TypeError, ValueError, json.JSONDecodeError):
+                if not isinstance(operation, Mapping):
                     continue
                 if str(operation.get("docTypeName") or "").casefold() not in {
                     "продажа",
@@ -5720,16 +6083,6 @@ class WbFinanceWeeklyBlock:
                 )
                 if operation_date_source == "week_start_fallback" or not nm_id:
                     continue
-                identity_hashes = {
-                    "sha256:"
-                    + hashlib.sha256(token.encode("utf-8")).hexdigest()
-                    for token in (
-                        str(operation.get(key) or "").strip()
-                        for key in ("srid", "rid", "orderUid", "order_uid")
-                    )
-                    if token
-                }
-                relevant_identity_hashes.update(identity_hashes)
                 matched_order_ids: set[int] = set()
                 for identity_hash in identity_hashes:
                     matched_order_ids.update(
@@ -5745,9 +6098,11 @@ class WbFinanceWeeklyBlock:
                     )
                     if str(operation.get(key) or "").strip()
                 }
-                explicit_fbs = any("fbs" in token for token in channel_tokens)
+                explicit_fbs = "fbs" in channel_tokens
                 if matched_order_ids or explicit_fbs:
-                    relevant_fbs_order_ids.update(matched_order_ids)
+                    relevant_fbs_cost_keys.add(
+                        (operation_date.isoformat(), nm_id)
+                    )
                     continue
                 source_date = canonical_cost_source_date(operation_date).isoformat()
                 relevant_wb_keys.add((source_date, nm_id))
@@ -5779,9 +6134,10 @@ class WbFinanceWeeklyBlock:
                     "sheet_vitrina_v1_warehouse_archival_estimate_rows",
                     "sheet_vitrina_v1_warehouse_functional_events",
                     FBS_OBSERVATIONS_TABLE,
-                    FBS_CURRENT_TABLE,
-                    FBS_EVENTS_TABLE,
-                    FBS_CUTOVER_TABLE,
+                    "sheet_vitrina_v1_ff_facilities",
+                    "sheet_vitrina_v1_warehouse_business_operations",
+                    "sheet_vitrina_v1_ff_pool_movement_lines",
+                    "sheet_vitrina_v1_ready_snapshots",
                 }
             ),
         )
@@ -5801,18 +6157,22 @@ class WbFinanceWeeklyBlock:
                 nm_id,
                 snapshot.wb.archival_first_factual_dates.get(nm_id),
             )
-        for identity_hash in sorted(relevant_identity_hashes):
-            add(
-                "fbs_identity",
-                identity_hash,
-                list(snapshot.fbs_order_ids_by_identity_hash.get(identity_hash, ())),
+        for key in sorted(relevant_fbs_cost_keys):
+            pooled = pooled_fbs_state_as_of(
+                snapshot,
+                business_date=key[0],
+                nm_id=key[1],
             )
-        for order_id in sorted(relevant_fbs_order_ids):
-            row = snapshot.fbs_cost_by_order_id.get(order_id)
             add(
-                "fbs_frozen_cost",
-                order_id,
-                dict(row) if row is not None else None,
+                "fbs_pooled_cost",
+                list(key),
+                dict(pooled) if pooled is not None else None,
+            )
+            fallback = snapshot.common_inventory_cost_by_date_nm.get(key)
+            add(
+                "fbs_common_inventory_fallback",
+                list(key),
+                dict(fallback) if fallback is not None else None,
             )
         return {
             "contract": "wb_finance_exact_target_dependency_v2",
@@ -5826,6 +6186,7 @@ class WbFinanceWeeklyBlock:
         target_keys: set[tuple[str, str, str]],
     ) -> dict[str, Any]:
         images: dict[str, Any] = {}
+        missing_images: dict[str, Any] = {}
         for table in (
             "wb_finance_weekly_aggregates",
             "wb_finance_weekly_cost_coverage",
@@ -5837,6 +6198,13 @@ class WbFinanceWeeklyBlock:
                 str(row["name"])
                 for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
             ]
+            if not columns:
+                missing_images[table] = {
+                    "columns": [],
+                    "rows": [],
+                    "missing_table": True,
+                }
+                continue
             rows: list[list[Any]] = []
             for seller_id, week_start, week_end in sorted(target_keys):
                 selected = conn.execute(
@@ -5851,9 +6219,11 @@ class WbFinanceWeeklyBlock:
                 ).fetchall()
                 rows.extend([[row[column] for column in columns] for row in selected])
             images[table] = {"columns": columns, "rows": rows}
-        return WbFinanceWeeklyBlock._canonicalize_finance_target_images(
+        canonical = WbFinanceWeeklyBlock._canonicalize_finance_target_images(
             conn, images
         )
+        canonical.update(missing_images)
+        return canonical
 
     @staticmethod
     def _canonicalize_finance_target_images(
