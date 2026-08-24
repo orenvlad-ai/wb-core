@@ -178,7 +178,7 @@ def _adapter_contract() -> None:
         calls.append((request, timeout))
         path = urllib_parse.urlparse(request.full_url).path
         if path == "/api/v3/stocks/507":
-            return _Response({"stocks": [{"chrtId": 9001, "stock": 7}]})
+            return _Response({"stocks": [{"chrtId": 9001, "amount": 7}]})
         if request.get_method() == "POST":
             return _Response({"orders": [{"id": 42, "supplierStatus": "complete", "wbStatus": "waiting"}]})
         if path == "/api/v3/warehouses":
