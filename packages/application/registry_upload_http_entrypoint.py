@@ -6376,9 +6376,7 @@ class RegistryUploadHttpEntrypoint:
                         )
                     )
                     finance_cost_recalculation = (
-                        self.wb_finance_weekly_block.recalculate_stale_cost_weeks(
-                            date_from=date(2026, 7, 1)
-                        )
+                        self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
                     )
                     transit_cost_replays = (
                         self.runtime.finalize_completed_wb_transit_cost_recalculations(

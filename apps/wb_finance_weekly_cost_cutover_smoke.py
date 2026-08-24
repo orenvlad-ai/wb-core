@@ -71,6 +71,8 @@ def _assert_all_history_policy(block: WbFinanceWeeklyBlock) -> None:
     if mixed_quality["source_units"] != {
         "projected_from_2026_07_01": 2,
         "canonical_exact_date": 4,
+        "fbs_pooled_physical": 0,
+        "fbs_same_day_common_inventory_fallback": 0,
     }:
         raise AssertionError(f"mixed temporal source split mismatch: {mixed_quality}")
     if mixed["aggregate"]["commission_control_reconciliation_rub"] != "0.0000":
@@ -225,11 +227,22 @@ def _assert_supply_layer_change_invalidates_profit(block: WbFinanceWeeklyBlock) 
                WHERE wb_supply_cost_layer_id='layer-77' AND is_current=1"""
         )
         conn.commit()
-    plan = block.plan_stale_cost_weeks()
+    forward_plan = block.plan_stale_cost_weeks()
+    if (
+        forward_plan["date_from"] != "2026-08-24"
+        or forward_plan["checked_week_count"] != 0
+        or forward_plan["stale_week_count"] != 0
+    ):
+        raise AssertionError(
+            f"ordinary refresh crossed the fixed historical cutoff: {forward_plan}"
+        )
+    plan = block.plan_stale_cost_weeks(date_from=date.min)
     stale_starts = {item["week_start"] for item in plan["weeks"]}
     if not {"2026-07-13", "2026-07-20"}.issubset(stale_starts):
         raise AssertionError(f"supply-layer profit drift was not detected: {plan}")
-    block.apply_stale_cost_weeks(expected_fingerprint=plan["fingerprint"])
+    block.apply_stale_cost_weeks(
+        expected_fingerprint=plan["fingerprint"], date_from=date.min
+    )
     first = _week(block, "2026-07-13")["metrics"]
     later = _week(block, "2026-07-20")["metrics"]
     if (
@@ -250,11 +263,22 @@ def _assert_canonical_change_invalidates_projection(block: WbFinanceWeeklyBlock)
                WHERE as_of_date='2026-07-01' AND nm_id=101"""
         )
         conn.commit()
-    plan = block.plan_stale_cost_weeks()
+    forward_plan = block.plan_stale_cost_weeks()
+    if (
+        forward_plan["date_from"] != "2026-08-24"
+        or forward_plan["checked_week_count"] != 0
+        or forward_plan["stale_week_count"] != 0
+    ):
+        raise AssertionError(
+            f"ordinary refresh crossed the fixed historical cutoff: {forward_plan}"
+        )
+    plan = block.plan_stale_cost_weeks(date_from=date.min)
     stale_starts = {item["week_start"] for item in plan["weeks"]}
     if "2026-01-05" not in stale_starts:
         raise AssertionError("all-history stale detection missed a January projection")
-    block.apply_stale_cost_weeks(expected_fingerprint=plan["fingerprint"])
+    block.apply_stale_cost_weeks(
+        expected_fingerprint=plan["fingerprint"], date_from=date.min
+    )
     recalculated = _week(block, "2026-01-05")["metrics"]
     after = _week(block, "2026-01-05")["cost_coverage"]["cost_state_hash"]
     if recalculated["cogs"] != "210.0000" or before == after:

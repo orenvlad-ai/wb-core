@@ -33,7 +33,7 @@ def main() -> None:
         block = WbFinanceWeeklyBlock(
             runtime,
             seller_id="seller-1",
-            now_factory=lambda: datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+            now_factory=lambda: datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc),
         )
         block.ensure_schema()
         _seed_sources(block.db_path)
@@ -183,6 +183,20 @@ def _assert_partial_schema_returns_blocker() -> None:
                     json.dumps(row, separators=(",", ":")),
                 ),
             )
+            cutoff_row = _row(901, "2026-08-18")
+            conn.execute(
+                "INSERT INTO wb_finance_weekly_raw_rows VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "seller-1",
+                    "901",
+                    "901",
+                    "2026-08-17",
+                    "2026-08-23",
+                    "101",
+                    "sha256:cutoff-fixture",
+                    json.dumps(cutoff_row, separators=(",", ":")),
+                ),
+            )
             conn.commit()
         block = WbFinanceWeeklyBlock(runtime, seller_id="seller-1")
         plan = block.plan_canonical_finance_backfill()
@@ -199,12 +213,12 @@ def _assert_plan(plan: dict) -> None:
         plan["status"] != "ready"
         or not plan["dry_run"]
         or not plan["apply_allowed"]
-        or plan["week_count"] != 3
-        or plan["finance_row_count"] != 5
+        or plan["week_count"] != 4
+        or plan["finance_row_count"] != 6
         or plan["finance_nm_id_count"] != 1
     ):
         raise AssertionError(f"unexpected all-history plan scope: {plan}")
-    if plan["date_from"] != "2026-01-05" or plan["date_to"] != "2026-07-19":
+    if plan["date_from"] != "2026-01-05" or plan["date_to"] != "2026-08-23":
         raise AssertionError(f"all loaded history was not selected: {plan}")
     if plan["fingerprint"] == REVOKED or REVOKED not in plan["revoked_fingerprints"]:
         raise AssertionError("revoked Finance plan identity was reused or not recorded")
@@ -265,8 +279,8 @@ def _assert_plan(plan: dict) -> None:
         raise AssertionError("new plan still proposes independent retro-cost values")
     if (
         plan["source_manifests"]["cost"]["missing_nm_id_count"] != 0
-        or plan["write_set"]["expected_sku_projection_row_count"] != 12
-        or len(plan["write_set"]["weeks"]) != 3
+        or plan["write_set"]["expected_sku_projection_row_count"] != 16
+        or len(plan["write_set"]["weeks"]) != 4
     ):
         raise AssertionError(f"cost/write manifests are incomplete: {plan}")
 
@@ -358,7 +372,7 @@ def _assert_apply_result(
 ) -> None:
     if (
         result["status"] != "applied"
-        or result["week_count"] != 3
+        or result["week_count"] != 4
         or result["retro_cost_map_rows_written"] != 0
         or result["non_target_digest_before"] != result["non_target_digest_after"]
         or not result["idempotent"]
@@ -393,9 +407,9 @@ def _assert_apply_result(
         ).fetchone()[0]
     if (
         retro_count
-        or raw_count != 5
-        or ads_count != 196
-        or sku_projection_count != 12
+        or raw_count != 6
+        or ads_count != 231
+        or sku_projection_count != 16
         or stale_sku_projection_count
     ):
         raise AssertionError("apply mutated raw Finance, ads, or retro-cost storage")
@@ -431,14 +445,15 @@ def _seed_sources(db_path: Path) -> None:
             INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES
                 ('warehouse_functional_cutover_v1','2026-07-01',101,'10','100','1000','certified','{}','sha256:jul1','2026-07-01T00:00:00Z'),
                 ('warehouse_functional_cutover_v1','2026-07-02',101,'10','120','1200','certified','{}','sha256:jul2','2026-07-02T00:00:00Z'),
-                ('warehouse_functional_cutover_v1','2026-07-14',101,'10','140','1400','certified','{}','sha256:jul14','2026-07-14T00:00:00Z');
+                ('warehouse_functional_cutover_v1','2026-07-14',101,'10','140','1400','certified','{}','sha256:jul14','2026-07-14T00:00:00Z'),
+                ('warehouse_functional_cutover_v1','2026-08-18',101,'10','150','1500','certified','{}','sha256:aug18','2026-08-18T00:00:00Z');
             CREATE TABLE temporal_source_slot_snapshots(
                 source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,captured_at TEXT,payload_json TEXT
             );
             """
         )
         cursor = date(2026, 1, 5)
-        while cursor <= date(2026, 7, 19):
+        while cursor <= date(2026, 8, 23):
             day = cursor.isoformat()
             payload = {
                 "kind": "success",
@@ -471,6 +486,7 @@ def _seed_weeks(block: WbFinanceWeeklyBlock) -> None:
         ],
     )
     block.ingest_week(date(2026, 7, 13), date(2026, 7, 19), [_row(5, "2026-07-14")])
+    block.ingest_week(date(2026, 8, 17), date(2026, 8, 23), [_row(6, "2026-08-18")])
 
 
 def _make_stored_results_stale(db_path: Path) -> None:
