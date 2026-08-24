@@ -66,6 +66,10 @@ RETRO_COST_PERIOD_END = date(2026, 6, 30)
 RETRO_COST_REFERENCE_DATE = date(2026, 7, 1)
 RETRO_COST_FIRST_WEEK_START = date(2026, 4, 27)
 RETRO_COST_FORMULA_VERSION = CANONICAL_COST_FORMULA_VERSION
+FBS_FINANCE_HISTORICAL_CUTOFF = date(2026, 8, 23)
+FBS_FINANCE_FORWARD_INGRESS_DATE = FBS_FINANCE_HISTORICAL_CUTOFF + timedelta(
+    days=1
+)
 PROFIT_METHOD_VERSION = "wb_finance_profit_covered_revenue_v4_signed_deductions"
 COST_METHOD_VERSION = CHANNEL_LOCATION_COST_FORMULA_VERSION
 
@@ -4253,7 +4257,7 @@ class WbFinanceWeeklyBlock:
             conn.close()
 
     def canonical_finance_historical_cutoff(self) -> date:
-        """Freeze the latest fully closed stored Finance week as cutoff C."""
+        """Return the task-frozen historical cutoff after source eligibility proof."""
 
         today = self.now_factory().date()
         with self._connect_canonical_plan() as conn:
@@ -4264,7 +4268,12 @@ class WbFinanceWeeklyBlock:
             ).fetchone()
         if row is None or not row[0]:
             raise ValueError("Finance has no fully closed week for a historical cutoff")
-        return date.fromisoformat(str(row[0]))
+        latest_closed = date.fromisoformat(str(row[0]))
+        if latest_closed < FBS_FINANCE_HISTORICAL_CUTOFF:
+            raise ValueError(
+                "Finance raw history has not reached the fixed FBS historical cutoff"
+            )
+        return FBS_FINANCE_HISTORICAL_CUTOFF
 
     def _plan_canonical_finance_backfill_in_connection(
         self,
@@ -5564,21 +5573,21 @@ class WbFinanceWeeklyBlock:
             json.loads(str(row["scope_json"] or "{}")) == expected_scope for row in rows
         )
 
-    def recalculate_stale_cost_weeks(
-        self, *, date_from: date = date.min
-    ) -> dict[str, Any]:
-        """Atomically rebuild loaded weeks whose canonical derived state changed."""
+    def recalculate_stale_cost_weeks(self) -> dict[str, Any]:
+        """Rebuild forward-ingress weeks whose canonical derived state changed."""
         self.ensure_schema()
-        plan = self.plan_stale_cost_weeks(date_from=date_from)
+        plan = self.plan_stale_cost_weeks(
+            date_from=FBS_FINANCE_FORWARD_INGRESS_DATE
+        )
         return self.apply_stale_cost_weeks(
             expected_fingerprint=str(plan["fingerprint"]),
-            date_from=date_from,
+            date_from=FBS_FINANCE_FORWARD_INGRESS_DATE,
         )
 
     def plan_stale_cost_weeks(
         self,
         *,
-        date_from: date = date.min,
+        date_from: date = FBS_FINANCE_FORWARD_INGRESS_DATE,
         date_to: date | None = None,
     ) -> dict[str, Any]:
         """Build a read-only, fingerprinted plan for stale derived Finance weeks."""
@@ -5753,7 +5762,7 @@ class WbFinanceWeeklyBlock:
         self,
         *,
         expected_fingerprint: str,
-        date_from: date = date.min,
+        date_from: date = FBS_FINANCE_FORWARD_INGRESS_DATE,
         date_to: date | None = None,
     ) -> dict[str, Any]:
         """Build and verify a query-only projection, then run one short CAS."""

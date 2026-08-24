@@ -397,10 +397,10 @@ def _test_decimal_and_allocations() -> None:
 def _test_downstream_cost_refresh_recalculates_finance_after_warehouse_commit() -> None:
     class FakeFinance:
         def __init__(self) -> None:
-            self.date_from = None
+            self.called = False
 
-        def recalculate_stale_cost_weeks(self, *, date_from):
-            self.date_from = date_from
+        def recalculate_stale_cost_weeks(self):
+            self.called = True
             return {
                 "status": "applied",
                 "recalculated_week_count": 2,
@@ -422,8 +422,8 @@ def _test_downstream_cost_refresh_recalculates_finance_after_warehouse_commit() 
         "Finance recalculation must use the selected runtime registry",
     )
     _assert(
-        finance.date_from == date(2026, 7, 1),
-        "Finance recalculation must include the 2026-06-29 boundary week",
+        finance.called is True,
+        "warehouse publication must request the forward-only Finance refresh",
     )
     _assert(
         result["post_verify_stale_week_count"] == 0

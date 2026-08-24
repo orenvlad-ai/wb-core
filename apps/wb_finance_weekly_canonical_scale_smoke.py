@@ -39,7 +39,7 @@ def main() -> None:
         block = WbFinanceWeeklyBlock(
             runtime,
             seller_id="seller-scale",
-            now_factory=lambda: datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+            now_factory=lambda: datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc),
         )
         block.ensure_schema()
         _seed_required_sources(block.db_path)
@@ -67,7 +67,12 @@ def main() -> None:
             plan["finance_nm_id_count"] != 3
             or len(plan["week_nm_operation_date_matrix"]) != WEEK_COUNT * 3
             or any(
-                item["canonical_source_date"] != "2026-07-01"
+                item["canonical_source_date"]
+                != (
+                    "2026-08-17"
+                    if item["operation_date"] == "2026-08-17"
+                    else "2026-07-01"
+                )
                 for item in plan["week_nm_operation_date_matrix"]
                 if item["nm_id"] in {"101", "303"}
             )
@@ -215,6 +220,13 @@ def _seed_required_sources(db_path: Path) -> None:
             INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES(
                 'warehouse_functional_cutover_v1','2026-07-01',101,'10','100','1000',
                 'certified','{}','sha256:scale-cost','2026-07-01T00:00:00Z'
+            ),(
+                'warehouse_functional_cutover_v1','2026-08-17',101,'10','100','1000',
+                'certified','{}','sha256:scale-cost-aug-101','2026-08-17T00:00:00Z'
+            ),(
+                'warehouse_functional_cutover_v1','2026-08-17',303,'10','100','1000',
+                'business_approved_archival_estimate','{}','sha256:scale-cost-aug-303',
+                '2026-08-17T00:00:00Z'
             );
             CREATE TABLE sheet_vitrina_v1_warehouse_archival_estimate_versions(
                 version_id TEXT PRIMARY KEY,effective_date TEXT NOT NULL,
@@ -315,8 +327,52 @@ def _seed_raw_history(db_path: Path) -> None:
                       ),
                       '2026-07-20T00:00:00Z','2026-07-20T00:00:00Z'
                FROM source""",
-            (RAW_ROW_COUNT, WEEK_COUNT, WEEK_COUNT),
+            (RAW_ROW_COUNT - 3, WEEK_COUNT - 1, WEEK_COUNT - 1),
         )
+        for offset, nm_id in enumerate((202, 101, 303), start=1):
+            identity = f"scale-cutoff-{offset}"
+            vendor_code = f"VC{nm_id}"
+            barcode = f"BAR{nm_id}"
+            raw = {
+                "reportId": identity,
+                "rrdId": identity,
+                "nmId": nm_id,
+                "srid": f"{identity}-srid",
+                "vendorCode": vendor_code,
+                "sku": barcode,
+                "rrDate": "2026-08-17",
+                "saleDt": "2026-08-17",
+                "docTypeName": "Продажа",
+                "sellerOperName": "Продажа",
+                "quantity": 1,
+                "retailPriceWithDisc": "200",
+                "forPay": "140",
+                "acquiringFee": "10",
+            }
+            conn.execute(
+                """INSERT INTO wb_finance_weekly_raw_rows(
+                       seller_id,report_id,rrd_id,report_type,week_start,week_end,nm_id,
+                       vendor_code,barcode,doc_type_name,seller_oper_name,row_hash,raw_json,
+                       first_seen_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "seller-scale",
+                    identity,
+                    identity,
+                    1,
+                    "2026-08-17",
+                    "2026-08-23",
+                    str(nm_id),
+                    vendor_code,
+                    barcode,
+                    "Продажа",
+                    "Продажа",
+                    f"sha256:{identity}",
+                    json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
+                    "2026-08-24T00:00:00Z",
+                    "2026-08-24T00:00:00Z",
+                ),
+            )
         conn.commit()
 
 

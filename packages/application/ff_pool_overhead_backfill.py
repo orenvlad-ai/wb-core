@@ -389,7 +389,7 @@ class FfPoolOverheadBackfill:
             try:
                 finance_result = block_from_env(
                     self.runtime.runtime_dir
-                ).recalculate_stale_cost_weeks(date_from=date(2026, 7, 1))
+                ).recalculate_stale_cost_weeks()
             except Exception as exc:
                 _mark_publication_error(
                     self.runtime,
