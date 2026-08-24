@@ -822,10 +822,14 @@ generation/recovery tables; before a generation exists, a missing-SKU row
 retains the legacy fail-closed suffix rollback and cannot consume the backlog
 ahead of its owner gate. After exact-SHA deploy the default query-only T0
 dry-run opens the operational store as `mode=ro` with SQLite `query_only=ON`.
-It does not clone the operational database. A bounded, chunked target-only
-in-memory projection contains exact target orders/statuses/evidence, their
-required mappings/events and current FF balance/aggregate dependencies; row,
-payload, target-manifest and scratch-size ceilings fail closed. Unrelated
+It does not clone the operational database. One explicit coherent read
+transaction streams the target dependency graph into a private mode-`0600`
+file-backed SQLite scratch with the exact production table/index/trigger
+schema, foreign-key readback, lifecycle AUTOINCREMENT seed and canonical
+warehouse-operation `rowid` seed. That makes consecutive same-SKU handoff
+evidence identical to live apply without loading the multi-gigabyte store into
+RAM. Row, payload, target-manifest, disk-capacity and scratch-size ceilings fail
+closed; the scratch and sidecars are removed after preview. Unrelated
 operational history is not materialized. T0 pins active storage
 generation/schema, Stage 7C cutover, old lifecycle cursor, source
 status maximum `C`, exact stable business identities in `(cursor,C]`, target
@@ -845,7 +849,13 @@ does not wait for historical identity quarantine. Missing mapping/SKU evidence
 stays pending with no debit/capital/WAC/fallback, while later valid forward rows
 continue. Target results and non-target changes inside the short writer
 transaction are reconciled exactly; past fulfilled/frozen events stay
-immutable. After the single authorized apply, query-only `verify-noop` binds
+immutable. Exact Decimal scale is normalized, but facility/SKU/status,
+quantity, WAC/capital, debit identity and invariant drift is never tolerated.
+Heavy coherent preview revalidation runs outside the writer lock and
+transaction. Any remaining canonical after-image mismatch fsyncs a private
+privacy-safe field-level diff before rollback. The production-scale smoke uses
+40,000 pinned statuses and a TEMP identity table rather than a platform-limited
+SQL parameter list. After the single authorized apply, query-only `verify-noop` binds
 the reviewed plan to completed durable readback and proves a repeat would write
 nothing without issuing another submit. Ambiguous post-commit transport
 requires query-only readback before any retry. See migration 157 for the exact

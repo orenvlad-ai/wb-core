@@ -57,6 +57,7 @@ def run(args: argparse.Namespace) -> int:
     runner = FfPoolFbsForwardRecoveryMutation(
         runtime_dir=Path(args.runtime_dir).resolve(),
         deployed_sha=str(args.deployed_sha),
+        scratch_dir=(Path(args.scratch_dir) if args.scratch_dir else None),
     )
     if args.command == "apply":
         payload = runner.apply(
@@ -98,6 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--deployed-sha", required=True)
     parser.add_argument("--output", default="")
+    parser.add_argument(
+        "--scratch-dir",
+        default="",
+        help=(
+            "Private mode-0700 directory for the bounded coherent disk preview; "
+            "defaults below the canonical runtime directory."
+        ),
+    )
     parser.add_argument("--compact", action="store_true")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("dry-run")

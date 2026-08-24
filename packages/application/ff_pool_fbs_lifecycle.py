@@ -898,7 +898,20 @@ def drain_post_checkpoint_fbs_lifecycle(
         starting_sequence = last_sequence
     pending_retry_limit = min(bound, 500)
     if pinned_sequences is not None:
-        placeholders = ",".join("?" for _ in pinned_sequences)
+        # A production recovery target can exceed SQLite's platform-specific
+        # host-parameter limit.  Materialize only the reviewed integer
+        # identities in a connection-local TEMP table, in bounded chunks, so
+        # the same canonical query is portable at the released 100k ceiling.
+        conn.execute(
+            """CREATE TEMP TABLE IF NOT EXISTS ff_pool_fbs_pinned_status_targets(
+                   observation_sequence INTEGER PRIMARY KEY
+               ) WITHOUT ROWID"""
+        )
+        conn.execute("DELETE FROM temp.ff_pool_fbs_pinned_status_targets")
+        conn.executemany(
+            "INSERT INTO temp.ff_pool_fbs_pinned_status_targets(observation_sequence) VALUES(?)",
+            ((value,) for value in pinned_sequences),
+        )
         pinned_rows = (
             conn.execute(
                 f"""SELECT status.observation_sequence,status.order_id,
@@ -911,6 +924,8 @@ def drain_post_checkpoint_fbs_lifecycle(
                            source.chrt_id,source.skus_json,source.office_id,
                            pending.deferred_identity_evidence_sequence
                     FROM {STATUS_OBSERVATIONS_TABLE} AS status
+                    JOIN temp.ff_pool_fbs_pinned_status_targets AS target
+                      ON target.observation_sequence=status.observation_sequence
                     LEFT JOIN {OBSERVATIONS_TABLE} AS source
                       ON source.order_id=status.order_id
                      AND source.source_revision=status.order_revision
@@ -920,10 +935,9 @@ def drain_post_checkpoint_fbs_lifecycle(
                          status.observation_sequence
                     LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
                       ON resolution.pending_id=pending.pending_id
-                    WHERE status.observation_sequence IN ({placeholders})
-                      AND resolution.pending_id IS NULL
+                    WHERE resolution.pending_id IS NULL
                     ORDER BY status.observation_sequence""",
-                (cutover_id, *pinned_sequences),
+                (cutover_id,),
             ).fetchall()
             if pinned_sequences
             else []
@@ -1186,10 +1200,26 @@ def drain_post_checkpoint_fbs_lifecycle(
                 manifest=manifest,
                 order=order,
             )
+            stable_cost_basis = {
+                key: value
+                for key, value in cost_basis.items()
+                if key not in {
+                    "balance_updated_at",
+                    "source_operation_posted_at",
+                }
+            }
             handoff_common = {
                 **common,
                 "wac": handoff_wac,
-                "evidence": {**evidence, "cost_basis": cost_basis},
+                "evidence": {**evidence, "cost_basis": stable_cost_basis},
+                "details_evidence": {
+                    **evidence,
+                    "cost_basis": cost_basis,
+                    "technical_timestamp_fields_excluded_from_identity": [
+                        "cost_basis.balance_updated_at",
+                        "cost_basis.source_operation_posted_at",
+                    ],
+                },
             }
             event = _append_event(
                 **handoff_common,
@@ -1267,13 +1297,13 @@ def drain_post_checkpoint_fbs_lifecycle(
             conn.execute(
                 f"""SELECT COUNT(*)
                     FROM {IDENTITY_PENDING_TABLE} AS pending
+                    JOIN temp.ff_pool_fbs_pinned_status_targets AS target
+                      ON target.observation_sequence=
+                         pending.source_status_observation_sequence
                     LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
                       ON resolution.pending_id=pending.pending_id
-                    WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
-                      AND pending.source_status_observation_sequence IN (
-                          {','.join('?' for _ in pinned_sequences)}
-                      )""",
-                (cutover_id, *pinned_sequences),
+                    WHERE pending.cutover_id=? AND resolution.pending_id IS NULL""",
+                (cutover_id,),
             ).fetchone()[0]
             if pinned_sequences
             else 0
@@ -1326,6 +1356,8 @@ def drain_post_checkpoint_fbs_lifecycle(
         "summary": summary,
     }
     result_digest = _fingerprint(result_material)
+    if pinned_sequences is not None:
+        conn.execute("DELETE FROM temp.ff_pool_fbs_pinned_status_targets")
     if pinned_sequences is None and lane == "forward":
         conn.execute(
             f"""UPDATE {FORWARD_STATE_TABLE}
@@ -1422,6 +1454,7 @@ def _append_event(
     physical_delta: int,
     occurred_at: str,
     evidence: Mapping[str, Any],
+    details_evidence: Mapping[str, Any] | None = None,
     source_order_observation_sequence: int = 0,
     source_status_observation_sequence: int = 0,
 ) -> dict[str, Any]:
@@ -1475,7 +1508,7 @@ def _append_event(
             canonical_decimal_text(wac),
             evidence_digest,
             occurred_at,
-            _json(evidence),
+            _json(details_evidence if details_evidence is not None else evidence),
         ),
     ).rowcount
     if inserted:
