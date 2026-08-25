@@ -147,6 +147,17 @@ CAS связывает exact operational generation identity и digest required
 source/history schema; отсутствующая deployed history schema блокирует dry-run
 до публикации manifest.
 
+Source CAS использует contract
+`sheet_vitrina_v1_inventory_history_backfill_source_cas_v2` и ограничен exact
+`date_from..date_to`. Для WB в него входят только выбранные ready revisions
+целевых дат; ready snapshot с `as_of_date > date_to` не является историческим
+источником. Для FBS один и тот же reconstruction contour одновременно фиксирует
+relevant facility roster/mappings, opening allocations и движения/резервы не
+позже `date_to`. Глобальные table counts и доказанно post-cutoff строки не входят
+в CAS. Late revision выбранного target-date WB source либо любое изменение
+relevant roster/mapping/FBS material до cutoff меняет digest и блокирует stale
+apply.
+
 Apply не наследует разрешение на deploy/dry-run. Он требует отдельный exact
 human gate, trusted-main deployed runner, reviewed manifest SHA-256, deployed
 SHA/schema/generation/source-watermark/target-history CAS, canonical writer
@@ -172,4 +183,5 @@ blind replay запрещён.
   realistic window;
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
+  target-scoped source CAS (post-cutoff tick stability и target-date drift),
   guarded apply, reconciliation and idempotent replay.

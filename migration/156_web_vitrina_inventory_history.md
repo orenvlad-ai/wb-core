@@ -64,6 +64,15 @@ generation id/path revision/watermark, storage-manifest digest and the exact
 required source/history schema digest. Missing deployed history tables fail
 closed before a dry-run manifest can be published.
 
+The source watermark contract is target-scoped. It hashes only selected ready
+evidence for `date_from..date_to` and the relevant facility roster, warehouse
+mappings, openings, allocations, operations, lifecycle events and observations
+that the FBS reconstruction consumes through `date_to`. Global table counts,
+post-cutoff ready snapshots and valid post-cutoff lifecycle/observation writes
+are excluded, so an ordinary current-day tick cannot stale a closed-window
+manifest. Any selected target-date ready revision or relevant at/before-cutoff
+FBS/roster/mapping change still changes the CAS and blocks apply.
+
 New facilities, multiple/ambiguous openings, source/schema/formula drift or an
 invalid target window make the manifest `blocked`. Expected evidence gaps stay
 explicit `partial`/`unavailable`; they are not silently converted to blockers

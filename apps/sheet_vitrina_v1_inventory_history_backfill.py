@@ -65,6 +65,7 @@ from packages.business_time import current_business_date_iso  # noqa: E402
 
 
 SCHEMA_VERSION = "sheet_vitrina_v1_inventory_history_backfill_v1"
+SOURCE_CAS_CONTRACT = "sheet_vitrina_v1_inventory_history_backfill_source_cas_v2"
 FORMULA_VERSION = "inventory_planning_v1"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 MAX_DAYS = 730
@@ -252,7 +253,11 @@ def _build_manifest(
             "deployed inventory history schema is missing: "
             + ", ".join(missing_history_tables)
         )
-    wb_history, wb_sources, wb_blockers = _ready_wb_history(conn, date_to=date_to)
+    wb_history, wb_sources, wb_blockers = _ready_wb_history(
+        conn,
+        date_from=date_from,
+        date_to=date_to,
+    )
     if not wb_history:
         raise InventoryHistoryBackfillError("no proven ready stock_total history exists")
     earliest = min(wb_history)
@@ -530,7 +535,8 @@ def _build_manifest(
         },
         "non_target_invariants": {
             "source_watermarks_digest": source_watermarks["digest"],
-            "source_table_counts": source_watermarks["table_counts"],
+            "source_scoped_row_counts": source_watermarks["scoped_row_counts"],
+            "post_cutoff_and_unrelated_rows": "excluded_from_target_source_cas",
             "forbidden_pools": ["FBO"],
             "seller_stock_readback_role": "excluded",
             "source_ledgers_written": False,
@@ -858,6 +864,7 @@ def _apply_manifest(
 def _ready_wb_history(
     conn: sqlite3.Connection,
     *,
+    date_from: str | None = None,
     date_to: str,
 ) -> tuple[dict[str, dict[str, int | None]], dict[str, dict[str, Any]], list[str]]:
     selected: dict[str, tuple[tuple[str, str, str, str], dict[str, int | None], dict[str, Any]]] = {}
@@ -866,7 +873,9 @@ def _ready_wb_history(
         """SELECT bundle_version,activated_at,as_of_date,snapshot_id,plan_version,
                   refreshed_at,plan_json
              FROM sheet_vitrina_v1_ready_snapshots
-            ORDER BY refreshed_at,activated_at,bundle_version,as_of_date"""
+            WHERE as_of_date<=? AND (? IS NULL OR as_of_date>=?)
+            ORDER BY refreshed_at,activated_at,bundle_version,as_of_date""",
+        (date_to, date_from, date_from),
     ).fetchall()
     for row in rows:
         try:
@@ -946,6 +955,7 @@ def _fbs_history(
     target_dates: Sequence[str],
     target_nm_ids: Sequence[int],
 ) -> dict[str, Any]:
+    date_to = str(target_dates[-1])
     facilities = [
         dict(row)
         for row in conn.execute(
@@ -955,29 +965,83 @@ def _fbs_history(
     roster: list[dict[str, Any]] = []
     by_facility: dict[str, Any] = {}
     blockers: list[str] = []
-    for index, facility in enumerate(facilities, start=1):
+    source_material: dict[str, dict[str, dict[str, Any]]] = {
+        table: {}
+        for table in (
+            FACILITIES_TABLE,
+            MANIFESTS_TABLE,
+            ALLOCATIONS_TABLE,
+            MAPPING_EXTENSIONS_TABLE,
+            MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+            OPERATIONS_TABLE,
+            LINES_TABLE,
+            EVENTS_TABLE,
+            OBSERVATIONS_TABLE,
+            WAREHOUSE_MAPPINGS_TABLE,
+        )
+    }
+    for facility in facilities:
         facility_id = str(facility["facility_id"])
         applicability_dates: list[str] = []
         for raw in conn.execute(
-            f"""SELECT observation.source_created_at
+            f"""SELECT observation.observation_sequence,
+                       observation.observation_id,observation.order_id,
+                       observation.source_revision,observation.source_created_at,
+                       observation.warehouse_id,observation.office_id,
+                       observation.nm_id,observation.observed_at,
+                       mapping.mapping_id,mapping.seller_warehouse_id,
+                       mapping.facility_id,mapping.mapping_digest,mapping.active,
+                       mapping.created_at,mapping.created_by
                   FROM {OBSERVATIONS_TABLE} observation
                   JOIN {WAREHOUSE_MAPPINGS_TABLE} mapping
                     ON mapping.seller_warehouse_id=observation.warehouse_id
                    AND mapping.facility_id=? AND mapping.active=1
-                 WHERE observation.source_created_at<>''""",
+                 WHERE observation.source_created_at<>''
+                 ORDER BY observation.observation_sequence,mapping.mapping_id""",
             (facility_id,),
         ).fetchall():
-            parsed = _source_business_date(str(raw[0]))
+            parsed = _source_business_date(str(raw[4]))
             if parsed:
+                if parsed > date_to:
+                    continue
                 applicability_dates.append(parsed)
-            elif str(raw[0] or ""):
+                _record_source(
+                    source_material,
+                    table=OBSERVATIONS_TABLE,
+                    key=str(raw[0]),
+                    row={
+                        "observation_sequence": int(raw[0]),
+                        "observation_id": str(raw[1]),
+                        "order_id": int(raw[2]),
+                        "source_revision": str(raw[3]),
+                        "source_created_at": str(raw[4]),
+                        "warehouse_id": raw[5],
+                        "office_id": raw[6],
+                        "nm_id": int(raw[7]),
+                        "observed_at": str(raw[8]),
+                    },
+                )
+                _record_source(
+                    source_material,
+                    table=WAREHOUSE_MAPPINGS_TABLE,
+                    key=str(raw[9]),
+                    row={
+                        "mapping_id": str(raw[9]),
+                        "seller_warehouse_id": int(raw[10]),
+                        "facility_id": str(raw[11]),
+                        "mapping_digest": str(raw[12]),
+                        "active": int(raw[13]),
+                        "created_at": str(raw[14]),
+                        "created_by": str(raw[15]),
+                    },
+                )
+            elif str(raw[4] or ""):
                 blockers.append(
                     f"invalid FBS applicability timestamp for facility {facility_id}"
                 )
         openings: list[dict[str, Any]] = []
         for manifest in conn.execute(
-            f"""SELECT manifest.cutover_id,manifest.business_date,manifest.cutover_at,
-                       manifest.manifest_digest,manifest.observation_watermark_digest
+            f"""SELECT manifest.*
                   FROM {MANIFESTS_TABLE} manifest
                  WHERE EXISTS(
                      SELECT 1 FROM {ALLOCATIONS_TABLE} allocation
@@ -986,53 +1050,117 @@ def _fbs_history(
                  ) ORDER BY manifest.cutover_at""",
             (facility_id,),
         ).fetchall():
+            manifest_row = dict(manifest)
+            if str(manifest_row["business_date"]) > date_to:
+                continue
             quantities = {
-                int(row[0]): int(row[1])
+                int(row["nm_id"]): int(row["quantity"])
                 for row in conn.execute(
-                    f"""SELECT nm_id,quantity FROM {ALLOCATIONS_TABLE}
+                    f"""SELECT * FROM {ALLOCATIONS_TABLE}
                          WHERE cutover_id=? AND facility_id=? AND pool='FBS' ORDER BY nm_id""",
-                    (str(manifest[0]), facility_id),
+                    (str(manifest_row["cutover_id"]), facility_id),
                 )
             }
+            _record_source(
+                source_material,
+                table=MANIFESTS_TABLE,
+                key=str(manifest_row["cutover_id"]),
+                row=manifest_row,
+            )
+            for allocation in conn.execute(
+                f"""SELECT * FROM {ALLOCATIONS_TABLE}
+                     WHERE cutover_id=? AND facility_id=? AND pool='FBS'
+                     ORDER BY line_no""",
+                (str(manifest_row["cutover_id"]), facility_id),
+            ).fetchall():
+                allocation_row = dict(allocation)
+                _record_source(
+                    source_material,
+                    table=ALLOCATIONS_TABLE,
+                    key=f"{allocation_row['cutover_id']}:{allocation_row['line_no']}",
+                    row=allocation_row,
+                )
             openings.append(
                 {
-                    "exact_from": str(manifest[1]),
-                    "boundary_at": str(manifest[2]),
-                    "revision": str(manifest[0]),
-                    "digest": str(manifest[3]),
-                    "watermark": str(manifest[4]),
+                    "exact_from": str(manifest_row["business_date"]),
+                    "boundary_at": str(manifest_row["cutover_at"]),
+                    "revision": str(manifest_row["cutover_id"]),
+                    "digest": str(manifest_row["manifest_digest"]),
+                    "watermark": str(manifest_row["observation_watermark_digest"]),
                     "quantities": quantities,
                     "source": "ff_pool_cutover_allocation",
                 }
             )
-            applicability_dates.append(str(manifest[1]))
+            applicability_dates.append(str(manifest_row["business_date"]))
         for extension in conn.execute(
-            f"""SELECT extension_id,created_at,plan_fingerprint,frozen_rows_digest,
-                       frozen_boundary_json FROM {MAPPING_EXTENSIONS_TABLE}
+            f"""SELECT * FROM {MAPPING_EXTENSIONS_TABLE}
                  WHERE facility_id=? ORDER BY created_at""",
             (facility_id,),
         ).fetchall():
+            extension_row = dict(extension)
+            exact_from = _source_business_date(str(extension_row["created_at"]))
+            if exact_from and exact_from > date_to:
+                continue
             quantities = {
-                int(row[0]): int(row[1])
+                int(row["nm_id"]): int(row["opening_quantity"])
                 for row in conn.execute(
-                    f"""SELECT nm_id,opening_quantity
+                    f"""SELECT *
                          FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
                          WHERE extension_id=? ORDER BY nm_id""",
-                    (str(extension[0]),),
+                    (str(extension_row["extension_id"]),),
                 )
             }
-            exact_from = _source_business_date(str(extension[1]))
             if not exact_from:
-                blockers.append(f"invalid mapping extension time: {extension[0]}")
+                blockers.append(
+                    f"invalid mapping extension time: {extension_row['extension_id']}"
+                )
                 continue
-            boundary = _loads(extension[4], {})
+            _record_source(
+                source_material,
+                table=MAPPING_EXTENSIONS_TABLE,
+                key=str(extension_row["extension_id"]),
+                row=extension_row,
+            )
+            for allocation in conn.execute(
+                f"""SELECT * FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+                     WHERE extension_id=? ORDER BY nm_id""",
+                (str(extension_row["extension_id"]),),
+            ).fetchall():
+                allocation_row = dict(allocation)
+                _record_source(
+                    source_material,
+                    table=MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+                    key=f"{allocation_row['extension_id']}:{allocation_row['nm_id']}",
+                    row=allocation_row,
+                )
+            mapping = conn.execute(
+                f"SELECT * FROM {WAREHOUSE_MAPPINGS_TABLE} WHERE mapping_id=?",
+                (str(extension_row["warehouse_mapping_id"]),),
+            ).fetchone()
+            if mapping is None:
+                blockers.append(
+                    "mapping extension references a missing warehouse mapping: "
+                    + str(extension_row["extension_id"])
+                )
+            else:
+                mapping_row = dict(mapping)
+                _record_source(
+                    source_material,
+                    table=WAREHOUSE_MAPPINGS_TABLE,
+                    key=str(mapping_row["mapping_id"]),
+                    row=mapping_row,
+                )
+            boundary = _loads(extension_row["frozen_boundary_json"], {})
             openings.append(
                 {
                     "exact_from": exact_from,
-                    "boundary_at": str(boundary.get("local_boundary_at") or extension[1]),
-                    "revision": str(extension[0]),
-                    "digest": str(extension[2]),
-                    "watermark": str(extension[3]),
+                    "boundary_at": str(
+                        boundary.get("local_boundary_at")
+                        or extension_row["created_at"]
+                    ),
+                    "revision": str(extension_row["extension_id"]),
+                    "digest": str(extension_row["plan_fingerprint"]),
+                    "watermark": str(extension_row["frozen_rows_digest"]),
                     "quantities": quantities,
                     "source": "fbs_mapping_extension_allocation",
                 }
@@ -1044,6 +1172,12 @@ def _fbs_history(
         applicable_from = min(applicability_dates) if applicability_dates else ""
         if not applicable_from and opening is None:
             continue
+        _record_source(
+            source_material,
+            table=FACILITIES_TABLE,
+            key=facility_id,
+            row=facility,
+        )
         roster.append(
             {
                 "facility_id": facility_id,
@@ -1052,7 +1186,7 @@ def _fbs_history(
                 "active": bool(facility["active"]),
                 "applicable": True,
                 "effective_from": applicable_from,
-                "display_order": index,
+                "display_order": len(roster) + 1,
             }
         )
         by_facility[facility_id] = _fold_facility(
@@ -1062,9 +1196,19 @@ def _fbs_history(
             opening=opening,
             target_dates=target_dates,
             target_nm_ids=target_nm_ids,
+            date_to=date_to,
             blockers=blockers,
+            source_material=source_material,
         )
-    return {"roster": roster, "by_facility": by_facility, "blockers": blockers}
+    return {
+        "roster": roster,
+        "by_facility": by_facility,
+        "blockers": blockers,
+        "source_material": {
+            table: [rows[key] for key in sorted(rows)]
+            for table, rows in sorted(source_material.items())
+        },
+    }
 
 
 def _fold_facility(
@@ -1075,7 +1219,9 @@ def _fold_facility(
     opening: Mapping[str, Any] | None,
     target_dates: Sequence[str],
     target_nm_ids: Sequence[int],
+    date_to: str,
     blockers: list[str],
+    source_material: dict[str, dict[str, dict[str, Any]]],
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "applicable_from": applicable_from,
@@ -1088,26 +1234,67 @@ def _fold_facility(
     physical = {int(key): int(value) for key, value in dict(opening["quantities"]).items()}
     movements: list[tuple[str, int, int, str]] = []
     for row in conn.execute(
-        f"""SELECT operation.business_date,line.nm_id,line.quantity_delta,
-                   operation.operation_id,operation.posted_at
+        f"""SELECT operation.operation_id,operation.operation_type,
+                   operation.source_system,operation.source_type,
+                   operation.source_id,operation.source_revision,
+                   operation.business_date,operation.posted_at,
+                   line.line_no,line.facility_id,line.pool,line.nm_id,
+                   line.quantity_delta
               FROM {LINES_TABLE} line
               JOIN {OPERATIONS_TABLE} operation USING(operation_id)
              WHERE line.facility_id=? AND line.pool='FBS'
                AND operation.posted_at>?
+               AND operation.business_date<=?
                AND operation.source_type<>'fbs_order_lifecycle_event'
              ORDER BY operation.posted_at,operation.operation_id,line.line_no""",
-        (facility_id, boundary_at),
+        (facility_id, boundary_at, date_to),
     ).fetchall():
-        movement_date = str(row[0])
+        movement_date = str(row["business_date"])
         try:
             date.fromisoformat(movement_date)
         except ValueError:
             blockers.append(f"invalid FBS movement business date for {facility_id}")
             continue
-        movements.append((movement_date, int(row[1]), int(row[2]), str(row[3])))
+        movements.append(
+            (
+                movement_date,
+                int(row["nm_id"]),
+                int(row["quantity_delta"]),
+                str(row["operation_id"]),
+            )
+        )
+        _record_source(
+            source_material,
+            table=OPERATIONS_TABLE,
+            key=str(row["operation_id"]),
+            row={
+                "operation_id": str(row["operation_id"]),
+                "operation_type": str(row["operation_type"]),
+                "source_system": str(row["source_system"]),
+                "source_type": str(row["source_type"]),
+                "source_id": str(row["source_id"]),
+                "source_revision": str(row["source_revision"]),
+                "business_date": movement_date,
+                "posted_at": str(row["posted_at"]),
+            },
+        )
+        _record_source(
+            source_material,
+            table=LINES_TABLE,
+            key=f"{row['operation_id']}:{row['line_no']}",
+            row={
+                "operation_id": str(row["operation_id"]),
+                "line_no": int(row["line_no"]),
+                "facility_id": str(row["facility_id"]),
+                "pool": str(row["pool"]),
+                "nm_id": int(row["nm_id"]),
+                "quantity_delta": int(row["quantity_delta"]),
+            },
+        )
     raw_lifecycle_rows = conn.execute(
-        f"""SELECT event_sequence,order_id,event_type,nm_id,quantity,
-                   physical_quantity_delta,occurred_at,event_id
+        f"""SELECT event_sequence,event_id,order_id,event_type,source_revision,
+                   status_digest,facility_id,pool,nm_id,quantity,
+                   physical_quantity_delta,evidence_digest,occurred_at
               FROM {EVENTS_TABLE}
              WHERE facility_id=? AND pool='FBS'
              ORDER BY occurred_at,event_sequence""",
@@ -1115,18 +1302,43 @@ def _fold_facility(
     ).fetchall()
     lifecycle_rows: list[tuple[sqlite3.Row, str]] = []
     for row in raw_lifecycle_rows:
-        event_date = _source_business_date(str(row[6]))
+        event_date = _source_business_date(str(row["occurred_at"]))
         if not event_date:
             blockers.append(f"invalid FBS lifecycle timestamp for {facility_id}")
             continue
+        if event_date > date_to:
+            continue
+        _record_source(
+            source_material,
+            table=EVENTS_TABLE,
+            key=str(row["event_id"]),
+            row={
+                "event_sequence": int(row["event_sequence"]),
+                "event_id": str(row["event_id"]),
+                "order_id": int(row["order_id"]),
+                "event_type": str(row["event_type"]),
+                "source_revision": str(row["source_revision"]),
+                "status_digest": str(row["status_digest"]),
+                "facility_id": str(row["facility_id"]),
+                "pool": str(row["pool"]),
+                "nm_id": int(row["nm_id"]),
+                "quantity": int(row["quantity"]),
+                "physical_quantity_delta": int(row["physical_quantity_delta"]),
+                "evidence_digest": str(row["evidence_digest"]),
+                "occurred_at": str(row["occurred_at"]),
+            },
+        )
         lifecycle_rows.append((row, event_date))
-        if int(row[5]) != 0 and str(row[6]) > boundary_at:
+        if (
+            int(row["physical_quantity_delta"]) != 0
+            and str(row["occurred_at"]) > boundary_at
+        ):
             movements.append(
                 (
                     event_date,
-                    int(row[3]),
-                    int(row[5]),
-                    str(row[7]),
+                    int(row["nm_id"]),
+                    int(row["physical_quantity_delta"]),
+                    str(row["event_id"]),
                 )
             )
     movements.sort(key=lambda item: (item[0], item[3]))
@@ -1144,10 +1356,13 @@ def _fold_facility(
             row, event_date = lifecycle_rows[lifecycle_index]
             if event_date > business_date:
                 break
-            event_type = str(row[2])
-            order_id = int(row[1])
+            event_type = str(row["event_type"])
+            order_id = int(row["order_id"])
             if event_type in {"opening_reserve", "reserve"}:
-                reservation_state[order_id] = (int(row[3]), int(row[4]))
+                reservation_state[order_id] = (
+                    int(row["nm_id"]),
+                    int(row["quantity"]),
+                )
             elif event_type in {"release", "handoff_debit", "opening_handoff_debit"}:
                 reservation_state.pop(order_id, None)
             lifecycle_index += 1
@@ -1219,87 +1434,72 @@ def _source_watermarks(
     date_from: str,
     date_to: str,
 ) -> dict[str, Any]:
-    ready_rows = [
-        list(row)
-        for row in conn.execute(
-            """SELECT bundle_version,as_of_date,snapshot_id,plan_version,refreshed_at,
-                      length(plan_json),hex(sha3(plan_json,256))
-                 FROM sheet_vitrina_v1_ready_snapshots
-                ORDER BY bundle_version,as_of_date"""
-        ).fetchall()
-    ] if _has_sha3(conn) else [
-        [*list(row[:5]), len(str(row[5])), _digest(json.loads(str(row[5])))]
-        for row in conn.execute(
-            """SELECT bundle_version,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
-                 FROM sheet_vitrina_v1_ready_snapshots
-                ORDER BY bundle_version,as_of_date"""
-        ).fetchall()
+    target_dates = list(_iter_dates(date_from, date_to))
+    wb_history, wb_sources, wb_blockers = _ready_wb_history(
+        conn,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    ready_material = [
+        {
+            "business_date": business_date,
+            "source": wb_sources[business_date],
+            "scopes": wb_history[business_date],
+        }
+        for business_date in target_dates
+        if business_date in wb_history
     ]
-    fbs_material: dict[str, Any] = {}
-    for table, order_by in (
-        (MANIFESTS_TABLE, "cutover_id"),
-        (ALLOCATIONS_TABLE, "cutover_id,line_no"),
-        (MAPPING_EXTENSIONS_TABLE, "extension_id"),
-        (MAPPING_EXTENSION_ALLOCATIONS_TABLE, "extension_id,nm_id"),
-        (FACILITIES_TABLE, "facility_id"),
-        (WAREHOUSE_MAPPINGS_TABLE, "mapping_id"),
-    ):
-        fbs_material[table] = [
-            list(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY {order_by}").fetchall()
-        ]
-    fbs_material[EVENTS_TABLE] = [
-        list(row)
-        for row in conn.execute(
-            f"""SELECT event_sequence,event_id,order_id,event_type,source_revision,
-                       status_digest,facility_id,nm_id,quantity,
-                       physical_quantity_delta,evidence_digest,occurred_at
-                  FROM {EVENTS_TABLE} ORDER BY event_sequence"""
-        ).fetchall()
-        if (_source_business_date(str(row[-1])) or "9999-12-31") <= date_to
-    ]
-    fbs_material[OPERATIONS_TABLE] = [
-        list(row)
-        for row in conn.execute(
-            f"""SELECT operation_id,operation_type,source_system,source_type,
-                       source_id,source_revision,business_date,posted_at
-                  FROM {OPERATIONS_TABLE} WHERE business_date<=? ORDER BY operation_id""",
-            (date_to,),
-        ).fetchall()
-    ]
-    fbs_material[LINES_TABLE] = [
-        list(row)
-        for row in conn.execute(
-            f"""SELECT line.operation_id,line.line_no,line.facility_id,line.pool,
-                       line.nm_id,line.quantity_delta
-                  FROM {LINES_TABLE} line
-                  JOIN {OPERATIONS_TABLE} operation USING(operation_id)
-                 WHERE operation.business_date<=?
-                 ORDER BY line.operation_id,line.line_no""",
-            (date_to,),
-        ).fetchall()
-    ]
-    fbs_material[OBSERVATIONS_TABLE] = [
-        list(row)
-        for row in conn.execute(
-            f"""SELECT observation_sequence,observation_id,order_id,source_revision,
-                       source_created_at,warehouse_id,office_id,nm_id,observed_at
-                  FROM {OBSERVATIONS_TABLE} ORDER BY observation_sequence"""
-        ).fetchall()
-        if (_source_business_date(str(row[4])) or "9999-12-31") <= date_to
-    ]
-    counts = {
-        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        for table in sorted(REQUIRED_SOURCE_TABLES)
+    target_nm_ids = sorted(
+        {
+            int(scope_key.split(":", 1)[1])
+            for business_date in target_dates
+            for scope_key in wb_history.get(business_date, {})
+            if scope_key.startswith("SKU:")
+        }
+    )
+    facility_history = _fbs_history(
+        conn,
+        target_dates=target_dates,
+        target_nm_ids=target_nm_ids,
+    )
+    fbs_material = dict(facility_history["source_material"])
+    fbs_projection = {
+        "roster": facility_history["roster"],
+        "by_facility": facility_history["by_facility"],
+    }
+    scoped_counts = {
+        "selected_ready_dates": len(ready_material),
+        **{table: len(rows) for table, rows in sorted(fbs_material.items())},
     }
     result = {
+        "contract": SOURCE_CAS_CONTRACT,
         "date_from": date_from,
         "date_to": date_to,
-        "ready_digest": _digest(ready_rows),
-        "fbs_digest": _digest(fbs_material),
-        "table_counts": counts,
+        "ready_digest": _digest(ready_material),
+        "fbs_digest": _digest(
+            {"source_material": fbs_material, "projection": fbs_projection}
+        ),
+        "facility_roster_digest": _digest(facility_history["roster"]),
+        "source_blockers_digest": _digest(
+            {
+                "ready": wb_blockers,
+                "fbs": facility_history["blockers"],
+            }
+        ),
+        "scoped_row_counts": scoped_counts,
     }
     result["digest"] = _digest(result)
     return result
+
+
+def _record_source(
+    material: dict[str, dict[str, dict[str, Any]]],
+    *,
+    table: str,
+    key: str,
+    row: Mapping[str, Any],
+) -> None:
+    material[table][key] = dict(row)
 
 
 def _target_history_state(
@@ -1649,14 +1849,6 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
         str(row[0])
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
-
-
-def _has_sha3(conn: sqlite3.Connection) -> bool:
-    try:
-        conn.execute("SELECT sha3('x',256)").fetchone()
-        return True
-    except sqlite3.OperationalError:
-        return False
 
 
 def _timestamp(value: datetime) -> str:
