@@ -31,7 +31,10 @@ from apps.release_protocol import (  # noqa: E402
     validate_production_manifest,
 )
 from ci.test_planner import (  # noqa: E402
+    GROUP_HARNESS_PATH,
+    PLANNER_PATH,
     PLAN_SCHEMA,
+    PR_GATE_WORKFLOW_PATH,
     canonical_json_bytes,
     verify_plan,
 )
@@ -205,6 +208,51 @@ def collect_workflow_plan(client: GitHubClient, workflow_run_id: int) -> tuple[d
     return run, artifact, extract_plan(raw_zip)
 
 
+def collect_workflow_jobs(
+    client: GitHubClient, workflow_run_id: int
+) -> list[Mapping[str, Any]]:
+    jobs: list[Mapping[str, Any]] = []
+    for page in range(1, 101):
+        payload = client.get(
+            f"/actions/runs/{workflow_run_id}/jobs?filter=latest&per_page=100&page={page}"
+        )
+        values = payload.get("jobs") if isinstance(payload, Mapping) else None
+        if not isinstance(values, list):
+            raise RunnerError("workflow-jobs-shape-invalid")
+        jobs.extend(item for item in values if isinstance(item, Mapping))
+        if len(values) < 100:
+            return jobs
+    raise RunnerError("workflow-jobs-pagination-bound-exceeded")
+
+
+def workflow_job_reasons(
+    jobs: list[Mapping[str, Any]], artifact_plan: Mapping[str, Any]
+) -> list[str]:
+    groups = artifact_plan.get("groups")
+    if not isinstance(groups, list) or any(
+        not isinstance(group, str) or not group for group in groups
+    ):
+        return ["plan-groups-invalid"]
+    expected = {
+        "Fast core checks",
+        "Deterministic impact plan",
+        "pr-gate",
+        *(f"Selected group · {group}" for group in groups),
+    }
+    actual_names = [str(job.get("name") or "") for job in jobs]
+    reasons: list[str] = []
+    if len(actual_names) != len(set(actual_names)):
+        reasons.append("workflow-job-names-duplicate")
+    if set(actual_names) != expected:
+        reasons.append("workflow-job-set-mismatch")
+    if any(
+        job.get("status") != "completed" or job.get("conclusion") != "success"
+        for job in jobs
+    ):
+        reasons.append("workflow-job-not-successful")
+    return reasons
+
+
 def workflow_pull_request(run: Mapping[str, Any]) -> int:
     prs = run.get("pull_requests")
     if not isinstance(prs, list) or len(prs) != 1:
@@ -221,7 +269,7 @@ def admission_reasons(
     run: Mapping[str, Any],
     pr: Mapping[str, Any],
     artifact_plan: Mapping[str, Any],
-    recomputed_plan: Mapping[str, Any],
+    recomputed_plan: Mapping[str, Any] | None,
     trusted_main_sha: str,
 ) -> list[str]:
     reasons: list[str] = []
@@ -231,8 +279,12 @@ def admission_reasons(
         reasons.append("repository-not-canonical")
     if run.get("name") != WORKFLOW_NAME:
         reasons.append("workflow-name-mismatch")
+    if run.get("path") != PR_GATE_WORKFLOW_PATH:
+        reasons.append("workflow-path-mismatch")
     if run.get("event") != "pull_request":
         reasons.append("workflow-provenance-not-pull-request")
+    if run.get("run_attempt") != 1:
+        reasons.append("workflow-run-attempt-not-one")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         reasons.append("workflow-not-successful")
     if exact_sha(run.get("head_sha"), "workflow-head") != head:
@@ -261,7 +313,27 @@ def admission_reasons(
         reasons.append("plan-base-mismatch")
     if artifact_plan.get("head_sha") != head:
         reasons.append("plan-head-mismatch")
-    if canonical_json_bytes(artifact_plan) != canonical_json_bytes(recomputed_plan):
+    planner = artifact_plan.get("planner")
+    if (
+        not isinstance(planner, Mapping)
+        or planner.get("path") != PLANNER_PATH
+        or planner.get("execution_sha") != base
+        or re.fullmatch(r"[0-9a-f]{64}", str(planner.get("blob_sha256") or "")) is None
+    ):
+        reasons.append("plan-planner-provenance-invalid")
+    group_harness = artifact_plan.get("group_harness")
+    if (
+        not isinstance(group_harness, Mapping)
+        or group_harness.get("path") != GROUP_HARNESS_PATH
+        or group_harness.get("execution_sha") != base
+        or group_harness.get("candidate_worktree_sha") != head
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(group_harness.get("blob_sha256") or "")
+        )
+        is None
+    ):
+        reasons.append("plan-group-harness-provenance-invalid")
+    if recomputed_plan is not None and canonical_json_bytes(artifact_plan) != canonical_json_bytes(recomputed_plan):
         reasons.append("plan-recomputation-mismatch")
     release_plan = artifact_plan.get("release_plan")
     if not isinstance(release_plan, Mapping) or release_plan.get("valid") is not True:
@@ -279,6 +351,10 @@ def classify_blocked_state(reasons: list[str]) -> str:
         "plan-base-mismatch",
         "plan-head-mismatch",
         "plan-recomputation-mismatch",
+        "plan-planner-provenance-invalid",
+        "plan-group-harness-provenance-invalid",
+        "planner-base-checkout-mismatch",
+        "pull-ref-head-mismatch",
     }
     return "superseded" if set(reasons) & superseded else "blocked"
 
@@ -394,16 +470,46 @@ def ensure_epoch_ancestry(base_sha: str) -> None:
 
 
 def recompute_plan(pr: int, base_sha: str, head_sha: str) -> dict[str, Any]:
-    subprocess.run(
-        ["git", "fetch", "--no-tags", "origin", f"pull/{pr}/head"],
+    if trusted_main_sha() != base_sha:
+        raise RunnerError("planner-base-checkout-mismatch", state="superseded")
+    fetch = subprocess.run(
+        [
+            "git",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            f"+refs/pull/{pr}/head:refs/remotes/origin/release-plan-head",
+        ],
         cwd=ROOT,
-        check=True,
+        check=False,
+        text=True,
+        capture_output=True,
     )
+    if fetch.returncode != 0:
+        raise RunnerError("pull-ref-head-fetch-failed")
+    resolved_head = exact_sha(
+        subprocess.run(
+            ["git", "rev-parse", "refs/remotes/origin/release-plan-head^{commit}"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout,
+        "pull-ref-head",
+    )
+    if resolved_head != head_sha:
+        raise RunnerError("pull-ref-head-mismatch", state="superseded")
+    require_unchanged_pr_gate_workflow(base_sha, head_sha)
     with tempfile.TemporaryDirectory(prefix="wb-core-release-plan-") as directory:
         output = Path(directory) / "test-plan.json"
+        env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
         subprocess.run(
             [
                 sys.executable,
+                "-I",
                 "ci/test_planner.py",
                 "--pr",
                 str(pr),
@@ -415,11 +521,35 @@ def recompute_plan(pr: int, base_sha: str, head_sha: str) -> dict[str, Any]:
                 str(output),
             ],
             cwd=ROOT,
+            env=env,
             check=True,
         )
         plan = json.loads(output.read_text(encoding="utf-8"))
     verify_plan(plan)
     return plan
+
+
+def require_unchanged_pr_gate_workflow(
+    base_sha: str, head_sha: str, *, root: Path = ROOT
+) -> None:
+    """Require the trusted PR workflow blob to be identical in base and head."""
+
+    base_workflow = subprocess.run(
+        ["git", "show", f"{base_sha}:{PR_GATE_WORKFLOW_PATH}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    head_workflow = subprocess.run(
+        ["git", "show", f"{head_sha}:{PR_GATE_WORKFLOW_PATH}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if base_workflow.returncode != 0 or head_workflow.returncode != 0:
+        raise RunnerError("pr-gate-workflow-blob-unavailable")
+    if base_workflow.stdout != head_workflow.stdout:
+        raise RunnerError("pr-gate-workflow-change-requires-staged-bootstrap")
 
 
 def merge_exact(client: GitHubClient, pr: int, head_sha: str) -> str:
@@ -534,6 +664,7 @@ def route_kind(plan: Mapping[str, Any]) -> tuple[str, bool]:
 
 def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[str, Any]:
     run, _artifact, artifact_plan = collect_workflow_plan(client, workflow_run_id)
+    jobs = collect_workflow_jobs(client, workflow_run_id)
     pr_number = workflow_pull_request(run)
     pr = client.get(f"/pulls/{pr_number}")
     head_sha = exact_sha(pr.get("head", {}).get("sha"), "pr-head")
@@ -561,15 +692,23 @@ def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[s
         return receipt
 
     trusted = trusted_main_sha()
-    recomputed = recompute_plan(pr_number, base_sha, head_sha)
     reasons = admission_reasons(
         repository=client.repository,
         run=run,
         pr=pr,
         artifact_plan=artifact_plan,
-        recomputed_plan=recomputed,
+        recomputed_plan=None,
         trusted_main_sha=trusted,
     )
+    reasons.extend(workflow_job_reasons(jobs, artifact_plan))
+    if not reasons:
+        try:
+            recomputed = recompute_plan(pr_number, base_sha, head_sha)
+        except RunnerError as exc:
+            reasons.append(exc.reason)
+        else:
+            if canonical_json_bytes(artifact_plan) != canonical_json_bytes(recomputed):
+                reasons.append("plan-recomputation-mismatch")
     try:
         ensure_epoch_ancestry(base_sha)
     except RunnerError as exc:
