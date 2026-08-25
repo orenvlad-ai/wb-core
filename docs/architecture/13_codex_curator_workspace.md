@@ -1,11 +1,14 @@
-# Archived Codex Curator Workspace v1
+# Codex Main Task Workspace v2
 
-Canonical curator workspace, registry-bound dispatch, pin/readback lifecycle и
-Desktop callback больше не являются частью correctness path `wb-core`.
+Main task автоматически получает `wbc NNNN <русское название>` и pin через
+local `wbc-task-intake` skill. Она хранит accepted goal/decisions, короткий
+passport, scope, acceptance и final owner-facing result.
 
-Исторический contract доступен в Git history на anchor
-`e44f548982900e286a2c1a73fdf439d0c8a49843`. Current UX — куратор запускает
-отдельного исполнителя, получает короткий GitHub/deploy отчёт и вручную принимает
-результат. Актуальный naming/pinning/owner-acceptance contract находится только
-в [Codex Execution Protocol](07_codex_execution_protocol.md#видимый-жизненный-цикл-codex-задач).
-Пользовательские чаты не удаляются и не архивируются автоматически.
+Implementation block получает one fresh visible internal subagent
+`wbc NNNN SSS <latin transliteration>` без pin. Default concurrency — one.
+Same-scope corrections продолжают его; new scope/new PR после terminal state
+получает следующий `SSS`. Subagent возвращает один terminal handoff либо exact
+gate callback и становится Done.
+
+Workspace не создаёт registry, scheduler, monitor, reviewer, callback service
+или release state. User chats не archive/unpin/delete автоматически.

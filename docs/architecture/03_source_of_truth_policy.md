@@ -22,12 +22,13 @@ Authoritative docs должны описывать текущую реализа
 Корневой [`AGENTS.md`](../../AGENTS.md) — короткий самодостаточный execution/governance entrypoint для Codex и ChatGPT, читающего репозиторий. Он не дублирует доменные контракты и направляет к authoritative docs. Для текущей работы не требуется отдельный project pack или прежняя ChatGPT Project instruction.
 
 Исторический saved project `WB Core · Кураторы` и его workspace automation не
-являются active runtime или source of truth. Куратор использует корневой
-протокол и передаёт реализацию отдельному исполнителю; archive pointer:
+являются active runtime или source of truth. Главная задача использует
+корневой протокол и один свежий внутренний subagent на bounded implementation
+block; archive pointer:
 [retired curator workspace](13_codex_curator_workspace.md).
 
 Тот же boundary применяется к retired Global Watcher, external orchestration
-registry, Task Passport, acceptance envelope, logical release lane,
+registry, legacy acceptance envelope, logical release lane,
 shepherd/takeover и persistent arbiter: они существуют только как migration
 history и retained fail-closed compatibility, но не являются current
 execution, PR admission, release или owner-acceptance path. Current flow
@@ -93,7 +94,7 @@ Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths 
 - никакого contract/schema change без синхронизации tests и authoritative docs;
 - никакой runtime snapshot не объявляется code или schema truth;
 - никакого cutover по принципу «на сервере вроде работает»;
-- никакой production mutation без explicit scope, dry-run, backup/reversibility, idempotency, audit и требуемых human gates;
+- никакой production mutation без exact protocol-v2 manifest, dry-run, backup/reversibility, idempotency, audit и exact owner apply authorization;
 - никакой потери или смешивания чужого dirty state при branch/sync/merge работе;
 - никакого подтверждения результата только по отчёту агента без проверки применимых branch/commit, semantic diff, checks, review state и authoritative docs;
 - каждый merged change подтверждается в current `origin/main`, а live/runtime change дополнительно — canonical deploy и live/public verify.

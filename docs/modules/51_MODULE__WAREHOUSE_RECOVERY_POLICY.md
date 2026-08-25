@@ -214,7 +214,7 @@ next policy writer reconciles them by CAS.
 
 The canonical production sequence is:
 
-1. deploy through the GitHub Release Train;
+1. deploy through the one-shot Release Runner from an exact successful PR Gate;
 2. run hosted canary dry-run against the exact deployed SHA;
 3. apply the exact fingerprinted T0/T1/T2 canary;
 4. run the isolated Playwright warehouse UI Flow with
@@ -244,7 +244,7 @@ fingerprints, before-images, reconciliation and rollback. Batch B is gated on
 retained Batch A. The Seller Portal transit comparison is a third query-only
 submanifest; backup drift cannot be waived by the runner and creates no T1.
 
-The exact apply is allowed only after Release Train deploy and human approval
+The exact apply is allowed only after one-shot exact-SHA deploy and owner approval
 bound to the deployed head, fingerprint, counts/aggregates, non-target digest
 and reversibility. A second successful run is T0. Finance raw/T3, full-store
 copies, adjacent-day backfill, global rebuild, writeoff and compensation are
