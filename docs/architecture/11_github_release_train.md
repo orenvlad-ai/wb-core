@@ -21,10 +21,17 @@ Components:
 ## Deterministic test plan
 
 Planner получает exact PR/base/head и делает `git diff --name-status` между
-ними. Registry читается как из base, так и из head; canonical union сохраняет
-оба набора commands/rules/dependencies, поэтому branch не может удалить свою
-coverage. Любой group conflict, invalid registry или unresolved dependency
-fail closed.
+ними. Для genuine PR canonical artifact всегда исполняет planner bytes из
+exact PR base checkout; exact head доступен только как read-only Git object,
+полученный через canonical base-repository `refs/pull/<PR>/head` с SHA
+readback. Ни head branch name, ни mutable `main`, ни head `PYTHONPATH` не
+используются. Registry читается как из base, так и из head; canonical union
+сохраняет оба набора commands/rules/dependencies, поэтому branch не может
+удалить свою coverage. Любой group conflict, invalid registry или unresolved
+dependency fail closed. Head schema, которую base planner не понимает, даёт
+явный `head-registry-schema-incompatible-staged-migration`: unmerged planner
+не исполняется как trusted substitute, а schema change разбивается на staged
+migration.
 
 Path rules поддерживают exact include/exclude mapping, выбирают suites и
 transitive dependencies. Orchestration docs/config и bounded
@@ -80,6 +87,9 @@ Canonical `test-plan.json` содержит:
 
 - schema/protocol/cutover epoch;
 - PR, exact base/head;
+- exact-base planner path/execution SHA/blob digest;
+- exact-base selected-group harness path/execution SHA/blob digest и exact-head
+  candidate working-tree binding;
 - base/head/union registry digests;
 - normalized changed records и changed-path digest;
 - unknown paths, reason codes, selected suites и bounded parallel groups;
@@ -93,9 +103,18 @@ timestamp/random field; одинаковый input даёт одинаковые
 
 ## PR Gate
 
-Required workflow запускается genuine `pull_request` event. Fast core всегда
-выполняет syntax, diff hygiene, planner/Runner/Apply smokes и workflow YAML
-parse. Selected suites исполняются по immutable plan artifact в matrix с
+Required workflow запускается genuine `pull_request` event. Fast core на exact
+proposed head всегда выполняет syntax, diff hygiene, candidate
+planner/Runner/Apply smokes и workflow YAML parse. Отдельный plan job остаётся
+на exact base checkout, materialize-ит exact pull-ref head objects без checkout
+или import head code и исполняет base planner в isolated Python. Selected suites
+исполняются на exact head по immutable plan artifact; после pull-ref fetch и
+SHA readback checkout token удаляется из local/recursive Git config до первого
+candidate command. Selected job materialize-ит отдельный credential-free
+exact-base worktree и запускает оттуда `ci/run_test_group.py`/plan verifier с
+cwd exact head: orchestration/commands остаются base-owned, а сами commands
+исполняют candidate tree. Head harness проверяется Fast core и активируется
+только после merge. Matrix работает с
 `max-parallel=4`; browser runtime устанавливается для exact groups, где хотя
 бы один selected suite declares `requires_browser=true`. Один aggregate
 job/check называется ровно `pr-gate`.
@@ -118,10 +137,24 @@ invalid-registry fallback запускает full selected matrix, но `pr-gate
 3. требует open, non-draft, same-repository PR в `main`;
 4. требует current main base, exact workflow/head/plan bindings и
    `mergeable=true` в одном snapshot;
-5. fetch-ит PR object without checkout и recompute-ит plan trusted planner-ом;
-6. требует byte-identical artifact/recomputed plan и protocol-v2 cutover epoch;
-7. проверяет, что epoch является ancestor base;
-8. проверяет durable operation receipt ровно один раз.
+5. требует exact workflow name/path/event, first attempt и byte-identical
+   base↔head `.github/workflows/pr-gate.yml`; head workflow никогда не
+   исполняется Runner-ом как trusted substitute;
+6. требует ровно Fast core, plan, canonical `Selected group · <group>` для
+   каждого group из artifact и aggregate `pr-gate`, все unique/completed/
+   successful; skip или extra/missing job fail closed;
+7. требует trusted checkout SHA равным exact PR base, fetch-ит canonical
+   `refs/pull/<PR>/head` с exact head readback и recompute-ит plan тем же
+   isolated exact-base planner-ом;
+8. требует byte-identical artifact/recomputed plan и protocol-v2 cutover epoch;
+9. проверяет, что epoch является ancestor base;
+10. проверяет durable operation receipt ровно один раз.
+
+Любое будущее изменение самого trusted `pr-gate.yml` получает явный
+`pr-gate-workflow-change-requires-staged-bootstrap` и не проходит ordinary
+Runner admission. Оно использует отдельный reviewed staged/bootstrap contour;
+это исключение не распространяется на обычные изменения planner/registry,
+которые продолжают автоматически завершаться normal one-shot Runner-ом.
 
 Runner не исполняет unmerged PR code, tests или compatibility baseline. Он не
 poll-ит, не sync-ит branch, не enqueue-ит и не resubmit-ит.

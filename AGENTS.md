@@ -91,8 +91,12 @@ tooling blocker; оно не превращается в запрос поком
 
 1. Один implementation block использует одну ветку и один non-draft PR в
    `main`. Labels не выбирают tests, release kind или state.
-2. `ci/test_planner.py` строит byte-stable `test-plan.json` по exact base/head,
-   base+head registry union, transitive dependencies и changed paths.
+2. `ci/test_planner.py` строит byte-stable `test-plan.json` исполняемым code
+   exact PR base по exact base/head objects, base+head registry union,
+   transitive dependencies и changed paths. Head planner активируется только
+   после merge; selected groups и plan verifier также запускает exact-base
+   harness с cwd exact head. Несовместимая head registry schema требует staged
+   migration.
 3. Unknown path, registry/workflow/core-framework change или unresolved mapping
    автоматически выбирает full regression. Пользователь и labels не выбирают
    tests.
@@ -100,8 +104,11 @@ tooling blocker; оно не превращается в запрос поком
    aggregate check `pr-gate`. Diagnostic dispatch имеет другое имя и не
    удовлетворяет required context. Untrusted PR code не получает secrets.
 5. После successful exact-head `pr-gate` trusted-main Release Runner один раз
-   проверяет open non-draft same-repo PR в `main`, exact head/base/plan hash и
+   проверяет open non-draft same-repo PR в `main`, exact head/base/planner/plan
+   hash, immutable base↔head PR Gate workflow, exact successful job set и
    mergeability. Он не запускает tests и не исполняет unmerged PR code.
+   Изменение самого trusted `pr-gate.yml` требует отдельного staged/bootstrap
+   contour; ordinary planner/registry change проходит normal one-shot flow.
 6. Runner делает один expected-head squash merge и exact readback. `repo_only`
    завершается receipt `done`; `live_runtime` deploy-ит exact merge SHA через
    canonical adapter, проверяет deployed SHA и пишет один receipt.

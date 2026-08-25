@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 REGISTRY_PATH = "ci/test_registry.json"
+PLANNER_PATH = "ci/test_planner.py"
+GROUP_HARNESS_PATH = "ci/run_test_group.py"
 PR_GATE_WORKFLOW_PATH = ".github/workflows/pr-gate.yml"
 REGISTRY_SCHEMA = "wb-core.test-registry/v2"
 PLAN_SCHEMA = "wb-core.test-plan/v2"
@@ -81,6 +83,38 @@ def load_registry_at(commit: str) -> tuple[dict[str, Any] | None, str | None]:
         return None, None
     raw = result.stdout.encode("utf-8")
     return _load_json_bytes(raw, f"{commit}:{REGISTRY_PATH}"), sha256(raw)
+
+
+def trusted_base_planner_digest(base_sha: str) -> str:
+    """Prove the executing planner bytes are from the exact PR base."""
+
+    result = subprocess.run(
+        ["git", "show", f"{base_sha}:{PLANNER_PATH}"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PlanError(f"trusted base planner is unavailable: {base_sha}:{PLANNER_PATH}")
+    base_bytes = result.stdout
+    executing_bytes = Path(__file__).resolve().read_bytes()
+    if executing_bytes != base_bytes:
+        raise PlanError(
+            "planner executable does not match exact PR base; staged planner activation is required"
+        )
+    return sha256(base_bytes)
+
+
+def trusted_base_blob_digest(base_sha: str, path: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{base_sha}:{path}"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PlanError(f"trusted base blob is unavailable: {base_sha}:{path}")
+    return sha256(result.stdout)
 
 
 def _string_list(value: Any, field: str) -> list[str]:
@@ -372,6 +406,11 @@ def registry_union_for_plan(
             validate_registry(base, "base registry")
         except PlanError:
             base_error = True
+    head_schema_incompatible = (
+        head.get("schema") != REGISTRY_SCHEMA
+        or not isinstance(head.get("protocol"), Mapping)
+        or head.get("protocol", {}).get("version") != 2
+    )
     try:
         validate_registry(head, "head registry")
     except PlanError:
@@ -381,6 +420,8 @@ def registry_union_for_plan(
         if base is None or base_error:
             raise PlanError("both registry inputs are invalid; no executable full regression exists")
         fallback, _ = union_registries(base, base)
+        if head_schema_incompatible:
+            return fallback, ["head-registry-schema-incompatible-staged-migration"], False
         return fallback, ["head-registry-invalid-full-regression"], False
     if base_error:
         fallback, _ = union_registries(head, head)
@@ -572,6 +613,8 @@ def build_plan(
     head_registry_blob_sha256: str | None = None,
     changes: Sequence[Mapping[str, str]],
     registry_error_codes: Sequence[str] = (),
+    planner_blob_sha256: str | None = None,
+    group_harness_blob_sha256: str | None = None,
 ) -> dict[str, Any]:
     if pr_number <= 0:
         raise PlanError("pull request number must be positive")
@@ -652,6 +695,19 @@ def build_plan(
         "pull_request": pr_number,
         "base_sha": base_sha,
         "head_sha": head_sha,
+        "planner": {
+            "path": PLANNER_PATH,
+            "execution_sha": base_sha,
+            "blob_sha256": planner_blob_sha256
+            or sha256(Path(__file__).resolve().read_bytes()),
+        },
+        "group_harness": {
+            "path": GROUP_HARNESS_PATH,
+            "execution_sha": base_sha,
+            "blob_sha256": group_harness_blob_sha256
+            or sha256((ROOT / GROUP_HARNESS_PATH).read_bytes()),
+            "candidate_worktree_sha": head_sha,
+        },
         "registry": {
             "path": REGISTRY_PATH,
             "base_blob_sha256": base_registry_blob_sha256,
@@ -728,6 +784,8 @@ def main() -> int:
 
     base_sha = _exact_sha(args.base, "base")
     head_sha = _exact_sha(args.head, "head")
+    planner_digest = trusted_base_planner_digest(base_sha)
+    group_harness_digest = trusted_base_blob_digest(base_sha, GROUP_HARNESS_PATH)
     registry_error_codes: list[str] = []
     try:
         base_registry, base_digest = load_registry_at(base_sha)
@@ -754,6 +812,8 @@ def main() -> int:
         head_registry_blob_sha256=head_digest,
         changes=changed_paths(base_sha, head_sha),
         registry_error_codes=registry_error_codes,
+        planner_blob_sha256=planner_digest,
+        group_harness_blob_sha256=group_harness_digest,
     )
     verify_plan(plan)
     args.output.parent.mkdir(parents=True, exist_ok=True)

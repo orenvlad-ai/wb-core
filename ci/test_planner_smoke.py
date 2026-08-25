@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -62,6 +64,223 @@ def executed_commands(plan: dict) -> list[tuple[str, ...]]:
         for suite in plan["execution"].values()
         for command in suite["commands"]
     ]
+
+
+def _run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _fixture_planner(label: str) -> str:
+    return f'''#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--base", required=True)
+parser.add_argument("--head", required=True)
+parser.add_argument("--output", required=True, type=Path)
+args = parser.parse_args()
+args.output.write_text(
+    json.dumps(
+        {{"base": args.base, "head": args.head, "planner_semantics": "{label}"}},
+        separators=(",", ":"),
+        sort_keys=True,
+    ),
+    encoding="utf-8",
+)
+'''
+
+
+def _fixture_group_harness(label: str) -> str:
+    write_marker = (
+        'args.marker.write_text(Path.cwd().name, encoding="utf-8")'
+        if label == "base"
+        else "pass"
+    )
+    return f'''#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--marker", required=True, type=Path)
+args = parser.parse_args()
+{write_marker}
+'''
+
+
+def candidate_group_harness_smoke() -> None:
+    candidate_registry = registry()
+    for suite_id, suite in candidate_registry["suites"].items():
+        suite["commands"] = [
+            [sys.executable, "-c", f"assert {suite_id!r} == {suite_id!r}"]
+        ]
+    plan = build(
+        candidate_registry,
+        candidate_registry,
+        changed("ci/run_test_group.py"),
+    )
+    with tempfile.TemporaryDirectory(prefix="wb-core-candidate-harness-") as raw:
+        plan_path = Path(raw) / "test-plan.json"
+        plan_path.write_bytes(planner.canonical_json_bytes(plan) + b"\n")
+        isolated_env = os.environ.copy()
+        isolated_env.pop("PYTHONHOME", None)
+        isolated_env.pop("PYTHONPATH", None)
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "ci/run_test_group.py",
+                "--plan",
+                str(plan_path),
+                "--group",
+                "core",
+            ],
+            cwd=ROOT,
+            env=isolated_env,
+            check=True,
+            capture_output=True,
+        )
+
+
+def trusted_base_materialization_smoke() -> None:
+    """Changed head planner bytes cannot replace exact-base plan semantics."""
+
+    with tempfile.TemporaryDirectory(prefix="wb-core-trusted-base-smoke-") as raw:
+        root = Path(raw)
+        remote = root / "remote.git"
+        seed = root / "seed"
+        trusted = root / "trusted"
+        _run(["git", "init", "--bare", str(remote)], root)
+        _run(["git", "init", str(seed)], root)
+        _run(["git", "config", "user.email", "planner-smoke@example.invalid"], seed)
+        _run(["git", "config", "user.name", "Planner Smoke"], seed)
+        (seed / "ci").mkdir()
+        (seed / "ci/test_planner.py").write_text(
+            _fixture_planner("base"), encoding="utf-8"
+        )
+        (seed / "ci/run_test_group.py").write_text(
+            _fixture_group_harness("base"), encoding="utf-8"
+        )
+        _run(["git", "add", "ci/test_planner.py", "ci/run_test_group.py"], seed)
+        _run(["git", "commit", "-m", "base planner"], seed)
+        base = _run(["git", "rev-parse", "HEAD"], seed).stdout.strip()
+        _run(["git", "remote", "add", "origin", str(remote)], seed)
+        _run(["git", "push", "origin", "HEAD:refs/heads/main"], seed)
+        _run(
+            ["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+            root,
+        )
+
+        (seed / "ci/test_planner.py").write_text(
+            _fixture_planner("head"), encoding="utf-8"
+        )
+        (seed / "ci/run_test_group.py").write_text(
+            _fixture_group_harness("head"), encoding="utf-8"
+        )
+        _run(["git", "add", "ci/test_planner.py", "ci/run_test_group.py"], seed)
+        _run(["git", "commit", "-m", "changed head planner"], seed)
+        head = _run(["git", "rev-parse", "HEAD"], seed).stdout.strip()
+        _run(["git", "push", "origin", "HEAD:refs/pull/1041/head"], seed)
+
+        _run(["git", "clone", "--no-checkout", str(remote), str(trusted)], root)
+        _run(["git", "checkout", "--detach", base], trusted)
+        assert _run(["git", "rev-parse", "HEAD"], trusted).stdout.strip() == base
+        _run(
+            [
+                "git",
+                "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "origin",
+                "+refs/pull/1041/head:refs/remotes/origin/pr-plan-head",
+            ],
+            trusted,
+        )
+        resolved = _run(
+            ["git", "rev-parse", "refs/remotes/origin/pr-plan-head^{commit}"],
+            trusted,
+        ).stdout.strip()
+        assert resolved == head
+        assert _run(["git", "rev-parse", "HEAD"], trusted).stdout.strip() == base
+
+        trusted_output = root / "trusted-plan.json"
+        candidate_output = root / "candidate-plan.json"
+        isolated_env = os.environ.copy()
+        isolated_env.pop("PYTHONHOME", None)
+        isolated_env.pop("PYTHONPATH", None)
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "ci/test_planner.py",
+                "--base",
+                base,
+                "--head",
+                head,
+                "--output",
+                str(trusted_output),
+            ],
+            cwd=trusted,
+            env=isolated_env,
+            check=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "ci/test_planner.py",
+                "--base",
+                base,
+                "--head",
+                head,
+                "--output",
+                str(candidate_output),
+            ],
+            cwd=seed,
+            env=isolated_env,
+            check=True,
+        )
+        trusted_plan = json.loads(trusted_output.read_text(encoding="utf-8"))
+        candidate_plan = json.loads(candidate_output.read_text(encoding="utf-8"))
+        assert trusted_plan["planner_semantics"] == "base"
+        assert candidate_plan["planner_semantics"] == "head"
+        assert trusted_output.read_bytes() != candidate_output.read_bytes()
+
+        trusted_marker = root / "trusted-harness.marker"
+        candidate_marker = root / "candidate-harness.marker"
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(trusted / "ci/run_test_group.py"),
+                "--marker",
+                str(trusted_marker),
+            ],
+            cwd=seed,
+            env=isolated_env,
+            check=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "ci/run_test_group.py",
+                "--marker",
+                str(candidate_marker),
+            ],
+            cwd=seed,
+            env=isolated_env,
+            check=True,
+        )
+        assert trusted_marker.read_text(encoding="utf-8") == "seed"
+        assert not candidate_marker.exists()
 
 
 def main() -> None:
@@ -268,6 +487,13 @@ def main() -> None:
     assert values["plan_valid"] == "false"
     assert values["release_valid"] == "false"
 
+    incompatible_schema = copy.deepcopy(head)
+    incompatible_schema["schema"] = "wb-core.test-registry/v3"
+    staged = build(base, incompatible_schema, changed("ci/test_registry.json"))
+    assert staged["registry"]["valid"] is False
+    assert staged["release_plan"]["valid"] is False
+    assert "head-registry-schema-incompatible-staged-migration" in staged["reason_codes"]
+
     removed_rule = copy.deepcopy(base)
     removed_rule["rules"] = [rule for rule in removed_rule["rules"] if rule["id"] != "finance"]
     preserved = build(base, removed_rule, changed("apps/finance_storage.py"))
@@ -350,6 +576,25 @@ def main() -> None:
     assert "if: needs.plan.outputs.execution_valid == 'true'" in pr_gate_text
     assert '"PLAN_VALID": "true"' in pr_gate_text
     assert '"RELEASE_VALID": "true"' in pr_gate_text
+    assert "Checkout trusted exact PR base" in pr_gate_text
+    assert "Materialize exact head objects read-only" in pr_gate_text
+    assert "ref: ${{ steps.meta.outputs.base }}" in pr_gate_text
+    assert "+refs/pull/$pr/head:$fetched_ref" in pr_gate_text
+    assert "env -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 -I ci/test_planner.py" in pr_gate_text
+    assert pr_gate_text.count(
+        "git config --local --unset-all http.https://github.com/.extraheader"
+    ) == 4
+    assert pr_gate_text.count(
+        "checkout credential remained before candidate execution"
+    ) == 2
+    assert 'git worktree add --detach "$trusted_harness" "$base"' in pr_gate_text
+    assert (
+        '"$RUNNER_TEMP/trusted-base-harness/ci/run_test_group.py"'
+        in pr_gate_text
+    )
+    assert "trusted harness checkout retained a credential" in pr_gate_text
+    candidate_group_harness_smoke()
+    trusted_base_materialization_smoke()
     assert planner._record_paths(
         [{"status": "R100", "old_path": "русский путь/до.md", "path": "русский путь/после.md"}]
     ) == ["русский путь/до.md", "русский путь/после.md"]

@@ -6,7 +6,9 @@ from __future__ import annotations
 import copy
 import io
 import json
+import subprocess
 import sys
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -32,6 +34,17 @@ def plan() -> dict:
         "pull_request": 1041,
         "base_sha": BASE,
         "head_sha": HEAD,
+        "planner": {
+            "path": runner.PLANNER_PATH,
+            "execution_sha": BASE,
+            "blob_sha256": "f" * 64,
+        },
+        "group_harness": {
+            "path": runner.GROUP_HARNESS_PATH,
+            "execution_sha": BASE,
+            "blob_sha256": "e" * 64,
+            "candidate_worktree_sha": HEAD,
+        },
         "registry": {},
         "changed_paths": [],
         "changed_paths_digest": "d" * 64,
@@ -52,6 +65,8 @@ def workflow() -> dict:
         "event": "pull_request",
         "status": "completed",
         "conclusion": "success",
+        "path": ".github/workflows/pr-gate.yml",
+        "run_attempt": 1,
         "head_sha": HEAD,
         "pull_requests": [{"number": 1041}],
     }
@@ -187,6 +202,109 @@ def main() -> None:
     )
     assert reasons == []
 
+    expected_jobs = [
+        {"name": "Fast core checks", "status": "completed", "conclusion": "success"},
+        {
+            "name": "Deterministic impact plan",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        {"name": "Selected group · release", "status": "completed", "conclusion": "success"},
+        {"name": "pr-gate", "status": "completed", "conclusion": "success"},
+    ]
+    assert runner.workflow_job_reasons(expected_jobs, golden) == []
+    assert "workflow-job-set-mismatch" in runner.workflow_job_reasons(
+        [job for job in expected_jobs if job["name"] != "Selected group · release"],
+        golden,
+    )
+    failed_jobs = copy.deepcopy(expected_jobs)
+    failed_jobs[2]["conclusion"] = "skipped"
+    assert "workflow-job-not-successful" in runner.workflow_job_reasons(
+        failed_jobs, golden
+    )
+
+    with tempfile.TemporaryDirectory(prefix="wb-core-runner-workflow-smoke-") as raw:
+        repository = Path(raw)
+        subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "runner-smoke@example.invalid"],
+            cwd=repository,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Runner Smoke"],
+            cwd=repository,
+            check=True,
+        )
+        workflow_path = repository / runner.PR_GATE_WORKFLOW_PATH
+        workflow_path.parent.mkdir(parents=True)
+        workflow_path.write_text("name: PR Gate\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "base workflow"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        )
+        workflow_base = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        runner.require_unchanged_pr_gate_workflow(
+            workflow_base, workflow_base, root=repository
+        )
+        workflow_path.write_text("name: Changed PR Gate\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "changed workflow"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        )
+        workflow_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        try:
+            runner.require_unchanged_pr_gate_workflow(
+                workflow_base, workflow_head, root=repository
+            )
+        except runner.RunnerError as exc:
+            assert exc.reason == "pr-gate-workflow-change-requires-staged-bootstrap"
+        else:
+            raise AssertionError("changed trusted PR workflow was admitted")
+
+    legacy_base_artifact = copy.deepcopy(golden)
+    legacy_base_artifact.pop("planner")
+    legacy_base_artifact.pop("group_harness")
+    legacy_base_artifact.pop("plan_hash")
+    legacy_base_artifact["plan_hash"] = runner.sha256(
+        canonical_json_bytes(legacy_base_artifact)
+    )
+    runner.verify_plan(legacy_base_artifact)
+    assert "plan-planner-provenance-invalid" in runner.admission_reasons(
+        repository="orenvlad-ai/wb-core",
+        run=workflow(),
+        pr=pull_request(),
+        artifact_plan=legacy_base_artifact,
+        recomputed_plan=None,
+        trusted_main_sha=BASE,
+    )
+    assert "plan-group-harness-provenance-invalid" in runner.admission_reasons(
+        repository="orenvlad-ai/wb-core",
+        run=workflow(),
+        pr=pull_request(),
+        artifact_plan=legacy_base_artifact,
+        recomputed_plan=None,
+        trusted_main_sha=BASE,
+    )
+
     dispatch = workflow()
     dispatch["event"] = "workflow_dispatch"
     assert "workflow-provenance-not-pull-request" in runner.admission_reasons(
@@ -254,6 +372,8 @@ def main() -> None:
     ):
         assert forbidden not in source
     assert "time.sleep" not in source
+    assert "pr-gate-workflow-change-requires-staged-bootstrap" in source
+    assert "workflow-job-set-mismatch" in source
     print("github_release_runner_smoke: ok")
 
 
