@@ -6,12 +6,14 @@ from __future__ import annotations
 import copy
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ci import replay_test_selection
 from ci import test_planner as planner
 
 
@@ -50,6 +52,18 @@ def build(base: dict | None, head: dict, changes: list[dict[str, str]]) -> dict:
     )
 
 
+def changed(*paths: str, status: str = "M") -> list[dict[str, str]]:
+    return [{"status": status, "path": path} for path in paths]
+
+
+def executed_commands(plan: dict) -> list[tuple[str, ...]]:
+    return [
+        tuple(command)
+        for suite in plan["execution"].values()
+        for command in suite["commands"]
+    ]
+
+
 def main() -> None:
     base = registry()
     head = copy.deepcopy(base)
@@ -82,6 +96,16 @@ def main() -> None:
     assert encoded == planner.canonical_json_bytes(reordered)
     planner.verify_plan(reordered)
 
+    duplicate = copy.deepcopy(head)
+    duplicate["suites"]["warehouse"]["commands"].append(["python3", "new_core.py"])
+    duplicate_plan = build(
+        duplicate,
+        duplicate,
+        [{"status": "A", "path": "unknown/new-code.py"}],
+    )
+    assert executed_commands(duplicate_plan).count(("python3", "new_core.py")) == 1
+    assert "duplicate-command-deduplicated" in duplicate_plan["reason_codes"]
+
     missing_base = build(None, head, [{"status": "M", "path": "apps/finance_storage.py"}])
     assert "base-registry-missing" in missing_base["reason_codes"]
 
@@ -99,6 +123,11 @@ def main() -> None:
 
     real_registry = json.loads((ROOT / planner.REGISTRY_PATH).read_text(encoding="utf-8"))
     planner.validate_registry(real_registry, "repository registry")
+    coverage = planner.registered_command_coverage(real_registry)
+    assert coverage["valid"] is True
+    assert coverage["gaps"] == []
+    assert coverage["registered_command_count"] >= 100
+    assert coverage["core_only_command_count"] == 3
     real_plan = planner.build_plan(
         pr_number=1041,
         base_sha=BASE_SHA,
@@ -108,6 +137,219 @@ def main() -> None:
         changes=[{"status": "M", "path": "apps/finance_storage.py"}],
     )
     assert "finance" in real_plan["browser_groups"]
+
+    full = set(real_registry["protocol"]["full_regression_suites"])
+    orchestration_paths = (
+        "AGENTS.md",
+        "docs/architecture/07_codex_execution_protocol.md",
+        "docs/architecture/12_codex_global_orchestration.md",
+        "docs/architecture/13_codex_curator_workspace.md",
+        ".codex/config.toml",
+        ".github/pull_request_template.md",
+    )
+    for path in orchestration_paths:
+        plan = build(real_registry, real_registry, changed(path))
+        assert plan["selected_suites"] == ["release_safety"], path
+        assert plan["release_plan"]["kind"] == "repo_only", path
+
+    release_tooling_paths = (
+        "apps/github_release_runner.py",
+        "apps/github_release_runner_smoke.py",
+        "apps/production_apply_runner.py",
+        "apps/production_apply_runner_smoke.py",
+        "apps/release_protocol.py",
+        ".github/workflows/release-runner.yml",
+        ".github/workflows/production-apply.yml",
+        "docs/architecture/11_github_release_train.md",
+    )
+    for path in release_tooling_paths:
+        plan = build(real_registry, real_registry, changed(path))
+        assert plan["selected_suites"] == ["release_safety"], path
+        assert plan["release_plan"]["kind"] == "repo_only", path
+
+    for path in (
+        "ci/test_registry.json",
+        "ci/test_planner.py",
+        "ci/run_test_group.py",
+        ".github/workflows/pr-gate.yml",
+        "apps/registry_upload_smoke_support.py",
+    ):
+        plan = build(real_registry, real_registry, changed(path))
+        assert set(plan["selected_suites"]) == full, path
+        assert plan["release_plan"]["kind"] == "repo_only", path
+
+    history_commands = {
+        ("python3", "apps/inventory_planning_read_model_smoke.py"),
+        ("python3", "apps/sheet_vitrina_v1_inventory_history_smoke.py"),
+        ("python3", "apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py"),
+        ("python3", "apps/sheet_vitrina_v1_inventory_planning_smoke.py"),
+    }
+    for path in (
+        "packages/application/sheet_vitrina_v1_inventory_history.py",
+        "apps/sheet_vitrina_v1_inventory_history_smoke.py",
+        "apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py",
+    ):
+        plan = build(real_registry, real_registry, changed(path))
+        assert set(plan["selected_suites"]) == {"inventory_history", "release_safety"}, path
+        assert history_commands <= set(executed_commands(plan)), path
+        assert "finance_storage" not in plan["selected_suites"], path
+
+    planning = build(
+        real_registry,
+        real_registry,
+        changed("packages/application/sheet_vitrina_v1_inventory_planning.py"),
+    )
+    assert set(planning["selected_suites"]) == {
+        "inventory_history",
+        "inventory_history_browser",
+        "release_safety",
+    }
+    assert ("python3", "apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py") in set(
+        executed_commands(planning)
+    )
+    assert "history-browser" in planning["browser_groups"]
+    assert "finance_storage" not in planning["selected_suites"]
+
+    business = build(
+        real_registry,
+        real_registry,
+        changed("apps/business_data_maintenance_smoke.py"),
+    )
+    assert "business_data_safety" in business["selected_suites"]
+    assert "finance_storage" not in business["selected_suites"]
+    assert ("python3", "apps/business_data_maintenance_smoke.py") in set(
+        executed_commands(business)
+    )
+
+    unknown_code = build(
+        real_registry,
+        real_registry,
+        changed("packages/new_domain/unregistered.py", status="A"),
+    )
+    assert set(unknown_code["selected_suites"]) == full
+    assert unknown_code["release_plan"]["kind"] == "live_runtime"
+    assert "unknown-path-full-regression" in unknown_code["reason_codes"]
+
+    deleted = build(
+        real_registry,
+        real_registry,
+        changed("apps/sheet_vitrina_v1_inventory_history_smoke.py", status="D"),
+    )
+    assert "inventory_history" in deleted["selected_suites"]
+    renamed = build(
+        real_registry,
+        real_registry,
+        [
+            {
+                "status": "R100",
+                "old_path": "apps/sheet_vitrina_v1_inventory_history_smoke.py",
+                "path": "packages/new_domain/renamed_history_smoke.py",
+            }
+        ],
+    )
+    assert set(renamed["selected_suites"]) == full
+    assert renamed["unknown_paths"] == ["packages/new_domain/renamed_history_smoke.py"]
+
+    invalid = copy.deepcopy(base)
+    invalid["suites"]["finance"]["depends_on"] = ["missing-suite"]
+    invalid_plan = build(base, invalid, changed("apps/finance_storage.py"))
+    assert set(invalid_plan["selected_suites"]) == set(base["protocol"]["full_regression_suites"])
+    assert invalid_plan["registry"]["valid"] is False
+    assert invalid_plan["release_plan"]["valid"] is False
+    assert "head-registry-invalid-full-regression" in invalid_plan["reason_codes"]
+    with tempfile.TemporaryDirectory(prefix="wb-core-planner-smoke-") as directory:
+        output = Path(directory) / "github-output"
+        planner.write_github_output(output, invalid_plan)
+        values = dict(
+            line.split("=", 1)
+            for line in output.read_text(encoding="utf-8").splitlines()
+        )
+    assert values["execution_valid"] == "true"
+    assert values["plan_valid"] == "false"
+    assert values["release_valid"] == "false"
+
+    removed_rule = copy.deepcopy(base)
+    removed_rule["rules"] = [rule for rule in removed_rule["rules"] if rule["id"] != "finance"]
+    preserved = build(base, removed_rule, changed("apps/finance_storage.py"))
+    assert "finance" in preserved["selected_suites"]
+    assert preserved["release_plan"]["kind"] == "live_runtime"
+
+    current_runtime_mappings = {
+        "apps/hosted_runtime_transport_reconcile.py": "release_safety",
+        "apps/supplier_cost_status_smoke.py": "fulfillment",
+        "packages/application/wb_finance_weekly.py": "finance_storage",
+        "packages/adapters/wb_fbs_orders.py": "fulfillment",
+        "packages/application/inventory_cost_blend.py": "web_vitrina",
+        "packages/application/calculation_parameters_v4.py": "web_vitrina",
+        "packages/application/russian_payment_orders.py": "fulfillment",
+        "packages/application/canonical_rub_money.py": "fulfillment",
+        "packages/adapters/stocks_block.py": "web_vitrina",
+        "packages/application/simple_xlsx.py": "fulfillment",
+        "packages/application/registry_upload_db_backed_runtime.py": "web_vitrina",
+    }
+    for path, expected_suite in current_runtime_mappings.items():
+        mapped = build(real_registry, real_registry, changed(path))
+        assert mapped["unknown_paths"] == [], path
+        assert expected_suite in mapped["selected_suites"], path
+        assert set(mapped["selected_suites"]) != full, path
+        assert mapped["release_plan"]["kind"] == "live_runtime", path
+
+    tree_audit = replay_test_selection.current_tree_mapping_audit(
+        real_registry, "origin/main"
+    )
+    assert tree_audit["scope"] == ["apps", "packages", "gas"]
+    assert (
+        tree_audit["specifically_mapped_path_count"]
+        + tree_audit["unmapped_residual_count"]
+        == tree_audit["tracked_path_count"]
+    )
+    assert (
+        tree_audit["baseline_specifically_mapped_path_count"]
+        + tree_audit["baseline_unmapped_residual_count"]
+        == tree_audit["baseline_tracked_path_count"]
+    )
+    assert tree_audit["new_unmapped_residual_paths"] == []
+    assert tree_audit["unmapped_residual_paths"]
+
+    protocol_text = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8")
+        for path in (
+            "AGENTS.md",
+            "docs/architecture/07_codex_execution_protocol.md",
+            "docs/architecture/12_codex_global_orchestration.md",
+            "docs/architecture/13_codex_curator_workspace.md",
+        )
+    )
+    assert "collaboration.spawn_agent" in protocol_text
+    for forbidden_thread_tool in (
+        "codex_app.create_thread",
+        "fork_thread",
+        "handoff_thread",
+        "send_message_to_thread",
+    ):
+        assert forbidden_thread_tool in protocol_text
+    assert "istoriya-ostatkov" in protocol_text
+    release_protocol_text = (
+        ROOT / "docs/architecture/11_github_release_train.md"
+    ).read_text(encoding="utf-8")
+    assert "--target-file <canonical-target>" in release_protocol_text
+    assert "legacy/default target" in release_protocol_text
+    baseline_text = (ROOT / ".github/workflows/baseline-ci.yml").read_text(encoding="utf-8")
+    assert "codex/process-cutover-pr-gate" not in baseline_text
+    assert "codex/pr-gate-rollback-" in baseline_text
+    config_text = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+    assert "max_concurrent_threads_per_session = 1" in config_text
+    core_only = {
+        tuple(entry["command"])
+        for entry in real_registry["protocol"]["core_only_commands"]
+    }
+    fast_core = planner.fast_core_workflow_commands()
+    assert all(fast_core.count(command) == 1 for command in core_only)
+    assert all((ROOT / planner._repo_command_path(command)).is_file() for command in core_only)
+    pr_gate_text = (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+    assert "if: needs.plan.outputs.execution_valid == 'true'" in pr_gate_text
+    assert '"PLAN_VALID": "true"' in pr_gate_text
+    assert '"RELEASE_VALID": "true"' in pr_gate_text
     assert planner._record_paths(
         [{"status": "R100", "old_path": "русский путь/до.md", "path": "русский путь/после.md"}]
     ) == ["русский путь/до.md", "русский путь/после.md"]

@@ -6,9 +6,11 @@
 
 - Main task:
 - Implementation subagent:
+- Dispatch mechanism (`collaboration.spawn_agent`):
 - Included scope:
 - Explicitly excluded:
 - Accepted decisions preserved:
+- One branch / one PR; previous block terminal before any new PR:
 
 ## Deterministic plan
 
@@ -26,6 +28,7 @@
 - [ ] Authoritative docs synchronized
 - [ ] No secrets, production data, or unrelated edits
 - [ ] Exact pull-request `pr-gate` successful
+- [ ] No sidebar/user-owned thread was used as implementation dispatch
 
 ## Safety
 

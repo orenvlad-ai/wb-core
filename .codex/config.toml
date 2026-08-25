@@ -1,2 +1,4 @@
+# Exactly one visible internal collaboration.spawn_agent implementation task.
+# Sidebar/user-owned threads are not an implementation-dispatch substitute.
 [agents]
 max_concurrent_threads_per_session = 1
