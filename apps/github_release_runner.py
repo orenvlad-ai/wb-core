@@ -290,14 +290,31 @@ def receipt_marker(operation: str) -> str:
     return f"<!-- {RECEIPT_MARKER} operation={operation} -->"
 
 
+def is_actions_bot_comment(comment: Mapping[str, Any]) -> bool:
+    user = comment.get("user")
+    return isinstance(user, Mapping) and user.get("login") == "github-actions[bot]"
+
+
 def matching_receipts(comments: list[Mapping[str, Any]], operation: str) -> list[Mapping[str, Any]]:
     marker = receipt_marker(operation)
-    return [comment for comment in comments if marker in str(comment.get("body") or "")]
+    return [
+        comment
+        for comment in comments
+        if marker in str(comment.get("body") or "")
+        and is_actions_bot_comment(comment)
+    ]
 
 
 def list_comments(client: GitHubClient, pr: int) -> list[Mapping[str, Any]]:
-    comments = client.get(f"/issues/{pr}/comments?per_page=100")
-    return comments if isinstance(comments, list) else []
+    comments: list[Mapping[str, Any]] = []
+    for page in range(1, 101):
+        values = client.get(f"/issues/{pr}/comments?per_page=100&page={page}")
+        if not isinstance(values, list):
+            raise RunnerError("issue-comments-shape-invalid")
+        comments.extend(item for item in values if isinstance(item, Mapping))
+        if len(values) < 100:
+            return comments
+    raise RunnerError("issue-comments-pagination-bound-exceeded")
 
 
 def post_receipt(client: GitHubClient, pr: int, receipt: Mapping[str, Any]) -> None:
@@ -537,8 +554,8 @@ def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[s
             release_kind=kind,
             reason_codes=reasons,
         )
-        post_receipt(client, pr_number, receipt)
         write_receipt(output, receipt)
+        post_receipt(client, pr_number, receipt)
         return receipt
 
     merge_sha: str | None = None
@@ -579,8 +596,8 @@ def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[s
         deployed_sha=deployed_sha,
         manifest=manifest,
     )
-    post_receipt(client, pr_number, receipt)
     write_receipt(output, receipt)
+    post_receipt(client, pr_number, receipt)
     return receipt
 
 

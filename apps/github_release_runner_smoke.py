@@ -130,9 +130,15 @@ def main() -> None:
     assert client.merge_body == {"sha": HEAD, "merge_method": "squash"}
 
     operation = runner.operation_id("orenvlad-ai/wb-core", 99, 1041, HEAD, golden["plan_hash"])
-    comment = {"body": runner.receipt_marker(operation) + "\n{}"}
+    comment = {
+        "body": runner.receipt_marker(operation) + "\n{}",
+        "user": {"login": "github-actions[bot]"},
+    }
     assert runner.matching_receipts([comment], operation) == [comment]
     assert len(runner.matching_receipts([comment, comment], operation)) == 2
+    assert runner.matching_receipts(
+        [{**comment, "user": {"login": "contributor"}}], operation
+    ) == []
 
     receipt = runner.make_receipt(
         state="done",

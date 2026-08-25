@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +83,33 @@ def main() -> None:
         pass
     else:
         raise AssertionError("unauthorized apply comment must fail closed")
+
+    release_payload = {
+        "state": "awaiting_apply",
+        "operation_id": "op-1",
+        "merge_sha": "a" * 40,
+        "manifest": {"sha256": "b" * 64, "operation_id": "op-1"},
+    }
+    release_comment = {
+        "user": {"login": "github-actions[bot]"},
+        "body": "<!-- wb-core-release-receipt operation=op-1 -->\n```json\n"
+        + json.dumps(release_payload)
+        + "\n```",
+    }
+    assert apply.parse_release_receipt(
+        [release_comment], merge_sha="a" * 40, manifest_sha="b" * 64, operation="op-1"
+    ) == release_payload
+    try:
+        apply.parse_release_receipt(
+            [{**release_comment, "user": {"login": "contributor"}}],
+            merge_sha="a" * 40,
+            manifest_sha="b" * 64,
+            operation="op-1",
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("untrusted awaiting-apply receipt must fail closed")
     print("production_apply_runner_smoke: ok")
 
 

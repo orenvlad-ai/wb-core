@@ -25,6 +25,8 @@ from apps.github_release_runner import (  # noqa: E402
     RECEIPT_MARKER,
     canonical_json_bytes,
     exact_sha,
+    is_actions_bot_comment,
+    list_comments,
 )
 from apps.release_protocol import CANONICAL_REPOSITORY, validate_production_manifest  # noqa: E402
 
@@ -50,11 +52,21 @@ def marker(operation: str) -> str:
     return f"<!-- {APPLY_MARKER} operation={operation} -->"
 
 
-def parse_release_receipt(comments: list[Mapping[str, Any]], *, merge_sha: str, manifest_sha: str) -> dict[str, Any]:
+def parse_release_receipt(
+    comments: list[Mapping[str, Any]],
+    *,
+    merge_sha: str,
+    manifest_sha: str,
+    operation: str,
+) -> dict[str, Any]:
     matches = []
     for comment in comments:
         body = str(comment.get("body") or "")
-        if f"<!-- {RECEIPT_MARKER} " not in body or "```json" not in body:
+        if (
+            f"<!-- {RECEIPT_MARKER} " not in body
+            or "```json" not in body
+            or not is_actions_bot_comment(comment)
+        ):
             continue
         try:
             payload_text = body.split("```json", 1)[1].split("```", 1)[0]
@@ -64,9 +76,11 @@ def parse_release_receipt(comments: list[Mapping[str, Any]], *, merge_sha: str, 
         manifest = payload.get("manifest")
         if (
             payload.get("state") == "awaiting_apply"
+            and payload.get("operation_id") == operation
             and payload.get("merge_sha") == merge_sha
             and isinstance(manifest, Mapping)
             and manifest.get("sha256") == manifest_sha
+            and manifest.get("operation_id") == operation
         ):
             matches.append(payload)
     if len(matches) != 1:
@@ -163,9 +177,13 @@ def main() -> int:
     pr = client.get(f"/pulls/{args.pr}")
     if pr.get("merged") is not True or exact_sha(pr.get("merge_commit_sha"), "pr-merge") != merge_sha:
         raise ApplyError("PR merge binding mismatch")
-    comments = client.get(f"/issues/{args.pr}/comments?per_page=100")
-    comments = comments if isinstance(comments, list) else []
-    prior = [item for item in comments if marker(args.operation_id) in str(item.get("body") or "")]
+    comments = list_comments(client, args.pr)
+    prior = [
+        item
+        for item in comments
+        if marker(args.operation_id) in str(item.get("body") or "")
+        and is_actions_bot_comment(item)
+    ]
     if prior:
         if len(prior) != 1:
             raise ApplyError("duplicate or ambiguous durable apply receipt")
@@ -173,7 +191,12 @@ def main() -> int:
         args.output.write_bytes(canonical_json_bytes(receipt) + b"\n")
         print(json.dumps(receipt, sort_keys=True))
         return 0
-    release_receipt = parse_release_receipt(comments, merge_sha=merge_sha, manifest_sha=args.manifest_sha256)
+    release_receipt = parse_release_receipt(
+        comments,
+        merge_sha=merge_sha,
+        manifest_sha=args.manifest_sha256,
+        operation=args.operation_id,
+    )
     authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
     validate_authorization(
         authorization,
@@ -209,10 +232,10 @@ def main() -> int:
         "apply_count": result["apply_count"],
         "evidence": result,
     }
-    body = marker(args.operation_id) + "\nProtocol-v2 one-shot production apply receipt:\n```json\n" + json.dumps(receipt, sort_keys=True, indent=2) + "\n```"
-    client.post(f"/issues/{args.pr}/comments", {"body": body})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(canonical_json_bytes(receipt) + b"\n")
+    body = marker(args.operation_id) + "\nProtocol-v2 one-shot production apply receipt:\n```json\n" + json.dumps(receipt, sort_keys=True, indent=2) + "\n```"
+    client.post(f"/issues/{args.pr}/comments", {"body": body})
     print(json.dumps(receipt, sort_keys=True))
     return 0
 
