@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--deploy-lease-json",
         default="",
         help=(
-            "Fresh GitHub Release Train Finance migration deploy-lease "
+            "Fresh Finance migration exclusive-operation deploy-lease "
             "readback. Canonical hosted execution requires it for every "
             "migration phase except health."
         ),

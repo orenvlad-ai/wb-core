@@ -1,0 +1,115 @@
+name: Release Runner
+
+on:
+  workflow_run:
+    workflows:
+      - PR Gate
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  route:
+    name: Route successful exact PR Gate plan
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      deploy_required: ${{ steps.route.outputs.deploy_required }}
+      release_kind: ${{ steps.route.outputs.release_kind }}
+    steps:
+      - name: Checkout trusted main router
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read immutable plan route only
+        id: route
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/github_release_runner.py route
+          --workflow-run-id "${{ github.event.workflow_run.id }}"
+          --github-output "$GITHUB_OUTPUT"
+
+  repo_release:
+    name: One-shot repository release
+    needs:
+      - route
+    if: needs.route.outputs.deploy_required == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted main runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Admit once, merge expected head once, emit one receipt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/github_release_runner.py run
+          --workflow-run-id "${{ github.event.workflow_run.id }}"
+          --output "$RUNNER_TEMP/release-receipt.json"
+
+      - name: Upload release receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-receipt-${{ github.event.workflow_run.id }}
+          path: ${{ runner.temp }}/release-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  deployed_release:
+    name: One-shot deployed release
+    needs:
+      - route
+    if: needs.route.outputs.deploy_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - name: Checkout trusted main runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install canonical deploy adapter dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Admit once, merge expected head once, deploy exact merge once, emit one receipt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/github_release_runner.py run
+          --workflow-run-id "${{ github.event.workflow_run.id }}"
+          --output "$RUNNER_TEMP/release-receipt.json"
+
+      - name: Upload release receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-receipt-${{ github.event.workflow_run.id }}
+          path: ${{ runner.temp }}/release-receipt.json
+          if-no-files-found: warn
+          retention-days: 90

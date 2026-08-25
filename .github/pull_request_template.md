@@ -1,30 +1,34 @@
-## Проверяемый итог
+## Outcome
 
-<!-- Коротко: какой результат должен быть подтверждён после closure. -->
+<!-- Проверяемый результат этого одного bounded implementation block. -->
 
-## Scope и ограничения
+## Task passport
 
-<!-- Укажите bounded scope, запреты и один execution-контур. -->
+- Main task:
+- Implementation subagent:
+- Included scope:
+- Explicitly excluded:
+- Accepted decisions preserved:
 
-- [ ] `task:standard`
-- [ ] `scope:repo-only`
-- [ ] `scope:live-runtime`
-- [ ] `scope:production-mutation` — автоматический выпуск запрещён до human gate
+## Deterministic plan
 
-## Проверки
+- Exact base SHA:
+- Exact head SHA:
+- Test plan hash:
+- Derived release kind:
+- Selected suites / full-regression reason:
 
-<!-- Перечислите реально выполненные targeted checks. -->
+## Verification
 
-- [ ] Targeted checks пройдены
-- [ ] Полный semantic diff прочитан
-- [ ] Findings исправлены и проверки повторены
-- [ ] Authoritative docs синхронизированы
-- [ ] Secrets, production data и unrelated edits отсутствуют
+- [ ] Local targeted checks passed
+- [ ] Full semantic diff reviewed
+- [ ] Findings fixed and checks repeated
+- [ ] Authoritative docs synchronized
+- [ ] No secrets, production data, or unrelated edits
+- [ ] Exact pull-request `pr-gate` successful
 
-## Release
+## Safety
 
-Для ordinary PR используется `task:standard` и ровно одна `scope:*` метка.
-После successful `baseline` PR получает `release:ready`. Release Train повторно
-проверяет open non-draft PR, same-repository head, labels и baseline, затем
-сериализует sync, merge и применимый deploy/verify. Технический terminal state
-не означает owner acceptance.
+- Production/runtime mutation in this PR:
+- Exact manifest / human gate (only when applicable):
+- Non-target and rollback evidence (only when applicable):

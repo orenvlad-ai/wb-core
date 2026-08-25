@@ -1,8 +1,9 @@
-"""Validation contract for the GitHub-owned Finance migration deploy lease.
+"""Validation contract for the retained Finance migration exclusive-operation lease.
 
-The global lease itself is durable GitHub state owned by the Release Train.
-Hosted Finance commands consume a freshly generated, machine-readable status
-document and bind it to the exact SHA deployed on the canonical target.
+The lease is an independent fail-closed Finance/storage safety guard, not a
+release queue. Hosted Finance commands consume a freshly generated,
+machine-readable status document and bind it to the exact SHA deployed on the
+canonical target.
 """
 
 from __future__ import annotations
@@ -134,7 +135,7 @@ def validate_finance_migration_deploy_lease(
         )
     if payload.get("global_release_blocked") is not True:
         raise FinanceMigrationDeployLeaseError(
-            "Finance migration deploy lease lacks global Release Train hold readback"
+            "Finance migration deploy lease lacks exclusive-operation hold readback"
         )
 
     lease = payload.get("lease")

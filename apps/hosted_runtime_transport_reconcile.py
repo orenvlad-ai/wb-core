@@ -5,7 +5,7 @@ File sync and dependency installation deliberately remain fail-closed. A
 separate explicit safe-finalize lane may CAS only an incomplete completion bit
 after exact metadata/runtime SHA, immutable metadata bytes, auth, process and
 probe evidence all agree. The explicit read-only mode disables every repair and
-is used when Release Train needs deployment proof without runtime mutation.
+is used when the one-shot Release Runner needs deployment proof without runtime mutation.
 """
 
 from __future__ import annotations

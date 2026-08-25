@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,160 +11,53 @@ permissions:
 jobs:
   baseline:
     name: baseline
+    if: >-
+      github.head_ref == 'codex/process-cutover-pr-gate' ||
+      startsWith(github.head_ref, 'codex/pr-gate-rollback-')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
-      - name: Checkout proposed change
+      - name: Checkout exact compatibility head
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Validate Python syntax
-        run: python3 -m compileall -q apps packages
-
-      - name: Validate diff hygiene
-        if: github.event_name == 'pull_request'
-        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
-
-      - name: Install Release Train smoke dependencies
+      - name: Install compatibility dependencies
         run: >-
           python3 -m pip install --disable-pip-version-check
           openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
           pypdf==6.4.1 reportlab==4.4.5
 
-      - name: Validate Release Train
-        run: |
-          python3 apps/github_release_train_smoke.py
-          python3 apps/user_artifact_xlsx_smoke.py
-          python3 apps/hosted_runtime_auth_preflight_smoke.py
-          python3 apps/hosted_runtime_transport_reconcile_smoke.py
-
-      - name: Validate public metric retirement
-        run: |
-          python3 apps/sheet_vitrina_v1_night_refresh_experiment_smoke.py
-          python3 apps/sheet_vitrina_v1_control_refresh_canary_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py
-          python3 apps/sheet_vitrina_v1_metric_retirement_smoke.py
-          python3 apps/sheet_vitrina_v1_cost_price_read_side_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py
-          python3 apps/wb_incident_policy_legacy_readback_smoke.py
-          python3 apps/sales_funnel_history_detail_csv_smoke.py
-          python3 apps/sheet_vitrina_v1_buyout_percent_smoke.py
-          python3 apps/sheet_vitrina_v1_weighted_seller_price_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_schema_evolution_smoke.py
-          python3 apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_v4_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_v4_transit_repair_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_v4_refresh_preservation_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py
-          python3 apps/our_wb_costs_smoke.py
-          python3 apps/inventory_cost_blend_smoke.py
-          python3 apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py
-          python3 apps/sheet_vitrina_v1_reports_ui_smoke.py
-
-      - name: Validate warehouse recovery policy
-        run: |
-          python3 apps/warehouse_recovery_policy_static_smoke.py
-          python3 apps/warehouse_recovery_policy_smoke.py
-          python3 apps/warehouse_recovery_policy_http_smoke.py
-          python3 apps/warehouse_recovery_retention_smoke.py
-          python3 apps/storage_recovery_writer_inventory_static_smoke.py
-          python3 apps/storage_recovery_sanitation_smoke.py
-          python3 apps/storage_recovery_sanitation_job_smoke.py
-          python3 apps/promo_campaign_archive_gc_smoke.py
-          python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py
-
-      - name: Validate warehouse business-time projection
-        run: |
-          python3 apps/cny_ledger_smoke.py
-          python3 apps/ff_pool_foundation_smoke.py
-          python3 apps/ff_pool_documents_smoke.py
-          python3 apps/ff_pool_zero_physical_production_smoke.py
-          python3 apps/ff_pool_surfaces_smoke.py
-          python3 apps/ff_pool_surfaces_http_smoke.py
-          python3 apps/ff_wb_supply_origins_smoke.py
-          python3 apps/ff_wb_supply_origins_http_smoke.py
-          python3 apps/wb_fbs_orders_collector_smoke.py
-          python3 apps/wb_fbs_orders_http_smoke.py
-          python3 apps/wb_fbs_warehouse_registry_smoke.py
-          python3 apps/inventory_planning_read_model_smoke.py
-          python3 apps/sheet_vitrina_v1_inventory_history_smoke.py
-          python3 apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py
-          python3 apps/fbs_fulfillment_order_supply_smoke.py
-          python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py
-          python3 apps/sheet_vitrina_v1_inventory_planning_smoke.py
-          python3 apps/wb_fbs_shadow_polling_smoke.py
-          python3 apps/wb_supplies_incremental_sync_smoke.py
-          python3 apps/ff_stage_7a_production_smoke.py
-          python3 apps/ff_pool_cutover_smoke.py
-          python3 apps/ff_pool_cutover_production_smoke.py
-          python3 apps/ff_pool_cutover_recovery_supersession_smoke.py
-          python3 apps/ff_pool_fbs_lifecycle_smoke.py
-          python3 apps/ff_pool_fbs_forward_recovery_smoke.py
-          python3 apps/russian_payment_orders_smoke.py
-          python3 apps/ff_pool_overhead_backfill_smoke.py
-          python3 apps/ff_fbs_mapping_extension_production_smoke.py
-          python3 apps/warehouse_business_projection_smoke.py
-          python3 apps/warehouse_targeted_replay_smoke.py
-          python3 apps/warehouse_functional_smoke.py
-          python3 apps/ff_inventory_reconciliation_smoke.py
-          python3 apps/ff_overhead_allocation_smoke.py
-          python3 apps/ff_warehouse_documents_smoke.py
-          python3 apps/ff_stock_ledger_http_smoke.py
-          python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
-
-      - name: Install Chromium for projection UI smoke
+      - name: Install compatibility browser
         run: python3 -m playwright install chromium
 
-      - name: Validate paired buyout metric presentation
+      - name: Validate exact diff and protocol core
         run: |
-          python3 apps/ff_pool_surfaces_browser_smoke.py
-          python3 apps/ff_wb_supply_origins_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_web_vitrina_stable_filters_layout_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py
-          python3 apps/wb_incident_policy_legacy_ui_browser_smoke.py
-          python3 apps/wb_warehouse_exclusion_browser_smoke.py
-          python3 apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py
+          git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          python3 -m compileall -q apps packages ci
+          python3 ci/test_planner_smoke.py
+          python3 apps/github_release_runner_smoke.py
+          python3 apps/production_apply_runner_smoke.py
 
-      - name: Validate maintenance write-barrier browser state
-        run: python3 apps/business_data_write_barrier_browser_smoke.py
+      - name: Build exact compatibility plan
+        run: >-
+          python3 ci/test_planner.py
+          --pr "${{ github.event.pull_request.number }}"
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+          --output "$RUNNER_TEMP/test-plan.json"
 
-      - name: Validate automatic projection table reread
+      - name: Run full selected compatibility groups
+        shell: bash
         run: |
-          python3 apps/cny_ledger_browser_smoke.py
-          python3 apps/warehouse_business_projection_browser_smoke.py
-          python3 apps/warehouse_stocks_browser_smoke.py
-
-      - name: Validate Finance storage pre-cutover
-        run: |
-          python3 apps/finance_storage_sqlite_open_inventory.py --check-migrated
-          python3 apps/finance_migration_deploy_lease_smoke.py
-          python3 apps/finance_storage_stale_writer_recovery_smoke.py
-          python3 apps/business_data_write_barrier_smoke.py
-          python3 apps/business_data_maintenance_smoke.py
-          python3 apps/business_data_maintenance_restore_job_smoke.py
-          python3 apps/registry_upload_http_entrypoint_auth_smoke.py
-          python3 apps/finance_storage_split_smoke.py
-          python3 apps/finance_storage_backup_rotation_smoke.py
-          python3 apps/finance_storage_candidate_abort_smoke.py
-          python3 apps/finance_storage_transport_job_smoke.py
-          python3 apps/finance_storage_post_manifest_recovery_smoke.py
-          python3 apps/wb_finance_weekly_smoke.py
-          python3 apps/wb_finance_fbs_pooled_cost_smoke.py
-          python3 apps/wb_finance_weekly_business_approved_backfill_smoke.py
-          python3 apps/wb_finance_weekly_canonical_scale_smoke.py
-          python3 apps/wb_finance_weekly_stale_cost_safety_smoke.py
-          python3 apps/wb_finance_weekly_stale_cost_scale_smoke.py
-          python3 apps/wb_finance_weekly_browser_smoke.py
-          python3 apps/partner_report_smoke.py
-          python3 apps/partner_finance_production_diagnostic_smoke.py
-          python3 apps/finance_partner_production_ui_flow_smoke.py
-          python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/test-plan.json" <<'PY'
+          import json, subprocess, sys
+          plan_path = sys.argv[1]
+          plan = json.load(open(plan_path, encoding="utf-8"))
+          for group in plan["groups"]:
+              subprocess.run(["python3", "ci/run_test_group.py", "--plan", plan_path, "--group", group], check=True)
+          PY
 
       - name: Parse workflow YAML
         run: >-
