@@ -69,6 +69,8 @@ jobs:
       browser_groups: ${{ steps.plan.outputs.browser_groups }}
       plan_hash: ${{ steps.plan.outputs.plan_hash }}
       plan_valid: ${{ steps.plan.outputs.plan_valid }}
+      execution_valid: ${{ steps.plan.outputs.execution_valid }}
+      release_valid: ${{ steps.plan.outputs.release_valid }}
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     steps:
       - name: Checkout proposed change
@@ -117,7 +119,7 @@ jobs:
     name: Selected group · ${{ matrix.group }}
     needs:
       - plan
-    if: needs.plan.outputs.plan_valid == 'true'
+    if: needs.plan.outputs.execution_valid == 'true'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -170,6 +172,8 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           SELECTED_RESULT: ${{ needs.selected.result }}
           PLAN_VALID: ${{ needs.plan.outputs.plan_valid }}
+          EXECUTION_VALID: ${{ needs.plan.outputs.execution_valid }}
+          RELEASE_VALID: ${{ needs.plan.outputs.release_valid }}
         run: |
           python3 - <<'PY'
           import os
@@ -178,6 +182,8 @@ jobs:
               "PLAN_RESULT": "success",
               "SELECTED_RESULT": "success",
               "PLAN_VALID": "true",
+              "EXECUTION_VALID": "true",
+              "RELEASE_VALID": "true",
           }
           mismatches = {key: (os.environ.get(key), value) for key, value in expected.items() if os.environ.get(key) != value}
           if mismatches:

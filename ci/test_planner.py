@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 REGISTRY_PATH = "ci/test_registry.json"
+PR_GATE_WORKFLOW_PATH = ".github/workflows/pr-gate.yml"
 REGISTRY_SCHEMA = "wb-core.test-registry/v2"
 PLAN_SCHEMA = "wb-core.test-plan/v2"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -87,6 +89,85 @@ def _string_list(value: Any, field: str) -> list[str]:
     return list(value)
 
 
+def fast_core_workflow_commands() -> list[tuple[str, ...]]:
+    """Extract unconditional exact commands from multiline runs in PR Gate core."""
+
+    workflow_path = ROOT / PR_GATE_WORKFLOW_PATH
+    if not workflow_path.is_file():
+        raise PlanError(f"Fast core workflow is missing: {PR_GATE_WORKFLOW_PATH}")
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    try:
+        core_start = lines.index("  core:")
+    except ValueError as exc:
+        raise PlanError("PR Gate workflow lacks the core job") from exc
+    core_end = next(
+        (
+            index
+            for index in range(core_start + 1, len(lines))
+            if re.fullmatch(r"  [A-Za-z0-9_-]+:", lines[index])
+        ),
+        len(lines),
+    )
+    core_lines = lines[core_start:core_end]
+    if any(line.startswith("    if:") for line in core_lines):
+        raise PlanError("PR Gate core job must be unconditional")
+
+    commands: list[tuple[str, ...]] = []
+    step_start = 0
+    for index, line in enumerate(core_lines):
+        if line.startswith("      - "):
+            step_start = index
+        if line != "        run: |":
+            continue
+        step_end = next(
+            (
+                cursor
+                for cursor in range(index + 1, len(core_lines))
+                if core_lines[cursor].startswith("      - ")
+            ),
+            len(core_lines),
+        )
+        if any(
+            candidate.startswith("        if:")
+            for candidate in core_lines[step_start:step_end]
+        ):
+            continue
+        for command_line in core_lines[index + 1 : step_end]:
+            if not command_line.startswith("          "):
+                continue
+            stripped = command_line.strip()
+            if not stripped or stripped.startswith(("#", "set ")):
+                continue
+            try:
+                command = tuple(shlex.split(stripped))
+            except ValueError as exc:
+                raise PlanError("PR Gate Fast core contains an invalid command line") from exc
+            if command:
+                commands.append(command)
+    return commands
+
+
+def validate_core_only_commands(
+    entries: Sequence[Mapping[str, Any]], source: str
+) -> None:
+    workflow_commands = fast_core_workflow_commands() if entries else []
+    for index, entry in enumerate(entries):
+        command = tuple(entry["command"])
+        path = _repo_command_path(command)
+        if path is None:
+            raise PlanError(
+                f"{source}.core_only_commands[{index}] lacks a repo script path"
+            )
+        if not (ROOT / path).is_file():
+            raise PlanError(
+                f"{source}.core_only_commands[{index}] path does not exist: {path}"
+            )
+        if workflow_commands.count(command) != 1:
+            raise PlanError(
+                f"{source}.core_only_commands[{index}] must occur exactly once in unconditional PR Gate Fast core: {list(command)}"
+            )
+
+
 def validate_registry(registry: Mapping[str, Any], source: str) -> None:
     if registry.get("schema") != REGISTRY_SCHEMA:
         raise PlanError(f"unsupported registry schema in {source}")
@@ -98,6 +179,31 @@ def validate_registry(registry: Mapping[str, Any], source: str) -> None:
     if SHA_RE.fullmatch(str(protocol.get("cutover_epoch") or "")) is None:
         raise PlanError(f"{source} has an invalid cutover epoch")
     full = _string_list(protocol.get("full_regression_suites"), f"{source}.full_regression_suites")
+    command_self_coverage = protocol.get("command_self_coverage", False)
+    if not isinstance(command_self_coverage, bool):
+        raise PlanError(f"{source}.command_self_coverage must be boolean")
+    core_only = protocol.get("core_only_commands", [])
+    if not isinstance(core_only, list):
+        raise PlanError(f"{source}.core_only_commands must be an array")
+    normalized_core_only: set[tuple[str, ...]] = set()
+    for index, entry in enumerate(core_only):
+        if not isinstance(entry, Mapping):
+            raise PlanError(f"{source}.core_only_commands[{index}] is invalid")
+        command = entry.get("command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or any(not isinstance(part, str) or not part for part in command)
+        ):
+            raise PlanError(f"{source}.core_only_commands[{index}].command is invalid")
+        justification = entry.get("justification")
+        if not isinstance(justification, str) or not justification.strip():
+            raise PlanError(f"{source}.core_only_commands[{index}].justification is required")
+        normalized = tuple(command)
+        if normalized in normalized_core_only:
+            raise PlanError(f"{source}.core_only_commands contains a duplicate command")
+        normalized_core_only.add(normalized)
+    validate_core_only_commands(core_only, source)
     if not isinstance(suites, Mapping) or not suites:
         raise PlanError(f"{source}.suites must be a non-empty object")
     for suite_id, suite in suites.items():
@@ -117,17 +223,38 @@ def validate_registry(registry: Mapping[str, Any], source: str) -> None:
     missing_full = sorted(set(full) - set(suites))
     if missing_full:
         raise PlanError(f"{source} full regression names unknown suites: {missing_full}")
+    missing_dependencies = sorted(
+        {
+            dependency
+            for suite in suites.values()
+            for dependency in suite.get("depends_on", [])
+            if dependency not in suites
+        }
+    )
+    if missing_dependencies:
+        raise PlanError(f"{source} has unresolved suite dependencies: {missing_dependencies}")
     if not isinstance(rules, list) or not rules:
         raise PlanError(f"{source}.rules must be a non-empty array")
     for index, rule in enumerate(rules):
         if not isinstance(rule, Mapping):
             raise PlanError(f"{source}.rules[{index}] is invalid")
         _string_list(rule.get("paths"), f"{source}.rules[{index}].paths")
+        exclude_paths = rule.get("exclude_paths", [])
+        if not isinstance(exclude_paths, list) or any(
+            not isinstance(item, str) or not item for item in exclude_paths
+        ):
+            raise PlanError(f"{source}.rules[{index}].exclude_paths is invalid")
         selected = _string_list(rule.get("suites"), f"{source}.rules[{index}].suites")
         if sorted(set(selected) - set(suites)):
             raise PlanError(f"{source}.rules[{index}] names an unknown suite")
         if rule.get("release") not in RELEASE_ORDER:
             raise PlanError(f"{source}.rules[{index}].release is invalid")
+    if command_self_coverage:
+        coverage = registered_command_coverage(registry)
+        if coverage["gaps"]:
+            raise PlanError(
+                f"{source} registered command self-coverage gaps: {coverage['gaps']}"
+            )
 
 
 def _normalized_suite(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -184,6 +311,7 @@ def union_registries(
             rule = {
                 "id": str(raw_rule.get("id") or "").strip(),
                 "paths": sorted(set(raw_rule["paths"])),
+                "exclude_paths": sorted(set(raw_rule.get("exclude_paths", []))),
                 "suites": sorted(set(raw_rule["suites"])),
                 "release": raw_rule["release"],
                 "force_full": bool(raw_rule.get("force_full", False)),
@@ -197,11 +325,26 @@ def union_registries(
             for suite in registry["protocol"]["full_regression_suites"]
         }
     )
+    core_only_values: dict[bytes, dict[str, Any]] = {}
+    for registry in registries:
+        for entry in registry["protocol"].get("core_only_commands", []):
+            normalized = {
+                "command": list(entry["command"]),
+                "justification": str(entry["justification"]).strip(),
+            }
+            core_only_values[canonical_json_bytes(normalized)] = normalized
     union = {
         "schema": REGISTRY_SCHEMA,
         "protocol": {
             "version": 2,
             "cutover_epoch": epochs.pop(),
+            "command_self_coverage": any(
+                bool(registry["protocol"].get("command_self_coverage", False))
+                for registry in registries
+            ),
+            "core_only_commands": [
+                core_only_values[key] for key in sorted(core_only_values)
+            ],
             "full_regression_suites": full,
         },
         "suites": {key: suites[key] for key in sorted(suites)},
@@ -209,6 +352,45 @@ def union_registries(
     }
     validate_registry(union, "registry union")
     return union, reason_codes
+
+
+def registry_union_for_plan(
+    base: Mapping[str, Any] | None,
+    head: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str], bool]:
+    """Return an executable union, falling back to full coverage on invalid input.
+
+    A valid counterpart may supply the exact commands needed to execute a full
+    regression, but the resulting release plan remains invalid so the PR cannot
+    pass the aggregate gate.
+    """
+
+    base_error = False
+    head_error = False
+    if base is not None:
+        try:
+            validate_registry(base, "base registry")
+        except PlanError:
+            base_error = True
+    try:
+        validate_registry(head, "head registry")
+    except PlanError:
+        head_error = True
+
+    if head_error:
+        if base is None or base_error:
+            raise PlanError("both registry inputs are invalid; no executable full regression exists")
+        fallback, _ = union_registries(base, base)
+        return fallback, ["head-registry-invalid-full-regression"], False
+    if base_error:
+        fallback, _ = union_registries(head, head)
+        return fallback, ["base-registry-invalid-full-regression"], False
+    try:
+        union, reasons = union_registries(base, head)
+    except PlanError:
+        fallback, _ = union_registries(head, head)
+        return fallback, ["registry-union-invalid-full-regression"], False
+    return union, reasons, True
 
 
 def changed_paths(base_sha: str, head_sha: str) -> list[dict[str, str]]:
@@ -253,6 +435,12 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
+def _rule_matches(path: str, rule: Mapping[str, Any]) -> bool:
+    return _matches(path, rule["paths"]) and not _matches(
+        path, rule.get("exclude_paths", [])
+    )
+
+
 def _dependency_closure(selected: set[str], suites: Mapping[str, Mapping[str, Any]]) -> tuple[set[str], bool]:
     expanded = set(selected)
     changed = False
@@ -270,6 +458,86 @@ def _dependency_closure(selected: set[str], suites: Mapping[str, Mapping[str, An
             raise PlanError(f"unresolved suite dependencies: {sorted(unknown)}")
         expanded.update(additions)
         changed = True
+
+
+def _repo_command_path(command: Sequence[str]) -> str | None:
+    for part in command[1:]:
+        if (
+            not part.startswith("-")
+            and not Path(part).is_absolute()
+            and part.endswith((".py", ".mjs", ".sh"))
+        ):
+            return part
+    return None
+
+
+def registered_command_coverage(registry: Mapping[str, Any]) -> dict[str, Any]:
+    suites = registry["suites"]
+    rules = registry["rules"]
+    core_only = {
+        tuple(entry["command"])
+        for entry in registry["protocol"].get("core_only_commands", [])
+    }
+    commands = {
+        tuple(command)
+        for suite in suites.values()
+        for command in suite["commands"]
+    }
+    gaps: list[dict[str, Any]] = []
+    for command in sorted(commands):
+        path = _repo_command_path(command)
+        if path is None:
+            if command not in core_only:
+                gaps.append({"command": list(command), "reason": "repo-command-path-unresolved"})
+            continue
+        matched = [rule for rule in rules if _rule_matches(path, rule)]
+        selected = {
+            suite_id for rule in matched for suite_id in rule["suites"]
+        }
+        selected, _dependency_added = _dependency_closure(selected, suites)
+        selected_commands = {
+            tuple(candidate)
+            for suite_id in selected
+            for candidate in suites[suite_id]["commands"]
+        }
+        if command not in selected_commands and command not in core_only:
+            gaps.append(
+                {
+                    "command": list(command),
+                    "path": path,
+                    "selected_suites": sorted(selected),
+                    "reason": "own-path-does-not-execute-command",
+                }
+            )
+    return {
+        "valid": not gaps,
+        "registered_command_count": len(commands),
+        "core_only_command_count": len(core_only),
+        "gaps": gaps,
+    }
+
+
+def _deduplicated_execution(
+    selected_ids: Sequence[str], suites: Mapping[str, Mapping[str, Any]]
+) -> tuple[dict[str, Any], int]:
+    seen: set[tuple[str, ...]] = set()
+    duplicate_count = 0
+    execution: dict[str, Any] = {}
+    for suite_id in selected_ids:
+        commands: list[list[str]] = []
+        for command in suites[suite_id]["commands"]:
+            normalized = tuple(command)
+            if normalized in seen:
+                duplicate_count += 1
+                continue
+            seen.add(normalized)
+            commands.append(list(command))
+        execution[suite_id] = {
+            "group": suites[suite_id]["group"],
+            "requires_browser": suites[suite_id]["requires_browser"],
+            "commands": commands,
+        }
+    return execution, duplicate_count
 
 
 def _release_kind(current: str, candidate: str) -> str:
@@ -303,22 +571,31 @@ def build_plan(
     base_registry_blob_sha256: str | None = None,
     head_registry_blob_sha256: str | None = None,
     changes: Sequence[Mapping[str, str]],
+    registry_error_codes: Sequence[str] = (),
 ) -> dict[str, Any]:
     if pr_number <= 0:
         raise PlanError("pull request number must be positive")
-    union, reason_codes = union_registries(base_registry, head_registry)
+    union, reason_codes, registry_valid = registry_union_for_plan(
+        base_registry, head_registry
+    )
+    if registry_error_codes:
+        registry_valid = False
+        reason_codes.extend(registry_error_codes)
     cutover_bootstrap = (
         base_registry is None and base_sha == union["protocol"]["cutover_epoch"]
     )
+    if base_registry is None and not cutover_bootstrap:
+        registry_valid = False
+        reason_codes.append("base-registry-missing-full-regression")
     paths = _record_paths(changes)
     suites = union["suites"]
     selected: set[str] = set()
     release_kind = "repo_only"
     unknown_paths: list[str] = []
-    force_full = False
+    force_full = not registry_valid
 
     for path in paths:
-        matches = [rule for rule in union["rules"] if _matches(path, rule["paths"])]
+        matches = [rule for rule in union["rules"] if _rule_matches(path, rule)]
         if not matches:
             unknown_paths.append(path)
             release_kind = _release_kind(release_kind, "live_runtime")
@@ -348,25 +625,23 @@ def build_plan(
         reason_codes.append("cutover-bootstrap-no-deploy")
 
     manifest = None
-    plan_errors: list[str] = []
+    plan_errors: list[str] = [] if registry_valid else ["registry-invalid"]
     if release_kind == "production_mutation":
-        manifest, plan_errors = _manifest_binding(head_sha, paths)
+        manifest, manifest_errors = _manifest_binding(head_sha, paths)
+        plan_errors.extend(manifest_errors)
 
     selected_ids = sorted(selected)
-    execution = {
-        suite_id: {
-            "group": suites[suite_id]["group"],
-            "requires_browser": suites[suite_id]["requires_browser"],
-            "commands": suites[suite_id]["commands"],
-        }
-        for suite_id in selected_ids
-    }
-    groups = sorted({suite["group"] for suite in execution.values()})
+    execution, duplicate_command_count = _deduplicated_execution(selected_ids, suites)
+    if duplicate_command_count:
+        reason_codes.append("duplicate-command-deduplicated")
+    groups = sorted(
+        {suite["group"] for suite in execution.values() if suite["commands"]}
+    )
     browser_groups = sorted(
         {
             suite["group"]
             for suite in execution.values()
-            if suite["requires_browser"] is True
+            if suite["requires_browser"] is True and suite["commands"]
         }
     )
     union_bytes = canonical_json_bytes(union)
@@ -382,6 +657,9 @@ def build_plan(
             "base_blob_sha256": base_registry_blob_sha256,
             "head_blob_sha256": head_registry_blob_sha256,
             "union_sha256": sha256(union_bytes),
+            "command_self_coverage": registered_command_coverage(union),
+            "deduplicated_command_count": duplicate_command_count,
+            "valid": registry_valid,
         },
         "changed_paths": list(changes),
         "changed_paths_digest": sha256(canonical_json_bytes(list(changes))),
@@ -412,6 +690,16 @@ def verify_plan(plan: Mapping[str, Any]) -> None:
     expected = sha256(canonical_json_bytes(unsigned))
     if supplied != expected:
         raise PlanError("test plan hash mismatch")
+    execution = plan.get("execution")
+    if not isinstance(execution, Mapping):
+        raise PlanError("test plan execution is invalid")
+    commands: list[tuple[str, ...]] = []
+    for suite in execution.values():
+        if not isinstance(suite, Mapping) or not isinstance(suite.get("commands"), list):
+            raise PlanError("test plan suite execution is invalid")
+        commands.extend(tuple(command) for command in suite["commands"])
+    if len(commands) != len(set(commands)):
+        raise PlanError("test plan executes a duplicate command")
 
 
 def write_github_output(path: Path, plan: Mapping[str, Any]) -> None:
@@ -421,6 +709,8 @@ def write_github_output(path: Path, plan: Mapping[str, Any]) -> None:
         "plan_hash": plan["plan_hash"],
         "release_kind": plan["release_plan"]["kind"],
         "plan_valid": str(bool(plan["release_plan"]["valid"])).lower(),
+        "execution_valid": "true",
+        "release_valid": str(bool(plan["release_plan"]["valid"])).lower(),
     }
     with path.open("a", encoding="utf-8") as handle:
         for key, value in values.items():
@@ -438,10 +728,22 @@ def main() -> int:
 
     base_sha = _exact_sha(args.base, "base")
     head_sha = _exact_sha(args.head, "head")
-    base_registry, base_digest = load_registry_at(base_sha)
-    head_registry, head_digest = load_registry_at(head_sha)
-    if head_registry is None or head_digest is None:
-        raise PlanError("head does not contain ci/test_registry.json")
+    registry_error_codes: list[str] = []
+    try:
+        base_registry, base_digest = load_registry_at(base_sha)
+    except PlanError:
+        base_registry, base_digest = None, None
+        registry_error_codes.append("base-registry-json-invalid-full-regression")
+    try:
+        head_registry, head_digest = load_registry_at(head_sha)
+    except PlanError:
+        head_registry, head_digest = None, None
+        registry_error_codes.append("head-registry-json-invalid-full-regression")
+    if head_registry is None:
+        if base_registry is None:
+            raise PlanError("head and base lack an executable test registry")
+        head_registry = base_registry
+        registry_error_codes.append("head-registry-missing-full-regression")
     plan = build_plan(
         pr_number=args.pr,
         base_sha=base_sha,
@@ -451,6 +753,7 @@ def main() -> int:
         base_registry_blob_sha256=base_digest,
         head_registry_blob_sha256=head_digest,
         changes=changed_paths(base_sha, head_sha),
+        registry_error_codes=registry_error_codes,
     )
     verify_plan(plan)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -458,7 +761,7 @@ def main() -> int:
     if args.github_output:
         write_github_output(args.github_output, plan)
     print(json.dumps({"plan_hash": plan["plan_hash"], "selected_suites": plan["selected_suites"], "release_plan": plan["release_plan"], "reason_codes": plan["reason_codes"]}, sort_keys=True))
-    return 0 if plan["release_plan"]["valid"] else 2
+    return 0
 
 
 if __name__ == "__main__":

@@ -34,15 +34,37 @@ Current canonical source acquisition остаётся server-side.
 - На один bounded implementation block создаётся ровно один fresh visible
   internal subagent. Его internal/task name соответствует
   `wbc NNNN SSS <latin transliteration>`: `SSS` последователен внутри main
-  task, semantic часть не длиннее 20 символов; subagent не pin-ится.
+  task, semantic часть — детерминированная латинская транслитерация русского
+  названия, а не английский перевод (`istoriya-ostatkov`, не
+  `inventory-history`), и не длиннее 20 символов; subagent не pin-ится.
+- Implementation dispatch выполняется только current internal-subagent
+  mechanism `collaboration.spawn_agent`. `codex_app.create_thread`,
+  `fork_thread`, `handoff_thread` и `send_message_to_thread` не являются его
+  заменой: user-owned task/thread создаётся только по прямой просьбе
+  пользователя. Если internal spawn недоступен, main chat возвращает exact
+  tooling blocker и не создаёт sidebar peer task. Internal subagent виден в
+  `Subagents`/`Activity` main task, не pin-ится и не создаёт
+  `::created-thread`.
+- Dispatch передаёт compact task passport и minimal bounded context. Полная
+  длинная main history не копируется по умолчанию; старые задачи читаются
+  on-demand только как evidence.
 - По умолчанию активен максимум один implementation subagent. Project config
   фиксирует тот же concurrency limit. Model-tier classification не используется.
+- Один implementation subagent владеет ровно одной веткой и одним PR. Новый
+  PR, включая infrastructure recovery, требует terminal handoff текущего блока
+  и следующего последовательного `SSS`; corrections в том же PR остаются у
+  текущего subagent.
 - Same-scope correction продолжает того же subagent. Материально новый scope
   или новый PR получает следующий `SSS` и нового subagent после terminal state
   предыдущего.
 - Subagent возвращает один terminal handoff и становится `Done`. Настоящий gate
   возвращает точный callback с одним требуемым действием и не остаётся
-  неопределённо `Active`.
+  неопределённо `Active`; pause/blocker является немедленным terminal
+  transition, а не причиной держать implementation task активной.
+- Main/subagent публикуют только meaningful state transitions. Одинаковые
+  сообщения «ещё идёт», частый polling неизменного CI и heartbeat-status
+  запрещены; используются event/terminal waits и UI activity. Истинный
+  blocker или terminal state сообщается сразу.
 - Пользователь не подтверждает повторно уже выбранную цель, business meaning,
   accepted exact plan или обычные технические решения внутри scope.
 
@@ -110,6 +132,10 @@ installed `openpyxl`, затем `xlsxwriter`, затем dependency-free OOXML.
 - Production read сначала определяет current target/source, затем использует
   штатный SSH и query-only server-owned access (`mode=ro` и
   `PRAGMA query_only=ON` для SQLite) либо эквивалент.
+- Production probe сначала разрешает exact canonical target и передаёт его
+  runner-у явно (`--target-file <canonical-target>`). Первый вызов
+  legacy/default target с расчётом на последующий guard не является preflight
+  или acceptance evidence.
 - Production mutation: dry-run default, explicit apply, bounded manifest,
   pre-change digest, backup/recovery evidence, expected affected records,
   non-target invariants, idempotency либо documented recovery, post-apply

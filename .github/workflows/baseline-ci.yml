@@ -11,9 +11,7 @@ permissions:
 jobs:
   baseline:
     name: baseline
-    if: >-
-      github.head_ref == 'codex/process-cutover-pr-gate' ||
-      startsWith(github.head_ref, 'codex/pr-gate-rollback-')
+    if: startsWith(github.head_ref, 'codex/pr-gate-rollback-')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
