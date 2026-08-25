@@ -166,7 +166,7 @@ def collect_workflow_plan(client: GitHubClient, workflow_run_id: int) -> tuple[d
     raw_zip = client.request(
         "GET",
         f"/actions/artifacts/{int(artifact['id'])}/zip",
-        accept="application/octet-stream",
+        accept="application/vnd.github+json",
         raw=True,
     )
     return run, artifact, extract_plan(raw_zip)

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,8 +88,61 @@ class FakeClient:
         return copy.deepcopy(self.pr)
 
 
+class ArtifactClient:
+    def __init__(self, artifact_plan: dict) -> None:
+        self.artifact_plan = artifact_plan
+        self.download_request: dict[str, object] = {}
+
+    def get(self, path: str) -> dict:
+        if path == "/actions/runs/99":
+            return workflow()
+        assert path == "/actions/runs/99/artifacts?per_page=100"
+        return {
+            "artifacts": [
+                {
+                    "id": 7,
+                    "name": "test-plan-1041-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "expired": False,
+                }
+            ]
+        }
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        accept: str,
+        raw: bool,
+    ) -> bytes:
+        self.download_request = {
+            "method": method,
+            "path": path,
+            "accept": accept,
+            "raw": raw,
+        }
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("test-plan.json", canonical_json_bytes(self.artifact_plan))
+        return payload.getvalue()
+
+
 def main() -> None:
     golden = plan()
+    artifact_client = ArtifactClient(golden)
+    collected_run, collected_artifact, collected_plan = runner.collect_workflow_plan(
+        artifact_client, 99
+    )
+    assert collected_run == workflow()
+    assert collected_artifact["id"] == 7
+    assert collected_plan == golden
+    assert artifact_client.download_request == {
+        "method": "GET",
+        "path": "/actions/artifacts/7/zip",
+        "accept": "application/vnd.github+json",
+        "raw": True,
+    }
+
     reasons = runner.admission_reasons(
         repository="orenvlad-ai/wb-core",
         run=workflow(),
