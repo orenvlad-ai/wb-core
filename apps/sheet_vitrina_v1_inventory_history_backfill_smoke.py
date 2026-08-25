@@ -153,10 +153,20 @@ def main() -> int:
         manifest = json.loads(Path(dry_run["manifest_path"]).read_text(encoding="utf-8"))
         by_date = {item["business_date"]: item for item in manifest["captures"]}
         reviewed_ready = dict(by_date["2026-08-21"]["source_manifest"]["ready"])
-        assert reviewed_ready["digest_roles"] == {
+        reviewed_audit = dict(
+            manifest["audit_provenance"]["ready_by_date"]["2026-08-21"]
+        )
+        assert reviewed_audit["digest_roles"] == {
             "inventory_evidence_digest": "capture_source_and_apply_cas",
+            "material_selection_digest": "capture_source_and_apply_cas",
+            "selection_identity": "immutable_audit_only_not_apply_cas",
             "observed_plan_digest": "immutable_audit_only_not_apply_cas",
         }
+        reviewed_source = {**reviewed_ready, **reviewed_audit}
+        assert "refreshed_at" not in reviewed_ready["material_selection_identity"]
+        assert reviewed_audit["selection_identity"]["refreshed_at"] == (
+            "2026-08-21T20:00:00Z"
+        )
         reviewed_wb = next(
             item
             for item in by_date["2026-08-21"]["components"]
@@ -173,7 +183,7 @@ def main() -> int:
         ] == "partial"
         assert by_date["2026-08-10"]["before"]["values_by_scope"] == {}
         assert by_date["2026-08-10"]["finalization_identity"].startswith(
-            "backfill:sheet_vitrina_v1_inventory_history_backfill_v1:"
+            "backfill:sheet_vitrina_v1_inventory_history_backfill_v2:"
         )
         assert _combined(by_date["2026-08-09"], "TOTAL") == (30, "full")
         assert _combined(by_date["2026-08-10"], "TOTAL") == (30, "partial")
@@ -198,7 +208,7 @@ def main() -> int:
             root=root,
             db_path=runtime.db_path,
             reviewed_digest=str(reviewed_source_watermarks["digest"]),
-            reviewed_source=reviewed_ready,
+            reviewed_source=reviewed_source,
             first_nm_id=first_nm_id,
             second_nm_id=second_nm_id,
         )
@@ -275,7 +285,7 @@ def main() -> int:
                 now=datetime(2026, 8, 22, 12, 4, tzinfo=timezone.utc),
             )
         except InventoryHistoryBackfillError as exc:
-            assert "row-count reconciliation" in str(exc)
+            assert "material qualification mismatch" in str(exc)
         else:
             raise AssertionError("tampered expected row counts must roll back")
         with sqlite3.connect(runtime.db_path) as conn:
@@ -297,6 +307,24 @@ def main() -> int:
         assert applied["database_written"] is True
         assert applied["recovery_evidence_path"].endswith(".json")
         assert Path(applied["recovery_evidence_path"]).is_file()
+        readback = run_backfill(
+            runtime_dir=runtime_dir,
+            evidence_dir=evidence_dir,
+            apply=False,
+            readback=True,
+            deployed_sha=DEPLOYED_SHA,
+            manifest_path=Path(dry_run["manifest_path"]),
+            expected_manifest_sha256=dry_run["manifest_sha256"],
+            deployed_sha_file=sha_file,
+            now=datetime(2026, 8, 22, 12, 6, tzinfo=timezone.utc),
+        )
+        assert readback["status"] == "reconciled"
+        assert readback["query_only"] is True
+        assert readback["exact_manifest_apply_receipt_count"] == 1
+        assert readback["visible_history_date_count"] == 13
+        assert readback["visible_history_quality"] == manifest["partitions"][
+            "date_quality"
+        ]
         history = read_inventory_history_window(
             runtime.db_path,
             dates=["2026-08-09", "2026-08-10", "2026-08-14", "2026-08-19", "2026-08-20"],
@@ -754,14 +782,63 @@ def _assert_ready_inventory_slice_cas(
     )
     assert str(_watermarks(revision_db)["digest"]) != reviewed_digest
 
-    rank_db = _ready_plan_mutation_copy(
+    volatile_v3_before_db = _ready_plan_mutation_copy(
         root=root,
         source=db_path,
-        name="ready-selection-rank",
+        name="ready-v3-false-drift-before",
         mutate=lambda plan: None,
-        outer_updates={"refreshed_at": "2026-08-21T21:00:00Z"},
+        outer_updates={"refreshed_at": "2026-08-25T11:06:42Z"},
     )
-    assert str(_watermarks(rank_db)["digest"]) != reviewed_digest
+    volatile_refresh_db = _ready_plan_mutation_copy(
+        root=root,
+        source=volatile_v3_before_db,
+        name="ready-v3-false-drift-after",
+        mutate=lambda plan: None,
+        outer_updates={"refreshed_at": "2026-08-25T14:06:15Z"},
+    )
+    volatile_before_sources, _ = _ready_sources(volatile_v3_before_db)
+    volatile_sources, volatile_blockers = _ready_sources(volatile_refresh_db)
+    volatile_before_source = volatile_before_sources["2026-08-21"]
+    volatile_source = volatile_sources["2026-08-21"]
+    assert not volatile_blockers
+    assert str(_watermarks(volatile_refresh_db)["digest"]) == reviewed_digest
+    assert _watermarks(volatile_v3_before_db) == _watermarks(volatile_refresh_db)
+    assert volatile_source["inventory_evidence_digest"] == reviewed_source[
+        "inventory_evidence_digest"
+    ]
+    assert volatile_source["material_selection_identity"] == reviewed_source[
+        "material_selection_identity"
+    ]
+    assert volatile_before_source["selection_identity"]["refreshed_at"] == (
+        "2026-08-25T11:06:42Z"
+    )
+    assert volatile_source["selection_identity"]["refreshed_at"] == (
+        "2026-08-25T14:06:15Z"
+    )
+    assert volatile_before_source["selection_identity"]["selection_rank"][0] == (
+        "2026-08-25T11:06:42Z"
+    )
+    assert volatile_source["selection_identity"]["selection_rank"][0] == (
+        "2026-08-25T14:06:15Z"
+    )
+
+    activated_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-stable-rank-activated-at",
+        mutate=lambda plan: None,
+        outer_updates={"activated_at": "2026-08-21T19:30:00Z"},
+    )
+    assert str(_watermarks(activated_db)["digest"]) != reviewed_digest
+
+    bundle_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-stable-rank-bundle-version",
+        mutate=lambda plan: None,
+        outer_updates={"bundle_version": "bundle-replacement"},
+    )
+    assert str(_watermarks(bundle_db)["digest"]) != reviewed_digest
 
     date_column_db = _ready_plan_mutation_copy(
         root=root,
@@ -803,7 +880,13 @@ def _ready_plan_mutation_copy(
         assignments = ["plan_json=?"]
         values: list[object] = [json.dumps(plan, ensure_ascii=False, sort_keys=True)]
         for column, value in (outer_updates or {}).items():
-            assert column in {"snapshot_id", "plan_version", "refreshed_at"}
+            assert column in {
+                "snapshot_id",
+                "plan_version",
+                "refreshed_at",
+                "activated_at",
+                "bundle_version",
+            }
             assignments.append(f"{column}=?")
             values.append(value)
         values.append("2026-08-21")

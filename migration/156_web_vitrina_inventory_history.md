@@ -73,36 +73,43 @@ are excluded, so an ordinary current-day tick cannot stale a closed-window
 manifest. Any selected target-date ready revision or relevant at/before-cutoff
 FBS/roster/mapping change still changes the CAS and blocks apply.
 
-Selected ready evidence uses a dedicated inventory-slice identity: exact
-persisted and embedded snapshot/revision/rank fields, the complete selected
-`DATA_VITRINA` header/date-column schema, and a sorted typed set of only
-`TOTAL/SKU stock_total` scopes and values. Its `inventory_evidence_digest` is
-the WB component source digest and source-CAS input. The full
-`observed_plan_digest` remains immutable audit provenance in the reviewed
-manifest/capture source manifest and is explicitly not an apply-CAS input.
-Consequently same-rank non-inventory metric drift does not stale a manifest,
-while selected snapshot/rank/revision, date/header/key/scope, typed missing
-state, or target stock value drift still fails closed.
+Selected ready evidence v2 uses a dedicated material inventory-slice identity:
+stable persisted/embedded snapshot and revision fields, the selection-rank
+suffix beginning at `activated_at`, the complete selected `DATA_VITRINA`
+header/date-column schema, and a sorted typed set of only `TOTAL/SKU
+stock_total` scopes and values. Its `inventory_evidence_digest` is the WB
+component source digest and source-CAS input. Volatile `refreshed_at` and
+selection-rank element zero plus the full `observed_plan_digest` remain
+immutable audit-only provenance outside capture identity/source watermark.
+Consequently normal refresh metadata churn and non-inventory metric drift do
+not stale a material-qualified manifest. Stable snapshot/rank suffix/revision,
+date/header/key/scope, typed missing state, target stock value, schema,
+generation or target-history drift still fails closed.
 
 New facilities, multiple/ambiguous openings, source/schema/formula drift or an
 invalid target window make the manifest `blocked`. Expected evidence gaps stay
 explicit `partial`/`unavailable`; they are not silently converted to blockers
 or values.
 
-The owner callback contains only a path-safe summary plus exact manifest hash,
-PR/head/merge/deployed SHA, target counts, full/partial/unavailable/inapplicable
-partitions, gaps, non-target invariants, recovery/readback contract and the
-exact proposed effect. The current release/deploy/dry-run authorization cannot
-be broadened into apply authorization.
+The callback contains a path-safe summary, PR/head/merge/deployed SHA, target
+counts, full/partial/unavailable/inapplicable partitions, gaps, non-target
+invariants, recovery/readback contract and the exact proposed effect. A legacy
+exact-manifest operation still has a separate owner hash gate. An already
+accepted bounded reversible task instead persists one OWNER/MEMBER scope-goal
+passport; its technical manifest hashes are machine evidence, not additional
+user confirmations.
 
 ## Separate apply gate and recovery
 
-Apply is permitted once, only after a separate exact owner authorization bound
-to the reviewed manifest and deployed SHA under the repository production-
-mutation contract. The runner then requires:
+Apply is permitted once under either the legacy exact owner manifest gate or a
+durable accepted scope-goal passport under the repository production-mutation
+contract. Scope-goal mode JIT generates immutable private candidates on the
+canonical host, requires two consecutive full material-CAS matches and permits
+at most three pre-submit regenerations. The runner then requires:
 
 - trusted-main exact deployed SHA;
-- exact manifest SHA-256 and non-empty approval reference;
+- exact machine-qualified manifest SHA-256 and non-empty task authorization
+  reference;
 - unchanged schema/generation, source watermarks and target-history digest;
 - canonical warehouse writer lock;
 - coherent target-scoped private before-image with a forward-restoration plan;
@@ -112,9 +119,10 @@ mutation contract. The runner then requires:
 - append/supersede-only writes to the four inventory-history tables;
 - query-only post-commit readback and source/non-target reconciliation.
 
-The manifest hash is the durable idempotency key. If transport is ambiguous,
-the applies row and finalization readback determine the outcome; the caller
-must not replay blindly. Restore is only through the canonical maintenance and
+The manifest hash is the durable DB idempotency key. There is exactly one
+mutation submit. If transport is ambiguous, the applies row, finalization and
+visible-history query-only readback determine the outcome; the caller must not
+replay blindly. Restore is only through the canonical maintenance and
 write-barrier procedure using the verified before-image.
 
 ## Acceptance

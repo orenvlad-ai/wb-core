@@ -3,28 +3,40 @@ name: Production Apply Runner
 on:
   workflow_dispatch:
     inputs:
+      authorization_mode:
+        description: Task-scoped goal or legacy exact-manifest authorization
+        required: true
+        default: scope-goal
+        type: choice
+        options:
+          - scope-goal
+          - exact-manifest
       pr:
         description: Exact merged PR number
         required: true
         type: number
+      release_operation_id:
+        description: Exact one-shot Release Runner operation id
+        required: false
+        type: string
       merge_sha:
-        description: Exact merge SHA
-        required: true
+        description: Legacy exact-manifest merge SHA
+        required: false
         type: string
       deployed_sha:
-        description: Exact deployed SHA
-        required: true
+        description: Legacy exact-manifest deployed SHA
+        required: false
         type: string
       manifest_sha256:
-        description: Exact reviewed manifest SHA-256 without prefix
-        required: true
+        description: Legacy exact reviewed manifest SHA-256 without prefix
+        required: false
         type: string
       operation_id:
-        description: Durable manifest operation id
-        required: true
+        description: Legacy exact manifest operation id
+        required: false
         type: string
       authorization_comment_id:
-        description: Exact OWNER or MEMBER apply-v2 authorization comment id
+        description: Exact OWNER or MEMBER authorization comment id
         required: true
         type: number
 
@@ -53,14 +65,16 @@ jobs:
           openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
           pypdf==6.4.1 reportlab==4.4.5
 
-      - name: Validate exact owner manifest and apply once
+      - name: Validate exact task passport, qualify dynamic manifest and apply once
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
         run: >-
           python3 apps/production_apply_runner.py
+          --authorization-mode "${{ inputs.authorization_mode }}"
           --pr "${{ inputs.pr }}"
+          --release-operation-id "${{ inputs.release_operation_id }}"
           --merge-sha "${{ inputs.merge_sha }}"
           --deployed-sha "${{ inputs.deployed_sha }}"
           --manifest-sha256 "${{ inputs.manifest_sha256 }}"
@@ -72,7 +86,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: production-apply-receipt-${{ inputs.operation_id }}
+          name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
           path: ${{ runner.temp }}/production-apply-receipt.json
           if-no-files-found: warn
           retention-days: 90

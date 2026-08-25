@@ -45,8 +45,10 @@ Current canonical source acquisition остаётся server-side.
   tooling blocker и не создаёт sidebar peer task. Internal subagent виден в
   `Subagents`/`Activity` main task, не pin-ится и не создаёт
   `::created-thread`.
-- Dispatch передаёт compact task passport и minimal bounded context. Полная
-  длинная main history не копируется по умолчанию; старые задачи читаются
+- Dispatch передаёт compact task passport и minimal bounded context. Обычный
+  implementation spawn обязан использовать exact `fork_turns:"none"`.
+  Положительное bounded число turns допустимо только с записанной в passport
+  необходимостью; `fork_turns:"all"` запрещён. Старые задачи читаются
   on-demand только как evidence.
 - По умолчанию активен максимум один implementation subagent. Project config
   фиксирует тот же concurrency limit. Model-tier classification не используется.
@@ -57,13 +59,16 @@ Current canonical source acquisition остаётся server-side.
 - Same-scope correction продолжает того же subagent. Материально новый scope
   или новый PR получает следующий `SSS` и нового subagent после terminal state
   предыдущего.
-- Subagent возвращает один terminal handoff и становится `Done`. Настоящий gate
+- Subagent возвращает один terminal handoff и становится `Done`. Это только
+  terminal status implementation block: main-task outcome отдельно остаётся
+  `in_progress`, `awaiting_operation`, `blocked` или `complete` и не выводится
+  из subagent `Done`/handoff автоматически. Настоящий gate
   возвращает точный callback с одним требуемым действием и не остаётся
   неопределённо `Active`; pause/blocker является немедленным terminal
   transition, а не причиной держать implementation task активной.
-- Main/subagent публикуют только meaningful state transitions. Одинаковые
-  сообщения «ещё идёт», частый polling неизменного CI и heartbeat-status
-  запрещены; используются event/terminal waits и UI activity. Истинный
+- Main/subagent публикуют только meaningful state transitions. Heartbeat-
+  сообщения, «ещё идёт» и polling неизменного CI запрещены полностью. Один
+  bounded event/terminal wait не требует промежуточного status-текста; новый
   blocker или terminal state сообщается сразу.
 - Пользователь не подтверждает повторно уже выбранную цель, business meaning,
   accepted exact plan или обычные технические решения внутри scope.
@@ -80,7 +85,8 @@ PR/plan hash/terminal receipt после появления.
 2. material scope expansion;
 3. credentials/login/2FA/captcha без разрешённого non-interactive пути;
 4. exact security/access/ruleset/new-destination change, не preauthorized;
-5. proven irreversible action или exact production-data apply manifest.
+5. proven irreversible action либо production-data scope, который ещё не
+   покрыт accepted task-scoped authorization/passport.
 
 Routine repo/GitHub/tests/merge, existing live deploy и technical remediation
 автономны внутри authorized scope. Accepted exact plan заранее разрешает
@@ -112,9 +118,14 @@ tooling blocker; оно не превращается в запрос поком
 6. Runner делает один expected-head squash merge и exact readback. `repo_only`
    завершается receipt `done`; `live_runtime` deploy-ит exact merge SHA через
    canonical adapter, проверяет deployed SHA и пишет один receipt.
-7. `production_mutation` после merge/deploy только query-only читает exact
-   manifest и пишет `awaiting_apply`. Default-off Apply Runner требует exact
-   OWNER/MEMBER authorization, durable operation id, один apply, readback и
+7. Legacy `production_mutation` после merge/deploy только query-only читает
+   exact manifest и пишет `awaiting_apply`. Default-off Apply Runner сохраняет
+   этот exact-manifest режим. Отдельный `scope-goal` mode принимает durable
+   OWNER/MEMBER task passport и exact `live_runtime/done` receipt для bounded
+   reversible scope. В task-scoped режиме manifest генерируется JIT на
+   canonical host, дважды material-CAS квалифицируется с bounded regeneration
+   до первого submit и не требует отдельного user hash confirmation. Mutation
+   submit остаётся ровно один; затем выполняются только query-only readback и
    reconciliation. Blind retry запрещён.
 
 Stable receipt states: `done`, `awaiting_apply`, `blocked`, `superseded`,
@@ -146,7 +157,10 @@ installed `openpyxl`, затем `xlsxwriter`, затем dependency-free OOXML.
 - Production mutation: dry-run default, explicit apply, bounded manifest,
   pre-change digest, backup/recovery evidence, expected affected records,
   non-target invariants, idempotency либо documented recovery, post-apply
-  readback и reconciliation. Ad-hoc SQL и local/server-only mutation запрещены.
+  readback и reconciliation. Accepted task-scoped reversible goal разрешает
+  machine regeneration/qualification manifest внутри exact passport scope;
+  manifest остаётся immutable audit/recovery artifact, а не объектом повторного
+  human approval. Ad-hoc SQL и local/server-only mutation запрещены.
 - Finance/storage additionally сохраняет lease/operation identity, coherent
   snapshot, capacity, writer/timer/barrier, exact target/generation, restore и
   non-target contracts из hosted runtime docs. Эти guards не образуют queue.

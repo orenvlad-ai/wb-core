@@ -2,9 +2,10 @@
 """Guarded historical inventory materialization for the main Web Vitrina.
 
 Dry-run is the default and performs query-only source reconstruction.  Apply
-accepts only the exact reviewed manifest, exact deployed SHA and a separate
-human approval reference.  It appends compact component/finalization rows and
-never rewrites ready snapshots or source ledgers.
+accepts only an exact machine-qualified immutable manifest, exact deployed SHA
+and a durable task-authorization reference.  It appends compact
+component/finalization rows and never rewrites ready snapshots or source
+ledgers.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E
     append_inventory_history_capture,
     append_inventory_history_finalization,
     preview_inventory_history_capture,
+    read_inventory_history_window,
 )
 from packages.application.storage_registry import (  # noqa: E402
     GenerationManifest,
@@ -64,9 +66,9 @@ from packages.application.wb_fbs_orders import (  # noqa: E402
 from packages.business_time import current_business_date_iso  # noqa: E402
 
 
-SCHEMA_VERSION = "sheet_vitrina_v1_inventory_history_backfill_v1"
-SOURCE_CAS_CONTRACT = "sheet_vitrina_v1_inventory_history_backfill_source_cas_v3"
-READY_EVIDENCE_CONTRACT = "sheet_vitrina_v1_inventory_ready_evidence_v1"
+SCHEMA_VERSION = "sheet_vitrina_v1_inventory_history_backfill_v2"
+SOURCE_CAS_CONTRACT = "sheet_vitrina_v1_inventory_history_backfill_source_cas_v4"
+READY_EVIDENCE_CONTRACT = "sheet_vitrina_v1_inventory_ready_evidence_v2"
 FORMULA_VERSION = "inventory_planning_v1"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 MAX_DAYS = 730
@@ -105,9 +107,14 @@ def run_backfill(
     manifest_path: Path | None = None,
     expected_manifest_sha256: str | None = None,
     approval_reference: str | None = None,
+    readback: bool = False,
     deployed_sha_file: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    if apply and readback:
+        raise InventoryHistoryBackfillError(
+            "apply and query-only readback modes are mutually exclusive"
+        )
     runtime_dir = runtime_dir.expanduser().resolve()
     evidence_dir = evidence_dir.expanduser().resolve()
     store_registry = StoreRegistry(runtime_dir)
@@ -130,6 +137,19 @@ def run_backfill(
         expected_deployed_sha=exact_deployed_sha,
         deployed_sha_file=sha_file,
     )
+    if readback:
+        if manifest_path is None or not expected_manifest_sha256:
+            raise InventoryHistoryBackfillError(
+                "--readback requires exact manifest path/hash"
+            )
+        return _readback_manifest(
+            db_path=db_path,
+            store_registry=store_registry,
+            manifest_path=manifest_path.expanduser().resolve(),
+            expected_manifest_sha256=str(expected_manifest_sha256),
+            deployed_sha=exact_deployed_sha,
+            deployed_sha_file=sha_file,
+        )
     if not apply:
         return _dry_run(
             db_path=db_path,
@@ -142,7 +162,7 @@ def run_backfill(
         )
     if manifest_path is None or not expected_manifest_sha256 or not approval_reference:
         raise InventoryHistoryBackfillError(
-            "--apply requires exact manifest path/hash and separate human approval reference"
+            "--apply requires exact manifest path/hash and durable task authorization reference"
         )
     try:
         with warehouse_sync_lock(runtime_dir, blocking=False):
@@ -206,6 +226,11 @@ def _dry_run(
         "manifest_path": str(manifest_path),
         "manifest_sha256": manifest_sha256,
         "plan_fingerprint": str(plan["plan_fingerprint"]),
+        "material_qualification_digest": str(
+            plan["material_qualification_digest"]
+        ),
+        "source_watermarks_digest": str(plan["source_watermarks"]["digest"]),
+        "target_history_digest": str(plan["pre_change"]["target_digest"]),
         "deployed_sha": deployed_sha,
         "date_from": str(plan["scope"]["date_from"]),
         "date_to": str(plan["scope"]["date_to"]),
@@ -215,6 +240,18 @@ def _dry_run(
         "target_scope_count": int(plan["expected_effect"]["scope_count"]),
         "target_sku_count": int(plan["expected_effect"]["sku_count"]),
         "facility_count": len(plan["facility_roster"]),
+        "inserted_capture_count": int(
+            plan["expected_effect"]["inserted_capture_count"]
+        ),
+        "inserted_component_count": int(
+            plan["expected_effect"]["inserted_component_count"]
+        ),
+        "inserted_finalization_count": int(
+            plan["expected_effect"]["inserted_finalization_count"]
+        ),
+        "full_date_count": int(date_quality.get("full", 0)),
+        "partial_date_count": int(date_quality.get("partial", 0)),
+        "unavailable_date_count": int(date_quality.get("unavailable", 0)),
         "full": int(scope_quality.get("full", 0)),
         "partial": int(scope_quality.get("partial", 0)),
         "unavailable": int(date_quality.get("unavailable", 0)),
@@ -294,6 +331,7 @@ def _build_manifest(
         storage_manifest=storage_manifest,
     )
     roster = facility_history["roster"]
+    ready_audit_provenance: dict[str, Any] = {}
     captures: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
     partitions = {
@@ -340,13 +378,18 @@ def _build_manifest(
                     source_digest=str(
                         wb_sources[business_date]["inventory_evidence_digest"]
                     ),
-                    source_watermark=str(wb_sources[business_date]["refreshed_at"]),
+                    source_watermark=str(
+                        wb_sources[business_date]["material_selection_digest"]
+                    ),
                     provenance={
                         "source": "sheet_vitrina_v1_ready_snapshots.stock_total",
                         "legacy_fact_semantics": "WB_only",
                         "inventory_evidence_contract": READY_EVIDENCE_CONTRACT,
                         "inventory_evidence_digest": wb_sources[business_date][
                             "inventory_evidence_digest"
+                        ],
+                        "material_selection_digest": wb_sources[business_date][
+                            "material_selection_digest"
                         ],
                     },
                 )
@@ -394,6 +437,12 @@ def _build_manifest(
                 date_scope_partitions["full"] += 1
             components.extend(scope_components)
             scope_count += 1
+        ready_source = wb_sources[business_date]
+        ready_audit_provenance[business_date] = {
+            "selection_identity": dict(ready_source["selection_identity"]),
+            "observed_plan_digest": str(ready_source["observed_plan_digest"]),
+            "digest_roles": dict(ready_source["digest_roles"]),
+        }
         source_manifest = {
             "contract": SCHEMA_VERSION,
             "business_date": business_date,
@@ -401,7 +450,15 @@ def _build_manifest(
                 "kind": "latest accepted closed-day ready evidence",
                 "date_to": date_to,
             },
-            "ready": wb_sources[business_date],
+            "ready": {
+                "inventory_evidence": ready_source["inventory_evidence"],
+                "inventory_evidence_digest": ready_source[
+                    "inventory_evidence_digest"
+                ],
+                "material_selection_identity": ready_source[
+                    "material_selection_identity"
+                ],
+            },
             "fbs_source_watermarks_digest": source_watermarks["fbs_digest"],
             "facility_roster_revision": _digest(roster),
             "formula": {
@@ -508,6 +565,11 @@ def _build_manifest(
             "all_dates_before_or_equal_last_closed_day": True,
         },
         "source_watermarks": source_watermarks,
+        "audit_provenance": {
+            "role": "immutable_audit_only_not_apply_cas",
+            "ready_by_date": ready_audit_provenance,
+            "schema": _schema_audit_provenance(conn),
+        },
         "facility_roster": roster,
         "captures": captures,
         "partitions": partitions,
@@ -559,8 +621,225 @@ def _build_manifest(
             "post_apply": "query-only capture/component/finalization and source-watermark reconciliation",
         },
     }
+    qualification = {
+        "contract": "sheet_vitrina_v1_inventory_history_material_qualification_v1",
+        "deployed_sha": deployed_sha,
+        "schema_generation": generation,
+        "scope": core["scope"],
+        "source_watermarks_digest": source_watermarks["digest"],
+        "target_history_digest": before["digest"],
+        "facility_roster_revision": _digest(roster),
+        "capture_identities": [
+            {
+                "business_date": item["business_date"],
+                "capture_id": item["capture_id"],
+                "source_digest": item["source_digest"],
+                "finalization_identity": item["finalization_identity"],
+            }
+            for item in captures
+        ],
+        "expected_effect": core["expected_effect"],
+        "partitions": partitions,
+        "non_target_invariants": core["non_target_invariants"],
+    }
+    core["material_qualification"] = qualification
+    core["material_qualification_digest"] = _digest(qualification)
     core["plan_fingerprint"] = _digest(core)
     return core
+
+
+def _load_exact_backfill_manifest(
+    *,
+    manifest_path: Path,
+    expected_manifest_sha256: str,
+    deployed_sha: str,
+) -> tuple[dict[str, Any], str]:
+    if not manifest_path.is_file():
+        raise InventoryHistoryBackfillError("qualified manifest is missing")
+    actual_manifest_sha256 = _file_digest(manifest_path)
+    if actual_manifest_sha256 != expected_manifest_sha256:
+        raise InventoryHistoryBackfillError("qualified manifest SHA-256 mismatch")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("status") != "ready":
+        raise InventoryHistoryBackfillError("qualified manifest is not a ready v2 manifest")
+    if str(manifest.get("deployed_sha") or "") != deployed_sha:
+        raise InventoryHistoryBackfillError("manifest/deployed SHA mismatch")
+    unsigned_manifest = dict(manifest)
+    supplied_plan_fingerprint = str(unsigned_manifest.pop("plan_fingerprint", ""))
+    if _digest(unsigned_manifest) != supplied_plan_fingerprint:
+        raise InventoryHistoryBackfillError("manifest plan fingerprint mismatch")
+    qualification = manifest.get("material_qualification")
+    if (
+        not isinstance(qualification, Mapping)
+        or _digest(qualification)
+        != str(manifest.get("material_qualification_digest") or "")
+    ):
+        raise InventoryHistoryBackfillError("manifest material qualification mismatch")
+    qualification_bindings = {
+        "deployed_sha": deployed_sha,
+        "schema_generation": manifest.get("schema_generation"),
+        "scope": manifest.get("scope"),
+        "source_watermarks_digest": dict(manifest.get("source_watermarks") or {}).get(
+            "digest"
+        ),
+        "target_history_digest": dict(manifest.get("pre_change") or {}).get(
+            "target_digest"
+        ),
+        "expected_effect": manifest.get("expected_effect"),
+        "partitions": manifest.get("partitions"),
+        "non_target_invariants": manifest.get("non_target_invariants"),
+    }
+    for field, expected in qualification_bindings.items():
+        if qualification.get(field) != expected:
+            raise InventoryHistoryBackfillError(
+                f"manifest material qualification mismatch: {field}"
+            )
+    expected_capture_identities = [
+        {
+            "business_date": item["business_date"],
+            "capture_id": item["capture_id"],
+            "source_digest": item["source_digest"],
+            "finalization_identity": item["finalization_identity"],
+        }
+        for item in list(manifest.get("captures") or [])
+    ]
+    if qualification.get("capture_identities") != expected_capture_identities:
+        raise InventoryHistoryBackfillError(
+            "manifest material qualification mismatch: capture_identities"
+        )
+    if qualification.get("facility_roster_revision") != _digest(
+        manifest.get("facility_roster")
+    ):
+        raise InventoryHistoryBackfillError(
+            "manifest material qualification mismatch: facility_roster_revision"
+        )
+    return manifest, actual_manifest_sha256
+
+
+def _readback_manifest(
+    *,
+    db_path: Path,
+    store_registry: StoreRegistry,
+    manifest_path: Path,
+    expected_manifest_sha256: str,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+) -> dict[str, Any]:
+    manifest, actual_manifest_sha256 = _load_exact_backfill_manifest(
+        manifest_path=manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+        deployed_sha=deployed_sha,
+    )
+    _validate_exact_deployment(
+        expected_deployed_sha=deployed_sha,
+        deployed_sha_file=deployed_sha_file,
+    )
+    scope = dict(manifest["scope"])
+    storage_manifest = store_registry.load(require_files=True)
+    if store_registry.resolve("operational", manifest=storage_manifest) != db_path:
+        raise InventoryHistoryBackfillError(
+            "canonical operational generation changed before readback"
+        )
+    with _query_only_connection(db_path) as conn:
+        generation = _schema_generation(
+            conn,
+            deployed_sha=deployed_sha,
+            storage_manifest=storage_manifest,
+        )
+        watermarks = _source_watermarks(
+            conn,
+            date_from=str(scope["date_from"]),
+            date_to=str(scope["date_to"]),
+        )
+        target = _target_history_state(
+            conn,
+            date_from=str(scope["date_from"]),
+            date_to=str(scope["date_to"]),
+        )
+        apply_rows = conn.execute(
+            f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
+            (actual_manifest_sha256,),
+        ).fetchall()
+        total_apply_count = int(
+            conn.execute(f"SELECT COUNT(*) FROM {APPLIES_TABLE}").fetchone()[0]
+        )
+    if generation != dict(manifest["schema_generation"]):
+        raise InventoryHistoryBackfillError("schema/generation changed at readback")
+    if watermarks["digest"] != str(manifest["source_watermarks"]["digest"]):
+        raise InventoryHistoryBackfillError("material source CAS changed at readback")
+    if len(apply_rows) != 1:
+        raise InventoryHistoryBackfillError("exact apply receipt is missing or ambiguous")
+    reconciliation = json.loads(str(apply_rows[0][0]))
+    if str(reconciliation.get("target_digest_after") or "") != str(
+        target["digest"]
+    ):
+        raise InventoryHistoryBackfillError(
+            "target history digest does not match committed reconciliation"
+        )
+    expected_effect = dict(manifest["expected_effect"])
+    for field in (
+        "inserted_capture_count",
+        "inserted_component_count",
+        "inserted_finalization_count",
+    ):
+        if int(reconciliation.get(field, -1)) != int(expected_effect[field]):
+            raise InventoryHistoryBackfillError(
+                f"exact apply reconciliation mismatch: {field}"
+            )
+    visible = read_inventory_history_window(
+        db_path,
+        dates=list(scope["dates"]),
+        current_date="",
+    )
+    visible_dates = dict(visible.get("dates") or {})
+    full_dates = partial_dates = unavailable_dates = 0
+    for business_date in list(scope["dates"]):
+        date_payload = visible_dates.get(str(business_date))
+        if not isinstance(date_payload, Mapping):
+            unavailable_dates += 1
+            continue
+        qualities = {
+            str(item.get("quality") or "unavailable")
+            for item in dict(date_payload.get("scopes") or {}).values()
+            if isinstance(item, Mapping)
+        }
+        if not qualities or "unavailable" in qualities:
+            unavailable_dates += 1
+        elif "partial" in qualities:
+            partial_dates += 1
+        else:
+            full_dates += 1
+    expected_quality = dict(manifest["partitions"]["date_quality"])
+    actual_quality = {
+        "full": full_dates,
+        "partial": partial_dates,
+        "unavailable": unavailable_dates,
+    }
+    if actual_quality != {key: int(expected_quality[key]) for key in actual_quality}:
+        raise InventoryHistoryBackfillError("visible history quality partition drifted")
+    if len(visible_dates) != int(scope["date_count"]):
+        raise InventoryHistoryBackfillError("visible history date coverage is incomplete")
+    return {
+        **reconciliation,
+        "mode": "query-only-readback",
+        "status": "reconciled",
+        "database_written": False,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": actual_manifest_sha256,
+        "material_qualification_digest": str(
+            manifest["material_qualification_digest"]
+        ),
+        "source_watermarks_digest": str(watermarks["digest"]),
+        "target_capture_count": int(target["capture_count"]),
+        "target_component_count": int(target["component_count"]),
+        "target_finalization_count": int(target["finalization_count"]),
+        "exact_manifest_apply_receipt_count": len(apply_rows),
+        "total_inventory_history_apply_receipt_count": total_apply_count,
+        "visible_history_date_count": len(visible_dates),
+        "visible_history_quality": actual_quality,
+        "non_target_preserved": bool(reconciliation.get("non_target_preserved")),
+        "query_only": True,
+    }
 
 
 def _apply_manifest(
@@ -575,22 +854,13 @@ def _apply_manifest(
     approval_reference: str,
     applied_at: str,
 ) -> dict[str, Any]:
-    if not manifest_path.is_file():
-        raise InventoryHistoryBackfillError("reviewed manifest is missing")
-    actual_manifest_sha256 = _file_digest(manifest_path)
-    if actual_manifest_sha256 != expected_manifest_sha256:
-        raise InventoryHistoryBackfillError("reviewed manifest SHA-256 mismatch")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("status") != "ready":
-        raise InventoryHistoryBackfillError("reviewed manifest is not a ready v1 manifest")
-    if str(manifest.get("deployed_sha") or "") != deployed_sha:
-        raise InventoryHistoryBackfillError("manifest/deployed SHA mismatch")
-    unsigned_manifest = dict(manifest)
-    supplied_plan_fingerprint = str(unsigned_manifest.pop("plan_fingerprint", ""))
-    if _digest(unsigned_manifest) != supplied_plan_fingerprint:
-        raise InventoryHistoryBackfillError("manifest plan fingerprint mismatch")
+    manifest, actual_manifest_sha256 = _load_exact_backfill_manifest(
+        manifest_path=manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+        deployed_sha=deployed_sha,
+    )
     if not approval_reference or len(approval_reference) > 500:
-        raise InventoryHistoryBackfillError("separate human approval reference is invalid")
+        raise InventoryHistoryBackfillError("durable task authorization reference is invalid")
     _validate_exact_deployment(
         expected_deployed_sha=deployed_sha,
         deployed_sha_file=deployed_sha_file,
@@ -1001,10 +1271,18 @@ def _ready_wb_history(
                 "refreshed_at": str(row["refreshed_at"]),
                 "selection_rank": list(rank),
             }
+            material_selection_identity = {
+                "bundle_version": str(row["bundle_version"]),
+                "activated_at": str(row["activated_at"]),
+                "snapshot_as_of_date": str(row["as_of_date"]),
+                "snapshot_id": str(row["snapshot_id"]),
+                "plan_version": str(row["plan_version"]),
+                "selection_rank_stable": list(rank[1:]),
+            }
             inventory_evidence = {
                 "contract": READY_EVIDENCE_CONTRACT,
                 "business_date": business_date,
-                "selection_identity": selection_identity,
+                "material_selection_identity": material_selection_identity,
                 "column_schema": {
                     "sheet_name": "DATA_VITRINA",
                     "header": [str(item) for item in header],
@@ -1020,14 +1298,20 @@ def _ready_wb_history(
                 "stock_total_scopes": typed_scopes,
             }
             inventory_evidence_digest = _digest(inventory_evidence)
+            material_selection_digest = _digest(material_selection_identity)
             source = {
                 **selection_identity,
                 "column_date": business_date,
+                "selection_identity": selection_identity,
+                "material_selection_identity": material_selection_identity,
+                "material_selection_digest": material_selection_digest,
                 "inventory_evidence": inventory_evidence,
                 "inventory_evidence_digest": inventory_evidence_digest,
                 "observed_plan_digest": observed_plan_digest,
                 "digest_roles": {
                     "inventory_evidence_digest": "capture_source_and_apply_cas",
+                    "material_selection_digest": "capture_source_and_apply_cas",
+                    "selection_identity": "immutable_audit_only_not_apply_cas",
                     "observed_plan_digest": "immutable_audit_only_not_apply_cas",
                 },
             }
@@ -1749,9 +2033,6 @@ def _schema_generation(
             raise InventoryHistoryBackfillError(
                 "canonical operational file identity does not match the storage generation"
             )
-    bundle = conn.execute(
-        "SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1"
-    ).fetchone()
     schema_tables = sorted(REQUIRED_SOURCE_TABLES | REQUIRED_HISTORY_TABLES)
     placeholders = ",".join("?" for _ in schema_tables)
     schema_material = [
@@ -1766,8 +2047,6 @@ def _schema_generation(
     return {
         "deployed_sha": deployed_sha,
         "sqlite_user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
-        "bundle_version": str(bundle[0]) if bundle else "",
-        "bundle_activated_at": str(bundle[1]) if bundle else "",
         "storage_generation": {
             "contract_version": storage_manifest.contract_version,
             "state": storage_manifest.state,
@@ -1783,6 +2062,17 @@ def _schema_generation(
         },
         "required_schema_digest": _digest(schema_material),
         "history_schema": SCHEMA_VERSION,
+    }
+
+
+def _schema_audit_provenance(conn: sqlite3.Connection) -> dict[str, str]:
+    bundle = conn.execute(
+        "SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1"
+    ).fetchone()
+    return {
+        "current_bundle_version": str(bundle[0]) if bundle else "",
+        "current_bundle_activated_at": str(bundle[1]) if bundle else "",
+        "role": "immutable_audit_only_not_apply_cas",
     }
 
 
@@ -1908,12 +2198,22 @@ def _query_only_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    descriptor = os.open(path, flags, 0o600)
+    encoded = (_json(payload) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        if path.read_bytes() != encoded:
+            raise InventoryHistoryBackfillError(
+                f"immutable evidence path already exists with different bytes: {path}"
+            )
+        os.chmod(path, 0o600)
+        return
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
     finally:
         if os.path.exists(path):
             os.chmod(path, 0o600)
@@ -1962,6 +2262,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--date-from")
     parser.add_argument("--date-to")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--readback", action="store_true")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--approval-reference")
@@ -1970,6 +2271,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.apply and args.readback:
+        print(_json({"status": "blocked", "error": "--apply and --readback are mutually exclusive"}))
+        return 2
     try:
         result = run_backfill(
             runtime_dir=args.runtime_dir,
@@ -1981,6 +2285,7 @@ def main() -> int:
             manifest_path=args.manifest,
             expected_manifest_sha256=args.manifest_sha256,
             approval_reference=args.approval_reference,
+            readback=bool(args.readback),
             deployed_sha_file=args.deployed_sha_file,
         )
     except (InventoryHistoryBackfillError, ValueError, sqlite3.Error) as exc:
