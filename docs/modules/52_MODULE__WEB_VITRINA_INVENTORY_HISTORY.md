@@ -84,10 +84,16 @@ effective dates. Таблицы защищены no-update/no-delete triggers: r
 # 3. Time and quality semantics
 
 Current business day читает latest accepted capture по durable insertion sequence. Closed day читает latest
-append-only finalization общего `yesterday_closed` contract. Поздняя принятая
-revision создаёт новую capture и superseding finalization; предыдущие capture,
-finalization и provenance не изменяются и не удаляются. Stock-specific cutoff,
-таймер или отдельная кнопка не вводятся.
+append-only finalization общего `yesterday_closed` contract. Перед финализацией
+accepted ready evidence для exact закрываемой даты materialize-ится отдельной
+immutable capture: WB берётся из колонки этой даты, а FBS — только из прежней
+same-date capture. Current FBS balance никогда не переносится в закрытую дату.
+Если same-date capture отсутствует, writer fail closed и не синтезирует
+historical FBS. Поздняя принятая revision создаёт новую capture и superseding
+finalization; предыдущие capture, finalization и provenance не изменяются и не
+удаляются. Повтор той же source revision идемпотентен даже при новом writer
+timestamp; новый доказанный ready snapshot/source revision создаёт append-only
+supersession. Stock-specific cutoff, таймер или отдельная кнопка не вводятся.
 
 Facility становится applicable только с independently evidenced
 first-stock/launch date. До этой даты её state `inapplicable`, обычное
@@ -111,6 +117,14 @@ manual `Загрузить`, automatic refresh и group refresh использу
 читает latest finalized/captured revision из canonical SQLite в
 `mode=ro + query_only` и передаёт уже materialized values/quality в существующую
 Web Vitrina row surface. Полный ledger на page request не replay-ится.
+
+Current-day WB capture использует active WB snapshot operand из того же
+`InventoryPlanningReadModel`, который публикует текущую Web Витрину. Если
+active snapshot не относится к current business date, применяется accepted
+current ready column, то есть тот же fallback, который остаётся видимым без
+current planning overlay. Source revision/digest/watermark сохраняются на WB
+component; accepted column и active snapshot не смешиваются для одного
+публичного scope.
 
 # 5. Historical backfill boundary
 
@@ -152,7 +166,10 @@ blind replay запрещён.
   partial marker/tooltip and full-value marker absence;
 - `apps/sheet_vitrina_v1_inventory_history_smoke.py` — idempotent capture,
   exact zero/missing, archived SKU, WB-only prelaunch full, late supersession,
-  indefinite retention and 174-day × 34-scope realistic window;
+  late exact closed-day WB with same-date-only FBS, numeric partial,
+  `50 162 + 82 900 + 26 697 = 159 759`, current-FBS retrocopy exclusion,
+  current UI WB equality, indefinite retention and 174-day × 34-scope
+  realistic window;
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
   guarded apply, reconciliation and idempotent replay.

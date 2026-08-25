@@ -27,6 +27,15 @@ It does not authorize or perform historical production population. It adds no
 schedule, no separate button, no WB/FBS source mutation and no rendered-plan
 snapshot store.
 
+For an accepted ready snapshot that contains a later exact WB column for the
+date being closed, the writer first appends a new same-date capture and points
+the superseding finalization to it. The WB operand comes from that exact dated
+column; every FBS operand is preserved only from an earlier immutable capture
+of the same business date. Current FBS balances are never copied backward. An
+identical ready source revision is idempotent independent of writer time, while
+a distinct proven ready revision is recorded as append-only supersession with
+its own provenance.
+
 ## Historical evidence rules
 
 For each proven ready date, persisted `stock_total` is retained with provenance
@@ -91,8 +100,8 @@ write-barrier procedure using the verified before-image.
 ## Acceptance
 
 Repository acceptance requires the inventory history, planning, browser and
-backfill smokes plus the exact-head baseline. Production acceptance requires
-Release Train deploy of the exact merge SHA, isolated UI verification and a
-production dry-run while no foreign control canary/timer pause is active and
-ordinary schedules are restored. Historical apply and final reconciliation
-remain pending until the separate owner gate.
+backfill smokes plus the exact-head `pr-gate`. Production acceptance requires
+the trusted-main Release Runner to deploy and read back the exact squash-merge
+SHA, followed by isolated UI verification. Any historical dry-run/apply and
+final reconciliation remain separate production-mutation scope and require
+their own exact manifest and owner gate.
