@@ -51,7 +51,9 @@ timestamp/random field; одинаковый input даёт одинаковые
 Required workflow запускается genuine `pull_request` event. Fast core всегда
 выполняет syntax, diff hygiene, planner/Runner/Apply smokes и workflow YAML
 parse. Selected suites исполняются по immutable plan artifact в matrix с
-`max-parallel=4`. Один aggregate job/check называется ровно `pr-gate`.
+`max-parallel=4`; browser runtime устанавливается для exact groups, где хотя
+бы один selected suite declares `requires_browser=true`. Один aggregate
+job/check называется ровно `pr-gate`.
 
 `workflow_dispatch` предназначен только для diagnostics; aggregate context
 называется `pr-gate-diagnostic` и не удовлетворяет ruleset. Workflow имеет

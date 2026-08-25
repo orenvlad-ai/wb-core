@@ -66,6 +66,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       groups: ${{ steps.plan.outputs.groups }}
+      browser_groups: ${{ steps.plan.outputs.browser_groups }}
       plan_hash: ${{ steps.plan.outputs.plan_hash }}
       plan_valid: ${{ steps.plan.outputs.plan_valid }}
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
@@ -143,7 +144,7 @@ jobs:
           pypdf==6.4.1 reportlab==4.4.5
 
       - name: Install browser for browser group
-        if: matrix.group == 'browser'
+        if: contains(fromJSON(needs.plan.outputs.browser_groups), matrix.group)
         run: python3 -m playwright install chromium
 
       - name: Run exact selected group

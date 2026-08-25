@@ -135,7 +135,7 @@
     "finance_storage": {
       "group": "finance",
       "depends_on": ["release_safety", "warehouse_recovery"],
-      "requires_browser": false,
+      "requires_browser": true,
       "commands": [
         ["python3", "apps/finance_storage_sqlite_open_inventory.py", "--check-migrated"],
         ["python3", "apps/finance_migration_deploy_lease_smoke.py"],

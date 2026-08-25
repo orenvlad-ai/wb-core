@@ -64,6 +64,7 @@ def main() -> None:
     finance = build(base, head, [{"status": "M", "path": "apps/finance_storage.py"}])
     planner.verify_plan(finance)
     assert finance["selected_suites"] == ["core", "finance", "warehouse"]
+    assert finance["browser_groups"] == []
     assert finance["release_plan"]["kind"] == "live_runtime"
     assert "transitive-domain-dependency" in finance["reason_codes"]
 
@@ -98,6 +99,15 @@ def main() -> None:
 
     real_registry = json.loads((ROOT / planner.REGISTRY_PATH).read_text(encoding="utf-8"))
     planner.validate_registry(real_registry, "repository registry")
+    real_plan = planner.build_plan(
+        pr_number=1041,
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        base_registry=real_registry,
+        head_registry=real_registry,
+        changes=[{"status": "M", "path": "apps/finance_storage.py"}],
+    )
+    assert "finance" in real_plan["browser_groups"]
     assert planner._record_paths(
         [{"status": "R100", "old_path": "русский путь/до.md", "path": "русский путь/после.md"}]
     ) == ["русский путь/до.md", "русский путь/после.md"]

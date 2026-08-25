@@ -362,6 +362,13 @@ def build_plan(
         for suite_id in selected_ids
     }
     groups = sorted({suite["group"] for suite in execution.values()})
+    browser_groups = sorted(
+        {
+            suite["group"]
+            for suite in execution.values()
+            if suite["requires_browser"] is True
+        }
+    )
     union_bytes = canonical_json_bytes(union)
     plan: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
@@ -381,6 +388,7 @@ def build_plan(
         "unknown_paths": unknown_paths,
         "selected_suites": selected_ids,
         "groups": groups,
+        "browser_groups": browser_groups,
         "execution": execution,
         "release_plan": {
             "kind": release_kind,
@@ -409,6 +417,7 @@ def verify_plan(plan: Mapping[str, Any]) -> None:
 def write_github_output(path: Path, plan: Mapping[str, Any]) -> None:
     values = {
         "groups": json.dumps(plan["groups"], separators=(",", ":")),
+        "browser_groups": json.dumps(plan["browser_groups"], separators=(",", ":")),
         "plan_hash": plan["plan_hash"],
         "release_kind": plan["release_plan"]["kind"],
         "plan_valid": str(bool(plan["release_plan"]["valid"])).lower(),
