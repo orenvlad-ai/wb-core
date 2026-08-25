@@ -84,6 +84,18 @@ def main() -> None:
     missing_base = build(None, head, [{"status": "M", "path": "apps/finance_storage.py"}])
     assert "base-registry-missing" in missing_base["reason_codes"]
 
+    cutover = planner.build_plan(
+        pr_number=1041,
+        base_sha=head["protocol"]["cutover_epoch"],
+        head_sha=HEAD_SHA,
+        base_registry=None,
+        head_registry=head,
+        changes=[{"status": "M", "path": "apps/finance_storage.py"}],
+    )
+    assert cutover["release_plan"]["kind"] == "repo_only"
+    assert cutover["release_plan"]["deploy_required"] is False
+    assert "cutover-bootstrap-no-deploy" in cutover["reason_codes"]
+
     real_registry = json.loads((ROOT / planner.REGISTRY_PATH).read_text(encoding="utf-8"))
     planner.validate_registry(real_registry, "repository registry")
     assert planner._record_paths(

@@ -307,6 +307,9 @@ def build_plan(
     if pr_number <= 0:
         raise PlanError("pull request number must be positive")
     union, reason_codes = union_registries(base_registry, head_registry)
+    cutover_bootstrap = (
+        base_registry is None and base_sha == union["protocol"]["cutover_epoch"]
+    )
     paths = _record_paths(changes)
     suites = union["suites"]
     selected: set[str] = set()
@@ -339,6 +342,10 @@ def build_plan(
         reason_codes.append("transitive-domain-dependency")
     if not selected:
         raise PlanError("test selection resolved to no suites")
+
+    if cutover_bootstrap:
+        release_kind = "repo_only"
+        reason_codes.append("cutover-bootstrap-no-deploy")
 
     manifest = None
     plan_errors: list[str] = []
