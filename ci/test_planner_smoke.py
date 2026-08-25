@@ -86,6 +86,9 @@ def main() -> None:
 
     real_registry = json.loads((ROOT / planner.REGISTRY_PATH).read_text(encoding="utf-8"))
     planner.validate_registry(real_registry, "repository registry")
+    assert planner._record_paths(
+        [{"status": "R100", "old_path": "русский путь/до.md", "path": "русский путь/после.md"}]
+    ) == ["русский путь/до.md", "русский путь/после.md"]
     print("test_planner_smoke: ok")
 
 

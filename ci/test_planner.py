@@ -215,22 +215,33 @@ def changed_paths(base_sha: str, head_sha: str) -> list[dict[str, str]]:
     output = _git(
         "diff",
         "--name-status",
+        "-z",
         "--find-renames",
         "--find-copies",
         base_sha,
         head_sha,
         "--",
     ).stdout
+    fields = output.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
     records: list[dict[str, str]] = []
-    for line in output.splitlines():
-        fields = line.split("\t")
-        status = fields[0]
-        if status.startswith(("R", "C")) and len(fields) == 3:
-            records.append({"status": status, "old_path": fields[1], "path": fields[2]})
-        elif len(fields) == 2:
-            records.append({"status": status, "path": fields[1]})
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            if index + 1 >= len(fields):
+                raise PlanError("truncated rename/copy diff record")
+            records.append(
+                {"status": status, "old_path": fields[index], "path": fields[index + 1]}
+            )
+            index += 2
         else:
-            raise PlanError(f"unresolved git diff record: {line!r}")
+            if index >= len(fields):
+                raise PlanError("truncated diff record")
+            records.append({"status": status, "path": fields[index]})
+            index += 1
     return sorted(records, key=lambda item: (item.get("path", ""), item.get("old_path", ""), item["status"]))
 
 
