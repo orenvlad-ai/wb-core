@@ -7,6 +7,7 @@ import copy
 import io
 import json
 import sys
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -129,6 +130,39 @@ class ArtifactClient:
 
 def main() -> None:
     golden = plan()
+    source_url = "https://api.github.com/repos/orenvlad-ai/wb-core/actions/artifacts/7/zip"
+    authenticated_request = urllib.request.Request(
+        source_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": "Bearer fixture-token",
+            "Cookie": "fixture-session=secret",
+        },
+    )
+    same_origin = runner._AuthSafeRedirectHandler().redirect_request(
+        authenticated_request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://api.github.com/redirected-artifact",
+    )
+    assert same_origin is not None
+    assert same_origin.get_header("Authorization") == "Bearer fixture-token"
+    assert same_origin.get_header("Cookie") == "fixture-session=secret"
+    cross_origin = runner._AuthSafeRedirectHandler().redirect_request(
+        authenticated_request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://artifact.example.test/signed-download?sig=fixture",
+    )
+    assert cross_origin is not None
+    assert cross_origin.get_header("Authorization") is None
+    assert cross_origin.get_header("Cookie") is None
+    assert cross_origin.get_header("Accept") == "application/vnd.github+json"
+
     artifact_client = ArtifactClient(golden)
     collected_run, collected_artifact, collected_plan = runner.collect_workflow_plan(
         artifact_client, 99
