@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_inventory_history_backfill import (  # noqa: E402
     InventoryHistoryBackfillError,
+    _source_watermarks,
     run_backfill,
 )
 from packages.application.ff_pool_cutover import (  # noqa: E402
@@ -26,6 +28,7 @@ from packages.application.ff_pool_cutover import (  # noqa: E402
     MANIFESTS_TABLE,
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
+    EVENTS_TABLE,
     MAPPING_EXTENSION_ALLOCATIONS_TABLE,
     MAPPING_EXTENSIONS_TABLE,
 )
@@ -159,6 +162,26 @@ def main() -> int:
         assert _combined(by_date["2026-08-14"], "TOTAL") == (35, "full")
         assert _combined(by_date["2026-08-19"], "TOTAL") == (35, "partial")
         assert _combined(by_date["2026-08-20"], "TOTAL") == (42, "full")
+        reviewed_source_watermarks = dict(manifest["source_watermarks"])
+        source_counts_before = _source_table_counts(runtime.db_path)
+        _seed_post_cutoff_ready(
+            runtime.db_path,
+            first_nm_id=first_nm_id,
+            second_nm_id=second_nm_id,
+        )
+        _seed_post_cutoff_noise(runtime.db_path, first_nm_id=first_nm_id)
+        post_cutoff_noise_digest = _file_digest(runtime.db_path)
+        source_counts_after = _source_table_counts(runtime.db_path)
+        assert source_counts_after["ready"] == source_counts_before["ready"] + 1
+        assert source_counts_after["events"] == source_counts_before["events"] + 1
+        assert source_counts_after["observations"] == source_counts_before["observations"] + 1
+        assert _watermarks(runtime.db_path) == reviewed_source_watermarks
+        _assert_target_source_changes_invalidate(
+            root=root,
+            db_path=runtime.db_path,
+            reviewed_digest=str(reviewed_source_watermarks["digest"]),
+            first_nm_id=first_nm_id,
+        )
 
         reviewed_storage = StoreRegistry(runtime_dir).load(require_files=True)
         drifted_storage = build_manifest(
@@ -200,7 +223,7 @@ def main() -> int:
                 runtime_dir / "storage_generation_manifest.json",
                 reviewed_storage,
             )
-        assert _file_digest(runtime.db_path) == original_digest
+        assert _file_digest(runtime.db_path) == post_cutoff_noise_digest
 
         tampered = dict(manifest)
         tampered["expected_effect"] = dict(manifest["expected_effect"])
@@ -460,6 +483,181 @@ def _seed_fbs_sources(db_path: Path, *, first_nm_id: int, second_nm_id: int) -> 
             (second_nm_id,),
         )
         conn.commit()
+
+
+def _seed_post_cutoff_noise(db_path: Path, *, first_nm_id: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"""INSERT INTO {EVENTS_TABLE}(
+                    event_id,cutover_id,order_id,episode_sequence,event_type,
+                    source_order_observation_sequence,
+                    source_status_observation_sequence,source_revision,
+                    status_digest,supplier_status,wb_status,source_observed_at,
+                    facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                    capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at,
+                    details_json
+                ) VALUES('post-cutoff-event','cutover-moscow',9001,1,'reserve',
+                         0,0,'post-cutoff-revision','sha256:post-cutoff-status',
+                         'new','waiting','2026-08-22T08:00:00Z','moscow','FBS',
+                         ?,1,0,'0','0','sha256:post-cutoff-event',
+                         '2026-08-22T08:00:00Z','{{}}')""",
+            (first_nm_id,),
+        )
+        conn.execute(
+            f"""INSERT INTO {OBSERVATIONS_TABLE}(
+                    observation_sequence,observation_id,order_id,source_revision,
+                    supply_id,delivery_type,source_created_at,warehouse_id,office_id,
+                    nm_id,chrt_id,seller_sku,rid_sha256,order_uid_sha256,skus_json,
+                    cargo_type,cross_border_type,is_zero_order,observed_at,
+                    collector_date_from,collector_date_to,collector_cursor
+                ) VALUES(3,'post-cutoff-observation',9001,'post-cutoff-revision',
+                         '','fbs','2026-08-22T08:00:00Z',1988668,1,?,1,'',
+                         'sha256:post-cutoff-rid','sha256:post-cutoff-uid','[]',
+                         1,0,0,'2026-08-22T08:00:00Z',1,2,0)""",
+            (first_nm_id,),
+        )
+        conn.commit()
+
+
+def _seed_post_cutoff_ready(
+    db_path: Path,
+    *,
+    first_nm_id: int,
+    second_nm_id: int,
+) -> None:
+    plan = _ready_plan(
+        business_date="2026-08-22",
+        first_nm_id=first_nm_id,
+        second_nm_id=second_nm_id,
+    )
+    with sqlite3.connect(db_path) as conn:
+        current = conn.execute(
+            """SELECT bundle_version,activated_at
+                 FROM registry_upload_current_state WHERE slot=1"""
+        ).fetchone()
+        assert current is not None
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                    bundle_version,activated_at,as_of_date,snapshot_id,
+                    plan_version,refreshed_at,plan_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                str(current[0]),
+                str(current[1]),
+                plan.as_of_date,
+                plan.snapshot_id,
+                plan.plan_version,
+                "2026-08-22T20:00:00Z",
+                json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+
+def _assert_target_source_changes_invalidate(
+    *,
+    root: Path,
+    db_path: Path,
+    reviewed_digest: str,
+    first_nm_id: int,
+) -> None:
+    ready_db = root / "target-ready-drift.sqlite3"
+    _clone_sqlite(db_path, ready_db)
+    with sqlite3.connect(ready_db) as conn:
+        row = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+                WHERE as_of_date='2026-08-21'"""
+        ).fetchone()
+        assert row is not None
+        plan = json.loads(str(row[0]))
+        data = next(
+            item
+            for item in plan["sheets"]
+            if item["sheet_name"] == "DATA_VITRINA"
+        )
+        total = next(item for item in data["rows"] if item[1] == "TOTAL|total_stock_total")
+        total[2] = int(total[2]) + 1
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_ready_snapshots
+                  SET refreshed_at='2026-08-21T21:00:00Z',plan_json=?
+                WHERE as_of_date='2026-08-21'""",
+            (json.dumps(plan, ensure_ascii=False, sort_keys=True),),
+        )
+        conn.commit()
+    assert str(_watermarks(ready_db)["digest"]) != reviewed_digest
+
+    event_db = root / "target-event-drift.sqlite3"
+    _clone_sqlite(db_path, event_db)
+    with sqlite3.connect(event_db) as conn:
+        conn.execute(
+            f"""INSERT INTO {EVENTS_TABLE}(
+                    event_id,cutover_id,order_id,episode_sequence,event_type,
+                    source_order_observation_sequence,
+                    source_status_observation_sequence,source_revision,
+                    status_digest,supplier_status,wb_status,source_observed_at,
+                    facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                    capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at,
+                    details_json
+                ) VALUES('target-event','cutover-moscow',9002,1,'reserve',0,0,
+                         'target-revision','sha256:target-status','new','waiting',
+                         '2026-08-21T08:00:00Z','moscow','FBS',?,1,0,'0','0',
+                         'sha256:target-event','2026-08-21T08:00:00Z','{{}}')""",
+            (first_nm_id,),
+        )
+        conn.commit()
+    assert str(_watermarks(event_db)["digest"]) != reviewed_digest
+
+    roster_db = root / "target-roster-drift.sqlite3"
+    _clone_sqlite(db_path, roster_db)
+    with sqlite3.connect(roster_db) as conn:
+        conn.execute(
+            f"UPDATE {FACILITIES_TABLE} SET name='Москва-2' WHERE facility_id='moscow'"
+        )
+        conn.commit()
+    assert str(_watermarks(roster_db)["digest"]) != reviewed_digest
+
+    mapping_db = root / "target-mapping-drift.sqlite3"
+    _clone_sqlite(db_path, mapping_db)
+    with sqlite3.connect(mapping_db) as conn:
+        conn.execute(
+            f"""INSERT INTO {WAREHOUSE_MAPPINGS_TABLE}(
+                    mapping_id,seller_warehouse_id,facility_id,mapping_digest,
+                    active,created_at,created_by
+                ) VALUES('map-moscow-late',1988668,'moscow',
+                         'sha256:mapping-late',1,'2026-08-21T09:00:00Z','smoke')"""
+        )
+        conn.commit()
+    assert str(_watermarks(mapping_db)["digest"]) != reviewed_digest
+
+
+def _clone_sqlite(source: Path, target: Path) -> None:
+    with sqlite3.connect(source) as source_conn, sqlite3.connect(target) as target_conn:
+        source_conn.backup(target_conn)
+
+
+def _watermarks(db_path: Path) -> dict[str, object]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _source_watermarks(
+            conn,
+            date_from="2026-08-09",
+            date_to="2026-08-21",
+        )
+
+
+def _source_table_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        return {
+            "ready": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_ready_snapshots"
+                ).fetchone()[0]
+            ),
+            "events": int(conn.execute(f"SELECT COUNT(*) FROM {EVENTS_TABLE}").fetchone()[0]),
+            "observations": int(
+                conn.execute(f"SELECT COUNT(*) FROM {OBSERVATIONS_TABLE}").fetchone()[0]
+            ),
+        }
 
 
 def _combined(capture: dict[str, object], scope_key: str) -> tuple[int, str]:
