@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_inventory_history_backfill import (  # noqa: E402
     InventoryHistoryBackfillError,
+    _ready_wb_history,
     _source_watermarks,
     run_backfill,
 )
@@ -150,6 +152,22 @@ def main() -> int:
         }
         manifest = json.loads(Path(dry_run["manifest_path"]).read_text(encoding="utf-8"))
         by_date = {item["business_date"]: item for item in manifest["captures"]}
+        reviewed_ready = dict(by_date["2026-08-21"]["source_manifest"]["ready"])
+        assert reviewed_ready["digest_roles"] == {
+            "inventory_evidence_digest": "capture_source_and_apply_cas",
+            "observed_plan_digest": "immutable_audit_only_not_apply_cas",
+        }
+        reviewed_wb = next(
+            item
+            for item in by_date["2026-08-21"]["components"]
+            if item["scope_key"] == "TOTAL" and item["component_kind"] == "WB"
+        )
+        assert reviewed_wb["source_digest"] == reviewed_ready[
+            "inventory_evidence_digest"
+        ]
+        assert reviewed_wb["provenance"]["inventory_evidence_digest"] == (
+            reviewed_ready["inventory_evidence_digest"]
+        )
         assert by_date["2026-08-10"]["proposed_values_by_scope"]["TOTAL"][
             "quality"
         ] == "partial"
@@ -176,6 +194,14 @@ def main() -> int:
         assert source_counts_after["events"] == source_counts_before["events"] + 1
         assert source_counts_after["observations"] == source_counts_before["observations"] + 1
         assert _watermarks(runtime.db_path) == reviewed_source_watermarks
+        _assert_ready_inventory_slice_cas(
+            root=root,
+            db_path=runtime.db_path,
+            reviewed_digest=str(reviewed_source_watermarks["digest"]),
+            reviewed_source=reviewed_ready,
+            first_nm_id=first_nm_id,
+            second_nm_id=second_nm_id,
+        )
         _assert_target_source_changes_invalidate(
             root=root,
             db_path=runtime.db_path,
@@ -321,6 +347,7 @@ def _ready_plan(
         ["Остатки", "TOTAL|total_stock_total", 30],
         ["Остатки", f"SKU:{first_nm_id}|stock_total", 10],
         ["Остатки", f"SKU:{second_nm_id}|stock_total", 20],
+        ["Заказы", "TOTAL|orders", 99],
     ]
     return SheetVitrinaV1Envelope(
         plan_version="inventory-history-smoke-plan-v1",
@@ -628,6 +655,202 @@ def _assert_target_source_changes_invalidate(
         )
         conn.commit()
     assert str(_watermarks(mapping_db)["digest"]) != reviewed_digest
+
+
+def _assert_ready_inventory_slice_cas(
+    *,
+    root: Path,
+    db_path: Path,
+    reviewed_digest: str,
+    reviewed_source: dict[str, object],
+    first_nm_id: int,
+    second_nm_id: int,
+) -> None:
+    unrelated_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-unrelated-metric",
+        mutate=lambda plan: _set_ready_value(plan, "TOTAL|orders", 123456),
+    )
+    unrelated_sources, unrelated_blockers = _ready_sources(unrelated_db)
+    unrelated_source = unrelated_sources["2026-08-21"]
+    assert not unrelated_blockers
+    assert str(_watermarks(unrelated_db)["digest"]) == reviewed_digest
+    assert unrelated_source["inventory_evidence_digest"] == reviewed_source[
+        "inventory_evidence_digest"
+    ]
+    assert unrelated_source["observed_plan_digest"] != reviewed_source[
+        "observed_plan_digest"
+    ]
+
+    total_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-total-value",
+        mutate=lambda plan: _set_ready_value(plan, "TOTAL|total_stock_total", 31),
+    )
+    assert str(_watermarks(total_db)["digest"]) != reviewed_digest
+
+    sku_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-sku-value",
+        mutate=lambda plan: _set_ready_value(
+            plan, f"SKU:{first_nm_id}|stock_total", 11
+        ),
+    )
+    assert str(_watermarks(sku_db)["digest"]) != reviewed_digest
+
+    missing_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-sku-missing",
+        mutate=lambda plan: _set_ready_value(
+            plan, f"SKU:{first_nm_id}|stock_total", ""
+        ),
+    )
+    missing_sources, _ = _ready_sources(missing_db)
+    missing_scopes = missing_sources["2026-08-21"]["inventory_evidence"][
+        "stock_total_scopes"
+    ]
+    assert next(
+        item
+        for item in missing_scopes
+        if item["scope_key"] == f"SKU:{first_nm_id}"
+    ) == {
+        "scope_kind": "SKU",
+        "scope_key": f"SKU:{first_nm_id}",
+        "row_key": f"SKU:{first_nm_id}|stock_total",
+        "state": "missing",
+        "quantity": None,
+    }
+    assert str(_watermarks(missing_db)["digest"]) != reviewed_digest
+
+    scope_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-scope-set",
+        mutate=lambda plan: _remove_ready_row(
+            plan, f"SKU:{second_nm_id}|stock_total"
+        ),
+    )
+    assert str(_watermarks(scope_db)["digest"]) != reviewed_digest
+
+    identity_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-snapshot-identity",
+        mutate=lambda plan: plan.update(snapshot_id="replacement-snapshot"),
+        outer_updates={"snapshot_id": "replacement-snapshot"},
+    )
+    assert str(_watermarks(identity_db)["digest"]) != reviewed_digest
+
+    revision_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-plan-revision",
+        mutate=lambda plan: plan.update(plan_version="replacement-plan-version"),
+        outer_updates={"plan_version": "replacement-plan-version"},
+    )
+    assert str(_watermarks(revision_db)["digest"]) != reviewed_digest
+
+    rank_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-selection-rank",
+        mutate=lambda plan: None,
+        outer_updates={"refreshed_at": "2026-08-21T21:00:00Z"},
+    )
+    assert str(_watermarks(rank_db)["digest"]) != reviewed_digest
+
+    date_column_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-date-column-schema",
+        mutate=_insert_ready_date_column,
+    )
+    assert str(_watermarks(date_column_db)["digest"]) != reviewed_digest
+
+    header_db = _ready_plan_mutation_copy(
+        root=root,
+        source=db_path,
+        name="ready-key-header-schema",
+        mutate=lambda plan: plan["sheets"][0]["header"].__setitem__(1, "metric_key"),
+    )
+    _, header_blockers = _ready_sources(header_db)
+    assert any("header drift" in item for item in header_blockers)
+    assert str(_watermarks(header_db)["digest"]) != reviewed_digest
+
+
+def _ready_plan_mutation_copy(
+    *,
+    root: Path,
+    source: Path,
+    name: str,
+    mutate: Callable[[dict[str, object]], None],
+    outer_updates: dict[str, str] | None = None,
+) -> Path:
+    target = root / f"{name}.sqlite3"
+    _clone_sqlite(source, target)
+    with sqlite3.connect(target) as conn:
+        row = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+                WHERE as_of_date='2026-08-21'"""
+        ).fetchone()
+        assert row is not None
+        plan = json.loads(str(row[0]))
+        mutate(plan)
+        assignments = ["plan_json=?"]
+        values: list[object] = [json.dumps(plan, ensure_ascii=False, sort_keys=True)]
+        for column, value in (outer_updates or {}).items():
+            assert column in {"snapshot_id", "plan_version", "refreshed_at"}
+            assignments.append(f"{column}=?")
+            values.append(value)
+        values.append("2026-08-21")
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_ready_snapshots SET "
+            + ",".join(assignments)
+            + " WHERE as_of_date=?",
+            values,
+        )
+        conn.commit()
+    return target
+
+
+def _set_ready_value(plan: dict[str, object], row_key: str, value: object) -> None:
+    data = next(
+        item for item in plan["sheets"] if item["sheet_name"] == "DATA_VITRINA"  # type: ignore[index]
+    )
+    row = next(item for item in data["rows"] if item[1] == row_key)
+    row[2] = value
+
+
+def _remove_ready_row(plan: dict[str, object], row_key: str) -> None:
+    data = next(
+        item for item in plan["sheets"] if item["sheet_name"] == "DATA_VITRINA"  # type: ignore[index]
+    )
+    data["rows"] = [item for item in data["rows"] if item[1] != row_key]
+
+
+def _insert_ready_date_column(plan: dict[str, object]) -> None:
+    plan["date_columns"].insert(0, "2026-08-08")  # type: ignore[union-attr]
+    data = next(
+        item for item in plan["sheets"] if item["sheet_name"] == "DATA_VITRINA"  # type: ignore[index]
+    )
+    data["header"].insert(2, "2026-08-08")
+    for row in data["rows"]:
+        row.insert(2, None)
+
+
+def _ready_sources(db_path: Path) -> tuple[dict[str, dict[str, object]], list[str]]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        _, sources, blockers = _ready_wb_history(
+            conn,
+            date_from="2026-08-09",
+            date_to="2026-08-21",
+        )
+    return sources, blockers
 
 
 def _clone_sqlite(source: Path, target: Path) -> None:

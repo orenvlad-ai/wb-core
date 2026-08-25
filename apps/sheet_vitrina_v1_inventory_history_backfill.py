@@ -65,7 +65,8 @@ from packages.business_time import current_business_date_iso  # noqa: E402
 
 
 SCHEMA_VERSION = "sheet_vitrina_v1_inventory_history_backfill_v1"
-SOURCE_CAS_CONTRACT = "sheet_vitrina_v1_inventory_history_backfill_source_cas_v2"
+SOURCE_CAS_CONTRACT = "sheet_vitrina_v1_inventory_history_backfill_source_cas_v3"
+READY_EVIDENCE_CONTRACT = "sheet_vitrina_v1_inventory_ready_evidence_v1"
 FORMULA_VERSION = "inventory_planning_v1"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 MAX_DAYS = 730
@@ -336,11 +337,17 @@ def _build_manifest(
                     state=wb_state,
                     quantity=wb_value,
                     source_revision=str(wb_sources[business_date]["snapshot_id"]),
-                    source_digest=str(wb_sources[business_date]["plan_digest"]),
+                    source_digest=str(
+                        wb_sources[business_date]["inventory_evidence_digest"]
+                    ),
                     source_watermark=str(wb_sources[business_date]["refreshed_at"]),
                     provenance={
                         "source": "sheet_vitrina_v1_ready_snapshots.stock_total",
                         "legacy_fact_semantics": "WB_only",
+                        "inventory_evidence_contract": READY_EVIDENCE_CONTRACT,
+                        "inventory_evidence_digest": wb_sources[business_date][
+                            "inventory_evidence_digest"
+                        ],
                     },
                 )
             ]
@@ -867,7 +874,10 @@ def _ready_wb_history(
     date_from: str | None = None,
     date_to: str,
 ) -> tuple[dict[str, dict[str, int | None]], dict[str, dict[str, Any]], list[str]]:
-    selected: dict[str, tuple[tuple[str, str, str, str], dict[str, int | None], dict[str, Any]]] = {}
+    selected: dict[
+        str,
+        tuple[tuple[str, str, str, str], dict[str, int | None], dict[str, Any]],
+    ] = {}
     blockers: list[str] = []
     rows = conn.execute(
         """SELECT bundle_version,activated_at,as_of_date,snapshot_id,plan_version,
@@ -883,37 +893,76 @@ def _ready_wb_history(
         except json.JSONDecodeError:
             blockers.append(f"invalid ready plan JSON: {row['bundle_version']}/{row['as_of_date']}")
             continue
-        data = next(
-            (
-                item
-                for item in list(plan.get("sheets") or [])
-                if str(item.get("sheet_name") or "") == "DATA_VITRINA"
-            ),
-            None,
-        )
-        if not isinstance(data, Mapping):
+        data_sheets = [
+            item
+            for item in list(plan.get("sheets") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("sheet_name") or "") == "DATA_VITRINA"
+        ]
+        if not data_sheets:
             continue
+        if len(data_sheets) != 1:
+            blockers.append(f"ambiguous ready DATA_VITRINA sheet: {row['snapshot_id']}")
+            continue
+        data = data_sheets[0]
         header = list(data.get("header") or [])
         plan_dates = [str(item) for item in list(plan.get("date_columns") or [])]
         if len(header) < 2 or header[:2] != ["label", "key"]:
             blockers.append(f"ready DATA_VITRINA header drift: {row['snapshot_id']}")
             continue
-        rows_by_id = {
-            str(item[1]): list(item)
-            for item in list(data.get("rows") or [])
-            if isinstance(item, list) and len(item) >= 2
+        if len(set(plan_dates)) != len(plan_dates):
+            blockers.append(f"duplicate ready date column: {row['snapshot_id']}")
+            continue
+        embedded_identity = {
+            "snapshot_id": str(plan.get("snapshot_id") or ""),
+            "plan_version": str(plan.get("plan_version") or ""),
+            "as_of_date": str(plan.get("as_of_date") or ""),
         }
+        persisted_identity = {
+            "snapshot_id": str(row["snapshot_id"]),
+            "plan_version": str(row["plan_version"]),
+            "as_of_date": str(row["as_of_date"]),
+        }
+        if embedded_identity != persisted_identity:
+            blockers.append(f"ready plan identity drift: {row['snapshot_id']}")
+            continue
+        rows_by_id: dict[str, list[Any]] = {}
+        duplicate_inventory_key = False
+        for raw_item in list(data.get("rows") or []):
+            if not isinstance(raw_item, list) or len(raw_item) < 2:
+                continue
+            row_id = str(raw_item[1])
+            is_inventory_key = row_id == "TOTAL|total_stock_total" or (
+                row_id.startswith("SKU:") and row_id.endswith("|stock_total")
+            )
+            if not is_inventory_key:
+                continue
+            if row_id in rows_by_id:
+                duplicate_inventory_key = True
+                break
+            rows_by_id[row_id] = list(raw_item)
+        if duplicate_inventory_key:
+            blockers.append(f"duplicate ready stock_total key: {row['snapshot_id']}")
+            continue
         rank = (
             str(row["refreshed_at"]),
             str(row["activated_at"]),
             str(row["bundle_version"]),
             str(row["snapshot_id"]),
         )
-        plan_digest = _digest(plan)
-        for business_date in plan_dates:
-            if business_date > date_to or business_date not in header:
+        observed_plan_digest = _digest(plan)
+        for date_position, business_date in enumerate(plan_dates):
+            if business_date > date_to:
                 continue
-            column = header.index(business_date)
+            header_positions = [
+                index for index, value in enumerate(header) if str(value) == business_date
+            ]
+            if len(header_positions) != 1:
+                blockers.append(
+                    f"ready date/header mismatch: {row['snapshot_id']}/{business_date}"
+                )
+                continue
+            column = header_positions[0]
             scopes: dict[str, int | None] = {}
             for row_id, item in rows_by_id.items():
                 if row_id == "TOTAL|total_stock_total":
@@ -927,20 +976,67 @@ def _ready_wb_history(
                     scopes[scope_key] = _optional_integer(item[column] if len(item) > column else None)
             if not scopes:
                 continue
-            source = {
+            typed_scopes = [
+                {
+                    "scope_kind": "TOTAL" if scope_key == "TOTAL" else "SKU",
+                    "scope_key": scope_key,
+                    "row_key": (
+                        "TOTAL|total_stock_total"
+                        if scope_key == "TOTAL"
+                        else f"{scope_key}|stock_total"
+                    ),
+                    "state": _value_state(value),
+                    "quantity": value,
+                }
+                for scope_key, value in sorted(
+                    scopes.items(), key=lambda item: _scope_sort_key(item[0])
+                )
+            ]
+            selection_identity = {
                 "bundle_version": str(row["bundle_version"]),
                 "activated_at": str(row["activated_at"]),
                 "snapshot_as_of_date": str(row["as_of_date"]),
                 "snapshot_id": str(row["snapshot_id"]),
                 "plan_version": str(row["plan_version"]),
                 "refreshed_at": str(row["refreshed_at"]),
-                "plan_digest": plan_digest,
+                "selection_rank": list(rank),
+            }
+            inventory_evidence = {
+                "contract": READY_EVIDENCE_CONTRACT,
+                "business_date": business_date,
+                "selection_identity": selection_identity,
+                "column_schema": {
+                    "sheet_name": "DATA_VITRINA",
+                    "header": [str(item) for item in header],
+                    "date_columns": plan_dates,
+                    "date_column_position": date_position,
+                    "header_column_index": column,
+                    "column_date": business_date,
+                    "key_columns": [
+                        {"index": 0, "value": "label"},
+                        {"index": 1, "value": "key"},
+                    ],
+                },
+                "stock_total_scopes": typed_scopes,
+            }
+            inventory_evidence_digest = _digest(inventory_evidence)
+            source = {
+                **selection_identity,
                 "column_date": business_date,
+                "inventory_evidence": inventory_evidence,
+                "inventory_evidence_digest": inventory_evidence_digest,
+                "observed_plan_digest": observed_plan_digest,
+                "digest_roles": {
+                    "inventory_evidence_digest": "capture_source_and_apply_cas",
+                    "observed_plan_digest": "immutable_audit_only_not_apply_cas",
+                },
             }
             prior = selected.get(business_date)
             if prior is None or rank > prior[0]:
                 selected[business_date] = (rank, scopes, source)
-            elif rank == prior[0] and prior[1] != scopes:
+            elif rank == prior[0] and prior[2]["inventory_evidence_digest"] != (
+                inventory_evidence_digest
+            ):
                 blockers.append(f"ambiguous ready stock_total revision: {business_date}")
     return (
         {business_date: value[1] for business_date, value in selected.items()},
@@ -1443,8 +1539,10 @@ def _source_watermarks(
     ready_material = [
         {
             "business_date": business_date,
-            "source": wb_sources[business_date],
-            "scopes": wb_history[business_date],
+            "inventory_evidence": wb_sources[business_date]["inventory_evidence"],
+            "inventory_evidence_digest": wb_sources[business_date][
+                "inventory_evidence_digest"
+            ],
         }
         for business_date in target_dates
         if business_date in wb_history
