@@ -193,10 +193,11 @@ Existing exact receipt запрещает duplicate action. Ambiguous merge tran
 ## Default-off Apply Runner
 
 Apply workflow имеет только manual `workflow_dispatch` и production
-environment. Inputs bind PR, merge/deployed SHA, manifest SHA-256, durable
-operation id и exact authorization comment id.
+environment. Он поддерживает два fail-closed authorization mode.
 
-Authorization comment обязан быть immutable `OWNER`/`MEMBER` body:
+Legacy `exact-manifest` inputs bind PR, merge/deployed SHA, manifest SHA-256,
+durable operation id и exact authorization comment id. Authorization comment
+обязан быть immutable `OWNER`/`MEMBER` body:
 
 ```text
 /wb-core apply-v2 pr <PR> merge <MERGE_SHA> deployed <DEPLOYED_SHA> manifest sha256:<MANIFEST_SHA256> operation <OPERATION_ID>
@@ -215,6 +216,36 @@ Readback и reconciliation запускаются по одному разу д�
 чтобы зафиксировать ambiguity без blind retry. Durable apply receipt binds
 authorization body digest, command/stdout/stderr digests, return codes и
 `apply_count` (0 или 1).
+
+Task-scoped `scope-goal` mode не принимает merge/deployed/manifest hashes от
+пользователя. Inputs содержат только merged PR, exact Release Runner operation
+id и durable authorization comment id. Runner сам выводит exact merge/deployed
+SHA из единственного trusted `live_runtime/done` receipt. Immutable
+`OWNER`/`MEMBER` comment является scope-level passport, например:
+
+```text
+/wb-core authorize-goal-v1 task WBC0006 profile inventory-history-backfill target wb_core_eu_hosted_runtime_active dates 2026-03-01..2026-08-24 captures 177 components 18054 finalizations 177 full-days 172 partial-days 5
+```
+
+Passport фиксирует business task, canonical target, profile, bounded dates,
+exact expected insertions/quality и one-submit boundary; manifest hash в нём
+не является human gate. Для supported profile Runner checkout-ит exact merge,
+проверяет canonical current-live target и запускает только deployed repo-owned
+backfill. Manifest создаётся JIT в operation-specific private `0600` evidence
+directory на canonical host и остаётся immutable audit/recovery artifact вне
+Git.
+
+Перед mutation требуются два consecutive полных query-only dry-run с одним
+material qualification digest. При material drift предыдущий candidate
+superseded и выполняется bounded regeneration, максимум три, до первого submit;
+это не mutation retry. Scope/count/quality/deployed-SHA escape fail closed.
+После квалификации вызывается ровно один `--apply`; его nonzero exit или
+ambiguous SSH transport никогда не повторяется. Отдельный deployed
+`--readback` открывает canonical store query-only, reconciles exact applies row,
+added capture/component/finalization counts, bounded-date visibility/quality,
+material source CAS и non-target invariants. Durable v3 receipt сохраняет все
+candidate hashes, exact applied manifest, command/output digests,
+`apply_count=0|1` и query-only result.
 
 ## Compatibility and rollback
 

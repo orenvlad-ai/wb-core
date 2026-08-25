@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Default-off one-shot production apply with exact owner and manifest binding."""
+"""One-submit production apply from a durable task-scoped authorization."""
 
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
+from pathlib import Path
+import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 
@@ -24,16 +28,41 @@ from apps.github_release_runner import (  # noqa: E402
     GitHubClient,
     RECEIPT_MARKER,
     canonical_json_bytes,
+    configure_deploy_environment,
     exact_sha,
     is_actions_bot_comment,
     list_comments,
 )
-from apps.release_protocol import CANONICAL_REPOSITORY, validate_production_manifest  # noqa: E402
+from apps.release_protocol import (  # noqa: E402
+    CANONICAL_PRODUCTION_TARGET_ID,
+    CANONICAL_REPOSITORY,
+    validate_production_manifest,
+)
 
 
-APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v2"
+APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
 APPLY_MARKER = "wb-core-production-apply-receipt"
+GOAL_PROFILE = "inventory-history-backfill"
+MAX_QUALIFICATION_CANDIDATES = 4
+TARGET_FILE = (
+    ROOT
+    / "artifacts"
+    / "registry_upload_http_entrypoint"
+    / "input"
+    / "hosted_runtime_target__europe_api.json"
+)
 AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC[0-9]{4}) "
+    r"profile (?P<profile>[a-z0-9-]{1,80}) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"dates (?P<date_from>[0-9]{4}-[0-9]{2}-[0-9]{2})\.\."
+    r"(?P<date_to>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"captures (?P<captures>[1-9][0-9]*) "
+    r"components (?P<components>[1-9][0-9]*) "
+    r"finalizations (?P<finalizations>[1-9][0-9]*) "
+    r"full-days (?P<full_days>[0-9]+) partial-days (?P<partial_days>[0-9]+)$"
+)
+LEGACY_AUTH_RE = re.compile(
     r"^/wb-core apply-v2 pr (?P<pr>[1-9][0-9]*) merge (?P<merge>[0-9a-f]{40}) "
     r"deployed (?P<deployed>[0-9a-f]{40}) manifest sha256:(?P<manifest>[0-9a-f]{64}) "
     r"operation (?P<operation>[A-Za-z0-9._:-]{1,160})$"
@@ -55,11 +84,46 @@ def marker(operation: str) -> str:
 def parse_release_receipt(
     comments: list[Mapping[str, Any]],
     *,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if (
+            f"<!-- {RECEIPT_MARKER} operation={release_operation} -->" not in body
+            or "```json" not in body
+            or not is_actions_bot_comment(comment)
+        ):
+            continue
+        try:
+            payload_text = body.split("```json", 1)[1].split("```", 1)[0]
+            payload = json.loads(payload_text)
+        except (IndexError, json.JSONDecodeError):
+            continue
+        if (
+            payload.get("state") == "done"
+            and payload.get("operation_id") == release_operation
+            and payload.get("pull_request") == pr
+            and payload.get("merge_sha") == merge_sha
+            and payload.get("deployed_sha") == merge_sha
+            and payload.get("release_kind") == "live_runtime"
+        ):
+            matches.append(payload)
+    if len(matches) != 1:
+        raise ApplyError("exact live-runtime release receipt is missing or ambiguous")
+    return matches[0]
+
+
+def parse_legacy_release_receipt(
+    comments: list[Mapping[str, Any]],
+    *,
     merge_sha: str,
     manifest_sha: str,
     operation: str,
 ) -> dict[str, Any]:
-    matches = []
+    matches: list[dict[str, Any]] = []
     for comment in comments:
         body = str(comment.get("body") or "")
         if (
@@ -69,8 +133,7 @@ def parse_release_receipt(
         ):
             continue
         try:
-            payload_text = body.split("```json", 1)[1].split("```", 1)[0]
-            payload = json.loads(payload_text)
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
         except (IndexError, json.JSONDecodeError):
             continue
         manifest = payload.get("manifest")
@@ -88,7 +151,7 @@ def parse_release_receipt(
     return matches[0]
 
 
-def validate_authorization(
+def validate_legacy_authorization(
     comment: Mapping[str, Any],
     *,
     pr: int,
@@ -100,7 +163,7 @@ def validate_authorization(
     association = str(comment.get("author_association") or "").upper()
     if association not in {"OWNER", "MEMBER"}:
         raise ApplyError("apply authorization association is not OWNER or MEMBER")
-    match = AUTH_RE.fullmatch(str(comment.get("body") or "").strip())
+    match = LEGACY_AUTH_RE.fullmatch(str(comment.get("body") or "").strip())
     if match is None:
         raise ApplyError("apply authorization body is not exact protocol-v2 syntax")
     expected = {
@@ -114,36 +177,403 @@ def validate_authorization(
         raise ApplyError("apply authorization binding mismatch")
 
 
-def command_evidence(command: list[str]) -> dict[str, Any]:
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+def validate_authorization(
+    comment: Mapping[str, Any],
+    *,
+    repository: str,
+    pr: int,
+) -> dict[str, Any]:
+    association = str(comment.get("author_association") or "").upper()
+    if association not in {"OWNER", "MEMBER"}:
+        raise ApplyError("task authorization association is not OWNER or MEMBER")
+    issue_url = str(comment.get("issue_url") or "")
+    expected_suffix = f"/repos/{repository}/issues/{pr}"
+    if not issue_url.endswith(expected_suffix):
+        raise ApplyError("task authorization is not attached to the exact pull request")
+    match = AUTH_RE.fullmatch(str(comment.get("body") or "").strip())
+    if match is None:
+        raise ApplyError("task authorization body is not exact goal-v1 syntax")
+    raw = match.groupdict()
+    if raw["profile"] != GOAL_PROFILE:
+        raise ApplyError("task authorization profile is unsupported")
+    if raw["target"] != CANONICAL_PRODUCTION_TARGET_ID:
+        raise ApplyError("task authorization target is not canonical production")
+    date_from = date.fromisoformat(raw["date_from"])
+    date_to = date.fromisoformat(raw["date_to"])
+    date_count = (date_to - date_from).days + 1
+    if date_count <= 0 or date_count > 730:
+        raise ApplyError("task authorization date scope is invalid")
+    goal: dict[str, Any] = {
+        "contract": "wb-core.production-goal-passport/v1",
+        "task": raw["task"],
+        "profile": raw["profile"],
+        "target_id": raw["target"],
+        "date_from": raw["date_from"],
+        "date_to": raw["date_to"],
+        "date_count": date_count,
+        "expected_inserted_capture_count": int(raw["captures"]),
+        "expected_inserted_component_count": int(raw["components"]),
+        "expected_inserted_finalization_count": int(raw["finalizations"]),
+        "expected_full_date_count": int(raw["full_days"]),
+        "expected_partial_date_count": int(raw["partial_days"]),
+        "max_mutation_submits": 1,
+        "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
+        "reversible": True,
+    }
+    if goal["expected_inserted_capture_count"] != date_count:
+        raise ApplyError("task authorization capture count does not match date scope")
+    if goal["expected_inserted_finalization_count"] != date_count:
+        raise ApplyError("task authorization finalization count does not match date scope")
+    if (
+        goal["expected_full_date_count"] + goal["expected_partial_date_count"]
+        != date_count
+    ):
+        raise ApplyError("task authorization quality partition does not match date scope")
+    if goal["expected_inserted_component_count"] < date_count:
+        raise ApplyError("task authorization component bound is invalid")
+    return goal
+
+
+def operation_id(repository: str, pr: int, comment_id: int, goal: Mapping[str, Any]) -> str:
+    material = canonical_json_bytes(
+        {
+            "repository": repository,
+            "pull_request": pr,
+            "authorization_comment_id": comment_id,
+            "goal": goal,
+        }
+    )
+    return "production-goal-v1-" + digest(material)[:32]
+
+
+def _canonical_target() -> dict[str, Any]:
+    payload = json.loads(TARGET_FILE.read_text(encoding="utf-8"))
+    expected = {
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "target_status": "active",
+        "target_role": "primary_live",
+        "target_lifecycle": "current_live",
+        "ssh_destination": "wb-core-eu-root",
+        "target_dir": "/opt/wb-core-runtime/app",
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ApplyError(f"canonical production target mismatch: {field}")
+    return payload
+
+
+def _ssh_command() -> list[str]:
+    command = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=20",
+    ]
+    identity = os.environ.get("WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE", "").strip()
+    if identity:
+        command.extend(["-i", identity])
+    options = os.environ.get("WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS", "").strip()
+    if options:
+        command.extend(shlex.split(options))
+    return command
+
+
+def _remote_command(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    evidence_dir: str,
+    mode: str,
+    manifest_path: str = "",
+    manifest_sha256: str = "",
+    approval_reference: str = "",
+) -> list[str]:
+    if mode not in {"dry-run", "apply", "readback"}:
+        raise ApplyError("unsupported remote production-goal mode")
+    target_dir = str(target["target_dir"])
+    parts = [
+        "python3",
+        f"{target_dir}/apps/sheet_vitrina_v1_inventory_history_backfill.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--evidence-dir",
+        evidence_dir,
+        "--deployed-sha",
+        merge_sha,
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "--date-from",
+        str(goal["date_from"]),
+        "--date-to",
+        str(goal["date_to"]),
+    ]
+    if mode in {"apply", "readback"}:
+        normalized_manifest_path = posixpath.normpath(manifest_path)
+        normalized_evidence_dir = posixpath.normpath(evidence_dir)
+        if (
+            normalized_manifest_path != manifest_path
+            or posixpath.dirname(normalized_manifest_path)
+            != normalized_evidence_dir
+            or re.fullmatch(
+                r"inventory-history-backfill-plan-[0-9]{8}T[0-9]{6}Z\.json",
+                posixpath.basename(normalized_manifest_path),
+            )
+            is None
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256)
+        ):
+            raise ApplyError("remote manifest binding escapes authorized evidence scope")
+        parts.extend(
+            [
+                "--manifest",
+                manifest_path,
+                "--manifest-sha256",
+                manifest_sha256,
+            ]
+        )
+    if mode == "apply":
+        if not approval_reference or len(approval_reference) > 500:
+            raise ApplyError("task authorization reference is invalid")
+        parts.extend(["--apply", "--approval-reference", approval_reference])
+    elif mode == "readback":
+        parts.append("--readback")
+    evidence_setup = (
+        "install -d -m 0700 " + shlex.quote(evidence_dir)
+        if mode == "dry-run"
+        else "test -d "
+        + shlex.quote(evidence_dir)
+        + " && test \"$(stat -c %a "
+        + shlex.quote(evidence_dir)
+        + ")\" = 700"
+    )
+    shell = (
+        "set -eu; umask 077; "
+        + evidence_setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def command_evidence(command: list[str], *, timeout_seconds: float = 3600.0) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "command_sha256": digest(canonical_json_bytes(command)),
+            "return_code": None,
+            "transport_ambiguous": True,
+            "error": type(exc).__name__,
+        }
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        payload = None
     return {
         "command_sha256": digest(canonical_json_bytes(command)),
         "return_code": result.returncode,
         "stdout_sha256": digest(result.stdout.encode("utf-8")),
         "stderr_sha256": digest(result.stderr.encode("utf-8")),
+        "transport_ambiguous": False,
+        "result": payload if isinstance(payload, Mapping) else None,
     }
 
 
-def run_commands(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    commands = manifest["commands"]
-    dry_run = command_evidence(commands["dry_run"])
-    if dry_run["return_code"] != 0:
-        return {"state": "blocked", "apply_count": 0, "dry_run": dry_run}
-    apply = command_evidence(commands["apply"])
-    readback = command_evidence(commands["readback"])
-    reconcile = command_evidence(commands["reconcile"])
-    complete = all(item["return_code"] == 0 for item in (apply, readback, reconcile))
+def _validate_candidate(payload: Mapping[str, Any], goal: Mapping[str, Any]) -> None:
+    expected = {
+        "status": "ready",
+        "date_from": goal["date_from"],
+        "date_to": goal["date_to"],
+        "date_count": goal["date_count"],
+        "inserted_capture_count": goal["expected_inserted_capture_count"],
+        "inserted_component_count": goal["expected_inserted_component_count"],
+        "inserted_finalization_count": goal["expected_inserted_finalization_count"],
+        "full_date_count": goal["expected_full_date_count"],
+        "partial_date_count": goal["expected_partial_date_count"],
+        "unavailable_date_count": 0,
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ApplyError(f"dynamic manifest escaped authorized goal: {field}")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(payload.get("deployed_sha") or "")):
+        raise ApplyError("dynamic manifest deployed SHA is invalid")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("manifest_sha256") or "")):
+        raise ApplyError("dynamic manifest digest is invalid")
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(payload.get("material_qualification_digest") or ""),
+    ):
+        raise ApplyError("dynamic material qualification digest is invalid")
+
+
+def run_dynamic_goal(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    operation: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    evidence_dir = f"/opt/wb-core-runtime/state/private-evidence/production-goals/{operation}"
+    attempts: list[dict[str, Any]] = []
+    previous_material_digest = ""
+    candidate: Mapping[str, Any] | None = None
+    for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+        evidence = command_evidence(
+            _remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                goal=goal,
+                evidence_dir=evidence_dir,
+                mode="dry-run",
+            )
+        )
+        payload = evidence.get("result")
+        if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
+            return {
+                "state": "blocked",
+                "reason": "jit-material-preflight-failed",
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        try:
+            _validate_candidate(payload, goal)
+        except ApplyError as exc:
+            return {
+                "state": "blocked",
+                "reason": str(exc),
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        if payload.get("deployed_sha") != merge_sha:
+            raise ApplyError("dynamic manifest is not bound to exact deployed merge SHA")
+        attempts.append(
+            {
+                **{key: value for key, value in evidence.items() if key != "result"},
+                "attempt": attempt,
+                "manifest_path": payload["manifest_path"],
+                "manifest_sha256": payload["manifest_sha256"],
+                "material_qualification_digest": payload[
+                    "material_qualification_digest"
+                ],
+                "source_watermarks_digest": payload["source_watermarks_digest"],
+                "target_history_digest": payload["target_history_digest"],
+                "qualification_state": "candidate",
+            }
+        )
+        current_material_digest = str(payload["material_qualification_digest"])
+        if current_material_digest == previous_material_digest:
+            attempts[-2]["qualification_state"] = "matching_witness"
+            attempts[-1]["qualification_state"] = "qualified"
+            candidate = payload
+            break
+        if len(attempts) > 1:
+            attempts[-2]["qualification_state"] = "superseded_material_drift"
+        previous_material_digest = current_material_digest
+        if attempt < MAX_QUALIFICATION_CANDIDATES:
+            time.sleep(1.1)
+    if candidate is None:
+        if attempts:
+            attempts[-1]["qualification_state"] = "unstable_at_bound"
+        return {
+            "state": "blocked",
+            "reason": "material-cas-did-not-survive-bounded-qualification",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+        }
+
+    manifest_path = str(candidate["manifest_path"])
+    manifest_sha256 = str(candidate["manifest_sha256"])
+    try:
+        apply_command = _remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            goal=goal,
+            evidence_dir=evidence_dir,
+            mode="apply",
+            manifest_path=manifest_path,
+            manifest_sha256=manifest_sha256,
+            approval_reference=approval_reference,
+        )
+    except ApplyError as exc:
+        return {
+            "state": "blocked",
+            "reason": str(exc),
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+        }
+    apply_evidence = command_evidence(apply_command)
+    # This is the single mutation submit boundary. It is never repeated,
+    # including after a nonzero exit or ambiguous SSH transport.
+    readback_evidence = command_evidence(
+        _remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            goal=goal,
+            evidence_dir=evidence_dir,
+            mode="readback",
+            manifest_path=manifest_path,
+            manifest_sha256=manifest_sha256,
+        )
+    )
+    readback = readback_evidence.get("result")
+    reconciled = (
+        readback_evidence.get("return_code") == 0
+        and isinstance(readback, Mapping)
+        and readback.get("status") == "reconciled"
+        and readback.get("query_only") is True
+        and readback.get("inserted_capture_count")
+        == goal["expected_inserted_capture_count"]
+        and readback.get("inserted_component_count")
+        == goal["expected_inserted_component_count"]
+        and readback.get("inserted_finalization_count")
+        == goal["expected_inserted_finalization_count"]
+        and readback.get("visible_history_date_count") == goal["date_count"]
+        and readback.get("visible_history_quality")
+        == {
+            "full": goal["expected_full_date_count"],
+            "partial": goal["expected_partial_date_count"],
+            "unavailable": 0,
+        }
+        and readback.get("exact_manifest_apply_receipt_count") == 1
+        and readback.get("total_inventory_history_apply_receipt_count") == 1
+        and readback.get("non_target_preserved") is True
+    )
     return {
-        "state": "done" if complete else "blocked",
+        "state": "done" if reconciled else "blocked",
+        "reason": "reconciled" if reconciled else "post-submit-readback-not-reconciled",
         "apply_count": 1,
-        "dry_run": dry_run,
-        "apply": apply,
-        "readback": readback,
-        "reconcile": reconcile,
+        "qualification_attempts": attempts,
+        "qualified_manifest": {
+            "path": manifest_path,
+            "sha256": manifest_sha256,
+            "material_qualification_digest": candidate[
+                "material_qualification_digest"
+            ],
+        },
+        "apply": apply_evidence,
+        "readback": readback_evidence,
     }
 
 
-def load_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
+def _write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(canonical_json_bytes(receipt) + b"\n")
+
+
+def _load_legacy_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
     raw = path.read_bytes()
     if digest(raw) != expected_sha:
         raise ApplyError("manifest digest mismatch")
@@ -153,58 +583,75 @@ def load_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
     return manifest
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", default=CANONICAL_REPOSITORY)
-    parser.add_argument("--pr", required=True, type=int)
-    parser.add_argument("--merge-sha", required=True)
-    parser.add_argument("--deployed-sha", required=True)
-    parser.add_argument("--manifest-sha256", required=True)
-    parser.add_argument("--operation-id", required=True)
-    parser.add_argument("--authorization-comment-id", required=True, type=int)
-    parser.add_argument("--output", required=True, type=Path)
-    args = parser.parse_args()
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("GITHUB_TOKEN is required")
+def _run_legacy_commands(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    commands = manifest["commands"]
+    dry_run = command_evidence(list(commands["dry_run"]))
+    if dry_run["return_code"] != 0:
+        return {"state": "blocked", "apply_count": 0, "dry_run": dry_run}
+    apply_result = command_evidence(list(commands["apply"]))
+    readback = command_evidence(list(commands["readback"]))
+    reconcile = command_evidence(list(commands["reconcile"]))
+    complete = all(
+        item["return_code"] == 0 for item in (apply_result, readback, reconcile)
+    )
+    return {
+        "state": "done" if complete else "blocked",
+        "apply_count": 1,
+        "dry_run": dry_run,
+        "apply": apply_result,
+        "readback": readback,
+        "reconcile": reconcile,
+    }
+
+
+def _run_legacy_mode(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
     merge_sha = exact_sha(args.merge_sha, "merge")
     deployed_sha = exact_sha(args.deployed_sha, "deployed")
     if deployed_sha != merge_sha:
         raise ApplyError("deployed SHA must equal exact merge SHA")
-    if re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256) is None:
-        raise ApplyError("manifest SHA-256 is invalid")
-    client = GitHubClient(args.repository, token)
-    pr = client.get(f"/pulls/{args.pr}")
-    if pr.get("merged") is not True or exact_sha(pr.get("merge_commit_sha"), "pr-merge") != merge_sha:
+    if exact_sha(pr.get("merge_commit_sha"), "pr-merge") != merge_sha:
         raise ApplyError("PR merge binding mismatch")
-    comments = list_comments(client, args.pr)
+    if re.fullmatch(r"[0-9a-f]{64}", str(args.manifest_sha256 or "")) is None:
+        raise ApplyError("manifest SHA-256 is invalid")
+    operation = str(args.operation_id or "")
     prior = [
         item
         for item in comments
-        if marker(args.operation_id) in str(item.get("body") or "")
+        if marker(operation) in str(item.get("body") or "")
         and is_actions_bot_comment(item)
     ]
     if prior:
         if len(prior) != 1:
             raise ApplyError("duplicate or ambiguous durable apply receipt")
-        receipt = {"schema": APPLY_RECEIPT_SCHEMA, "state": "already_terminal", "operation_id": args.operation_id}
-        args.output.write_bytes(canonical_json_bytes(receipt) + b"\n")
+        receipt = {
+            "schema": APPLY_RECEIPT_SCHEMA,
+            "state": "already_terminal",
+            "operation_id": operation,
+            "pull_request": args.pr,
+        }
+        _write_receipt(args.output, receipt)
         print(json.dumps(receipt, sort_keys=True))
         return 0
-    release_receipt = parse_release_receipt(
+    release_receipt = parse_legacy_release_receipt(
         comments,
         merge_sha=merge_sha,
-        manifest_sha=args.manifest_sha256,
-        operation=args.operation_id,
+        manifest_sha=str(args.manifest_sha256),
+        operation=operation,
     )
     authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
-    validate_authorization(
+    validate_legacy_authorization(
         authorization,
         pr=args.pr,
         merge_sha=merge_sha,
         deployed_sha=deployed_sha,
-        manifest_sha=args.manifest_sha256,
-        operation=args.operation_id,
+        manifest_sha=str(args.manifest_sha256),
+        operation=operation,
     )
     subprocess.run(["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True)
     subprocess.run(["git", "checkout", "--detach", merge_sha], cwd=ROOT, check=True)
@@ -212,31 +659,161 @@ def main() -> int:
     manifest_path = (ROOT / str(binding["path"])).resolve()
     if ROOT not in manifest_path.parents:
         raise ApplyError("manifest path escapes repository")
-    manifest = load_manifest(manifest_path, args.manifest_sha256)
-    if manifest.get("operation_id") != args.operation_id:
+    manifest = _load_legacy_manifest(manifest_path, str(args.manifest_sha256))
+    if manifest.get("operation_id") != operation:
         raise ApplyError("manifest operation id mismatch")
-    result = run_commands(manifest)
+    result = _run_legacy_commands(manifest)
+    approval_body = str(authorization.get("body") or "").strip()
     receipt = {
         "schema": APPLY_RECEIPT_SCHEMA,
         "state": result["state"],
-        "operation_id": args.operation_id,
+        "operation_id": operation,
         "repository": args.repository,
         "pull_request": args.pr,
         "merge_sha": merge_sha,
         "deployed_sha": deployed_sha,
-        "manifest_sha256": args.manifest_sha256,
+        "manifest_sha256": str(args.manifest_sha256),
         "authorization_comment_id": args.authorization_comment_id,
-        "authorization_body_sha256": digest(
-            str(authorization.get("body") or "").strip().encode("utf-8")
-        ),
+        "authorization_body_sha256": digest(approval_body.encode("utf-8")),
         "apply_count": result["apply_count"],
         "evidence": result,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(canonical_json_bytes(receipt) + b"\n")
-    body = marker(args.operation_id) + "\nProtocol-v2 one-shot production apply receipt:\n```json\n" + json.dumps(receipt, sort_keys=True, indent=2) + "\n```"
+    _write_receipt(args.output, receipt)
+    body = (
+        marker(operation)
+        + "\nProtocol-v2 one-shot production apply receipt:\n```json\n"
+        + json.dumps(receipt, sort_keys=True, indent=2)
+        + "\n```"
+    )
     client.post(f"/issues/{args.pr}/comments", {"body": body})
     print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--authorization-mode",
+        choices=("scope-goal", "exact-manifest"),
+        default="scope-goal",
+    )
+    parser.add_argument("--repository", default=CANONICAL_REPOSITORY)
+    parser.add_argument("--pr", required=True, type=int)
+    parser.add_argument("--release-operation-id")
+    parser.add_argument("--authorization-comment-id", required=True, type=int)
+    parser.add_argument("--merge-sha")
+    parser.add_argument("--deployed-sha")
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--operation-id")
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise SystemExit("GITHUB_TOKEN is required")
+    client = GitHubClient(args.repository, token)
+    pr = client.get(f"/pulls/{args.pr}")
+    if pr.get("merged") is not True:
+        raise ApplyError("pull request is not merged")
+    comments = list_comments(client, args.pr)
+    if args.authorization_mode == "exact-manifest":
+        required = {
+            "merge_sha": args.merge_sha,
+            "deployed_sha": args.deployed_sha,
+            "manifest_sha256": args.manifest_sha256,
+            "operation_id": args.operation_id,
+        }
+        missing = sorted(field for field, value in required.items() if not value)
+        if missing:
+            raise ApplyError(
+                "exact-manifest mode inputs are missing: " + ", ".join(missing)
+            )
+        return _run_legacy_mode(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
+    if not args.release_operation_id:
+        raise ApplyError("scope-goal mode requires --release-operation-id")
+    merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
+    release_receipt = parse_release_receipt(
+        comments,
+        pr=args.pr,
+        release_operation=args.release_operation_id,
+        merge_sha=merge_sha,
+    )
+    authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
+    goal = validate_authorization(
+        authorization,
+        repository=args.repository,
+        pr=args.pr,
+    )
+    operation = operation_id(
+        args.repository,
+        args.pr,
+        args.authorization_comment_id,
+        goal,
+    )
+    prior = [
+        item
+        for item in comments
+        if marker(operation) in str(item.get("body") or "")
+        and is_actions_bot_comment(item)
+    ]
+    if prior:
+        if len(prior) != 1:
+            raise ApplyError("duplicate or ambiguous durable apply receipt")
+        receipt = {
+            "schema": APPLY_RECEIPT_SCHEMA,
+            "state": "already_terminal",
+            "operation_id": operation,
+            "pull_request": args.pr,
+        }
+        _write_receipt(args.output, receipt)
+        print(json.dumps(receipt, sort_keys=True))
+        return 0
+
+    subprocess.run(["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True)
+    subprocess.run(["git", "checkout", "--detach", merge_sha], cwd=ROOT, check=True)
+    target = _canonical_target()
+    approval_body = str(authorization.get("body") or "").strip()
+    approval_reference = (
+        f"github:{args.repository}:pr:{args.pr}:comment:{args.authorization_comment_id}:"
+        f"sha256:{digest(approval_body.encode('utf-8'))}"
+    )
+    with tempfile.TemporaryDirectory(prefix="wb-core-production-goal-") as directory:
+        configure_deploy_environment(Path(directory))
+        result = run_dynamic_goal(
+            target=target,
+            merge_sha=merge_sha,
+            goal=goal,
+            operation=operation,
+            approval_reference=approval_reference,
+        )
+    receipt = {
+        "schema": APPLY_RECEIPT_SCHEMA,
+        "state": result["state"],
+        "operation_id": operation,
+        "repository": args.repository,
+        "pull_request": args.pr,
+        "release_operation_id": release_receipt["operation_id"],
+        "merge_sha": merge_sha,
+        "deployed_sha": merge_sha,
+        "authorization_comment_id": args.authorization_comment_id,
+        "authorization_body_sha256": digest(approval_body.encode("utf-8")),
+        "goal": goal,
+        "apply_count": result["apply_count"],
+        "evidence": result,
+    }
+    _write_receipt(args.output, receipt)
+    body = (
+        marker(operation)
+        + "\nTask-scoped one-submit production apply receipt:\n```json\n"
+        + json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n```"
+    )
+    client.post(f"/issues/{args.pr}/comments", {"body": body})
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 
 

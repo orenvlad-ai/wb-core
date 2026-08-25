@@ -148,7 +148,7 @@ source/history schema; отсутствующая deployed history schema бло
 до публикации manifest.
 
 Source CAS использует contract
-`sheet_vitrina_v1_inventory_history_backfill_source_cas_v3` и ограничен exact
+`sheet_vitrina_v1_inventory_history_backfill_source_cas_v4` и ограничен exact
 `date_from..date_to`. Для WB в него входят только выбранные ready revisions
 целевых дат; ready snapshot с `as_of_date > date_to` не является историческим
 источником. Для FBS один и тот же reconstruction contour одновременно фиксирует
@@ -159,25 +159,36 @@ relevant roster/mapping/FBS material до cutoff меняет digest и блок
 apply.
 
 Каждая выбранная WB revision нормализуется по contract
-`sheet_vitrina_v1_inventory_ready_evidence_v1`: persisted и embedded
-snapshot/revision identity, полный selection rank, exact `DATA_VITRINA`
-header/date-column schema и отсортированный typed set только
-`TOTAL/SKU stock_total` (`exact`, `exact_zero`, `missing`). Его
-`inventory_evidence_digest` является capture source digest и apply CAS.
-`observed_plan_digest` полного multi-metric plan сохраняется отдельно как
-immutable audit provenance с ролью `audit_only_not_apply_cas`. Поэтому изменение
-не-inventory метрики того же selected plan не делает reviewed manifest stale,
-но replacement snapshot/rank/revision, header/date/key/scope либо любое target
-`stock_total` значение/state обязательно меняет CAS.
+`sheet_vitrina_v1_inventory_ready_evidence_v2`. Apply-blocking material identity
+включает stable `bundle_version`, `activated_at`, snapshot as-of,
+`snapshot_id`, `plan_version`, stable suffix selection rank без его volatile timestamp element,
+exact business date и `DATA_VITRINA` header/date-column/key schema, а также
+отсортированный typed set только `TOTAL/SKU stock_total` (`exact`,
+`exact_zero`, `missing`). Его `inventory_evidence_digest` является WB component
+source digest и apply CAS. `refreshed_at`, полный selection rank и
+`observed_plan_digest` полного multi-metric plan сохраняются отдельно как
+immutable audit provenance с ролью `audit_only_not_apply_cas`; они не входят в
+capture identity/source watermark. Поэтому обычный refresh того же stable
+snapshot/revision и изменение non-inventory metric не stale-ят qualified
+manifest. Replacement stable source identity/rank suffix, header/date/key/scope,
+schema/generation/target-history либо любое target `stock_total` value/state
+обязательно меняют material qualification digest и fail closed.
 
-Apply не наследует разрешение на deploy/dry-run. Он требует отдельный exact
-human gate, trusted-main deployed runner, reviewed manifest SHA-256, deployed
-SHA/schema/generation/source-watermark/target-history CAS, canonical writer
-lock и coherent verified target-scoped `0600` before-image. Full-store/T3
-backup для этой bounded append-only mutation запрещён. Write allowlist ограничен четырьмя
-history tables; операция append/supersede-only. Manifest hash даёт idempotent
-no-op, а ambiguous transport проверяется через applies/finalization readback —
-blind replay запрещён.
+Legacy exact-manifest apply сохраняет отдельный owner gate. Для уже accepted
+bounded reversible task используется durable OWNER/MEMBER scope-goal passport
+без manifest hash: trusted-main Runner сам выводит exact deployed merge SHA,
+JIT создаёт private immutable manifests на canonical host и требует два
+consecutive полных material-CAS совпадения. При pre-submit material drift он
+boundedly регенерирует candidate до трёх раз; это не mutation retry и не требует
+нового user confirmation. Только последний qualified candidate может один раз
+вызвать mutation. Apply всё равно требует deployed SHA/schema/generation/
+source/target CAS, canonical writer lock и coherent verified target-scoped
+`0600` before-image. Full-store/T3 backup для этой bounded append-only mutation
+запрещён. Write allowlist ограничен четырьмя history tables; операция
+append/supersede-only. Manifest hash остаётся DB idempotency key. После
+единственного submit, включая ambiguous transport, выполняется только отдельный
+query-only readback через exact applies/finalization и visible-history
+reconciliation; blind replay запрещён.
 
 # 6. Verification
 
@@ -196,6 +207,10 @@ blind replay запрещён.
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
   target-scoped source CAS (post-cutoff tick и same-plan non-inventory drift
-  stability; selected identity/rank/schema/scope/value/state и target-date FBS
-  drift invalidation),
-  guarded apply, reconciliation and idempotent replay.
+  stability; real `refreshed_at`/rank[0] v3 false-drift regression; stable
+  selected identity/rank suffix/schema/scope/value/state и target-date FBS
+  drift invalidation), guarded apply, query-only visible-history reconciliation
+  and idempotent replay;
+- `apps/production_apply_runner_smoke.py` — scope-goal passport, exact Release
+  receipt binding, consecutive qualification, bounded regeneration, one-submit
+  boundary and ambiguous-transport query-only reconciliation.
