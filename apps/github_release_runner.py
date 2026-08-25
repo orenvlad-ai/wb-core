@@ -52,6 +52,38 @@ class RunnerError(RuntimeError):
         self.state = state
 
 
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    return (scheme, hostname, parsed.port or (443 if scheme == "https" else 80))
+
+
+class _AuthSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep GitHub auth on-origin and strip it from signed storage redirects."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        source_origin = _url_origin(req.full_url)
+        target_origin = _url_origin(newurl)
+        if source_origin is None or target_origin is None or source_origin != target_origin:
+            for header in ("Authorization", "Proxy-Authorization", "Cookie"):
+                redirected.remove_header(header)
+        return redirected
+
+
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -106,7 +138,8 @@ class GitHubClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            opener = urllib.request.build_opener(_AuthSafeRedirectHandler())
+            with opener.open(request, timeout=30) as response:
                 payload = response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:2000]
