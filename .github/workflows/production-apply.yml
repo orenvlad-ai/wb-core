@@ -11,6 +11,7 @@ on:
         options:
           - scope-goal
           - exact-manifest
+          - receipt-recovery
       pr:
         description: Exact merged PR number
         required: true
@@ -32,7 +33,19 @@ on:
         required: false
         type: string
       operation_id:
-        description: Legacy exact manifest operation id
+        description: Legacy manifest or recovered receipt operation id
+        required: false
+        type: string
+      source_run_id:
+        description: Failed Production Apply run containing the immutable done receipt
+        required: false
+        type: number
+      source_artifact_name:
+        description: Exact immutable receipt artifact name for recovery
+        required: false
+        type: string
+      source_receipt_sha256:
+        description: Exact SHA-256 of production-apply-receipt.json for recovery
         required: false
         type: string
       authorization_comment_id:
@@ -42,12 +55,15 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
 
 jobs:
   apply_once:
     name: One exact production apply and reconciliation
+    if: inputs.authorization_mode != 'receipt-recovery'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production
@@ -87,6 +103,47 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/production-apply-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  recover_receipt:
+    name: Verify immutable done receipt and publish once (no production access)
+    if: inputs.authorization_mode == 'receipt-recovery'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted main receipt recovery
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact immutable receipt and publish idempotently
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode receipt-recovery
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --output "$RUNNER_TEMP/production-apply-receipt.json"
+
+      - name: Upload verified recovered receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-apply-recovery-pr-${{ inputs.pr }}-source-run-${{ inputs.source_run_id }}-run-${{ github.run_id }}
           path: ${{ runner.temp }}/production-apply-receipt.json
           if-no-files-found: warn
           retention-days: 90

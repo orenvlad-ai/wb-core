@@ -213,4 +213,5 @@ reconciliation; blind replay запрещён.
   and idempotent replay;
 - `apps/production_apply_runner_smoke.py` — scope-goal passport, exact Release
   receipt binding, consecutive qualification, bounded regeneration, one-submit
-  boundary and ambiguous-transport query-only reconciliation.
+  boundary, ambiguous-transport query-only reconciliation and immutable
+  done-receipt recovery without any production command.
