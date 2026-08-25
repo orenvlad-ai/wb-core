@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections.abc import Mapping
 from typing import Any
 
@@ -44,6 +46,10 @@ APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
 APPLY_MARKER = "wb-core-production-apply-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 MAX_QUALIFICATION_CANDIDATES = 4
+RECOVERY_WORKFLOW_NAME = "Production Apply Runner"
+RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
+RECOVERY_ARTIFACT_FILE = "production-apply-receipt.json"
+MAX_RECOVERY_ARTIFACT_BYTES = 262_144
 TARGET_FILE = (
     ROOT
     / "artifacts"
@@ -573,6 +579,360 @@ def _write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     path.write_bytes(canonical_json_bytes(receipt) + b"\n")
 
 
+def _recovery_artifact_name(pr: int, run_id: int) -> str:
+    return f"production-apply-receipt-pr-{pr}-run-{run_id}"
+
+
+def _extract_recovery_receipt(raw_zip: bytes, expected_sha256: str) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if len(files) != 1 or files[0].filename != RECOVERY_ARTIFACT_FILE:
+                raise ApplyError("recovery artifact shape is invalid")
+            if files[0].file_size <= 0 or files[0].file_size > MAX_RECOVERY_ARTIFACT_BYTES:
+                raise ApplyError("recovery receipt file size is invalid")
+            raw_receipt = archive.read(files[0])
+    except zipfile.BadZipFile as exc:
+        raise ApplyError("recovery artifact ZIP is invalid") from exc
+    if digest(raw_receipt) != expected_sha256:
+        raise ApplyError("recovery receipt digest mismatch")
+    try:
+        receipt = json.loads(raw_receipt.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApplyError("recovery receipt JSON is invalid") from exc
+    if not isinstance(receipt, dict):
+        raise ApplyError("recovery receipt shape is invalid")
+    if raw_receipt != canonical_json_bytes(receipt) + b"\n":
+        raise ApplyError("recovery receipt bytes are not canonical")
+    return receipt
+
+
+def _collect_recovery_receipt(
+    client: GitHubClient,
+    *,
+    pr: int,
+    run_id: int,
+    artifact_name: str,
+    receipt_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected_name = _recovery_artifact_name(pr, run_id)
+    if artifact_name != expected_name:
+        raise ApplyError("recovery artifact name binding mismatch")
+    run = client.get(f"/actions/runs/{run_id}")
+    if not isinstance(run, Mapping):
+        raise ApplyError("recovery source run shape is invalid")
+    repository = run.get("repository")
+    expected_run = {
+        "id": run_id,
+        "name": RECOVERY_WORKFLOW_NAME,
+        "path": RECOVERY_WORKFLOW_PATH,
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "failure",
+        "head_branch": "main",
+    }
+    for field, value in expected_run.items():
+        if run.get(field) != value:
+            raise ApplyError(f"recovery source run binding mismatch: {field}")
+    if not isinstance(repository, Mapping) or repository.get("full_name") != client.repository:
+        raise ApplyError("recovery source run repository mismatch")
+    run_head = exact_sha(run.get("head_sha"), "recovery-run-head")
+    matches: list[Mapping[str, Any]] = []
+    for page in range(1, 11):
+        payload = client.get(
+            f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+        )
+        values = payload.get("artifacts") if isinstance(payload, Mapping) else None
+        if not isinstance(values, list):
+            raise ApplyError("recovery artifact listing shape is invalid")
+        matches.extend(
+            item
+            for item in values
+            if isinstance(item, Mapping) and item.get("name") == artifact_name
+        )
+        if len(values) < 100:
+            break
+    else:
+        raise ApplyError("recovery artifact pagination bound exceeded")
+    if len(matches) != 1:
+        raise ApplyError("recovery artifact is missing or ambiguous")
+    artifact = matches[0]
+    artifact_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is True
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(artifact.get("size_in_bytes"), int)
+        or int(artifact["size_in_bytes"]) <= 0
+        or int(artifact["size_in_bytes"]) > MAX_RECOVERY_ARTIFACT_BYTES
+        or not isinstance(artifact_run, Mapping)
+        or artifact_run.get("id") != run_id
+        or artifact_run.get("head_branch") != "main"
+        or artifact_run.get("head_sha") != run_head
+    ):
+        raise ApplyError("recovery artifact provenance mismatch")
+    raw_zip = client.request(
+        "GET",
+        f"/actions/artifacts/{int(artifact['id'])}/zip",
+        accept="application/vnd.github+json",
+        raw=True,
+    )
+    if not isinstance(raw_zip, bytes):
+        raise ApplyError("recovery artifact download shape is invalid")
+    return dict(run), _extract_recovery_receipt(raw_zip, receipt_sha256)
+
+
+def _validate_recovery_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    repository: str,
+    pr: int,
+    merge_sha: str,
+    run_head_sha: str,
+    authorization_comment_id: int,
+    expected_operation: str,
+    goal: Mapping[str, Any],
+) -> None:
+    expected = {
+        "schema": APPLY_RECEIPT_SCHEMA,
+        "state": "done",
+        "operation_id": expected_operation,
+        "repository": repository,
+        "pull_request": pr,
+        "merge_sha": merge_sha,
+        "deployed_sha": merge_sha,
+        "authorization_comment_id": authorization_comment_id,
+        "apply_count": 1,
+    }
+    for field, value in expected.items():
+        if receipt.get(field) != value:
+            raise ApplyError(f"recovery receipt binding mismatch: {field}")
+    if merge_sha != run_head_sha:
+        raise ApplyError("recovery source run head is not the exact merge SHA")
+    if receipt.get("goal") != dict(goal):
+        raise ApplyError("recovery receipt goal binding mismatch")
+    derived_operation = operation_id(
+        repository,
+        pr,
+        authorization_comment_id,
+        goal,
+    )
+    if derived_operation != expected_operation:
+        raise ApplyError("recovery operation derivation mismatch")
+    release_operation = str(receipt.get("release_operation_id") or "")
+    if re.fullmatch(r"release-v2-[0-9a-f]{32}", release_operation) is None:
+        raise ApplyError("recovery release operation id is invalid")
+    evidence = receipt.get("evidence")
+    if not isinstance(evidence, Mapping):
+        raise ApplyError("recovery receipt evidence is missing")
+    expected_evidence = {
+        "state": "done",
+        "reason": "reconciled",
+        "apply_count": 1,
+    }
+    for field, value in expected_evidence.items():
+        if evidence.get(field) != value:
+            raise ApplyError(f"recovery receipt evidence mismatch: {field}")
+    qualified = evidence.get("qualified_manifest")
+    apply_evidence = evidence.get("apply")
+    readback_evidence = evidence.get("readback")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (qualified, apply_evidence, readback_evidence)
+    ):
+        raise ApplyError("recovery receipt terminal evidence is incomplete")
+    readback = readback_evidence.get("result")
+    if (
+        readback_evidence.get("return_code") != 0
+        or readback_evidence.get("transport_ambiguous") is not False
+        or not isinstance(readback, Mapping)
+        or readback.get("status") != "reconciled"
+        or readback.get("mode") != "query-only-readback"
+        or readback.get("query_only") is not True
+        or readback.get("database_written") is not False
+        or readback.get("deployed_sha") != merge_sha
+        or readback.get("inserted_capture_count")
+        != goal["expected_inserted_capture_count"]
+        or readback.get("inserted_component_count")
+        != goal["expected_inserted_component_count"]
+        or readback.get("inserted_finalization_count")
+        != goal["expected_inserted_finalization_count"]
+        or readback.get("visible_history_date_count") != goal["date_count"]
+        or readback.get("visible_history_quality")
+        != {
+            "full": goal["expected_full_date_count"],
+            "partial": goal["expected_partial_date_count"],
+            "unavailable": 0,
+        }
+        or readback.get("exact_manifest_apply_receipt_count") != 1
+        or readback.get("total_inventory_history_apply_receipt_count") != 1
+        or readback.get("non_target_preserved") is not True
+    ):
+        raise ApplyError("recovery receipt readback is not exact reconciled proof")
+    manifest_sha = qualified.get("sha256")
+    apply_result = apply_evidence.get("result")
+    if (
+        not isinstance(manifest_sha, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha) is None
+        or not isinstance(apply_result, Mapping)
+        or apply_result.get("manifest_sha256") != manifest_sha
+        or readback.get("manifest_sha256") != manifest_sha
+        or apply_result.get("status") != "reconciled"
+        or apply_result.get("database_written") is not True
+        or apply_result.get("non_target_preserved") is not True
+    ):
+        raise ApplyError("recovery receipt apply evidence is inconsistent")
+
+
+def _comment_payload(comment: Mapping[str, Any], operation: str) -> dict[str, Any]:
+    body = str(comment.get("body") or "")
+    if body.count(marker(operation)) != 1 or body.count("```json") != 1:
+        raise ApplyError("existing recovery comment shape is ambiguous")
+    try:
+        payload_text = body.split("```json", 1)[1].split("```", 1)[0]
+        payload = json.loads(payload_text)
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise ApplyError("existing recovery comment JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ApplyError("existing recovery comment payload is invalid")
+    return payload
+
+
+def _recovery_comment_body(
+    receipt: Mapping[str, Any],
+    *,
+    run_id: int,
+    artifact_name: str,
+    receipt_sha256: str,
+) -> str:
+    operation = str(receipt["operation_id"])
+    return (
+        marker(operation)
+        + "\nRecovered immutable task-scoped production apply receipt; no production command was executed."
+        + f"\nSource Actions run: {run_id}; artifact: `{artifact_name}`; "
+        + f"receipt SHA-256: `{receipt_sha256}`."
+        + "\n```json\n"
+        + json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n```"
+    )
+
+
+def _run_receipt_recovery(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    if args.source_run_id is None or args.source_run_id <= 0:
+        raise ApplyError("receipt-recovery mode requires a positive source run id")
+    if not args.source_artifact_name:
+        raise ApplyError("receipt-recovery mode requires a source artifact name")
+    if re.fullmatch(r"[0-9a-f]{64}", str(args.source_receipt_sha256 or "")) is None:
+        raise ApplyError("receipt-recovery mode requires an exact receipt SHA-256")
+    if not args.operation_id:
+        raise ApplyError("receipt-recovery mode requires an exact operation id")
+    run, receipt = _collect_recovery_receipt(
+        client,
+        pr=args.pr,
+        run_id=args.source_run_id,
+        artifact_name=args.source_artifact_name,
+        receipt_sha256=args.source_receipt_sha256,
+    )
+    merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
+    authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
+    goal = validate_authorization(
+        authorization,
+        repository=args.repository,
+        pr=args.pr,
+    )
+    _validate_recovery_receipt(
+        receipt,
+        repository=args.repository,
+        pr=args.pr,
+        merge_sha=merge_sha,
+        run_head_sha=exact_sha(run.get("head_sha"), "recovery-run-head"),
+        authorization_comment_id=args.authorization_comment_id,
+        expected_operation=args.operation_id,
+        goal=goal,
+    )
+    authorization_body = str(authorization.get("body") or "").strip()
+    if receipt.get("authorization_body_sha256") != digest(
+        authorization_body.encode("utf-8")
+    ):
+        raise ApplyError("recovery authorization body digest mismatch")
+    parse_release_receipt(
+        comments,
+        pr=args.pr,
+        release_operation=str(receipt["release_operation_id"]),
+        merge_sha=merge_sha,
+    )
+    # Persist the already-verified immutable source before attempting publication.
+    # A comment transport failure therefore remains recoverable without touching
+    # production or trusting a reconstructed payload.
+    _write_receipt(args.output, receipt)
+    body = _recovery_comment_body(
+        receipt,
+        run_id=args.source_run_id,
+        artifact_name=args.source_artifact_name,
+        receipt_sha256=args.source_receipt_sha256,
+    )
+    marked = [
+        item for item in comments if marker(args.operation_id) in str(item.get("body") or "")
+    ]
+    if len(marked) > 1:
+        raise ApplyError("duplicate or ambiguous durable apply receipt")
+    if marked:
+        existing = marked[0]
+        if (
+            not is_actions_bot_comment(existing)
+            or _comment_payload(existing, args.operation_id) != receipt
+        ):
+            raise ApplyError("existing durable apply receipt does not match source")
+        publication_state = "already_terminal"
+        published = existing
+    else:
+        published = client.post(f"/issues/{args.pr}/comments", {"body": body})
+        if (
+            not isinstance(published, Mapping)
+            or not is_actions_bot_comment(published)
+            or published.get("body") != body
+        ):
+            raise ApplyError("recovered receipt publication response mismatch")
+        readback_comments = list_comments(client, args.pr)
+        readback_marked = [
+            item
+            for item in readback_comments
+            if marker(args.operation_id) in str(item.get("body") or "")
+        ]
+        if (
+            len(readback_marked) != 1
+            or not is_actions_bot_comment(readback_marked[0])
+            or _comment_payload(readback_marked[0], args.operation_id) != receipt
+        ):
+            raise ApplyError("recovered receipt publication readback mismatch")
+        published = readback_marked[0]
+        publication_state = "published"
+    comment_id = published.get("id")
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        raise ApplyError("recovered receipt comment id is invalid")
+    print(
+        json.dumps(
+            {
+                "state": publication_state,
+                "operation_id": args.operation_id,
+                "source_run_id": args.source_run_id,
+                "source_artifact_name": args.source_artifact_name,
+                "source_receipt_sha256": args.source_receipt_sha256,
+                "comment_id": comment_id,
+                "comment_body_sha256": digest(str(published["body"]).encode("utf-8")),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _load_legacy_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
     raw = path.read_bytes()
     if digest(raw) != expected_sha:
@@ -694,7 +1054,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--authorization-mode",
-        choices=("scope-goal", "exact-manifest"),
+        choices=("scope-goal", "exact-manifest", "receipt-recovery"),
         default="scope-goal",
     )
     parser.add_argument("--repository", default=CANONICAL_REPOSITORY)
@@ -705,6 +1065,9 @@ def main() -> int:
     parser.add_argument("--deployed-sha")
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--operation-id")
+    parser.add_argument("--source-run-id", type=int)
+    parser.add_argument("--source-artifact-name")
+    parser.add_argument("--source-receipt-sha256")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     token = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -715,6 +1078,13 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode == "receipt-recovery":
+        return _run_receipt_recovery(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
     if args.authorization_mode == "exact-manifest":
         required = {
             "merge_sha": args.merge_sha,

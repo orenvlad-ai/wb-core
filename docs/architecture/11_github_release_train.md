@@ -247,6 +247,28 @@ material source CAS и non-target invariants. Durable v3 receipt сохраня�
 candidate hashes, exact applied manifest, command/output digests,
 `apply_count=0|1` и query-only result.
 
+Terminal receipt publication использует PR timeline endpoint и явные
+`issues: write` плюс `pull-requests: write`: workflow не полагается на
+`issues: write` как достаточный permission для closed/merged PR. Если apply уже
+завершён и reconciled, но publication упала после записи immutable artifact,
+режим `receipt-recovery` принимает exact merged PR, failed source run, его
+детерминированное artifact name, SHA-256 exact
+`production-apply-receipt.json`, operation id и исходный authorization comment.
+Отдельный recovery job имеет только GitHub read/comment permissions: production
+environment, SSH secrets, dependency install, dry-run, qualification, apply,
+readback и любые production commands в нём отсутствуют.
+
+Recovery требует один completed failed `workflow_dispatch` Production Apply run
+на `main`, один unexpired artifact с exact run/head provenance, canonical bytes,
+receipt `state=done`, derived goal/operation/authorization/release/merge/deployed
+bindings, `apply_count=1`, successful query-only reconciled readback, один exact
+apply-ledger receipt и preserved non-target digest. Wrong run/artifact/PR/
+operation/digest, non-done receipt, incomplete evidence, чужой marker или
+несколько marker comments fail closed. При нуле marker comments Actions bot
+публикует original receipt payload и делает exact comment readback; один уже
+существующий Actions-bot comment с byte-semantically тем же receipt считается
+idempotent `already_terminal`, а второй comment не создаётся.
+
 ## Compatibility and rollback
 
 `baseline` запускается только для prefix `codex/pr-gate-rollback-` и только
