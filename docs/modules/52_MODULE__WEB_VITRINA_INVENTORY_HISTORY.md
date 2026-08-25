@@ -148,7 +148,7 @@ source/history schema; отсутствующая deployed history schema бло
 до публикации manifest.
 
 Source CAS использует contract
-`sheet_vitrina_v1_inventory_history_backfill_source_cas_v2` и ограничен exact
+`sheet_vitrina_v1_inventory_history_backfill_source_cas_v3` и ограничен exact
 `date_from..date_to`. Для WB в него входят только выбранные ready revisions
 целевых дат; ready snapshot с `as_of_date > date_to` не является историческим
 источником. Для FBS один и тот же reconstruction contour одновременно фиксирует
@@ -157,6 +157,18 @@ relevant facility roster/mappings, opening allocations и движения/ре�
 в CAS. Late revision выбранного target-date WB source либо любое изменение
 relevant roster/mapping/FBS material до cutoff меняет digest и блокирует stale
 apply.
+
+Каждая выбранная WB revision нормализуется по contract
+`sheet_vitrina_v1_inventory_ready_evidence_v1`: persisted и embedded
+snapshot/revision identity, полный selection rank, exact `DATA_VITRINA`
+header/date-column schema и отсортированный typed set только
+`TOTAL/SKU stock_total` (`exact`, `exact_zero`, `missing`). Его
+`inventory_evidence_digest` является capture source digest и apply CAS.
+`observed_plan_digest` полного multi-metric plan сохраняется отдельно как
+immutable audit provenance с ролью `audit_only_not_apply_cas`. Поэтому изменение
+не-inventory метрики того же selected plan не делает reviewed manifest stale,
+но replacement snapshot/rank/revision, header/date/key/scope либо любое target
+`stock_total` значение/state обязательно меняет CAS.
 
 Apply не наследует разрешение на deploy/dry-run. Он требует отдельный exact
 human gate, trusted-main deployed runner, reviewed manifest SHA-256, deployed
@@ -183,5 +195,7 @@ blind replay запрещён.
   realistic window;
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
-  target-scoped source CAS (post-cutoff tick stability и target-date drift),
+  target-scoped source CAS (post-cutoff tick и same-plan non-inventory drift
+  stability; selected identity/rank/schema/scope/value/state и target-date FBS
+  drift invalidation),
   guarded apply, reconciliation and idempotent replay.

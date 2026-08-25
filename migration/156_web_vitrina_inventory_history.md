@@ -73,6 +73,17 @@ are excluded, so an ordinary current-day tick cannot stale a closed-window
 manifest. Any selected target-date ready revision or relevant at/before-cutoff
 FBS/roster/mapping change still changes the CAS and blocks apply.
 
+Selected ready evidence uses a dedicated inventory-slice identity: exact
+persisted and embedded snapshot/revision/rank fields, the complete selected
+`DATA_VITRINA` header/date-column schema, and a sorted typed set of only
+`TOTAL/SKU stock_total` scopes and values. Its `inventory_evidence_digest` is
+the WB component source digest and source-CAS input. The full
+`observed_plan_digest` remains immutable audit provenance in the reviewed
+manifest/capture source manifest and is explicitly not an apply-CAS input.
+Consequently same-rank non-inventory metric drift does not stale a manifest,
+while selected snapshot/rank/revision, date/header/key/scope, typed missing
+state, or target stock value drift still fails closed.
+
 New facilities, multiple/ambiguous openings, source/schema/formula drift or an
 invalid target window make the manifest `blocked`. Expected evidence gaps stay
 explicit `partial`/`unavailable`; they are not silently converted to blockers
