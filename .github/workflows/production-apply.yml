@@ -1,0 +1,78 @@
+name: Production Apply Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Exact merged PR number
+        required: true
+        type: number
+      merge_sha:
+        description: Exact merge SHA
+        required: true
+        type: string
+      deployed_sha:
+        description: Exact deployed SHA
+        required: true
+        type: string
+      manifest_sha256:
+        description: Exact reviewed manifest SHA-256 without prefix
+        required: true
+        type: string
+      operation_id:
+        description: Durable manifest operation id
+        required: true
+        type: string
+      authorization_comment_id:
+        description: Exact OWNER or MEMBER apply-v2 authorization comment id
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  apply_once:
+    name: One exact production apply and reconciliation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    steps:
+      - name: Checkout trusted main apply runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install canonical apply dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Validate exact owner manifest and apply once
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --pr "${{ inputs.pr }}"
+          --merge-sha "${{ inputs.merge_sha }}"
+          --deployed-sha "${{ inputs.deployed_sha }}"
+          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --output "$RUNNER_TEMP/production-apply-receipt.json"
+
+      - name: Upload immutable apply receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-apply-receipt-${{ inputs.operation_id }}
+          path: ${{ runner.temp }}/production-apply-receipt.json
+          if-no-files-found: warn
+          retention-days: 90

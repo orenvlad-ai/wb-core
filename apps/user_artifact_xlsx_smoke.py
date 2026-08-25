@@ -12,11 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.github_release_train_spec import (  # noqa: E402
+from apps.release_protocol import (  # noqa: E402
     ExecutionContour,
-    TaskClass,
-    TaskIntent,
-    classify_task,
     github_closure_required,
 )
 from apps.user_artifact_xlsx import (  # noqa: E402
@@ -32,25 +29,21 @@ def _assert_protocol_contract() -> None:
     execution = (ROOT / "docs" / "architecture" / "07_codex_execution_protocol.md").read_text(
         encoding="utf-8"
     )
-    release_train = (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
+    release_runner = (ROOT / "docs" / "architecture" / "11_github_release_train.md").read_text(
         encoding="utf-8"
     )
     sources = (agents, execution)
-    assert len(tuple(ExecutionContour)) == 6
+    assert len(tuple(ExecutionContour)) == 5
     assert ExecutionContour.USER_ARTIFACT.value == "user-artifact"
-    assert classify_task(TaskIntent(read_only=True, user_artifact=True)) == TaskClass.STANDARD
-    assert not github_closure_required(TaskClass.STANDARD, ExecutionContour.USER_ARTIFACT)
-    assert github_closure_required(TaskClass.STANDARD, ExecutionContour.REPO_ONLY)
-    assert not github_closure_required(TaskClass.DIAGNOSTIC, ExecutionContour.READ_ONLY)
-    assert "Пять Execution-Контуров" not in execution
+    assert not github_closure_required(ExecutionContour.USER_ARTIFACT)
+    assert github_closure_required(ExecutionContour.REPO_ONLY)
+    assert not github_closure_required(ExecutionContour.READ_ONLY)
     for source in sources:
         for required in (
             "`user-artifact`",
             "не является `ДИАГНОСТИКОЙ`",
             "branch",
             "worktree",
-            "Release Train",
-            "scope:user-artifact",
             "load_workspace_dependencies",
             "CODEX_PRIMARY_RUNTIME_NODE",
             "CODEX_PRIMARY_RUNTIME_NODE_MODULES",
@@ -67,10 +60,10 @@ def _assert_protocol_contract() -> None:
         "CODEX_PRIMARY_RUNTIME_PYTHON",
     ):
         assert required in execution
-    assert "user-artifact" in release_train and "не входит" in release_train
+    assert "user-artifact" in release_runner and "не входит" in release_runner
     release_sources = "\n".join(
         (
-            (ROOT / "apps" / "github_release_train.py").read_text(encoding="utf-8"),
+            (ROOT / "apps" / "github_release_runner.py").read_text(encoding="utf-8"),
             (ROOT / ".github" / "pull_request_template.md").read_text(encoding="utf-8"),
         )
     )
@@ -88,7 +81,7 @@ def _assert_canonical_source_acquisition_contract() -> None:
     hosted_runtime = (
         ROOT / "docs" / "architecture" / "10_hosted_runtime_deploy_contract.md"
     ).read_text(encoding="utf-8")
-    release_train = (
+    release_runner = (
         ROOT / "docs" / "architecture" / "11_github_release_train.md"
     ).read_text(encoding="utf-8")
     module_index = (ROOT / "docs" / "modules" / "00_INDEX__MODULES.md").read_text(
@@ -110,11 +103,12 @@ def _assert_canonical_source_acquisition_contract() -> None:
         assert "query_only=ON" in source
         assert "server-owned" in source
 
-    for source in (agents, source_policy, execution, hosted_runtime, release_train):
+    for source in (agents, source_policy, execution, hosted_runtime):
         lowered = source.casefold()
         assert ("архивн" in lowered or "archived" in lowered) and "mcp" in lowered
         assert "canonical" in lowered and "server-side" in lowered
         assert "blocker" in lowered
+    assert "one-shot" in release_runner.casefold()
 
     assert "Canonical Production Read-Only Evidence Path" in hosted_runtime
     assert "actual standard SSH connectivity/read preflight" in hosted_runtime

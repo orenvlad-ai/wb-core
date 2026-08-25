@@ -1,0 +1,224 @@
+{
+  "schema": "wb-core.test-registry/v2",
+  "protocol": {
+    "version": 2,
+    "cutover_epoch": "4f0333ad7b500967fe4175aa6e53359043832360",
+    "full_regression_suites": [
+      "browser_ui",
+      "finance_storage",
+      "fulfillment",
+      "release_safety",
+      "warehouse_recovery",
+      "web_vitrina"
+    ]
+  },
+  "suites": {
+    "release_safety": {
+      "group": "release",
+      "depends_on": [],
+      "requires_browser": false,
+      "commands": [
+        ["python3", "apps/user_artifact_xlsx_smoke.py"],
+        ["python3", "apps/hosted_runtime_auth_preflight_smoke.py"],
+        ["python3", "apps/hosted_runtime_transport_reconcile_smoke.py"]
+      ]
+    },
+    "web_vitrina": {
+      "group": "web",
+      "depends_on": ["release_safety"],
+      "requires_browser": false,
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_night_refresh_experiment_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_control_refresh_canary_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_metric_retirement_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"],
+        ["python3", "apps/wb_incident_policy_legacy_readback_smoke.py"],
+        ["python3", "apps/sales_funnel_history_detail_csv_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_buyout_percent_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_weighted_seller_price_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_schema_evolution_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_transit_repair_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_refresh_preservation_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py"],
+        ["python3", "apps/our_wb_costs_smoke.py"],
+        ["python3", "apps/inventory_cost_blend_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_reports_ui_smoke.py"]
+      ]
+    },
+    "warehouse_recovery": {
+      "group": "warehouse",
+      "depends_on": ["release_safety"],
+      "requires_browser": false,
+      "commands": [
+        ["python3", "apps/warehouse_recovery_policy_static_smoke.py"],
+        ["python3", "apps/warehouse_recovery_policy_smoke.py"],
+        ["python3", "apps/warehouse_recovery_policy_http_smoke.py"],
+        ["python3", "apps/warehouse_recovery_retention_smoke.py"],
+        ["python3", "apps/storage_recovery_writer_inventory_static_smoke.py"],
+        ["python3", "apps/storage_recovery_sanitation_smoke.py"],
+        ["python3", "apps/storage_recovery_sanitation_job_smoke.py"],
+        ["python3", "apps/promo_campaign_archive_gc_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"]
+      ]
+    },
+    "fulfillment": {
+      "group": "fulfillment",
+      "depends_on": ["warehouse_recovery"],
+      "requires_browser": false,
+      "commands": [
+        ["python3", "apps/cny_ledger_smoke.py"],
+        ["python3", "apps/ff_pool_foundation_smoke.py"],
+        ["python3", "apps/ff_pool_documents_smoke.py"],
+        ["python3", "apps/ff_pool_zero_physical_production_smoke.py"],
+        ["python3", "apps/ff_pool_surfaces_smoke.py"],
+        ["python3", "apps/ff_pool_surfaces_http_smoke.py"],
+        ["python3", "apps/ff_wb_supply_origins_smoke.py"],
+        ["python3", "apps/ff_wb_supply_origins_http_smoke.py"],
+        ["python3", "apps/wb_fbs_orders_collector_smoke.py"],
+        ["python3", "apps/wb_fbs_orders_http_smoke.py"],
+        ["python3", "apps/wb_fbs_warehouse_registry_smoke.py"],
+        ["python3", "apps/inventory_planning_read_model_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_inventory_history_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py"],
+        ["python3", "apps/fbs_fulfillment_order_supply_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_inventory_planning_smoke.py"],
+        ["python3", "apps/wb_fbs_shadow_polling_smoke.py"],
+        ["python3", "apps/wb_supplies_incremental_sync_smoke.py"],
+        ["python3", "apps/ff_stage_7a_production_smoke.py"],
+        ["python3", "apps/ff_pool_cutover_smoke.py"],
+        ["python3", "apps/ff_pool_cutover_production_smoke.py"],
+        ["python3", "apps/ff_pool_cutover_recovery_supersession_smoke.py"],
+        ["python3", "apps/ff_pool_fbs_lifecycle_smoke.py"],
+        ["python3", "apps/ff_pool_fbs_forward_recovery_smoke.py"],
+        ["python3", "apps/russian_payment_orders_smoke.py"],
+        ["python3", "apps/ff_pool_overhead_backfill_smoke.py"],
+        ["python3", "apps/ff_fbs_mapping_extension_production_smoke.py"],
+        ["python3", "apps/warehouse_business_projection_smoke.py"],
+        ["python3", "apps/warehouse_targeted_replay_smoke.py"],
+        ["python3", "apps/warehouse_functional_smoke.py"],
+        ["python3", "apps/ff_inventory_reconciliation_smoke.py"],
+        ["python3", "apps/ff_overhead_allocation_smoke.py"],
+        ["python3", "apps/ff_warehouse_documents_smoke.py"],
+        ["python3", "apps/ff_stock_ledger_http_smoke.py"],
+        ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"]
+      ]
+    },
+    "browser_ui": {
+      "group": "browser",
+      "depends_on": ["fulfillment", "web_vitrina"],
+      "requires_browser": true,
+      "commands": [
+        ["python3", "apps/ff_pool_surfaces_browser_smoke.py"],
+        ["python3", "apps/ff_wb_supply_origins_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_stable_filters_layout_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py"],
+        ["python3", "apps/wb_incident_policy_legacy_ui_browser_smoke.py"],
+        ["python3", "apps/wb_warehouse_exclusion_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_settings_browser_smoke.py"],
+        ["python3", "apps/business_data_write_barrier_browser_smoke.py"],
+        ["python3", "apps/cny_ledger_browser_smoke.py"],
+        ["python3", "apps/warehouse_business_projection_browser_smoke.py"],
+        ["python3", "apps/warehouse_stocks_browser_smoke.py"]
+      ]
+    },
+    "finance_storage": {
+      "group": "finance",
+      "depends_on": ["release_safety", "warehouse_recovery"],
+      "requires_browser": false,
+      "commands": [
+        ["python3", "apps/finance_storage_sqlite_open_inventory.py", "--check-migrated"],
+        ["python3", "apps/finance_migration_deploy_lease_smoke.py"],
+        ["python3", "apps/finance_storage_stale_writer_recovery_smoke.py"],
+        ["python3", "apps/business_data_write_barrier_smoke.py"],
+        ["python3", "apps/business_data_maintenance_smoke.py"],
+        ["python3", "apps/business_data_maintenance_restore_job_smoke.py"],
+        ["python3", "apps/registry_upload_http_entrypoint_auth_smoke.py"],
+        ["python3", "apps/finance_storage_split_smoke.py"],
+        ["python3", "apps/finance_storage_backup_rotation_smoke.py"],
+        ["python3", "apps/finance_storage_candidate_abort_smoke.py"],
+        ["python3", "apps/finance_storage_transport_job_smoke.py"],
+        ["python3", "apps/finance_storage_post_manifest_recovery_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_smoke.py"],
+        ["python3", "apps/wb_finance_fbs_pooled_cost_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_business_approved_backfill_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_canonical_scale_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_stale_cost_safety_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_stale_cost_scale_smoke.py"],
+        ["python3", "apps/wb_finance_weekly_browser_smoke.py"],
+        ["python3", "apps/partner_report_smoke.py"],
+        ["python3", "apps/partner_finance_production_diagnostic_smoke.py"],
+        ["python3", "apps/finance_partner_production_ui_flow_smoke.py"],
+        ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"]
+      ]
+    }
+  },
+  "rules": [
+    {
+      "id": "ci-and-protocol",
+      "paths": [".github/**", ".codex/**", "ci/**", "AGENTS.md", ".github/pull_request_template.md", "docs/architecture/07_codex_execution_protocol.md", "docs/architecture/11_github_release_train.md", "docs/architecture/12_codex_global_orchestration.md", "docs/architecture/13_codex_curator_workspace.md", "apps/github_release_runner.py", "apps/github_release_runner_smoke.py", "apps/production_apply_runner.py", "apps/production_apply_runner_smoke.py", "apps/release_protocol.py"],
+      "suites": ["release_safety"],
+      "release": "repo_only",
+      "force_full": true
+    },
+    {
+      "id": "documentation",
+      "paths": ["README.md", "IMPLEMENTATION_REPORT.md", "docs/**", "migration/**", "workspaces/**", "reports/**", ".gitignore", ".clasp.json"],
+      "suites": ["release_safety"],
+      "release": "repo_only"
+    },
+    {
+      "id": "web-vitrina",
+      "paths": ["apps/sheet_vitrina_v1_*", "apps/our_wb_costs*", "apps/inventory_cost*", "apps/sales_funnel*", "apps/wb_incident_policy*", "packages/application/sheet_vitrina_v1_*", "packages/application/our_wb_cost*", "packages/application/proxy_v4*", "packages/adapters/templates/sheet_vitrina_v1_*", "gas/sheet_vitrina_v1/**", "registry/**"],
+      "suites": ["web_vitrina"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "warehouse-recovery",
+      "paths": ["apps/warehouse_recovery*", "apps/storage_recovery*", "apps/business_data_*", "apps/promo_campaign_archive*", "packages/application/warehouse_recovery*", "packages/application/storage_recovery*", "packages/application/business_data_*"],
+      "suites": ["warehouse_recovery"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "fulfillment",
+      "paths": ["apps/ff_*", "apps/fbs_*", "apps/wb_fbs_*", "apps/wb_supplies_*", "apps/cny_ledger*", "apps/warehouse_*", "apps/inventory_planning_*", "apps/russian_payment_orders*", "packages/application/ff_*", "packages/application/fbs_*", "packages/application/wb_fbs_*", "packages/application/wb_supplies*", "packages/application/cny_ledger*", "packages/application/warehouse_*", "packages/application/inventory_planning*", "packages/contracts/ff_*", "packages/contracts/fbs_*", "artifacts/warehouse_chain_audit_*/**"],
+      "suites": ["fulfillment"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "finance-storage",
+      "paths": ["apps/finance_*", "apps/wb_finance_*", "apps/partner_*", "apps/registry_upload_http_entrypoint_*", "packages/application/finance_*", "packages/application/partner_*", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/templates/*finance*", "artifacts/wb_finance_weekly/**"],
+      "suites": ["finance_storage"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "browser-ui",
+      "paths": ["apps/*browser*", "packages/adapters/templates/**"],
+      "suites": ["browser_ui"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "runtime-general",
+      "paths": ["apps/**", "packages/**", "artifacts/**"],
+      "suites": ["release_safety"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "production-mutation-manifest",
+      "paths": ["release/production-mutations/*.json"],
+      "suites": ["finance_storage", "fulfillment", "warehouse_recovery"],
+      "release": "production_mutation",
+      "force_full": true
+    }
+  ]
+}

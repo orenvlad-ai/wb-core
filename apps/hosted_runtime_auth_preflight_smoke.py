@@ -15,7 +15,7 @@ from apps.registry_upload_http_entrypoint_hosted_runtime import (
     _validate_production_target_identity,
     load_hosted_runtime_target,
 )
-from apps.github_release_train_spec import CANONICAL_PRODUCTION_TARGET_ID
+from apps.release_protocol import CANONICAL_PRODUCTION_TARGET_ID
 
 
 def main() -> None:

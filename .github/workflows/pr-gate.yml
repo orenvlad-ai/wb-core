@@ -1,0 +1,186 @@
+name: PR Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Diagnostic PR number; this run cannot satisfy required PR provenance
+        required: true
+        type: number
+      base_sha:
+        description: Exact diagnostic base SHA
+        required: true
+        type: string
+      head_sha:
+        description: Exact diagnostic head SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Fast core checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout proposed change
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate exact diff hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          else
+            git diff --check "${{ inputs.base_sha }}...${{ inputs.head_sha }}"
+          fi
+
+      - name: Validate syntax and deterministic protocol core
+        run: |
+          python3 -m compileall -q apps packages ci
+          python3 ci/test_planner_smoke.py
+          python3 apps/github_release_runner_smoke.py
+          python3 apps/production_apply_runner_smoke.py
+
+      - name: Parse workflow YAML
+        run: >-
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each {
+          |path| YAML.parse_file(path) }'
+
+  plan:
+    name: Deterministic impact plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      groups: ${{ steps.plan.outputs.groups }}
+      plan_hash: ${{ steps.plan.outputs.plan_hash }}
+      plan_valid: ${{ steps.plan.outputs.plan_valid }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+    steps:
+      - name: Checkout proposed change
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve exact event bindings
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            pr="${{ github.event.pull_request.number }}"
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            pr="${{ inputs.pr_number }}"
+            base="${{ inputs.base_sha }}"
+            head="${{ inputs.head_sha }}"
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=test-plan-$pr-$head" >> "$GITHUB_OUTPUT"
+
+      - name: Build canonical test plan
+        id: plan
+        run: >-
+          python3 ci/test_planner.py
+          --pr "${{ steps.meta.outputs.pr }}"
+          --base "${{ steps.meta.outputs.base }}"
+          --head "${{ steps.meta.outputs.head }}"
+          --output "$RUNNER_TEMP/test-plan.json"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload immutable test plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ runner.temp }}/test-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+  selected:
+    name: Selected group · ${{ matrix.group }}
+    needs:
+      - plan
+    if: needs.plan.outputs.plan_valid == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact proposed head
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download immutable test plan
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.plan.outputs.artifact_name }}
+          path: ${{ runner.temp }}/plan
+
+      - name: Install selected suite dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Install browser for browser group
+        if: matrix.group == 'browser'
+        run: python3 -m playwright install chromium
+
+      - name: Run exact selected group
+        run: >-
+          python3 ci/run_test_group.py
+          --plan "$RUNNER_TEMP/plan/test-plan.json"
+          --group "${{ matrix.group }}"
+
+  pr_gate:
+    name: ${{ github.event_name == 'pull_request' && 'pr-gate' || 'pr-gate-diagnostic' }}
+    needs:
+      - core
+      - plan
+      - selected
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate exact PR provenance and selected results
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CORE_RESULT: ${{ needs.core.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SELECTED_RESULT: ${{ needs.selected.result }}
+          PLAN_VALID: ${{ needs.plan.outputs.plan_valid }}
+        run: |
+          python3 - <<'PY'
+          import os
+          expected = {
+              "CORE_RESULT": "success",
+              "PLAN_RESULT": "success",
+              "SELECTED_RESULT": "success",
+              "PLAN_VALID": "true",
+          }
+          mismatches = {key: (os.environ.get(key), value) for key, value in expected.items() if os.environ.get(key) != value}
+          if mismatches:
+              raise SystemExit(f"PR Gate aggregate failed: {mismatches}")
+          if os.environ["EVENT_NAME"] not in {"pull_request", "workflow_dispatch"}:
+              raise SystemExit("unsupported PR Gate provenance")
+          PY
