@@ -70,6 +70,21 @@ healthy by timeout. Any service-gate block writes the complete final 27-row and
 readiness receipt and trusted callback. The same structured gate is repeated in
 final readiness qualification, mutation reconciliation and terminal readback.
 
+WBC0008 block 011 corrects the pre-mutation lock-context protocol defect found
+by the first block-011 scope-goal attempt. The Finance lock and all three other
+lifecycle locks now have independent enter/exit ownership, close their current
+handle on acquisition failure, release every acquired lifecycle lock in reverse
+order after a partial acquisition, and always unlock/close after normal return
+or a body exception. The smoke executes the exact nested `apply_batch` lock
+path through the first durable journal-write boundary and proves that this
+boundary is not called after an earlier failure. It also directly covers
+normal exit, body-exception propagation, contention, partial acquisition,
+symlink rejection, repeated acquisition and descriptor/lock cleanup. Terminal
+readiness `readiness-v1-6e2294ca39ba7606c08d32dbc7454854`, operation
+`production-goal-v1-5a329a68fad1c027014d4d8f905670c9` and job
+`8d7f62433effef29df3e14ca77e590253733d08c9d65ffaf923cfcb7ad0c7ddb`
+remain immutable and are never retried or reused.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
