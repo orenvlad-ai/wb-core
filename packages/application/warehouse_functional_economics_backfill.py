@@ -701,6 +701,9 @@ def apply_functional_economics_backfill_plan(
                     data_version_at_writer_lock
                     != data_version_after_revalidation
                 ),
+                "changed_since_observer_started": (
+                    data_version_at_writer_lock != data_version_before
+                ),
             }
             if current_business_date_iso() != operation_business_date:
                 raise FunctionalEconomicsBackfillError(

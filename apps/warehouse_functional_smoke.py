@@ -5087,6 +5087,10 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         and concurrent_result["lock_free_revalidation_telemetry"][
             "changed_before_writer_lock"
         ]
+        is True
+        and concurrent_result["lock_free_revalidation_telemetry"][
+            "changed_since_observer_started"
+        ]
         is True,
         "data_version observes the FBS commit as telemetry without becoming a gate",
     )
