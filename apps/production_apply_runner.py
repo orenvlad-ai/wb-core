@@ -44,7 +44,7 @@ from apps.release_protocol import (  # noqa: E402
 
 APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
 APPLY_MARKER = "wb-core-production-apply-receipt"
-WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v1"
+WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v2"
 WARM_READINESS_MARKER = "wb-core-root-warm-archive-readiness-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
@@ -245,6 +245,16 @@ def parse_warm_readiness_receipt(
                 r"sha256:[0-9a-f]{64}",
                 str(payload.get("material_qualification_digest") or ""),
             )
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("immutable_non_target_digest") or ""),
+            )
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("mutable_canonical_topology_digest") or ""),
+            )
+            and isinstance(payload.get("mutable_canonical_observations"), list)
+            and len(payload["mutable_canonical_observations"]) >= 3
             and _valid_warm_systemd_service_gate(
                 service_gate, require_healthy=True
             )
@@ -833,7 +843,12 @@ def _validate_candidate(
                 raise ApplyError(f"dynamic manifest escaped authorized goal: {field}")
         if payload.get("database_written") is not False:
             raise ApplyError("warm archive qualification unexpectedly wrote data")
-        for field in ("manifest_sha256", "material_qualification_digest", "non_target_digest"):
+        for field in (
+            "manifest_sha256",
+            "material_qualification_digest",
+            "immutable_non_target_digest",
+            "mutable_canonical_topology_digest",
+        ):
             if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
                 raise ApplyError(f"dynamic warm archive digest is invalid: {field}")
         if (
@@ -845,8 +860,14 @@ def _validate_candidate(
             != warm_readiness.get("projection_manifest_sha256")
             or payload.get("material_qualification_digest")
             != warm_readiness.get("material_qualification_digest")
+            or payload.get("immutable_non_target_digest")
+            != warm_readiness.get("immutable_non_target_digest")
+            or payload.get("mutable_canonical_topology_digest")
+            != warm_readiness.get("mutable_canonical_topology_digest")
             or not isinstance(payload.get("activity_evidence"), list)
             or len(payload["activity_evidence"]) != goal["expected_source_count"]
+            or not isinstance(payload.get("mutable_canonical_observations"), list)
+            or len(payload["mutable_canonical_observations"]) < 3
         ):
             raise ApplyError("dynamic warm archive readiness binding is invalid")
         return
@@ -950,7 +971,15 @@ def run_dynamic_goal(
                     "expected_reclaimed_allocated_bytes": payload[
                         "expected_reclaimed_allocated_bytes"
                     ],
-                    "non_target_digest": payload["non_target_digest"],
+                    "immutable_non_target_digest": payload[
+                        "immutable_non_target_digest"
+                    ],
+                    "mutable_canonical_topology_digest": payload[
+                        "mutable_canonical_topology_digest"
+                    ],
+                    "mutable_canonical_observations": payload[
+                        "mutable_canonical_observations"
+                    ],
                     "readiness_id": payload["readiness_id"],
                     "projection_manifest_sha256": payload[
                         "projection_manifest_sha256"
@@ -1048,6 +1077,12 @@ def run_dynamic_goal(
             and readback.get("backup_capacity_guard_passed") is True
             and readback.get("services_healthy") is True
             and readback.get("non_target_preserved") is True
+            and isinstance(readback.get("mutation_scope_reconciliation"), Mapping)
+            and readback["mutation_scope_reconciliation"].get("exact") is True
+            and readback["mutation_scope_reconciliation"].get(
+                "non_target_unlink_move_write_count"
+            )
+            == 0
             and readback.get("promo_action_count") == 0
             and readback.get("business_data_mutation_count") == 0
             and readback.get("exact_manifest_apply_receipt_count") == 1
@@ -1265,6 +1300,11 @@ def _validate_recovery_receipt(
         readback_job = (
             readback.get("job") if isinstance(readback, Mapping) else None
         )
+        mutation_scope = (
+            readback.get("mutation_scope_reconciliation")
+            if isinstance(readback, Mapping)
+            else None
+        )
         apply_request = (
             readback_job.get("request")
             if isinstance(readback_job, Mapping)
@@ -1290,6 +1330,9 @@ def _validate_recovery_receipt(
             or readback.get("backup_capacity_guard_passed") is not True
             or readback.get("services_healthy") is not True
             or readback.get("non_target_preserved") is not True
+            or not isinstance(mutation_scope, Mapping)
+            or mutation_scope.get("exact") is not True
+            or mutation_scope.get("non_target_unlink_move_write_count") != 0
             or readback.get("promo_action_count") != 0
             or readback.get("business_data_mutation_count") != 0
             or not isinstance(manifest_sha, str)
@@ -1720,6 +1763,15 @@ def _run_warm_readiness_mode(
                 "material_qualification_digest": payload.get(
                     "material_qualification_digest"
                 ),
+                "immutable_non_target_digest": payload.get(
+                    "immutable_non_target_digest"
+                ),
+                "mutable_canonical_topology_digest": payload.get(
+                    "mutable_canonical_topology_digest"
+                ),
+                "mutable_canonical_observations": payload.get(
+                    "mutable_canonical_observations"
+                ),
                 "expected_reclaimed_allocated_bytes": payload.get(
                     "expected_reclaimed_allocated_bytes"
                 ),
@@ -1740,6 +1792,8 @@ def _run_warm_readiness_mode(
             "projection_manifest_path",
             "projection_manifest_sha256",
             "material_qualification_digest",
+            "immutable_non_target_digest",
+            "mutable_canonical_topology_digest",
         ):
             if not receipt.get(field):
                 raise ApplyError(f"ready warm archive receipt lacks {field}")

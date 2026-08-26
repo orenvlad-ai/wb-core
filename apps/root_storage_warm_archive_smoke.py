@@ -226,10 +226,8 @@ def _exercise_apply_lock_path(root: Path) -> None:
     readiness_id = "readiness-v1-" + "c" * 32
     fresh_material = {
         "expected_reclaimed_allocated_bytes": 512,
-        "non_target_digest": "sha256:" + "d" * 64,
-        "root_policy": {
-            "protected_path_identity_digest": "sha256:" + "e" * 64,
-        },
+        "immutable_non_target_digest": "sha256:" + "d" * 64,
+        "mutable_canonical_topology_digest": "sha256:" + "e" * 64,
         "targets": [{"key": "fixture"}],
     }
     material_digest = warm._digest(fresh_material)
@@ -250,6 +248,11 @@ def _exercise_apply_lock_path(root: Path) -> None:
         "services": {},
         "systemd_service_gate": {},
         "activity_gates": [],
+        "non_target": {
+            "immutable_digest": "sha256:" + "d" * 64,
+            "mutable_canonical_topology_digest": "sha256:" + "e" * 64,
+            "mutable_canonical": {"observation_rows": []},
+        },
     }
     original_functions = {
         name: getattr(warm, name)
@@ -325,6 +328,541 @@ def _exercise_apply_lock_path(root: Path) -> None:
             setattr(warm, name, value)
 
 
+def _mutable_fixture_policy(path: Path, *, resolver_type: str = "literal") -> dict[str, object]:
+    resolver: dict[str, object]
+    if resolver_type == "literal":
+        resolver = {"type": "literal", "path": str(path)}
+    else:
+        resolver = {"type": "store_registry", "logical_store": "operational"}
+    return {
+        "non_target_cas": {
+            "contract_version": "wb_core_non_target_cas_v1",
+            "active_mutable_canonical_stores": [
+                {
+                    "key": "fixture_current",
+                    "owner": "fixture_operational_store",
+                    "classification": "essential_bounded_business_writer",
+                    "resolver": resolver,
+                    "expected_owning_services": [
+                        "wb-core-autoanswers-worker.service"
+                    ],
+                    "allow_no_open_handles": True,
+                }
+            ],
+        },
+        "producers": [
+            {
+                "owner": "fixture_operational_store",
+                "classification": "essential_bounded_business_writer",
+                "path_patterns": [str(path)] if resolver_type == "literal" else [],
+            }
+        ],
+    }
+
+
+def _non_target_fixture(
+    snapshot: dict[str, object], *, immutable_digest: str = "sha256:" + "1" * 64
+) -> dict[str, object]:
+    return {
+        "immutable_digest": immutable_digest,
+        "mutable_canonical": snapshot,
+        "mutable_canonical_topology_digest": snapshot["topology_digest"],
+    }
+
+
+def _exercise_non_target_cas_split(root: Path) -> None:
+    root = root.resolve()
+    original_mount_identity = warm._mount_identity
+    warm._mount_identity = lambda path: {
+        "mount_id": 1,
+        "mount_point": str(root.anchor),
+        "filesystem_type": "fixture",
+        "source": "fixture-device",
+        "options": "rw",
+    }
+    mutable = root / "wb_autoanswers_runtime.sqlite3"
+    _seed(mutable)
+    policy = _mutable_fixture_policy(mutable)
+    service_snapshot = _healthy_systemd_snapshot()
+    registry = {"stores": {}}
+    baseline = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=policy,
+        store_registry=registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [],
+    )
+    baseline_inode = mutable.stat().st_ino
+    with mutable.open("ab") as handle:
+        handle.write(b"\0" * 4096)
+        handle.flush()
+        os.fsync(handle.fileno())
+    grown = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=policy,
+        store_registry=registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [],
+    )
+    assert mutable.stat().st_ino == baseline_inode
+    assert baseline["topology_digest"] == grown["topology_digest"]
+    growth_reconciliation = warm._reconcile_non_target(
+        _non_target_fixture(baseline),
+        _non_target_fixture(grown),
+        phase="readiness_to_jit_autoanswers_growth",
+    )
+    assert growth_reconciliation["immutable_preserved"] is True
+    assert growth_reconciliation["mutable_canonical_topology_preserved"] is True
+    assert growth_reconciliation["mutable_canonical_evolution"][0][
+        "ordinary_content_evolution_observed"
+    ] is True
+
+    before_material = {
+        "immutable_non_target_digest": "sha256:" + "1" * 64,
+        "mutable_canonical_topology": baseline["topology_rows"],
+        "mutable_canonical_topology_digest": baseline["topology_digest"],
+    }
+    after_material = {
+        **before_material,
+        "mutable_canonical_topology": grown["topology_rows"],
+        "mutable_canonical_topology_digest": grown["topology_digest"],
+    }
+    assert warm._digest(before_material) == warm._digest(after_material)
+
+    replacement = root / "replacement.sqlite3"
+    _seed(replacement)
+    os.replace(replacement, mutable)
+    replaced = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=policy,
+        store_registry=registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [],
+    )
+    try:
+        warm._reconcile_non_target(
+            _non_target_fixture(baseline),
+            _non_target_fixture(replaced),
+            phase="inode_replacement",
+        )
+    except warm.WarmArchiveError as exc:
+        assert "topology/content reconciliation failed" in str(exc)
+    else:
+        raise AssertionError("mutable canonical inode replacement was admitted")
+
+    mutable.unlink()
+    mutable.symlink_to(root / "missing.sqlite3")
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=policy,
+            store_registry=registry,
+            service_snapshot=service_snapshot,
+            opener_reader=lambda _path: [],
+        )
+    except warm.WarmArchiveError as exc:
+        assert "path is unsafe" in str(exc)
+    else:
+        raise AssertionError("mutable canonical symlink replacement was admitted")
+    mutable.unlink()
+    mutable.mkdir()
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=policy,
+            store_registry=registry,
+            service_snapshot=service_snapshot,
+            opener_reader=lambda _path: [],
+        )
+    except warm.WarmArchiveError as exc:
+        assert "path is unsafe" in str(exc)
+    else:
+        raise AssertionError("mutable canonical type replacement was admitted")
+    mutable.rmdir()
+    _seed(mutable)
+
+    for field, changed in (
+        ("path", str(root / "moved.sqlite3")),
+        ("device", 999999),
+        ("mount", {"mount_id": 999, "source": "/dev/other"}),
+        ("inode", baseline_inode + 1000),
+        ("kind", "symlink"),
+        ("uid", 99),
+    ):
+        drifted = json.loads(json.dumps(grown))
+        drifted["topology_rows"][0]["topology"][field] = changed
+        drifted["topology_digest"] = warm._digest(drifted["topology_rows"])
+        try:
+            warm._reconcile_non_target(
+                _non_target_fixture(grown),
+                _non_target_fixture(drifted),
+                phase=f"mutable_{field}_drift",
+            )
+        except warm.WarmArchiveError:
+            pass
+        else:
+            raise AssertionError(f"mutable canonical {field} drift was admitted")
+
+    unknown_policy = _mutable_fixture_policy(mutable)
+    unknown_policy["non_target_cas"]["active_mutable_canonical_stores"][0][
+        "owner"
+    ] = "unknown-owner"
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=unknown_policy,
+            store_registry=registry,
+            service_snapshot=service_snapshot,
+            opener_reader=lambda _path: [],
+        )
+    except warm.WarmArchiveError as exc:
+        assert "unknown/unregistered" in str(exc)
+    else:
+        raise AssertionError("unknown mutable canonical owner was admitted")
+
+    store_policy = _mutable_fixture_policy(mutable, resolver_type="store_registry")
+    store_registry = {
+        "stores": {
+            "operational": {
+                "logical_store": "operational",
+                "path": str(mutable),
+                "generation_id": "generation-a",
+                "generation_epoch": "epoch-a",
+                "relative_path": mutable.name,
+                "schema_revision": "operational_v1",
+                "source_fingerprint": "sha256:" + "2" * 64,
+                "manifest_sha256": "sha256:" + "3" * 64,
+            }
+        }
+    }
+    registry_before = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=store_policy,
+        store_registry=store_registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [],
+    )
+    changed_registry = json.loads(json.dumps(store_registry))
+    changed_registry["stores"]["operational"]["generation_id"] = "generation-b"
+    registry_after = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=store_policy,
+        store_registry=changed_registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [],
+    )
+    try:
+        warm._reconcile_non_target(
+            _non_target_fixture(registry_before),
+            _non_target_fixture(registry_after),
+            phase="store_registry_identity_replacement",
+        )
+    except warm.WarmArchiveError:
+        pass
+    else:
+        raise AssertionError("StoreRegistry identity replacement was admitted")
+
+    unexpected_opener = lambda _path: [
+        {"pid": 999999, "fd": 4, "comm": "unknown", "access_mode": "read_write"}
+    ]
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=policy,
+            store_registry=registry,
+            service_snapshot=service_snapshot,
+            opener_reader=unexpected_opener,
+        )
+    except warm.WarmArchiveError as exc:
+        assert "unexpected open-handle owner" in str(exc)
+    else:
+        raise AssertionError("unexpected mutable canonical opener was admitted")
+
+    for reason in ("add", "remove", "content", "stat"):
+        try:
+            warm._reconcile_non_target(
+                _non_target_fixture(grown),
+                _non_target_fixture(
+                    grown, immutable_digest="sha256:" + reason[0] * 64
+                ),
+                phase=f"immutable_{reason}_drift",
+            )
+        except warm.WarmArchiveError:
+            pass
+        else:
+            raise AssertionError(f"immutable non-target {reason} drift was admitted")
+
+    exact_policy = warm.TARGET_POLICIES[0]
+    exact_target = {
+        "key": exact_policy["key"],
+        "source_path": exact_policy["source_path"],
+        "sidecars": [],
+    }
+    warm._assert_exact_source_unlink_authority(
+        Path(exact_policy["source_path"]), exact_target
+    )
+    try:
+        warm._assert_exact_source_unlink_authority(
+            root / "non-target.sqlite3", exact_target
+        )
+    except warm.WarmArchiveError as exc:
+        assert "literal six-path authority" in str(exc)
+    else:
+        raise AssertionError("non-target unlink path was admitted")
+    exact_journal = {
+        "items": [
+            {
+                "key": item["key"],
+                "unlink_count": 1,
+                "archive_path": str(
+                    warm.DESTINATION_ROOT
+                    / warm.DESTINATION_FAMILY_NAME
+                    / item["archive_name"]
+                ),
+                "manifest_path": str(
+                    warm.DESTINATION_ROOT
+                    / warm.DESTINATION_FAMILY_NAME
+                    / (item["archive_name"] + ".manifest.json")
+                ),
+            }
+            for item in warm.TARGET_POLICIES
+        ],
+        "non_target_before": {
+            "mutable_canonical": {
+                "topology_rows": grown["topology_rows"],
+            }
+        },
+        "promo_action_count": 0,
+        "business_data_mutation_count": 0,
+    }
+    mutation_scope = warm._mutation_scope_reconciliation(exact_journal)
+    assert mutation_scope["exact"] is True
+    assert mutation_scope["non_target_unlink_move_write_count"] == 0
+    escaped_journal = json.loads(json.dumps(exact_journal))
+    escaped_journal["items"][0]["archive_path"] = str(mutable)
+    assert warm._mutation_scope_reconciliation(escaped_journal)["exact"] is False
+    warm._mount_identity = original_mount_identity
+
+
+def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
+    root = root.resolve()
+    readiness_id = "readiness-v1-" + "d" * 32
+    operation_id = "production-goal-v1-" + "e" * 32
+    readiness_root = root / "readiness"
+    production_root = root / "production-goals"
+    readiness_dir = readiness_root / readiness_id
+    evidence_dir = production_root / operation_id
+    readiness_dir.mkdir(parents=True, mode=0o700)
+    evidence_dir.mkdir(parents=True, mode=0o700)
+    os.chmod(readiness_dir, 0o700)
+    os.chmod(evidence_dir, 0o700)
+    runtime = root / "runtime"
+    root_backups = root / "root-backups"
+    runtime.mkdir()
+    root_backups.mkdir()
+    deployed_sha = "f" * 40
+    deployed_marker = root / ".wb-core-runtime-sha"
+    deployed_marker.write_text(deployed_sha + "\n", encoding="utf-8")
+    autoanswers = root / "wb_autoanswers_runtime.sqlite3"
+    autoanswers.unlink(missing_ok=True)
+    _seed(autoanswers)
+    policy = _mutable_fixture_policy(autoanswers)
+    service_snapshot = _healthy_systemd_snapshot()
+    original_mount_identity = warm._mount_identity
+    original_material_snapshot = warm._material_snapshot
+    original_service_gate = warm._systemd_service_gate_with_resample
+    original_stabilize = warm._stabilize_activity
+    original_readiness_root = warm.READINESS_EVIDENCE_ROOT
+    original_production_root = warm.PRODUCTION_GOAL_EVIDENCE_ROOT
+    original_atomic_write = warm._atomic_write_json
+    warm._mount_identity = lambda path: {
+        "mount_id": 1,
+        "mount_point": str(root.anchor),
+        "filesystem_type": "fixture",
+        "source": "fixture-device",
+        "options": "rw",
+    }
+    warm.READINESS_EVIDENCE_ROOT = readiness_root
+    warm.PRODUCTION_GOAL_EVIDENCE_ROOT = production_root
+    healthy_gate = {
+        "healthy": True,
+        "classification": "healthy",
+        "expected_unit_count": 27,
+        "observed_unit_count": 27,
+        "expected_pair_count": 12,
+        "observed_pair_count": 12,
+        "units": [],
+        "pairs": [],
+        "failing_unit_count": 0,
+        "failing_pair_count": 0,
+        "resample_required_pair_names": [],
+        "pair_resample_evidence": {"samples": []},
+    }
+    calls = 0
+
+    def material_snapshot(**_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            with autoanswers.open("ab") as handle:
+                handle.write(b"\0" * 4096)
+                handle.flush()
+                os.fsync(handle.fileno())
+        mutable_snapshot = warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=policy,
+            store_registry={"stores": {}},
+            service_snapshot=service_snapshot,
+            opener_reader=lambda _path: [],
+        )
+        targets = [
+            {
+                "key": item["key"],
+                "source_path": item["source_path"],
+                "archive_name": item["archive_name"],
+                "owner": item["owner"],
+                "family": item["family"],
+                "restore_role": item["restore_role"],
+                "projected_archive_size_bytes": 1,
+                "identity": dict(item["expected_identity"]),
+            }
+            for item in warm.TARGET_POLICIES
+        ]
+        immutable_digest = "sha256:" + "1" * 64
+        material = {
+            "contract_name": warm.CONTRACT_NAME,
+            "profile": warm.PROFILE,
+            "source_count": 6,
+            "destination_root": str(warm.DESTINATION_ROOT),
+            "destination_family": str(
+                warm.DESTINATION_ROOT / warm.DESTINATION_FAMILY_NAME
+            ),
+            "targets": targets,
+            "filesystems": {},
+            "finance": {
+                "next_replacement_required_bytes": 1,
+                "required_available_floor_bytes": 2,
+            },
+            "store_registry": {"identity_digest": "sha256:" + "2" * 64},
+            "root_policy": {"policy_sha256": "sha256:" + "3" * 64},
+            "immutable_non_target_digest": immutable_digest,
+            "mutable_canonical_topology": mutable_snapshot["topology_rows"],
+            "mutable_canonical_topology_digest": mutable_snapshot[
+                "topology_digest"
+            ],
+            "expected_unlink_count": 6,
+            "expected_reclaimed_allocated_bytes": 27_591_725_056,
+            "root_minimum_after_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+            "control_artifact_reserve_bytes": warm.CONTROL_ARTIFACT_RESERVE_BYTES,
+            "compression": "zstd-level-1-single-thread",
+        }
+        activity = [
+            {
+                "classification": "clean",
+                "read_only_opener_count": 0,
+                "write_capable_or_unknown_opener_count": 0,
+                "kernel_locks": [],
+                "hold_evidence": {"marker_paths": [], "hold_xattr_names": []},
+            }
+            for _ in range(6)
+        ]
+        non_target = {
+            "immutable_digest": immutable_digest,
+            "mutable_canonical": mutable_snapshot,
+            "mutable_canonical_topology_digest": mutable_snapshot[
+                "topology_digest"
+            ],
+        }
+        observations = {
+            "activity_gates": activity,
+            "filesystems_before": {"root": {}, "backup": {}},
+            "journald": {},
+            "services": service_snapshot,
+            "systemd_service_gate": healthy_gate,
+            "non_target": non_target,
+            "capacity_stages": [
+                {
+                    "key": item["key"],
+                    "projected_available_at_peak_bytes": 10,
+                    "sufficient": True,
+                }
+                for item in warm.TARGET_POLICIES
+            ],
+            "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+        }
+        return material, observations
+
+    warm._material_snapshot = material_snapshot
+    warm._systemd_service_gate_with_resample = lambda *_args, **_kwargs: healthy_gate
+    warm._stabilize_activity = lambda **_kwargs: {
+        "status": "clean",
+        "samples": [],
+        "callback": [],
+    }
+    try:
+        ready = warm.readiness(
+            runtime_dir=runtime,
+            root_backups=root_backups,
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_marker,
+            evidence_dir=readiness_dir,
+            readiness_id=readiness_id,
+        )
+        assert ready["status"] == "ready"
+        assert calls == 2
+        assert ready["mutable_canonical_observations"][0][
+            "ordinary_mutable_fields"
+        ]["apparent_size_bytes"] > 0
+        dry = warm.dry_run(
+            runtime_dir=runtime,
+            root_backups=root_backups,
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_marker,
+            evidence_dir=evidence_dir,
+            operation_id=operation_id,
+            projection_manifest=Path(ready["projection_manifest_path"]),
+            projection_manifest_sha256=str(ready["projection_manifest_sha256"]),
+        )
+        assert dry["status"] == "ready"
+        assert dry["material_qualification_digest"] == ready[
+            "material_qualification_digest"
+        ]
+        first_mutations: list[Path] = []
+
+        def first_mutation(path: Path, _payload: object) -> None:
+            first_mutations.append(path)
+            raise _MutationBoundary("readiness-jit first durable mutation reached")
+
+        warm._atomic_write_json = first_mutation
+        try:
+            warm.apply_batch(
+                runtime_dir=runtime,
+                root_backups=root_backups,
+                deployed_sha=deployed_sha,
+                deployed_sha_file=deployed_marker,
+                evidence_dir=evidence_dir,
+                operation_id=operation_id,
+                manifest_path=Path(dry["manifest_path"]),
+                manifest_sha256=str(dry["manifest_sha256"]),
+                approval_reference="github:owner:wbc0008-012",
+            )
+        except _MutationBoundary as exc:
+            assert str(exc) == "readiness-jit first durable mutation reached"
+        else:
+            raise AssertionError("qualified readiness/JIT did not reach apply boundary")
+        assert first_mutations == [
+            evidence_dir / "root-warm-archive-apply.json"
+        ]
+    finally:
+        warm._mount_identity = original_mount_identity
+        warm._material_snapshot = original_material_snapshot
+        warm._systemd_service_gate_with_resample = original_service_gate
+        warm._stabilize_activity = original_stabilize
+        warm.READINESS_EVIDENCE_ROOT = original_readiness_root
+        warm.PRODUCTION_GOAL_EVIDENCE_ROOT = original_production_root
+        warm._atomic_write_json = original_atomic_write
+
+
 def run() -> None:
     assert len(warm.TARGET_POLICIES) == 6
     assert len({item["source_path"] for item in warm.TARGET_POLICIES}) == 6
@@ -339,6 +877,8 @@ def run() -> None:
         lock_root = Path(raw)
         _exercise_lock_contexts(lock_root)
         _exercise_apply_lock_path(lock_root)
+        _exercise_non_target_cas_split(lock_root)
+        _exercise_readiness_to_jit_autoanswers_growth(lock_root)
     assert {
         owner for _timer, owner in warm.TIMER_SERVICE_PAIRS
     } == set(warm.SERVICE_NAMES) - set(warm.PERSISTENT_SERVICE_NAMES) - {
@@ -531,6 +1071,18 @@ def run() -> None:
         ],
     }
     assert warm._classify_activity_evidence(clean_activity) == []
+    target_drift = dict(clean_activity)
+    target_drift["identity_matches_expected"] = False
+    assert warm._classify_activity_evidence(target_drift)[0]["code"] == (
+        "source_identity_drift"
+    )
+    sidecar_drift = dict(clean_activity)
+    sidecar_drift["sidecars"] = [
+        {"suffix": "-wal", "path": "/fixture-wal", "present": True}
+    ]
+    assert warm._classify_activity_evidence(sidecar_drift)[0]["code"] == (
+        "sqlite_sidecar_present"
+    )
     for mode in ("write_only", "read_write", "unknown"):
         blocked = dict(clean_activity)
         blocked["fd_openers"] = [

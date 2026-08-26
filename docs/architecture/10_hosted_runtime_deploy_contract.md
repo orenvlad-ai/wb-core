@@ -455,6 +455,13 @@ timer is enabled/restarted by canonical deploy and publishes the atomic
 policy-bound artifact `/var/lib/wb-core-root-storage-policy/status.json` every
 five minutes. `root-storage-readback` fails closed when that artifact is stale,
 malformed, policy-mismatched or contains an unregistered large root producer.
+The same policy contains the closed non-target CAS resolver registry used only
+by the WBC0008 exact-six runner. Current Finance raw/operational resolve through
+StoreRegistry and Autoanswers through one literal canonical binding. Ordinary
+same-inode content/size/mtime evolution is observation evidence, while path,
+device/mount, inode/type, symlink, owner/classification, StoreRegistry identity
+and owning-service/open-handle relationship remain stable topology guards.
+Unknown/unregistered objects never acquire mutable status by name similarity.
 The target-bound policy and historical block-003 journald drop-in
 source are
 `artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json` and

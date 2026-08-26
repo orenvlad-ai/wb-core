@@ -38,6 +38,73 @@
     },
     "expected_effective_values_after": {}
   },
+  "non_target_cas": {
+    "contract_version": "wb_core_non_target_cas_v1",
+    "active_mutable_canonical_stores": [
+      {
+        "key": "finance_raw_current",
+        "owner": "registry_operational_store",
+        "classification": "essential_bounded_business_writer",
+        "resolver": {
+          "type": "store_registry",
+          "logical_store": "finance_raw"
+        },
+        "expected_owning_services": [
+          "wb-core-registry-http.service",
+          "wb-ai-api.service",
+          "wb-core-data-mcp.service",
+          "wb-core-sheet-vitrina-refresh.service",
+          "wb-core-sheet-vitrina-canary-restore.service",
+          "wb-core-sheet-vitrina-closure-retry.service",
+          "wb-core-feedbacks-auto-complaints-tick.service",
+          "wb-core-wb-finance-weekly.service",
+          "wb-core-finance-backup-rotation.service",
+          "wb-core-warehouse-functional-sync.service",
+          "wb-core-fbs-shadow-collector.service",
+          "wb-core-fbs-warehouse-registry.service"
+        ],
+        "allow_no_open_handles": true
+      },
+      {
+        "key": "operational_current",
+        "owner": "registry_operational_store",
+        "classification": "essential_bounded_business_writer",
+        "resolver": {
+          "type": "store_registry",
+          "logical_store": "operational"
+        },
+        "expected_owning_services": [
+          "wb-core-registry-http.service",
+          "wb-ai-api.service",
+          "wb-core-data-mcp.service",
+          "wb-core-sheet-vitrina-refresh.service",
+          "wb-core-sheet-vitrina-canary-restore.service",
+          "wb-core-sheet-vitrina-closure-retry.service",
+          "wb-core-feedbacks-auto-complaints-tick.service",
+          "wb-core-wb-finance-weekly.service",
+          "wb-core-finance-backup-rotation.service",
+          "wb-core-warehouse-functional-sync.service",
+          "wb-core-fbs-shadow-collector.service",
+          "wb-core-fbs-warehouse-registry.service"
+        ],
+        "allow_no_open_handles": true
+      },
+      {
+        "key": "autoanswers_current",
+        "owner": "autoanswers_operational_store",
+        "classification": "essential_bounded_business_writer",
+        "resolver": {
+          "type": "literal",
+          "path": "/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3"
+        },
+        "expected_owning_services": [
+          "wb-core-autoanswers-readonly-sync.service",
+          "wb-core-autoanswers-worker.service"
+        ],
+        "allow_no_open_handles": true
+      }
+    ]
+  },
   "producers": [
     {
       "owner": "registry_operational_store",

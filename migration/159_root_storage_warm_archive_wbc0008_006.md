@@ -24,10 +24,13 @@ owner/classification are independently checked. Reclaimed bytes are calculated
 from 512-byte allocated blocks.
 
 WBC0008 block 007 is the same exact-six lifecycle scope and only corrects the
-pre-submit repeatability defect found by the first block-006 operation. Every
-new readiness/manifest/apply record uses contract
-`root_storage_warm_archive_wbc0008_006_v2`; v1 evidence and the terminal old
-operation stay immutable and are never resumed or replayed. Every
+pre-submit repeatability defect found by the first block-006 operation. WBC0008
+block 012 retains that unchanged scope and corrects the producer-ownership CAS
+boundary after a legitimate same-inode 4,096-byte Autoanswers write changed the
+old global protected-file `size/mtime` digest between readiness and the first
+JIT witness. Every new readiness/manifest/apply record uses contract
+`root_storage_warm_archive_wbc0008_006_v3`; v1/v2 evidence and terminal old
+operations stay immutable and are never resumed or replayed. Every
 qualification and mutation CAS gate now retains structured per-source activity
 evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
 and device/inode binding, kernel locks, sidecars, before/after identity and hash
@@ -85,6 +88,34 @@ readiness `readiness-v1-6e2294ca39ba7606c08d32dbc7454854`, operation
 `8d7f62433effef29df3e14ca77e590253733d08c9d65ffaf923cfcb7ad0c7ddb`
 remain immutable and are never retried or reused.
 
+WBC0008 block 012 partitions non-target evidence through the versioned
+root-storage policy rather than by filename:
+
+- exact target sources and sidecars retain the existing full identity, SHA,
+  activity, hold and provenance CAS at every gate;
+- immutable non-target files inside the six affected source families and any
+  destination-family non-target retain exact enumeration, type, path,
+  device/inode, mode, uid/gid, size/mtime and content digest; add/remove/content
+  or stat drift fails closed;
+- active mutable canonical stores are only the explicit policy bindings for
+  current Finance raw, current operational and Autoanswers stores. StoreRegistry
+  resolves the first two and the literal Autoanswers binding resolves the
+  third. Their stable CAS contains canonical path, device/mount, inode/type,
+  no-symlink proof, owner/classification, StoreRegistry generation identity
+  where applicable and the declared owning-service relationship. Ordinary
+  same-inode content, allocated-byte, size and mtime/ctime evolution is retained
+  as observation evidence but is excluded from the stable topology digest.
+
+An unknown resolver, owner, classification, path, destination object or
+unrelated FD owner fails closed. Mutation authority remains the six literal
+source unlinks plus their exact archive/manifest outputs and private control
+evidence; the terminal ledger proves zero non-target unlink/move/write paths.
+Readiness, both JIT witnesses, mutation start, every per-source pre-unlink gate,
+crash resume and terminal readback persist separate immutable and mutable-
+topology digests plus before/after mutable observations. Thus concurrent
+ordinary store evolution is distinguishable from replacement/misrouting or an
+operation-caused non-target mutation without weakening target CAS.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
@@ -97,14 +128,16 @@ every stage. Projected terminal root availability must be at least 25 GiB.
 
 For each source the worker:
 
-1. verifies exact source CAS and non-target digest;
+1. verifies exact source CAS, immutable non-target digest and mutable canonical
+   topology digest;
 2. compresses and fsyncs the destination temp;
 3. stream-decompresses to the exact original byte count and SHA-256;
 4. materializes a full restored file and repeats SQLite quick/integrity/schema
    proof;
 5. durably publishes and independently rereads the archive/manifest pair;
 6. repeats source identity/hash/sidecar/opener/lock/hold/provenance CAS,
-   non-target digest and capacity immediately before unlink;
+   immutable non-target and mutable canonical topology CAS plus capacity
+   immediately before unlink;
 7. writes an fsynced pending-unlink intent, submits one source unlink, fsyncs
    the source directory, and reconciles absence before proceeding.
 
@@ -133,8 +166,11 @@ consecutive clean post-projection witnesses inside a maximum 60-second
 stabilization window. Persistent write-capable/unknown FD, lock, sidecar, hold
 or material drift returns one terminal structured callback and no operation is
 created. The immutable ready receipt binds the release operation, deployed SHA,
-exact source material/SHA, conservative capacity proof and one private full
-compression projection.
+exact source material/SHA, conservative capacity proof, separate immutable
+non-target and mutable canonical topology digests and one private full
+compression projection. Its durable evidence records ordinary mutable fields
+and owning-service/open-handle relationships without placing those volatile
+content fields in the qualification digest.
 
 The trusted Apply Runner accepts the later task-scoped operation only with that
 single exact ready receipt. It creates at most four private JIT candidates and
@@ -160,13 +196,15 @@ reconciliation; root available at least 25 GiB; backup above the Finance plus
 8 GiB floor; fresh normal root-monitor status; healthy Registry HTTP, AI API,
 Data MCP, root-monitor and Finance timers; preserved StoreRegistry/non-target
 identities; unchanged journald PID, effective values and protected inventory;
-and zero Promo or business-data mutation. Anything else is terminal
+separate immutable/mutable topology reconciliation, zero non-target mutation
+paths and zero Promo or business-data mutation. Anything else is terminal
 `BLOCKED` with no substitute file and no replay.
 
 Strict exclusions are all other raw or compressed copies, incident/forensic or
 legal-hold material, the sole DCP archive, active/rollback monoliths, Finance,
 warehouse and Autoanswers restore sets, Promo GC, journald changes, generation
-retirement, a new mount/destination, capacity expansion and WBC0008 block 007.
+retirement, a new mount/destination, capacity expansion and every later storage
+stage.
 
 Required checks:
 

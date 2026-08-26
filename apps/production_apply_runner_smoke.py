@@ -282,6 +282,8 @@ def _run_dynamic_sequence(
                 ),
                 "projection_manifest_sha256": "sha256:" + "5" * 64,
                 "material_qualification_digest": "sha256:" + "8" * 64,
+                "immutable_non_target_digest": "sha256:" + "7" * 64,
+                "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
             }
             if goal["profile"] == apply.WARM_ARCHIVE_GOAL_PROFILE
             else None
@@ -443,6 +445,12 @@ def main() -> None:
         ),
         "projection_manifest_sha256": "sha256:" + "5" * 64,
         "material_qualification_digest": "sha256:" + "8" * 64,
+        "immutable_non_target_digest": "sha256:" + "7" * 64,
+        "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
+        "mutable_canonical_observations": [
+            {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
+            for key in ("finance_raw_current", "operational_current", "autoanswers_current")
+        ],
         "systemd_service_gate": healthy_systemd_gate,
     }
     parsed_readiness = apply.parse_warm_readiness_receipt(
@@ -592,7 +600,12 @@ def main() -> None:
         ),
         "manifest_sha256": warm_manifest_sha,
         "material_qualification_digest": "sha256:" + "8" * 64,
-        "non_target_digest": "sha256:" + "7" * 64,
+        "immutable_non_target_digest": "sha256:" + "7" * 64,
+        "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
+        "mutable_canonical_observations": [
+            {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
+            for key in ("finance_raw_current", "operational_current", "autoanswers_current")
+        ],
         "readiness_id": "readiness-v1-" + "6" * 32,
         "projection_manifest_path": (
             "/opt/wb-core-runtime/state/private-evidence/"
@@ -616,14 +629,22 @@ def main() -> None:
         "backup_capacity_guard_passed": True,
         "services_healthy": True,
         "non_target_preserved": True,
+        "mutation_scope_reconciliation": {
+            "exact": True,
+            "non_target_unlink_move_write_count": 0,
+        },
         "promo_action_count": 0,
         "business_data_mutation_count": 0,
         "exact_manifest_apply_receipt_count": 1,
     }
+    warm_candidate_after_autoanswers_growth = json.loads(json.dumps(warm_candidate))
+    warm_candidate_after_autoanswers_growth["mutable_canonical_observations"][2][
+        "ordinary_mutable_fields"
+    ] = {"size_bytes": 4097, "mtime_ns": 1787830000000000000}
     warm_success = _run_dynamic_sequence(
         [
             {**common, "result": warm_candidate},
-            {**common, "result": warm_candidate},
+            {**common, "result": warm_candidate_after_autoanswers_growth},
             {**common, "result": {"status": "queued"}},
             {**common, "result": warm_readback},
         ],
@@ -631,6 +652,12 @@ def main() -> None:
     )
     assert warm_success["state"] == "done"
     assert warm_success["apply_count"] == 1
+    assert len(warm_success["qualification_attempts"]) == 2
+    assert warm_success["qualification_attempts"][0][
+        "mutable_canonical_observations"
+    ][2]["ordinary_mutable_fields"] != warm_success["qualification_attempts"][1][
+        "mutable_canonical_observations"
+    ][2]["ordinary_mutable_fields"]
     warm_operation = apply.operation_id(
         "orenvlad-ai/wb-core", 1050, AUTHORIZATION_COMMENT_ID, warm_goal
     )
@@ -679,6 +706,50 @@ def main() -> None:
         expected_operation=warm_operation,
         goal=warm_goal,
     )
+    warm_scope_escape = json.loads(json.dumps(warm_recovery_readback))
+    warm_scope_escape["mutation_scope_reconciliation"][
+        "non_target_unlink_move_write_count"
+    ] = 1
+    try:
+        invalid_warm_recovery = {
+            "schema": apply.APPLY_RECEIPT_SCHEMA,
+            "state": "done",
+            "operation_id": warm_operation,
+            "repository": "orenvlad-ai/wb-core",
+            "pull_request": 1050,
+            "release_operation_id": RECOVERY_RELEASE_OPERATION,
+            "merge_sha": MERGE_SHA,
+            "deployed_sha": MERGE_SHA,
+            "authorization_comment_id": AUTHORIZATION_COMMENT_ID,
+            "goal": warm_goal,
+            "apply_count": 1,
+            "evidence": {
+                "state": "done",
+                "reason": "reconciled",
+                "apply_count": 1,
+                "qualified_manifest": {"sha256": warm_manifest_sha},
+                "apply": {"transport_ambiguous": True},
+                "readback": {
+                    "return_code": 0,
+                    "transport_ambiguous": False,
+                    "result": warm_scope_escape,
+                },
+            },
+        }
+        apply._validate_recovery_receipt(
+            invalid_warm_recovery,
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
+            merge_sha=MERGE_SHA,
+            run_head_sha=MERGE_SHA,
+            authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+            expected_operation=warm_operation,
+            goal=warm_goal,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("warm recovery must fail on non-target mutation evidence")
 
     drift = _run_dynamic_sequence(
         [

@@ -26,6 +26,7 @@ STATUS_ARTIFACT_MAX_AGE_SECONDS = 10 * 60
 CLASS_DISCRETIONARY = "discretionary_root_writer"
 CLASS_ESSENTIAL = "essential_bounded_business_writer"
 CLASS_RETAINED = "retained_no_active_writer"
+NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v1"
 DEFAULT_POLICY_PATH = (
     Path(__file__).resolve().parents[2]
     / "artifacts"
@@ -79,6 +80,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     if not isinstance(producers, list) or not producers:
         raise RootStoragePolicyError("root storage policy producers must be a non-empty array")
     owner_ids: set[str] = set()
+    producers_by_owner: dict[str, dict[str, Any]] = {}
     for producer in producers:
         if not isinstance(producer, dict):
             raise RootStoragePolicyError("root storage producer must be a JSON object")
@@ -96,6 +98,65 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
             if not str(pattern).startswith("/"):
                 raise RootStoragePolicyError("root storage producer paths must be absolute")
         owner_ids.add(owner)
+        producers_by_owner[owner] = producer
+    non_target_cas = payload.get("non_target_cas")
+    if (
+        not isinstance(non_target_cas, dict)
+        or non_target_cas.get("contract_version") != NON_TARGET_CAS_CONTRACT
+    ):
+        raise RootStoragePolicyError("root storage non-target CAS policy is invalid")
+    bindings = non_target_cas.get("active_mutable_canonical_stores")
+    if not isinstance(bindings, list) or not bindings:
+        raise RootStoragePolicyError("root storage mutable canonical store registry is empty")
+    binding_keys: set[str] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise RootStoragePolicyError("mutable canonical store binding must be an object")
+        key = str(binding.get("key") or "").strip()
+        owner = str(binding.get("owner") or "").strip()
+        classification = str(binding.get("classification") or "").strip()
+        resolver = binding.get("resolver")
+        services = binding.get("expected_owning_services")
+        producer = producers_by_owner.get(owner)
+        if (
+            not key
+            or key in binding_keys
+            or producer is None
+            or classification != CLASS_ESSENTIAL
+            or producer.get("classification") != classification
+            or not isinstance(resolver, dict)
+            or not isinstance(services, list)
+            or not services
+            or len(set(str(item) for item in services)) != len(services)
+            or not all(
+                isinstance(item, str)
+                and item.startswith("wb-")
+                and item.endswith(".service")
+                for item in services
+            )
+            or not isinstance(binding.get("allow_no_open_handles"), bool)
+        ):
+            raise RootStoragePolicyError("mutable canonical store binding is invalid")
+        resolver_type = str(resolver.get("type") or "")
+        if resolver_type == "store_registry":
+            if resolver.get("logical_store") not in {"finance_raw", "operational"}:
+                raise RootStoragePolicyError("mutable StoreRegistry resolver is invalid")
+        elif resolver_type == "literal":
+            literal = Path(str(resolver.get("path") or ""))
+            if not literal.is_absolute():
+                raise RootStoragePolicyError("mutable literal resolver path is invalid")
+            matched = _producer_for_path(payload, literal)
+            if (
+                matched is None
+                or matched.get("owner") != owner
+                or matched.get("classification") != classification
+            ):
+                raise RootStoragePolicyError(
+                    "mutable literal resolver lacks exact producer ownership"
+                )
+        else:
+            raise RootStoragePolicyError("mutable canonical store resolver is unknown")
+        binding_keys.add(key)
     return payload
 
 
@@ -346,6 +407,14 @@ def _producer_for_path(policy: Mapping[str, Any], path: Path) -> dict[str, Any] 
     if len(matches) > 1:
         raise RootStoragePolicyError(f"large root file matches multiple producers: {value}")
     return matches[0] if matches else None
+
+
+def registered_producer_for_path(
+    policy: Mapping[str, Any], path: Path
+) -> dict[str, Any] | None:
+    """Return the unique explicit producer registration for one literal path."""
+
+    return _producer_for_path(policy, Path(path))
 
 
 def _nearest_existing_parent(path: Path) -> Path:

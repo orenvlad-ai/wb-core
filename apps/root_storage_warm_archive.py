@@ -45,19 +45,30 @@ from packages.application.finance_storage_snapshot_retention import (  # noqa: E
     LOCK_FILENAME as FINANCE_STORAGE_LOCK_FILENAME,
 )
 from packages.application.root_storage_policy import (  # noqa: E402
+    CLASS_ESSENTIAL,
     collect_root_storage_status,
     load_policy,
     read_root_storage_status_artifact,
+    registered_producer_for_path,
 )
-from packages.application.storage_registry import StoreRegistry, manifest_payload  # noqa: E402
+from packages.application.storage_registry import (  # noqa: E402
+    StoreRegistry,
+    manifest_payload,
+)
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v2"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v3"
 PROFILE = "root-warm-archive-six"
 EXPECTED_SOURCE_COUNT = 6
 DESTINATION_FAMILY_NAME = "root-warm-archive-wbc0008-006"
 DESTINATION_ROOT = Path("/opt/wb-core-runtime/state/backups")
 GENERATION_ROOT = Path("/opt/wb-core-runtime/state/generations")
+READINESS_EVIDENCE_ROOT = Path(
+    "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness"
+)
+PRODUCTION_GOAL_EVIDENCE_ROOT = Path(
+    "/opt/wb-core-runtime/state/private-evidence/production-goals"
+)
 ROOT_MINIMUM_AFTER_BYTES = 25 * 1024**3
 EMERGENCY_RESERVE_BYTES = 8 * 1024**3
 CONTROL_ARTIFACT_RESERVE_BYTES = 64 * 1024**2
@@ -1192,20 +1203,37 @@ def _store_registry(runtime_dir: Path, targets: list[Mapping[str, Any]]) -> dict
     manifest = registry.load(require_files=True)
     raw = registry.resolve("finance_raw", manifest=manifest)
     operational = registry.resolve("operational", manifest=manifest)
-    active = {str(raw.resolve()), str(operational.resolve()), str((runtime_dir / "registry_upload_runtime.sqlite3").resolve())}
+    active = {str(raw.resolve()), str(operational.resolve())}
     if any(str(item["source_path"]) in active for item in targets):
         raise WarmArchiveError("a target is an active/canonical StoreRegistry database")
     manifest_path = runtime_dir / "storage_generation_manifest.json"
+    stores = {}
+    for logical_store, path in (("finance_raw", raw), ("operational", operational)):
+        generation = registry.generation(logical_store, manifest=manifest)
+        stores[logical_store] = {
+            "logical_store": logical_store,
+            "path": str(path.resolve()),
+            "generation_id": generation.generation_id,
+            "generation_epoch": generation.generation_epoch,
+            "relative_path": generation.relative_path,
+            "schema_revision": generation.schema_revision,
+            "source_fingerprint": manifest.source_fingerprint,
+            "manifest_sha256": manifest.manifest_sha256,
+        }
     return {
         "manifest": manifest_payload(manifest),
         "manifest_file_sha256": _sha256_file(manifest_path) if manifest_path.is_file() else None,
         "active_paths": sorted(active),
-        "digest": _digest({"manifest": manifest_payload(manifest), "active_paths": sorted(active)}),
+        "stores": stores,
+        "identity_digest": _digest(stores),
     }
 
 
 def _root_policy_snapshot(
-    targets: list[Mapping[str, Any]], *, require_targets: bool = True
+    targets: list[Mapping[str, Any]],
+    *,
+    mutable_paths: set[str] | None = None,
+    require_targets: bool = True,
 ) -> dict[str, Any]:
     policy = load_policy()
     status_payload = collect_root_storage_status(policy=policy)
@@ -1230,11 +1258,14 @@ def _root_policy_snapshot(
             raise WarmArchiveError("target root-storage owner/classification is not exact")
         target_rows.append(dict(row))
     target_paths = {str(item["source_path"]) for item in targets}
-    protected = []
+    mutable_paths = set(mutable_paths or set())
+    immutable_protected = []
     for row in status_payload["large_root_files"]:
         if str(row["path"]) in target_paths:
             continue
-        protected.append(
+        if str(row["path"]) in mutable_paths:
+            continue
+        immutable_protected.append(
             {
                 "path": str(row["path"]),
                 "device": int(row["device"]),
@@ -1248,14 +1279,14 @@ def _root_policy_snapshot(
     return {
         "policy_sha256": status_payload["policy_sha256"],
         "target_rows": target_rows,
-        "protected_path_identities": protected,
-        "protected_path_identity_digest": _digest(protected),
+        "immutable_protected_path_identities": immutable_protected,
+        "immutable_protected_path_identity_digest": _digest(immutable_protected),
         "status": status_payload["status"],
         "available_bytes": int(status_payload["filesystems"]["root"]["available_bytes"]),
     }
 
 
-def _non_target_snapshot() -> dict[str, Any]:
+def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
     excluded = set()
     roots = set()
     for policy in TARGET_POLICIES:
@@ -1288,52 +1319,431 @@ def _non_target_snapshot() -> dict[str, Any]:
                     }
                 )
             rows.append(row)
-    global_rows = []
     destination = DESTINATION_ROOT / DESTINATION_FAMILY_NAME
-    for root in (
-        Path("/opt/wb-core-runtime/backups"),
-        Path("/opt/wb-core-runtime/evidence"),
-        DESTINATION_ROOT,
-    ):
-        if root.is_symlink() or not root.is_dir():
-            raise WarmArchiveError(f"non-target inventory root is unavailable: {root}")
-        for path in sorted(root.rglob("*"), key=str):
-            value = path.lstat()
-            if str(path) in excluded:
+    destination_rows = []
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_dir():
+            raise WarmArchiveError("destination family is unsafe")
+        destination_stat = destination.lstat()
+        if (
+            stat.S_IMODE(destination_stat.st_mode) != 0o700
+            or int(destination_stat.st_uid) != 0
+            or int(destination_stat.st_gid) != 0
+        ):
+            raise WarmArchiveError("destination family ownership/mode is unsafe")
+        exact_output_names = {
+            name
+            for item in TARGET_POLICIES
+            for name in (
+                str(item["archive_name"]),
+                str(item["archive_name"]) + ".manifest.json",
+            )
+        }
+        foreign = []
+        for path in sorted(destination.iterdir(), key=str):
+            owned_temp = bool(
+                operation_id
+                and re.fullmatch(
+                    rf"\.wbc0008-006-{re.escape(operation_id)}-[0-9]{{2}}\."
+                    r"(?:archive\.tmp|manifest\.tmp|restore\.tmp\.sqlite3)",
+                    path.name,
+                )
+            )
+            if path.name in exact_output_names or owned_temp:
                 continue
-            try:
-                path.resolve().relative_to(destination.resolve())
-            except ValueError:
-                pass
-            else:
-                continue
-            if not stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode):
-                continue
-            global_rows.append(
-                {
-                    "path": str(path),
-                    "kind": "symlink" if stat.S_ISLNK(value.st_mode) else "file",
-                    "device": int(value.st_dev),
-                    "inode": int(value.st_ino),
-                    "size_bytes": int(value.st_size),
-                    "allocated_bytes": int(value.st_blocks * 512),
-                    "mode": oct(stat.S_IMODE(value.st_mode)),
-                    "uid": int(value.st_uid),
-                    "gid": int(value.st_gid),
-                    "mtime_ns": int(value.st_mtime_ns),
-                    "ctime_ns": int(value.st_ctime_ns),
-                }
+            foreign.append(str(path))
+        if foreign:
+            raise WarmArchiveError(
+                "destination family contains an unknown/unregistered non-target artifact",
+                evidence={"unknown_destination_paths": foreign},
             )
     material = {
         "exact_family_content_rows": rows,
-        "global_backup_evidence_identity_rows": global_rows,
+        "destination_immutable_non_target_rows": destination_rows,
     }
     return {
         **material,
         "exact_family_content_digest": _digest(rows),
-        "global_backup_evidence_identity_digest": _digest(global_rows),
-        "digest": _digest(material),
+        "destination_immutable_non_target_digest": _digest(destination_rows),
+        "immutable_digest": _digest(material),
     }
+
+
+def _stable_file_topology(path: Path) -> dict[str, Any]:
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise WarmArchiveError(f"mutable canonical store path is unsafe: {path}")
+    resolved = path.resolve(strict=True)
+    if resolved != path:
+        raise WarmArchiveError(f"mutable canonical store path resolution drifted: {path}")
+    value = path.lstat()
+    if not stat.S_ISREG(value.st_mode):
+        raise WarmArchiveError(f"mutable canonical store type drifted: {path}")
+    mount = _mount_identity(path)
+    if int(value.st_dev) != int(path.stat().st_dev):
+        raise WarmArchiveError(f"mutable canonical store device drifted: {path}")
+    return {
+        "path": str(path),
+        "device": int(value.st_dev),
+        "device_major": int(os.major(value.st_dev)),
+        "device_minor": int(os.minor(value.st_dev)),
+        "inode": int(value.st_ino),
+        "kind": "file",
+        "mode": oct(stat.S_IMODE(value.st_mode)),
+        "uid": int(value.st_uid),
+        "gid": int(value.st_gid),
+        "nlink": int(value.st_nlink),
+        "mount": mount,
+    }
+
+
+def _process_parent_pid(pid: int) -> int | None:
+    try:
+        raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        tail = raw.rsplit(")", 1)[1].strip().split()
+        return int(tail[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _opener_owning_service(
+    pid: int,
+    *,
+    expected_services: tuple[str, ...],
+    service_snapshot: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    try:
+        cgroup = (Path("/proc") / str(pid) / "cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup = ""
+    direct = [name for name in expected_services if f"/{name}" in cgroup]
+    if len(direct) == 1:
+        return direct[0]
+    expected_pids = {
+        int((service_snapshot.get(name) or {}).get("MainPID") or 0): name
+        for name in expected_services
+        if int((service_snapshot.get(name) or {}).get("MainPID") or 0) > 0
+    }
+    current = int(pid)
+    seen = set()
+    for _ in range(64):
+        if current in expected_pids:
+            return expected_pids[current]
+        if current <= 1 or current in seen:
+            break
+        seen.add(current)
+        parent = _process_parent_pid(current)
+        if parent is None:
+            break
+        current = parent
+    return None
+
+
+def _active_mutable_canonical_snapshot(
+    *,
+    runtime_dir: Path,
+    policy: Mapping[str, Any],
+    store_registry: Mapping[str, Any],
+    service_snapshot: Mapping[str, Mapping[str, Any]],
+    opener_reader: Callable[[Path], list[dict[str, Any]]] = _process_fd_openers,
+) -> dict[str, Any]:
+    non_target_cas = policy.get("non_target_cas")
+    bindings = (
+        non_target_cas.get("active_mutable_canonical_stores")
+        if isinstance(non_target_cas, Mapping)
+        else None
+    )
+    if not isinstance(bindings, list) or not bindings:
+        raise WarmArchiveError("mutable canonical store classification is unavailable")
+    producers = {
+        str(item.get("owner") or ""): item
+        for item in policy.get("producers") or []
+        if isinstance(item, Mapping)
+    }
+    target_paths = {
+        str(Path(str(item["source_path"])))
+        for item in TARGET_POLICIES
+    }
+    target_paths.update(
+        path + suffix
+        for path in list(target_paths)
+        for suffix in ("-wal", "-shm", "-journal")
+    )
+    topology_rows = []
+    observation_rows = []
+    resolved_paths = set()
+    for binding in bindings:
+        key = str(binding.get("key") or "")
+        owner = str(binding.get("owner") or "")
+        classification = str(binding.get("classification") or "")
+        producer = producers.get(owner)
+        resolver = binding.get("resolver")
+        expected_services = tuple(str(item) for item in binding.get("expected_owning_services") or [])
+        if (
+            not key
+            or not isinstance(resolver, Mapping)
+            or producer is None
+            or classification != CLASS_ESSENTIAL
+            or producer.get("classification") != classification
+            or not expected_services
+            or any(name not in SERVICE_NAMES for name in expected_services)
+        ):
+            raise WarmArchiveError("unknown/unregistered mutable canonical classification")
+        registry_identity = None
+        if resolver.get("type") == "store_registry":
+            logical_store = str(resolver.get("logical_store") or "")
+            registry_identity = (store_registry.get("stores") or {}).get(logical_store)
+            if not isinstance(registry_identity, Mapping):
+                raise WarmArchiveError("StoreRegistry mutable resolver identity is unavailable")
+            path = Path(str(registry_identity.get("path") or ""))
+        elif resolver.get("type") == "literal":
+            path = Path(str(resolver.get("path") or ""))
+            registered = registered_producer_for_path(policy, path)
+            if (
+                registered is None
+                or registered.get("owner") != owner
+                or registered.get("classification") != classification
+            ):
+                raise WarmArchiveError("literal mutable store owner/classification drifted")
+        else:
+            raise WarmArchiveError("mutable canonical resolver type is unknown")
+        path_registration = registered_producer_for_path(policy, path)
+        if path_registration is not None and (
+            path_registration.get("owner") != owner
+            or path_registration.get("classification") != classification
+        ):
+            raise WarmArchiveError(
+                "mutable canonical store conflicts with its registered path owner"
+            )
+        if (
+            str(path) in target_paths
+            or str(path).startswith(str(DESTINATION_ROOT / DESTINATION_FAMILY_NAME) + "/")
+        ):
+            raise WarmArchiveError("mutable canonical store overlaps exact mutation scope")
+        topology = _stable_file_topology(path)
+        openers = opener_reader(path)
+        opener_relationships = []
+        for opener in openers:
+            owning_service = _opener_owning_service(
+                int(opener.get("pid") or 0),
+                expected_services=expected_services,
+                service_snapshot=service_snapshot,
+            )
+            relationship = {
+                **dict(opener),
+                "owning_service": owning_service,
+                "expected_relationship": owning_service is not None,
+            }
+            opener_relationships.append(relationship)
+        if any(not item["expected_relationship"] for item in opener_relationships):
+            raise WarmArchiveError(
+                "mutable canonical store has an unexpected open-handle owner",
+                evidence={"key": key, "path": str(path), "openers": opener_relationships},
+            )
+        if not openers and binding.get("allow_no_open_handles") is not True:
+            raise WarmArchiveError("mutable canonical store lacks its required owner handle")
+        value = path.stat()
+        topology_row = {
+            "key": key,
+            "owner": owner,
+            "classification": classification,
+            "resolver": dict(resolver),
+            "expected_owning_services": list(expected_services),
+            "allow_no_open_handles": bool(binding.get("allow_no_open_handles")),
+            "registry_identity": dict(registry_identity) if registry_identity else None,
+            "topology": topology,
+        }
+        topology_rows.append(topology_row)
+        observation_rows.append(
+            {
+                **topology_row,
+                "ordinary_mutable_fields": {
+                    "apparent_size_bytes": int(value.st_size),
+                    "allocated_bytes": int(value.st_blocks * 512),
+                    "mtime_ns": int(value.st_mtime_ns),
+                    "ctime_ns": int(value.st_ctime_ns),
+                },
+                "open_handle_relationships": opener_relationships,
+            }
+        )
+        resolved_paths.add(str(path))
+    return {
+        "contract_version": str(non_target_cas.get("contract_version") or ""),
+        "topology_rows": topology_rows,
+        "topology_digest": _digest(topology_rows),
+        "observation_rows": observation_rows,
+        "resolved_paths": sorted(resolved_paths),
+    }
+
+
+def _non_target_snapshot(
+    runtime_dir: Path,
+    *,
+    service_snapshot: Mapping[str, Mapping[str, Any]] | None = None,
+    require_targets: bool = True,
+    operation_id: str = "",
+) -> dict[str, Any]:
+    services = dict(service_snapshot or _systemd_snapshot())
+    policy = load_policy()
+    store_registry = _store_registry(runtime_dir, list(TARGET_POLICIES))
+    mutable = _active_mutable_canonical_snapshot(
+        runtime_dir=runtime_dir,
+        policy=policy,
+        store_registry=store_registry,
+        service_snapshot=services,
+    )
+    immutable = _immutable_non_target_snapshot(operation_id=operation_id)
+    root_policy = _root_policy_snapshot(
+        list(TARGET_POLICIES),
+        mutable_paths=set(mutable["resolved_paths"]),
+        require_targets=require_targets,
+    )
+    return {
+        "immutable": immutable,
+        "immutable_digest": _digest(
+            {
+                "scoped": immutable["immutable_digest"],
+                "root_policy": root_policy[
+                    "immutable_protected_path_identity_digest"
+                ],
+            }
+        ),
+        "mutable_canonical": mutable,
+        "mutable_canonical_topology_digest": mutable["topology_digest"],
+        "root_policy": root_policy,
+        "store_registry": store_registry,
+        "services": services,
+    }
+
+
+def _reconcile_non_target(
+    before: Mapping[str, Any], after: Mapping[str, Any], *, phase: str
+) -> dict[str, Any]:
+    before_observations = {
+        str(item["key"]): item
+        for item in (before.get("mutable_canonical") or {}).get("observation_rows") or []
+    }
+    after_observations = {
+        str(item["key"]): item
+        for item in (after.get("mutable_canonical") or {}).get("observation_rows") or []
+    }
+    evolution = []
+    for key in sorted(set(before_observations) | set(after_observations)):
+        earlier = before_observations.get(key)
+        later = after_observations.get(key)
+        evolution.append(
+            {
+                "key": key,
+                "before": (earlier or {}).get("ordinary_mutable_fields"),
+                "after": (later or {}).get("ordinary_mutable_fields"),
+                "ordinary_content_evolution_observed": bool(
+                    earlier
+                    and later
+                    and earlier.get("ordinary_mutable_fields")
+                    != later.get("ordinary_mutable_fields")
+                ),
+                "open_handles_before": (earlier or {}).get(
+                    "open_handle_relationships"
+                ),
+                "open_handles_after": (later or {}).get(
+                    "open_handle_relationships"
+                ),
+            }
+        )
+    result = {
+        "phase": phase,
+        "immutable_digest_before": before.get("immutable_digest"),
+        "immutable_digest_after": after.get("immutable_digest"),
+        "immutable_preserved": before.get("immutable_digest")
+        == after.get("immutable_digest"),
+        "mutable_canonical_topology_digest_before": before.get(
+            "mutable_canonical_topology_digest"
+        ),
+        "mutable_canonical_topology_digest_after": after.get(
+            "mutable_canonical_topology_digest"
+        ),
+        "mutable_canonical_topology_preserved": before.get(
+            "mutable_canonical_topology_digest"
+        )
+        == after.get("mutable_canonical_topology_digest"),
+        "mutable_canonical_evolution": evolution,
+    }
+    if not result["immutable_preserved"] or not result[
+        "mutable_canonical_topology_preserved"
+    ]:
+        raise WarmArchiveError(
+            f"non-target topology/content reconciliation failed: {phase}",
+            evidence=result,
+        )
+    return result
+
+
+def _mutation_scope_reconciliation(journal: Mapping[str, Any]) -> dict[str, Any]:
+    policies = {str(item["key"]): item for item in TARGET_POLICIES}
+    expected_unlinks = sorted(str(item["source_path"]) for item in TARGET_POLICIES)
+    expected_outputs = sorted(
+        str(DESTINATION_ROOT / DESTINATION_FAMILY_NAME / name)
+        for item in TARGET_POLICIES
+        for name in (
+            str(item["archive_name"]),
+            str(item["archive_name"]) + ".manifest.json",
+        )
+    )
+    observed_unlinks = []
+    observed_outputs = []
+    item_errors = []
+    for item in journal.get("items") or []:
+        key = str(item.get("key") or "")
+        policy = policies.get(key)
+        if policy is None:
+            item_errors.append({"key": key, "reason": "unknown_target_key"})
+            continue
+        if int(item.get("unlink_count") or 0) == 1:
+            observed_unlinks.append(str(policy["source_path"]))
+        archive_path = str(item.get("archive_path") or "")
+        manifest_path = str(item.get("manifest_path") or "")
+        expected_archive = str(
+            DESTINATION_ROOT
+            / DESTINATION_FAMILY_NAME
+            / str(policy["archive_name"])
+        )
+        expected_manifest = expected_archive + ".manifest.json"
+        if archive_path:
+            observed_outputs.append(archive_path)
+        if manifest_path:
+            observed_outputs.append(manifest_path)
+        if archive_path and archive_path != expected_archive:
+            item_errors.append({"key": key, "reason": "archive_path_escape"})
+        if manifest_path and manifest_path != expected_manifest:
+            item_errors.append({"key": key, "reason": "manifest_path_escape"})
+    mutable_paths = {
+        str(row.get("topology", {}).get("path") or "")
+        for row in (
+            (journal.get("non_target_before") or {})
+            .get("mutable_canonical", {})
+            .get("topology_rows", [])
+        )
+    }
+    result = {
+        "expected_literal_unlink_paths": expected_unlinks,
+        "observed_literal_unlink_paths": sorted(observed_unlinks),
+        "expected_destination_output_paths": expected_outputs,
+        "observed_destination_output_paths": sorted(observed_outputs),
+        "mutable_canonical_paths": sorted(mutable_paths),
+        "mutable_canonical_path_overlap": sorted(
+            mutable_paths & (set(observed_unlinks) | set(observed_outputs))
+        ),
+        "item_errors": item_errors,
+        "non_target_unlink_move_write_count": 0,
+    }
+    result["exact"] = bool(
+        sorted(observed_unlinks) == expected_unlinks
+        and sorted(observed_outputs) == expected_outputs
+        and not result["mutable_canonical_path_overlap"]
+        and not item_errors
+        and int(journal.get("promo_action_count", -1)) == 0
+        and int(journal.get("business_data_mutation_count", -1)) == 0
+    )
+    return result
 
 
 def _finance_snapshot(runtime_dir: Path) -> dict[str, Any]:
@@ -1888,6 +2298,13 @@ def _validate_reusable_material(material: Mapping[str, Any]) -> list[dict[str, A
         or material.get("destination_family")
         != str(DESTINATION_ROOT / DESTINATION_FAMILY_NAME)
         or material.get("compression") != "zstd-level-1-single-thread"
+        or not SHA256_RE.fullmatch(
+            str(material.get("immutable_non_target_digest") or "")
+        )
+        or not SHA256_RE.fullmatch(
+            str(material.get("mutable_canonical_topology_digest") or "")
+        )
+        or not isinstance(material.get("mutable_canonical_topology"), list)
     ):
         raise WarmArchiveError("reusable compression projection contract is invalid")
     targets = material.get("targets")
@@ -1943,7 +2360,6 @@ def _material_snapshot(
         ]
     if len(targets) != EXPECTED_SOURCE_COUNT:
         raise WarmArchiveError("exact target count is not six")
-    root_policy = _root_policy_snapshot(targets)
     finance = _finance_snapshot(runtime_dir)
     active_jobs = _active_sanitation_jobs(runtime_dir, own_job_id=own_job_id)
     if active_jobs:
@@ -1963,8 +2379,9 @@ def _material_snapshot(
     )
     if not lifecycle_locks_held and any(item["locked"] for item in lifecycle_locks):
         raise WarmArchiveError("another storage lifecycle operation is active")
-    store_registry = _store_registry(runtime_dir, targets)
-    non_target = _non_target_snapshot()
+    non_target = _non_target_snapshot(runtime_dir)
+    store_registry = non_target["store_registry"]
+    root_policy = non_target["root_policy"]
     destination_family = DESTINATION_ROOT / DESTINATION_FAMILY_NAME
     if destination_family.exists():
         if destination_family.is_symlink() or not destination_family.is_dir():
@@ -2007,7 +2424,7 @@ def _material_snapshot(
     projected_root = int(filesystems["root"]["available_bytes"]) + expected_reclaimed
     if projected_root < ROOT_MINIMUM_AFTER_BYTES:
         raise WarmArchiveError("exact six do not project root above 25 GiB")
-    services = _systemd_snapshot()
+    services = non_target["services"]
     service_gate = _systemd_service_gate_with_resample(services)
     if not service_gate["healthy"]:
         raise WarmArchiveError(
@@ -2041,10 +2458,20 @@ def _material_snapshot(
         "root_policy": {
             "policy_sha256": root_policy["policy_sha256"],
             "target_rows": root_policy["target_rows"],
-            "protected_path_identities": root_policy["protected_path_identities"],
-            "protected_path_identity_digest": root_policy["protected_path_identity_digest"],
+            "immutable_protected_path_identities": root_policy[
+                "immutable_protected_path_identities"
+            ],
+            "immutable_protected_path_identity_digest": root_policy[
+                "immutable_protected_path_identity_digest"
+            ],
         },
-        "non_target_digest": non_target["digest"],
+        "immutable_non_target_digest": non_target["immutable_digest"],
+        "mutable_canonical_topology": non_target["mutable_canonical"][
+            "topology_rows"
+        ],
+        "mutable_canonical_topology_digest": non_target[
+            "mutable_canonical_topology_digest"
+        ],
         "expected_unlink_count": EXPECTED_SOURCE_COUNT,
         "expected_reclaimed_allocated_bytes": expected_reclaimed,
         "root_minimum_after_bytes": ROOT_MINIMUM_AFTER_BYTES,
@@ -2073,7 +2500,7 @@ def _validate_evidence_scope(evidence_dir: Path, operation_id: str) -> Path:
     if not re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation_id):
         raise WarmArchiveError("operation id is invalid")
     evidence_dir = evidence_dir.resolve()
-    expected = Path("/opt/wb-core-runtime/state/private-evidence/production-goals") / operation_id
+    expected = PRODUCTION_GOAL_EVIDENCE_ROOT / operation_id
     if evidence_dir != expected or evidence_dir.is_symlink() or not evidence_dir.is_dir():
         raise WarmArchiveError("evidence directory escaped exact operation scope")
     if stat.S_IMODE(evidence_dir.stat().st_mode) != 0o700:
@@ -2114,8 +2541,7 @@ def _validate_readiness_scope(evidence_dir: Path, readiness_id: str) -> Path:
         raise WarmArchiveError("readiness id is invalid")
     evidence_dir = evidence_dir.resolve()
     expected = (
-        Path("/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness")
-        / readiness_id
+        READINESS_EVIDENCE_ROOT / readiness_id
     )
     if evidence_dir != expected or evidence_dir.is_symlink() or not evidence_dir.is_dir():
         raise WarmArchiveError("readiness evidence directory escaped exact scope")
@@ -2339,6 +2765,13 @@ def readiness(
         "initial_systemd_service_gate": initial_systemd_service_gate,
         "material": material,
         "material_qualification_digest": _digest(material),
+        "immutable_non_target_digest": material["immutable_non_target_digest"],
+        "mutable_canonical_topology_digest": material[
+            "mutable_canonical_topology_digest"
+        ],
+        "mutable_canonical_observations": full_observations["non_target"][
+            "mutable_canonical"
+        ]["observation_rows"],
         "observations": full_observations,
     }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2385,6 +2818,17 @@ def readiness(
         "projection_manifest_path": str(projection_path),
         "projection_manifest_sha256": projection_sha256,
         "material_qualification_digest": _digest(material),
+        "immutable_non_target_digest": material["immutable_non_target_digest"],
+        "mutable_canonical_topology_digest": material[
+            "mutable_canonical_topology_digest"
+        ],
+        "mutable_canonical_observations": (
+            final_observations["non_target"]["mutable_canonical"][
+                "observation_rows"
+            ]
+            if final_observations
+            else []
+        ),
         "expected_reclaimed_allocated_bytes": material[
             "expected_reclaimed_allocated_bytes"
         ],
@@ -2443,9 +2887,7 @@ def _load_readiness_projection(
     deployed_sha: str,
 ) -> dict[str, Any]:
     projection_path = projection_path.resolve()
-    expected_root = Path(
-        "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness"
-    )
+    expected_root = READINESS_EVIDENCE_ROOT
     try:
         relative = projection_path.relative_to(expected_root)
     except ValueError as exc:
@@ -2475,6 +2917,12 @@ def _load_readiness_projection(
         or payload.get("deployed_sha") != deployed_sha
         or payload.get("readiness_id") != relative.parts[0]
         or payload.get("material_qualification_digest") != _digest(payload.get("material"))
+        or payload.get("immutable_non_target_digest")
+        != (payload.get("material") or {}).get("immutable_non_target_digest")
+        or payload.get("mutable_canonical_topology_digest")
+        != (payload.get("material") or {}).get(
+            "mutable_canonical_topology_digest"
+        )
     ):
         raise WarmArchiveError("compression projection payload is invalid")
     readiness_receipt_path = projection_path.parent / "root-warm-archive-readiness.json"
@@ -2594,7 +3042,13 @@ def dry_run(
         "manifest_path": str(manifest_path),
         "manifest_sha256": manifest_sha256,
         "material_qualification_digest": material_digest,
-        "non_target_digest": material["non_target_digest"],
+        "immutable_non_target_digest": material["immutable_non_target_digest"],
+        "mutable_canonical_topology_digest": material[
+            "mutable_canonical_topology_digest"
+        ],
+        "mutable_canonical_observations": observations["non_target"][
+            "mutable_canonical"
+        ]["observation_rows"],
         "readiness_id": projection["readiness_id"],
         "projection_manifest_path": str(projection_manifest),
         "projection_manifest_sha256": projection_manifest_sha256,
@@ -2618,6 +3072,23 @@ def _load_manifest(
         raise WarmArchiveError("manifest binding escaped exact private evidence scope")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     projection = payload.get("readiness_projection") if isinstance(payload, dict) else None
+    projection_path_valid = False
+    if isinstance(projection, Mapping):
+        try:
+            projection_relative = Path(str(projection.get("path") or "")).relative_to(
+                READINESS_EVIDENCE_ROOT
+            )
+        except ValueError:
+            projection_relative = Path()
+        projection_path_valid = bool(
+            len(projection_relative.parts) == 2
+            and READINESS_ID_RE.fullmatch(projection_relative.parts[0]) is not None
+            and re.fullmatch(
+                r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+                projection_relative.parts[1],
+            )
+            is not None
+        )
     if (
         not isinstance(payload, dict)
         or payload.get("contract_name") != CONTRACT_NAME
@@ -2627,13 +3098,7 @@ def _load_manifest(
         or int((payload.get("material") or {}).get("source_count") or 0) != EXPECTED_SOURCE_COUNT
         or not isinstance(projection, Mapping)
         or READINESS_ID_RE.fullmatch(str(projection.get("readiness_id") or "")) is None
-        or re.fullmatch(
-            r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
-            r"readiness-v1-[0-9a-f]{32}/"
-            r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
-            str(projection.get("path") or ""),
-        )
-        is None
+        or not projection_path_valid
         or not SHA256_RE.fullmatch(str(projection.get("sha256") or ""))
         or projection.get("material_qualification_digest")
         != payload.get("material_qualification_digest")
@@ -2918,6 +3383,27 @@ def _exact_source_cas(
     )
 
 
+def _assert_exact_source_unlink_authority(
+    source: Path, target: Mapping[str, Any]
+) -> None:
+    """Keep the destructive primitive structurally bound to one literal target."""
+
+    policy = next(
+        (item for item in TARGET_POLICIES if item["key"] == target.get("key")),
+        None,
+    )
+    if (
+        policy is None
+        or str(source) != str(policy["source_path"])
+        or str(target.get("source_path") or "") != str(policy["source_path"])
+        or str(source) in {
+            str(item.get("path") or "")
+            for item in target.get("sidecars") or []
+        }
+    ):
+        raise WarmArchiveError("source unlink escaped the literal six-path authority")
+
+
 def _journal_path(evidence_dir: Path) -> Path:
     return evidence_dir / "root-warm-archive-apply.json"
 
@@ -2935,11 +3421,24 @@ def _ensure_destination_family() -> Path:
     destination = DESTINATION_ROOT / DESTINATION_FAMILY_NAME
     if destination.is_symlink():
         raise WarmArchiveError("destination family is a symlink")
-    destination.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(destination, 0o700)
+    created = False
+    if destination.exists():
+        if not destination.is_dir():
+            raise WarmArchiveError("destination family is not a directory")
+    else:
+        destination.mkdir(mode=0o700)
+        created = True
     if destination.resolve().parent != DESTINATION_ROOT.resolve():
         raise WarmArchiveError("destination family escaped the backup mount")
-    _fsync_directory(DESTINATION_ROOT)
+    value = destination.lstat()
+    if (
+        stat.S_IMODE(value.st_mode) != 0o700
+        or int(value.st_uid) != 0
+        or int(value.st_gid) != 0
+    ):
+        raise WarmArchiveError("destination family ownership/mode is unsafe")
+    if created:
+        _fsync_directory(DESTINATION_ROOT)
     return destination
 
 
@@ -3009,6 +3508,33 @@ def _reconcile_pending_unlink(
     }
 
 
+def _remove_owned_operation_temp(
+    path: Path,
+    *,
+    item_state: Mapping[str, Any],
+    allowed_phases: set[str],
+) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    phase = str(item_state.get("phase") or "")
+    if (
+        phase not in allowed_phases
+        or path.is_symlink()
+        or not path.is_file()
+    ):
+        raise WarmArchiveError(f"unknown/unowned destination temp blocks apply: {path}")
+    value = path.lstat()
+    if (
+        stat.S_IMODE(value.st_mode) != 0o600
+        or int(value.st_uid) != 0
+        or int(value.st_gid) != 0
+        or int(value.st_nlink) != 1
+    ):
+        raise WarmArchiveError(f"owned destination temp identity is unsafe: {path}")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
 def _process_target(
     *,
     runtime_dir: Path,
@@ -3027,14 +3553,29 @@ def _process_target(
     temp_archive = destination / f".wbc0008-006-{operation_id}-{index:02d}.archive.tmp"
     temp_manifest = destination / f".wbc0008-006-{operation_id}-{index:02d}.manifest.tmp"
     restore_temp = destination / f".wbc0008-006-{operation_id}-{index:02d}.restore.tmp.sqlite3"
-    if restore_temp.exists():
-        restore_temp.unlink()
-        _fsync_directory(destination)
+    if any(
+        path.is_symlink()
+        for path in (archive, manifest_path, temp_archive, temp_manifest, restore_temp)
+    ):
+        raise WarmArchiveError("destination archive/control path is a symlink")
+    _remove_owned_operation_temp(
+        restore_temp,
+        item_state=item_state,
+        allowed_phases={
+            "archive_prechecked",
+            "archive_verified_pending_publish",
+            "pending_unlink",
+            "unlink_done",
+        },
+    )
     if temp_archive.exists():
         if archive.exists() or manifest_path.exists():
             raise WarmArchiveError("owned archive temp coexists with a published pair")
-        temp_archive.unlink()
-        _fsync_directory(destination)
+        _remove_owned_operation_temp(
+            temp_archive,
+            item_state=item_state,
+            allowed_phases={"archive_prechecked"},
+        )
     if archive.exists() and not manifest_path.exists() and temp_manifest.exists():
         pending = json.loads(temp_manifest.read_text(encoding="utf-8"))
         archive_identity = _file_identity(archive)
@@ -3054,8 +3595,11 @@ def _process_target(
     elif temp_manifest.exists():
         if archive.exists() or manifest_path.exists():
             raise WarmArchiveError("owned manifest temp coexists with a published pair")
-        temp_manifest.unlink()
-        _fsync_directory(destination)
+        _remove_owned_operation_temp(
+            temp_manifest,
+            item_state=item_state,
+            allowed_phases={"archive_verified_pending_publish"},
+        )
     reconciled = _reconcile_pending_unlink(
         target=target,
         item_state=item_state,
@@ -3088,9 +3632,12 @@ def _process_target(
     }
     journal["updated_at"] = _now()
     _atomic_write_json(journal_path, journal)
-    non_target_before = _non_target_snapshot()
-    if non_target_before["digest"] != journal["non_target_digest_before"]:
-        raise WarmArchiveError("non-target evidence digest drifted before archive")
+    non_target_before = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target_before_reconciliation = _reconcile_non_target(
+        journal["non_target_before"],
+        non_target_before,
+        phase=f"{target['key']}:before_archive",
+    )
     if archive.exists() != manifest_path.exists():
         raise WarmArchiveError("published archive pair is incomplete")
     if not archive.exists():
@@ -3169,9 +3716,14 @@ def _process_target(
     source_cas = _exact_source_cas(
         target, gate_name="mutation_exact_pre_unlink", full_hash=True
     )
-    non_target_pre_unlink = _non_target_snapshot()
-    if non_target_pre_unlink["digest"] != journal["non_target_digest_before"]:
-        raise WarmArchiveError("non-target evidence digest drifted before unlink")
+    non_target_pre_unlink = _non_target_snapshot(
+        runtime_dir, require_targets=False
+    )
+    non_target_pre_unlink_reconciliation = _reconcile_non_target(
+        journal["non_target_before"],
+        non_target_pre_unlink,
+        phase=f"{target['key']}:exact_pre_unlink",
+    )
     capacity_pre_unlink = _capacity_guard(runtime_dir=runtime_dir, archive_bytes=0, restore_bytes=0)
     journal_item = {
         "key": target["key"],
@@ -3187,19 +3739,24 @@ def _process_target(
         "archive_proof": published_proof,
         "capacity_before": capacity_before,
         "capacity_pre_unlink": capacity_pre_unlink,
-        "non_target_digest": non_target_pre_unlink["digest"],
+        "non_target_reconciliation_before_archive": non_target_before_reconciliation,
+        "non_target_reconciliation_pre_unlink": non_target_pre_unlink_reconciliation,
     }
     journal["items"][index - 1] = journal_item
     journal["updated_at"] = _now()
     _atomic_write_json(journal_path, journal)
+    _assert_exact_source_unlink_authority(source, target)
     source.unlink()
     _fsync_directory(source.parent)
     if source.exists():
         raise WarmArchiveError("source remains after the single unlink")
     capacity_after = _filesystem_snapshot(runtime_dir, Path("/opt/wb-core-runtime/backups"))
-    non_target_after = _non_target_snapshot()
-    if non_target_after["digest"] != journal["non_target_digest_before"]:
-        raise WarmArchiveError("non-target evidence digest changed after unlink")
+    non_target_after = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target_after_reconciliation = _reconcile_non_target(
+        journal["non_target_before"],
+        non_target_after,
+        phase=f"{target['key']}:after_unlink",
+    )
     final_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     final_manifest.update(
         {
@@ -3238,7 +3795,7 @@ def _process_target(
         "archive_proof": final_proof,
         "reclaimed_allocated_bytes": int(target["identity"]["allocated_bytes"]),
         "capacity_after": capacity_after,
-        "non_target_digest_after": non_target_after["digest"],
+        "non_target_reconciliation_after": non_target_after_reconciliation,
         "completed_at": _now(),
     }
 
@@ -3402,18 +3959,24 @@ def _apply_batch_locked(
         finance_now = _finance_snapshot(runtime_dir)
         if _active_sanitation_jobs(runtime_dir, own_job_id=own_job_id):
             raise WarmArchiveError("another sanitation operation is non-terminal")
-        _store_registry(runtime_dir, fresh_material["targets"])
-        non_target_now = _non_target_snapshot()
-        root_policy_now = _root_policy_snapshot(
-            fresh_material["targets"], require_targets=False
+        non_target_now = _non_target_snapshot(
+            runtime_dir,
+            require_targets=False,
+            operation_id=operation_id,
+        )
+        crash_resume_non_target_reconciliation = _reconcile_non_target(
+            journal["non_target_before"],
+            non_target_now,
+            phase="crash_resume",
         )
         services_now = _systemd_snapshot()
         services_gate_now = _systemd_service_gate_with_resample(services_now)
         journald_now = _journald_snapshot()
         if (
-            non_target_now["digest"] != journal["non_target_digest_before"]
-            or root_policy_now["protected_path_identity_digest"]
-            != journal["root_policy_protected_digest_before"]
+            not crash_resume_non_target_reconciliation["immutable_preserved"]
+            or not crash_resume_non_target_reconciliation[
+                "mutable_canonical_topology_preserved"
+            ]
             or not services_gate_now["healthy"]
             or journald_now["service"].get("MainPID")
             != journal["journald_before"]["service"].get("MainPID")
@@ -3453,8 +4016,13 @@ def _apply_batch_locked(
                 "systemd_service_gate"
             ],
             "activity_evidence_before": fresh_observations["activity_gates"],
-            "non_target_digest_before": fresh_material["non_target_digest"],
-            "root_policy_protected_digest_before": fresh_material["root_policy"]["protected_path_identity_digest"],
+            "non_target_before": fresh_observations["non_target"],
+            "immutable_non_target_digest_before": fresh_material[
+                "immutable_non_target_digest"
+            ],
+            "mutable_canonical_topology_digest_before": fresh_material[
+                "mutable_canonical_topology_digest"
+            ],
             "items": [{"key": item["key"], "phase": "pending"} for item in fresh_material["targets"]],
             "mutation_submit_count": 1,
             "promo_action_count": 0,
@@ -3481,9 +4049,11 @@ def _apply_batch_locked(
     monitor = _monitor_after_batch(journal=journal, journal_path=journal_path)
     filesystems_after = _filesystem_snapshot(runtime_dir, root_backups)
     finance_after = _finance_snapshot(runtime_dir)
-    non_target_after = _non_target_snapshot()
-    root_policy_after = _root_policy_snapshot(
-        fresh_material["targets"], require_targets=False
+    non_target_after = _non_target_snapshot(runtime_dir, require_targets=False)
+    terminal_non_target_reconciliation = _reconcile_non_target(
+        journal["non_target_before"],
+        non_target_after,
+        phase="terminal",
     )
     services_after = _systemd_snapshot()
     services_gate_after = _systemd_service_gate_with_resample(services_after)
@@ -3491,10 +4061,12 @@ def _apply_batch_locked(
     journal_reconciliation = _reconcile_correction_journal_inventory(
         journal["journald_before"]["inventory"], journald_after["inventory"]
     )
+    mutation_scope_reconciliation = _mutation_scope_reconciliation(journal)
     if (
-        non_target_after["digest"] != journal["non_target_digest_before"]
-        or root_policy_after["protected_path_identity_digest"]
-        != journal["root_policy_protected_digest_before"]
+        not terminal_non_target_reconciliation["immutable_preserved"]
+        or not terminal_non_target_reconciliation[
+            "mutable_canonical_topology_preserved"
+        ]
         or not services_gate_after["healthy"]
         or journald_after["service"].get("MainPID")
         != journal["journald_before"]["service"].get("MainPID")
@@ -3502,6 +4074,7 @@ def _apply_batch_locked(
         != journal["journald_before"]["effective"]["values"]
         or journal_reconciliation["deleted_count"] != 0
         or journal_reconciliation["protected_drift"]
+        or mutation_scope_reconciliation["exact"] is not True
         or int(filesystems_after["root"]["available_bytes"]) < ROOT_MINIMUM_AFTER_BYTES
         or int(filesystems_after["backup"]["available_bytes"])
         < int(finance_after["required_available_floor_bytes"])
@@ -3532,8 +4105,12 @@ def _apply_batch_locked(
         "monitor": monitor,
         "journald_after": journald_after,
         "journald_reconciliation": journal_reconciliation,
-        "non_target_digest_after": non_target_after["digest"],
-        "root_policy_protected_digest_after": root_policy_after["protected_path_identity_digest"],
+        "mutation_scope_reconciliation": mutation_scope_reconciliation,
+        "terminal_non_target_reconciliation": terminal_non_target_reconciliation,
+        "immutable_non_target_digest_after": non_target_after["immutable_digest"],
+        "mutable_canonical_topology_digest_after": non_target_after[
+            "mutable_canonical_topology_digest"
+        ],
         "completed_at": _now(),
     }
     _atomic_write_json(journal_path, completed)
@@ -3617,7 +4194,7 @@ def readback_batch(
         )
     filesystems = _filesystem_snapshot(runtime_dir, root_backups)
     finance = _finance_snapshot(runtime_dir)
-    non_target = _non_target_snapshot()
+    non_target = _non_target_snapshot(runtime_dir, require_targets=False)
     services = _systemd_snapshot()
     systemd_service_gate = _systemd_service_gate_with_resample(services)
     journald = _journald_snapshot()
@@ -3629,9 +4206,33 @@ def readback_batch(
     )
     raw_unlink_count = sum(int(item.get("unlink_count") or 0) for item in (journal or {}).get("items", []))
     reclaimed = sum(int(item.get("reclaimed_allocated_bytes") or 0) for item in (journal or {}).get("items", []))
+    mutation_scope_reconciliation = (
+        _mutation_scope_reconciliation(journal) if journal else None
+    )
+    try:
+        non_target_reconciliation = (
+            _reconcile_non_target(
+                journal["non_target_before"],
+                non_target,
+                phase="query_only_terminal_readback",
+            )
+            if journal
+            else None
+        )
+    except WarmArchiveError as exc:
+        non_target_reconciliation = {
+            "phase": "query_only_terminal_readback",
+            "immutable_preserved": False,
+            "mutable_canonical_topology_preserved": False,
+            "error": str(exc),
+            "evidence": exc.evidence,
+        }
     non_target_preserved = bool(
         journal
-        and non_target["digest"] == journal.get("non_target_digest_before")
+        and non_target_reconciliation
+        and non_target_reconciliation.get("immutable_preserved") is True
+        and non_target_reconciliation.get("mutable_canonical_topology_preserved")
+        is True
         and journald_reconciliation.get("deleted_count") == 0
         and not journald_reconciliation.get("protected_drift")
     )
@@ -3647,6 +4248,8 @@ def readback_batch(
         and raw_unlink_count == EXPECTED_SOURCE_COUNT
         and reclaimed == int(manifest["material"]["expected_reclaimed_allocated_bytes"])
         and non_target_preserved
+        and mutation_scope_reconciliation
+        and mutation_scope_reconciliation.get("exact") is True
         and int(filesystems["root"]["available_bytes"]) >= ROOT_MINIMUM_AFTER_BYTES
         and int(filesystems["backup"]["available_bytes"]) >= int(finance["required_available_floor_bytes"])
         and systemd_service_gate["healthy"]
@@ -3692,8 +4295,13 @@ def readback_batch(
         "services_healthy": systemd_service_gate["healthy"],
         "journald": journald,
         "journald_reconciliation": journald_reconciliation,
-        "non_target_digest": non_target["digest"],
+        "immutable_non_target_digest": non_target["immutable_digest"],
+        "mutable_canonical_topology_digest": non_target[
+            "mutable_canonical_topology_digest"
+        ],
+        "non_target_reconciliation": non_target_reconciliation,
         "non_target_preserved": non_target_preserved,
+        "mutation_scope_reconciliation": mutation_scope_reconciliation,
         "promo_action_count": int((journal or {}).get("promo_action_count") or 0),
         "business_data_mutation_count": int((journal or {}).get("business_data_mutation_count") or 0),
         "exact_manifest_apply_receipt_count": 1 if journal and journal.get("status") == "complete" else 0,

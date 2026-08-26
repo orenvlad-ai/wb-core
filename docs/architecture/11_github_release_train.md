@@ -264,7 +264,13 @@ scope-goal operation после такого receipt не допускается
 
 Ready receipt cryptographically binds the private projection path/SHA,
 material digest, exact six source identities/SHA and conservative capacity
-guard. Subsequent JIT witnesses and mutation-start qualification reuse that
+guard. После WBC0008 block 012 он также отдельно связывает immutable non-target
+content digest и mutable canonical identity-topology digest. Только явные
+root-policy resolver bindings для current Finance raw/operational и
+Autoanswers относятся ко второй группе: их same-inode content/size/mtime
+эволюция сохраняется как evidence, но не меняет material CAS; path/device/
+mount/inode/type/symlink/owner/classification/StoreRegistry или owning-service
+relationship drift блокирует. Subsequent JIT witnesses and mutation-start qualification reuse that
 projection only while fresh stat/sidecar/FD/lock/hold/provenance/material CAS,
 capacity and non-target checks remain exact. They do not repeat compression
 measurement, full SQLite integrity or full source hashing merely to obtain two
@@ -302,6 +308,9 @@ added capture/component/finalization counts, bounded-date visibility/quality,
 material source CAS и non-target invariants. Durable v3 receipt сохраняет все
 candidate hashes, exact applied manifest, command/output digests,
 `apply_count=0|1` и query-only result.
+Для exact-six readback дополнительно обязательны раздельная immutable/mutable
+reconciliation, before/after ordinary mutable observations и exact mutation-
+scope ledger с нулём non-target unlink/move/write.
 
 Terminal receipt publication использует PR timeline endpoint и явные
 `issues: write` плюс `pull-requests: write`: workflow не полагается на
