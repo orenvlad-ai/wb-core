@@ -970,7 +970,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                     f"""INSERT INTO {BALANCES_TABLE}(
                            facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
                            wac_rub,source_watermark,updated_at
-                       ) VALUES(?,'FBS',?,1,?,?,?, 'orenburg-existing',?)""",
+                       ) VALUES(?,'FBS',?,1,?,?,?, 'mapping-extension-2026-08-24',?)""",
                     (
                         ORENBURG_FACILITY_ID,
                         nm_id,
@@ -997,8 +997,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             )
             _seed_orenburg_mapping_and_history(
                 conn,
-                roster_nm_ids=roster_nm_ids,
-                non_target_nm_ids=non_target_nm_ids,
+                allocation_nm_ids=non_target_nm_ids,
             )
             # Production-shaped unrelated noise proves that the planner does
             # not scan/hash entire operational tables.
@@ -1081,8 +1080,15 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["stock_managed_roster"]["exact_partition_proven"] is True
         assert plan["mapping_evidence"]["seller_warehouse_id"] == 854205
         assert plan["mapping_evidence"]["official_office_id"] == 12223
-        assert plan["mapping_evidence"]["allocation_count"] == 33
-        assert plan["mapping_evidence"]["allocation_nm_ids"] == roster_nm_ids
+        assert plan["mapping_evidence"]["allocation_count"] == 21
+        assert plan["mapping_evidence"]["allocation_nm_ids"] == non_target_nm_ids
+        consistency = plan["mapping_evidence"]["allocation_balance_consistency"]
+        assert consistency["expected_nm_ids"] == non_target_nm_ids
+        assert consistency["current_nm_ids"] == non_target_nm_ids
+        assert consistency["positive_receipt_allocation_count"] == 21
+        assert consistency["same_source_watermark_nm_ids"] == non_target_nm_ids
+        assert consistency["same_source_value_match_count"] == 21
+        assert consistency["blockers"] == []
         assert plan["target_effects"]["effect_row_count"] == 0
         assert plan["historical_zero_evidence"]["exact_zero_count"] == 12
         assert (
@@ -1177,6 +1183,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         assert fallback["mode"] == "stdout_only"
         assert not (runtime_dir / "not-written.json").exists()
+        _assert_orenburg_allocation_drift_blocks()
         return {
             "facility_id": ORENBURG_FACILITY_ID,
             "target_count": len(plan["nm_ids"]),
@@ -1187,14 +1194,89 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             "bounded_unrelated_noise_rows": 4_000,
             "private_output_mode": "0600_or_stdout_only",
             "apply_exposed": False,
+            "allocation_drift_failed_closed": True,
         }
+
+
+def _assert_orenburg_allocation_drift_blocks() -> None:
+    non_target_nm_ids = [700_000_000 + value for value in range(21)]
+    drift_cases = {
+        "count": non_target_nm_ids[:-1],
+        "identity": sorted((*non_target_nm_ids[:-1], ORENBURG_TARGET_NM_IDS[0])),
+    }
+    for case, allocation_nm_ids in drift_cases.items():
+        with TemporaryDirectory(prefix=f"dense-fbs-orenburg-{case}-drift-") as raw:
+            runtime_dir = Path(raw) / "runtime"
+            runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+            runtime_dir.mkdir(parents=True)
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                _ensure_schema(conn)
+                _enable_writer(conn)
+                _insert_facility(
+                    conn,
+                    ORENBURG_FACILITY_ID,
+                    "FF-ORENBURG-DRIFT",
+                    active=True,
+                )
+                for nm_id in (*ORENBURG_TARGET_NM_IDS, *non_target_nm_ids):
+                    _insert_nomenclature(conn, nm_id)
+                for position, nm_id in enumerate(non_target_nm_ids, start=1):
+                    conn.execute(
+                        f"""INSERT INTO {BALANCES_TABLE}(
+                               facility_id,pool,nm_id,projection_epoch,quantity,
+                               capital_rub,wac_rub,source_watermark,updated_at
+                           ) VALUES(?,'FBS',?,1,?,?,?,'mapping-extension-2026-08-24',?)""",
+                        (
+                            ORENBURG_FACILITY_ID,
+                            nm_id,
+                            position,
+                            str(position),
+                            "1",
+                            NOW,
+                        ),
+                    )
+                _seed_orenburg_mapping_and_history(
+                    conn,
+                    allocation_nm_ids=allocation_nm_ids,
+                )
+                conn.commit()
+            plan = DenseFbsService(
+                db_path=runtime.db_path,
+                runtime_dir=runtime_dir,
+            ).build_zero_repair_plan(
+                facility_id=ORENBURG_FACILITY_ID,
+                nm_ids=ORENBURG_TARGET_NM_IDS,
+                seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+                official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+                expected_roster_count=ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
+                expected_existing_non_target_count=(
+                    ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS
+                ),
+                historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert plan["apply_allowed"] is False
+            if case == "count":
+                assert plan["mapping_evidence"]["allocation_count"] == 20
+                assert any(
+                    "allocation count drifted" in blocker
+                    for blocker in plan["blockers"]
+                )
+            else:
+                assert plan["mapping_evidence"]["allocation_count"] == 21
+                assert plan["mapping_evidence"]["allocation_nm_ids"] != non_target_nm_ids
+                assert any(
+                    "allocation identities do not exactly match" in blocker
+                    for blocker in plan["blockers"]
+                )
 
 
 def _seed_orenburg_mapping_and_history(
     conn: sqlite3.Connection,
     *,
-    roster_nm_ids: list[int],
-    non_target_nm_ids: list[int],
+    allocation_nm_ids: list[int],
 ) -> None:
     mapping_id = "fbs-map-orenburg-854205"
     extension_id = "fbs-map-extension-orenburg"
@@ -1244,8 +1326,8 @@ def _seed_orenburg_mapping_and_history(
             "2026-08-24T18:00:00Z",
         ),
     )
-    non_target_positions = {
-        nm_id: position for position, nm_id in enumerate(non_target_nm_ids, start=1)
+    allocation_positions = {
+        nm_id: position for position, nm_id in enumerate(allocation_nm_ids, start=1)
     }
     conn.executemany(
         """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations(
@@ -1256,14 +1338,18 @@ def _seed_orenburg_mapping_and_history(
             (
                 extension_id,
                 nm_id,
-                non_target_positions.get(nm_id, 0),
-                str(non_target_positions.get(nm_id, 0)),
-                "1" if nm_id in non_target_positions else "0",
+                allocation_positions[nm_id],
+                str(allocation_positions[nm_id]),
+                "1",
                 "mapping-extension-2026-08-24",
-                "sha256:" + hashlib.sha256(str(nm_id).encode()).hexdigest(),
+                _mapping_allocation_digest(
+                    extension_id=extension_id,
+                    nm_id=nm_id,
+                    position=allocation_positions[nm_id],
+                ),
                 "2026-08-24T18:00:00Z",
             )
-            for nm_id in roster_nm_ids
+            for nm_id in allocation_nm_ids
         ),
     )
     for business_date, capture_id, finalization_id in (
@@ -1329,6 +1415,27 @@ def _seed_orenburg_mapping_and_history(
             for nm_id in ORENBURG_TARGET_NM_IDS
         ),
     )
+
+
+def _mapping_allocation_digest(
+    *, extension_id: str, nm_id: int, position: int
+) -> str:
+    material = {
+        "extension_id": str(extension_id),
+        "nm_id": int(nm_id),
+        "opening_quantity": int(position),
+        "opening_capital_rub": str(position),
+        "frozen_wac_rub": "1",
+        "source_balance_watermark": "mapping-extension-2026-08-24",
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _production_shaped_benchmark() -> dict[str, Any]:

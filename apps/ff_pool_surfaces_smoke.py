@@ -41,6 +41,10 @@ from packages.application.ff_pool_surfaces import (  # noqa: E402
     FfPoolSurfaceError,
     _resolve_supplier_lines_with_canonical_nomenclature,
 )
+from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
+    RegistryUploadDbBackedRuntime,
+    _ensure_schema,
+)
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 from apps.russian_payment_orders_smoke import _fixture, _render_pdf  # noqa: E402
 
@@ -60,6 +64,7 @@ def main() -> None:
     _guided_preview_is_default_off()
     _guided_source_uses_canonical_nomenclature()
     _overhead_operator_workflows()
+    _facility_deactivation_guard_matrix()
     with TemporaryDirectory(prefix="ff-pool-surfaces-") as directory:
         root = Path(directory)
         clock = Clock()
@@ -81,6 +86,207 @@ def main() -> None:
         _deactivation_with_dependencies_is_blocked(surface, facilities)
         _read_models(surface, request_id, facilities)
     print("ff_pool_surfaces_smoke: OK")
+
+
+def _facility_deactivation_guard_matrix() -> None:
+    with TemporaryDirectory(prefix="ff-pool-facility-deactivation-") as directory:
+        runtime_dir = Path(directory)
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        clock = Clock()
+        cases = (
+            "allowed",
+            "quantity",
+            "capital",
+            "wac",
+            "reservation",
+            "order",
+            "reconciliation",
+            "identity",
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            _ensure_schema(conn)
+            conn.execute(
+                f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) "
+                "VALUES(1,1,0,'facility-deactivation-v1',?,'{}')",
+                (clock(),),
+            )
+            for position, case in enumerate(cases, start=1):
+                facility_id = f"fac_deactivation_{case}"
+                timestamp = clock()
+                conn.execute(
+                    f"""INSERT INTO {FACILITIES_TABLE}(
+                           facility_id,code,name,active,display_timezone,created_at,updated_at
+                       ) VALUES(?,?,?,1,'Asia/Yekaterinburg',?,?)""",
+                    (
+                        facility_id,
+                        f"DEACT-{position}",
+                        f"Deactivation {case}",
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                conn.execute(
+                    f"INSERT INTO {FACILITY_PROFILES_TABLE}(facility_id,city,future_fields_json,created_at,updated_at) "
+                    "VALUES(?,'Тестоград','{}',?,?)",
+                    (facility_id, timestamp, timestamp),
+                )
+                quantity = 1 if case == "quantity" else 0
+                capital = "1" if case in {"quantity", "capital"} else "0"
+                wac = "1" if case in {"quantity", "wac"} else None
+                conn.execute(
+                    f"""INSERT INTO {BALANCES_TABLE}(
+                           facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                           wac_rub,source_watermark,updated_at
+                       ) VALUES(?,'FBS',?,1,?,?,?,'deactivation-fixture',?)""",
+                    (facility_id, 810_000_000 + position, quantity, capital, wac, timestamp),
+                )
+                if case == "allowed":
+                    # Preserve the baseline FBO boundary: a zero-quantity FBO
+                    # cost shape is not given a new FBS lifecycle rule here.
+                    conn.execute(
+                        f"""INSERT INTO {BALANCES_TABLE}(
+                               facility_id,pool,nm_id,projection_epoch,quantity,
+                               capital_rub,wac_rub,source_watermark,updated_at
+                           ) VALUES(?,'FBO',819999999,1,0,'7','7',
+                                    'fbo-out-of-scope',?)""",
+                        (facility_id, timestamp),
+                    )
+                if case == "reservation":
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_current(
+                               cutover_id,order_id,state,episode_sequence,source_revision,
+                               status_digest,supplier_status,wb_status,facility_id,pool,
+                               nm_id,quantity,frozen_wac_rub,debit_event_id,updated_at
+                           ) VALUES('cutover-deactivation-reservation',9300001,'reserved',1,
+                                    'revision','digest','new','waiting',?,'FBS',810000005,
+                                    1,'1','',?)""",
+                        (facility_id, timestamp),
+                    )
+                if case in {"order", "identity"}:
+                    warehouse_id = 870_000 + position
+                    order_id = 9_400_000 + position
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings(
+                               mapping_id,seller_warehouse_id,facility_id,mapping_digest,
+                               active,created_at,created_by
+                           ) VALUES(?,?,?,?,1,?,'deactivation-smoke')""",
+                        (
+                            f"map-deactivation-{case}",
+                            warehouse_id,
+                            facility_id,
+                            f"sha256:map-{case}",
+                            timestamp,
+                        ),
+                    )
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_order_observations(
+                               observation_id,order_id,source_revision,supply_id,
+                               delivery_type,source_created_at,warehouse_id,office_id,
+                               nm_id,chrt_id,seller_sku,rid_sha256,order_uid_sha256,
+                               skus_json,cargo_type,cross_border_type,is_zero_order,
+                               observed_at,collector_date_from,collector_date_to,
+                               collector_cursor
+                           ) VALUES(?,?,?,'','fbs','',?,12223,810000000,NULL,'sku',
+                                    '','','[]',NULL,NULL,0,?,20260826,20260826,0)""",
+                        (
+                            f"observation-deactivation-{case}",
+                            order_id,
+                            f"revision-deactivation-{case}",
+                            warehouse_id,
+                            timestamp,
+                        ),
+                    )
+                    if case == "identity":
+                        conn.execute(
+                            """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_status_current(
+                                   order_id,order_revision,status_digest,supplier_status,
+                                   wb_status,source_observed_at,local_first_seen_at,
+                                   local_last_seen_at,observation_count,episode_sequence
+                               ) VALUES(?,?,'digest','complete','sold',?,?,?,1,1)""",
+                            (
+                                order_id,
+                                f"revision-deactivation-{case}",
+                                timestamp,
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+                        conn.execute(
+                            """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_identity_pending(
+                                   pending_id,cutover_id,order_id,
+                                   source_status_observation_sequence,order_revision,
+                                   status_digest,deferred_identity_evidence_sequence,
+                                   reason_code,reason_detail_code,evidence_digest,created_at
+                               ) VALUES('pending-deactivation-identity','cutover-identity',?,1,
+                                        ?,'digest',0,'identity_evidence_missing_or_drifted',
+                                        'identity_evidence_missing_or_drifted','sha256:pending',?)""",
+                            (order_id, f"revision-deactivation-{case}", timestamp),
+                        )
+                if case == "reconciliation":
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events(
+                               event_id,cutover_id,order_id,episode_sequence,event_type,
+                               source_order_observation_sequence,
+                               source_status_observation_sequence,source_revision,
+                               status_digest,supplier_status,wb_status,source_observed_at,
+                               facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                               capital_delta_rub,frozen_wac_rub,evidence_digest,
+                               occurred_at,details_json
+                           ) VALUES('event-deactivation-reconciliation','cutover-reconciliation',
+                                    9500001,1,'post_handoff_reconciliation',0,0,'revision',
+                                    'digest','complete','canceled',?,?,'FBS',810000007,1,0,
+                                    '0','1','sha256:event',?,'{}')""",
+                        (timestamp, facility_id, timestamp),
+                    )
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane(
+                               reconciliation_id,cutover_id,order_id,event_id,reason_code,
+                               evidence_digest,state,created_at
+                           ) VALUES('reconciliation-deactivation','cutover-reconciliation',
+                                    9500001,'event-deactivation-reconciliation','fixture',
+                                    'sha256:reconciliation','open',?)""",
+                        (timestamp,),
+                    )
+            conn.commit()
+
+        surface = FfPoolSurface(
+            db_path=runtime.db_path,
+            runtime_dir=runtime_dir,
+            timestamp_factory=clock,
+        )
+        expected_evidence = {
+            "quantity": "nonzero_balance_count",
+            "capital": "noncanonical_fbs_balance_count",
+            "wac": "noncanonical_fbs_balance_count",
+            "reservation": "active_fbs_reservation_count",
+            "order": "unfinished_fbs_order_count",
+            "reconciliation": "open_fbs_reconciliation_count",
+            "identity": "unresolved_identity_order_count",
+        }
+        for case in cases:
+            facility_id = f"fac_deactivation_{case}"
+            detail = surface.facility_detail(facility_id)
+            try:
+                result = surface.update_facility(
+                    facility_id,
+                    {
+                        "request_id": f"fixture:facility:deactivate:{case}",
+                        "expected_updated_at": detail["facility"]["updated_at"],
+                        "active": False,
+                    },
+                    actor="deactivation-smoke",
+                )
+            except FfPoolSurfaceError as exc:
+                if case == "allowed":
+                    raise
+                assert exc.code == "facility_deactivation_blocked"
+                assert exc.details["contract_name"] == "ff_pool_fbs_facility_deactivation_v1"
+                assert exc.details[expected_evidence[case]] >= 1
+            else:
+                if case != "allowed":
+                    raise AssertionError(f"{case} dependency must block facility deactivation")
+                assert result["facility"]["active"] is False
 
 
 def _overhead_operator_workflows() -> None:

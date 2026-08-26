@@ -83,6 +83,17 @@ VISIBLE_DOCUMENT_KINDS = tuple(
     item for item in DOCUMENT_KINDS if item != "facility_pool_opening"
 )
 FBS_LIFECYCLE_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
+FBS_LIFECYCLE_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+FBS_RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
+FBS_IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+)
+FBS_ORDER_OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+FBS_ORDER_STATUS_CURRENT_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+FBS_WAREHOUSE_MAPPINGS_TABLE = (
+    "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
+)
 FBS_CUTOVER_MANIFESTS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_manifests"
 FACILITY_ONBOARDING_REQUESTS_TABLE = (
     "sheet_vitrina_v1_ff_facility_onboarding_requests"
@@ -1484,7 +1495,7 @@ class FfPoolSurface:
                 if blockers["has_unfinished_dependencies"]:
                     raise FfPoolSurfaceError(
                         "facility_deactivation_blocked",
-                        "Facility has unfinished dependencies or a non-zero pool balance",
+                        "Facility has non-terminal physical, cost, reservation, order, or reconciliation truth",
                         details=blockers,
                         http_status=409,
                     )
@@ -1547,6 +1558,7 @@ class FfPoolSurface:
     def _facility_deactivation_blockers(
         self, conn: sqlite3.Connection, facility_id: str
     ) -> dict[str, Any]:
+        tables = self._tables(conn)
         pending_states = ("accepted", "processing", "blocked", "ready", "posted", "replay")
         pending_requests = int(
             conn.execute(
@@ -1556,17 +1568,197 @@ class FfPoolSurface:
                 (*pending_states, json.dumps(facility_id, ensure_ascii=False)),
             ).fetchone()[0]
         )
-        nonzero_balances = int(
-            conn.execute(
-                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND quantity<>0",
-                (facility_id,),
-            ).fetchone()[0]
+        balance_rows = conn.execute(
+            f"""SELECT pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+                       source_watermark
+                  FROM {BALANCES_TABLE} WHERE facility_id=?
+                 ORDER BY pool,nm_id,projection_epoch""",
+            (facility_id,),
+        ).fetchall()
+        nonzero_balances = sum(int(row[3]) != 0 for row in balance_rows)
+        noncanonical_fbs_balances = [
+            {
+                "pool": str(row[0]),
+                "nm_id": int(row[1]),
+                "projection_epoch": int(row[2]),
+                "quantity": int(row[3]),
+                "capital_rub": str(row[4]),
+                "wac_rub": row[5],
+                "source_watermark": str(row[6]),
+            }
+            for row in balance_rows
+            if str(row[0]) == "FBS"
+            and (
+                int(row[3]) != 0
+                or _decimal(row[4]) != Decimal("0")
+                or row[5] is not None
+            )
+        ]
+        active_reservations = (
+            [
+                {
+                    "cutover_id": str(row[0]),
+                    "order_id": int(row[1]),
+                    "nm_id": int(row[2]),
+                    "quantity": int(row[3]),
+                }
+                for row in conn.execute(
+                    f"""SELECT cutover_id,order_id,nm_id,quantity
+                          FROM {FBS_LIFECYCLE_CURRENT_TABLE}
+                         WHERE facility_id=? AND pool='FBS' AND state='reserved'
+                         ORDER BY cutover_id,order_id""",
+                    (facility_id,),
+                ).fetchall()
+            ]
+            if FBS_LIFECYCLE_CURRENT_TABLE in tables
+            else []
         )
-        return {
+        open_reconciliation = (
+            [
+                {"reconciliation_id": str(row[0]), "order_id": int(row[1])}
+                for row in conn.execute(
+                    f"""SELECT lane.reconciliation_id,lane.order_id
+                          FROM {FBS_RECONCILIATION_TABLE} lane
+                          JOIN {FBS_LIFECYCLE_EVENTS_TABLE} event
+                            ON event.event_id=lane.event_id
+                         WHERE lane.state='open' AND event.facility_id=?
+                           AND event.pool='FBS'
+                         ORDER BY lane.reconciliation_id""",
+                    (facility_id,),
+                ).fetchall()
+            ]
+            if {FBS_RECONCILIATION_TABLE, FBS_LIFECYCLE_EVENTS_TABLE} <= tables
+            else []
+        )
+        mapped_order_cte = f"""SELECT DISTINCT observation.order_id
+              FROM {FBS_ORDER_OBSERVATIONS_TABLE} observation
+              JOIN {FBS_WAREHOUSE_MAPPINGS_TABLE} mapping
+                ON mapping.seller_warehouse_id=observation.warehouse_id
+               AND mapping.active=1
+             WHERE mapping.facility_id=? AND observation.delivery_type='fbs'"""
+        unresolved_identity_order_ids = (
+            [
+                int(row[0])
+                for row in conn.execute(
+                    f"""WITH mapped_order AS ({mapped_order_cte})
+                         SELECT DISTINCT pending.order_id
+                           FROM {FBS_IDENTITY_PENDING_TABLE} pending
+                           JOIN mapped_order USING(order_id)
+                           LEFT JOIN {FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE} resolution
+                             ON resolution.pending_id=pending.pending_id
+                          WHERE resolution.pending_id IS NULL
+                          ORDER BY pending.order_id""",
+                    (facility_id,),
+                ).fetchall()
+            ]
+            if {
+                FBS_IDENTITY_PENDING_TABLE,
+                FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE,
+                FBS_ORDER_OBSERVATIONS_TABLE,
+                FBS_WAREHOUSE_MAPPINGS_TABLE,
+            }
+            <= tables
+            else []
+        )
+        unfinished_orders: list[dict[str, Any]] = []
+        if {
+            FBS_ORDER_OBSERVATIONS_TABLE,
+            FBS_ORDER_STATUS_CURRENT_TABLE,
+            FBS_WAREHOUSE_MAPPINGS_TABLE,
+        } <= tables:
+            lifecycle_join = (
+                f"""LEFT JOIN {FBS_LIFECYCLE_CURRENT_TABLE} lifecycle
+                       ON lifecycle.order_id=observation.order_id
+                      AND lifecycle.facility_id=? AND lifecycle.pool='FBS'"""
+                if FBS_LIFECYCLE_CURRENT_TABLE in tables
+                else ""
+            )
+            lifecycle_state = "COALESCE(lifecycle.state,'')" if lifecycle_join else "''"
+            parameters: tuple[Any, ...] = (
+                (facility_id, facility_id) if lifecycle_join else (facility_id,)
+            )
+            order_rows = conn.execute(
+                f"""WITH mapped_order AS ({mapped_order_cte}), latest_order AS (
+                         SELECT observation.order_id,
+                                MAX(observation.observation_sequence) observation_sequence
+                           FROM {FBS_ORDER_OBSERVATIONS_TABLE} observation
+                           JOIN mapped_order USING(order_id)
+                          GROUP BY observation.order_id
+                     )
+                     SELECT DISTINCT observation.order_id,status.supplier_status,
+                            status.wb_status,{lifecycle_state} lifecycle_state
+                       FROM latest_order
+                       JOIN {FBS_ORDER_OBSERVATIONS_TABLE} observation
+                         ON observation.observation_sequence=latest_order.observation_sequence
+                       LEFT JOIN {FBS_ORDER_STATUS_CURRENT_TABLE} status
+                         ON status.order_id=observation.order_id
+                       {lifecycle_join}
+                      ORDER BY observation.order_id""",
+                parameters,
+            ).fetchall()
+            terminal_lifecycle = {
+                "released",
+                "fulfilled",
+                "fulfilled_reconciliation",
+                "cancelled_noop",
+                "late_pre_t_isolated",
+            }
+            terminal_wb = {
+                "sold",
+                "accepted_by_client",
+                "canceled",
+                "canceled_by_client",
+                "declined_by_client",
+                "defect",
+            }
+            for row in order_rows:
+                supplier_status = str(row[1] or "")
+                wb_status = str(row[2] or "")
+                lifecycle_state_value = str(row[3] or "")
+                if (
+                    lifecycle_state_value in terminal_lifecycle
+                    or supplier_status == "cancel"
+                    or wb_status in terminal_wb
+                ):
+                    continue
+                unfinished_orders.append(
+                    {
+                        "order_id": int(row[0]),
+                        "supplier_status": supplier_status,
+                        "wb_status": wb_status,
+                        "lifecycle_state": lifecycle_state_value,
+                    }
+                )
+        blockers = {
             "pending_request_count": pending_requests,
             "nonzero_balance_count": nonzero_balances,
-            "has_unfinished_dependencies": bool(pending_requests or nonzero_balances),
+            "noncanonical_fbs_balances": noncanonical_fbs_balances,
+            "active_fbs_reservations": active_reservations,
+            "open_fbs_reconciliation": open_reconciliation,
+            "unresolved_identity_order_ids": unresolved_identity_order_ids,
+            "unfinished_fbs_orders": unfinished_orders,
         }
+        result = {
+            "contract_name": "ff_pool_fbs_facility_deactivation_v1",
+            "facility_id": str(facility_id),
+            **blockers,
+            "noncanonical_fbs_balance_count": len(noncanonical_fbs_balances),
+            "active_fbs_reservation_count": len(active_reservations),
+            "open_fbs_reconciliation_count": len(open_reconciliation),
+            "unresolved_identity_order_count": len(unresolved_identity_order_ids),
+            "unfinished_fbs_order_count": len(unfinished_orders),
+            "has_unfinished_dependencies": bool(
+                pending_requests
+                or nonzero_balances
+                or noncanonical_fbs_balances
+                or active_reservations
+                or open_reconciliation
+                or unresolved_identity_order_ids
+                or unfinished_orders
+            ),
+        }
+        result["fingerprint"] = _fingerprint(result)
+        return result
 
     def accept_document_preview(
         self,

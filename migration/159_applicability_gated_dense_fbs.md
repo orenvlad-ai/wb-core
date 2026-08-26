@@ -23,6 +23,11 @@ reconciliation/identity dependency, unfinished FBS order/lifecycle, or a
 missing applicable row at any active facility. A fully
 covered canonical-zero SKU may be archived and later reactivated against its
 retained row and immutable documents.
+An active facility can become inactive only while every FBS row has canonical
+zero shape and it has no pending pool request, active FBS reservation, open
+reconciliation, unresolved mapped identity or unfinished mapped FBS order. The
+existing quantity guard for other pools is retained without extending these new
+FBS dependency rules into FBO.
 FBO, WB, aggregate FF, reservations, orders and historical captures are outside
 the zero-initialization effect.
 
@@ -106,8 +111,9 @@ is rejected.
 
 The plan proves the one active mapping seller warehouse `854205` + official
 office `12223` → the exact facility with pinned mapping/official evidence and
-mapping-extension receipt whose 33 allocation identities exactly equal the
-active roster. It proves the exact active stock-managed roster of 33 identities,
+mapping-extension receipt whose 21 positive-WAC allocation identities exactly
+equal the current non-target Orenburg FBS identities. It proves the exact active
+stock-managed roster of 33 identities,
 partitioned into the approved 12 absent targets and the exact 21
 current Orenburg FBS balance identities. All 12 targets must remain applicable
 at the canonical EKT business date. The targets must be absent across every

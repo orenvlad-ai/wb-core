@@ -466,33 +466,12 @@ class DenseFbsService:
                 blockers.append("operational StoreRegistry generation is implicit or not query-only")
             if facility is None or not bool(facility["active"]):
                 blockers.append("exact target facility is missing or inactive")
-            mapping_evidence = _exact_repair_mapping_evidence(
-                conn,
-                facility_id=str(facility_id),
-                seller_warehouse_id=int(seller_warehouse_id),
-                official_office_id=int(official_office_id),
-            )
-            blockers.extend(mapping_evidence["blockers"])
-
             roster = stock_managed_nomenclature(conn)
             roster_nm_ids = [int(item["nm_id"]) for item in roster]
             if len(roster_nm_ids) != int(expected_roster_count):
                 blockers.append(
                     "stock-managed roster count drifted: "
                     f"expected {int(expected_roster_count)}, found {len(roster_nm_ids)}"
-                )
-            if int(mapping_evidence.get("allocation_count") or 0) != int(
-                expected_roster_count
-            ):
-                blockers.append(
-                    "mapping-extension allocation roster count drifted: "
-                    f"expected {int(expected_roster_count)}, found "
-                    f"{int(mapping_evidence.get('allocation_count') or 0)}"
-                )
-            if list(mapping_evidence.get("allocation_nm_ids") or []) != roster_nm_ids:
-                blockers.append(
-                    "mapping-extension allocation identities do not exactly match "
-                    "the active stock-managed roster"
                 )
             missing_target_identities = sorted(set(selected_nm_ids) - set(roster_nm_ids))
             if missing_target_identities:
@@ -585,6 +564,27 @@ class DenseFbsService:
                 blockers.append(
                     "active stock-managed roster is not exactly targets plus current "
                     "Orenburg FBS identities"
+                )
+            mapping_evidence = _exact_repair_mapping_evidence(
+                conn,
+                facility_id=str(facility_id),
+                seller_warehouse_id=int(seller_warehouse_id),
+                official_office_id=int(official_office_id),
+                expected_allocation_nm_ids=non_target_nm_ids,
+            )
+            blockers.extend(mapping_evidence["blockers"])
+            if int(mapping_evidence.get("allocation_count") or 0) != int(
+                expected_existing_non_target_count
+            ):
+                blockers.append(
+                    "mapping-extension allocation count drifted: "
+                    f"expected {int(expected_existing_non_target_count)}, found "
+                    f"{int(mapping_evidence.get('allocation_count') or 0)}"
+                )
+            if list(mapping_evidence.get("allocation_nm_ids") or []) != non_target_nm_ids:
+                blockers.append(
+                    "mapping-extension allocation identities do not exactly match "
+                    "the current Orenburg FBS non-target identities"
                 )
 
             target_effects = _target_effect_evidence(
@@ -1611,6 +1611,7 @@ def _exact_repair_mapping_evidence(
     facility_id: str,
     seller_warehouse_id: int,
     official_office_id: int,
+    expected_allocation_nm_ids: Sequence[int],
 ) -> dict[str, Any]:
     mappings = "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
     extensions = "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
@@ -1727,6 +1728,13 @@ def _exact_repair_mapping_evidence(
         if extension
         else []
     )
+    allocation_balance_consistency = _repair_allocation_balance_consistency(
+        conn,
+        extension_id=str(extension.get("extension_id") or ""),
+        facility_id=str(facility_id),
+        expected_nm_ids=expected_allocation_nm_ids,
+    )
+    blockers.extend(allocation_balance_consistency["blockers"])
     result = {
         "seller_warehouse_id": int(seller_warehouse_id),
         "official_office_id": int(official_office_id),
@@ -1736,10 +1744,150 @@ def _exact_repair_mapping_evidence(
         "allocation_count": allocation_count,
         "allocation_nm_ids": allocation_nm_ids,
         "allocation_digest": allocation_digest,
+        "allocation_balance_consistency": allocation_balance_consistency,
         "blockers": blockers,
     }
     result["fingerprint"] = _fingerprint(result)
     return result
+
+
+def _repair_allocation_balance_consistency(
+    conn: sqlite3.Connection,
+    *,
+    extension_id: str,
+    facility_id: str,
+    expected_nm_ids: Sequence[int],
+) -> dict[str, Any]:
+    """Bind the 21 receipt allocations to current canonical FBS identities.
+
+    Opening values are compared to the current balance only while both rows
+    still carry the same source watermark. A later canonical watermark may
+    legitimately reflect ordinary lifecycle movements, so only its canonical
+    physical shape and exact identity remain safe invariants in that case.
+    """
+
+    allocations = "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
+    selected = sorted({int(value) for value in expected_nm_ids})
+    rows = conn.execute(
+        f"""SELECT allocation.nm_id,allocation.opening_quantity,
+                   allocation.opening_capital_rub,allocation.frozen_wac_rub,
+                   allocation.source_balance_watermark,allocation.allocation_digest,
+                   balance.quantity,balance.capital_rub,balance.wac_rub,
+                   balance.source_watermark,balance.projection_epoch
+              FROM {allocations} allocation
+              LEFT JOIN {BALANCES_TABLE} balance
+                ON balance.facility_id=? AND balance.pool='FBS'
+               AND balance.nm_id=allocation.nm_id
+             WHERE allocation.extension_id=?
+             ORDER BY allocation.nm_id""",
+        (str(facility_id), str(extension_id)),
+    ).fetchall()
+    blockers: list[str] = []
+    invalid_allocation_nm_ids: list[int] = []
+    missing_current_nm_ids: list[int] = []
+    invalid_current_nm_ids: list[int] = []
+    same_source_nm_ids: list[int] = []
+    same_source_value_drift_nm_ids: list[int] = []
+    current_nm_ids: list[int] = []
+    for row in rows:
+        nm_id = int(row[0])
+        try:
+            opening_quantity = int(row[1])
+            opening_capital = Decimal(str(row[2]))
+            frozen_wac = Decimal(str(row[3]))
+        except (InvalidOperation, TypeError, ValueError):
+            invalid_allocation_nm_ids.append(nm_id)
+            continue
+        if (
+            opening_quantity <= 0
+            or not opening_capital.is_finite()
+            or opening_capital <= 0
+            or not frozen_wac.is_finite()
+            or frozen_wac <= 0
+            or not str(row[4] or "")
+            or not str(row[5] or "")
+            or str(row[5])
+            != _fingerprint(
+                {
+                    "extension_id": str(extension_id),
+                    "nm_id": nm_id,
+                    "opening_quantity": opening_quantity,
+                    "opening_capital_rub": str(row[2]),
+                    "frozen_wac_rub": str(row[3]),
+                    "source_balance_watermark": str(row[4]),
+                }
+            )
+        ):
+            invalid_allocation_nm_ids.append(nm_id)
+        if row[6] is None:
+            missing_current_nm_ids.append(nm_id)
+            continue
+        current_nm_ids.append(nm_id)
+        try:
+            current_quantity = int(row[6])
+            current_capital = Decimal(str(row[7]))
+            current_wac = None if row[8] is None else Decimal(str(row[8]))
+        except (InvalidOperation, TypeError, ValueError):
+            invalid_current_nm_ids.append(nm_id)
+            continue
+        current_is_canonical = (
+            current_quantity == 0
+            and current_capital.is_finite()
+            and current_capital == 0
+            and current_wac is None
+        ) or (
+            current_quantity > 0
+            and current_capital.is_finite()
+            and current_capital > 0
+            and current_wac is not None
+            and current_wac.is_finite()
+            and current_wac > 0
+        )
+        if not current_is_canonical or not str(row[9] or ""):
+            invalid_current_nm_ids.append(nm_id)
+        if str(row[9] or "") == str(row[4] or ""):
+            same_source_nm_ids.append(nm_id)
+            if (
+                current_quantity != opening_quantity
+                or current_capital != opening_capital
+                or current_wac != frozen_wac
+            ):
+                same_source_value_drift_nm_ids.append(nm_id)
+    if invalid_allocation_nm_ids:
+        blockers.append(
+            "mapping-extension allocations are not receipt-backed positive WAC rows: "
+            + ", ".join(map(str, sorted(set(invalid_allocation_nm_ids))))
+        )
+    if missing_current_nm_ids:
+        blockers.append(
+            "mapping-extension allocation lacks its current canonical FBS row: "
+            + ", ".join(map(str, sorted(set(missing_current_nm_ids))))
+        )
+    if invalid_current_nm_ids:
+        blockers.append(
+            "current Orenburg FBS allocation row has a non-canonical shape: "
+            + ", ".join(map(str, sorted(set(invalid_current_nm_ids))))
+        )
+    if same_source_value_drift_nm_ids:
+        blockers.append(
+            "current Orenburg FBS row drifted from its matching allocation source: "
+            + ", ".join(map(str, sorted(set(same_source_value_drift_nm_ids))))
+        )
+    if current_nm_ids != selected:
+        blockers.append(
+            "current canonical allocation identities do not equal the exact non-target set"
+        )
+    evidence = {
+        "expected_nm_ids": selected,
+        "current_nm_ids": current_nm_ids,
+        "positive_receipt_allocation_count": len(rows) - len(set(invalid_allocation_nm_ids)),
+        "same_source_watermark_nm_ids": same_source_nm_ids,
+        "same_source_value_match_count": len(same_source_nm_ids)
+        - len(set(same_source_value_drift_nm_ids)),
+        "blockers": blockers,
+    }
+    evidence["fingerprint"] = _fingerprint(evidence)
+    return evidence
 
 
 def _target_effect_evidence(

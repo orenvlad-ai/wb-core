@@ -823,6 +823,11 @@ missing applicable coverage at an active facility, active reservation or
 unfinished lifecycle/order dependency. Canonical-zero
 archive/reactivation retains the balance, documents and history. Current reads
 use the canonical EKT business-date helper, not process-local date.
+Facility deactivation holds the same shared lock and requires canonical-zero
+FBS physical/capital/WAC plus no pending pool request, active FBS reservation,
+open reconciliation, unresolved mapped identity or unfinished mapped FBS order.
+The existing quantity guard for other pools remains unchanged; these new FBS
+dependency rules do not extend FBO semantics.
 
 Receipts, writeoffs, transfers, reservations and FBS order lifecycle writers
 must find an existing applicable physical row. They cannot create it implicitly.
@@ -840,8 +845,9 @@ the same service for the exact 12 reviewed targets and expects the exact
 33-SKU roster partitioned into those targets and 21 existing non-target FBS
 rows. It requires an explicit active target file and StoreRegistry generation,
 pins mapping `854205`/office `12223`, target-effect/history and scoped non-target
-fingerprints, requires the 33 mapping-extension allocation identities to equal
-the active roster, performs no unscoped table hash, and has no apply entrypoint.
+fingerprints, requires the 21 receipt-backed positive-WAC mapping-extension
+allocation identities to equal the exact 21 current non-target FBS identities,
+performs no unscoped table hash, and has no apply entrypoint.
 Deployment performs no production repair.
 
 ### Stage 7C exact opening and FBS lifecycle

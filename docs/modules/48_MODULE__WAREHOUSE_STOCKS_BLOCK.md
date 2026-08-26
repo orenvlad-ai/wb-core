@@ -191,7 +191,11 @@ Retiring a SKU is blocked under the same warehouse lock while any prior FBS row
 is non-canonical-zero, any active-facility applicable row is missing, or an
 active reservation/unfinished FBS lifecycle/order dependency exists. A
 zero-covered SKU may archive/reactivate without resetting
-its row. New-SKU activation stores only its facility pairs plus a compact
+its row. Facility deactivation is likewise blocked for non-canonical-zero FBS
+quantity/capital/WAC, pending pool requests, active FBS reservations, open
+reconciliation, unresolved mapped identity or unfinished mapped FBS orders;
+the pre-existing quantity guard for other pools is unchanged. New-SKU
+activation stores only its facility pairs plus a compact
 streamed proof of existing coverage; it does not persist the default
 applicability cross-product. Current applicability uses the canonical EKT
 business date.
