@@ -203,7 +203,7 @@ reconciliation; blind replay запрещён.
 - `apps/sheet_vitrina_v1_inventory_planning_smoke.py` — public identities,
   order, TOTAL/SKU and no duplicate aggregate;
 - `apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py` — user visibility,
-  partial marker/tooltip and full-value marker absence;
+  inactive-facility current exclusion and full-value marker absence;
 - `apps/sheet_vitrina_v1_inventory_history_smoke.py` — idempotent capture,
   exact zero/missing, archived SKU, WB-only prelaunch full, late supersession,
   late exact closed-day WB with same-date-only FBS, numeric partial,
@@ -211,8 +211,9 @@ reconciliation; blind replay запрещён.
   current UI WB equality, indefinite retention and 174-day × 34-scope
   realistic window;
 - `apps/ff_pool_dense_fbs_smoke.py` — current typed state/reason/provenance,
-  future-T0 explicit zero, archive/reactivation retention and no historical
-  retrocopy;
+  future-T0 explicit zero, fail-closed non-zero/reservation/order SKU retirement,
+  zero archive/reactivation retention, exact-id transport resume, canonical EKT
+  date boundary, compact new-SKU coverage and no historical retrocopy;
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
   target-scoped source CAS (post-cutoff tick и same-plan non-inventory drift

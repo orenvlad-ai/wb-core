@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import errno
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Mapping, Sequence
-from zoneinfo import ZoneInfo
 
 from packages.application.ff_pool_documents import (
     DOCUMENT_LINES_TABLE,
@@ -27,12 +27,15 @@ from packages.application.ff_pool_fbs_applicability import (
     append_applicability_event,
     append_dense_intent_event,
     coverage_receipt,
+    current_business_date,
     dense_intent_state,
     ensure_ff_pool_fbs_applicability_schema,
     fbs_pair_applicability,
+    fbs_physical_component,
     persist_dense_intent,
     stock_managed_nomenclature,
 )
+from packages.business_time import business_date_from_timestamp
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -58,6 +61,10 @@ class DenseFbsError(ValueError):
         super().__init__(message)
         self.code = str(code)
         self.details = details
+
+
+class DenseFbsResumableError(DenseFbsError):
+    """Canonical request evidence proves that exact-id resume is safe."""
 
 
 class DenseFbsService:
@@ -103,9 +110,32 @@ class DenseFbsService:
                     f"SELECT * FROM {FACILITIES_TABLE} WHERE facility_id=?",
                     (str(facility_id),),
                 ).fetchone()
+                intent_already_active = (
+                    dense_intent_state(conn, str(intent["intent_id"]))["state"]
+                    == "active"
+                )
                 if row is None:
-                    raise DenseFbsError("facility_not_found", "Staged facility disappeared")
+                    if intent_already_active:
+                        conn.rollback()
+                        raise DenseFbsError(
+                            "facility_activation_request_already_terminal",
+                            "Previously activated facility was later removed",
+                        )
+                    raise self._terminal_publication_error(
+                        conn,
+                        intent,
+                        DenseFbsError("facility_not_found", "Staged facility disappeared"),
+                    )
                 if bool(row["active"]):
+                    if not intent_already_active:
+                        raise self._terminal_publication_error(
+                            conn,
+                            intent,
+                            DenseFbsError(
+                                "facility_activation_cas_drift",
+                                "Facility became active outside its dense FBS publication",
+                            ),
+                        )
                     conn.rollback()
                     return {
                         "contract_name": CONTRACT_NAME,
@@ -114,13 +144,26 @@ class DenseFbsService:
                         "coverage": materialized,
                         "idempotent": True,
                     }
-                if str(row["updated_at"]) != str(expected_updated_at):
+                if intent_already_active:
+                    conn.rollback()
                     raise DenseFbsError(
-                        "facility_activation_cas_drift",
-                        "Facility changed after dense FBS activation was staged",
-                        details={"current_updated_at": str(row["updated_at"])},
+                        "facility_activation_request_already_terminal",
+                        "Previously activated facility was later changed; use a new activation request",
                     )
-                self._verify_materialized_under_transaction(conn, intent)
+                if str(row["updated_at"]) != str(expected_updated_at):
+                    raise self._terminal_publication_error(
+                        conn,
+                        intent,
+                        DenseFbsError(
+                            "facility_activation_cas_drift",
+                            "Facility changed after dense FBS activation was staged",
+                            details={"current_updated_at": str(row["updated_at"])},
+                        ),
+                    )
+                try:
+                    self._verify_materialized_under_transaction(conn, intent)
+                except DenseFbsError as exc:
+                    raise self._terminal_publication_error(conn, intent, exc) from exc
                 profile = conn.execute(
                     f"SELECT city FROM {FACILITY_PROFILES_TABLE} WHERE facility_id=?",
                     (str(facility_id),),
@@ -140,9 +183,13 @@ class DenseFbsService:
                     (now, str(facility_id), str(expected_updated_at)),
                 ).rowcount
                 if changed != 1:
-                    raise DenseFbsError(
-                        "facility_activation_cas_drift",
-                        "Facility activation CAS did not match exactly one staged row",
+                    raise self._terminal_publication_error(
+                        conn,
+                        intent,
+                        DenseFbsError(
+                            "facility_activation_cas_drift",
+                            "Facility activation CAS did not match exactly one staged row",
+                        ),
                     )
                 change_id = "fffc_" + _fingerprint(
                     {
@@ -226,7 +273,14 @@ class DenseFbsService:
             with self._write() as conn:
                 ensure_ff_pool_fbs_applicability_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
-                self._verify_materialized_under_transaction(conn, intent)
+                try:
+                    self._verify_materialized_under_transaction(conn, intent)
+                except DenseFbsError as exc:
+                    raise self._terminal_publication_error(conn, intent, exc) from exc
+                intent_already_active = (
+                    dense_intent_state(conn, str(intent["intent_id"]))["state"]
+                    == "active"
+                )
                 for item in normalized:
                     row = conn.execute(
                         f"SELECT is_active,is_hidden,nm_id,updated_at FROM {NOMENCLATURE_TABLE} "
@@ -234,9 +288,19 @@ class DenseFbsService:
                         (item["item_id"],),
                     ).fetchone()
                     if row is None:
-                        raise DenseFbsError(
-                            "staged_nomenclature_missing",
-                            f"Staged nomenclature item disappeared: {item['item_id']}",
+                        if intent_already_active:
+                            conn.rollback()
+                            raise DenseFbsError(
+                                "sku_activation_request_already_terminal",
+                                "Previously activated nomenclature was later removed",
+                            )
+                        raise self._terminal_publication_error(
+                            conn,
+                            intent,
+                            DenseFbsError(
+                                "staged_nomenclature_missing",
+                                f"Staged nomenclature item disappeared: {item['item_id']}",
+                            ),
                         )
                     if (
                         bool(row[0])
@@ -244,27 +308,68 @@ class DenseFbsService:
                         and int(row[2]) == item["nm_id"]
                         and str(row[3]) == item["updated_at"]
                     ):
-                        continue
+                        if intent_already_active:
+                            continue
+                        raise self._terminal_publication_error(
+                            conn,
+                            intent,
+                            DenseFbsError(
+                                "sku_activation_cas_drift",
+                                "Staged nomenclature became active outside dense publication",
+                                details={"item_id": item["item_id"]},
+                            ),
+                        )
+                    if intent_already_active:
+                        conn.rollback()
+                        raise DenseFbsError(
+                            "sku_activation_request_already_terminal",
+                            "Previously activated nomenclature was later changed; use a new activation request",
+                            details={"item_id": item["item_id"]},
+                        )
                     if (
                         bool(row[0])
                         or bool(row[1])
                         or int(row[2] or 0) != item["nm_id"]
                         or str(row[3]) != item["updated_at"]
                     ):
-                        raise DenseFbsError(
-                            "sku_activation_cas_drift",
-                            "Staged nomenclature changed before dense coverage completed",
-                            details={"item_id": item["item_id"]},
+                        raise self._terminal_publication_error(
+                            conn,
+                            intent,
+                            DenseFbsError(
+                                "sku_activation_cas_drift",
+                                "Staged nomenclature changed before dense coverage completed",
+                                details={"item_id": item["item_id"]},
+                            ),
                         )
+                if intent_already_active:
+                    conn.rollback()
+                    return {
+                        "contract_name": CONTRACT_NAME,
+                        "intent_id": intent["intent_id"],
+                        "state": "active",
+                        "coverage": materialized,
+                        "idempotent": True,
+                    }
+                for item in normalized:
+                    row = conn.execute(
+                        f"SELECT is_active FROM {NOMENCLATURE_TABLE} WHERE item_id=?",
+                        (item["item_id"],),
+                    ).fetchone()
+                    if row is not None and bool(row[0]):
+                        continue
                     changed = conn.execute(
                         f"UPDATE {NOMENCLATURE_TABLE} SET is_active=1 "
                         "WHERE item_id=? AND is_active=0 AND is_hidden=0 AND nm_id=? AND updated_at=?",
                         (item["item_id"], item["nm_id"], item["updated_at"]),
                     ).rowcount
                     if changed != 1:
-                        raise DenseFbsError(
-                            "sku_activation_cas_drift",
-                            "SKU activation CAS did not match exactly one staged row",
+                        raise self._terminal_publication_error(
+                            conn,
+                            intent,
+                            DenseFbsError(
+                                "sku_activation_cas_drift",
+                                "SKU activation CAS did not match exactly one staged row",
+                            ),
                         )
                 append_dense_intent_event(
                     conn,
@@ -321,7 +426,13 @@ class DenseFbsService:
         *,
         facility_id: str,
         nm_ids: Sequence[int],
-        expected_existing_non_target_count: int | None = None,
+        seller_warehouse_id: int,
+        official_office_id: int,
+        expected_roster_count: int,
+        expected_existing_non_target_count: int,
+        historical_business_date: str,
+        canonical_target: Mapping[str, Any],
+        storage_generation: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Query-only deterministic plan using the same dense pool_inventory shape."""
 
@@ -337,6 +448,7 @@ class DenseFbsService:
                 NOMENCLATURE_TABLE,
             } <= ensure_tables:
                 raise DenseFbsError("repair_schema_unavailable", "Dense FBS repair schema is unavailable")
+            conn.execute("PRAGMA query_only=ON")
             facility = conn.execute(
                 f"SELECT facility_id,code,name,active,display_timezone,updated_at "
                 f"FROM {FACILITIES_TABLE} WHERE facility_id=?",
@@ -344,30 +456,79 @@ class DenseFbsService:
             ).fetchone()
             epoch = _writer_epoch(conn)
             blockers: list[str] = []
+            exact_target = dict(canonical_target)
+            exact_storage = dict(storage_generation)
+            if not bool(exact_target.get("accepted")):
+                blockers.append("explicit canonical hosted-runtime target was not accepted")
+            if bool(exact_storage.get("implicit")) or not bool(
+                exact_storage.get("query_only")
+            ):
+                blockers.append("operational StoreRegistry generation is implicit or not query-only")
             if facility is None or not bool(facility["active"]):
                 blockers.append("exact target facility is missing or inactive")
-            catalog = conn.execute(
-                f"SELECT item_id,nm_id,updated_at FROM {NOMENCLATURE_TABLE} "
-                f"WHERE is_active=1 AND is_hidden=0 AND nm_id IN ({','.join('?' for _ in selected_nm_ids)}) "
-                "ORDER BY nm_id,item_id",
-                selected_nm_ids,
-            ).fetchall()
-            counts = {
-                nm_id: sum(int(row["nm_id"]) == nm_id for row in catalog)
-                for nm_id in selected_nm_ids
-            }
-            ambiguous = [nm_id for nm_id, count in counts.items() if count != 1]
-            if ambiguous:
+            mapping_evidence = _exact_repair_mapping_evidence(
+                conn,
+                facility_id=str(facility_id),
+                seller_warehouse_id=int(seller_warehouse_id),
+                official_office_id=int(official_office_id),
+            )
+            blockers.extend(mapping_evidence["blockers"])
+
+            roster = stock_managed_nomenclature(conn)
+            roster_nm_ids = [int(item["nm_id"]) for item in roster]
+            if len(roster_nm_ids) != int(expected_roster_count):
+                blockers.append(
+                    "stock-managed roster count drifted: "
+                    f"expected {int(expected_roster_count)}, found {len(roster_nm_ids)}"
+                )
+            if int(mapping_evidence.get("allocation_count") or 0) != int(
+                expected_roster_count
+            ):
+                blockers.append(
+                    "mapping-extension allocation roster count drifted: "
+                    f"expected {int(expected_roster_count)}, found "
+                    f"{int(mapping_evidence.get('allocation_count') or 0)}"
+                )
+            if list(mapping_evidence.get("allocation_nm_ids") or []) != roster_nm_ids:
+                blockers.append(
+                    "mapping-extension allocation identities do not exactly match "
+                    "the active stock-managed roster"
+                )
+            missing_target_identities = sorted(set(selected_nm_ids) - set(roster_nm_ids))
+            if missing_target_identities:
                 blockers.append(
                     "target SKU lacks one exact active nomenclature identity: "
-                    + ", ".join(map(str, ambiguous))
+                    + ", ".join(map(str, missing_target_identities))
+                )
+            target_applicability = [
+                {
+                    "nm_id": nm_id,
+                    **fbs_pair_applicability(
+                        conn,
+                        facility_id=str(facility_id),
+                        nm_id=nm_id,
+                        as_of_date=current_business_date(),
+                        facility_active=bool(facility and facility["active"]),
+                        sku_active=nm_id in set(roster_nm_ids),
+                    ),
+                }
+                for nm_id in selected_nm_ids
+            ]
+            inapplicable_targets = [
+                int(item["nm_id"])
+                for item in target_applicability
+                if not bool(item["applicable"])
+            ]
+            if inapplicable_targets:
+                blockers.append(
+                    "repair targets are not applicable at the canonical EKT business date: "
+                    + ", ".join(map(str, inapplicable_targets))
                 )
             target_rows = [
-                _balance_cas_row(
+                _repair_balance_cas_row(
                     conn,
                     facility_id=str(facility_id),
                     nm_id=nm_id,
-                    epoch=epoch,
                 )
                 for nm_id in selected_nm_ids
             ]
@@ -391,34 +552,68 @@ class DenseFbsService:
                     + ", ".join(map(str, conflicts))
                 )
             placeholders = ",".join("?" for _ in selected_nm_ids)
-            balance_non_target_count, balance_non_target_digest = _streaming_query_digest(
+            target_facility_non_target_count, target_facility_non_target_digest = (
+                _streaming_query_digest(
                 conn,
-                f"""SELECT * FROM {BALANCES_TABLE}
-                    WHERE NOT (
-                        facility_id=? AND pool='FBS'
-                        AND nm_id IN ({placeholders})
-                    )
-                    ORDER BY facility_id,pool,nm_id""",
+                f"""SELECT facility_id,pool,nm_id,projection_epoch,quantity,
+                           capital_rub,wac_rub,source_watermark,updated_at
+                      FROM {BALANCES_TABLE}
+                     WHERE facility_id=? AND pool='FBS'
+                       AND nm_id NOT IN ({placeholders})
+                     ORDER BY nm_id""",
                 (str(facility_id), *selected_nm_ids),
+                )
             )
-            target_facility_non_target_count = int(
-                conn.execute(
-                    f"""SELECT COUNT(*) FROM {BALANCES_TABLE}
-                        WHERE facility_id=? AND pool='FBS'
-                          AND nm_id NOT IN ({placeholders})""",
+            non_target_nm_ids = [
+                int(row[0])
+                for row in conn.execute(
+                    f"""SELECT nm_id FROM {BALANCES_TABLE}
+                         WHERE facility_id=? AND pool='FBS'
+                           AND nm_id NOT IN ({placeholders})
+                         ORDER BY nm_id""",
                     (str(facility_id), *selected_nm_ids),
-                ).fetchone()[0]
-            )
-            if (
-                expected_existing_non_target_count is not None
-                and target_facility_non_target_count
-                != int(expected_existing_non_target_count)
-            ):
+                ).fetchall()
+            ]
+            if target_facility_non_target_count != int(expected_existing_non_target_count):
                 blockers.append(
                     "target facility non-target FBS row count drifted: "
                     f"expected {int(expected_existing_non_target_count)}, "
                     f"found {target_facility_non_target_count}"
                 )
+            exact_roster_partition = sorted(selected_nm_ids + non_target_nm_ids)
+            if roster_nm_ids != exact_roster_partition:
+                blockers.append(
+                    "active stock-managed roster is not exactly targets plus current "
+                    "Orenburg FBS identities"
+                )
+
+            target_effects = _target_effect_evidence(
+                conn,
+                facility_id=str(facility_id),
+                seller_warehouse_id=int(seller_warehouse_id),
+                nm_ids=selected_nm_ids,
+            )
+            if int(target_effects["effect_row_count"]) != 0:
+                blockers.append(
+                    "repair targets already have FBS movement/document/lifecycle/"
+                    "reservation/order effects"
+                )
+            history_evidence = _historical_zero_evidence(
+                conn,
+                facility_id=str(facility_id),
+                nm_ids=selected_nm_ids,
+                business_date=str(historical_business_date),
+            )
+            blockers.extend(history_evidence["blockers"])
+
+            scoped_non_targets = _scoped_repair_non_targets(
+                conn,
+                facility_id=str(facility_id),
+                roster_nm_ids=roster_nm_ids,
+                target_nm_ids=selected_nm_ids,
+                historical_business_date=str(historical_business_date),
+                seller_warehouse_id=int(seller_warehouse_id),
+            )
             dense_manifest = {
                 "contract_name": CONTRACT_NAME,
                 "subject_kind": "repair",
@@ -426,16 +621,45 @@ class DenseFbsService:
                 "intent_id": "future_owner_gated_intent",
                 "effective_from": "future_apply_t0",
                 "cutover_at": "future_apply_t0",
-                "roster_fingerprint": _fingerprint(selected_nm_ids),
+                "roster_fingerprint": _fingerprint(roster),
                 "applicable_nm_ids": selected_nm_ids,
                 "expected_balance_rows": target_rows,
             }
+            plan_boundary = {
+                "projection_epoch": int(epoch),
+                "sqlite_schema_version": int(
+                    conn.execute("PRAGMA schema_version").fetchone()[0]
+                ),
+                "mapping_fingerprint": str(mapping_evidence["fingerprint"]),
+                "roster_fingerprint": _fingerprint(roster),
+                "target_effects_fingerprint": str(target_effects["fingerprint"]),
+                "historical_evidence_fingerprint": str(
+                    history_evidence["fingerprint"]
+                ),
+                "scoped_non_targets_fingerprint": str(
+                    scoped_non_targets["fingerprint"]
+                ),
+                "canonical_target_fingerprint": _fingerprint(exact_target),
+                "storage_generation_fingerprint": _fingerprint(exact_storage),
+            }
+            plan_boundary["fingerprint"] = _fingerprint(plan_boundary)
             plan = {
                 "contract_name": "ff_pool_dense_fbs_zero_repair_plan_v1",
                 "mode": "dry_run",
                 "facility": dict(facility) if facility is not None else {},
                 "pool": "FBS",
                 "projection_epoch": epoch,
+                "canonical_target": exact_target,
+                "storage_generation": exact_storage,
+                "plan_boundary": plan_boundary,
+                "mapping_evidence": mapping_evidence,
+                "stock_managed_roster": {
+                    "expected_count": int(expected_roster_count),
+                    "actual_count": len(roster_nm_ids),
+                    "nm_ids": roster_nm_ids,
+                    "fingerprint": _fingerprint(roster),
+                    "exact_partition_proven": roster_nm_ids == exact_roster_partition,
+                },
                 "nm_ids": selected_nm_ids,
                 "targets": [
                     {"nm_id": nm_id, "target_fbs": 0}
@@ -443,6 +667,9 @@ class DenseFbsService:
                 ],
                 "dense_fbs_initialization": dense_manifest,
                 "target_rows": target_rows,
+                "target_applicability": target_applicability,
+                "target_effects": target_effects,
+                "historical_zero_evidence": history_evidence,
                 "expected_effects": {
                     "balance_insert_count": sum(not row["row_present"] for row in target_rows),
                     "balance_update_count": 0,
@@ -454,15 +681,18 @@ class DenseFbsService:
                 },
                 "non_targets": {
                     "target_facility_existing_fbs_row_count": target_facility_non_target_count,
-                    "balance_row_count": balance_non_target_count,
-                    "balance_digest": balance_non_target_digest,
-                    **_optional_table_digests(conn),
+                    "target_facility_existing_fbs_nm_ids": non_target_nm_ids,
+                    "target_facility_existing_fbs_digest": target_facility_non_target_digest,
+                    **scoped_non_targets,
                 },
                 "storage": {
                     "whole_database_copy": False,
+                    "query_only": True,
                     "bounded_target_row_count": len(selected_nm_ids),
                     "non_target_digest_fetch_chunk_rows": 512,
                     "non_target_rows_retained_in_memory": False,
+                    "full_operational_table_scan_allowed": False,
+                    "scope_bound_nm_id_count": len(roster_nm_ids),
                 },
                 "apply_allowed": not blockers,
                 "blockers": blockers,
@@ -657,28 +887,8 @@ class DenseFbsService:
         plan = dict(intent["plan"])
         documents: list[dict[str, Any]] = []
         try:
-            materialize_nm_ids = {
-                int(value) for value in plan.get("materialize_nm_ids") or []
-            }
-            preexisting_pairs = [
-                (str(item["facility_id"]), int(item["nm_id"]))
-                for item in plan.get("pairs") or []
-                if int(item["nm_id"]) not in materialize_nm_ids
-            ]
-            if preexisting_pairs:
-                with self._read() as conn:
-                    preexisting_receipt = coverage_receipt(
-                        conn,
-                        pairs=preexisting_pairs,
-                        as_of_date=str(intent["effective_from"]),
-                        projection_epoch=int(plan["projection_epoch"]),
-                    )
-                if not preexisting_receipt["complete"]:
-                    raise DenseFbsError(
-                        "preexisting_dense_fbs_coverage_incomplete",
-                        "SKU activation cannot repair pre-existing FBS coverage gaps",
-                        details=preexisting_receipt["incomplete"],
-                    )
+            with self._read() as conn:
+                _verify_compact_existing_coverage(conn, plan=plan)
             for specification in plan.get("documents") or []:
                 documents.append(self._materialize_document(intent, specification))
             with self._read() as conn:
@@ -699,7 +909,47 @@ class DenseFbsService:
                     "Dense FBS coverage readback remains incomplete",
                     details=receipt["incomplete"],
                 )
+        except DenseFbsResumableError as exc:
+            resumable = {
+                "code": exc.code,
+                "message": str(exc),
+                "details": exc.details,
+                "resume_requires_same_orchestration_identity": True,
+                "blind_retry_allowed": False,
+            }
+            with self._write() as conn:
+                append_dense_intent_event(
+                    conn,
+                    intent_id=str(intent["intent_id"]),
+                    state="resumable",
+                    receipt=resumable,
+                    recorded_at=self._now(),
+                )
+                conn.commit()
+            raise
         except Exception as exc:
+            if _recoverable_materialization_error(exc):
+                resumable = {
+                    "code": "dense_fbs_materialization_resumable",
+                    "message": str(exc),
+                    "recoverable_error_type": type(exc).__name__,
+                    "resume_requires_same_orchestration_identity": True,
+                    "blind_retry_allowed": False,
+                }
+                with self._write() as conn:
+                    append_dense_intent_event(
+                        conn,
+                        intent_id=str(intent["intent_id"]),
+                        state="resumable",
+                        receipt=resumable,
+                        recorded_at=self._now(),
+                    )
+                    conn.commit()
+                raise DenseFbsResumableError(
+                    "dense_fbs_materialization_resumable",
+                    "Dense FBS materialization hit a recoverable exact-intent failure",
+                    details=resumable,
+                ) from exc
             code = str(getattr(exc, "code", "dense_fbs_materialization_failed"))
             details = getattr(exc, "details", None)
             blocked = {
@@ -767,27 +1017,71 @@ class DenseFbsService:
             "targets": list(specification["targets"]),
             "dense_fbs_initialization": dense,
         }
-        preview = service.accept_preview(
-            identity=identity,
-            document_kind="pool_inventory",
-            manifest=manifest,
-        )
+        try:
+            preview = service.accept_preview(
+                identity=identity,
+                document_kind="pool_inventory",
+                manifest=manifest,
+            )
+        except Exception as exc:
+            status = service.status(request_id=identity.request_id)
+            return _document_transport_readback(
+                status=status,
+                identity=identity,
+                phase="accept_preview",
+                error=exc,
+            )
         status = preview
-        if str(status.get("state") or "") == "ready":
+        if str(status.get("state") or "") == "processing":
+            status = service.resume_request(str(status["request_id"]))
+        if str(status.get("state") or "") == "accepted":
+            try:
+                status = service.process_request(str(status["request_id"]))
+            except Exception as exc:
+                status = service.status(request_id=str(preview["request_id"]))
+                return _document_transport_readback(
+                    status=status,
+                    identity=identity,
+                    phase="process_request",
+                    error=exc,
+                )
+        if str(status.get("state") or "") in {"ready", "posted", "replay"}:
             try:
                 status = service.post(str(status["request_id"]))
-            except Exception:
-                # Ambiguous transport is reconciled by immutable readback; a
-                # non-complete state is re-raised below and is never retried.
+            except Exception as exc:
+                # Never submit again in the same invocation.  Immutable
+                # canonical readback decides complete vs exact-id resume.
                 status = service.status(request_id=str(preview["request_id"]))
+                return _document_transport_readback(
+                    status=status,
+                    identity=identity,
+                    phase="post",
+                    error=exc,
+                )
+        if str(status.get("state") or "") in {
+            "accepted",
+            "processing",
+            "ready",
+            "posted",
+            "replay",
+        }:
+            raise DenseFbsResumableError(
+                "dense_fbs_document_resumable",
+                "Canonical pool_inventory request is durable but not complete",
+                details={
+                    "request_id": str(status.get("request_id") or identity.request_id),
+                    "canonical_state": str(status.get("state") or ""),
+                },
+            )
         if str(status.get("state") or "") != "complete":
+            error = dict(status.get("error") or {})
             raise DenseFbsError(
-                "dense_fbs_document_incomplete",
+                str(error.get("code") or "dense_fbs_document_incomplete"),
                 "Dense FBS pool_inventory document did not complete",
                 details={
                     "request_id": str(status.get("request_id") or identity.request_id),
                     "state": str(status.get("state") or ""),
-                    "error": status.get("error"),
+                    "error": error,
                 },
             )
         document = dict(status.get("document") or {})
@@ -802,6 +1096,7 @@ class DenseFbsService:
         self, conn: sqlite3.Connection, intent: Mapping[str, Any]
     ) -> dict[str, Any]:
         plan = dict(intent["plan"])
+        _verify_compact_existing_coverage(conn, plan=plan)
         receipt = coverage_receipt(
             conn,
             pairs=[
@@ -841,6 +1136,33 @@ class DenseFbsService:
     def _intent_state(self, intent_id: str) -> dict[str, Any]:
         with self._read() as conn:
             return dense_intent_state(conn, intent_id)
+
+    def _terminal_publication_error(
+        self,
+        conn: sqlite3.Connection,
+        intent: Mapping[str, Any],
+        error: DenseFbsError,
+    ) -> DenseFbsError:
+        """Roll back registry work, then commit only terminal intent evidence."""
+
+        conn.rollback()
+        with self._write() as evidence_conn:
+            evidence_conn.execute("BEGIN IMMEDIATE")
+            append_dense_intent_event(
+                evidence_conn,
+                intent_id=str(intent["intent_id"]),
+                state="blocked",
+                receipt={
+                    "code": error.code,
+                    "message": str(error),
+                    "details": error.details,
+                    "phase": "active_publication",
+                    "blind_retry_allowed": False,
+                },
+                recorded_at=self._now(),
+            )
+            evidence_conn.commit()
+        return error
 
     def _document_service(self) -> FfPoolDocumentService:
         if self.document_service_factory is not None:
@@ -910,12 +1232,22 @@ def _activation_plan(
         )
     pairs: list[dict[str, Any]] = []
     documents: list[dict[str, Any]] = []
+    existing_nm_ids = sorted(set(roster_nm_ids) - selected_materialize_nm_ids)
+    existing_coverage_proof = _compact_existing_coverage(
+        conn,
+        facilities=facilities,
+        nm_ids=existing_nm_ids,
+        as_of_date=effective_from,
+        projection_epoch=epoch,
+    )
     for facility in facilities:
         facility_id = str(facility["facility_id"])
         applicable_nm_ids: list[int] = []
         expected_rows: list[dict[str, Any]] = []
         targets: list[dict[str, Any]] = []
         for nm_id in sorted(roster_nm_ids):
+            if nm_id not in selected_materialize_nm_ids:
+                continue
             applicability = fbs_pair_applicability(
                 conn,
                 facility_id=facility_id,
@@ -932,8 +1264,6 @@ def _activation_plan(
                 }
             )
             if not applicability["applicable"]:
-                continue
-            if nm_id not in selected_materialize_nm_ids:
                 continue
             row = _balance_cas_row(
                 conn,
@@ -1003,6 +1333,7 @@ def _activation_plan(
         ),
         "assumed_active_nm_ids": sorted({int(value) for value in assumed_active_nm_ids}),
         "materialize_nm_ids": sorted(selected_materialize_nm_ids),
+        "existing_coverage_proof": existing_coverage_proof,
         "expected_subject": dict(expected_subject),
         "storage": {
             "whole_database_copy": False,
@@ -1010,6 +1341,175 @@ def _activation_plan(
             "bounded_document_count": len(documents),
         },
     }
+
+
+def _document_transport_readback(
+    *,
+    status: Mapping[str, Any],
+    identity: DocumentIdentity,
+    phase: str,
+    error: Exception,
+) -> dict[str, Any]:
+    """Classify ambiguous transport only from the canonical request state."""
+
+    state = str(status.get("state") or "")
+    request_id = str(status.get("request_id") or identity.request_id)
+    if state == "complete":
+        document = dict(status.get("document") or {})
+        return {
+            "request_id": request_id,
+            "document_id": str(document.get("document_id") or ""),
+            "posted_manifest_sha256": str(
+                status.get("posted_manifest_sha256") or ""
+            ),
+            "state": "complete",
+            "transport_reconciled": True,
+        }
+    if state in {"accepted", "processing", "ready", "posted", "replay"}:
+        raise DenseFbsResumableError(
+            "dense_fbs_document_transport_resumable",
+            "Transport failed but canonical request evidence permits exact-id resume",
+            details={
+                "request_id": request_id,
+                "canonical_state": state,
+                "transport_phase": str(phase),
+                "transport_error_type": type(error).__name__,
+                "canonical_submit_repeated": False,
+            },
+        ) from error
+    canonical_error = dict(status.get("error") or {})
+    raise DenseFbsError(
+        str(canonical_error.get("code") or "dense_fbs_document_transport_unresolved"),
+        "Transport result lacks a safe resumable canonical request state",
+        details={
+            "request_id": request_id,
+            "canonical_state": state or "not_found",
+            "transport_phase": str(phase),
+            "transport_error_type": type(error).__name__,
+            "canonical_error": canonical_error,
+        },
+    ) from error
+
+
+def _compact_existing_coverage(
+    conn: sqlite3.Connection,
+    *,
+    facilities: Sequence[Mapping[str, Any]],
+    nm_ids: Sequence[int],
+    as_of_date: str,
+    projection_epoch: int,
+) -> dict[str, Any]:
+    """Hash existing coverage without persisting a facility x SKU cross-product."""
+
+    digest = hashlib.sha256()
+    counts = {"covered": 0, "inapplicable": 0, "missing": 0}
+    incomplete_sample: list[dict[str, Any]] = []
+    pair_count = 0
+    selected_nm_ids = sorted({int(value) for value in nm_ids})
+    for facility in sorted(facilities, key=lambda item: str(item["facility_id"])):
+        facility_id = str(facility["facility_id"])
+        for nm_id in selected_nm_ids:
+            component = fbs_physical_component(
+                conn,
+                facility_id=facility_id,
+                nm_id=nm_id,
+                as_of_date=as_of_date,
+                projection_epoch=int(projection_epoch),
+                facility_active=True,
+                sku_active=True,
+            )
+            state = str(component["state"])
+            coverage_state = (
+                "covered"
+                if state in {"exact", "exact_zero"}
+                else "inapplicable"
+                if state == "inapplicable"
+                else "missing"
+            )
+            counts[coverage_state] += 1
+            pair_count += 1
+            provenance = dict(component.get("provenance") or {})
+            applicability = dict(provenance.get("applicability") or provenance)
+            material = {
+                "facility_id": facility_id,
+                "nm_id": nm_id,
+                "coverage_state": coverage_state,
+                "applicability_event": str(
+                    applicability.get("event")
+                    or applicability.get("event_id")
+                    or ""
+                ),
+                "applicability_reason": str(applicability.get("reason") or ""),
+                "applicability_effective_from": str(
+                    applicability.get("effective_from") or ""
+                ),
+            }
+            digest.update(_json(material).encode("utf-8"))
+            digest.update(b"\n")
+            if coverage_state == "missing" and len(incomplete_sample) < 25:
+                incomplete_sample.append(
+                    {"facility_id": facility_id, "nm_id": nm_id, "state": state}
+                )
+    receipt = {
+        "contract_name": "ff_pool_fbs_compact_existing_coverage_v1",
+        "as_of_date": str(as_of_date),
+        "projection_epoch": int(projection_epoch),
+        "pair_count": pair_count,
+        "covered_count": counts["covered"],
+        "inapplicable_count": counts["inapplicable"],
+        "missing_count": counts["missing"],
+        "incomplete_sample": incomplete_sample,
+        "rows_persisted": False,
+        "stream_sha256": "sha256:" + digest.hexdigest(),
+        "complete": counts["missing"] == 0,
+    }
+    receipt["fingerprint"] = _fingerprint(receipt)
+    return receipt
+
+
+def _verify_compact_existing_coverage(
+    conn: sqlite3.Connection,
+    *,
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    planned = dict(plan.get("existing_coverage_proof") or {})
+    if not planned or int(planned.get("pair_count") or 0) == 0:
+        return planned
+    materialize_nm_ids = {
+        int(value) for value in plan.get("materialize_nm_ids") or []
+    }
+    roster = dict(plan.get("roster") or {})
+    existing_nm_ids = [
+        int(item["nm_id"])
+        for item in roster.get("skus") or []
+        if int(item["nm_id"]) not in materialize_nm_ids
+    ]
+    live = _compact_existing_coverage(
+        conn,
+        facilities=[dict(item) for item in roster.get("facilities") or []],
+        nm_ids=existing_nm_ids,
+        as_of_date=str(plan["effective_from"]),
+        projection_epoch=int(plan["projection_epoch"]),
+    )
+    if not bool(live["complete"]):
+        raise DenseFbsError(
+            "preexisting_dense_fbs_coverage_incomplete",
+            "SKU activation cannot repair pre-existing FBS coverage gaps",
+            details={
+                "missing_count": int(live["missing_count"]),
+                "incomplete_sample": list(live["incomplete_sample"]),
+            },
+        )
+    if str(live["fingerprint"]) != str(planned.get("fingerprint") or ""):
+        raise DenseFbsError(
+            "preexisting_dense_fbs_coverage_drift",
+            "Existing dense FBS coverage changed after SKU activation was staged",
+            details={
+                "planned_fingerprint": str(planned.get("fingerprint") or ""),
+                "live_fingerprint": str(live["fingerprint"]),
+            },
+        )
+    return live
 
 
 def _balance_cas_row(
@@ -1024,6 +1524,35 @@ def _balance_cas_row(
             FROM {BALANCES_TABLE}
             WHERE facility_id=? AND pool='FBS' AND nm_id=? AND projection_epoch=?""",
         (str(facility_id), int(nm_id), int(epoch)),
+    ).fetchone()
+    if row is None:
+        return {"nm_id": int(nm_id), "row_present": False}
+    return {
+        "nm_id": int(nm_id),
+        "row_present": True,
+        "projection_epoch": int(row[0]),
+        "quantity": int(row[1]),
+        "capital_rub": str(row[2]),
+        "wac_rub": row[3],
+        "source_watermark": str(row[4]),
+        "updated_at": str(row[5]),
+    }
+
+
+def _repair_balance_cas_row(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    nm_id: int,
+) -> dict[str, Any]:
+    """Pin absence across every epoch for one future repair target."""
+
+    row = conn.execute(
+        f"""SELECT projection_epoch,quantity,capital_rub,wac_rub,
+                   source_watermark,updated_at
+              FROM {BALANCES_TABLE}
+             WHERE facility_id=? AND pool='FBS' AND nm_id=?""",
+        (str(facility_id), int(nm_id)),
     ).fetchone()
     if row is None:
         return {"nm_id": int(nm_id), "row_present": False}
@@ -1076,39 +1605,556 @@ def _writer_epoch(
     return int(row[0])
 
 
-def _optional_table_digests(conn: sqlite3.Connection) -> dict[str, Any]:
+def _exact_repair_mapping_evidence(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    seller_warehouse_id: int,
+    official_office_id: int,
+) -> dict[str, Any]:
+    mappings = "sheet_vitrina_v1_wb_supplies_fbs_warehouse_facility_mappings"
+    extensions = "sheet_vitrina_v1_ff_pool_fbs_mapping_extensions"
+    allocations = "sheet_vitrina_v1_ff_pool_fbs_mapping_extension_allocations"
     tables = _tables(conn)
-    specifications = {
-        "movement_lines": (LINES_TABLE, "operation_id,line_no"),
-        "operations": (OPERATIONS_TABLE, "operation_id"),
-        "documents": (DOCUMENTS_TABLE, "document_id"),
-        "document_lines": (DOCUMENT_LINES_TABLE, "document_id,line_no"),
-        "reservations_orders": (FBS_CURRENT_TABLE, "cutover_id,order_id"),
-        "applicability_events": (APPLICABILITY_EVENTS_TABLE, "event_sequence"),
-        "inventory_history": (
-            "sheet_vitrina_v1_inventory_history_components",
-            "capture_id,scope_kind,scope_key,component_kind,component_id",
-        ),
-        "functional_balances": (
-            "sheet_vitrina_v1_warehouse_functional_balances",
-            "version_id,warehouse_key,nm_id",
-        ),
-        "wb_snapshots": (
-            "sheet_vitrina_v1_warehouse_wb_snapshots",
-            "snapshot_id",
-        ),
+    blockers: list[str] = []
+    if {mappings, extensions, allocations} - tables:
+        blockers.append("exact Orenburg mapping-extension evidence schema is unavailable")
+        result = {"mapping": {}, "extension": {}, "allocation_count": 0, "blockers": blockers}
+        result["fingerprint"] = _fingerprint(result)
+        return result
+    required_mapping_columns = {
+        "mapping_id",
+        "seller_warehouse_id",
+        "facility_id",
+        "mapping_digest",
+        "active",
+        "official_office_id",
+        "official_evidence_digest",
+    }
+    mapping_columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({mappings})")
+    }
+    if required_mapping_columns - mapping_columns:
+        blockers.append("official warehouse mapping evidence columns are unavailable")
+        result = {"mapping": {}, "extension": {}, "allocation_count": 0, "blockers": blockers}
+        result["fingerprint"] = _fingerprint(result)
+        return result
+    mapping_rows = conn.execute(
+        f"""SELECT mapping_id,seller_warehouse_id,facility_id,mapping_digest,
+                   official_office_id,official_evidence_digest,created_at,created_by
+              FROM {mappings}
+             WHERE seller_warehouse_id=? AND active=1
+             ORDER BY created_at,mapping_id""",
+        (int(seller_warehouse_id),),
+    ).fetchall()
+    exact_mapping_rows = [
+        row
+        for row in mapping_rows
+        if str(row[2]) == str(facility_id)
+        and int(row[4]) == int(official_office_id)
+        and bool(str(row[3] or ""))
+        and bool(str(row[5] or ""))
+    ]
+    if len(mapping_rows) != 1 or len(exact_mapping_rows) != 1:
+        blockers.append(
+            "seller warehouse mapping is not one exact active "
+            f"{seller_warehouse_id}/{official_office_id}->{facility_id} identity"
+        )
+    mapping = dict(exact_mapping_rows[0]) if len(exact_mapping_rows) == 1 else {}
+    extension_rows = (
+        conn.execute(
+            f"""SELECT extension_id,cutover_id,warehouse_mapping_id,
+                       seller_warehouse_id,official_office_id,facility_id,
+                       source_receipt_document_id,source_receipt_root_document_id,
+                       source_receipt_digest,mapping_digest,official_evidence_digest,
+                       frozen_rows_digest,plan_fingerprint,deployed_sha,
+                       approval_reference,created_by,created_at
+                  FROM {extensions}
+                 WHERE warehouse_mapping_id=? AND seller_warehouse_id=?
+                   AND official_office_id=? AND facility_id=?
+                 ORDER BY created_at,extension_id""",
+            (
+                str(mapping.get("mapping_id") or ""),
+                int(seller_warehouse_id),
+                int(official_office_id),
+                str(facility_id),
+            ),
+        ).fetchall()
+        if mapping
+        else []
+    )
+    if len(extension_rows) != 1:
+        blockers.append("exact accepted Orenburg mapping extension is missing or ambiguous")
+    extension = dict(extension_rows[0]) if len(extension_rows) == 1 else {}
+    if extension and (
+        str(extension.get("mapping_digest") or "")
+        != str(mapping.get("mapping_digest") or "")
+        or str(extension.get("official_evidence_digest") or "")
+        != str(mapping.get("official_evidence_digest") or "")
+        or len(str(extension.get("deployed_sha") or "")) != 40
+        or not all(
+            str(extension.get(key) or "")
+            for key in (
+                "source_receipt_document_id",
+                "source_receipt_root_document_id",
+                "source_receipt_digest",
+                "frozen_rows_digest",
+                "plan_fingerprint",
+                "approval_reference",
+            )
+        )
+    ):
+        blockers.append("Orenburg mapping extension provenance is incomplete or drifted")
+    allocation_count, allocation_digest = (
+        _streaming_query_digest(
+            conn,
+            f"""SELECT extension_id,nm_id,opening_quantity,opening_capital_rub,
+                       frozen_wac_rub,source_balance_watermark,allocation_digest,created_at
+                  FROM {allocations} WHERE extension_id=? ORDER BY nm_id""",
+            (str(extension.get("extension_id") or ""),),
+        )
+        if extension
+        else (0, _fingerprint([]))
+    )
+    allocation_nm_ids = (
+        [
+            int(row[0])
+            for row in conn.execute(
+                f"SELECT nm_id FROM {allocations} WHERE extension_id=? ORDER BY nm_id",
+                (str(extension.get("extension_id") or ""),),
+            ).fetchall()
+        ]
+        if extension
+        else []
+    )
+    result = {
+        "seller_warehouse_id": int(seller_warehouse_id),
+        "official_office_id": int(official_office_id),
+        "facility_id": str(facility_id),
+        "mapping": mapping,
+        "extension": extension,
+        "allocation_count": allocation_count,
+        "allocation_nm_ids": allocation_nm_ids,
+        "allocation_digest": allocation_digest,
+        "blockers": blockers,
+    }
+    result["fingerprint"] = _fingerprint(result)
+    return result
+
+
+def _target_effect_evidence(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    seller_warehouse_id: int,
+    nm_ids: Sequence[int],
+) -> dict[str, Any]:
+    tables = _tables(conn)
+    selected = sorted({int(value) for value in nm_ids})
+    placeholders = ",".join("?" for _ in selected)
+    empty = (0, _fingerprint([]))
+    specifications: dict[str, tuple[str, tuple[Any, ...]] | None] = {
+        "movement_lines": (
+            f"""SELECT line.operation_id,line.line_no,line.facility_id,line.pool,
+                       line.nm_id,line.quantity_delta,line.capital_delta_rub,
+                       line.wac_snapshot_rub,line.metadata_json,
+                       operation.business_date,operation.posted_at
+                  FROM {LINES_TABLE} line
+                  JOIN {OPERATIONS_TABLE} operation USING(operation_id)
+                 WHERE line.facility_id=? AND line.pool='FBS'
+                   AND line.nm_id IN ({placeholders})
+                 ORDER BY line.operation_id,line.line_no""",
+            (str(facility_id), *selected),
+        ) if LINES_TABLE in tables else None,
+        "document_lines": (
+            f"""SELECT document_id,line_no,facility_id,pool,nm_id,line_role,
+                       quantity,capital_rub,expense_rub,metadata_json
+                  FROM {DOCUMENT_LINES_TABLE}
+                 WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
+                 ORDER BY document_id,line_no""",
+            (str(facility_id), *selected),
+        ) if DOCUMENT_LINES_TABLE in tables else None,
+        "lifecycle_events": (
+            f"""SELECT event_sequence,event_id,order_id,event_type,facility_id,nm_id,
+                       physical_quantity_delta,evidence_digest,occurred_at
+                  FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events
+                 WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
+                 ORDER BY event_sequence""",
+            (str(facility_id), *selected),
+        ) if "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events" in tables else None,
+        "lifecycle_current": (
+            f"""SELECT cutover_id,order_id,state,facility_id,nm_id,quantity,updated_at
+                  FROM {FBS_CURRENT_TABLE}
+                 WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
+                 ORDER BY cutover_id,order_id""",
+            (str(facility_id), *selected),
+        ) if FBS_CURRENT_TABLE in tables else None,
+        "legacy_reservations": (
+            f"""SELECT operation.operation_id,operation.supply_id,
+                       line.line_no,line.nm_id,line.quantity_delta
+                  FROM sheet_vitrina_v1_ff_stock_reservation_lines line
+                  JOIN sheet_vitrina_v1_ff_stock_reservation_operations operation
+                    ON operation.operation_id=line.operation_id
+                 WHERE line.nm_id IN ({placeholders})
+                 ORDER BY operation.operation_id,line.line_no""",
+            tuple(selected),
+        ) if {
+            "sheet_vitrina_v1_ff_stock_reservation_lines",
+            "sheet_vitrina_v1_ff_stock_reservation_operations",
+        } <= tables else None,
+        "official_orders": (
+            f"""SELECT observation_sequence,order_id,source_revision,warehouse_id,
+                       office_id,nm_id,observed_at
+                  FROM sheet_vitrina_v1_wb_supplies_fbs_order_observations
+                 WHERE warehouse_id=? AND nm_id IN ({placeholders})
+                 ORDER BY observation_sequence""",
+            (int(seller_warehouse_id), *selected),
+        ) if "sheet_vitrina_v1_wb_supplies_fbs_order_observations" in tables else None,
+        "identity_mapped_order_evidence": (
+            f"""SELECT evidence.evidence_sequence,evidence.order_id,
+                       evidence.order_revision,evidence.warehouse_id,
+                       evidence.nm_id,evidence.identity_mapping_id,
+                       mapping.target_nm_id,evidence.outcome,evidence.observed_at
+                  FROM sheet_vitrina_v1_wb_supplies_fbs_identity_evidence evidence
+                  JOIN sheet_vitrina_v1_wb_supplies_fbs_identity_mappings mapping
+                    ON mapping.mapping_id=evidence.identity_mapping_id
+                 WHERE mapping.target_nm_id IN ({placeholders})
+                 ORDER BY evidence.evidence_sequence""",
+            tuple(selected),
+        ) if {
+            "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence",
+            "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings",
+        } <= tables else None,
     }
     result: dict[str, Any] = {}
-    for key, (table, order) in specifications.items():
-        if table not in tables:
-            result[f"{key}_count"] = 0
-            result[f"{key}_digest"] = _fingerprint([])
-            continue
-        count, digest = _streaming_query_digest(
-            conn, f"SELECT * FROM {table} ORDER BY {order}"
+    total = 0
+    for key, specification in specifications.items():
+        count, digest = (
+            _streaming_query_digest(conn, specification[0], specification[1])
+            if specification is not None
+            else empty
         )
         result[f"{key}_count"] = count
         result[f"{key}_digest"] = digest
+        total += count
+    result["effect_row_count"] = total
+    result["fingerprint"] = _fingerprint(result)
+    return result
+
+
+def _historical_zero_evidence(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    nm_ids: Sequence[int],
+    business_date: str,
+) -> dict[str, Any]:
+    captures = "sheet_vitrina_v1_inventory_history_captures"
+    components = "sheet_vitrina_v1_inventory_history_components"
+    finalizations = "sheet_vitrina_v1_inventory_history_finalizations"
+    tables = _tables(conn)
+    blockers: list[str] = []
+    selected = sorted({int(value) for value in nm_ids})
+    if {captures, components, finalizations} - tables:
+        blockers.append("accepted inventory-history evidence schema is unavailable")
+        result = {"business_date": str(business_date), "rows": [], "blockers": blockers}
+        result["fingerprint"] = _fingerprint(result)
+        return result
+    finalization = conn.execute(
+        f"""SELECT finalization_sequence,finalization_id,capture_id,
+                   finalization_identity,finalization_digest,finalized_at
+              FROM {finalizations} WHERE business_date=?
+             ORDER BY finalization_sequence DESC LIMIT 1""",
+        (str(business_date),),
+    ).fetchone()
+    if finalization is None:
+        blockers.append(f"latest accepted history is missing for {business_date}")
+        result = {"business_date": str(business_date), "rows": [], "blockers": blockers}
+        result["fingerprint"] = _fingerprint(result)
+        return result
+    capture = conn.execute(
+        f"""SELECT capture_id,business_date,capture_kind,formula_version,
+                   bundle_version,ready_snapshot_id,ready_plan_version,
+                   generation_identity,facility_roster_revision,source_digest,
+                   captured_at
+              FROM {captures} WHERE capture_id=?""",
+        (str(finalization[2]),),
+    ).fetchone()
+    if capture is None or str(capture[1]) != str(business_date):
+        blockers.append("latest finalization does not bind an exact same-date capture")
+    placeholders = ",".join("?" for _ in selected)
+    rows = [
+        {
+            "nm_id": int(row[0]),
+            "state": str(row[1]),
+            "quantity": row[2],
+            "source_revision": str(row[3]),
+            "source_digest": str(row[4]),
+            "source_watermark": str(row[5]),
+            "provenance": json.loads(str(row[6] or "{}")),
+        }
+        for row in conn.execute(
+            f"""SELECT nm_id,state,quantity,source_revision,source_digest,
+                       source_watermark,provenance_json
+                  FROM {components}
+                 WHERE capture_id=? AND component_kind='FBS_FACILITY'
+                   AND component_id=? AND nm_id IN ({placeholders})
+                 ORDER BY nm_id""",
+            (str(finalization[2]), str(facility_id), *selected),
+        ).fetchall()
+    ]
+    if [item["nm_id"] for item in rows] != selected:
+        blockers.append(
+            f"{business_date} accepted history does not cover the exact target set"
+        )
+    invalid = [
+        item["nm_id"]
+        for item in rows
+        if item["state"] != "exact_zero"
+        or int(item["quantity"] if item["quantity"] is not None else -1) != 0
+        or str(item["provenance"].get("source") or "")
+        != "fbs_mapping_extension_allocation"
+    ]
+    if invalid:
+        blockers.append(
+            "historical targets are not exact_zero with mapping-extension provenance: "
+            + ", ".join(map(str, invalid))
+        )
+    next_date = (
+        datetime.fromisoformat(str(business_date)).date()
+        + timedelta(days=1)
+    ).isoformat()
+    next_finalization = conn.execute(
+        f"""SELECT capture_id,finalization_digest FROM {finalizations}
+             WHERE business_date=? ORDER BY finalization_sequence DESC LIMIT 1""",
+        (next_date,),
+    ).fetchone()
+    next_rows: list[dict[str, Any]] = []
+    if next_finalization is not None:
+        next_rows = [
+            {
+                "nm_id": int(row[0]),
+                "state": str(row[1]),
+                "quantity": row[2],
+                "provenance": json.loads(str(row[3] or "{}")),
+            }
+            for row in conn.execute(
+                f"""SELECT nm_id,state,quantity,provenance_json FROM {components}
+                     WHERE capture_id=? AND component_kind='FBS_FACILITY'
+                       AND component_id=? AND nm_id IN ({placeholders})
+                     ORDER BY nm_id""",
+                (str(next_finalization[0]), str(facility_id), *selected),
+            ).fetchall()
+        ]
+    retrocopied = [
+        item["nm_id"]
+        for item in next_rows
+        if "dense_fbs" in str(item["provenance"].get("source") or "")
+    ]
+    if retrocopied:
+        blockers.append("25-Aug history contains forbidden current dense-FBS retrocopy")
+    result = {
+        "business_date": str(business_date),
+        "latest_finalization": dict(finalization),
+        "accepted_capture": dict(capture) if capture is not None else {},
+        "rows": rows,
+        "exact_zero_count": sum(item["state"] == "exact_zero" for item in rows),
+        "mapping_extension_provenance_count": sum(
+            str(item["provenance"].get("source") or "")
+            == "fbs_mapping_extension_allocation"
+            for item in rows
+        ),
+        "next_business_date": next_date,
+        "next_day_finalization_digest": (
+            str(next_finalization[1]) if next_finalization is not None else ""
+        ),
+        "next_day_target_count": len(next_rows),
+        "next_day_target_digest": _fingerprint(next_rows),
+        "forbidden_next_day_retrocopy_count": len(retrocopied),
+        "query_only_no_history_rewrite": True,
+        "blockers": blockers,
+    }
+    result["fingerprint"] = _fingerprint(result)
+    return result
+
+
+def _scoped_repair_non_targets(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    roster_nm_ids: Sequence[int],
+    target_nm_ids: Sequence[int],
+    historical_business_date: str,
+    seller_warehouse_id: int,
+) -> dict[str, Any]:
+    tables = _tables(conn)
+    roster = sorted({int(value) for value in roster_nm_ids})
+    targets = {int(value) for value in target_nm_ids}
+    non_targets = [value for value in roster if value not in targets]
+    roster_placeholders = ",".join("?" for _ in roster) or "NULL"
+    non_target_placeholders = ",".join("?" for _ in non_targets) or "NULL"
+    result: dict[str, Any] = {}
+
+    def record(key: str, sql: str | None, parameters: Sequence[Any] = ()) -> None:
+        count, digest = (
+            _streaming_query_digest(conn, sql, parameters)
+            if sql is not None
+            else (0, _fingerprint([]))
+        )
+        result[f"{key}_count"] = count
+        result[f"{key}_digest"] = digest
+
+    record(
+        "moscow_fbs_balances",
+        f"""SELECT balance.facility_id,balance.nm_id,balance.projection_epoch,
+                   balance.quantity,balance.capital_rub,balance.wac_rub,
+                   balance.source_watermark,balance.updated_at
+              FROM {BALANCES_TABLE} balance
+              JOIN {FACILITIES_TABLE} facility USING(facility_id)
+             WHERE balance.facility_id<>? AND balance.pool='FBS'
+               AND balance.nm_id IN ({roster_placeholders})
+             ORDER BY balance.facility_id,balance.nm_id""",
+        (str(facility_id), *roster),
+    )
+    record(
+        "fbo_balances",
+        f"""SELECT facility_id,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+                   source_watermark,updated_at FROM {BALANCES_TABLE}
+             WHERE pool='FBO' AND nm_id IN ({roster_placeholders})
+             ORDER BY facility_id,nm_id""",
+        tuple(roster),
+    )
+    record(
+        "target_facility_non_target_movements",
+        f"""SELECT line.operation_id,line.line_no,line.nm_id,line.quantity_delta,
+                   line.capital_delta_rub,line.wac_snapshot_rub,line.metadata_json,
+                   operation.business_date,operation.posted_at
+              FROM {LINES_TABLE} line
+              JOIN {OPERATIONS_TABLE} operation USING(operation_id)
+             WHERE line.facility_id=? AND line.pool='FBS'
+               AND line.nm_id IN ({non_target_placeholders})
+             ORDER BY line.operation_id,line.line_no"""
+        if {LINES_TABLE, OPERATIONS_TABLE} <= tables else None,
+        (str(facility_id), *non_targets),
+    )
+    record(
+        "target_facility_non_target_documents",
+        f"""SELECT document_id,line_no,nm_id,line_role,quantity,capital_rub,expense_rub,
+                   metadata_json FROM {DOCUMENT_LINES_TABLE}
+             WHERE facility_id=? AND pool='FBS'
+               AND nm_id IN ({non_target_placeholders})
+             ORDER BY document_id,line_no""" if DOCUMENT_LINES_TABLE in tables else None,
+        (str(facility_id), *non_targets),
+    )
+    record(
+        "reservations_orders",
+        f"""SELECT cutover_id,order_id,state,facility_id,nm_id,quantity,
+                   frozen_wac_rub,updated_at FROM {FBS_CURRENT_TABLE}
+             WHERE facility_id=? AND pool='FBS'
+               AND nm_id IN ({non_target_placeholders})
+             ORDER BY cutover_id,order_id""" if FBS_CURRENT_TABLE in tables else None,
+        (str(facility_id), *non_targets),
+    )
+    record(
+        "official_orders",
+        f"""SELECT observation_sequence,order_id,source_revision,warehouse_id,
+                   office_id,nm_id,observed_at
+              FROM sheet_vitrina_v1_wb_supplies_fbs_order_observations
+             WHERE warehouse_id=? AND nm_id IN ({non_target_placeholders})
+             ORDER BY observation_sequence"""
+        if "sheet_vitrina_v1_wb_supplies_fbs_order_observations" in tables
+        else None,
+        (int(seller_warehouse_id), *non_targets),
+    )
+    active_version = (
+        conn.execute(
+            "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active "
+            "WHERE slot=1"
+        ).fetchone()
+        if "sheet_vitrina_v1_warehouse_functional_active" in tables
+        else None
+    )
+    record(
+        "functional_aggregate_cost_wac",
+        f"""SELECT version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                   cost_covered_quantity,quality,certified,wb_quantity,
+                   wb_in_way_to_client,wb_in_way_from_client
+              FROM sheet_vitrina_v1_warehouse_functional_balances
+             WHERE version_id=? AND nm_id IN ({roster_placeholders})
+             ORDER BY warehouse_key,nm_id"""
+        if active_version is not None
+        and "sheet_vitrina_v1_warehouse_functional_balances" in tables
+        else None,
+        ((str(active_version[0]), *roster) if active_version is not None else ()),
+    )
+    record(
+        "wb_snapshots",
+        """SELECT snapshot.snapshot_id,snapshot.version_id,snapshot.fetched_at,
+                  snapshot.snapshot_date,snapshot.pagination_complete,
+                  snapshot.page_count,snapshot.raw_row_count,snapshot.raw_rows_digest,
+                  snapshot.created_at
+             FROM sheet_vitrina_v1_warehouse_functional_active active
+             JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+               ON snapshot.version_id=active.version_id
+            WHERE active.slot=1 ORDER BY snapshot.snapshot_id"""
+        if {
+            "sheet_vitrina_v1_warehouse_functional_active",
+            "sheet_vitrina_v1_warehouse_wb_snapshots",
+        } <= tables
+        else None,
+    )
+    history_captures = "sheet_vitrina_v1_inventory_history_captures"
+    history_components = "sheet_vitrina_v1_inventory_history_components"
+    history_finalizations = "sheet_vitrina_v1_inventory_history_finalizations"
+    history_dates = [
+        str(historical_business_date),
+        (
+            datetime.fromisoformat(str(historical_business_date)).date()
+            + timedelta(days=1)
+        ).isoformat(),
+    ]
+    history_capture_ids: list[str] = []
+    if {history_captures, history_components, history_finalizations} <= tables:
+        for business_date in history_dates:
+            row = conn.execute(
+                f"""SELECT capture_id FROM {history_finalizations}
+                     WHERE business_date=? ORDER BY finalization_sequence DESC LIMIT 1""",
+                (business_date,),
+            ).fetchone()
+            if row is not None:
+                history_capture_ids.append(str(row[0]))
+    history_placeholders = ",".join("?" for _ in history_capture_ids) or "NULL"
+    record(
+        "inventory_history",
+        f"""SELECT capture_id,scope_kind,scope_key,nm_id,component_kind,
+                   component_id,state,quantity,source_revision,source_digest,
+                   source_watermark,provenance_json
+              FROM {history_components}
+             WHERE capture_id IN ({history_placeholders})
+               AND (nm_id IS NULL OR nm_id IN ({roster_placeholders}))
+             ORDER BY capture_id,scope_kind,scope_key,component_kind,component_id"""
+        if history_capture_ids else None,
+        (*history_capture_ids, *roster),
+    )
+    record(
+        "applicability_events",
+        f"""SELECT event_sequence,event_id,facility_id,nm_id,state,effective_from,
+                   reason,provenance_json,actor,recorded_at
+              FROM {APPLICABILITY_EVENTS_TABLE}
+             WHERE nm_id IN ({roster_placeholders})
+             ORDER BY event_sequence"""
+        if APPLICABILITY_EVENTS_TABLE in tables else None,
+        tuple(roster),
+    )
+    result["scope"] = {
+        "facility_id": str(facility_id),
+        "roster_nm_id_count": len(roster),
+        "target_nm_id_count": len(targets),
+        "non_target_nm_id_count": len(non_targets),
+        "history_dates": history_dates,
+        "unscoped_operational_table_hashes": False,
+    }
+    result["fingerprint"] = _fingerprint(result)
     return result
 
 
@@ -1164,9 +2210,37 @@ def _intent_from_row(
     }
 
 
+def _recoverable_materialization_error(exc: Exception) -> bool:
+    """Keep transient local I/O failures resumable under the exact durable intent."""
+
+    if isinstance(exc, DenseFbsError):
+        return False
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, sqlite3.OperationalError):
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "database is locked",
+                "database table is locked",
+                "database is busy",
+                "interrupted",
+                "disk i/o error",
+            )
+        )
+    return isinstance(exc, OSError) and exc.errno in {
+        errno.EAGAIN,
+        errno.EINTR,
+        errno.ETIMEDOUT,
+        errno.ECONNABORTED,
+        errno.ECONNRESET,
+        errno.EPIPE,
+    }
+
+
 def _business_date(timestamp: str) -> str:
-    parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-    return parsed.astimezone(ZoneInfo("Asia/Yekaterinburg")).date().isoformat()
+    return business_date_from_timestamp(timestamp)
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:

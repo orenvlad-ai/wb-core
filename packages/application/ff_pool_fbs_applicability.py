@@ -8,14 +8,17 @@ coerced to zero by this module.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import sqlite3
 from typing import Any, Mapping, Sequence
-from zoneinfo import ZoneInfo
 
+from packages.business_time import (
+    business_date_from_timestamp,
+    current_business_date_iso,
+)
 from packages.application.ff_pool_foundation import BALANCES_TABLE, FACILITIES_TABLE
 
 
@@ -24,7 +27,7 @@ APPLICABILITY_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_applicability_events"
 DENSE_INTENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_dense_intents"
 DENSE_INTENT_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_dense_intent_events"
 NOMENCLATURE_TABLE = "sheet_vitrina_v1_nomenclature_items"
-FBS_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_order_current"
+FBS_CURRENT_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_current"
 DOCUMENTS_TABLE = "sheet_vitrina_v1_ff_pool_documents"
 DOCUMENT_LINES_TABLE = "sheet_vitrina_v1_ff_pool_document_lines"
 REQUESTS_TABLE = "sheet_vitrina_v1_ff_pool_document_requests"
@@ -32,12 +35,24 @@ REQUESTS_TABLE = "sheet_vitrina_v1_ff_pool_document_requests"
 COMPONENT_STATES = frozenset({"exact", "exact_zero", "missing", "inapplicable"})
 APPLICABILITY_STATES = frozenset({"applicable", "inapplicable"})
 INTENT_STATES = frozenset(
-    {"staged", "materializing", "materialized", "active", "blocked"}
+    {"staged", "materializing", "resumable", "materialized", "active", "blocked"}
 )
-BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+FBS_LIFECYCLE_CURRENT_TABLE = FBS_CURRENT_TABLE
+FBS_LIFECYCLE_EVENTS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+FBS_RECONCILIATION_TABLE = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
+FBS_IDENTITY_PENDING_TABLE = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+)
+FBS_ORDER_OBSERVATIONS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+FBS_ORDER_STATUS_CURRENT_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+FBS_IDENTITY_MAPPINGS_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings"
+FBS_IDENTITY_EVIDENCE_TABLE = "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence"
+LEGACY_RESERVATION_OPERATIONS_TABLE = "sheet_vitrina_v1_ff_stock_reservation_operations"
+LEGACY_RESERVATION_LINES_TABLE = "sheet_vitrina_v1_ff_stock_reservation_lines"
 
 
-class FbsApplicabilityError(RuntimeError):
+class FbsApplicabilityError(ValueError):
     def __init__(self, code: str, message: str, *, details: Any = None) -> None:
         super().__init__(message)
         self.code = str(code)
@@ -68,6 +83,8 @@ def ensure_ff_pool_fbs_applicability_schema(conn: sqlite3.Connection) -> None:
         ON {APPLICABILITY_EVENTS_TABLE}(
             facility_id,nm_id,effective_from DESC,event_sequence DESC
         );
+        CREATE INDEX IF NOT EXISTS ff_pool_fbs_applicability_by_nm
+        ON {APPLICABILITY_EVENTS_TABLE}(nm_id,event_sequence DESC);
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_applicability_no_update
         BEFORE UPDATE ON {APPLICABILITY_EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS applicability evidence is immutable'); END;
@@ -107,7 +124,7 @@ def ensure_ff_pool_fbs_applicability_schema(conn: sqlite3.Connection) -> None:
             event_id TEXT NOT NULL UNIQUE,
             intent_id TEXT NOT NULL REFERENCES {DENSE_INTENTS_TABLE}(intent_id),
             state TEXT NOT NULL
-                CHECK(state IN ('staged','materializing','materialized','active','blocked')),
+                CHECK(state IN ('staged','materializing','resumable','materialized','active','blocked')),
             receipt_json TEXT NOT NULL DEFAULT '{{}}' CHECK(json_valid(receipt_json)),
             receipt_fingerprint TEXT NOT NULL,
             recorded_at TEXT NOT NULL
@@ -127,16 +144,15 @@ def ensure_ff_pool_fbs_applicability_schema(conn: sqlite3.Connection) -> None:
 
 
 def current_business_date(value: str | None = None) -> str:
+    """Normalize through the canonical EKT business-time implementation."""
+
     if value:
         token = str(value).strip()
         if len(token) == 10:
             date.fromisoformat(token)
             return token
-        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            raise ValueError("Timestamp must include an explicit timezone")
-        return parsed.astimezone(BUSINESS_TIMEZONE).date().isoformat()
-    return datetime.now(timezone.utc).astimezone(BUSINESS_TIMEZONE).date().isoformat()
+        return business_date_from_timestamp(token)
+    return current_business_date_iso()
 
 
 def stock_managed_nomenclature(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -169,6 +185,22 @@ def stock_managed_nomenclature(conn: sqlite3.Connection) -> list[dict[str, Any]]
             }
         )
     return result
+
+
+def nomenclature_sku_active_or_unmanaged(
+    conn: sqlite3.Connection, *, nm_id: int
+) -> bool:
+    """Preserve legacy writers unless this nmId has a managed registry identity."""
+
+    if NOMENCLATURE_TABLE not in _tables(conn):
+        return True
+    rows = conn.execute(
+        f"SELECT is_active,is_hidden FROM {NOMENCLATURE_TABLE} WHERE nm_id=?",
+        (int(nm_id),),
+    ).fetchall()
+    if not rows:
+        return True
+    return any(bool(row[0]) and not bool(row[1]) for row in rows)
 
 
 def fbs_pair_applicability(
@@ -351,6 +383,10 @@ def require_fbs_pair_writeable(
         f"SELECT active FROM {FACILITIES_TABLE} WHERE facility_id=?",
         (str(facility_id),),
     ).fetchone()
+    sku_active = nomenclature_sku_active_or_unmanaged(
+        conn,
+        nm_id=int(nm_id),
+    )
     component = fbs_physical_component(
         conn,
         facility_id=facility_id,
@@ -358,7 +394,7 @@ def require_fbs_pair_writeable(
         as_of_date=effective_date,
         projection_epoch=projection_epoch,
         facility_active=bool(facility[0]) if facility is not None else False,
-        sku_active=True,
+        sku_active=sku_active,
     )
     if component["state"] == "missing":
         raise FbsApplicabilityError(
@@ -390,6 +426,257 @@ def require_fbs_pair_writeable(
             },
         )
     return component
+
+
+def require_fbs_sku_retirable(
+    conn: sqlite3.Connection,
+    *,
+    nm_id: int,
+) -> dict[str, Any]:
+    """Prove that retiring one stock-managed SKU cannot hide live FBS truth."""
+
+    selected_nm_id = int(nm_id)
+    if selected_nm_id <= 0:
+        raise FbsApplicabilityError(
+            "sku_retirement_identity_invalid",
+            "Stock-managed SKU retirement requires a positive prior nmId",
+        )
+    tables = _tables(conn)
+    nonzero_rows: list[dict[str, Any]] = []
+    if BALANCES_TABLE in tables:
+        for row in conn.execute(
+            f"""SELECT facility_id,quantity,capital_rub,wac_rub,source_watermark
+                  FROM {BALANCES_TABLE}
+                 WHERE pool='FBS' AND nm_id=?
+                 ORDER BY facility_id,projection_epoch""",
+            (selected_nm_id,),
+        ).fetchall():
+            if (
+                int(row[1]) != 0
+                or _decimal(row[2]) != Decimal("0")
+                or row[3] is not None
+            ):
+                nonzero_rows.append(
+                    {
+                        "facility_id": str(row[0]),
+                        "quantity": int(row[1]),
+                        "capital_rub": str(row[2]),
+                        "wac_rub": row[3],
+                        "source_watermark": str(row[4]),
+                    }
+                )
+
+    incomplete_coverage: list[dict[str, Any]] = []
+    if FACILITIES_TABLE in tables and BALANCES_TABLE in tables:
+        as_of_date = current_business_date()
+        for row in conn.execute(
+            f"SELECT facility_id FROM {FACILITIES_TABLE} WHERE active=1 ORDER BY facility_id"
+        ).fetchall():
+            facility_id = str(row[0])
+            component = fbs_physical_component(
+                conn,
+                facility_id=facility_id,
+                nm_id=selected_nm_id,
+                as_of_date=as_of_date,
+                facility_active=True,
+                sku_active=True,
+            )
+            if component["state"] == "missing":
+                incomplete_coverage.append(
+                    {
+                        "facility_id": facility_id,
+                        "state": "missing",
+                        "reason": str(component["reason"]),
+                    }
+                )
+
+    active_lifecycle_reservations: list[dict[str, Any]] = []
+    if FBS_LIFECYCLE_CURRENT_TABLE in tables:
+        active_lifecycle_reservations = [
+            {
+                "cutover_id": str(row[0]),
+                "order_id": int(row[1]),
+                "facility_id": str(row[2]),
+                "quantity": int(row[3]),
+            }
+            for row in conn.execute(
+                f"""SELECT cutover_id,order_id,facility_id,quantity
+                      FROM {FBS_LIFECYCLE_CURRENT_TABLE}
+                     WHERE pool='FBS' AND nm_id=? AND state='reserved'
+                     ORDER BY cutover_id,order_id""",
+                (selected_nm_id,),
+            ).fetchall()
+        ]
+
+    legacy_reserved_quantity = Decimal("0")
+    if {
+        LEGACY_RESERVATION_OPERATIONS_TABLE,
+        LEGACY_RESERVATION_LINES_TABLE,
+    } <= tables:
+        legacy_reserved_quantity = _decimal(
+            conn.execute(
+                f"""SELECT COALESCE(SUM(line.quantity_delta),0)
+                      FROM {LEGACY_RESERVATION_LINES_TABLE} line
+                      JOIN {LEGACY_RESERVATION_OPERATIONS_TABLE} operation
+                        ON operation.operation_id=line.operation_id
+                     WHERE line.nm_id=?""",
+                (selected_nm_id,),
+            ).fetchone()[0]
+        )
+
+    open_reconciliation: list[dict[str, Any]] = []
+    if {FBS_RECONCILIATION_TABLE, FBS_LIFECYCLE_EVENTS_TABLE} <= tables:
+        open_reconciliation = [
+            {
+                "reconciliation_id": str(row[0]),
+                "order_id": int(row[1]),
+                "facility_id": str(row[2]),
+            }
+            for row in conn.execute(
+                f"""SELECT lane.reconciliation_id,lane.order_id,event.facility_id
+                      FROM {FBS_RECONCILIATION_TABLE} lane
+                      JOIN {FBS_LIFECYCLE_EVENTS_TABLE} event
+                        ON event.event_id=lane.event_id
+                     WHERE lane.state='open' AND event.pool='FBS' AND event.nm_id=?
+                     ORDER BY lane.reconciliation_id""",
+                (selected_nm_id,),
+            ).fetchall()
+        ]
+
+    unresolved_identity_orders: list[int] = []
+    if {
+        FBS_IDENTITY_PENDING_TABLE,
+        FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE,
+        FBS_ORDER_OBSERVATIONS_TABLE,
+    } <= tables:
+        unresolved_identity_orders = [
+            int(row[0])
+            for row in conn.execute(
+                f"""SELECT DISTINCT pending.order_id
+                      FROM {FBS_IDENTITY_PENDING_TABLE} pending
+                      JOIN {FBS_ORDER_OBSERVATIONS_TABLE} observation
+                        ON observation.order_id=pending.order_id
+                      LEFT JOIN {FBS_IDENTITY_PENDING_RESOLUTIONS_TABLE} resolution
+                        ON resolution.pending_id=pending.pending_id
+                     WHERE observation.nm_id=? AND resolution.pending_id IS NULL
+                     ORDER BY pending.order_id""",
+                (selected_nm_id,),
+            ).fetchall()
+        ]
+
+    unfinished_orders: list[dict[str, Any]] = []
+    if {FBS_ORDER_OBSERVATIONS_TABLE, FBS_ORDER_STATUS_CURRENT_TABLE} <= tables:
+        lifecycle_join = (
+            f"LEFT JOIN {FBS_LIFECYCLE_CURRENT_TABLE} lifecycle "
+            "ON lifecycle.order_id=observation.order_id"
+            if FBS_LIFECYCLE_CURRENT_TABLE in tables
+            else ""
+        )
+        lifecycle_state = (
+            "COALESCE(lifecycle.state,'')" if lifecycle_join else "''"
+        )
+        identity_scope = ""
+        parameters: tuple[Any, ...] = (selected_nm_id,)
+        if {FBS_IDENTITY_MAPPINGS_TABLE, FBS_IDENTITY_EVIDENCE_TABLE} <= tables:
+            identity_scope = f"""
+                    UNION
+                    SELECT evidence.order_id
+                      FROM {FBS_IDENTITY_EVIDENCE_TABLE} evidence
+                      JOIN {FBS_IDENTITY_MAPPINGS_TABLE} mapping
+                        ON mapping.mapping_id=evidence.identity_mapping_id
+                     WHERE mapping.target_nm_id=?
+                """
+            parameters = (selected_nm_id, selected_nm_id)
+        rows = conn.execute(
+            f"""WITH latest_order AS (
+                     SELECT observation.order_id,
+                            MAX(observation.observation_sequence) observation_sequence
+                       FROM {FBS_ORDER_OBSERVATIONS_TABLE} observation
+                      WHERE observation.order_id IN (
+                            SELECT direct.order_id
+                              FROM {FBS_ORDER_OBSERVATIONS_TABLE} direct
+                             WHERE direct.nm_id=?
+                            {identity_scope}
+                      )
+                      GROUP BY observation.order_id
+                 )
+                 SELECT observation.order_id,status.supplier_status,status.wb_status,
+                        {lifecycle_state} lifecycle_state
+                   FROM latest_order
+                   JOIN {FBS_ORDER_OBSERVATIONS_TABLE} observation
+                     ON observation.observation_sequence=latest_order.observation_sequence
+                   LEFT JOIN {FBS_ORDER_STATUS_CURRENT_TABLE} status
+                     ON status.order_id=observation.order_id
+                   {lifecycle_join}
+                  ORDER BY observation.order_id""",
+            parameters,
+        ).fetchall()
+        terminal_lifecycle = {
+            "released",
+            "fulfilled",
+            "fulfilled_reconciliation",
+            "cancelled_noop",
+            "late_pre_t_isolated",
+        }
+        terminal_wb = {
+            "sold",
+            "accepted_by_client",
+            "canceled",
+            "canceled_by_client",
+            "declined_by_client",
+            "defect",
+        }
+        for row in rows:
+            supplier_status = str(row[1] or "")
+            wb_status = str(row[2] or "")
+            lifecycle_state_value = str(row[3] or "")
+            terminal = (
+                lifecycle_state_value in terminal_lifecycle
+                or supplier_status == "cancel"
+                or wb_status in terminal_wb
+            )
+            if not terminal:
+                unfinished_orders.append(
+                    {
+                        "order_id": int(row[0]),
+                        "supplier_status": supplier_status,
+                        "wb_status": wb_status,
+                        "lifecycle_state": lifecycle_state_value,
+                    }
+                )
+
+    blockers = {
+        "nonzero_fbs_rows": nonzero_rows,
+        "incomplete_coverage": incomplete_coverage,
+        "active_lifecycle_reservations": active_lifecycle_reservations,
+        "legacy_reserved_quantity": str(legacy_reserved_quantity),
+        "open_reconciliation": open_reconciliation,
+        "unresolved_identity_order_ids": unresolved_identity_orders,
+        "unfinished_orders": unfinished_orders,
+    }
+    blocked = bool(
+        nonzero_rows
+        or incomplete_coverage
+        or active_lifecycle_reservations
+        or legacy_reserved_quantity > 0
+        or open_reconciliation
+        or unresolved_identity_orders
+        or unfinished_orders
+    )
+    evidence = {
+        "contract_name": "ff_pool_fbs_sku_retirement_v1",
+        "nm_id": selected_nm_id,
+        "retirement_allowed": not blocked,
+        "blockers": blockers,
+        "fingerprint": _fingerprint(blockers),
+    }
+    if blocked:
+        raise FbsApplicabilityError(
+            "fbs_sku_retirement_blocked",
+            f"SKU {selected_nm_id} cannot be retired while FBS truth is non-terminal",
+            details=evidence,
+        )
+    return evidence
 
 
 def append_applicability_event(

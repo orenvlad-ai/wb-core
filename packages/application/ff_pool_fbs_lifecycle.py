@@ -28,7 +28,9 @@ from packages.application.ff_pool_foundation import (
 )
 from packages.application.ff_pool_fbs_applicability import (
     FbsApplicabilityError,
+    current_business_date,
     fbs_physical_component,
+    nomenclature_sku_active_or_unmanaged,
     require_fbs_pair_writeable,
 )
 from packages.application.wb_fbs_orders import (
@@ -1121,7 +1123,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                 conn,
                 facility_id=str(order["facility_id"]),
                 nm_id=int(order["nm_id"]),
-                effective_date=str(row[7])[:10],
+                effective_date=current_business_date(str(row[7])),
                 projection_epoch=int(manifest["feature_epoch"]),
             )
         except FbsApplicabilityError as exc:
@@ -1437,7 +1439,7 @@ def available_quantity(
     nm_id: int,
 ) -> dict[str, Any]:
     manifest = conn.execute(
-        """SELECT business_date,feature_epoch
+        """SELECT feature_epoch
            FROM sheet_vitrina_v1_ff_pool_cutover_manifests
            WHERE cutover_id=?""",
         (str(cutover_id),),
@@ -1450,14 +1452,18 @@ def available_quantity(
         f"SELECT active FROM {FACILITIES_TABLE} WHERE facility_id=?",
         (str(facility_id),),
     ).fetchone()
+    sku_active = nomenclature_sku_active_or_unmanaged(
+        conn,
+        nm_id=int(nm_id),
+    )
     component = fbs_physical_component(
         conn,
         facility_id=str(facility_id),
         nm_id=int(nm_id),
-        as_of_date=str(manifest[0]),
-        projection_epoch=int(manifest[1]),
+        as_of_date=current_business_date(),
+        projection_epoch=int(manifest[0]),
         facility_active=bool(facility[0]) if facility is not None else False,
-        sku_active=True,
+        sku_active=sku_active,
     )
     if component["state"] in {"missing", "inapplicable"}:
         raise FfPoolFbsLifecycleError(

@@ -28,6 +28,7 @@ from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
 from packages.application.ff_pool_fbs_lifecycle import ensure_ff_pool_fbs_lifecycle_schema
 from packages.application.ff_pool_fbs_applicability import (
     ensure_ff_pool_fbs_applicability_schema,
+    require_fbs_sku_retirable,
 )
 from packages.application.ff_wb_supply_origins import ensure_ff_wb_supply_origin_schema
 from packages.application.inventory_planning_read_model import ensure_inventory_planning_schema
@@ -7375,6 +7376,7 @@ class RegistryUploadDbBackedRuntime:
             activation_items: list[dict[str, Any]] = []
             with _connect(self.db_path) as conn:
                 _ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
                 existing = {
                     str(row["item_id"]): row
                     for row in conn.execute(
@@ -7393,11 +7395,19 @@ class RegistryUploadDbBackedRuntime:
                         and desired_nm_id > 0
                     )
                     prior = existing.get(str(prepared["item_id"]))
-                    already_published = bool(
+                    prior_nm_id = int(prior["nm_id"] or 0) if prior is not None else 0
+                    prior_stock_managed = bool(
                         prior is not None
                         and bool(prior["is_active"])
                         and not bool(prior["is_hidden"])
-                        and int(prior["nm_id"] or 0) == desired_nm_id
+                        and prior_nm_id > 0
+                    )
+                    if prior_stock_managed and (
+                        not desired_stock_managed or desired_nm_id != prior_nm_id
+                    ):
+                        require_fbs_sku_retirable(conn, nm_id=prior_nm_id)
+                    already_published = bool(
+                        prior_stock_managed and prior_nm_id == desired_nm_id
                     )
                     if desired_stock_managed and not already_published:
                         staged = {**prepared, "is_active": 0, "nm_id": desired_nm_id}
@@ -7453,6 +7463,16 @@ class RegistryUploadDbBackedRuntime:
         with warehouse_functional_write_lock(self.runtime_dir):
             with _connect(self.db_path) as conn:
                 _ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT is_active,is_hidden,nm_id FROM "
+                    "sheet_vitrina_v1_nomenclature_items WHERE item_id=?",
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"nomenclature item not found: {item_id}")
+                if bool(row[0]) and not bool(row[1]) and int(row[2] or 0) > 0:
+                    require_fbs_sku_retirable(conn, nm_id=int(row[2]))
                 cursor = conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_nomenclature_items
@@ -7463,7 +7483,7 @@ class RegistryUploadDbBackedRuntime:
                     (updated_at, item_id),
                 )
                 conn.commit()
-                if cursor.rowcount <= 0:
+                if cursor.rowcount != 1:
                     raise ValueError(f"nomenclature item not found: {item_id}")
         loaded = self.load_nomenclature_item(item_id)
         if loaded is None:

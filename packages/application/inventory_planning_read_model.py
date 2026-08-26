@@ -26,6 +26,7 @@ from packages.application.ff_pool_foundation import (
     FEATURE_EPOCHS_TABLE,
 )
 from packages.application.ff_pool_fbs_applicability import (
+    current_business_date,
     fbs_physical_component,
     stock_managed_nomenclature,
 )
@@ -594,6 +595,7 @@ def _fbs_facilities(
     requested_nm_ids: list[int],
     include_seller_stock_reconciliation: bool = True,
 ) -> dict[str, Any]:
+    canonical_as_of_date = current_business_date()
     manifest = conn.execute(
         f"""SELECT cutover_id,business_date,feature_epoch,cutover_at,
                    manifest_digest,observation_watermark_digest
@@ -688,6 +690,7 @@ def _fbs_facilities(
     active_stock_nm_ids = {
         int(item["nm_id"]) for item in stock_managed_nomenclature(conn)
     }
+    coverage_nm_ids = active_stock_nm_ids | sku_scope
     if epoch_ready:
         for balance in conn.execute(
             f"""SELECT facility_id,nm_id,SUM(quantity) quantity,
@@ -745,12 +748,12 @@ def _fbs_facilities(
                 if row_facility_id == facility_id
             }
             applicable = bool(facility["active"])
-            for nm_id in sorted(sku_scope):
+            for nm_id in sorted(coverage_nm_ids):
                 component = fbs_physical_component(
                     conn,
                     facility_id=facility_id,
                     nm_id=nm_id,
-                    as_of_date=date.today().isoformat(),
+                    as_of_date=canonical_as_of_date,
                     projection_epoch=int(manifest["feature_epoch"]),
                     facility_active=bool(facility["active"]),
                     sku_active=nm_id in active_stock_nm_ids,
@@ -770,13 +773,9 @@ def _fbs_facilities(
                     "reserved": sku_reserved,
                     "available": sku_available,
                     "available_is_signed": True,
-                    "state": (
-                        str(component["state"])
-                        if component["state"] in {"missing", "inapplicable"}
-                        else "exact_zero"
-                        if sku_available == 0
-                        else "exact"
-                    ),
+                    # exact_zero describes the physical row, never a positive
+                    # physical quantity fully offset by reservations.
+                    "state": str(component["state"]),
                     "quality": (
                         "inapplicable"
                         if component["state"] == "inapplicable"
@@ -801,7 +800,8 @@ def _fbs_facilities(
                         "role": "reconciliation_only",
                     },
                 }
-                sku_values.append(typed)
+                if nm_id in sku_scope:
+                    sku_values.append(typed)
                 typed_values.append(typed)
             applicable_values = [
                 item for item in typed_values if item["state"] != "inapplicable"
@@ -849,7 +849,7 @@ def _fbs_facilities(
                     "inapplicable"
                     if not applicable
                     else "exact_zero"
-                    if available == 0
+                    if physical == 0
                     else "exact"
                     if available is not None
                     else "missing"

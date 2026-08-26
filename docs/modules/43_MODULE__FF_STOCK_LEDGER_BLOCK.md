@@ -798,19 +798,31 @@ dated event and requires the retained physical row. Applicability is not
 materialized as one default row per pair.
 
 Facility activation and SKU activation/reactivation follow
-`staged -> materializing -> materialized -> active`. The immutable intent pins
-the full roster, writer epoch, applicability, balance before-images, subject CAS
-and plan fingerprint. Materialization reuses canonical `pool_inventory`
+`staged -> materializing -> [resumable] -> materialized -> active`. The
+immutable intent pins the roster, writer epoch, applicability, materialized
+balance before-images, compact existing-coverage proof, subject CAS and plan
+fingerprint. Materialization reuses canonical `pool_inventory`
 request/document/absolute-target/readback evidence: an absent applicable row is
 inserted as `quantity=0`, `capital_rub=0`, `wac_rub=NULL`; an existing row is
-retained exactly. Neither case emits a movement or changes quantity/capital/WAC.
+retained exactly. A retained canonical zero receives the same immutable dense-T0
+receipt without being rewritten. Neither case emits a movement or changes
+quantity/capital/WAC.
 Facility activation covers the full applicable SKU roster. SKU activation covers
 only the staged SKU across every active facility after proving all pre-existing
-pairs complete; it cannot opportunistically repair an older gap.
+pairs complete through a streamed receipt; it persists neither the existing
+cross-product nor default-applicability events and cannot opportunistically
+repair an older gap.
 The registry subject stays inactive until completed coverage is rechecked in the
 final publication transaction. Shared warehouse locking, idempotent request
 identity and canonical status readback handle concurrency and ambiguous
 transport without active-then-catch-up or blind retry.
+
+Retirement through delete, inactive/hidden save or `nmId` replacement holds the
+same lock and fails before publication for any non-canonical-zero FBS row,
+missing applicable coverage at an active facility, active reservation or
+unfinished lifecycle/order dependency. Canonical-zero
+archive/reactivation retains the balance, documents and history. Current reads
+use the canonical EKT business-date helper, not process-local date.
 
 Receipts, writeoffs, transfers, reservations and FBS order lifecycle writers
 must find an existing applicable physical row. They cannot create it implicitly.
@@ -824,9 +836,13 @@ inventory line plus request manifest remains the coverage receipt after later
 movements advance the current balance watermark. A pre-T0 business event is
 routed to explicit reconciliation/forward recovery rather than copying current
 zero into history. The generic query-only future Orenburg repair planner uses
-the same service for the exact 12 reviewed targets and expects 21 existing
-non-target FBS rows; it has no apply entrypoint and deployment performs no
-production repair.
+the same service for the exact 12 reviewed targets and expects the exact
+33-SKU roster partitioned into those targets and 21 existing non-target FBS
+rows. It requires an explicit active target file and StoreRegistry generation,
+pins mapping `854205`/office `12223`, target-effect/history and scoped non-target
+fingerprints, requires the 33 mapping-extension allocation identities to equal
+the active roster, performs no unscoped table hash, and has no apply entrypoint.
+Deployment performs no production repair.
 
 ### Stage 7C exact opening and FBS lifecycle
 

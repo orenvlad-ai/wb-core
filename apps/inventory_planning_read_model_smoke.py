@@ -87,6 +87,30 @@ def main() -> int:
         assert "Частичные данные" in missing_skus[2]["quality"][
             "fbs_total_reason_ru"
         ]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"UPDATE {CURRENT_TABLE} SET quantity=5 WHERE cutover_id='cutover-smoke' "
+                "AND order_id=9001"
+            )
+            conn.commit()
+        zero_available = model.current()
+        zero_available_moscow = next(
+            item
+            for item in next(
+                sku for sku in zero_available["skus"] if sku["nm_id"] == 1
+            )["fbs_facilities"]
+            if item["facility_id"] == "moscow"
+        )
+        assert zero_available_moscow["physical"] == 5
+        assert zero_available_moscow["reserved"] == 5
+        assert zero_available_moscow["available"] == 0
+        assert zero_available_moscow["state"] == "exact"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"UPDATE {CURRENT_TABLE} SET quantity=8 WHERE cutover_id='cutover-smoke' "
+                "AND order_id=9001"
+            )
+            conn.commit()
         assert missing["formula"]["version"] == FORMULA_VERSION
         assert missing["formula"]["effective_from"] == "2026-08-16"
         assert missing["formula"]["six_stage_total_changed"] is False
@@ -134,6 +158,21 @@ def main() -> int:
         assert exact_skus[1]["incident_quantity"] == 35
         assert exact_skus[1]["wb_effective_total"] == -25
         assert exact_skus[1]["effective_total"] == -28
+
+        # Facility totals cover the full active stock-managed roster, including
+        # SKU 3 which is deliberately absent from the current WB snapshot.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('moscow','FBS',2,7,0,'0',NULL,'smoke-zero',?)""",
+                (NOW,),
+            )
+            conn.commit()
+        complete_moscow = model.current()
+        assert _metric(complete_moscow, "fbs_total") == 1
+        assert _metric(complete_moscow, "total") == 31
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(
@@ -188,7 +227,7 @@ def main() -> int:
 
 
 def _seed(conn: sqlite3.Connection) -> None:
-    for nm_id in (1, 2):
+    for nm_id in (1, 2, 3):
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_nomenclature_items(
                    item_id,is_active,is_hidden,nm_id,nomenclature_name,
@@ -278,6 +317,13 @@ def _seed(conn: sqlite3.Connection) -> None:
                ) VALUES(?,'FBS',1,7,?,'0',NULL,'smoke',?)""",
             (facility_id, quantity, NOW),
         )
+    conn.execute(
+        f"""INSERT INTO {BALANCES_TABLE}(
+               facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+               source_watermark,updated_at
+           ) VALUES('moscow','FBS',3,7,4,'0',NULL,'smoke-non-wb-sku',?)""",
+        (NOW,),
+    )
     conn.execute(
         f"""INSERT INTO {MANIFESTS_TABLE}(
                cutover_id,manifest_digest,deployed_sha,cutover_at,business_date,feature_epoch,

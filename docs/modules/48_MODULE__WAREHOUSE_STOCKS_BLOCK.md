@@ -181,11 +181,20 @@ activation is staged inactive, covered by the existing `pool_inventory`
 document/CAS/readback contour under the shared warehouse lock, and published
 active only after all applicable physical rows are exact. Missing rows become
 document-proven explicit zero without movement, quantity/capital delta or WAC;
-existing rows are retained field-for-field. Receipts, writeoffs, reservations
-and order lifecycle cannot create a missing FBS row. FBO, WB and the six-stage
+existing rows are retained field-for-field and an existing canonical zero gets
+an immutable dense-T0 receipt without a rewrite. Receipts, writeoffs,
+reservations and order lifecycle cannot create a missing FBS row. FBO, WB and the six-stage
 aggregate are unchanged by initialization. Current readers publish typed
 `exact|exact_zero|missing|inapplicable` evidence and exclude inactive facility
 and inactive-SKU pairs without deleting their historical rows.
+Retiring a SKU is blocked under the same warehouse lock while any prior FBS row
+is non-canonical-zero, any active-facility applicable row is missing, or an
+active reservation/unfinished FBS lifecycle/order dependency exists. A
+zero-covered SKU may archive/reactivate without resetting
+its row. New-SKU activation stores only its facility pairs plus a compact
+streamed proof of existing coverage; it does not persist the default
+applicability cross-product. Current applicability uses the canonical EKT
+business date.
 
 # 2. Physical and cost rules
 

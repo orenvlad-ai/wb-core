@@ -36,7 +36,10 @@ from packages.application.ff_pool_foundation import (
     record_ff_pool_parity_diagnostic,
 )
 from packages.application.ff_pool_fbs_applicability import (
+    DENSE_INTENT_EVENTS_TABLE,
+    DENSE_INTENTS_TABLE,
     FbsApplicabilityError,
+    current_business_date,
     require_fbs_pair_writeable,
 )
 from packages.application.warehouse_recovery_policy import (
@@ -1306,6 +1309,28 @@ class FfPoolDocumentService:
             self._finalize_posted(str(row["request_id"]))
             finalized += 1
         return {"processing_reset": reset, "posted_finalized": finalized}
+
+    def resume_request(self, request_id: str) -> dict[str, Any]:
+        """Reset only one exact interrupted preview request for idempotent resume."""
+
+        canonical = self._resolve_request_id(request_id)
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            changed = conn.execute(
+                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',updated_at=? "
+                "WHERE request_id=? AND state='processing'",
+                (now, canonical),
+            ).rowcount
+            if changed:
+                self._event(
+                    conn,
+                    request_id=canonical,
+                    stage="exact_request_resume",
+                    status="complete",
+                    details={"prior_state": "processing", "blind_retry": False},
+                )
+            conn.commit()
+        return self.status(request_id=canonical)
 
     def open_transfer_projection(self, root_document_id: str) -> dict[str, Any]:
         """Derive bounded in-flight balance from immutable shipment/children."""
@@ -4194,12 +4219,15 @@ def _plan_pool_reallocation(
 
 
 def _dense_fbs_initialization(
-    request: Mapping[str, Any], manifest: Mapping[str, Any]
+    conn: sqlite3.Connection,
+    request: Mapping[str, Any],
+    manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
     raw = manifest.get("dense_fbs_initialization")
     if raw is None:
         return {}
     dense = _json_object(raw)
+    intent_id = str(dense.get("intent_id") or "")
     if (
         dense.get("contract_name") != "ff_pool_dense_fbs_initialization_v1"
         or str(request["source_system"] or "") != "wb_core_dense_fbs"
@@ -4210,13 +4238,56 @@ def _dense_fbs_initialization(
         or str(dense.get("effective_from") or "")
         != str(request["business_date"] or "")
         or str(manifest.get("scope") or "") != "FBS"
-        or not str(dense.get("intent_id") or "")
+        or not intent_id
         or not str(dense.get("roster_fingerprint") or "").startswith("sha256:")
         or not str(dense.get("effective_from") or "")
     ):
         raise FfPoolDocumentError(
             "dense_fbs_initialization_contract_invalid",
             "Dense FBS inventory initialization contract is invalid",
+        )
+    intent = conn.execute(
+        f"""SELECT subject_kind,subject_id,effective_from,cutover_at,
+                   roster_fingerprint,plan_fingerprint,plan_json
+              FROM {DENSE_INTENTS_TABLE} WHERE intent_id=?""",
+        (intent_id,),
+    ).fetchone()
+    state = conn.execute(
+        f"""SELECT state FROM {DENSE_INTENT_EVENTS_TABLE} WHERE intent_id=?
+             ORDER BY event_sequence DESC LIMIT 1""",
+        (intent_id,),
+    ).fetchone()
+    plan = _json_object(_loads(intent[6], {})) if intent is not None else {}
+    specifications = [
+        dict(item)
+        for item in plan.get("documents") or []
+        if isinstance(item, Mapping)
+        and str(item.get("facility_id") or "")
+        == str(manifest.get("facility_id") or "")
+    ]
+    specification = specifications[0] if len(specifications) == 1 else {}
+    if (
+        intent is None
+        or state is None
+        or str(state[0]) == "blocked"
+        or str(request["source_id"] or "")
+        != f"{intent_id}:{manifest.get('facility_id') or ''}"
+        or str(intent[0]) != str(dense.get("subject_kind") or "")
+        or str(intent[1]) != str(dense.get("subject_id") or "")
+        or str(intent[2]) != str(dense.get("effective_from") or "")
+        or str(intent[3]) != str(dense.get("cutover_at") or "")
+        or str(intent[4]) != str(dense.get("roster_fingerprint") or "")
+        or str(intent[5]) != str(dense.get("plan_fingerprint") or "")
+        or list(specification.get("applicable_nm_ids") or [])
+        != list(dense.get("applicable_nm_ids") or [])
+        or list(specification.get("expected_balance_rows") or [])
+        != list(dense.get("expected_balance_rows") or [])
+        or list(specification.get("targets") or [])
+        != list(manifest.get("targets") or [])
+    ):
+        raise FfPoolDocumentError(
+            "dense_fbs_intent_binding_invalid",
+            "Dense FBS inventory request is not bound to its exact durable intent",
         )
     return dense
 
@@ -4255,7 +4326,7 @@ def _plan_pool_inventory(
     manifest: Mapping[str, Any],
     epoch: int,
 ) -> dict[str, Any]:
-    dense_initialization = _dense_fbs_initialization(request, manifest)
+    dense_initialization = _dense_fbs_initialization(conn, request, manifest)
     facility_id = _facility(
         conn,
         str(manifest.get("facility_id") or ""),
@@ -4341,7 +4412,9 @@ def _plan_pool_inventory(
                         "selected_pool": True,
                         **(
                             {"explicit_physical_zero": True}
-                            if pool == "FBS" and balance is None and target == 0
+                            if pool == "FBS"
+                            and target == 0
+                            and (balance is None or dense_initialization)
                             else {}
                         ),
                     },
@@ -6072,19 +6145,15 @@ def _apply_balance_movement(
     capital_delta = int(movement["capital_delta_cents"])
     key = (facility_id, pool, nm_id)
     row = _balance_row(conn, key, epoch=epoch, required=False)
-    if row is None and pool == "FBS" and not allow_missing_fbs:
-        raise FfPoolDocumentError(
-            "applicable_fbs_balance_missing",
-            "FBS receipts, writeoffs and transfers cannot implicitly create a physical row",
-            details={"facility_id": facility_id, "nm_id": nm_id},
-        )
-    if row is not None and pool == "FBS":
+    if pool == "FBS" and not allow_missing_fbs:
         try:
             require_fbs_pair_writeable(
                 conn,
                 facility_id=facility_id,
                 nm_id=nm_id,
-                effective_date=str(business_date or posted_at)[:10],
+                effective_date=current_business_date(
+                    str(business_date or posted_at)
+                ),
                 projection_epoch=epoch,
             )
         except FbsApplicabilityError as exc:

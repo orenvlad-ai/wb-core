@@ -153,17 +153,13 @@ def main() -> int:
                     f'td[data-row-id="SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
                     f'[data-cell-date="{CURRENT_DATE}"]'
                 )
-            ).to_have_text("30◐")
-            partial_cell = page.locator(
-                f'td[data-row-id="SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
-                f'[data-cell-date="{CURRENT_DATE}"]'
-            )
-            expect(partial_cell.locator(".inventory-partial-marker")).to_have_count(1)
-            if "Оренбург" not in (partial_cell.get_attribute("title") or ""):
-                raise AssertionError("partial total tooltip must name the missing facility")
+            ).to_have_text("30")
+            # The missing row belongs to an inactive facility. Migration 159
+            # retains that physical/history evidence but excludes it from the
+            # current operand instead of publishing a false partial warning.
             expect(
                 page.locator(
-                    f'td[data-row-id="SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
+                    f'td[data-row-id="SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}"]'
                     f'[data-cell-date="{CURRENT_DATE}"] .inventory-partial-marker'
                 )
             ).to_have_count(0)
