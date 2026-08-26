@@ -20,5 +20,14 @@ transitions через event/terminal waits, без повторных «ещё 
 polling неизменного CI. Subagent возвращает один terminal handoff либо exact
 gate callback и становится Done.
 
+Post-task
+[`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) доступен
+только одному куратору production protocol/documentation как внутреннее
+read-only guidance. Обычные main/domain curators и implementation subagents не
+читают и не вызывают его как execution checklist и не меняют из-за него
+поведение; для них остаются только root `AGENTS.md` и релевантные authoritative
+domain docs. Checklist не создаёт workspace actor, gate, approval, test, task,
+PR или mutation.
+
 Workspace не создаёт registry, scheduler, monitor, reviewer, callback service
 или release state. User chats не archive/unpin/delete автоматически.

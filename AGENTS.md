@@ -70,6 +70,15 @@ Current canonical source acquisition остаётся server-side.
   сообщения, «ещё идёт» и polling неизменного CI запрещены полностью. Один
   bounded event/terminal wait не требует промежуточного status-текста; новый
   blocker или terminal state сообщается сразу.
+- Post-task checklist
+  [`docs/architecture/14_codex_task_audit_checklist.md`](docs/architecture/14_codex_task_audit_checklist.md)
+  является внутренним read-only инструментом только одного куратора,
+  оптимизирующего production protocol и его документацию. Обычные main/domain
+  curators и implementation subagents не читают и не вызывают его как
+  execution checklist и не меняют из-за него поведение задачи: их единственный
+  operational entrypoint остаётся этот файл плюс релевантные authoritative
+  domain docs. Сам checklist не создаёт gate, approval, test, task, PR или
+  mutation.
 - Пользователь не подтверждает повторно уже выбранную цель, business meaning,
   accepted exact plan или обычные технические решения внутри scope.
 
