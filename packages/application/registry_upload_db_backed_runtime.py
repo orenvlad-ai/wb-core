@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 
 from packages.business_time import business_date_from_timestamp
 
+from packages.application.change_registry import ensure_change_registry_schema
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
 from packages.application.root_storage_policy import admit_root_write
 from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
@@ -13244,6 +13245,9 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
           )
         """
     )
+    ensure_change_registry_schema(conn)
+
+
 def _ensure_column(
     conn: sqlite3.Connection,
     *,
