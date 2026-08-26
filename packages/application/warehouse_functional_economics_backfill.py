@@ -114,6 +114,31 @@ ARCHIVED_READY_METRIC_KEYS = ARCHIVED_PUBLIC_METRIC_KEYS
 MUTATED_READY_METRIC_KEYS = frozenset(TARGET_KEYS | set(ARCHIVED_READY_METRIC_KEYS))
 ZERO = Decimal("0")
 
+_WAREHOUSE_INPUT_COMPONENT_NAMES = {
+    "dates": "selection_dates",
+    "cutover": "functional_cutover",
+    "versions": "functional_versions",
+    "balances": "functional_balances",
+    "supplier_cost_states": "functional_supplier_cost_states",
+    "supplier_cost_state_replays": "functional_supplier_cost_state_replays",
+    "supplier_cost_state_corrections": "functional_supplier_cost_state_corrections",
+    "supplier_cost_state_replay_rollbacks": (
+        "functional_supplier_cost_state_replay_rollbacks"
+    ),
+    "active_version": "active_functional_identity",
+    "supplier_shipments": "source_watermark_supplier_shipments",
+    "supplier_shipment_lines": "source_watermark_supplier_shipment_lines",
+    "cny_ledger_operations": "source_watermark_cny_ledger_operations",
+    "supplier_financial_documents": "source_watermark_supplier_financial_documents",
+    "supplier_financial_expense_lines": (
+        "source_watermark_supplier_financial_expense_lines"
+    ),
+    "cny_documents": "source_watermark_cny_documents",
+    "daily_cost": "daily_wb_cost",
+    "parameters": "calculation_settings",
+    "proxy_v4_parameters": "proxy_v4_settings",
+}
+
 
 class FunctionalEconomicsBackfillError(RuntimeError):
     pass
@@ -194,9 +219,15 @@ def build_functional_economics_backfill_plan(
     warehouse_dates = [
         day for day in dates if day >= CANONICAL_COST_POLICY_DATE.isoformat()
     ]
-    warehouse_input_manifest_digest = _warehouse_input_manifest_digest(
+    warehouse_input_manifest = _warehouse_input_manifest(
         runtime,
         dates=dates,
+    )
+    warehouse_input_manifest_digest = _warehouse_input_manifest_digest_from_value(
+        warehouse_input_manifest
+    )
+    warehouse_input_component_evidence = _warehouse_input_component_evidence(
+        warehouse_input_manifest
     )
     capital = OwnProductCapitalBlock(runtime=runtime)
     warehouse_context = _exact_functional_snapshot_context(runtime, warehouse_dates)
@@ -249,9 +280,20 @@ def build_functional_economics_backfill_plan(
         )
         for day in dates
     }
-    if _warehouse_input_manifest_digest(runtime, dates=dates) != warehouse_input_manifest_digest:
-        raise FunctionalEconomicsBackfillError(
-            "functional warehouse/cost/settings inputs drifted during dry-run"
+    current_warehouse_input_manifest = _warehouse_input_manifest(
+        runtime,
+        dates=dates,
+    )
+    if (
+        _warehouse_input_manifest_digest_from_value(current_warehouse_input_manifest)
+        != warehouse_input_manifest_digest
+    ):
+        raise _material_component_drift_error(
+            phase="dry_run_revalidation",
+            expected=warehouse_input_component_evidence,
+            actual=_warehouse_input_component_evidence(
+                current_warehouse_input_manifest
+            ),
         )
     source_fingerprint = "sha256:" + _hash(
         {
@@ -395,6 +437,7 @@ def build_functional_economics_backfill_plan(
         "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
         "ready_snapshot_manifest_digest": _snapshot_manifest_digest(snapshots),
         "warehouse_input_manifest_digest": warehouse_input_manifest_digest,
+        "warehouse_input_component_evidence": warehouse_input_component_evidence,
         "non_target_digest": before_digest,
         "updates": updates,
     }
@@ -501,8 +544,10 @@ def apply_functional_economics_backfill_plan(
                 },
                 "recovery_policy": existing_recovery,
             }
-        raise FunctionalEconomicsBackfillError(
-            "functional cost/settings or ready snapshots drifted after dry-run"
+        raise _plan_material_drift_error(
+            normalized,
+            fresh,
+            phase="pre_apply_revalidation",
         )
     if not normalized.get("updates"):
         recovery = recovery_registry.plan_noop(
@@ -611,15 +656,15 @@ def apply_functional_economics_backfill_plan(
         schema_conn.commit()
     before_images: list[dict[str, Any]] = []
     after_images: list[dict[str, Any]] = []
+    revalidation_telemetry: dict[str, Any] = {}
     try:
         with _connect(runtime.db_path) as conn:
-            # Hold an idle connection as a global mutation detector while the
-            # expensive full revalidation runs without any SQLite transaction.
-            # PRAGMA data_version changes on this connection after every commit
-            # by another connection.  Once the exact plan is revalidated, a
-            # bounded BEGIN IMMEDIATE plus a second check closes the race.
-            # Thus the writer slot covers only optimistic row updates/readback,
-            # in both WAL and rollback-journal modes.
+            # Keep the expensive rebuild outside any SQLite transaction.  The
+            # connection-local data_version observer is telemetry only: it
+            # intentionally sees unrelated same-store commits such as FBS
+            # shadow polling and therefore cannot be a semantic publication
+            # gate.  Exact material components are re-read on this same
+            # connection after BEGIN IMMEDIATE, immediately before writes.
             data_version_before = int(conn.execute("PRAGMA data_version").fetchone()[0])
             final_fresh = build_functional_economics_backfill_plan(
                 runtime,
@@ -629,25 +674,46 @@ def apply_functional_economics_backfill_plan(
                 latest_business_date=target_latest_date,
             )
             if str(final_fresh.get("plan_fingerprint") or "") != fingerprint:
-                raise FunctionalEconomicsBackfillError(
-                    "functional warehouse/cost/settings inputs drifted during lock-free revalidation"
+                raise _plan_material_drift_error(
+                    normalized,
+                    final_fresh,
+                    phase="lock_free_revalidation",
                 )
+            data_version_after_revalidation = int(
+                conn.execute("PRAGMA data_version").fetchone()[0]
+            )
             _before_functional_economics_write_lock()
-            data_version_validated = int(conn.execute("PRAGMA data_version").fetchone()[0])
-            if data_version_validated != data_version_before:
-                raise FunctionalEconomicsBackfillError(
-                    "operational store changed during lock-free economics revalidation"
-                )
             conn.execute("BEGIN IMMEDIATE")
-            data_version_locked = int(conn.execute("PRAGMA data_version").fetchone()[0])
-            if data_version_locked != data_version_validated:
-                raise FunctionalEconomicsBackfillError(
-                    "operational store changed before bounded economics write lock"
-                )
+            data_version_at_writer_lock = int(
+                conn.execute("PRAGMA data_version").fetchone()[0]
+            )
+            revalidation_telemetry = {
+                "semantic_gate": False,
+                "data_version_before": data_version_before,
+                "data_version_after_lock_free_revalidation": (
+                    data_version_after_revalidation
+                ),
+                "data_version_at_writer_lock": data_version_at_writer_lock,
+                "changed_during_lock_free_revalidation": (
+                    data_version_after_revalidation != data_version_before
+                ),
+                "changed_before_writer_lock": (
+                    data_version_at_writer_lock
+                    != data_version_after_revalidation
+                ),
+                "changed_since_observer_started": (
+                    data_version_at_writer_lock != data_version_before
+                ),
+            }
             if current_business_date_iso() != operation_business_date:
                 raise FunctionalEconomicsBackfillError(
                     "functional economics apply crossed the canonical business-date boundary before write"
                 )
+            _revalidate_functional_economics_material_cas(
+                conn,
+                normalized,
+                telemetry=revalidation_telemetry,
+            )
             for item in normalized["updates"]:
                 before = conn.execute(
                     """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
@@ -669,6 +735,10 @@ def apply_functional_economics_backfill_plan(
                         "as_of_date": str(item["as_of_date"]),
                         "plan_json": str(item["after_plan_json"]),
                     }
+                )
+                _before_functional_economics_target_update(
+                    connection=conn,
+                    item=item,
                 )
                 cursor = conn.execute(
                     """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
@@ -730,10 +800,10 @@ def apply_functional_economics_backfill_plan(
                     "functional economics apply crossed the canonical business-date boundary before commit"
                 )
             conn.commit()
-    except Exception:
+    except Exception as exc:
         recovery_registry.fail_recoverable(
             str(recovery["operation_id"]),
-            error="functional economics transaction failed",
+            error=str(exc),
             next_action="resume_targeted_economics_publication",
         )
         raise
@@ -775,6 +845,7 @@ def apply_functional_economics_backfill_plan(
         "recovery_policy": recovery,
         "applied_plan_fingerprint": fingerprint,
         "rollback_manifest_digest": manifest_digest,
+        "lock_free_revalidation_telemetry": revalidation_telemetry,
     }
 
 
@@ -971,11 +1042,26 @@ def _warehouse_input_manifest_digest(
     dates: list[str],
     connection: sqlite3.Connection | None = None,
 ) -> str:
-    """Fingerprint every persisted input used by warehouse/economics projection.
+    return _warehouse_input_manifest_digest_from_value(
+        _warehouse_input_manifest(
+            runtime,
+            dates=dates,
+            connection=connection,
+        )
+    )
 
-    The same manifest is captured before/after dry-run and rechecked while the
-    ready-snapshot write lock is held.  This prevents an hourly functional sync
-    or settings publication during the coherent backup from committing stale
+
+def _warehouse_input_manifest(
+    runtime: RegistryUploadDbBackedRuntime | None,
+    *,
+    dates: list[str],
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """Materialize every persisted input used by warehouse/economics projection.
+
+    The same manifest is captured before/after dry-run and rechecked on the
+    locked writer connection.  This prevents an hourly functional sync or
+    settings publication during the coherent backup from committing stale
     warehouse-history or Proxy cells.
     """
 
@@ -984,7 +1070,15 @@ def _warehouse_input_manifest_digest(
         selected_set.add(CANONICAL_COST_POLICY_DATE.isoformat())
     selected = sorted(selected_set)
     own_connection = connection is None
-    conn = connection or _connect(runtime.db_path)
+    if connection is None and runtime is None:
+        raise FunctionalEconomicsBackfillError(
+            "warehouse input manifest requires a runtime or an exact connection"
+        )
+    if connection is not None:
+        conn = connection
+    else:
+        assert runtime is not None
+        conn = _connect(runtime.db_path)
     try:
         table_names = {
             str(row[0])
@@ -1128,10 +1222,27 @@ def _warehouse_input_manifest_digest(
                 """SELECT * FROM sheet_vitrina_v1_proxy_v4_parameter_versions
                    ORDER BY effective_date,revision,created_at,version_id""",
             )
-        return "sha256:" + _hash(manifest)
+        return manifest
     finally:
         if own_connection:
             conn.close()
+
+
+def _warehouse_input_manifest_digest_from_value(manifest: Mapping[str, Any]) -> str:
+    return "sha256:" + _hash(manifest)
+
+
+def _warehouse_input_component_evidence(
+    manifest: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    for key, value in sorted(manifest.items()):
+        component = _WAREHOUSE_INPUT_COMPONENT_NAMES.get(str(key), str(key))
+        evidence[component] = {
+            "row_count": len(value) if isinstance(value, list) else 1,
+            "digest": "sha256:" + _hash(value),
+        }
+    return evidence
 
 
 def _query_manifest_rows(
@@ -1140,6 +1251,149 @@ def _query_manifest_rows(
     parameters: tuple[Any, ...] = (),
 ) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(query, parameters).fetchall()]
+
+
+def _material_component_drift_error(
+    *,
+    phase: str,
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    telemetry: Mapping[str, Any] | None = None,
+) -> FunctionalEconomicsBackfillError:
+    changed_components = sorted(
+        key
+        for key in set(expected) | set(actual)
+        if expected.get(key) != actual.get(key)
+    )
+    if not changed_components:
+        changed_components = ["material_manifest"]
+    details = {
+        "code": "functional_economics_material_cas_drift",
+        "phase": str(phase),
+        "changed_components": changed_components,
+        "expected": {key: expected.get(key) for key in changed_components},
+        "actual": {key: actual.get(key) for key in changed_components},
+    }
+    if telemetry:
+        details["data_version_telemetry"] = dict(telemetry)
+    return FunctionalEconomicsBackfillError(
+        "functional economics material components drifted: "
+        + json.dumps(
+            details,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _plan_material_drift_error(
+    expected_plan: Mapping[str, Any],
+    actual_plan: Mapping[str, Any],
+    *,
+    phase: str,
+) -> FunctionalEconomicsBackfillError:
+    expected = dict(expected_plan.get("warehouse_input_component_evidence") or {})
+    actual = dict(actual_plan.get("warehouse_input_component_evidence") or {})
+    for component, field in (
+        ("warehouse_input_manifest", "warehouse_input_manifest_digest"),
+        ("ready_snapshot_manifest", "ready_snapshot_manifest_digest"),
+        ("derived_source_fingerprint", "source_fingerprint"),
+        ("ready_snapshot_non_target", "non_target_digest"),
+    ):
+        expected[component] = {"digest": str(expected_plan.get(field) or "")}
+        actual[component] = {"digest": str(actual_plan.get(field) or "")}
+    expected["ready_snapshot_target_projection"] = {
+        "digest": "sha256:" + _hash(expected_plan.get("updates") or [])
+    }
+    actual["ready_snapshot_target_projection"] = {
+        "digest": "sha256:" + _hash(actual_plan.get("updates") or [])
+    }
+    expected["plan_fingerprint"] = {
+        "digest": str(expected_plan.get("plan_fingerprint") or "")
+    }
+    actual["plan_fingerprint"] = {
+        "digest": str(actual_plan.get("plan_fingerprint") or "")
+    }
+    return _material_component_drift_error(
+        phase=phase,
+        expected=expected,
+        actual=actual,
+    )
+
+
+def _ready_snapshot_manifest_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return _query_manifest_rows(
+        conn,
+        """SELECT bundle_version,as_of_date,plan_json,refreshed_at
+           FROM sheet_vitrina_v1_ready_snapshots
+           ORDER BY bundle_version,as_of_date""",
+    )
+
+
+def _revalidate_functional_economics_material_cas(
+    conn: sqlite3.Connection,
+    plan: Mapping[str, Any],
+    *,
+    telemetry: Mapping[str, Any] | None = None,
+) -> None:
+    """Re-read every material input on the locked writer connection."""
+
+    expected_components = dict(
+        plan.get("warehouse_input_component_evidence") or {}
+    )
+    current_manifest = _warehouse_input_manifest(
+        # The connection already resolves the exact operational StoreRegistry
+        # generation, so no path resolution is allowed in this locked phase.
+        None,
+        dates=_plan_dates(plan),
+        connection=conn,
+    )
+    actual_components = _warehouse_input_component_evidence(current_manifest)
+    expected_components["warehouse_input_manifest"] = {
+        "digest": str(plan.get("warehouse_input_manifest_digest") or "")
+    }
+    actual_components["warehouse_input_manifest"] = {
+        "digest": _warehouse_input_manifest_digest_from_value(current_manifest)
+    }
+
+    current_snapshots = _ready_snapshot_manifest_rows(conn)
+    expected_components["ready_snapshot_manifest"] = {
+        "digest": str(plan.get("ready_snapshot_manifest_digest") or ""),
+        "row_count": int(plan.get("snapshot_count") or 0),
+    }
+    actual_components["ready_snapshot_manifest"] = {
+        "digest": _snapshot_manifest_digest(current_snapshots),
+        "row_count": len(current_snapshots),
+    }
+    current_snapshot_by_key = {
+        (str(row["bundle_version"]), str(row["as_of_date"])): row
+        for row in current_snapshots
+    }
+    for update in plan.get("updates") or []:
+        key = (str(update["bundle_version"]), str(update["as_of_date"]))
+        component = f"ready_snapshot_target:{key[0]}:{key[1]}"
+        current = current_snapshot_by_key.get(key)
+        expected_components[component] = {
+            "digest": str(update.get("before_plan_sha256") or ""),
+            "row_count": 1,
+        }
+        actual_components[component] = {
+            "digest": (
+                "sha256:" + _sha(str(current["plan_json"]))
+                if current is not None
+                else "missing"
+            ),
+            "row_count": 1 if current is not None else 0,
+        }
+
+    if expected_components != actual_components:
+        raise _material_component_drift_error(
+            phase="bounded_writer_material_cas",
+            expected=expected_components,
+            actual=actual_components,
+            telemetry=telemetry,
+        )
 
 
 def _transform_snapshot(
@@ -2425,6 +2679,14 @@ def _plan_fingerprint(plan: Mapping[str, Any]) -> str:
 
 def _before_functional_economics_write_lock() -> None:
     """Test seam after full validation and before the bounded writer phase."""
+
+
+def _before_functional_economics_target_update(
+    *,
+    connection: sqlite3.Connection,
+    item: Mapping[str, Any],
+) -> None:
+    """Test seam after target read and before its optimistic plan_json CAS."""
 
 
 def _hash(value: Any) -> str:

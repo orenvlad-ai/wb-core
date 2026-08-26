@@ -97,6 +97,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
     WAREHOUSE_TARGET_KEYS,
     _exact_functional_snapshot_dates,
+    _revalidate_functional_economics_material_cas,
     _transform_snapshot,
     _warehouse_input_manifest_digest,
     apply_functional_economics_backfill_plan,
@@ -110,6 +111,10 @@ from packages.application.warehouse_functional_lock import (  # noqa: E402
     WarehouseFunctionalBusyError,
     warehouse_functional_job_lock,
     warehouse_functional_write_lock,
+)
+from packages.application.wb_fbs_orders import (  # noqa: E402
+    POLL_RUNS_TABLE as FBS_POLL_RUNS_TABLE,
+    ensure_wb_fbs_orders_schema,
 )
 from packages.business_time import current_business_date_iso  # noqa: E402
 from packages.application.wb_finance_weekly import (  # noqa: E402
@@ -4973,8 +4978,9 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             )
     except Exception as exc:
         _assert(
-            "warehouse/cost/settings inputs drifted" in str(exc),
-            "publication during recovery journaling is rejected under the write lock",
+            "daily_wb_cost" in str(exc)
+            and "functional_economics_material_cas_drift" in str(exc),
+            "publication during recovery journaling reports the exact cost component",
         )
     else:
         raise AssertionError("concurrent warehouse source drift must block economics backfill")
@@ -4996,17 +5002,31 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         race_blocked_plan == json.dumps(plan),
         "concurrent source drift leaves the ready snapshot unchanged",
     )
-    # The heavy full-manifest validation must hold only a WAL read snapshot.
-    # An interactive FF writer is allowed to commit immediately; the stale
-    # background snapshot then aborts before any ready-snapshot mutation.
+    # The heavy full-manifest validation must hold no SQLite transaction.  A
+    # natural FBS poll-run commit is outside the economics material manifest:
+    # it must commit promptly and the exact economics publication must still
+    # pass its locked material CAS.
     from packages.application import warehouse_functional_economics_backfill as economics_module
 
-    dry_run = build_functional_economics_backfill_plan(runtime)
     with sqlite3.connect(runtime.db_path) as conn:
+        ensure_wb_fbs_orders_schema(conn)
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS ff_interactive_writer_probe(id TEXT PRIMARY KEY,created_at TEXT NOT NULL)"
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,
+                   plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-smoke",
+                NOW,
+                "2026-07-02",
+                "snap-economics-fbs-concurrency",
+                "v1",
+                NOW,
+                json.dumps(plan),
+            ),
         )
         conn.commit()
+    dry_run = build_functional_economics_backfill_plan(runtime)
     validation_entered = threading.Event()
     release_validation = threading.Event()
 
@@ -5016,16 +5036,19 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             raise AssertionError("concurrent economics validation probe timed out")
 
     background_errors: list[Exception] = []
+    background_results: list[dict[str, object]] = []
 
     def apply_background() -> None:
         try:
-            apply_functional_economics_backfill_plan(
-                runtime,
-                dry_run,
-                confirm_fingerprint=dry_run["plan_fingerprint"],
-                backup_dir=root / "economics-backups",
+            background_results.append(
+                apply_functional_economics_backfill_plan(
+                    runtime,
+                    dry_run,
+                    confirm_fingerprint=dry_run["plan_fingerprint"],
+                    backup_dir=root / "economics-backups",
+                )
             )
-        except Exception as exc:  # expected stale-snapshot abort
+        except Exception as exc:
             background_errors.append(exc)
 
     with patch.object(
@@ -5039,19 +5062,41 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         interactive_started = time.monotonic()
         with sqlite3.connect(runtime.db_path, timeout=2) as interactive:
             interactive.execute(
-                "INSERT INTO ff_interactive_writer_probe(id,created_at) VALUES(?,?)",
-                ("ff-preview-status", NOW),
+                f"""INSERT INTO {FBS_POLL_RUNS_TABLE}(
+                       run_id,status,started_at,completed_at,duration_ms
+                   ) VALUES(?,?,?,?,?)""",
+                ("economics-unrelated-fbs-poll", "success", NOW, NOW, 1),
             )
             interactive.commit()
         interactive_ms = int((time.monotonic() - interactive_started) * 1000)
         release_validation.set()
-        background.join(timeout=5)
-    _assert(not background.is_alive(), "background economics aborts without a multi-minute writer wait")
-    _assert(interactive_ms < 1_500, f"interactive writer starved for {interactive_ms}ms")
+        background.join(timeout=20)
+    _assert(not background.is_alive(), "background economics completes without a multi-minute writer wait")
+    _assert(interactive_ms < 1_500, f"FBS writer starved for {interactive_ms}ms")
     _assert(
-        background_errors
-        and "changed during lock-free economics revalidation" in str(background_errors[0]),
-        f"concurrent commit must fail the guarded background plan: {background_errors}",
+        not background_errors and len(background_results) == 1,
+        f"unrelated FBS commit must not invalidate material economics CAS: {background_errors}",
+    )
+    concurrent_result = background_results[0]
+    _assert(
+        concurrent_result["database_written"] is True
+        and concurrent_result["lock_free_revalidation_telemetry"][
+            "semantic_gate"
+        ]
+        is False
+        and concurrent_result["lock_free_revalidation_telemetry"][
+            "changed_before_writer_lock"
+        ]
+        is True
+        and concurrent_result["lock_free_revalidation_telemetry"][
+            "changed_since_observer_started"
+        ]
+        is True,
+        "data_version observes the FBS commit as telemetry without becoming a gate",
+    )
+    rollback_target_scoped_functional_economics(
+        runtime,
+        manifest_digest=str(concurrent_result["rollback_manifest_digest"]),
     )
     with sqlite3.connect(runtime.db_path) as conn:
         concurrent_plan = conn.execute(
@@ -5059,10 +5104,221 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
         ).fetchone()[0]
         probe_count = conn.execute(
-            "SELECT COUNT(*) FROM ff_interactive_writer_probe WHERE id='ff-preview-status'"
+            f"SELECT COUNT(*) FROM {FBS_POLL_RUNS_TABLE} "
+            "WHERE run_id='economics-unrelated-fbs-poll'"
         ).fetchone()[0]
-    _assert(concurrent_plan == json.dumps(plan), "failed stale snapshot preserves last-good economics")
-    _assert(probe_count == 1, "interactive FF writer commit must survive background abort")
+    _assert(concurrent_plan == json.dumps(plan), "rollback restores the pre-publication ready snapshot")
+    _assert(probe_count == 1, "natural FBS poll evidence survives economics publish/rollback")
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-02'"""
+        )
+        conn.commit()
+
+    # Every material dependency class is compared on the locked writer
+    # connection and reports its exact component before any target write.
+    component_plan_json = json.dumps(
+        {
+            "date_columns": ["2026-07-18"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "write_start_cell": "A1",
+                    "header": ["Показатель", "row_id", "2026-07-18"],
+                    "rows": [
+                        ["SKU", "SKU:104|orderSum", 100],
+                        ["SKU", "SKU:104|orderCount", 2],
+                        ["SKU", "SKU:104|ads_sum", 10],
+                    ],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,
+                   plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-smoke",
+                NOW,
+                "2026-07-18",
+                "snap-economics-material-components",
+                "v1",
+                NOW,
+                component_plan_json,
+            ),
+        )
+        conn.commit()
+    dry_run = build_functional_economics_backfill_plan(runtime)
+    selected_dates = sorted(
+        set(dry_run["source_dates"])
+        | (
+            {"2026-07-01"}
+            if any(day < "2026-07-01" for day in dry_run["source_dates"])
+            else set()
+        )
+    )
+    placeholders = ",".join("?" for _ in selected_dates)
+    with sqlite3.connect(runtime.db_path) as conn:
+        selected_balance = conn.execute(
+            f"""SELECT balance.rowid
+                FROM sheet_vitrina_v1_warehouse_functional_balances balance
+                JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
+                  ON snapshot.version_id=balance.version_id
+                WHERE snapshot.snapshot_date IN ({placeholders})
+                ORDER BY balance.version_id,balance.warehouse_key,balance.nm_id
+                LIMIT 1""",
+            tuple(selected_dates),
+        ).fetchone()
+    _assert(
+        selected_balance is not None,
+        "functional economics fixture exposes a relevant balance row",
+    )
+
+    material_drift_cases = [
+        (
+            "active_functional_identity",
+            "UPDATE sheet_vitrina_v1_warehouse_functional_active "
+            "SET updated_at=updated_at||'.drift' WHERE slot=1",
+            (),
+        ),
+        (
+            "functional_balances",
+            "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+            "SET quantity=quantity||'0' WHERE rowid=?",
+            (int(selected_balance[0]),),
+        ),
+        (
+            "daily_wb_cost",
+            "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+            "SET fingerprint=fingerprint||'-drift' "
+            "WHERE cutover_id=? AND as_of_date='2026-07-01' AND nm_id=104",
+            (FUNCTIONAL_CUTOVER_ID,),
+        ),
+        (
+            "calculation_settings",
+            """INSERT INTO sheet_vitrina_v1_calculation_parameter_versions(
+                   version_id,block_key,revision,effective_date,rates_json,
+                   fingerprint,source,created_by,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                "economics-settings-drift",
+                "proxy_3",
+                999999,
+                "2026-07-01",
+                "{}",
+                "sha256:economics-settings-drift",
+                "smoke",
+                "smoke",
+                NOW,
+            ),
+        ),
+        (
+            "source_watermark_supplier_shipments",
+            """INSERT INTO sheet_vitrina_v1_supplier_shipments(
+                   shipment_id,created_at,updated_at,shipment_date,
+                   match_status,warnings_json,errors_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-locked-source-drift",
+                NOW,
+                NOW,
+                "2026-07-18",
+                "all_matched",
+                "[]",
+                "[]",
+            ),
+        ),
+        (
+            "ready_snapshot_manifest",
+            "UPDATE sheet_vitrina_v1_ready_snapshots "
+            "SET refreshed_at=refreshed_at||'.drift' "
+            "WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'",
+            (),
+        ),
+    ]
+    for expected_component, statement, parameters in material_drift_cases:
+        conn = sqlite3.connect(runtime.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(statement, parameters)
+            _assert(cursor.rowcount == 1, f"material drift fixture changed one row: {expected_component}")
+            try:
+                _revalidate_functional_economics_material_cas(
+                    conn,
+                    dry_run,
+                    telemetry={"semantic_gate": False},
+                )
+            except Exception as exc:
+                _assert(
+                    "functional_economics_material_cas_drift" in str(exc)
+                    and expected_component in str(exc),
+                    f"material drift reports {expected_component}: {exc}",
+                )
+            else:
+                raise AssertionError(
+                    f"material drift must fail before write: {expected_component}"
+                )
+        finally:
+            conn.rollback()
+            conn.close()
+
+    # The per-row plan_json predicate remains an independent optimistic CAS.
+    # A synthetic same-transaction target change after the before-read must
+    # make the conditional UPDATE affect zero rows and roll the transaction
+    # back completely.
+    def force_target_row_conflict(
+        *,
+        connection: sqlite3.Connection,
+        item: dict[str, object],
+    ) -> None:
+        connection.execute(
+            """UPDATE sheet_vitrina_v1_ready_snapshots
+               SET plan_json=plan_json||' '
+               WHERE bundle_version=? AND as_of_date=?""",
+            (item["bundle_version"], item["as_of_date"]),
+        )
+
+    with patch.object(
+        economics_module,
+        "_before_functional_economics_target_update",
+        side_effect=force_target_row_conflict,
+    ):
+        try:
+            apply_functional_economics_backfill_plan(
+                runtime,
+                dry_run,
+                confirm_fingerprint=dry_run["plan_fingerprint"],
+                backup_dir=root / "economics-backups",
+            )
+        except Exception as exc:
+            _assert(
+                "ready snapshot optimistic update conflict" in str(exc),
+                f"target plan_json conflict is explicit: {exc}",
+            )
+        else:
+            raise AssertionError("target plan_json optimistic conflict must fail")
+    with sqlite3.connect(runtime.db_path) as conn:
+        target_conflict_plan = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()[0]
+    _assert(
+        target_conflict_plan == json.dumps(plan),
+        "target-row optimistic conflict rolls back before any publication",
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-18'"""
+        )
+        conn.commit()
+
     dry_run = build_functional_economics_backfill_plan(runtime)
     operation_business_date = str(dry_run["business_date"])
     next_business_date = (
@@ -5185,6 +5441,11 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         targeted_noop["idempotent"] is True
         and targeted_noop["database_written"] is False,
         "targeted economics exact repeat is a no-op",
+    )
+    _assert(
+        targeted_noop["warehouse_input_component_evidence"]
+        == targeted_repeated["warehouse_input_component_evidence"],
+        "idempotent no-change readback preserves exact component evidence",
     )
     with sqlite3.connect(runtime.db_path) as conn:
         stored = json.loads(conn.execute(
