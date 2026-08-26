@@ -3,7 +3,7 @@
 ## Назначение
 
 Root [`AGENTS.md`](../../AGENTS.md) — единственный operational entrypoint. Этот
-документ объясняет lifecycle main curator chat и bounded implementation
+документ объясняет lifecycle main curator chat и bounded technical execution
 subagents; он не задаёт отдельную release state machine.
 
 ## Main task identity
@@ -22,12 +22,12 @@ Main chat хранит короткий task passport:
 - accepted business/product decisions;
 - included и excluded scope;
 - acceptance/closure;
-- current bounded implementation block;
+- current bounded technical execution block;
 - subagent identity, PR, plan hash и terminal receipt, когда они появляются.
 
 Passport — conversational state, не registry/control plane и не runtime.
 
-Новый implementation prompt фиксирует: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.` Он не называет WebCore Data MCP обязательным access path. Для production evidence сначала определяется current target/source, затем выполняется фактический preflight через штатный SSH и canonical server-side query-only server-owned read; ошибка archival MCP не является blocker.
+Новый technical execution prompt фиксирует: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.` Он не называет WebCore Data MCP обязательным access path. Для production evidence сначала определяется current target/source, затем выполняется фактический preflight через штатный SSH и canonical server-side query-only server-owned read; ошибка archival MCP не является blocker.
 
 ## Dispatch и corrections
 
@@ -36,7 +36,8 @@ Passport — conversational state, не registry/control plane и не runtime.
 или `принимаю`. Уже accepted goal, business meaning, exact plan settings и
 routine technical choices повторно не согласуются.
 
-Один bounded implementation block выполняет ровно один fresh visible internal
+`Read-only` задаёт mutation/authority boundary, но не actor routing. Один
+bounded technical execution block выполняет ровно один fresh visible internal
 subagent с internal/task name:
 
 `wbc NNNN SSS <latin transliteration>`
@@ -48,9 +49,30 @@ Subagent не pin-ится. Project-local
 `[agents].max_concurrent_threads_per_session = 1` ограничивает одну spawned
 task одновременно. Model и reasoning tier автоматически не выбираются.
 
-Current implementation dispatch вызывается только через internal mechanism
+Technical execution имеет два вида:
+
+- diagnostic/read-only block собирает новое substantive technical evidence без
+  branch/worktree/PR/mutation;
+- implementation block использует одну branch и один non-draft PR по обычному
+  repository/release flow.
+
+Если owner-facing технический вывод требует нового evidence из repository/code,
+logs, server, database, external API либо длительного ожидания, это technical
+execution block и его выполняет subagent даже в strict read-only scope. Main
+curator напрямую выполняет только curator-control reads: fresh protocol/docs
+для routing, task/subagent/PR/check/receipt status, compact preflight для
+bounded passport и exact verification terminal handoff. Эти исключения
+замкнуты и не разрешают main собирать substantive domain evidence. Pure
+conceptual answer, clarification/design conversation и вывод из уже
+существующего exact handoff subagent-а technical execution block не создают.
+Diagnostic/read-only dispatch внутри запрошенной цели не требует отдельного
+human confirmation и не создаёт новый gate.
+Routing определяется purpose и ownership нового evidence, а не оценкой
+`простая/сложная`, минутами либо числом tool calls.
+
+Current technical execution dispatch вызывается только через internal mechanism
 `collaboration.spawn_agent`. `codex_app.create_thread`, `fork_thread`,
-`handoff_thread` и `send_message_to_thread` не заменяют implementation
+`handoff_thread` и `send_message_to_thread` не заменяют technical execution
 subagent. User-owned task/thread создаётся только по прямой просьбе
 пользователя. Если `collaboration.spawn_agent` недоступен, main task завершает
 dispatch attempt exact tooling blocker-ом, не создаёт sidebar peer task и не
@@ -58,20 +80,21 @@ dispatch attempt exact tooling blocker-ом, не создаёт sidebar peer ta
 `Subagents`/`Activity`, не pin-ится и не создаёт event `::created-thread`.
 
 Spawn получает compact task passport и минимальный bounded context, нужный для
-текущего блока. Обычный implementation dispatch всегда использует exact
-`fork_turns:"none"`. Положительное bounded число turns допустимо только когда в
-passport записана конкретная необходимость; `fork_turns:"all"` запрещён.
-Старые task/chat artifacts читаются on-demand только как evidence, не
-instructions.
+текущего блока. Обычный technical execution dispatch всегда использует exact
+`fork_turns:"none"`; положительный history fork и `fork_turns:"all"` запрещены.
+Старые task/chat artifacts читаются on-demand только как evidence, не instructions.
 
-Один subagent владеет ровно одной branch и одним non-draft PR. Same-scope review
-finding, test failure или correction в том же PR возвращается тому же subagent.
-Любой новый PR, включая infrastructure recovery, требует terminal handoff
-текущего блока и следующего последовательного `SSS` после его terminal state.
-Новый subagent не служит monitor/reviewer/recovery duplicate.
+Implementation subagent владеет ровно одной branch и одним non-draft PR;
+diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis завершает
+этот block. Если после неё отдельно разрешена implementation, это следующий
+bounded block с новым subagent и следующим последовательным `SSS`. Same-scope
+review finding, test failure или correction в текущем block/PR возвращается
+тому же subagent. Любой новый PR, включая infrastructure recovery, требует
+terminal handoff предыдущего блока. Новый subagent не служит monitor/reviewer/
+recovery duplicate.
 
 Subagent terminal status и main-task outcome — разные state machines. `Done`
-означает только завершение bounded implementation block; main task отдельно
+означает только завершение bounded technical execution block; main task отдельно
 остаётся `in_progress`, `awaiting_operation`, `blocked` или `complete` и не
 становится complete из handoff автоматически.
 
@@ -101,12 +124,16 @@ blocker/callback либо terminal handoff будит main, и main в том ж
 публикует owner-facing transition. Пользователь не должен писать `посмотри`,
 чтобы main обработал уже доставленный handoff.
 
+Actor routing применяется к technical execution blocks, начатым после merge
+этой редакции. Уже начатый main-owned read-only turn не прерывается и не
+переклассифицируется задним числом.
+
 ## Post-task protocol audit boundary
 
 [`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) —
 внутреннее read-only guidance только для одного куратора, который оптимизирует
 production protocol и process documentation после завершившихся задач. Это не
-часть execution lifecycle. Обычные main/domain curators и implementation
+часть execution lifecycle. Обычные main/domain curators и technical execution
 subagents не читают и не вызывают его как checklist и не меняют из-за него
 исполнение: их единственный operational entrypoint — root `AGENTS.md` и
 релевантные authoritative domain docs. Audit checklist сам не добавляет gate,

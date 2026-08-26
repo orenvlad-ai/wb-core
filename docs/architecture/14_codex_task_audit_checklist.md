@@ -6,7 +6,7 @@
 ответственного за оптимизацию WBC production protocol и process documentation.
 Это не authoritative execution checklist.
 
-Обычные main/domain curators и implementation subagents **MUST NOT** читать или
+Обычные main/domain curators и technical execution subagents **MUST NOT** читать или
 вызывать этот документ ради исполнения задачи и **MUST NOT** менять из-за него
 своё поведение. Их единственный operational entrypoint — root
 [`AGENTS.md`](../../AGENTS.md) плюс релевантные authoritative domain docs.
@@ -41,12 +41,20 @@ tightening. Любое замедление допустимо только дл
    transitions, terminal handoff, exact GitHub checks/receipts и durable
    operation evidence. Не создавай новый test или mutation ради доказательства.
    Отсутствие UI/status evidence не превращай в failure или success.
-3. **State split.** Отдельно зафиксируй terminal state implementation block и
+3. **Actor/context.** Проверь purpose и ownership evidence. Substantive
+   technical read-only работа внутри main curator является actor/context
+   finding, если owner-facing conclusion потребовал нового evidence из
+   repository/code, logs, server, database, external API либо длительного
+   ожидания. Curator-control reads, pure conceptual/clarification/design ответ
+   и вывод из уже существующего exact handoff отклонением не являются. Finding
+   проходит обычный cost-first decision order ниже; он не означает
+   автоматический `TIGHTEN`, новый task gate или отдельное human confirmation.
+4. **State split.** Отдельно зафиксируй terminal state technical execution block и
    business outcome main task. `Done` subagent-а не означает автоматически
    завершённый business outcome.
-4. **Contour.** Отнеси наблюдение ровно к одному execution contour из таблицы
+5. **Contour.** Отнеси наблюдение ровно к одному execution contour из таблицы
    ниже. Если наблюдений несколько, раздели их на независимые findings.
-5. **Wait review.** Нормой является ровно один outstanding bounded
+6. **Wait review.** Нормой является ровно один outstanding bounded
    terminal/event wait, сохраняющий main turn активным, пока subagent
    non-terminal. Чистый tool timeout разрешает немедленный silent re-arm того
    же wait как renewal lease/subscription; это не polling и не evidence
@@ -54,17 +62,18 @@ tightening. Любое замедление допустимо только дл
    heartbeat/user-facing «ещё идёт» на timeout остаётся нарушением. После
    meaningful callback/event wait можно повторить; кроме silent timeout re-arm,
    иных повторов без нового event быть не должно.
-6. **Classification.** Пройди decision order и назначь finding ровно один code.
-7. **Cost test.** Для любой предлагаемой protocol/documentation change заполни
+7. **Classification.** Пройди decision order и назначь finding ровно один code.
+8. **Cost test.** Для любой предлагаемой protocol/documentation change заполни
    все delta fields. Если данных недостаточно, оставь `NO_CHANGE`; не добавляй
    guard «на всякий случай».
-8. **Stop.** Сохрани только read-only audit conclusion. Не открывай follow-up
+9. **Stop.** Сохрани только read-only audit conclusion. Не открывай follow-up
    task/PR и не исправляй найденный domain/platform defect из этого audit.
 
 ## Execution contours
 
 | Contour | Process treatment |
 | --- | --- |
+| Diagnostic/read-only technical execution | Audit отличает fresh-subagent сбор нового substantive domain evidence от curator-control reads. Main-owned substantive сбор является actor/context finding и проходит обычный cost-first decision order, а не автоматически `TIGHTEN`. |
 | Standard OS maintenance | Использовать штатную OS-процедуру в accepted scope с proportional target/recovery/readback evidence. Сам факт production host не создаёт blanket PR requirement. |
 | Bounded reversible one-off infrastructure maintenance | Допустимо выполнить быстро без PR, только если заранее exact scope/identity, recovery, один mutation submit, non-target protection, post-action readback и durable receipt. Local `/tmp` допустим как working evidence, но никогда не как единственное terminal evidence destructive/production operation. |
 | Recurring automation | Implementation должна быть repo-owned и проходить обычный repository/release flow. Audit не проектирует и не запускает automation. |
@@ -130,8 +139,9 @@ change, positive is slower/costlier. Диапазон допустим, когд
 
 ```text
 task/block: <identity>
-implementation_terminal: <state + exact evidence>
+technical_execution_terminal: <state + exact evidence>
 business_outcome: <state + exact evidence or unknown>
+actor_context: <curator-control only | fresh subagent | deviation + exact evidence>
 contour: <one contour>
 finding: <one concise observation>
 classification: <one code>

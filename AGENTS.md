@@ -31,13 +31,29 @@ Current canonical source acquisition остаётся server-side.
   semantic часть имеет максимум 25 символов.
 - Ясное намерение `реализуй` / `исправь` / `сделай` разрешает implementation
   dispatch. После design-интервью его разрешают `запускай` / `принимаю`.
-- На один bounded implementation block создаётся ровно один fresh visible
+- `Read-only` задаёт mutation/authority boundary, но не выбирает actor. Любой
+  substantive technical execution образует bounded block одного из двух видов:
+  diagnostic/read-only block без branch/worktree/PR/mutation либо implementation
+  block с одной веткой и одним PR по repository flow.
+- Owner-facing технический вывод, которому нужно новое evidence из repository/
+  code, logs, server, database, external API либо длительное ожидание, выполняет
+  fresh visible internal subagent даже при strict read-only scope. Main curator
+  напрямую делает только curator-control reads: fresh protocol/docs для routing,
+  task/subagent/PR/check/receipt status, compact preflight для bounded passport и
+  exact verification terminal handoff; они не расширяются в сбор substantive
+  domain evidence. Pure conceptual answer, clarification/design conversation и
+  вывод из уже существующего exact handoff subagent-а не требуют subagent-а.
+  Diagnostic/read-only dispatch внутри запрошенной цели не требует отдельного
+  human confirmation и не создаёт новый gate.
+- Routing определяется purpose и ownership нового evidence, а не оценкой
+  `простая/сложная`, минутами либо числом tool calls.
+- На один bounded technical execution block создаётся ровно один fresh visible
   internal subagent. Его internal/task name соответствует
   `wbc NNNN SSS <latin transliteration>`: `SSS` последователен внутри main
   task, semantic часть — детерминированная латинская транслитерация русского
   названия, а не английский перевод (`istoriya-ostatkov`, не
   `inventory-history`), и не длиннее 20 символов; subagent не pin-ится.
-- Implementation dispatch выполняется только current internal-subagent
+- Technical execution dispatch выполняется только current internal-subagent
   mechanism `collaboration.spawn_agent`. `codex_app.create_thread`,
   `fork_thread`, `handoff_thread` и `send_message_to_thread` не являются его
   заменой: user-owned task/thread создаётся только по прямой просьбе
@@ -46,26 +62,25 @@ Current canonical source acquisition остаётся server-side.
   `Subagents`/`Activity` main task, не pin-ится и не создаёт
   `::created-thread`.
 - Dispatch передаёт compact task passport и minimal bounded context. Обычный
-  implementation spawn обязан использовать exact `fork_turns:"none"`.
-  Положительное bounded число turns допустимо только с записанной в passport
-  необходимостью; `fork_turns:"all"` запрещён. Старые задачи читаются
-  on-demand только как evidence.
-- По умолчанию активен максимум один implementation subagent. Project config
+  technical execution spawn обязан использовать exact `fork_turns:"none"`.
+  Положительный history fork и `fork_turns:"all"` запрещены. Старые задачи
+  читаются on-demand только как evidence.
+- По умолчанию активен максимум один technical execution subagent. Project config
   фиксирует тот же concurrency limit. Model-tier classification не используется.
-- Один implementation subagent владеет ровно одной веткой и одним PR. Новый
-  PR, включая infrastructure recovery, требует terminal handoff текущего блока
-  и следующего последовательного `SSS`; corrections в том же PR остаются у
-  текущего subagent.
-- Same-scope correction продолжает того же subagent. Материально новый scope
-  или новый PR получает следующий `SSS` и нового subagent после terminal state
-  предыдущего.
+- Implementation subagent владеет ровно одной веткой и одним PR; diagnostic
+  subagent branch/worktree/PR не создаёт. Terminal diagnosis заканчивает этот
+  block; отдельно разрешённая затем implementation является следующим bounded
+  block со следующим последовательным `SSS`. Same-scope correction в текущем
+  block/PR продолжает того же subagent. Материально новый scope или новый PR,
+  включая infrastructure recovery, получает нового subagent после terminal
+  state предыдущего.
 - Subagent возвращает один terminal handoff и становится `Done`. Это только
-  terminal status implementation block: main-task outcome отдельно остаётся
+  terminal status technical execution block: main-task outcome отдельно остаётся
   `in_progress`, `awaiting_operation`, `blocked` или `complete` и не выводится
   из subagent `Done`/handoff автоматически. Настоящий gate
   возвращает точный callback с одним требуемым действием и не остаётся
   неопределённо `Active`; pause/blocker является немедленным terminal
-  transition, а не причиной держать implementation task активной.
+  transition, а не причиной держать technical execution task активной.
 - После successful internal spawn main curator сохраняет текущий turn активным
   до meaningful callback либо terminal handoff: пока subagent non-terminal,
   main не публикует final, не становится idle и не возвращает управление
@@ -83,11 +98,14 @@ Current canonical source acquisition остаётся server-side.
   handoff. Один terminal payload возвращается ровно один раз, без дублирования
   идентичного terminal handoff несколькими каналами, после чего subagent
   становится `Done`.
+- Это actor routing применяется к technical execution blocks, начатым после
+  merge этой редакции. Уже начатый main-owned read-only turn не прерывается и
+  не переклассифицируется задним числом.
 - Post-task checklist
   [`docs/architecture/14_codex_task_audit_checklist.md`](docs/architecture/14_codex_task_audit_checklist.md)
   является внутренним read-only инструментом только одного куратора,
   оптимизирующего production protocol и его документацию. Обычные main/domain
-  curators и implementation subagents не читают и не вызывают его как
+  curators и technical execution subagents не читают и не вызывают его как
   execution checklist и не меняют из-за него поведение задачи: их единственный
   operational entrypoint остаётся этот файл плюс релевантные authoritative
   domain docs. Сам checklist не создаёт gate, approval, test, task, PR или
@@ -96,7 +114,7 @@ Current canonical source acquisition остаётся server-side.
   accepted exact plan или обычные технические решения внутри scope.
 
 Минимальный task passport main chat: цель; accepted decisions; included и
-excluded scope; acceptance; текущий implementation block и subagent identity;
+excluded scope; acceptance; текущий technical execution block и subagent identity;
 PR/plan hash/terminal receipt после появления.
 
 ## Human gates
