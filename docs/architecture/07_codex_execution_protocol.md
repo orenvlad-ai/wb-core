@@ -77,15 +77,29 @@ Subagent terminal status и main-task outcome — разные state machines. `
 
 Subagent либо:
 
-- возвращает один terminal handoff и становится `Done`;
+- возвращает один terminal handoff/terminal final ровно один раз, не дублируя
+  идентичный terminal payload несколькими каналами, и становится `Done`;
 - либо возвращает точный human/tooling callback с resource/effect и одним
   минимальным действием, не оставаясь indefinitely active. Pause/blocker — это
   немедленный terminal transition, не неопределённый `Active`.
 
+После successful internal spawn main curator **MUST** сохранять текущий turn
+активным до meaningful callback либо terminal handoff. Пока subagent
+non-terminal, main **MUST NOT** публиковать final, становиться idle или
+возвращать управление пользователю. Он держит ровно один outstanding
+event/terminal wait. Quiet mode означает отсутствие heartbeat/status-текста,
+а не completion turn.
+
 Main и subagent сообщают только meaningful state transitions. «Ещё идёт»,
-heartbeat и polling неизменного CI запрещены полностью. Один bounded
-event/terminal wait не требует промежуточного status-текста. Настоящий
-blocker/terminal transition публикуется сразу.
+heartbeat и polling неизменного CI запрещены полностью. Timeout tool-level wait
+разрешает только немедленный silent re-arm того же event wait. Это renewal
+lease/subscription, а не progress evidence; на timeout **MUST NOT** выполняться
+`list_agents`, worktree/Git/CI/status reads или user-facing «ещё идёт».
+Повторный wait после meaningful callback/event разрешён; silent re-arm после
+чистого tool timeout — единственное отдельное исключение. Meaningful
+blocker/callback либо terminal handoff будит main, и main в том же turn
+публикует owner-facing transition. Пользователь не должен писать `посмотри`,
+чтобы main обработал уже доставленный handoff.
 
 ## Post-task protocol audit boundary
 
