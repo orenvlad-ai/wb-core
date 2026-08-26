@@ -28,6 +28,7 @@ from packages.application.root_storage_policy import (
     admit_root_write,
     collect_root_storage_status,
     load_policy,
+    read_root_storage_status_artifact,
 )
 
 
@@ -50,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--output", type=Path)
     status.add_argument("--fail-on-unregistered", action="store_true")
 
+    subparsers.add_parser("status-readback")
+
     admission = subparsers.add_parser("admission")
     admission.add_argument("--owner", required=True)
     admission.add_argument("--destination", type=Path, required=True)
@@ -64,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    policy = load_policy(args.policy_file)
     try:
+        policy = load_policy(args.policy_file)
         if args.command == "status":
             result = collect_root_storage_status(policy=policy)
             if args.output:
@@ -74,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.fail_on_unregistered and result["unregistered_large_root_files"]:
                 return 2
             return 0
+        if args.command == "status-readback":
+            result = read_root_storage_status_artifact(policy=policy)
+            print(_canonical_json(result))
+            return 0 if result.get("ok") else 3
         if args.command == "admission":
             result = admit_root_write(
                 owner=args.owner,

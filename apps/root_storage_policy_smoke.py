@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -26,6 +26,7 @@ from packages.application.root_storage_policy import (
     collect_root_storage_status,
     load_policy,
     predict_sqlite_backup_bytes,
+    read_root_storage_status_artifact,
     storage_level,
 )
 
@@ -36,6 +37,7 @@ def main() -> int:
     _assert_thresholds(policy)
     _assert_admission(policy)
     _assert_unregistered_detection(policy)
+    _assert_status_artifact(policy)
     _assert_journal_manifest(legacy_policy)
     _assert_one_shot_activation(legacy_policy)
     _assert_reconciliation(legacy_policy)
@@ -117,6 +119,36 @@ def _assert_admission(policy: dict[str, object]) -> None:
             else:
                 raise AssertionError("large predicted-free floor admitted unsafe output")
 
+        with mock.patch.object(
+            policy_module.os,
+            "statvfs",
+            return_value=SimpleNamespace(f_bavail=14 * GIB, f_frsize=1),
+        ):
+            bounded = admit_root_write(
+                owner="ads_historical_recovery",
+                destination=destination,
+                predicted_output_bytes=1,
+                policy=policy,
+                root_path=root,
+            )
+            assert bounded["allowed"] is True
+            assert bounded["storage_level"] == "critical"
+
+        with mock.patch.object(
+            policy_module.os,
+            "statvfs",
+            return_value=SimpleNamespace(f_bavail=30 * GIB, f_frsize=1),
+        ):
+            large_bounded = admit_root_write(
+                owner="buyout_mature_backfill",
+                destination=destination,
+                predicted_output_bytes=1 * GIB,
+                policy=policy,
+                root_path=root,
+            )
+            assert large_bounded["allowed"] is True
+            assert large_bounded["predicted_free_after_bytes"] == 29 * GIB
+
         for owner, predicted, destination_value in (
             ("", 1, destination),
             ("unknown-owner", 1, destination),
@@ -189,6 +221,75 @@ def _assert_unregistered_detection(policy: dict[str, object]) -> None:
         assert status["alerts"] == [
             {"code": "unregistered_large_root_producer", "severity": "critical", "count": 1}
         ]
+
+
+def _assert_status_artifact(policy: dict[str, object]) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        fixed_now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
+        fixture = deepcopy(policy)
+        fixture["filesystems"] = {"root": str(root)}
+        fixture["scan_roots"] = [str(root)]
+        with mock.patch.object(
+            policy_module,
+            "_mountinfo_for_path",
+            return_value={
+                "mount_id": 1,
+                "mount_point": str(root),
+                "source": "/dev/fixture",
+                "filesystem_type": "ext4",
+                "mount_options": "rw",
+            },
+        ), mock.patch.object(policy_module, "_filesystem_uuid", return_value="fixture-uuid"), mock.patch.object(
+            policy_module.os,
+            "statvfs",
+            return_value=SimpleNamespace(
+                f_bavail=30 * GIB,
+                f_bfree=30 * GIB,
+                f_blocks=40 * GIB,
+                f_frsize=1,
+                f_files=1000,
+                f_ffree=900,
+                f_favail=900,
+            ),
+        ):
+            status = collect_root_storage_status(
+                policy=fixture,
+                root_path=root,
+                now=fixed_now,
+            )
+        artifact = root / "status.json"
+        app._write_json_atomic(artifact, status, mode=0o644)
+        readback = read_root_storage_status_artifact(
+            policy=fixture,
+            artifact_path=artifact,
+            now=fixed_now + timedelta(seconds=300),
+        )
+        assert readback["ok"] is True
+        assert readback["fresh"] is True
+        assert readback["age_seconds"] == 300
+
+        unregistered = deepcopy(status)
+        unregistered["unregistered_large_root_files"] = [{"path": str(root / "unknown.bin")}]
+        unregistered["safe_for_discretionary_root_writes"] = False
+        app._write_json_atomic(artifact, unregistered, mode=0o644)
+        blocked = read_root_storage_status_artifact(
+            policy=fixture,
+            artifact_path=artifact,
+            now=fixed_now + timedelta(seconds=300),
+        )
+        assert blocked["ok"] is False
+
+        try:
+            read_root_storage_status_artifact(
+                policy=fixture,
+                artifact_path=artifact,
+                now=fixed_now + timedelta(seconds=601),
+            )
+        except RootStoragePolicyError as exc:
+            assert "stale" in str(exc)
+        else:
+            raise AssertionError("stale root storage status artifact did not fail closed")
 
 
 def _assert_journal_manifest(policy: dict[str, object]) -> None:
@@ -656,9 +757,29 @@ def _assert_static_safety() -> None:
             / "hosted_runtime_target__europe_api.json"
         ).read_text(encoding="utf-8")
     )
-    managed = {item["name"] for item in active_target["managed_systemd_units"]}
-    assert "wb-core-root-storage-policy.service" not in managed
-    assert "wb-core-root-storage-policy.timer" not in managed
+    managed = {
+        item["name"]: item for item in active_target["managed_systemd_units"]
+    }
+    assert managed["wb-core-root-storage-policy.service"] == {
+        "name": "wb-core-root-storage-policy.service",
+        "enable": False,
+        "restart": True,
+    }
+    assert managed["wb-core-root-storage-policy.timer"] == {
+        "name": "wb-core-root-storage-policy.timer",
+        "enable": True,
+        "restart": True,
+    }
+    unit = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "systemd"
+        / "wb-core-root-storage-policy.service"
+    ).read_text(encoding="utf-8")
+    assert "StateDirectory=wb-core-root-storage-policy" in unit
+    assert "status.json --fail-on-unregistered" in unit
+    assert "journald" not in unit.lower()
 
 
 def _legacy_activation_policy(policy: dict[str, object]) -> dict[str, object]:

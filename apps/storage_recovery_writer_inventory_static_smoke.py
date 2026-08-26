@@ -169,6 +169,15 @@ WRITERS = [
         "lifecycle": "verified compressed generation",
     },
     {
+        "owner": "registry_operational_store",
+        "source": "packages/application/supplier_shipment_factual_correction.py",
+        "cadence": "human_gated_verified_restore",
+        "artifact": "in-place coherent operational-store restore",
+        "full_monolith": True,
+        "guard": "verified backup identity + inode-preserving restore readback",
+        "lifecycle": "essential bounded business recovery; no new retained copy",
+    },
+    {
         "owner": "autoanswers_first_schema",
         "source": "packages/application/wb_autoanswers_runtime.py",
         "cadence": "once_per_schema_version",
@@ -266,6 +275,7 @@ def build_inventory() -> dict[str, object]:
     observed = set()
     backup_call_counts: dict[str, int] = {}
     admission_call_counts: dict[str, int] = {}
+    backup_entrypoints: list[dict[str, object]] = []
     for base in ("apps", "packages"):
         for path in (ROOT / base).rglob("*.py"):
             relative = str(path.relative_to(ROOT))
@@ -281,6 +291,7 @@ def build_inventory() -> dict[str, object]:
                 observed.add(relative)
                 backup_call_counts[relative] = backup_count
                 admission_call_counts[relative] = admission_count
+                backup_entrypoints.extend(_writer_entrypoints(source, relative))
     unclassified = sorted(observed - classified_sources)
     missing = sorted(
         source for source in classified_sources if not (ROOT / source).is_file()
@@ -295,9 +306,37 @@ def build_inventory() -> dict[str, object]:
         if str(item["owner"]) not in producer_registry
     )
     admission_missing = sorted(
-        source
-        for source in observed
-        if admission_call_counts[source] < backup_call_counts[source]
+        {
+            str(item["source"])
+            for item in backup_entrypoints
+            if not bool(item["admission_covered"])
+        }
+    )
+    registered_owner_ids = set(producer_registry)
+    unregistered_entrypoint_owners = sorted(
+        {
+            owner
+            for item in backup_entrypoints
+            for owner in item["admission_owners"]
+            if not str(owner).startswith("$") and owner not in registered_owner_ids
+        }
+    )
+    allowed_dynamic_owners = {
+        (
+            "packages/application/registry_upload_db_backed_runtime.py",
+            "backup_database",
+            "$admission_owner",
+        )
+    }
+    unbounded_dynamic_entrypoint_owners = sorted(
+        {
+            (str(item["source"]), str(item["function"]), str(owner))
+            for item in backup_entrypoints
+            for owner in item["admission_owners"]
+            if str(owner).startswith("$")
+            and (str(item["source"]), str(item["function"]), str(owner))
+            not in allowed_dynamic_owners
+        }
     )
     scheduled_full = [
         item
@@ -314,7 +353,10 @@ def build_inventory() -> dict[str, object]:
         "unregistered_root_storage_owners": unregistered_owners,
         "backup_call_counts": backup_call_counts,
         "admission_call_counts": admission_call_counts,
+        "backup_entrypoints": backup_entrypoints,
         "large_write_admission_missing": admission_missing,
+        "unregistered_entrypoint_admission_owners": unregistered_entrypoint_owners,
+        "unbounded_dynamic_entrypoint_admission_owners": unbounded_dynamic_entrypoint_owners,
         "scheduled_full_monolith_writers": scheduled_full,
         "routine_full_monolith_count": len(scheduled_full),
         "status": (
@@ -323,6 +365,8 @@ def build_inventory() -> dict[str, object]:
             and not missing
             and not scheduled_full
             and not unregistered_owners
+            and not unregistered_entrypoint_owners
+            and not unbounded_dynamic_entrypoint_owners
             and not admission_missing
             else "failed"
         ),
@@ -349,6 +393,88 @@ def _writer_call_counts(source: str) -> tuple[int, int]:
         elif isinstance(node.func, ast.Name) and node.func.id == "admit_root_write":
             admission_count += 1
     return backup_count, admission_count
+
+
+def _writer_entrypoints(source: str, relative: str) -> list[dict[str, object]]:
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def containing_function(node: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        current = parents.get(node)
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return current
+            current = parents.get(current)
+        return None
+
+    def value_name(node: ast.AST | None) -> str:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return "$" + node.id
+        return "$dynamic"
+
+    admissions: dict[ast.AST | None, list[tuple[int, str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "admit_root_write":
+            owner_keyword = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "owner"),
+                None,
+            )
+            admissions.setdefault(containing_function(node), []).append(
+                (int(node.lineno), value_name(owner_keyword))
+            )
+
+    entries: list[dict[str, object]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        primitive = ""
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {
+            "backup",
+            "backup_database",
+        }:
+            primitive = node.func.attr
+        elif isinstance(node.func, ast.Name) and node.func.id == "backup_database":
+            primitive = node.func.id
+        if not primitive:
+            continue
+        function = containing_function(node)
+        inline_owner = next(
+            (
+                keyword.value
+                for keyword in node.keywords
+                if keyword.arg == "admission_owner"
+            ),
+            None,
+        )
+        admission_owners: list[str] = []
+        admission_lines: list[int] = []
+        if inline_owner is not None:
+            admission_owners.append(value_name(inline_owner))
+            admission_lines.append(int(node.lineno))
+        else:
+            for line, owner in admissions.get(function, []):
+                if line < int(node.lineno):
+                    admission_lines.append(line)
+                    admission_owners.append(owner)
+        entries.append(
+            {
+                "source": relative,
+                "function": None if function is None else function.name,
+                "backup_line": int(node.lineno),
+                "primitive": primitive,
+                "admission_lines": sorted(set(admission_lines)),
+                "admission_owners": sorted(set(admission_owners)),
+                "admission_covered": bool(admission_lines),
+            }
+        )
+    return sorted(entries, key=lambda item: (int(item["backup_line"]), str(item["primitive"])))
 
 
 def main() -> int:

@@ -6,9 +6,11 @@ RequiresMountsFor=/opt/wb-core-runtime/state/backups /opt/wb-core-runtime/state/
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
-RuntimeDirectory=wb-core-root-storage
+StateDirectory=wb-core-root-storage-policy
+StateDirectoryMode=0755
 UMask=0022
-ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/root_storage_policy.py status --output /run/wb-core-root-storage/status.json
+NoNewPrivileges=true
+ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/root_storage_policy.py status --output /var/lib/wb-core-root-storage-policy/status.json --fail-on-unregistered
 
 [Install]
 WantedBy=multi-user.target

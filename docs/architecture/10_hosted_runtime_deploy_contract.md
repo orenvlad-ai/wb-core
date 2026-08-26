@@ -450,9 +450,12 @@ Canonical repo-owned systemd artifacts for this contour:
 
 The root-storage status command publishes warning/critical/hard capacity state
 and exact large-producer registration without deleting or moving data. The
-repo-owned monitor service/timer artifacts above are dormant and absent from
-the active target's `managed_systemd_units`; block 004 neither installs nor
-starts them. The target-bound policy and historical block-003 journald drop-in
+repo-owned monitor service/timer artifacts above are active managed units: the
+timer is enabled/restarted by canonical deploy and publishes the atomic
+policy-bound artifact `/var/lib/wb-core-root-storage-policy/status.json` every
+five minutes. `root-storage-readback` fails closed when that artifact is stale,
+malformed, policy-mismatched or contains an unregistered large root producer.
+The target-bound policy and historical block-003 journald drop-in
 source are
 `artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json` and
 `artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf`;
@@ -502,6 +505,7 @@ Supported commands:
 - `public-probe`
 - `deploy-and-verify`
 - `root-storage-status`
+- `root-storage-readback`
 - `root-storage-admission`
 - `journald-corrective-readback` (`journald-retention-readback` remains a
   compatibility alias to the current target-bound readback)
@@ -593,7 +597,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
 - `root_storage_policy_file = artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json`
-- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/FBS-shadow/Autoanswers units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`. The dedicated read-only FBS-shadow timer is deploy-enabled/restarted. The dormant root-storage monitor service/timer are deliberately absent from this active list; unrelated business timers and the detached restore template retain their explicit target flags.
+- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/FBS-shadow/Autoanswers units + root-storage monitor units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`. The dedicated read-only FBS-shadow timer and root-storage monitor timer are deploy-enabled/restarted. The root-storage oneshot itself is timer-owned; unrelated business timers and the detached restore template retain their explicit target flags.
 - `retired_systemd_units = wb-core-spp-tester-schedule-tick.timer + wb-core-spp-tester-schedule-tick.service`; immediately after auth preflight and before runtime sync/dependency work, deploy idempotently disables/stops both obsolete schedule units, removes their unit files and performs `daemon-reload`. This is the deployment proof that the removed SPP Autocheck cannot start inside a long rollout window or keep running from a previous release.
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
@@ -948,7 +952,9 @@ Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are
 Current deploy contract note:
 - `deploy` does more than `rsync + restart`:
   - sync current checkout;
-  - publish root/backup/generation capacity and large-producer status and fail on an unregistered large root producer;
+  - publish root/backup/generation capacity and large-producer status to the
+    atomic server-owned artifact and fail on an unregistered large root
+    producer;
   - ensure host OS dependencies for SellerPortalBot recovery are present (`python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`);
   - use the same installed headed-browser dependencies for the independent WB buyer-session recovery while preserving separate state, lock and ports;
   - ensure host OS dependencies for SellerPortalBot owner runtime are present (`postgresql`, `postgresql-client`);
@@ -956,6 +962,8 @@ Current deploy contract note:
   - create/repair `/opt/wb-web-bot/venv`, install `playwright==1.58.0` and `psycopg2-binary==2.9.11` into it and ensure Playwright Chromium can launch from both Python contexts;
   - create/repair `/opt/wb-ai/venv`, install the pinned local API/handoff packages and verify `/opt/wb-web-bot/bot` plus `/opt/wb-ai/run_web_source_handoff.py` imports;
   - install/update repo-owned systemd units when configured;
+  - enable/restart the read-only root-storage monitor timer and validate its
+    fresh policy-bound artifact;
   - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
   - after all ordinary deploy mutations, run the exact versioned block-004 journald drop-in corrective removal/restart boundary at most once;

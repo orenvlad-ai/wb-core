@@ -4421,6 +4421,19 @@ def main() -> None:
             **base_target_payload["runtime_env"],
             "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
         }
+        deploy_target_payload["managed_systemd_units"] = [
+            *base_target_payload["managed_systemd_units"],
+            {
+                "name": "wb-core-root-storage-policy.service",
+                "enable": False,
+                "restart": True,
+            },
+            {
+                "name": "wb-core-root-storage-policy.timer",
+                "enable": True,
+                "restart": True,
+            },
+        ]
         deploy_target_file.write_text(
             json.dumps(deploy_target_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -4573,8 +4586,15 @@ def main() -> None:
             journald_readback_command = " ".join(
                 deploy_dry_run["commands"]["journald_operation_readback"]
             )
-            if "status --fail-on-unregistered" not in root_status_command:
+            if " status " not in root_status_command or "--fail-on-unregistered" not in root_status_command:
                 raise AssertionError("deploy must publish status and reject unregistered large root producers")
+            if "/var/lib/wb-core-root-storage-policy/status.json" not in root_status_command:
+                raise AssertionError("deploy must atomically publish the server-owned root status artifact")
+            root_status_readback_command = " ".join(
+                deploy_dry_run["commands"]["root_storage_status_artifact_readback"]
+            )
+            if "status-readback" not in root_status_readback_command:
+                raise AssertionError("deploy must validate the fresh server-owned root status artifact")
             if deploy_dry_run["commands"]["journald_operation_name"] != "corrective_remove":
                 raise AssertionError("deploy must select the corrective journald operation")
             if "journald-corrective-remove" not in journald_operation_command:
@@ -4660,9 +4680,21 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose systemd enable command")
             if "restart" not in " ".join(deploy_dry_run["commands"]["systemd_restart"]):
                 raise AssertionError("deploy --dry-run must expose systemd restart command")
+            systemd_install = " ".join(deploy_dry_run["commands"]["systemd_install"])
+            systemd_enable = " ".join(deploy_dry_run["commands"]["systemd_enable"])
+            systemd_restart = " ".join(deploy_dry_run["commands"]["systemd_restart"])
+            if (
+                "wb-core-root-storage-policy.service" not in systemd_install
+                or "wb-core-root-storage-policy.timer" not in systemd_install
+                or "wb-core-root-storage-policy.timer" not in systemd_enable
+                or "wb-core-root-storage-policy.service" not in systemd_restart
+                or "wb-core-root-storage-policy.timer" not in systemd_restart
+            ):
+                raise AssertionError("deploy must install and activate the root-storage monitor timer")
             command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
             for required_command in (
                 "root-storage-status",
+                "root-storage-readback",
                 "root-storage-admission",
                 "journald-retention-readback",
                 "journald-corrective-readback",

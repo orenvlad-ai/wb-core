@@ -8,6 +8,10 @@
     "large_output": 268435456,
     "large_predicted_free_after_floor": 16106127360
   },
+  "status_artifact": {
+    "path": "/var/lib/wb-core-root-storage-policy/status.json",
+    "max_age_seconds": 600
+  },
   "filesystems": {
     "root": "/",
     "backup": "/opt/wb-core-runtime/state/backups",
