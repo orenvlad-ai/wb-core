@@ -113,6 +113,19 @@ SERVICE_NAMES = (
     "wb-core-autoanswers-worker.service",
     "wb-core-autoanswers-worker.timer",
 )
+SYSTEMD_REQUIRED_PROPERTIES = (
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Result",
+    "MainPID",
+    "ExecMainStatus",
+    "UnitFileState",
+)
+SYSTEMD_TIMER_PROPERTIES = (
+    "LastTriggerUSec",
+    "NextElapseUSecRealtime",
+)
 OTHER_LIFECYCLE_LOCKS = (
     ".finance-storage-split.lock",
     ".finance-storage-stale-writer-recovery.lock",
@@ -1381,60 +1394,249 @@ def _other_lifecycle_locks(runtime_dir: Path) -> list[dict[str, Any]]:
 def _systemd_snapshot(names: tuple[str, ...] = SERVICE_NAMES) -> dict[str, Any]:
     result = {}
     for name in names:
-        completed = subprocess.run(
-            [
-                "systemctl",
-                "show",
-                name,
-                "--no-pager",
-                "--property=LoadState",
-                "--property=ActiveState",
-                "--property=SubState",
-                "--property=Result",
-                "--property=MainPID",
-                "--property=ExecMainStatus",
-                "--property=UnitFileState",
-            ],
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise WarmArchiveError(f"systemd readback failed: {name}")
-        values = {}
+        values = {
+            "Id": "",
+            **{property_name: "" for property_name in SYSTEMD_REQUIRED_PROPERTIES},
+            **{property_name: "" for property_name in SYSTEMD_TIMER_PROPERTIES},
+        }
+        observed_properties: set[str] = set()
+        try:
+            completed = subprocess.run(
+                [
+                    "systemctl",
+                    "show",
+                    name,
+                    "--no-pager",
+                    "--property=Id",
+                    *(f"--property={item}" for item in SYSTEMD_REQUIRED_PROPERTIES),
+                    *(f"--property={item}" for item in SYSTEMD_TIMER_PROPERTIES),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            values.update(
+                {
+                    "QueryReturnCode": None,
+                    "QueryError": type(exc).__name__,
+                    "QueryStderrSha256": None,
+                }
+            )
+            result[name] = values
+            continue
         for line in completed.stdout.splitlines():
             key, separator, value = line.partition("=")
             if separator:
                 values[key] = value
+                observed_properties.add(key)
+        values.update(
+            {
+                "QueryReturnCode": int(completed.returncode),
+                "QueryError": None,
+                "QueryStderrSha256": _digest(completed.stderr.encode("utf-8")),
+                "ObservedProperties": sorted(observed_properties),
+            }
+        )
         result[name] = values
     return result
 
 
+def _systemd_int(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _systemd_service_gate(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify every literal unit without collapsing evidence to one bool."""
+
+    expected_names = list(SERVICE_NAMES)
+    observed_names = list(snapshot)
+    missing_names = [name for name in expected_names if name not in snapshot]
+    unexpected_names = [name for name in observed_names if name not in SERVICE_NAMES]
+    rows = []
+    for name in expected_names:
+        source = snapshot.get(name)
+        values = source if isinstance(source, Mapping) else {}
+        kind = (
+            "timer"
+            if name.endswith(".timer")
+            else "persistent_service"
+            if name in PERSISTENT_SERVICE_NAMES
+            else "oneshot_service"
+        )
+        row = {
+            "name": name,
+            "unit_kind": kind,
+            "Id": values.get("Id", ""),
+            **{
+                property_name: values.get(property_name, "")
+                for property_name in SYSTEMD_REQUIRED_PROPERTIES
+            },
+            "QueryReturnCode": values.get("QueryReturnCode"),
+            "QueryError": values.get("QueryError"),
+            "QueryStderrSha256": values.get("QueryStderrSha256"),
+            "ObservedProperties": values.get("ObservedProperties"),
+        }
+        if kind == "timer":
+            row.update(
+                {
+                    property_name: values.get(property_name, "")
+                    for property_name in SYSTEMD_TIMER_PROPERTIES
+                }
+            )
+        reasons: list[str] = []
+        observed_properties = set(
+            values.get("ObservedProperties")
+            if isinstance(values.get("ObservedProperties"), list)
+            else values
+        )
+        mandatory_properties = (
+            ("Id", "LoadState", "ActiveState", "SubState", "Result", "UnitFileState")
+            if kind == "timer"
+            else ("Id", *SYSTEMD_REQUIRED_PROPERTIES)
+        )
+        missing_properties = [
+            property_name
+            for property_name in mandatory_properties
+            if property_name not in observed_properties
+        ]
+        query_failed = (
+            values.get("QueryReturnCode") != 0 or values.get("QueryError") is not None
+        )
+        identity_mismatch = values.get("Id") != name
+        absent_or_masked = (
+            values.get("LoadState") in {"not-found", "masked", "error"}
+            or str(values.get("UnitFileState") or "").startswith("masked")
+        )
+        result_stale = values.get("Result") not in {"", "success"}
+        exec_status = _systemd_int(values.get("ExecMainStatus"))
+        exec_stale = exec_status not in {None, 0}
+        main_pid = _systemd_int(values.get("MainPID"))
+
+        if missing_properties or query_failed or identity_mismatch:
+            classification = "predicate_or_literal_unit_list_defect"
+            healthy = False
+            if missing_properties:
+                reasons.append("required_properties_missing")
+            if query_failed:
+                reasons.append("systemctl_query_failed")
+            if identity_mismatch:
+                reasons.append("literal_unit_identity_mismatch")
+        elif absent_or_masked:
+            classification = "absent_or_masked"
+            healthy = False
+            reasons.append("required_unit_absent_or_masked")
+        elif kind == "timer":
+            waiting = (
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState") == "active"
+                and values.get("SubState") == "waiting"
+                and values.get("UnitFileState") == "enabled"
+            )
+            if waiting and (result_stale or exec_stale):
+                classification = "stale_result_or_exec_main_status"
+                healthy = True
+                reasons.append("timer_waiting_predicate_owns_current_health")
+            elif waiting:
+                classification = "expected_waiting_timer"
+                healthy = True
+            else:
+                classification = "real_unhealthy_timer_control"
+                healthy = False
+                reasons.append("timer_not_loaded_active_waiting_enabled")
+        elif kind == "persistent_service":
+            owns_current_process = (
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState") == "active"
+                and values.get("SubState") == "running"
+                and main_pid is not None
+                and main_pid > 0
+            )
+            if owns_current_process and (result_stale or exec_stale):
+                classification = "stale_result_or_exec_main_status"
+                healthy = True
+                reasons.append("active_main_pid_owns_current_health")
+            elif owns_current_process:
+                classification = "healthy_persistent_service"
+                healthy = True
+            else:
+                classification = "real_unhealthy_owning_service"
+                healthy = False
+                reasons.append("persistent_service_not_active_running_with_pid")
+        else:
+            correct_inactive = (
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState") == "inactive"
+                and values.get("SubState") in {"dead", "exited"}
+                and main_pid in {None, 0}
+            )
+            active_invocation = (
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState") in {"active", "activating"}
+                and values.get("SubState") in {"start", "running", "exited"}
+                and main_pid is not None
+                and main_pid > 0
+            )
+            if correct_inactive and not result_stale and not exec_stale:
+                classification = "correct_inactive_oneshot"
+                healthy = True
+            elif active_invocation and (result_stale or exec_stale):
+                classification = "stale_result_or_exec_main_status"
+                healthy = True
+                reasons.append("active_oneshot_pid_owns_current_health")
+            elif active_invocation:
+                classification = "healthy_active_oneshot"
+                healthy = True
+            else:
+                classification = "real_unhealthy_owning_service"
+                healthy = False
+                if correct_inactive and (result_stale or exec_stale):
+                    reasons.append("last_oneshot_invocation_failed")
+                else:
+                    reasons.append("oneshot_state_predicate_failed")
+
+        row.update(
+            {
+                "classification": classification,
+                "healthy": healthy,
+                "reason_codes": reasons,
+            }
+        )
+        rows.append(row)
+
+    list_defect = bool(missing_names or unexpected_names or len(rows) != len(SERVICE_NAMES))
+    failing = [row for row in rows if row.get("healthy") is not True]
+    counts: dict[str, int] = {}
+    for row in rows:
+        classification = str(row["classification"])
+        counts[classification] = counts.get(classification, 0) + 1
+    return {
+        "expected_unit_count": len(SERVICE_NAMES),
+        "observed_unit_count": len(snapshot),
+        "expected_unit_names": expected_names,
+        "missing_unit_names": missing_names,
+        "unexpected_unit_names": unexpected_names,
+        "classification": (
+            "predicate_or_literal_unit_list_defect"
+            if list_defect
+            else "required_units_unhealthy"
+            if failing
+            else "healthy"
+        ),
+        "classification_counts": counts,
+        "healthy": not list_defect and not failing,
+        "failing_unit_count": len(failing),
+        "failing_units": failing,
+        "units": rows,
+    }
+
+
 def _services_healthy(snapshot: Mapping[str, Any]) -> bool:
-    for name, values in snapshot.items():
-        if name.endswith(".timer"):
-            if (
-                values.get("LoadState") != "loaded"
-                or values.get("ActiveState") != "active"
-                or values.get("UnitFileState") != "enabled"
-            ):
-                return False
-        elif name in PERSISTENT_SERVICE_NAMES:
-            if (
-                values.get("LoadState") != "loaded"
-                or values.get("ActiveState") != "active"
-                or int(values.get("MainPID") or 0) <= 0
-            ):
-                return False
-        elif (
-            values.get("LoadState") != "loaded"
-            or values.get("ActiveState") not in {"active", "inactive", "activating"}
-            or values.get("Result") not in {"", "success"}
-            or int(values.get("ExecMainStatus") or 0) != 0
-        ):
-            return False
-    return True
+    return bool(_systemd_service_gate(snapshot)["healthy"])
 
 
 def _journald_snapshot() -> dict[str, Any]:
@@ -1577,8 +1779,15 @@ def _material_snapshot(
     if projected_root < ROOT_MINIMUM_AFTER_BYTES:
         raise WarmArchiveError("exact six do not project root above 25 GiB")
     services = _systemd_snapshot()
-    if not _services_healthy(services):
-        raise WarmArchiveError("required production service/timer health is not ready")
+    service_gate = _systemd_service_gate(services)
+    if not service_gate["healthy"]:
+        raise WarmArchiveError(
+            "required production service/timer health is not ready",
+            evidence={
+                "classification": service_gate["classification"],
+                "systemd_service_gate": service_gate,
+            },
+        )
     material = {
         "contract_name": CONTRACT_NAME,
         "profile": PROFILE,
@@ -1626,6 +1835,7 @@ def _material_snapshot(
         "non_target": non_target,
         "journald": _journald_snapshot(),
         "services": services,
+        "systemd_service_gate": service_gate,
     }
     return material, observations
 
@@ -1809,6 +2019,30 @@ def readiness(
             raise WarmArchiveError("existing readiness receipt binding is invalid")
         return {**payload, "idempotent": True}
 
+    initial_systemd_service_gate = _systemd_service_gate(_systemd_snapshot())
+    if not initial_systemd_service_gate["healthy"]:
+        result = {
+            "contract_name": CONTRACT_NAME,
+            "status": "blocked",
+            "query_only": True,
+            "database_written": False,
+            "readiness_id": readiness_id,
+            "deployed_sha": deployed_sha,
+            "reason": "required_systemd_service_gate_blocked",
+            "initial_systemd_service_gate": initial_systemd_service_gate,
+            "systemd_service_gate": initial_systemd_service_gate,
+            "callback": [
+                {
+                    "message": "required production service/timer health is not ready",
+                    "classification": initial_systemd_service_gate["classification"],
+                    "systemd_service_gate": initial_systemd_service_gate,
+                }
+            ],
+            "completed_at": _now(),
+        }
+        _atomic_write_json(receipt_path, result)
+        return result
+
     pre_stabilization = _stabilize_activity(
         phase="pre_projection", required_clean=2, targets=None
     )
@@ -1821,6 +2055,8 @@ def readiness(
             "readiness_id": readiness_id,
             "deployed_sha": deployed_sha,
             "reason": "persistent_source_activity_before_projection",
+            "initial_systemd_service_gate": initial_systemd_service_gate,
+            "systemd_service_gate": initial_systemd_service_gate,
             "pre_projection_stabilization": pre_stabilization,
             "callback": pre_stabilization.get("callback", []),
             "completed_at": _now(),
@@ -1843,6 +2079,10 @@ def readiness(
             "readiness_id": readiness_id,
             "deployed_sha": deployed_sha,
             "reason": "full_projection_or_material_preflight_blocked",
+            "initial_systemd_service_gate": initial_systemd_service_gate,
+            "systemd_service_gate": exc.evidence.get(
+                "systemd_service_gate", initial_systemd_service_gate
+            ),
             "pre_projection_stabilization": pre_stabilization,
             "callback": [
                 {
@@ -1867,6 +2107,7 @@ def readiness(
         "readiness_id": readiness_id,
         "deployed_sha": deployed_sha,
         "created_at": _now(),
+        "initial_systemd_service_gate": initial_systemd_service_gate,
         "material": material,
         "material_qualification_digest": _digest(material),
         "observations": full_observations,
@@ -1922,6 +2163,14 @@ def readiness(
             "required_available_floor_bytes"
         ],
         "root_minimum_after_bytes": ROOT_MINIMUM_AFTER_BYTES,
+        "initial_systemd_service_gate": initial_systemd_service_gate,
+        "systemd_service_gate": (
+            final_observations.get("systemd_service_gate")
+            if final_observations
+            else (final_error or {}).get("evidence", {}).get(
+                "systemd_service_gate", initial_systemd_service_gate
+            )
+        ),
         "capacity_guard_passed": bool(
             ready
             and final_observations
@@ -3122,6 +3371,7 @@ def readback_batch(
     finance = _finance_snapshot(runtime_dir)
     non_target = _non_target_snapshot()
     services = _systemd_snapshot()
+    systemd_service_gate = _systemd_service_gate(services)
     journald = _journald_snapshot()
     root_readback = read_root_storage_status_artifact(policy=load_policy())
     journald_reconciliation = (
@@ -3151,7 +3401,7 @@ def readback_batch(
         and non_target_preserved
         and int(filesystems["root"]["available_bytes"]) >= ROOT_MINIMUM_AFTER_BYTES
         and int(filesystems["backup"]["available_bytes"]) >= int(finance["required_available_floor_bytes"])
-        and _services_healthy(services)
+        and systemd_service_gate["healthy"]
         and root_readback.get("ok") is True
         and root_readback.get("fresh") is True
         and root_readback.get("status", {}).get("status") == "normal"
@@ -3190,7 +3440,8 @@ def readback_batch(
         "root_minimum_passed": int(filesystems["root"]["available_bytes"]) >= ROOT_MINIMUM_AFTER_BYTES,
         "root_monitor": root_readback,
         "services": services,
-        "services_healthy": _services_healthy(services),
+        "systemd_service_gate": systemd_service_gate,
+        "services_healthy": systemd_service_gate["healthy"],
         "journald": journald,
         "journald_reconciliation": journald_reconciliation,
         "non_target_digest": non_target["digest"],
