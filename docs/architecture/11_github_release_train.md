@@ -237,6 +237,19 @@ SHA из единственного trusted `live_runtime/done` receipt. Immutab
 /wb-core authorize-goal-v1 task WBC0006 profile inventory-history-backfill target wb_core_eu_hosted_runtime_active dates 2026-03-01..2026-08-24 captures 177 components 18054 finalizations 177 full-days 172 partial-days 5
 ```
 
+Для bounded file-lifecycle WBC0008 block 006 поддерживается отдельный exact
+profile без manifest hash в owner passport:
+
+```text
+/wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 unlinks 6 reclaimed-allocated-bytes <exact-bytes> root-minimum-bytes 26843545600 backup-floor-bytes <finance-next-replacement-plus-8GiB>
+```
+
+Этот profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
+caller-known detached sanitation job. После submit разрешён только query-only
+job/archive readback; ambiguous transport не запускает submit повторно. Exact
+six archive/restore/unlink и capacity/non-target/service reconciliation описаны
+в `migration/159_root_storage_warm_archive_wbc0008_006.md`.
+
 Passport фиксирует business task, canonical target, profile, bounded dates,
 exact expected insertions/quality и one-submit boundary; manifest hash в нём
 не является human gate. Для supported profile Runner checkout-ит exact merge,

@@ -69,10 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     submit.add_argument("--job-id", required=True)
     submit.add_argument("--deployed-sha", required=True)
-    submit.add_argument("--operation", choices=("plan", "apply"), required=True)
-    submit.add_argument("--root", dest="root_name", choices=("root", "backup"), required=True)
-    submit.add_argument("--family", required=True)
+    submit.add_argument(
+        "--operation",
+        choices=("plan", "apply", "warm-archive-apply"),
+        required=True,
+    )
+    submit.add_argument("--root", dest="root_name", choices=("root", "backup"))
+    submit.add_argument("--family", default="")
     submit.add_argument("--fingerprint", default="")
+    submit.add_argument("--manifest", default="")
+    submit.add_argument("--manifest-sha256", default="")
+    submit.add_argument("--goal-operation-id", default="")
+    submit.add_argument("--approval-reference", default="")
     submit.add_argument(
         "--reserved-free-bytes",
         type=int,
@@ -105,6 +113,10 @@ def submit_job(
     root_name: str,
     family: str,
     fingerprint: str = "",
+    manifest: str = "",
+    manifest_sha256: str = "",
+    goal_operation_id: str = "",
+    approval_reference: str = "",
     reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
     starter: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -113,45 +125,86 @@ def submit_job(
     job_id = _require_job_id(job_id)
     deployed_sha = _require_deployed_sha(deployed_sha)
     operation = str(operation or "").strip()
-    if operation not in {"plan", "apply"}:
+    if operation not in {"plan", "apply", "warm-archive-apply"}:
         raise SanitationJobError("unsupported sanitation job operation")
-    if root_name not in FAMILY_POLICIES or family not in FAMILY_POLICIES[root_name]:
-        raise SanitationJobError("sanitation job family is outside the exact allowlist")
     if int(reserved_free_bytes) < 0:
         raise SanitationJobError("reserved free bytes must be non-negative")
     approved = str(fingerprint or "").strip()
+    if operation in {"plan", "apply"}:
+        if root_name not in FAMILY_POLICIES or family not in FAMILY_POLICIES[root_name]:
+            raise SanitationJobError(
+                "sanitation job family is outside the exact allowlist"
+            )
     if operation == "apply":
         if not FINGERPRINT_PATTERN.fullmatch(approved):
             raise SanitationJobError("apply job requires an exact sanitation fingerprint")
-    elif approved:
+    elif operation == "plan" and approved:
         raise SanitationJobError("plan job must not carry an apply fingerprint")
+    if operation == "warm-archive-apply":
+        if root_name or family or approved or int(reserved_free_bytes) != DEFAULT_RESERVED_FREE_BYTES:
+            raise SanitationJobError(
+                "warm archive job must not carry generic family inputs"
+            )
+        if (
+            re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+                r"production-goal-v1-[0-9a-f]{32}/"
+                r"root-warm-archive-plan-[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?\.json",
+                str(manifest or ""),
+            )
+            is None
+            or not FINGERPRINT_PATTERN.fullmatch(str(manifest_sha256 or ""))
+            or re.fullmatch(
+                r"production-goal-v1-[0-9a-f]{32}",
+                str(goal_operation_id or ""),
+            )
+            is None
+            or not str(approval_reference or "")
+            or len(str(approval_reference)) > 500
+        ):
+            raise SanitationJobError("warm archive exact request binding is invalid")
 
     runtime_dir = _canonical_directory(runtime_dir, label="runtime")
     root_backups = _canonical_directory(root_backups, label="root backup")
-    roots = _canonical_roots(
-        runtime_dir=runtime_dir,
-        root_backups=root_backups,
-    )
-    _resolve_family(
-        roots=roots,
-        root_name=root_name,
-        family=family,
-    )
+    if operation in {"plan", "apply"}:
+        roots = _canonical_roots(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+        )
+        _resolve_family(
+            roots=roots,
+            root_name=root_name,
+            family=family,
+        )
     _verify_deployed_sha(
         deployed_sha=deployed_sha,
         deployed_sha_file=deployed_sha_file,
     )
 
-    request_material = {
+    request_material: dict[str, Any] = {
         "contract_name": CONTRACT_NAME,
         "job_id": job_id,
         "deployed_sha": deployed_sha,
         "operation": operation,
-        "root": root_name,
-        "family": family,
-        "fingerprint": approved,
-        "reserved_free_bytes": int(reserved_free_bytes),
     }
+    if operation == "warm-archive-apply":
+        request_material.update(
+            {
+                "manifest": str(manifest),
+                "manifest_sha256": str(manifest_sha256),
+                "goal_operation_id": str(goal_operation_id),
+                "approval_reference": str(approval_reference),
+            }
+        )
+    else:
+        request_material.update(
+            {
+                "root": root_name,
+                "family": family,
+                "fingerprint": approved,
+                "reserved_free_bytes": int(reserved_free_bytes),
+            }
+        )
     request = {
         **request_material,
         "request_digest": _fingerprint(request_material),
@@ -396,6 +449,22 @@ def _execute_request(
             deployed_sha_file=deployed_sha_file,
             reserved_free_bytes=int(request["reserved_free_bytes"]),
         )
+    if request["operation"] == "warm-archive-apply":
+        from apps.root_storage_warm_archive import apply_batch
+
+        evidence_dir = Path(str(request["manifest"])).parent
+        return apply_batch(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha=request["deployed_sha"],
+            deployed_sha_file=deployed_sha_file,
+            evidence_dir=evidence_dir,
+            operation_id=request["goal_operation_id"],
+            manifest_path=Path(str(request["manifest"])),
+            manifest_sha256=request["manifest_sha256"],
+            approval_reference=request["approval_reference"],
+            own_job_id=request["job_id"],
+        )
     raise SanitationJobError("persisted sanitation operation is invalid")
 
 
@@ -481,29 +550,62 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
     job_id = _require_job_id(str(request.get("job_id") or ""))
     if job_id != job_dir.name:
         raise SanitationJobError("job request id/path mismatch")
-    material = {
+    operation = str(request.get("operation") or "")
+    material: dict[str, Any] = {
         "contract_name": CONTRACT_NAME,
         "job_id": job_id,
         "deployed_sha": _require_deployed_sha(
             str(request.get("deployed_sha") or "")
         ),
-        "operation": str(request.get("operation") or ""),
-        "root": str(request.get("root") or ""),
-        "family": str(request.get("family") or ""),
-        "fingerprint": str(request.get("fingerprint") or ""),
-        "reserved_free_bytes": int(request.get("reserved_free_bytes") or 0),
+        "operation": operation,
     }
-    if material["operation"] not in {"plan", "apply"}:
+    if operation == "warm-archive-apply":
+        material.update(
+            {
+                "manifest": str(request.get("manifest") or ""),
+                "manifest_sha256": str(request.get("manifest_sha256") or ""),
+                "goal_operation_id": str(request.get("goal_operation_id") or ""),
+                "approval_reference": str(request.get("approval_reference") or ""),
+            }
+        )
+        if (
+            re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+                r"production-goal-v1-[0-9a-f]{32}/"
+                r"root-warm-archive-plan-[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?\.json",
+                material["manifest"],
+            )
+            is None
+            or not FINGERPRINT_PATTERN.fullmatch(material["manifest_sha256"])
+            or re.fullmatch(
+                r"production-goal-v1-[0-9a-f]{32}",
+                material["goal_operation_id"],
+            )
+            is None
+            or not material["approval_reference"]
+            or len(material["approval_reference"]) > 500
+        ):
+            raise SanitationJobError("persisted warm archive request is invalid")
+    else:
+        material.update(
+            {
+                "root": str(request.get("root") or ""),
+                "family": str(request.get("family") or ""),
+                "fingerprint": str(request.get("fingerprint") or ""),
+                "reserved_free_bytes": int(request.get("reserved_free_bytes") or 0),
+            }
+        )
+    if operation not in {"plan", "apply", "warm-archive-apply"}:
         raise SanitationJobError("persisted sanitation operation is invalid")
-    if (
+    if operation in {"plan", "apply"} and (
         material["root"] not in FAMILY_POLICIES
         or material["family"] not in FAMILY_POLICIES[material["root"]]
     ):
         raise SanitationJobError("persisted sanitation family is outside allowlist")
-    if material["operation"] == "apply":
+    if operation == "apply":
         if not FINGERPRINT_PATTERN.fullmatch(material["fingerprint"]):
             raise SanitationJobError("persisted apply fingerprint is invalid")
-    elif material["fingerprint"]:
+    elif operation == "plan" and material["fingerprint"]:
         raise SanitationJobError("persisted plan has an unexpected fingerprint")
     if request.get("request_digest") != _fingerprint(material):
         raise SanitationJobError("job request digest mismatch")
@@ -742,9 +844,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             job_id=str(args.job_id),
             deployed_sha=str(args.deployed_sha),
             operation=str(args.operation),
-            root_name=str(args.root_name),
+            root_name=str(args.root_name or ""),
             family=str(args.family),
             fingerprint=str(args.fingerprint),
+            manifest=str(args.manifest),
+            manifest_sha256=str(args.manifest_sha256),
+            goal_operation_id=str(args.goal_operation_id),
+            approval_reference=str(args.approval_reference),
             reserved_free_bytes=int(args.reserved_free_bytes),
         )
     if args.command == "status":
