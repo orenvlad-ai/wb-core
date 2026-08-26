@@ -173,6 +173,7 @@ def parse_warm_readiness_receipt(
             payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
         except (IndexError, json.JSONDecodeError):
             continue
+        service_gate = payload.get("systemd_service_gate")
         if (
             payload.get("schema") == WARM_READINESS_RECEIPT_SCHEMA
             and payload.get("state") == "ready"
@@ -196,6 +197,13 @@ def parse_warm_readiness_receipt(
                 r"sha256:[0-9a-f]{64}",
                 str(payload.get("material_qualification_digest") or ""),
             )
+            and isinstance(service_gate, Mapping)
+            and service_gate.get("expected_unit_count") == 27
+            and service_gate.get("observed_unit_count") == 27
+            and service_gate.get("healthy") is True
+            and service_gate.get("failing_unit_count") == 0
+            and isinstance(service_gate.get("units"), list)
+            and len(service_gate["units"]) == 27
         ):
             matches.append(payload)
     if len(matches) != 1:
@@ -711,6 +719,19 @@ def _readiness_callback_summary(rows: Any) -> list[dict[str, Any]]:
     for item in rows:
         if not isinstance(item, Mapping):
             continue
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+        service_gate = item.get("systemd_service_gate") or evidence.get(
+            "systemd_service_gate"
+        )
+        service_gate_summary = (
+            {
+                "classification": service_gate.get("classification"),
+                "failing_unit_count": service_gate.get("failing_unit_count"),
+                "failing_units": service_gate.get("failing_units"),
+            }
+            if isinstance(service_gate, Mapping)
+            else None
+        )
         result.append(
             {
                 "message": item.get("message"),
@@ -719,6 +740,7 @@ def _readiness_callback_summary(rows: Any) -> list[dict[str, Any]]:
                 "blockers": item.get("blockers"),
                 "fd_openers": item.get("fd_openers"),
                 "kernel_locks": item.get("kernel_locks"),
+                "systemd_service_gate": service_gate_summary,
             }
         )
     return result
@@ -1579,6 +1601,9 @@ def _run_warm_readiness_mode(
             timeout_seconds=14_400.0,
         )
     payload = evidence.get("result")
+    systemd_service_gate = (
+        payload.get("systemd_service_gate") if isinstance(payload, Mapping) else None
+    )
     valid_payload = bool(
         evidence.get("return_code") == 0
         and isinstance(payload, Mapping)
@@ -1587,12 +1612,19 @@ def _run_warm_readiness_mode(
         and payload.get("database_written") is False
         and payload.get("readiness_id") == readiness
         and payload.get("deployed_sha") == merge_sha
+        and isinstance(systemd_service_gate, Mapping)
+        and systemd_service_gate.get("expected_unit_count") == 27
+        and systemd_service_gate.get("observed_unit_count") == 27
+        and isinstance(systemd_service_gate.get("units"), list)
+        and len(systemd_service_gate["units"]) == 27
         and (
             payload.get("status") != "ready"
             or (
                 payload.get("source_count") == 6
                 and payload.get("capacity_guard_passed") is True
                 and payload.get("root_minimum_after_bytes") == 25 * 1024**3
+                and systemd_service_gate.get("healthy") is True
+                and systemd_service_gate.get("failing_unit_count") == 0
             )
         )
     )
@@ -1640,6 +1672,7 @@ def _run_warm_readiness_mode(
                 "root_minimum_after_bytes": payload.get(
                     "root_minimum_after_bytes"
                 ),
+                "systemd_service_gate": payload.get("systemd_service_gate"),
                 "callback": _readiness_callback_summary(
                     payload.get("callback", [])
                 ),

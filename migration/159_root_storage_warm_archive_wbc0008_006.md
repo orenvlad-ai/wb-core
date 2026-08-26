@@ -42,6 +42,21 @@ and detached-job failure state name the exact source and structured blocker;
 command-line contents are represented by a digest and matched terms, not copied
 as potentially secret text.
 
+Every fresh readiness also persists one complete query-only snapshot of the 27
+literal required systemd units before compression projection. Each unit records
+`LoadState`, `ActiveState`, `SubState`, `Result`, `MainPID`,
+`ExecMainStatus` and `UnitFileState`; timer rows additionally retain
+`LastTriggerUSec` and `NextElapseUSecRealtime` when systemd exposes them. The
+gate classifies current persistent ownership, a correct inactive one-shot, an
+expected active/waiting timer, a current active one-shot, an absent/masked unit,
+a real unhealthy owning service/timer control, stale result/exit fields whose
+current PID or waiting predicate is authoritative, and a query/predicate/literal
+unit-list defect. Missing fields, a failed query or an `Id` mismatch fail closed.
+Any service-gate block writes the complete 27-row snapshot, exact failing rows
+and reason codes to the private readiness receipt and the trusted callback; it
+must not collapse the failure to a generic health string. The same structured
+gate is repeated in final readiness qualification and terminal readback.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary

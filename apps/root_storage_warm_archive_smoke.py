@@ -29,6 +29,47 @@ def _seed(path: Path) -> None:
         connection.commit()
 
 
+def _healthy_systemd_snapshot() -> dict[str, dict[str, object]]:
+    snapshot: dict[str, dict[str, object]] = {}
+    for name in warm.SERVICE_NAMES:
+        values: dict[str, object] = {
+            "Id": name,
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "MainPID": "0",
+            "ExecMainStatus": "0",
+            "UnitFileState": "static",
+            "LastTriggerUSec": "",
+            "NextElapseUSecRealtime": "",
+            "QueryReturnCode": 0,
+            "QueryError": None,
+            "QueryStderrSha256": "sha256:" + "0" * 64,
+        }
+        if name.endswith(".timer"):
+            values.update(
+                {
+                    "ActiveState": "active",
+                    "SubState": "waiting",
+                    "UnitFileState": "enabled",
+                    "LastTriggerUSec": "Wed 2026-08-26 17:17:00 UTC",
+                    "NextElapseUSecRealtime": "Wed 2026-08-26 18:17:00 UTC",
+                }
+            )
+        elif name in warm.PERSISTENT_SERVICE_NAMES:
+            values.update(
+                {
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": "101",
+                    "UnitFileState": "enabled",
+                }
+            )
+        snapshot[name] = values
+    return snapshot
+
+
 def run() -> None:
     assert len(warm.TARGET_POLICIES) == 6
     assert len({item["source_path"] for item in warm.TARGET_POLICIES}) == 6
@@ -37,6 +78,70 @@ def run() -> None:
     assert warm.ROOT_MINIMUM_AFTER_BYTES == 25 * 1024**3
     assert warm.EMERGENCY_RESERVE_BYTES == 8 * 1024**3
     assert warm.READINESS_REQUIRED_CONSECUTIVE_CLEAN == 3
+    assert len(warm.SERVICE_NAMES) == 27
+    healthy_systemd = warm._systemd_service_gate(_healthy_systemd_snapshot())
+    assert healthy_systemd["healthy"] is True
+    assert healthy_systemd["expected_unit_count"] == 27
+    assert len(healthy_systemd["units"]) == 27
+    assert healthy_systemd["classification_counts"] == {
+        "correct_inactive_oneshot": 12,
+        "expected_waiting_timer": 12,
+        "healthy_persistent_service": 3,
+    }
+    for row in healthy_systemd["units"]:
+        for field in warm.SYSTEMD_REQUIRED_PROPERTIES:
+            assert field in row
+        if row["unit_kind"] == "timer":
+            for field in warm.SYSTEMD_TIMER_PROPERTIES:
+                assert field in row
+
+    failed_oneshot_snapshot = _healthy_systemd_snapshot()
+    failed_oneshot_snapshot["wb-core-warehouse-functional-sync.service"].update(
+        {"Result": "exit-code", "ExecMainStatus": "1"}
+    )
+    failed_oneshot = warm._systemd_service_gate(failed_oneshot_snapshot)
+    assert failed_oneshot["healthy"] is False
+    assert failed_oneshot["failing_unit_count"] == 1
+    assert failed_oneshot["failing_units"][0]["classification"] == (
+        "real_unhealthy_owning_service"
+    )
+    assert failed_oneshot["failing_units"][0]["reason_codes"] == [
+        "last_oneshot_invocation_failed"
+    ]
+
+    stale_timer_snapshot = _healthy_systemd_snapshot()
+    stale_timer_snapshot["wb-core-warehouse-functional-sync.timer"].update(
+        {"Result": "exit-code", "ExecMainStatus": "1"}
+    )
+    stale_timer = warm._systemd_service_gate(stale_timer_snapshot)
+    stale_timer_row = next(
+        item
+        for item in stale_timer["units"]
+        if item["name"] == "wb-core-warehouse-functional-sync.timer"
+    )
+    assert stale_timer["healthy"] is True
+    assert stale_timer_row["classification"] == "stale_result_or_exec_main_status"
+
+    masked_snapshot = _healthy_systemd_snapshot()
+    masked_snapshot["wb-core-autoanswers-worker.timer"].update(
+        {"LoadState": "masked", "UnitFileState": "masked"}
+    )
+    masked = warm._systemd_service_gate(masked_snapshot)
+    assert masked["healthy"] is False
+    assert masked["failing_units"][0]["classification"] == "absent_or_masked"
+
+    missing_snapshot = _healthy_systemd_snapshot()
+    missing_snapshot.pop("wb-core-data-mcp.service")
+    missing = warm._systemd_service_gate(missing_snapshot)
+    assert missing["healthy"] is False
+    assert missing["classification"] == "predicate_or_literal_unit_list_defect"
+    assert missing["missing_unit_names"] == ["wb-core-data-mcp.service"]
+    assert next(
+        item
+        for item in missing["units"]
+        if item["name"] == "wb-core-data-mcp.service"
+    )["classification"] == "predicate_or_literal_unit_list_defect"
+
     clean_activity = {
         "identity_matches_expected": True,
         "material_stable_during_gate": True,

@@ -385,6 +385,14 @@ def main() -> None:
     readiness_id = apply.warm_readiness_id(
         "orenvlad-ai/wb-core", 1050, "release-v2-test"
     )
+    healthy_systemd_gate = {
+        "expected_unit_count": 27,
+        "observed_unit_count": 27,
+        "healthy": True,
+        "failing_unit_count": 0,
+        "failing_units": [],
+        "units": [{"name": f"unit-{index}"} for index in range(27)],
+    }
     readiness_payload = {
         "schema": apply.WARM_READINESS_RECEIPT_SCHEMA,
         "state": "ready",
@@ -401,6 +409,7 @@ def main() -> None:
         ),
         "projection_manifest_sha256": "sha256:" + "5" * 64,
         "material_qualification_digest": "sha256:" + "8" * 64,
+        "systemd_service_gate": healthy_systemd_gate,
     }
     parsed_readiness = apply.parse_warm_readiness_receipt(
         [
@@ -418,6 +427,33 @@ def main() -> None:
         merge_sha=MERGE_SHA,
     )
     assert parsed_readiness == readiness_payload
+    systemd_gate = {
+        "classification": "required_units_unhealthy",
+        "failing_unit_count": 1,
+        "failing_units": [
+            {
+                "name": "wb-core-warehouse-functional-sync.service",
+                "classification": "real_unhealthy_owning_service",
+                "Result": "exit-code",
+                "ExecMainStatus": "1",
+            }
+        ],
+        "units": [{"name": f"unit-{index}"} for index in range(27)],
+    }
+    callback = apply._readiness_callback_summary(
+        [
+            {
+                "message": "required production service/timer health is not ready",
+                "classification": "required_units_unhealthy",
+                "evidence": {"systemd_service_gate": systemd_gate},
+            }
+        ]
+    )
+    assert callback[0]["systemd_service_gate"] == {
+        "classification": "required_units_unhealthy",
+        "failing_unit_count": 1,
+        "failing_units": systemd_gate["failing_units"],
+    }
     try:
         apply.parse_release_receipt(
             [{**release_comment(), "user": {"login": "contributor"}}],

@@ -271,6 +271,13 @@ measurement, full SQLite integrity or full source hashing merely to obtain two
 equivalent witnesses. Actual archive/independent full restore/SQLite proof and
 one exact full pre-unlink source hash remain mandatory inside mutation.
 
+Before that projection the readiness receipt persists the complete 27-literal
+systemd unit snapshot and per-unit classification defined by migration 159,
+including timer last/next trigger evidence. A failed service gate publishes the
+same exact rows and failing predicates in its durable callback; the trusted
+workflow never substitutes a generic service-health message or creates a
+production-goal operation from that blocked receipt.
+
 Passport фиксирует business task, canonical target, profile, bounded dates,
 exact expected insertions/quality и one-submit boundary; manifest hash в нём
 не является human gate. Для supported profile Runner checkout-ит exact merge,
