@@ -11,6 +11,7 @@ source_basis:
   - "packages/application/sheet_vitrina_v1_inventory_planning.py"
   - "apps/sheet_vitrina_v1_inventory_history_backfill.py"
   - "migration/156_web_vitrina_inventory_history.md"
+  - "migration/159_applicability_gated_dense_fbs.md"
 related_modules:
   - "29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
@@ -28,8 +29,9 @@ related_docs:
   - "migration/145_inventory_planning_and_fbs_orders_surfaces.md"
   - "migration/146_inventory_planning_main_vitrina_rows.md"
   - "migration/156_web_vitrina_inventory_history.md"
+  - "migration/159_applicability_gated_dense_fbs.md"
 source_of_truth_level: "canonical_module_contract"
-update_note: "Введены compact typed component history, latest closed-day supersession, partial numeric totals and a dry-run-first exact-manifest backfill."
+update_note: "Compact typed component history remains immutable; Migration 159 publishes current FBS exact/exact_zero/missing/inapplicable reason/provenance from dense applicability without retrocopying current zero into history."
 ---
 
 # 1. Public metric contract
@@ -49,7 +51,7 @@ Source names могут уже содержать технический пре�
 публичной подписи. Logical metric key и исходное server-owned facility name
 при этом не меняются.
 
-`Остатки общие = Остатки WB + available всех applicable FBS facilities`.
+`Остатки общие = Остатки WB + available всех applicable active FBS facilities`.
 WB остаётся одним typed operand со своей действующей reserve semantics. FBS
 available остаётся exact `physical - active reserved`. FBO, aggregate FF,
 transit и seller-stock reconciliation не являются operands этой формулы.
@@ -95,18 +97,21 @@ finalization; предыдущие capture, finalization и provenance не из
 timestamp; новый доказанный ready snapshot/source revision создаёт append-only
 supersession. Stock-specific cutoff, таймер или отдельная кнопка не вводятся.
 
-Facility становится applicable только с independently evidenced
-first-stock/launch date. До этой даты её state `inapplicable`, обычное
-отображение `—` и нет warning. До первой applicable FBS facility общая сумма
-равна WB и имеет `full` quality. Inactive facility с остатком продолжает
-участвовать; inactive без остатка/applicability не создаёт synthetic operand.
+Для current state после Migration 159 facility × SKU становится applicable с
+future proven dense activation `T0`: active facility и active/non-hidden
+positive-`nmId` SKU применимы по умолчанию, кроме явного датированного
+`inapplicable`. До T0 и для inactive facility/SKU текущая пара `inapplicable`;
+её сохранённая история и физический row не удаляются. Archive/reactivation не
+переносит balance назад и не сбрасывает его. Historical applicability остаётся
+только из independently persisted same-date evidence; current default или zero
+никогда не ретрокопируется в старую дату.
 
-Если все applicable operands exact, публикуется numeric `full`. Если часть
-missing, публикуется сумма известных operands с `partial` и exact missing list.
-В строке missing facility показывается `—`; доказанный ноль показывается `0`.
-Partial total остаётся числом с маленьким нейтральным `◐`; tooltip/ARIA
-перечисляет missing components. Для `full` marker отсутствует. Browser не
-вычисляет business truth и не вводит current/final/health styling.
+Если все current applicable operands exact, публикуется numeric `full`. Если
+хотя бы один applicable component `missing`, facility/SKU aggregate и общий
+FBS operand недоступны с exact missing list; известная под-сумма не выдаётся за
+полный текущий остаток. В строке missing показывается `—`, доказанный
+`exact_zero` показывается `0`, а `inapplicable` не является operand. Browser не
+вычисляет business truth и не вводит отдельный health/UI contour.
 
 # 4. Capture and read path
 
@@ -193,7 +198,8 @@ reconciliation; blind replay запрещён.
 # 6. Verification
 
 - `apps/inventory_planning_read_model_smoke.py` — physical/reserved operands,
-  partial known sum, inactive residual and seller-readback exclusion;
+  applicable-missing fail-closed aggregate, inactive current exclusion with
+  retained history and seller-readback exclusion;
 - `apps/sheet_vitrina_v1_inventory_planning_smoke.py` — public identities,
   order, TOTAL/SKU and no duplicate aggregate;
 - `apps/sheet_vitrina_v1_inventory_planning_browser_smoke.py` — user visibility,
@@ -204,6 +210,9 @@ reconciliation; blind replay запрещён.
   `50 162 + 82 900 + 26 697 = 159 759`, current-FBS retrocopy exclusion,
   current UI WB equality, indefinite retention and 174-day × 34-scope
   realistic window;
+- `apps/ff_pool_dense_fbs_smoke.py` — current typed state/reason/provenance,
+  future-T0 explicit zero, archive/reactivation retention and no historical
+  retrocopy;
 - `apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py` — Moscow/Orenburg
   applicability/exact boundaries, full/partial partitions, dry-run byte safety,
   target-scoped source CAS (post-cutoff tick и same-plan non-inventory drift

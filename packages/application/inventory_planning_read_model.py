@@ -25,6 +25,10 @@ from packages.application.ff_pool_foundation import (
     FACILITY_PROFILES_TABLE,
     FEATURE_EPOCHS_TABLE,
 )
+from packages.application.ff_pool_fbs_applicability import (
+    fbs_physical_component,
+    stock_managed_nomenclature,
+)
 from packages.application.wb_fbs_orders import WAREHOUSE_MAPPINGS_TABLE
 from packages.application.wb_incident_policy import canonical_seller_id
 
@@ -243,7 +247,7 @@ class InventoryPlanningReadModel:
                 if incident["quantity"] is None
                 else wb_total - int(incident["quantity"])
             )
-            total = wb_total + int(fbs_total or 0)
+            total = None if fbs_total is None else wb_total + int(fbs_total)
             effective_total = (
                 None
                 if fbs_total is None or wb_effective is None
@@ -355,10 +359,10 @@ class InventoryPlanningReadModel:
                     "facilities": fbs["facilities"],
                     "missing_components": fbs["missing_components"],
                     "inactive_facility_count": fbs["inactive_facility_count"],
-                    "current_total_uses_active_facilities_only": False,
+                    "current_total_uses_active_facilities_only": True,
                     "applicability_rule": (
-                        "active facility with exact FBS projection or inactive facility "
-                        "with residual physical/reserved stock"
+                        "every active facility x stock-managed active SKU is applicable "
+                        "unless a dated explicit inapplicable event exists"
                     ),
                     "inactive_history_rewritten": False,
                     "seller_stock_role": "timestamped_reconciliation_only",
@@ -681,6 +685,9 @@ def _fbs_facilities(
     balance_by_facility_nm_id: dict[tuple[str, int], dict[str, Any]] = {}
     reservation_by_facility_nm_id: dict[tuple[str, int], dict[str, Any]] = {}
     sku_scope = {int(nm_id) for nm_id in requested_nm_ids if int(nm_id) > 0}
+    active_stock_nm_ids = {
+        int(item["nm_id"]) for item in stock_managed_nomenclature(conn)
+    }
     if epoch_ready:
         for balance in conn.execute(
             f"""SELECT facility_id,nm_id,SUM(quantity) quantity,
@@ -723,6 +730,7 @@ def _fbs_facilities(
         physical = reserved = None
         updated_at = ""
         sku_values: list[dict[str, Any]] = []
+        typed_values: list[dict[str, Any]] = []
         facility_balances: dict[int, dict[str, Any]] = {}
         facility_reservations: dict[int, dict[str, Any]] = {}
         if epoch_ready:
@@ -736,25 +744,77 @@ def _fbs_facilities(
                 for (row_facility_id, nm_id), value in reservation_by_facility_nm_id.items()
                 if row_facility_id == facility_id
             }
-            has_residual_quantity = any(
-                int(value["quantity"]) != 0
-                for value in (*facility_balances.values(), *facility_reservations.values())
-            )
-            has_exact_projection = bool(facility_balances or facility_reservations)
-            applicable = bool(
-                has_exact_projection
-                and (bool(facility["active"]) or has_residual_quantity)
-            )
-            physical = (
-                sum(int(value["quantity"]) for value in facility_balances.values())
-                if applicable and facility_balances
-                else None
-            )
-            reserved = (
-                sum(int(value["quantity"]) for value in facility_reservations.values())
-                if applicable
-                else None
-            )
+            applicable = bool(facility["active"])
+            for nm_id in sorted(sku_scope):
+                component = fbs_physical_component(
+                    conn,
+                    facility_id=facility_id,
+                    nm_id=nm_id,
+                    as_of_date=date.today().isoformat(),
+                    projection_epoch=int(manifest["feature_epoch"]),
+                    facility_active=bool(facility["active"]),
+                    sku_active=nm_id in active_stock_nm_ids,
+                )
+                reservation_value = facility_reservations.get(nm_id)
+                sku_physical = component["quantity"]
+                sku_reserved = int(reservation_value["quantity"]) if reservation_value else 0
+                sku_available = (
+                    None
+                    if component["state"] in {"missing", "inapplicable"}
+                    else sku_physical - sku_reserved
+                )
+                official_sku = readback_by_facility_nm_id.get((facility_id, nm_id))
+                typed = {
+                    "nm_id": nm_id,
+                    "physical": sku_physical,
+                    "reserved": sku_reserved,
+                    "available": sku_available,
+                    "available_is_signed": True,
+                    "state": (
+                        str(component["state"])
+                        if component["state"] in {"missing", "inapplicable"}
+                        else "exact_zero"
+                        if sku_available == 0
+                        else "exact"
+                    ),
+                    "quality": (
+                        "inapplicable"
+                        if component["state"] == "inapplicable"
+                        else "missing"
+                        if component["state"] == "missing"
+                        else "exact_ledger"
+                    ),
+                    "reason": str(component["reason"]),
+                    "reason_ru": (
+                        ""
+                        if sku_available is not None or component["state"] == "inapplicable"
+                        else "Отсутствует exact physical FBS component для SKU."
+                    ),
+                    "provenance": dict(component["provenance"]),
+                    "seller_stock": {
+                        "quantity": official_sku,
+                        "delta_to_ledger_physical": (
+                            None
+                            if official_sku is None or sku_physical is None
+                            else official_sku - int(sku_physical)
+                        ),
+                        "role": "reconciliation_only",
+                    },
+                }
+                sku_values.append(typed)
+                typed_values.append(typed)
+            applicable_values = [
+                item for item in typed_values if item["state"] != "inapplicable"
+            ]
+            missing_values = [
+                item for item in applicable_values if item["state"] == "missing"
+            ]
+            if applicable and not missing_values:
+                physical = sum(int(item["physical"] or 0) for item in applicable_values)
+                reserved = sum(int(item["reserved"] or 0) for item in applicable_values)
+            else:
+                physical = None
+                reserved = None
             updated_at = max(
                 [
                     str(value["updated_at"] or "")
@@ -762,60 +822,6 @@ def _fbs_facilities(
                 ],
                 default="",
             )
-            for nm_id in sorted(sku_scope):
-                balance_value = facility_balances.get(nm_id)
-                reservation_value = facility_reservations.get(nm_id)
-                sku_physical = (
-                    int(balance_value["quantity"])
-                    if balance_value is not None
-                    else None
-                )
-                sku_reserved = int(reservation_value["quantity"]) if reservation_value else 0
-                sku_available = (
-                    None
-                    if not applicable or sku_physical is None
-                    else sku_physical - sku_reserved
-                )
-                official_sku = readback_by_facility_nm_id.get((facility_id, nm_id))
-                sku_values.append(
-                    {
-                        "nm_id": nm_id,
-                        "physical": sku_physical,
-                        "reserved": sku_reserved,
-                        "available": sku_available,
-                        "available_is_signed": True,
-                        "state": (
-                            "inapplicable"
-                            if not applicable
-                            else "exact_zero"
-                            if sku_available == 0
-                            else "exact"
-                            if sku_available is not None
-                            else "missing"
-                        ),
-                        "quality": (
-                            "inapplicable"
-                            if not applicable
-                            else "exact_ledger"
-                            if sku_available is not None
-                            else "missing"
-                        ),
-                        "reason_ru": (
-                            ""
-                            if sku_available is not None or not applicable
-                            else "Отсутствует exact physical FBS component для SKU."
-                        ),
-                        "seller_stock": {
-                            "quantity": official_sku,
-                            "delta_to_ledger_physical": (
-                                None
-                                if official_sku is None or sku_physical is None
-                                else official_sku - sku_physical
-                            ),
-                            "role": "reconciliation_only",
-                        },
-                    }
-                )
         else:
             applicable = False
         available = None if physical is None or reserved is None else physical - reserved
@@ -848,6 +854,29 @@ def _fbs_facilities(
                     if available is not None
                     else "missing"
                 ),
+                "reason": (
+                    "facility_inactive"
+                    if not applicable
+                    else "applicable_physical_components_missing"
+                    if physical is None
+                    else "complete_applicable_physical_components"
+                ),
+                "provenance": {
+                    "contract_name": "ff_pool_fbs_facility_component_v1",
+                    "projection_epoch": (
+                        int(manifest["feature_epoch"]) if epoch_ready else None
+                    ),
+                    "applicable_nm_ids": [
+                        int(item["nm_id"])
+                        for item in typed_values
+                        if item["state"] != "inapplicable"
+                    ],
+                    "missing_nm_ids": [
+                        int(item["nm_id"])
+                        for item in typed_values
+                        if item["state"] == "missing"
+                    ],
+                },
                 "physical": physical,
                 "reserved": reserved,
                 "available": available,
@@ -886,7 +915,10 @@ def _fbs_facilities(
                 ),
             }
         )
-    available_total = physical_total - reserved_total
+    totals_complete = not missing_facilities
+    available_total = (
+        physical_total - reserved_total if totals_complete else None
+    )
     totals_quality = "partial" if missing_facilities else "exact_ledger"
     applicable_rows = [row for row in rows if row["applicable"]]
     sku_values: list[dict[str, Any]] = []
@@ -902,28 +934,52 @@ def _fbs_facilities(
             )
             for row in applicable_rows
         ]
+        applicable_values = [
+            value
+            for value in facility_values
+            if value is not None and value["state"] != "inapplicable"
+        ]
         missing = [
             str(row["name"] or row["facility_id"])
             for row, value in zip(applicable_rows, facility_values)
-            if value is None or value["available"] is None
+            if value is not None
+            and value["state"] != "inapplicable"
+            and value["available"] is None
         ]
-        exact = all(
-            value is not None and value["available"] is not None
-            for value in facility_values
+        exact = bool(applicable_values) and all(
+            value["available"] is not None for value in applicable_values
         )
         known_values = [
             value
-            for value in facility_values
-            if value is not None and value["available"] is not None
+            for value in applicable_values
+            if value["available"] is not None
         ]
         sku_values.append(
             {
                 "nm_id": nm_id,
-                "physical": sum(int(value["physical"]) for value in known_values),
-                "reserved": sum(int(value["reserved"]) for value in known_values),
-                "available": sum(int(value["available"]) for value in known_values),
+                "physical": (
+                    sum(int(value["physical"]) for value in known_values)
+                    if exact
+                    else None
+                ),
+                "reserved": (
+                    sum(int(value["reserved"]) for value in known_values)
+                    if exact
+                    else None
+                ),
+                "available": (
+                    sum(int(value["available"]) for value in known_values)
+                    if exact
+                    else None
+                ),
                 "available_is_signed": True,
-                "quality": "exact_ledger" if exact else "partial",
+                "quality": (
+                    "inapplicable"
+                    if not applicable_values
+                    else "exact_ledger"
+                    if exact
+                    else "partial"
+                ),
                 "missing_components": missing,
                 "reason_ru": (
                     ""
@@ -934,8 +990,8 @@ def _fbs_facilities(
         )
     return {
         "facilities": rows,
-        "physical_total": physical_total,
-        "reserved_total": reserved_total,
+        "physical_total": physical_total if totals_complete else None,
+        "reserved_total": reserved_total if totals_complete else None,
         "available_total": available_total,
         "sku_values": sku_values,
         "quality": totals_quality,

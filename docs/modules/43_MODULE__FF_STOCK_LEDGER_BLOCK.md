@@ -12,12 +12,15 @@ source_basis:
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/157_fbs_lifecycle_forward_recovery.md"
+  - "migration/159_applicability_gated_dense_fbs.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
   - "packages/contracts/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_fbs_lifecycle.py"
+  - "packages/application/ff_pool_fbs_applicability.py"
+  - "packages/application/ff_pool_dense_fbs.py"
   - "packages/application/ff_pool_fbs_forward_recovery.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/russian_payment_orders.py"
@@ -93,6 +96,9 @@ related_tables:
   - "sheet_vitrina_v1_ff_pool_fbs_forward_state"
   - "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
   - "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_targets"
+  - "sheet_vitrina_v1_ff_pool_fbs_applicability_events"
+  - "sheet_vitrina_v1_ff_pool_fbs_dense_intents"
+  - "sheet_vitrina_v1_ff_pool_fbs_dense_intent_events"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -132,6 +138,8 @@ related_runners:
   - "apps/ff_fbs_mapping_extension_production_smoke.py"
   - "apps/ff_pool_fbs_forward_recovery.py"
   - "apps/ff_pool_fbs_forward_recovery_smoke.py"
+  - "apps/ff_pool_dense_fbs.py"
+  - "apps/ff_pool_dense_fbs_smoke.py"
   - "apps/ff_stock_reservation_smoke.py"
   - "apps/ff_inventory_reconciliation.py"
   - "apps/ff_inventory_reconciliation_smoke.py"
@@ -155,7 +163,7 @@ related_runners:
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only physical ledger plus separate append-only reservation and WB-supply lifecycle journals. Migration 142 opens facility × FBS|FBO detail beneath that aggregate with signed INTEGER/exact Decimal conservation, exact historical FBS checkpoint and epoch-gated post-T reserve/release/complete+sorted fulfillment; no code writes WB. Migration 143 also atomically upgrades the exact known legacy order-classification CHECK before apply, preserving rows and reservation FKs while ambiguous schemas fail closed. A WB debit requires exact whole composition, physical availability and a frozen positive same-SKU FF WAC; missing downstream add-ons do not block movement, but missing/stale FF WAC does and keeps an explicit reservation. Confirmed cancellation or two distinct complete official-snapshot gaps returns only the unaccepted remainder at the exact original debit cost. Manager inventory and overhead use durable request/preview/document/replay state machines with exact reload-safe readback."
+update_note: "`Остатки ФФ` use one append-only physical ledger plus separate reservation/order journals. Migration 159 adds staged applicability-gated dense FBS activation through canonical pool_inventory receipts: active pairs are exact/exact_zero or fail closed, dated inapplicable is explicit, and missing is never zero."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -762,14 +770,13 @@ latest official evidence, facility revision and exact IDs; confirm appends one
 mapping plus audit only. Its recovery scope names that warehouse's unresolved
 identities and never automatically starts a global backlog replay.
 
-Creating an internal facility is also audited preview/confirm. Confirm creates
-only an empty inactive facility with zero quantity/capital, no inventory
-document, no mapping and no WB mutation. A later ordinary transfer continues
-to use the existing document preview/confirm ledger: every SKU conserves exact
-quantity and Decimal capital/WAC, aggregate FF remains the sum of detail and
-duplicate capital is forbidden. Activation, binding and transfer are distinct
-operator decisions; safe activation of an empty/waiting facility cannot make
-the global FBS aggregate unavailable.
+Creating an internal facility is also audited preview/confirm. An explicitly
+inactive facility remains an empty retained registry subject with no mapping or
+WB mutation. If active publication is requested, Migration 159 first stages the
+facility inactive, posts and reads back the complete active-SKU `pool_inventory`
+roster, and only then publishes active. Activation, binding and transfer remain
+distinct decisions. A facility can therefore never become an active
+applicable-missing operand during ordinary onboarding.
 
 WB-declared stock is reconciliation-only. The UI shows internal physical,
 official declared, delta, timestamp, completeness and source digest. For an
@@ -780,6 +787,46 @@ evidence is non-blocking. Synthetic API/browser/mobile coverage proves both
 binding directions, inactive facility onboarding and zero physical/capital
 effect; production creation/binding/transfer requires a later explicit
 operator preview and confirm.
+
+### Applicability-gated dense FBS
+
+Migration 159 makes current FBS applicability explicit without adding another
+physical ledger. Every active facility × active/non-hidden positive-`nmId` SKU
+is applicable by default. The only override is a dated append-only
+`inapplicable` event with reason, actor and provenance; reinstatement is another
+dated event and requires the retained physical row. Applicability is not
+materialized as one default row per pair.
+
+Facility activation and SKU activation/reactivation follow
+`staged -> materializing -> materialized -> active`. The immutable intent pins
+the full roster, writer epoch, applicability, balance before-images, subject CAS
+and plan fingerprint. Materialization reuses canonical `pool_inventory`
+request/document/absolute-target/readback evidence: an absent applicable row is
+inserted as `quantity=0`, `capital_rub=0`, `wac_rub=NULL`; an existing row is
+retained exactly. Neither case emits a movement or changes quantity/capital/WAC.
+Facility activation covers the full applicable SKU roster. SKU activation covers
+only the staged SKU across every active facility after proving all pre-existing
+pairs complete; it cannot opportunistically repair an older gap.
+The registry subject stays inactive until completed coverage is rechecked in the
+final publication transaction. Shared warehouse locking, idempotent request
+identity and canonical status readback handle concurrency and ambiguous
+transport without active-then-catch-up or blind retry.
+
+Receipts, writeoffs, transfers, reservations and FBS order lifecycle writers
+must find an existing applicable physical row. They cannot create it implicitly.
+The server-owned component contract is `exact | exact_zero | missing |
+inapplicable` with reason and provenance. Missing never means zero. Archive and
+reactivation retain all rows/documents and cannot reset a balance. FBO and WB are
+outside dense initialization.
+
+The first explicit zero is valid only from its proven dense `T0`. Its immutable
+inventory line plus request manifest remains the coverage receipt after later
+movements advance the current balance watermark. A pre-T0 business event is
+routed to explicit reconciliation/forward recovery rather than copying current
+zero into history. The generic query-only future Orenburg repair planner uses
+the same service for the exact 12 reviewed targets and expects 21 existing
+non-target FBS rows; it has no apply entrypoint and deployment performs no
+production repair.
 
 ### Stage 7C exact opening and FBS lifecycle
 

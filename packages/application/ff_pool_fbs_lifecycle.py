@@ -26,6 +26,11 @@ from packages.application.ff_pool_foundation import (
     ensure_ff_pool_foundation_schema,
     record_ff_pool_parity_diagnostic,
 )
+from packages.application.ff_pool_fbs_applicability import (
+    FbsApplicabilityError,
+    fbs_physical_component,
+    require_fbs_pair_writeable,
+)
 from packages.application.wb_fbs_orders import (
     IDENTITY_EVIDENCE_TABLE,
     IDENTITY_MAPPINGS_TABLE,
@@ -1111,6 +1116,16 @@ def drain_post_checkpoint_fbs_lifecycle(
             summary["identity_pending"] += 1
             continue
         order = _order_payload(raw_order, mapped, quantity=int(row[6]))
+        try:
+            require_fbs_pair_writeable(
+                conn,
+                facility_id=str(order["facility_id"]),
+                nm_id=int(order["nm_id"]),
+                effective_date=str(row[7])[:10],
+                projection_epoch=int(manifest["feature_epoch"]),
+            )
+        except FbsApplicabilityError as exc:
+            raise FfPoolFbsLifecycleError(exc.code, str(exc)) from exc
         state_row = conn.execute(
             f"SELECT state,debit_event_id FROM {CURRENT_TABLE} WHERE cutover_id=? AND order_id=?",
             (cutover_id, order_id),
@@ -1420,12 +1435,38 @@ def available_quantity(
     cutover_id: str,
     facility_id: str,
     nm_id: int,
-) -> dict[str, int]:
-    physical_row = conn.execute(
-        f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=?",
-        (facility_id, int(nm_id)),
+) -> dict[str, Any]:
+    manifest = conn.execute(
+        """SELECT business_date,feature_epoch
+           FROM sheet_vitrina_v1_ff_pool_cutover_manifests
+           WHERE cutover_id=?""",
+        (str(cutover_id),),
     ).fetchone()
-    physical = int(physical_row[0]) if physical_row else 0
+    if manifest is None:
+        raise FfPoolFbsLifecycleError(
+            "cutover_manifest_missing", "FBS availability cutover manifest is missing"
+        )
+    facility = conn.execute(
+        f"SELECT active FROM {FACILITIES_TABLE} WHERE facility_id=?",
+        (str(facility_id),),
+    ).fetchone()
+    component = fbs_physical_component(
+        conn,
+        facility_id=str(facility_id),
+        nm_id=int(nm_id),
+        as_of_date=str(manifest[0]),
+        projection_epoch=int(manifest[1]),
+        facility_active=bool(facility[0]) if facility is not None else False,
+        sku_active=True,
+    )
+    if component["state"] in {"missing", "inapplicable"}:
+        raise FfPoolFbsLifecycleError(
+            "fbs_balance_missing"
+            if component["state"] == "missing"
+            else "fbs_pair_inapplicable",
+            f"FBS availability is {component['state']} for {facility_id}/{nm_id}",
+        )
+    physical = int(component["quantity"])
     reserved = int(
         conn.execute(
             f"""SELECT COALESCE(SUM(quantity),0) FROM {CURRENT_TABLE}
@@ -1434,7 +1475,15 @@ def available_quantity(
             (cutover_id, facility_id, int(nm_id)),
         ).fetchone()[0]
     )
-    return {"physical": physical, "reserved": reserved, "available": physical - reserved}
+    return {
+        "contract_name": str(component["contract_name"]),
+        "state": str(component["state"]),
+        "physical": physical,
+        "reserved": reserved,
+        "available": physical - reserved,
+        "reason": str(component["reason"]),
+        "provenance": dict(component["provenance"]),
+    }
 
 
 def _append_event(

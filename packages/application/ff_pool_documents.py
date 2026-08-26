@@ -35,6 +35,10 @@ from packages.application.ff_pool_foundation import (
     ensure_ff_pool_foundation_schema,
     record_ff_pool_parity_diagnostic,
 )
+from packages.application.ff_pool_fbs_applicability import (
+    FbsApplicabilityError,
+    require_fbs_pair_writeable,
+)
 from packages.application.warehouse_recovery_policy import (
     RecoveryPolicyError,
     RecoveryState,
@@ -4189,6 +4193,61 @@ def _plan_pool_reallocation(
     }
 
 
+def _dense_fbs_initialization(
+    request: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    raw = manifest.get("dense_fbs_initialization")
+    if raw is None:
+        return {}
+    dense = _json_object(raw)
+    if (
+        dense.get("contract_name") != "ff_pool_dense_fbs_initialization_v1"
+        or str(request["source_system"] or "") != "wb_core_dense_fbs"
+        or str(request["source_type"] or "")
+        != "ff_pool_dense_fbs_initialization_v1"
+        or str(dense.get("plan_fingerprint") or "")
+        != str(request["source_revision"] or "")
+        or str(dense.get("effective_from") or "")
+        != str(request["business_date"] or "")
+        or str(manifest.get("scope") or "") != "FBS"
+        or not str(dense.get("intent_id") or "")
+        or not str(dense.get("roster_fingerprint") or "").startswith("sha256:")
+        or not str(dense.get("effective_from") or "")
+    ):
+        raise FfPoolDocumentError(
+            "dense_fbs_initialization_contract_invalid",
+            "Dense FBS inventory initialization contract is invalid",
+        )
+    return dense
+
+
+def _dense_fbs_balance_cas_row(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    nm_id: int,
+    epoch: int,
+) -> dict[str, Any]:
+    row = _balance_row(
+        conn,
+        (str(facility_id), "FBS", int(nm_id)),
+        epoch=epoch,
+        required=False,
+    )
+    if row is None:
+        return {"nm_id": int(nm_id), "row_present": False}
+    return {
+        "nm_id": int(nm_id),
+        "row_present": True,
+        "projection_epoch": int(row["projection_epoch"]),
+        "quantity": int(row["quantity"]),
+        "capital_rub": str(row["capital_rub"]),
+        "wac_rub": row["wac_rub"],
+        "source_watermark": str(row["source_watermark"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
 def _plan_pool_inventory(
     conn: sqlite3.Connection,
     *,
@@ -4196,7 +4255,12 @@ def _plan_pool_inventory(
     manifest: Mapping[str, Any],
     epoch: int,
 ) -> dict[str, Any]:
-    facility_id = _facility(conn, str(manifest.get("facility_id") or ""), require_active=True)
+    dense_initialization = _dense_fbs_initialization(request, manifest)
+    facility_id = _facility(
+        conn,
+        str(manifest.get("facility_id") or ""),
+        require_active=not bool(dense_initialization),
+    )
     scope = _scope(str(manifest.get("scope") or ""))
     selected_pools = POOLS if scope == "both" else (scope,)
     targets = list(manifest.get("targets") or [])
@@ -4208,6 +4272,44 @@ def _plan_pool_inventory(
         if nm_id in by_nm:
             raise FfPoolDocumentError("duplicate_nm_id", "Inventory contains duplicate resolved SKU")
         by_nm[nm_id] = item
+    if dense_initialization:
+        expected_nm_ids = sorted(
+            int(value)
+            for value in dense_initialization.get("applicable_nm_ids") or []
+        )
+        if sorted(by_nm) != expected_nm_ids:
+            raise FfPoolDocumentError(
+                "dense_fbs_roster_drift",
+                "Dense FBS inventory targets differ from the pinned applicable roster",
+            )
+        expected_rows = {
+            int(item["nm_id"]): dict(item)
+            for item in dense_initialization.get("expected_balance_rows") or []
+            if isinstance(item, Mapping)
+        }
+        if sorted(expected_rows) != sorted(by_nm):
+            raise FfPoolDocumentError(
+                "dense_fbs_balance_cas_invalid",
+                "Dense FBS balance CAS does not cover the complete target roster",
+            )
+        live_rows = {
+            nm_id: _dense_fbs_balance_cas_row(
+                conn,
+                facility_id=facility_id,
+                nm_id=nm_id,
+                epoch=epoch,
+            )
+            for nm_id in sorted(by_nm)
+        }
+        if live_rows != expected_rows:
+            raise FfPoolDocumentError(
+                "dense_fbs_balance_drift",
+                "Dense FBS physical rows changed after the staged plan",
+                details={
+                    "expected_fingerprint": _fingerprint(expected_rows),
+                    "current_fingerprint": _fingerprint(live_rows),
+                },
+            )
     cost_bases = _json_object(manifest.get("cost_basis_by_nm") or {})
     root_document_id = _request_document_id(request)
     parent_lines: list[dict[str, Any]] = []
@@ -4246,6 +4348,17 @@ def _plan_pool_inventory(
                 )
             )
             delta = target - before_q
+            if dense_initialization and delta != 0:
+                raise FfPoolDocumentError(
+                    "dense_fbs_nonzero_delta_blocked",
+                    "Dense FBS initialization may only retain quantity or materialize zero",
+                    details={
+                        "facility_id": facility_id,
+                        "nm_id": nm_id,
+                        "before_quantity": before_q,
+                        "target_quantity": target,
+                    },
+                )
             if pool == "FBS" and balance is None and target == 0:
                 explicit_zero_balances.append(
                     {"facility_id": facility_id, "pool": pool, "nm_id": nm_id}
@@ -4368,6 +4481,16 @@ def _plan_pool_inventory(
                 int(item["nm_id"]) for item in explicit_zero_balances
             ],
             "zero_or_synthetic_cost": False,
+            **(
+                {
+                    "dense_fbs_initialization": dense_initialization,
+                    "dense_fbs_roster_fingerprint": str(
+                        dense_initialization.get("roster_fingerprint") or ""
+                    ),
+                }
+                if dense_initialization
+                else {}
+            ),
         },
     }
     if explicit_zero_balances:
@@ -5475,6 +5598,9 @@ def _apply_plan(
                 line_no=line_no,
                 epoch=epoch,
                 posted_at=posted_at,
+                business_date=str(request["business_date"]),
+                allow_missing_fbs=str(request["document_kind"])
+                == "facility_pool_opening",
             )
     _materialize_explicit_zero_balances(
         conn,
@@ -5936,6 +6062,8 @@ def _apply_balance_movement(
     line_no: int,
     epoch: int,
     posted_at: str,
+    business_date: str = "",
+    allow_missing_fbs: bool = False,
 ) -> None:
     facility_id = str(movement["facility_id"])
     pool = _pool(str(movement["pool"]))
@@ -5944,6 +6072,27 @@ def _apply_balance_movement(
     capital_delta = int(movement["capital_delta_cents"])
     key = (facility_id, pool, nm_id)
     row = _balance_row(conn, key, epoch=epoch, required=False)
+    if row is None and pool == "FBS" and not allow_missing_fbs:
+        raise FfPoolDocumentError(
+            "applicable_fbs_balance_missing",
+            "FBS receipts, writeoffs and transfers cannot implicitly create a physical row",
+            details={"facility_id": facility_id, "nm_id": nm_id},
+        )
+    if row is not None and pool == "FBS":
+        try:
+            require_fbs_pair_writeable(
+                conn,
+                facility_id=facility_id,
+                nm_id=nm_id,
+                effective_date=str(business_date or posted_at)[:10],
+                projection_epoch=epoch,
+            )
+        except FbsApplicabilityError as exc:
+            raise FfPoolDocumentError(
+                exc.code,
+                str(exc),
+                details=exc.details,
+            ) from exc
     before_quantity = int(row["quantity"]) if row is not None else 0
     try:
         before_capital = Decimal(str(row["capital_rub"])) if row is not None else ZERO

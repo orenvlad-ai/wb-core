@@ -1122,18 +1122,29 @@ class FfPoolSurface:
         return bytes(row["source_file_blob"]), str(row["source_filename"] or "document.xlsx"), str(row["source_content_type"] or "application/octet-stream")
 
     def create_facility(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        from packages.application.warehouse_functional_lock import (
+            warehouse_functional_write_lock,
+        )
+
+        with warehouse_functional_write_lock(self.runtime_dir):
+            return self._create_facility_locked(payload, actor=actor)
+
+    def _create_facility_locked(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
         request_id = _request_id(payload.get("request_id"))
         name = _text(payload.get("name"), field="name", maximum=200)
         city_raw = str(payload.get("city") or "").strip()
         city = _text(city_raw, field="city", maximum=120) if city_raw else ""
         display_timezone = _timezone(payload.get("display_timezone") or "Asia/Yekaterinburg")
-        active = _boolean(payload.get("active", True), field="active")
-        request_identity = _fingerprint({"action": "create", "name": name, "city": city, "display_timezone": display_timezone, "active": active})
+        requested_active = _boolean(payload.get("active", True), field="active")
+        request_identity = _fingerprint({"action": "create", "name": name, "city": city, "display_timezone": display_timezone, "active": requested_active})
         self._require_writer()
         facility_digest = _fingerprint({"request_id": request_id, "purpose": "facility_identity"}).removeprefix("sha256:")
         facility_id = "fff_" + facility_digest[:28]
         code = FACILITY_CODE_PREFIX + facility_digest[:10].upper()
         now = self._now()
+        idempotent = False
         with _connect_write(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing_change = conn.execute(
@@ -1143,40 +1154,66 @@ class FfPoolSurface:
             if existing_change is not None:
                 if str(existing_change["request_identity"]) != request_identity:
                     raise FfPoolSurfaceError("request_id_identity_conflict", "request_id was already used for another facility change", http_status=409)
+                facility_id = str(existing_change["facility_id"])
+                idempotent = True
                 conn.rollback()
-                return {**self.facility_detail(str(existing_change["facility_id"])), "idempotent": True}
-            current = {
-                "facility_id": facility_id,
-                "code": code,
-                "name": name,
-                "city": city,
-                "active": active,
-                "display_timezone": display_timezone,
-            }
-            conn.execute(
-                f"""INSERT INTO {FACILITIES_TABLE}(facility_id,code,name,active,display_timezone,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?)""",
-                (facility_id, code, name, int(active), display_timezone, now, now),
-            )
-            conn.execute(
-                f"""INSERT INTO {FACILITY_PROFILES_TABLE}(
-                       facility_id,city,future_fields_json,created_at,updated_at
-                   ) VALUES(?,?,'{{}}',?,?)""",
-                (facility_id, city, now, now),
-            )
-            self._append_facility_change(
-                conn,
-                request_id=request_id,
-                request_identity=request_identity,
-                facility_id=facility_id,
-                action="created",
-                actor=actor,
-                previous={},
-                current=current,
-                changed_at=now,
-            )
-            conn.commit()
-        return {**self.facility_detail(facility_id), "idempotent": False}
+            else:
+                # Registry publication is deliberately staged inactive.  The
+                # dense FBS service posts/readbacks the canonical pool_inventory
+                # roster before the separate active transition becomes visible.
+                current = {
+                    "facility_id": facility_id,
+                    "code": code,
+                    "name": name,
+                    "city": city,
+                    "active": False,
+                    "display_timezone": display_timezone,
+                }
+                conn.execute(
+                    f"""INSERT INTO {FACILITIES_TABLE}(facility_id,code,name,active,display_timezone,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?)""",
+                    (facility_id, code, name, 0, display_timezone, now, now),
+                )
+                conn.execute(
+                    f"""INSERT INTO {FACILITY_PROFILES_TABLE}(
+                           facility_id,city,future_fields_json,created_at,updated_at
+                       ) VALUES(?,?,'{{}}',?,?)""",
+                    (facility_id, city, now, now),
+                )
+                self._append_facility_change(
+                    conn,
+                    request_id=request_id,
+                    request_identity=request_identity,
+                    facility_id=facility_id,
+                    action="created",
+                    actor=actor,
+                    previous={},
+                    current=current,
+                    changed_at=now,
+                )
+                conn.commit()
+        if requested_active:
+            from packages.application.ff_pool_dense_fbs import DenseFbsError, DenseFbsService
+
+            detail = self.facility_detail(facility_id)
+            if not bool((detail.get("facility") or {}).get("active")):
+                try:
+                    DenseFbsService(
+                        db_path=self.db_path,
+                        runtime_dir=self.runtime_dir,
+                        timestamp_factory=self.timestamp_factory,
+                    ).activate_facility(
+                        facility_id=facility_id,
+                        expected_updated_at=str(detail["facility"]["updated_at"]),
+                        request_id=request_id,
+                        request_identity=request_identity,
+                        actor=_actor(actor),
+                    )
+                except DenseFbsError as exc:
+                    raise FfPoolSurfaceError(
+                        exc.code, str(exc), details=exc.details, http_status=409
+                    ) from exc
+        return {**self.facility_detail(facility_id), "idempotent": idempotent}
 
     def preview_facility_create(
         self, payload: Mapping[str, Any], *, actor: str
@@ -1374,6 +1411,18 @@ class FfPoolSurface:
         )
 
     def update_facility(self, facility_id: str, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        from packages.application.warehouse_functional_lock import (
+            warehouse_functional_write_lock,
+        )
+
+        with warehouse_functional_write_lock(self.runtime_dir):
+            return self._update_facility_locked(
+                facility_id, payload, actor=actor
+            )
+
+    def _update_facility_locked(
+        self, facility_id: str, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
         selected = _identity_token(facility_id, field="facility_id")
         request_id = _request_id(payload.get("request_id"))
         expected = str(payload.get("expected_updated_at") or "").strip()
@@ -1439,6 +1488,36 @@ class FfPoolSurface:
                         details=blockers,
                         http_status=409,
                     )
+            if not before["active"] and current["active"]:
+                if set(normalized) != {"active"}:
+                    raise FfPoolSurfaceError(
+                        "facility_activation_metadata_split_required",
+                        "Activate the staged facility separately from name/timezone changes",
+                        http_status=409,
+                    )
+                conn.rollback()
+                from packages.application.ff_pool_dense_fbs import DenseFbsError, DenseFbsService
+
+                try:
+                    result = DenseFbsService(
+                        db_path=self.db_path,
+                        runtime_dir=self.runtime_dir,
+                        timestamp_factory=self.timestamp_factory,
+                    ).activate_facility(
+                        facility_id=selected,
+                        expected_updated_at=expected,
+                        request_id=request_id,
+                        request_identity=request_identity,
+                        actor=_actor(actor),
+                    )
+                except DenseFbsError as exc:
+                    raise FfPoolSurfaceError(
+                        exc.code, str(exc), details=exc.details, http_status=409
+                    ) from exc
+                return {
+                    **self.facility_detail(selected),
+                    "idempotent": bool(result.get("idempotent")),
+                }
             conn.execute(
                 f"UPDATE {FACILITIES_TABLE} SET name=?,active=?,display_timezone=?,updated_at=? WHERE facility_id=? AND updated_at=?",
                 (current["name"], int(current["active"]), current["display_timezone"], now, selected, expected),

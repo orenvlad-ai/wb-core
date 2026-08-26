@@ -266,6 +266,27 @@ def _seed_facilities(
 ) -> None:
     with sqlite3.connect(runtime.db_path) as conn:
         ensure_warehouse_functional_schema(conn)
+        for nm_id in active_nm_ids:
+            if conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_nomenclature_items "
+                "WHERE is_active=1 AND is_hidden=0 AND nm_id=?",
+                (nm_id,),
+            ).fetchone() is None:
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                           item_id,is_active,is_hidden,nm_id,nomenclature_name,
+                           product_type,match_key,aliases_json,created_at,updated_at
+                       ) VALUES(?,1,0,?,?,?,?,'[]',?,?)""",
+                    (
+                        f"fbs-smoke-nm-{nm_id}",
+                        nm_id,
+                        f"FBS Smoke {nm_id}",
+                        "fixture",
+                        f"fbs-smoke-{nm_id}",
+                        NOW_TEXT,
+                        NOW_TEXT,
+                    ),
+                )
         conn.execute(
             f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) VALUES(9,1,1,'fbs-smoke',?,'{{}}')",
             (NOW_TEXT,),

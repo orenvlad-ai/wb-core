@@ -59,28 +59,31 @@ def main() -> int:
             "reason_ru": "Недоступно: WB временно не передаёт распределение",
             "historical_values_preserved": True,
         }
-        assert _metric(missing, "fbs_total") == 97
-        assert _metric(missing, "total") == 127
-        assert missing["fbs"]["physical"] == 105
-        assert missing["fbs"]["reserved"] == 8
-        assert missing["fbs"]["available"] == 97
+        # Both facilities are active, so the absent SKU 2 physical rows are
+        # applicable-missing.  The aggregate must remain unavailable instead
+        # of silently treating those missing components as zero.
+        assert _metric(missing, "fbs_total") is None, missing["fbs"]
+        assert _metric(missing, "total") is None
+        assert missing["fbs"]["physical"] is None
+        assert missing["fbs"]["reserved"] is None
+        assert missing["fbs"]["available"] is None
         assert len(missing["fbs"]["facilities"]) == 2
-        assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] == 1
+        assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] is None
         missing_skus = {item["nm_id"]: item for item in missing["skus"]}
         assert missing_skus[1]["wb_total"] == 10
-        assert missing_skus[1]["fbs_physical"] == 105
+        assert missing_skus[1]["fbs_physical"] == 5
         assert missing_skus[1]["fbs_reserved"] == 8
-        assert missing_skus[1]["fbs_total"] == 97
-        assert missing_skus[1]["total"] == 107
+        assert missing_skus[1]["fbs_total"] == -3
+        assert missing_skus[1]["total"] == 7
         assert missing_skus[1]["wb_effective_total"] is None
         assert missing_skus[1]["fbs_facilities"][0]["seller_stock"] == {
             "quantity": 6,
             "delta_to_ledger_physical": 1,
             "role": "reconciliation_only",
         }
-        assert missing_skus[2]["fbs_total"] == 0
-        assert missing_skus[2]["total"] == 20
-        assert missing_skus[2]["quality"]["total"] == "partial"
+        assert missing_skus[2]["fbs_total"] is None
+        assert missing_skus[2]["total"] is None
+        assert missing_skus[2]["quality"]["total"] == "unavailable"
         assert "Частичные данные" in missing_skus[2]["quality"][
             "fbs_total_reason_ru"
         ]
@@ -125,12 +128,12 @@ def main() -> int:
         exact = model.current()
         assert exact["wb"]["incident_quantity"] == 35
         assert _metric(exact, "wb_effective_total") == -5
-        assert _metric(exact, "effective_total") == 92
+        assert _metric(exact, "effective_total") is None
         assert exact["wb"]["incident_evidence"]["synthetic_cap_applied"] is False
         exact_skus = {item["nm_id"]: item for item in exact["skus"]}
         assert exact_skus[1]["incident_quantity"] == 35
         assert exact_skus[1]["wb_effective_total"] == -25
-        assert exact_skus[1]["effective_total"] == 72
+        assert exact_skus[1]["effective_total"] == -28
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(
@@ -139,8 +142,8 @@ def main() -> int:
             )
             conn.commit()
         activated = model.current()
-        assert _metric(activated, "fbs_facility:orenburg") == 100
-        assert _metric(activated, "fbs_total") == 97
+        assert _metric(activated, "fbs_facility:orenburg") is None
+        assert _metric(activated, "fbs_total") is None
         assert activated["formula"]["effective_from"] == exact["formula"]["effective_from"]
 
         with sqlite3.connect(db_path) as conn:
@@ -150,12 +153,12 @@ def main() -> int:
             )
             conn.commit()
         deactivated = model.current()
-        assert _metric(deactivated, "fbs_total") == 97
-        assert _metric(deactivated, "fbs_facility:moscow") == -3
+        assert _metric(deactivated, "fbs_total") is None
+        assert _metric(deactivated, "fbs_facility:moscow") is None
         assert next(
             item for item in deactivated["fbs"]["facilities"]
             if item["facility_id"] == "moscow"
-        )["applicable"] is True
+        )["applicable"] is False
         assert deactivated["fbs"]["inactive_history_rewritten"] is False
 
         with sqlite3.connect(db_path) as conn:
@@ -170,21 +173,37 @@ def main() -> int:
             conn.commit()
         unavailable = model.current()
         assert _metric(unavailable, "fbs_facility:empty") is None
-        assert _metric(unavailable, "fbs_total") == 97
-        assert _metric(unavailable, "total") == 127
-        assert unavailable["quality"]["fbs"] == "exact_ledger"
+        assert _metric(unavailable, "fbs_total") is None
+        assert _metric(unavailable, "total") is None
+        assert unavailable["quality"]["fbs"] == "partial"
         empty = next(
             item for item in unavailable["fbs"]["facilities"]
             if item["facility_id"] == "empty"
         )
-        assert empty["applicable"] is False
-        assert empty["state"] == "inapplicable"
+        assert empty["applicable"] is True
+        assert empty["state"] == "missing"
 
     print("inventory_planning_read_model_smoke: OK")
     return 0
 
 
 def _seed(conn: sqlite3.Connection) -> None:
+    for nm_id in (1, 2):
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                   item_id,is_active,is_hidden,nm_id,nomenclature_name,
+                   product_type,match_key,aliases_json,created_at,updated_at
+               ) VALUES(?,1,0,?,?,?,?,'[]',?,?)""",
+            (
+                f"planning-nm-{nm_id}",
+                nm_id,
+                f"Planning SKU {nm_id}",
+                "fixture",
+                f"planning-{nm_id}",
+                NOW,
+                NOW,
+            ),
+        )
     conn.execute(
         "INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,'whfv-current',?)",
         (NOW,),

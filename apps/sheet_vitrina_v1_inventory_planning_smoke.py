@@ -137,10 +137,10 @@ def main() -> int:
             row.metric_key.removeprefix("total_") == INVENTORY_FBS_TOTAL_KEY
             for row in contract.rows
         ), "ordinary UI must not duplicate the facility sum with an FBS aggregate row"
-        assert _value(rows, f"SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 107
-        assert _value(rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 130
-        assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}") == 237
-        assert 237 == 107 + 130, "TOTAL must equal WB + all FBS facilities once"
+        assert _value(rows, f"SKU:{first_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 7
+        assert _value(rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 30
+        assert _value(rows, f"TOTAL|{inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)}") == 37
+        assert 37 == 7 + 30, "TOTAL must equal WB + active applicable FBS facilities once"
 
         hidden_metric_keys = {
             *INCIDENT_STOCK_METRIC_KEYS,
@@ -164,8 +164,8 @@ def main() -> int:
         }
         assert internal_by_nm_id[first_nm_id]["wb_effective_total"] == 6
         assert internal_by_nm_id[second_nm_id]["wb_effective_total"] == 19
-        assert internal_by_nm_id[first_nm_id]["effective_total"] == 103
-        assert internal_by_nm_id[second_nm_id]["effective_total"] == 129
+        assert internal_by_nm_id[first_nm_id]["effective_total"] == 3
+        assert internal_by_nm_id[second_nm_id]["effective_total"] == 29
         assert internal["formula"]["stock_total"] == "Остаток WB: всего + Остаток FBS: всего"
         exact_contract = fixture.entrypoint.web_vitrina_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
@@ -176,7 +176,7 @@ def main() -> int:
         exact_rows = {row.row_id: row for row in exact_contract.rows}
         assert not ({row.metric_key for row in exact_contract.rows} & hidden_metric_keys)
         assert _value(exact_rows, f"SKU:{first_nm_id}|{INVENTORY_WB_TOTAL_KEY}") == 10
-        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 130
+        assert _value(exact_rows, f"SKU:{second_nm_id}|{COMBINED_TOTAL_ALIAS_KEY}") == 30
 
         assert STAGES == (
             "production",
@@ -256,6 +256,30 @@ def _value(rows: dict[str, object], row_id: str) -> int | str:
 def _seed_inventory_planning(db_path: Path, *, nm_ids: tuple[int, int]) -> None:
     first_nm_id, second_nm_id = nm_ids
     with sqlite3.connect(db_path) as conn:
+        for nm_id in nm_ids:
+            active_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_nomenclature_items "
+                    "WHERE is_active=1 AND is_hidden=0 AND nm_id=?",
+                    (nm_id,),
+                ).fetchone()[0]
+            )
+            if active_count == 0:
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                           item_id,is_active,is_hidden,nm_id,nomenclature_name,
+                           product_type,match_key,aliases_json,created_at,updated_at
+                       ) VALUES(?,1,0,?,?,?,?,'[]',?,?)""",
+                    (
+                        f"planning-nm-{nm_id}",
+                        nm_id,
+                        f"Planning SKU {nm_id}",
+                        "fixture",
+                        f"planning-{nm_id}",
+                        NOW,
+                        NOW,
+                    ),
+                )
         conn.execute(
             "INSERT OR REPLACE INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,'planning-v1-current',?)",
             (NOW,),

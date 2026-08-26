@@ -664,7 +664,10 @@ def _facility_management(surface: FfPoolSurface, db_path: Path, clock: Clock) ->
     )
     assert updated["facility"]["facility_id"] == stable_id
     assert updated["facility"]["code"] == stable_code
-    assert len(updated["audit"]) == 4
+    assert len(updated["audit"]) == 5
+    audit_actions = [item["action"] for item in updated["audit"]]
+    assert audit_actions.count("created") == 1, audit_actions
+    assert audit_actions.count("activated") == 1, audit_actions
     second = surface.create_facility(
         {
             "request_id": "fixture:facility:orenburg",
@@ -676,7 +679,7 @@ def _facility_management(surface: FfPoolSurface, db_path: Path, clock: Clock) ->
         actor="fixture-operator",
     )
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute(f"SELECT COUNT(*) FROM {FACILITY_CHANGES_TABLE}").fetchone()[0] == 5
+        assert conn.execute(f"SELECT COUNT(*) FROM {FACILITY_CHANGES_TABLE}").fetchone()[0] == 7
         try:
             conn.execute(f"DELETE FROM {FACILITIES_TABLE} WHERE facility_id=?", (stable_id,))
         except sqlite3.IntegrityError as exc:

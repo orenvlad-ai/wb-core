@@ -14,10 +14,13 @@ source_basis:
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
   - "migration/155_functional_economics_inventory_blend_publication.md"
+  - "migration/159_applicability_gated_dense_fbs.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
   - "packages/application/ff_pool_documents.py"
+  - "packages/application/ff_pool_fbs_applicability.py"
+  - "packages/application/ff_pool_dense_fbs.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_pool_surfaces.py"
@@ -51,7 +54,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed. Migration 142 activates facility × pool detail beneath `ff` through one owner-gated signed-INTEGER/exact-Decimal opening, exact historical FBS checkpoint and post-T lifecycle while preserving aggregate=sum(detail), the same six stages and zero WB writes. Exact typed aggregate WB sentinel сохраняет raw evidence и SKU/TOTAL, но не создаёт warehouse/region allocation; strict action contours remain fail closed."
+update_note: "Active truth remains versioned functional balances. Migration 159 stages facility/SKU activation until canonical dense FBS coverage is exact, preserves existing balances, emits zero movement/capital/WAC effect and leaves FBO/WB/six-stage aggregation unchanged."
 ---
 
 # 1. Active warehouse contract
@@ -170,6 +173,19 @@ remains the current raw-combined presentation alias; persisted ready history
 and all calculation consumers are unchanged. A historical exact-date request
 is never overlaid from the current planning snapshot. Missing per-SKU physical
 FBS evidence remains unavailable and is never synthesized as zero.
+
+Migration 159 closes the current-state coverage gap at the registry boundary.
+Every active facility × active stock-managed SKU is applicable to FBS by
+default, unless an immutable dated exception says otherwise. New facility/SKU
+activation is staged inactive, covered by the existing `pool_inventory`
+document/CAS/readback contour under the shared warehouse lock, and published
+active only after all applicable physical rows are exact. Missing rows become
+document-proven explicit zero without movement, quantity/capital delta or WAC;
+existing rows are retained field-for-field. Receipts, writeoffs, reservations
+and order lifecycle cannot create a missing FBS row. FBO, WB and the six-stage
+aggregate are unchanged by initialization. Current readers publish typed
+`exact|exact_zero|missing|inapplicable` evidence and exclude inactive facility
+and inactive-SKU pairs without deleting their historical rows.
 
 # 2. Physical and cost rules
 

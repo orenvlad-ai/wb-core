@@ -130,6 +130,7 @@
         ["python3", "apps/ff_pool_foundation_smoke.py"],
         ["python3", "apps/ff_pool_documents_smoke.py"],
         ["python3", "apps/ff_pool_zero_physical_production_smoke.py"],
+        ["python3", "apps/ff_pool_dense_fbs_smoke.py"],
         ["python3", "apps/ff_pool_surfaces_smoke.py"],
         ["python3", "apps/ff_pool_surfaces_http_smoke.py"],
         ["python3", "apps/ff_wb_supply_origins_smoke.py"],

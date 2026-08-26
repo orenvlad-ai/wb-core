@@ -74,6 +74,29 @@ def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
                 ),
             ),
         )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ff_pool_feature_epochs(
+                   epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json
+               ) VALUES(1,1,1,'supplier-smoke-dense',?,'{}')""",
+            ("2026-05-30T08:00:00Z",),
+        )
+        active_nm_ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT nm_id FROM sheet_vitrina_v1_nomenclature_items "
+                "WHERE is_active=1 AND is_hidden=0 AND nm_id>0 ORDER BY nm_id"
+            ).fetchall()
+        ]
+        conn.executemany(
+            """INSERT INTO sheet_vitrina_v1_ff_pool_balances(
+                   facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                   wac_rub,source_watermark,updated_at
+               ) VALUES(?,'FBS',?,1,0,'0',NULL,'supplier-smoke-dense',?)""",
+            (
+                (TARGET_FACILITY_ID, nm_id, "2026-05-30T08:00:00Z")
+                for nm_id in active_nm_ids
+            ),
+        )
         conn.commit()
 
 
