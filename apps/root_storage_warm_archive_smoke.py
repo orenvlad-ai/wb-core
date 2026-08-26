@@ -36,6 +36,42 @@ def run() -> None:
     assert warm.DESTINATION_ROOT == Path("/opt/wb-core-runtime/state/backups")
     assert warm.ROOT_MINIMUM_AFTER_BYTES == 25 * 1024**3
     assert warm.EMERGENCY_RESERVE_BYTES == 8 * 1024**3
+    assert warm.READINESS_REQUIRED_CONSECUTIVE_CLEAN == 3
+    clean_activity = {
+        "identity_matches_expected": True,
+        "material_stable_during_gate": True,
+        "sidecars": [
+            {"suffix": suffix, "path": "/fixture" + suffix, "present": False}
+            for suffix in ("-wal", "-shm", "-journal")
+        ],
+        "fd_openers": [
+            {
+                "pid": 101,
+                "fd": 7,
+                "comm": "sqlite-reader",
+                "access_mode": "read_only",
+            }
+        ],
+        "kernel_locks": [],
+        "hold_evidence": {"marker_paths": [], "hold_xattr_names": []},
+        "provenance_matches_expected": True,
+        "related_process_observations": [
+            {
+                "pid": 202,
+                "matches": ["fixture.sqlite3"],
+                "classification": "observation_only_without_fd_or_lock_binding",
+            }
+        ],
+    }
+    assert warm._classify_activity_evidence(clean_activity) == []
+    for mode in ("write_only", "read_write", "unknown"):
+        blocked = dict(clean_activity)
+        blocked["fd_openers"] = [
+            {"pid": 303, "fd": 9, "comm": "writer", "access_mode": mode}
+        ]
+        blockers = warm._classify_activity_evidence(blocked)
+        assert blockers[0]["code"] == "write_capable_or_unknown_fd_opener"
+        assert blockers[0]["access_mode"] == mode
 
     with tempfile.TemporaryDirectory(prefix="root-warm-archive-smoke-") as raw:
         root = Path(raw)

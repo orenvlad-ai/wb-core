@@ -10,6 +10,7 @@ bytes and readback never submits another unlink.
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -48,14 +49,10 @@ from packages.application.root_storage_policy import (  # noqa: E402
     load_policy,
     read_root_storage_status_artifact,
 )
-from packages.application.storage_registry import (  # noqa: E402
-    StoreRegistry,
-    manifest_payload,
-    sqlite_process_openers,
-)
+from packages.application.storage_registry import StoreRegistry, manifest_payload  # noqa: E402
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v1"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v2"
 PROFILE = "root-warm-archive-six"
 EXPECTED_SOURCE_COUNT = 6
 DESTINATION_FAMILY_NAME = "root-warm-archive-wbc0008-006"
@@ -66,9 +63,13 @@ EMERGENCY_RESERVE_BYTES = 8 * 1024**3
 CONTROL_ARTIFACT_RESERVE_BYTES = 64 * 1024**2
 MANIFEST_RESERVE_BYTES_PER_SOURCE = 1024**2
 CHUNK_SIZE = 8 * 1024**2
+READINESS_REQUIRED_CONSECUTIVE_CLEAN = 3
+READINESS_MAX_STABILIZATION_SECONDS = 60
+READINESS_SAMPLE_INTERVAL_SECONDS = 2.0
 JOB_ID_RE = re.compile(r"[0-9a-f]{64}")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+READINESS_ID_RE = re.compile(r"readiness-v1-[0-9a-f]{32}")
 HOLD_TERMS = ("hold", "legal", "forensic", "incident", "preserve", "retain")
 PROTECTED_PREFIXES = (
     "/opt/wb-core-runtime/state/incident_backups/",
@@ -318,6 +319,10 @@ TARGET_POLICIES: tuple[dict[str, Any], ...] = (
 class WarmArchiveError(RuntimeError):
     """Exact block-006 guard failed closed."""
 
+    def __init__(self, message: str, *, evidence: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.evidence = dict(evidence or {})
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -329,9 +334,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="/opt/wb-core-runtime/app/.wb-core-runtime-sha",
     )
     parser.add_argument("--evidence-dir", required=True)
-    parser.add_argument("--operation-id", required=True)
+    parser.add_argument("--operation-id", default="")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("dry-run")
+    readiness = subparsers.add_parser("readiness")
+    readiness.add_argument("--readiness-id", required=True)
+    dry_run_parser = subparsers.add_parser("dry-run")
+    dry_run_parser.add_argument("--projection-manifest", required=True)
+    dry_run_parser.add_argument("--projection-manifest-sha256", required=True)
     apply = subparsers.add_parser("apply")
     apply.add_argument("--manifest", required=True)
     apply.add_argument("--manifest-sha256", required=True)
@@ -397,18 +406,33 @@ def _file_identity(path: Path, *, include_sha256: bool = True) -> dict[str, Any]
     return result
 
 
-def _sidecars(source: Path) -> list[dict[str, Any]]:
+def _sidecar_observation(source: Path) -> list[dict[str, Any]]:
     result = []
     for suffix in ("-wal", "-shm", "-journal"):
         path = Path(str(source) + suffix)
         if path.is_symlink():
-            raise WarmArchiveError(f"SQLite sidecar is a symlink: {path}")
+            result.append(
+                {
+                    "suffix": suffix,
+                    "path": str(path),
+                    "present": True,
+                    "kind": "symlink",
+                }
+            )
+            continue
         row = {"suffix": suffix, "path": str(path), "present": path.exists()}
         if path.exists():
             row["identity"] = _file_identity(path)
         result.append(row)
+    return result
+
+
+def _sidecars(source: Path) -> list[dict[str, Any]]:
+    result = _sidecar_observation(source)
     wal = next(item for item in result if item["suffix"] == "-wal")
     rollback = next(item for item in result if item["suffix"] == "-journal")
+    if any(item.get("kind") == "symlink" for item in result):
+        raise WarmArchiveError(f"SQLite source sidecar is a symlink: {source}")
     if wal["present"] and int(wal["identity"]["apparent_size_bytes"]) != 0:
         raise WarmArchiveError("SQLite source WAL is non-empty")
     if rollback["present"]:
@@ -529,15 +553,115 @@ def _provenance(policy: Mapping[str, Any], source_identity: Mapping[str, Any]) -
     return {"records": records, "digest": _digest(records)}
 
 
-def _kernel_locks(identity: Mapping[str, Any]) -> list[str]:
+def _kernel_locks(identity: Mapping[str, Any], *, source: Path) -> list[dict[str, Any]]:
     token = (
         f"{int(identity['device_major']):02x}:"
         f"{int(identity['device_minor']):02x}:{int(identity['inode'])}"
     )
     locks = Path("/proc/locks")
     if not locks.is_file():
-        raise WarmArchiveError("kernel lock inventory is unavailable")
-    return [line for line in locks.read_text(encoding="utf-8").splitlines() if token in line]
+        raise WarmArchiveError(
+            f"kernel lock inventory is unavailable for source: {source}",
+            evidence={"source_path": str(source), "kernel_lock_inventory": "unavailable"},
+        )
+    result = []
+    for line in locks.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if token not in fields:
+            continue
+        result.append(
+            {
+                "source_path": str(source),
+                "lock_id": fields[0].rstrip(":") if fields else "",
+                "lock_type": fields[1] if len(fields) > 1 else "unknown",
+                "scope": fields[2] if len(fields) > 2 else "unknown",
+                "access_mode": fields[3].lower() if len(fields) > 3 else "unknown",
+                "pid": int(fields[4]) if len(fields) > 4 and fields[4].isdigit() else None,
+                "device_inode": token,
+                "range_start": fields[6] if len(fields) > 6 else "unknown",
+                "range_end": fields[7] if len(fields) > 7 else "unknown",
+            }
+        )
+    return result
+
+
+def _process_fd_openers(source: Path) -> list[dict[str, Any]]:
+    """Collect exact inode-bound FD evidence with fail-closed access modes."""
+
+    if source.is_symlink() or not source.is_file():
+        raise WarmArchiveError(
+            f"source is unavailable during FD inventory: {source}",
+            evidence={"source_path": str(source), "fd_inventory": "source_unavailable"},
+        )
+    source_stat = source.stat()
+    proc = Path("/proc")
+    if not proc.is_dir():
+        raise WarmArchiveError(
+            f"process inventory is unavailable for source: {source}",
+            evidence={"source_path": str(source), "fd_inventory": "proc_unavailable"},
+        )
+    result = []
+    for pid_dir in sorted(
+        (item for item in proc.iterdir() if item.name.isdigit()),
+        key=lambda item: int(item.name),
+    ):
+        fd_dir = pid_dir / "fd"
+        try:
+            fd_paths = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd_path in fd_paths:
+            try:
+                fd_stat = fd_path.stat()
+            except OSError:
+                continue
+            if fd_stat.st_dev != source_stat.st_dev or fd_stat.st_ino != source_stat.st_ino:
+                continue
+            flags: int | None = None
+            try:
+                for line in (pid_dir / "fdinfo" / fd_path.name).read_text(
+                    encoding="utf-8"
+                ).splitlines():
+                    if line.startswith("flags:"):
+                        flags = int(line.split(":", 1)[1].strip(), 8)
+                        break
+            except (OSError, ValueError):
+                pass
+            try:
+                comm = (pid_dir / "comm").read_text(encoding="utf-8").strip()[:120]
+            except OSError:
+                comm = ""
+            try:
+                fd_target = os.readlink(fd_path)
+            except OSError:
+                fd_target = "unavailable"
+            try:
+                real_target = str(fd_path.resolve(strict=True))
+            except OSError:
+                real_target = "unavailable"
+            result.append(
+                {
+                    "source_path": str(source),
+                    "pid": int(pid_dir.name),
+                    "fd": int(fd_path.name),
+                    "access_mode": (
+                        {0: "read_only", 1: "write_only", 2: "read_write"}.get(
+                            flags & os.O_ACCMODE, "unknown"
+                        )
+                        if flags is not None
+                        else "unknown"
+                    ),
+                    "comm": comm,
+                    "fd_target": fd_target[:500],
+                    "real_fd_target": real_target[:500],
+                    "target_device": int(fd_stat.st_dev),
+                    "target_device_major": int(os.major(fd_stat.st_dev)),
+                    "target_device_minor": int(os.minor(fd_stat.st_dev)),
+                    "target_inode": int(fd_stat.st_ino),
+                    "binds_source_device_inode": True,
+                }
+            )
+    return result
 
 
 def _related_processes(source: Path) -> list[dict[str, Any]]:
@@ -551,29 +675,182 @@ def _related_processes(source: Path) -> list[dict[str, Any]]:
         if not item.name.isdigit() or int(item.name) in own:
             continue
         try:
-            command = (
-                (item / "cmdline")
-                .read_bytes()
-                .replace(b"\x00", b" ")
-                .decode("utf-8", errors="replace")
-                .strip()
-            )
+            command_bytes = (item / "cmdline").read_bytes()
+            command = command_bytes.replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
         except OSError:
             continue
         matches = sorted(term for term in terms if term and term in command)
         if matches:
-            result.append({"pid": int(item.name), "matches": matches, "command": command[:500]})
+            try:
+                comm = (item / "comm").read_text(encoding="utf-8").strip()[:120]
+            except OSError:
+                comm = ""
+            result.append(
+                {
+                    "pid": int(item.name),
+                    "comm": comm,
+                    "matches": matches,
+                    "cmdline_sha256": _digest(command_bytes),
+                    "classification": "observation_only_without_fd_or_lock_binding",
+                }
+            )
     return result
 
 
-def _hold_evidence(policy: Mapping[str, Any], source: Path) -> dict[str, Any]:
+def _identity_fields_match(
+    observed: Mapping[str, Any], expected: Mapping[str, Any], *, include_sha256: bool
+) -> bool:
+    fields = [key for key in expected if include_sha256 or key != "sha256"]
+    return {key: observed.get(key) for key in fields} == {
+        key: expected.get(key) for key in fields
+    }
+
+
+def _classify_activity_evidence(evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if evidence.get("identity_matches_expected") is not True:
+        blockers.append({"code": "source_identity_drift"})
+    if evidence.get("material_stable_during_gate") is not True:
+        blockers.append({"code": "source_material_drift_during_gate"})
+    sidecars = [item for item in evidence.get("sidecars", []) if item.get("present")]
+    if sidecars:
+        blockers.append({"code": "sqlite_sidecar_present", "sidecars": sidecars})
+    for opener in evidence.get("fd_openers", []):
+        mode = str(opener.get("access_mode") or "unknown")
+        if mode != "read_only":
+            blockers.append(
+                {
+                    "code": "write_capable_or_unknown_fd_opener",
+                    "pid": opener.get("pid"),
+                    "fd": opener.get("fd"),
+                    "comm": opener.get("comm"),
+                    "access_mode": mode,
+                }
+            )
+    if evidence.get("kernel_locks"):
+        blockers.append(
+            {"code": "kernel_lock_present", "locks": evidence["kernel_locks"]}
+        )
+    hold = evidence.get("hold_evidence") or {}
+    if hold.get("marker_paths") or hold.get("hold_xattr_names"):
+        blockers.append({"code": "hold_evidence_present", "hold_evidence": hold})
+    if evidence.get("provenance_matches_expected") is not True:
+        blockers.append({"code": "provenance_drift"})
+    return blockers
+
+
+def _source_activity_gate(
+    *,
+    policy: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+    expected_provenance_digest: str,
+    gate_name: str,
+    include_sha256: bool,
+    raise_on_block: bool = True,
+) -> dict[str, Any]:
+    """Observe exact file activity; string coincidences never become blockers."""
+
+    source = Path(str(policy["source_path"]))
+    identity_before = _file_identity(source, include_sha256=include_sha256)
+    sidecars = _sidecar_observation(source)
+    openers = _process_fd_openers(source)
+    locks = _kernel_locks(identity_before, source=source)
+    related = _related_processes(source)
+    opener_pids = {int(item["pid"]) for item in openers}
+    for item in related:
+        item["actual_fd_binding_observed"] = int(item["pid"]) in opener_pids
+        if item["actual_fd_binding_observed"]:
+            item["classification"] = "related_process_with_exact_fd_binding"
+    hold = _hold_evidence(policy, source, fail_on_hold=False)
+    source_identity_for_provenance = dict(expected_identity)
+    source_identity_for_provenance.update(identity_before)
+    source_identity_for_provenance.setdefault("sha256", expected_identity.get("sha256"))
+    try:
+        provenance = _provenance(policy, source_identity_for_provenance)
+        provenance_error = None
+    except WarmArchiveError as exc:
+        provenance = {"records": [], "digest": "", "error": str(exc)}
+        provenance_error = str(exc)
+    identity_after = _file_identity(source, include_sha256=False)
+    expected_stat = {key: value for key, value in identity_before.items() if key != "sha256"}
+    evidence = {
+        "gate": gate_name,
+        "observed_at": _now(),
+        "source_path": str(source),
+        "expected_identity": dict(expected_identity),
+        "identity_before": identity_before,
+        "identity_after": identity_after,
+        "identity_matches_expected": _identity_fields_match(
+            identity_before, expected_identity, include_sha256=include_sha256
+        ),
+        "sha256_verified": include_sha256,
+        "sha256_matches_expected": (
+            identity_before.get("sha256") == expected_identity.get("sha256")
+            if include_sha256
+            else None
+        ),
+        "material_stable_during_gate": identity_after == expected_stat,
+        "sidecars": sidecars,
+        "fd_openers": openers,
+        "read_only_opener_count": sum(
+            1 for item in openers if item.get("access_mode") == "read_only"
+        ),
+        "write_capable_or_unknown_opener_count": sum(
+            1 for item in openers if item.get("access_mode") != "read_only"
+        ),
+        "kernel_locks": locks,
+        "hold_evidence": hold,
+        "provenance": provenance,
+        "provenance_error": provenance_error,
+        "provenance_matches_expected": (
+            provenance_error is None
+            and (
+                not expected_provenance_digest
+                or provenance.get("digest") == expected_provenance_digest
+            )
+        ),
+        "related_process_observations": related,
+    }
+    blockers = _classify_activity_evidence(evidence)
+    evidence["blockers"] = blockers
+    evidence["classification"] = (
+        "blocked"
+        if blockers
+        else "clean_with_read_only_openers"
+        if openers
+        else "clean"
+    )
+    if blockers and raise_on_block:
+        raise WarmArchiveError(
+            f"source activity gate blocked: {source}",
+            evidence=evidence,
+        )
+    return evidence
+
+
+def _hold_evidence(
+    policy: Mapping[str, Any], source: Path, *, fail_on_hold: bool = True
+) -> dict[str, Any]:
     if any(str(source).startswith(prefix) for prefix in PROTECTED_PREFIXES):
-        raise WarmArchiveError("source entered an incident/forensic/Finance protected prefix")
+        raise WarmArchiveError(
+            f"source entered an incident/forensic/Finance protected prefix: {source}",
+            evidence={"source_path": str(source), "protected_prefix_match": True},
+        )
     root = Path(str(policy["hold_root"]))
-    if root.is_symlink() or not root.is_dir() or source.resolve() not in [
-        candidate.resolve() for candidate in root.rglob("*") if candidate.is_file()
-    ]:
-        raise WarmArchiveError("source does not belong to its exact proven family")
+    try:
+        source.resolve().relative_to(root.resolve())
+    except (ValueError, OSError) as exc:
+        raise WarmArchiveError(
+            f"source does not belong to its exact proven family: {source}",
+            evidence={"source_path": str(source), "searched_root": str(root)},
+        ) from exc
+    if root.is_symlink() or not root.is_dir() or source.is_symlink() or not source.is_file():
+        raise WarmArchiveError(
+            f"source does not belong to its exact proven family: {source}",
+            evidence={"source_path": str(source), "searched_root": str(root)},
+        )
     markers = sorted(
         str(candidate)
         for candidate in root.rglob("*")
@@ -584,15 +861,24 @@ def _hold_evidence(policy: Mapping[str, Any], source: Path) -> dict[str, Any]:
     except OSError as exc:
         raise WarmArchiveError("source xattr inventory failed") from exc
     hold_xattrs = [name for name in xattrs if any(term in name.lower() for term in HOLD_TERMS)]
-    if markers or hold_xattrs:
-        raise WarmArchiveError("incident/forensic/legal hold evidence is present")
-    return {
-        "classification": "no_incident_forensic_legal_hold_evidence",
+    result = {
+        "classification": (
+            "incident_forensic_legal_hold_evidence_present"
+            if markers or hold_xattrs
+            else "no_incident_forensic_legal_hold_evidence"
+        ),
         "searched_root": str(root),
         "marker_paths": markers,
         "xattr_names": xattrs,
+        "hold_xattr_names": hold_xattrs,
         "protected_prefix_match": False,
     }
+    if fail_on_hold and (markers or hold_xattrs):
+        raise WarmArchiveError(
+            f"incident/forensic/legal hold evidence is present for source: {source}",
+            evidence={"source_path": str(source), "hold_evidence": result},
+        )
+    return result
 
 
 def _zstd() -> str:
@@ -623,33 +909,133 @@ def _measure_compressed_size(source: Path) -> int:
     return size
 
 
-def _target_probe(policy: Mapping[str, Any], *, measure_compression: bool) -> dict[str, Any]:
+def _projection_precheck(
+    policy: Mapping[str, Any], expected_identity: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    started = time.monotonic()
+    samples = []
+    consecutive_clean = 0
+    while True:
+        sample = _source_activity_gate(
+            policy=policy,
+            expected_identity=expected_identity,
+            expected_provenance_digest="",
+            gate_name=f"full_projection_lightweight_precheck:{len(samples) + 1}",
+            include_sha256=False,
+            raise_on_block=False,
+        )
+        samples.append(sample)
+        non_activity_blockers = [
+            item
+            for item in sample["blockers"]
+            if item["code"] != "write_capable_or_unknown_fd_opener"
+        ]
+        if non_activity_blockers:
+            raise WarmArchiveError(
+                f"source material gate blocked before full projection: {policy['source_path']}",
+                evidence={**sample, "blockers": non_activity_blockers},
+            )
+        consecutive_clean = consecutive_clean + 1 if not sample["blockers"] else 0
+        if consecutive_clean >= 2:
+            full_sample = _source_activity_gate(
+                policy=policy,
+                expected_identity=expected_identity,
+                expected_provenance_digest="",
+                gate_name="full_projection_single_hash_precheck",
+                include_sha256=True,
+                raise_on_block=False,
+            )
+            samples.append(full_sample)
+            full_non_activity_blockers = [
+                item
+                for item in full_sample["blockers"]
+                if item["code"] != "write_capable_or_unknown_fd_opener"
+            ]
+            if full_non_activity_blockers:
+                raise WarmArchiveError(
+                    f"source material gate blocked during full projection: {policy['source_path']}",
+                    evidence={**full_sample, "blockers": full_non_activity_blockers},
+                )
+            if not full_sample["blockers"]:
+                return full_sample, samples
+            consecutive_after_hash = 0
+            while True:
+                after_hash = _source_activity_gate(
+                    policy=policy,
+                    expected_identity={
+                        **expected_identity,
+                        **full_sample["identity_before"],
+                    },
+                    expected_provenance_digest=str(
+                        full_sample["provenance"]["digest"]
+                    ),
+                    gate_name=(
+                        "full_projection_post_hash_activity_stabilization:"
+                        f"{len(samples) + 1}"
+                    ),
+                    include_sha256=False,
+                    raise_on_block=False,
+                )
+                samples.append(after_hash)
+                after_non_activity = [
+                    item
+                    for item in after_hash["blockers"]
+                    if item["code"] != "write_capable_or_unknown_fd_opener"
+                ]
+                if after_non_activity:
+                    raise WarmArchiveError(
+                        f"source material drifted after full projection hash: {policy['source_path']}",
+                        evidence={**after_hash, "blockers": after_non_activity},
+                    )
+                consecutive_after_hash = (
+                    consecutive_after_hash + 1 if not after_hash["blockers"] else 0
+                )
+                if consecutive_after_hash >= 2:
+                    return full_sample, samples
+                if time.monotonic() - started >= READINESS_MAX_STABILIZATION_SECONDS:
+                    raise WarmArchiveError(
+                        f"persistent write-capable source activity after full projection hash: {policy['source_path']}",
+                        evidence={
+                            "source_path": policy["source_path"],
+                            "classification": "persistent_write_capable_activity",
+                            "samples": samples,
+                            "callback": after_hash["blockers"],
+                        },
+                    )
+                time.sleep(READINESS_SAMPLE_INTERVAL_SECONDS)
+        if time.monotonic() - started >= READINESS_MAX_STABILIZATION_SECONDS:
+            raise WarmArchiveError(
+                f"persistent write-capable source activity before full projection: {policy['source_path']}",
+                evidence={
+                    "source_path": policy["source_path"],
+                    "classification": "persistent_write_capable_activity",
+                    "samples": samples,
+                    "callback": samples[-1]["blockers"],
+                },
+            )
+        time.sleep(READINESS_SAMPLE_INTERVAL_SECONDS)
+
+
+def _target_probe(
+    policy: Mapping[str, Any], *, measure_compression: bool
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     source = Path(str(policy["source_path"]))
-    identity_before = _file_identity(source)
     expected_identity = dict(policy["expected_identity"])
-    observed_expected_fields = {
-        key: identity_before.get(key) for key in expected_identity
-    }
-    if observed_expected_fields != expected_identity:
-        raise WarmArchiveError("source identity drifted from the exact block-006 scope")
+    first_activity, precheck_samples = _projection_precheck(policy, expected_identity)
+    identity_before = first_activity["identity_before"]
     if identity_before["mode"] != "0o600" or identity_before["uid"] != 0 or identity_before["gid"] != 0:
-        raise WarmArchiveError("source permissions/ownership are not private root:root")
+        raise WarmArchiveError(
+            f"source permissions/ownership are not private root:root: {source}",
+            evidence=first_activity,
+        )
     if identity_before["nlink"] != 1:
-        raise WarmArchiveError("source has another hard link")
-    sidecars_before = _sidecars(source)
-    openers_before = sqlite_process_openers(source)
-    locks_before = _kernel_locks(identity_before)
-    related_before = _related_processes(source)
-    if openers_before or locks_before or related_before:
-        raise WarmArchiveError("source has an opener, lock or current operation")
+        raise WarmArchiveError(
+            f"source has another hard link: {source}", evidence=first_activity
+        )
+    sidecars_before = first_activity["sidecars"]
     sqlite = _sqlite_probe(source)
-    provenance = _provenance(policy, identity_before)
-    hold = _hold_evidence(policy, source)
-    identity_after = _file_identity(source)
-    if identity_after != identity_before or _sidecars(source) != sidecars_before:
-        raise WarmArchiveError("source material identity drifted during preflight")
-    if sqlite_process_openers(source) or _kernel_locks(identity_after) or _related_processes(source):
-        raise WarmArchiveError("source became active during preflight")
+    provenance = first_activity["provenance"]
+    hold = first_activity["hold_evidence"]
     result = {
         "key": str(policy["key"]),
         "source_path": str(source),
@@ -659,18 +1045,56 @@ def _target_probe(policy: Mapping[str, Any], *, measure_compression: bool) -> di
         "restore_role": str(policy["restore_role"]),
         "identity": identity_before,
         "sidecars": sidecars_before,
-        "openers": [],
-        "kernel_locks": [],
-        "current_operations": [],
         "sqlite": sqlite,
         "provenance": provenance,
         "hold_evidence": hold,
     }
     if measure_compression:
         result["projected_archive_size_bytes"] = _measure_compressed_size(source)
-        if _file_identity(source) != identity_before:
-            raise WarmArchiveError("source drifted during compression measurement")
-    return result
+    final_activity = _source_activity_gate(
+        policy=policy,
+        expected_identity=identity_before,
+        expected_provenance_digest=str(provenance["digest"]),
+        gate_name="full_projection_postcheck",
+        include_sha256=False,
+        raise_on_block=False,
+    )
+    material_blockers = [
+        item
+        for item in final_activity["blockers"]
+        if item["code"]
+        in {
+            "source_identity_drift",
+            "source_material_drift_during_gate",
+            "sqlite_sidecar_present",
+            "kernel_lock_present",
+            "hold_evidence_present",
+            "provenance_drift",
+        }
+    ]
+    if material_blockers:
+        final_activity["blockers"] = material_blockers
+        raise WarmArchiveError(
+            f"source material drifted during full projection: {source}",
+            evidence=final_activity,
+        )
+    return result, [*precheck_samples, final_activity]
+
+
+def _lightweight_target_witness(
+    target: Mapping[str, Any], *, gate_name: str, raise_on_block: bool = True
+) -> dict[str, Any]:
+    policy = next(
+        item for item in TARGET_POLICIES if str(item["key"]) == str(target["key"])
+    )
+    return _source_activity_gate(
+        policy=policy,
+        expected_identity=target["identity"],
+        expected_provenance_digest=str(target["provenance"]["digest"]),
+        gate_name=gate_name,
+        include_sha256=False,
+        raise_on_block=raise_on_block,
+    )
 
 
 def _filesystem(path: Path) -> dict[str, Any]:
@@ -1024,15 +1448,68 @@ def _journald_snapshot() -> dict[str, Any]:
     return {"service": service, "effective": effective, "inventory": inventory}
 
 
+def _validate_reusable_material(material: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if (
+        material.get("contract_name") != CONTRACT_NAME
+        or material.get("profile") != PROFILE
+        or int(material.get("source_count") or 0) != EXPECTED_SOURCE_COUNT
+        or material.get("destination_root") != str(DESTINATION_ROOT)
+        or material.get("destination_family")
+        != str(DESTINATION_ROOT / DESTINATION_FAMILY_NAME)
+        or material.get("compression") != "zstd-level-1-single-thread"
+    ):
+        raise WarmArchiveError("reusable compression projection contract is invalid")
+    targets = material.get("targets")
+    if not isinstance(targets, list) or len(targets) != EXPECTED_SOURCE_COUNT:
+        raise WarmArchiveError("reusable compression projection target count is invalid")
+    for policy, target in zip(TARGET_POLICIES, targets, strict=True):
+        if (
+            target.get("key") != policy["key"]
+            or target.get("source_path") != policy["source_path"]
+            or target.get("archive_name") != policy["archive_name"]
+            or target.get("owner") != policy["owner"]
+            or target.get("family") != policy["family"]
+            or target.get("restore_role") != policy["restore_role"]
+            or not isinstance(target.get("projected_archive_size_bytes"), int)
+            or int(target["projected_archive_size_bytes"]) <= 0
+            or {
+                key: (target.get("identity") or {}).get(key)
+                for key in policy["expected_identity"]
+            }
+            != dict(policy["expected_identity"])
+        ):
+            raise WarmArchiveError(
+                f"reusable compression projection escaped exact source: {policy['source_path']}"
+            )
+    return copy.deepcopy(targets)
+
+
 def _material_snapshot(
     *,
     runtime_dir: Path,
     root_backups: Path,
     own_job_id: str = "",
     lifecycle_locks_held: bool = False,
+    reusable_material: Mapping[str, Any] | None = None,
+    witness_name: str = "material_qualification",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     filesystems = _filesystem_snapshot(runtime_dir, root_backups)
-    targets = [_target_probe(policy, measure_compression=True) for policy in TARGET_POLICIES]
+    activity_gates: list[dict[str, Any]] = []
+    if reusable_material is None:
+        targets = []
+        for policy in TARGET_POLICIES:
+            target, target_gates = _target_probe(policy, measure_compression=True)
+            targets.append(target)
+            activity_gates.extend(target_gates)
+    else:
+        targets = _validate_reusable_material(reusable_material)
+        activity_gates = [
+            _lightweight_target_witness(
+                target,
+                gate_name=f"{witness_name}:{target['key']}",
+            )
+            for target in targets
+        ]
     if len(targets) != EXPECTED_SOURCE_COUNT:
         raise WarmArchiveError("exact target count is not six")
     root_policy = _root_policy_snapshot(targets)
@@ -1137,6 +1614,9 @@ def _material_snapshot(
         "compression": "zstd-level-1-single-thread",
     }
     observations = {
+        "witness_name": witness_name,
+        "reused_compression_projection": reusable_material is not None,
+        "activity_gates": activity_gates,
         "filesystems_before": filesystems,
         "root_policy_status": root_policy["status"],
         "finance_available_bytes": finance["available_bytes"],
@@ -1190,6 +1670,360 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _validate_readiness_scope(evidence_dir: Path, readiness_id: str) -> Path:
+    if READINESS_ID_RE.fullmatch(readiness_id) is None:
+        raise WarmArchiveError("readiness id is invalid")
+    evidence_dir = evidence_dir.resolve()
+    expected = (
+        Path("/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness")
+        / readiness_id
+    )
+    if evidence_dir != expected or evidence_dir.is_symlink() or not evidence_dir.is_dir():
+        raise WarmArchiveError("readiness evidence directory escaped exact scope")
+    if stat.S_IMODE(evidence_dir.stat().st_mode) != 0o700:
+        raise WarmArchiveError("readiness evidence directory is not private")
+    return evidence_dir
+
+
+def _activity_sample(
+    targets: list[Mapping[str, Any]], *, phase: str, sample_number: int
+) -> dict[str, Any]:
+    started = time.monotonic()
+    observations = [
+        _lightweight_target_witness(
+            target,
+            gate_name=f"readiness:{phase}:{sample_number}:{target['key']}",
+            raise_on_block=False,
+        )
+        for target in targets
+    ]
+    blockers = [
+        {
+            "source_path": item["source_path"],
+            "classification": item["classification"],
+            "blockers": item["blockers"],
+            "fd_openers": item["fd_openers"],
+            "kernel_locks": item["kernel_locks"],
+        }
+        for item in observations
+        if item["blockers"]
+    ]
+    return {
+        "phase": phase,
+        "sample_number": sample_number,
+        "observed_at": _now(),
+        "duration_seconds": round(time.monotonic() - started, 6),
+        "clean": not blockers,
+        "blockers": blockers,
+        "sources": observations,
+    }
+
+
+def _literal_activity_sample(*, phase: str, sample_number: int) -> dict[str, Any]:
+    targets = []
+    for policy in TARGET_POLICIES:
+        identity = dict(policy["expected_identity"])
+        identity.update(
+            {
+                "path": str(Path(str(policy["source_path"])).resolve()),
+                "device_major": int(os.major(int(identity["device"]))),
+                "device_minor": int(os.minor(int(identity["device"]))),
+            }
+        )
+        provenance = _provenance(policy, identity)
+        targets.append(
+            {
+                "key": policy["key"],
+                "source_path": policy["source_path"],
+                "identity": identity,
+                "provenance": provenance,
+            }
+        )
+    return _activity_sample(targets, phase=phase, sample_number=sample_number)
+
+
+def _stabilize_activity(
+    *,
+    phase: str,
+    required_clean: int,
+    targets: list[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = started + READINESS_MAX_STABILIZATION_SECONDS
+    samples = []
+    consecutive_clean = 0
+    sample_number = 0
+    while True:
+        sample_number += 1
+        sample = (
+            _activity_sample(targets, phase=phase, sample_number=sample_number)
+            if targets is not None
+            else _literal_activity_sample(phase=phase, sample_number=sample_number)
+        )
+        samples.append(sample)
+        consecutive_clean = consecutive_clean + 1 if sample["clean"] else 0
+        if consecutive_clean >= required_clean:
+            return {
+                "status": "clean",
+                "phase": phase,
+                "required_consecutive_clean": required_clean,
+                "consecutive_clean": consecutive_clean,
+                "elapsed_seconds": round(time.monotonic() - started, 6),
+                "samples": samples,
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "status": "blocked",
+                "phase": phase,
+                "required_consecutive_clean": required_clean,
+                "consecutive_clean": consecutive_clean,
+                "elapsed_seconds": round(time.monotonic() - started, 6),
+                "samples": samples,
+                "callback": samples[-1]["blockers"],
+            }
+        time.sleep(READINESS_SAMPLE_INTERVAL_SECONDS)
+
+
+def readiness(
+    *,
+    runtime_dir: Path,
+    root_backups: Path,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+    evidence_dir: Path,
+    readiness_id: str,
+) -> dict[str, Any]:
+    """Build one full projection, then prove bounded lightweight stability."""
+
+    _verify_deployed_sha(deployed_sha=deployed_sha, deployed_sha_file=deployed_sha_file)
+    evidence_dir = _validate_readiness_scope(evidence_dir, readiness_id)
+    receipt_path = evidence_dir / "root-warm-archive-readiness.json"
+    if receipt_path.exists():
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("contract_name") != CONTRACT_NAME
+            or payload.get("readiness_id") != readiness_id
+            or payload.get("deployed_sha") != deployed_sha
+        ):
+            raise WarmArchiveError("existing readiness receipt binding is invalid")
+        return {**payload, "idempotent": True}
+
+    pre_stabilization = _stabilize_activity(
+        phase="pre_projection", required_clean=2, targets=None
+    )
+    if pre_stabilization["status"] != "clean":
+        result = {
+            "contract_name": CONTRACT_NAME,
+            "status": "blocked",
+            "query_only": True,
+            "database_written": False,
+            "readiness_id": readiness_id,
+            "deployed_sha": deployed_sha,
+            "reason": "persistent_source_activity_before_projection",
+            "pre_projection_stabilization": pre_stabilization,
+            "callback": pre_stabilization.get("callback", []),
+            "completed_at": _now(),
+        }
+        _atomic_write_json(receipt_path, result)
+        return result
+
+    try:
+        material, full_observations = _material_snapshot(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            witness_name="readiness_full_projection",
+        )
+    except WarmArchiveError as exc:
+        result = {
+            "contract_name": CONTRACT_NAME,
+            "status": "blocked",
+            "query_only": True,
+            "database_written": False,
+            "readiness_id": readiness_id,
+            "deployed_sha": deployed_sha,
+            "reason": "full_projection_or_material_preflight_blocked",
+            "pre_projection_stabilization": pre_stabilization,
+            "callback": [
+                {
+                    "message": str(exc),
+                    "source_path": exc.evidence.get("source_path"),
+                    "classification": exc.evidence.get("classification"),
+                    "blockers": exc.evidence.get("blockers"),
+                    "fd_openers": exc.evidence.get("fd_openers"),
+                    "kernel_locks": exc.evidence.get("kernel_locks"),
+                    "evidence": exc.evidence,
+                }
+            ],
+            "completed_at": _now(),
+        }
+        _atomic_write_json(receipt_path, result)
+        return result
+    projection = {
+        "contract_name": CONTRACT_NAME,
+        "status": "projection_ready",
+        "query_only": True,
+        "database_written": False,
+        "readiness_id": readiness_id,
+        "deployed_sha": deployed_sha,
+        "created_at": _now(),
+        "material": material,
+        "material_qualification_digest": _digest(material),
+        "observations": full_observations,
+    }
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    projection_path = evidence_dir / f"root-warm-archive-readiness-projection-{timestamp}.json"
+    _atomic_write_json(projection_path, projection)
+    projection_sha256 = _sha256_file(projection_path)
+
+    stabilization = _stabilize_activity(
+        phase="post_projection",
+        required_clean=READINESS_REQUIRED_CONSECUTIVE_CLEAN,
+        targets=material["targets"],
+    )
+    final_material = None
+    final_observations = None
+    final_error = None
+    if stabilization["status"] == "clean":
+        try:
+            final_material, final_observations = _material_snapshot(
+                runtime_dir=runtime_dir,
+                root_backups=root_backups,
+                reusable_material=material,
+                witness_name="readiness_final_capacity_and_material_cas",
+            )
+        except WarmArchiveError as exc:
+            final_error = {"message": str(exc), "evidence": exc.evidence}
+    ready = bool(
+        stabilization["status"] == "clean"
+        and final_error is None
+        and final_material is not None
+        and _digest(final_material) == _digest(material)
+    )
+    result = {
+        "contract_name": CONTRACT_NAME,
+        "status": "ready" if ready else "blocked",
+        "query_only": True,
+        "database_written": False,
+        "readiness_id": readiness_id,
+        "deployed_sha": deployed_sha,
+        "source_count": EXPECTED_SOURCE_COUNT,
+        "required_consecutive_clean": READINESS_REQUIRED_CONSECUTIVE_CLEAN,
+        "max_stabilization_seconds": READINESS_MAX_STABILIZATION_SECONDS,
+        "pre_projection_stabilization": pre_stabilization,
+        "post_projection_stabilization": stabilization,
+        "projection_manifest_path": str(projection_path),
+        "projection_manifest_sha256": projection_sha256,
+        "material_qualification_digest": _digest(material),
+        "expected_reclaimed_allocated_bytes": material[
+            "expected_reclaimed_allocated_bytes"
+        ],
+        "required_backup_floor_bytes": material["finance"][
+            "required_available_floor_bytes"
+        ],
+        "root_minimum_after_bytes": ROOT_MINIMUM_AFTER_BYTES,
+        "capacity_guard_passed": bool(
+            ready
+            and final_observations
+            and all(
+                bool(item["sufficient"])
+                for item in final_observations["capacity_stages"]
+            )
+        ),
+        "minimum_projected_backup_available_bytes": (
+            min(
+                int(item["projected_available_at_peak_bytes"])
+                for item in final_observations["capacity_stages"]
+            )
+            if final_observations
+            else None
+        ),
+        "projected_root_available_bytes": (
+            final_observations["projected_root_available_bytes"]
+            if final_observations
+            else None
+        ),
+        "final_material_digest": _digest(final_material) if final_material else None,
+        "final_observations": final_observations,
+        "final_error": final_error,
+        "callback": (
+            []
+            if ready
+            else stabilization.get("callback", [])
+            or ([final_error] if final_error else [])
+        ),
+        "completed_at": _now(),
+    }
+    _atomic_write_json(receipt_path, result)
+    return result
+
+
+def _load_readiness_projection(
+    *,
+    projection_path: Path,
+    projection_sha256: str,
+    deployed_sha: str,
+) -> dict[str, Any]:
+    projection_path = projection_path.resolve()
+    expected_root = Path(
+        "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness"
+    )
+    try:
+        relative = projection_path.relative_to(expected_root)
+    except ValueError as exc:
+        raise WarmArchiveError("compression projection escaped readiness evidence") from exc
+    if (
+        len(relative.parts) != 2
+        or READINESS_ID_RE.fullmatch(relative.parts[0]) is None
+        or re.fullmatch(
+            r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+            relative.parts[1],
+        )
+        is None
+        or not SHA256_RE.fullmatch(projection_sha256)
+        or projection_path.is_symlink()
+        or not projection_path.is_file()
+        or stat.S_IMODE(projection_path.stat().st_mode) != 0o600
+        or _sha256_file(projection_path) != projection_sha256
+    ):
+        raise WarmArchiveError("compression projection binding is invalid")
+    payload = json.loads(projection_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract_name") != CONTRACT_NAME
+        or payload.get("status") != "projection_ready"
+        or payload.get("query_only") is not True
+        or payload.get("database_written") is not False
+        or payload.get("deployed_sha") != deployed_sha
+        or payload.get("readiness_id") != relative.parts[0]
+        or payload.get("material_qualification_digest") != _digest(payload.get("material"))
+    ):
+        raise WarmArchiveError("compression projection payload is invalid")
+    readiness_receipt_path = projection_path.parent / "root-warm-archive-readiness.json"
+    if (
+        readiness_receipt_path.is_symlink()
+        or not readiness_receipt_path.is_file()
+        or stat.S_IMODE(readiness_receipt_path.stat().st_mode) != 0o600
+    ):
+        raise WarmArchiveError("ready compression projection receipt is unavailable")
+    readiness_receipt = json.loads(readiness_receipt_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(readiness_receipt, dict)
+        or readiness_receipt.get("status") != "ready"
+        or readiness_receipt.get("query_only") is not True
+        or readiness_receipt.get("database_written") is not False
+        or readiness_receipt.get("readiness_id") != payload.get("readiness_id")
+        or readiness_receipt.get("deployed_sha") != deployed_sha
+        or readiness_receipt.get("projection_manifest_path") != str(projection_path)
+        or readiness_receipt.get("projection_manifest_sha256") != projection_sha256
+        or readiness_receipt.get("material_qualification_digest")
+        != payload.get("material_qualification_digest")
+    ):
+        raise WarmArchiveError("compression projection lacks an exact ready receipt")
+    _validate_reusable_material(payload["material"])
+    return payload
+
+
 def dry_run(
     *,
     runtime_dir: Path,
@@ -1198,10 +2032,22 @@ def dry_run(
     deployed_sha_file: Path,
     evidence_dir: Path,
     operation_id: str,
+    projection_manifest: Path,
+    projection_manifest_sha256: str,
 ) -> dict[str, Any]:
     _verify_deployed_sha(deployed_sha=deployed_sha, deployed_sha_file=deployed_sha_file)
     evidence_dir = _validate_evidence_scope(evidence_dir, operation_id)
-    material, observations = _material_snapshot(runtime_dir=runtime_dir, root_backups=root_backups)
+    projection = _load_readiness_projection(
+        projection_path=projection_manifest,
+        projection_sha256=projection_manifest_sha256,
+        deployed_sha=deployed_sha,
+    )
+    material, observations = _material_snapshot(
+        runtime_dir=runtime_dir,
+        root_backups=root_backups,
+        reusable_material=projection["material"],
+        witness_name="jit_lightweight_material_qualification",
+    )
     material_digest = _digest(material)
     manifest = {
         "contract_name": CONTRACT_NAME,
@@ -1214,6 +2060,14 @@ def dry_run(
         "material": material,
         "material_qualification_digest": material_digest,
         "observations": observations,
+        "readiness_projection": {
+            "readiness_id": projection["readiness_id"],
+            "path": str(projection_manifest),
+            "sha256": projection_manifest_sha256,
+            "material_qualification_digest": projection[
+                "material_qualification_digest"
+            ],
+        },
     }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     manifest_path = evidence_dir / f"root-warm-archive-plan-{timestamp}.json"
@@ -1224,6 +2078,13 @@ def dry_run(
     _atomic_write_json(manifest_path, manifest)
     manifest_sha256 = _sha256_file(manifest_path)
     stages = observations["capacity_stages"]
+    activity = observations["activity_gates"]
+    read_only_openers = sum(
+        int(item["read_only_opener_count"]) for item in activity
+    )
+    blocking_openers = sum(
+        int(item["write_capable_or_unknown_opener_count"]) for item in activity
+    )
     return {
         "contract_name": CONTRACT_NAME,
         "status": "ready",
@@ -1242,13 +2103,24 @@ def dry_run(
         "required_backup_floor_bytes": material["finance"]["required_available_floor_bytes"],
         "minimum_projected_backup_available_bytes": min(int(item["projected_available_at_peak_bytes"]) for item in stages),
         "capacity_guard_passed": all(bool(item["sufficient"]) for item in stages),
-        "openers_count": 0,
-        "locks_count": 0,
-        "holds_count": 0,
+        "openers_count": blocking_openers,
+        "read_only_openers_count": read_only_openers,
+        "write_capable_or_unknown_openers_count": blocking_openers,
+        "locks_count": sum(len(item["kernel_locks"]) for item in activity),
+        "holds_count": sum(
+            1
+            for item in activity
+            if item["hold_evidence"]["marker_paths"]
+            or item["hold_evidence"]["hold_xattr_names"]
+        ),
         "manifest_path": str(manifest_path),
         "manifest_sha256": manifest_sha256,
         "material_qualification_digest": material_digest,
         "non_target_digest": material["non_target_digest"],
+        "readiness_id": projection["readiness_id"],
+        "projection_manifest_path": str(projection_manifest),
+        "projection_manifest_sha256": projection_manifest_sha256,
+        "activity_evidence": observations["activity_gates"],
         "root_policy_sha256": material["root_policy"]["policy_sha256"],
     }
 
@@ -1267,6 +2139,7 @@ def _load_manifest(
     ):
         raise WarmArchiveError("manifest binding escaped exact private evidence scope")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    projection = payload.get("readiness_projection") if isinstance(payload, dict) else None
     if (
         not isinstance(payload, dict)
         or payload.get("contract_name") != CONTRACT_NAME
@@ -1274,6 +2147,18 @@ def _load_manifest(
         or payload.get("operation_id") != operation_id
         or payload.get("material_qualification_digest") != _digest(payload.get("material"))
         or int((payload.get("material") or {}).get("source_count") or 0) != EXPECTED_SOURCE_COUNT
+        or not isinstance(projection, Mapping)
+        or READINESS_ID_RE.fullmatch(str(projection.get("readiness_id") or "")) is None
+        or re.fullmatch(
+            r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+            r"readiness-v1-[0-9a-f]{32}/"
+            r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+            str(projection.get("path") or ""),
+        )
+        is None
+        or not SHA256_RE.fullmatch(str(projection.get("sha256") or ""))
+        or projection.get("material_qualification_digest")
+        != payload.get("material_qualification_digest")
     ):
         raise WarmArchiveError("manifest contract/material binding is invalid")
     return payload
@@ -1529,33 +2414,17 @@ def _capacity_guard(
     }
 
 
-def _exact_source_cas(target: Mapping[str, Any]) -> dict[str, Any]:
-    source = Path(str(target["source_path"]))
-    identity = _file_identity(source)
-    if identity != target["identity"] or _sidecars(source) != target["sidecars"]:
-        raise WarmArchiveError("source material CAS drifted")
-    openers = sqlite_process_openers(source)
-    locks = _kernel_locks(identity)
-    related = _related_processes(source)
-    hold = _hold_evidence(
-        next(item for item in TARGET_POLICIES if item["key"] == target["key"]),
-        source,
+def _exact_source_cas(
+    target: Mapping[str, Any], *, gate_name: str, full_hash: bool
+) -> dict[str, Any]:
+    policy = next(item for item in TARGET_POLICIES if item["key"] == target["key"])
+    return _source_activity_gate(
+        policy=policy,
+        expected_identity=target["identity"],
+        expected_provenance_digest=str(target["provenance"]["digest"]),
+        gate_name=gate_name,
+        include_sha256=full_hash,
     )
-    provenance = _provenance(
-        next(item for item in TARGET_POLICIES if item["key"] == target["key"]),
-        identity,
-    )
-    if openers or locks or related or hold["marker_paths"] or provenance["digest"] != target["provenance"]["digest"]:
-        raise WarmArchiveError("source opener/lock/hold/provenance CAS failed")
-    return {
-        "identity": identity,
-        "sidecars": target["sidecars"],
-        "openers": openers,
-        "kernel_locks": locks,
-        "current_operations": related,
-        "hold_evidence": hold,
-        "provenance_digest": provenance["digest"],
-    }
 
 
 def _journal_path(evidence_dir: Path) -> Path:
@@ -1619,6 +2488,10 @@ def _reconcile_pending_unlink(
                 "completed_at": str(item_state.get("completed_at") or _now()),
             },
             "published_pair_readback": proof,
+            "activity_evidence": {
+                **dict(payload.get("activity_evidence") or {}),
+                **dict(item_state.get("activity_evidence") or {}),
+            },
             "finalized_at": _now(),
         }
     )
@@ -1709,7 +2582,21 @@ def _process_target(
         archive_bytes=int(target["projected_archive_size_bytes"]),
         restore_bytes=int(target["identity"]["apparent_size_bytes"]),
     )
-    _exact_source_cas(target)
+    source_cas_before_archive = _exact_source_cas(
+        target, gate_name="mutation_pre_archive", full_hash=False
+    )
+    journal["items"][index - 1] = {
+        **dict(item_state),
+        "key": target["key"],
+        "phase": "archive_prechecked",
+        "activity_evidence": {
+            **dict(item_state.get("activity_evidence") or {}),
+            "pre_archive": source_cas_before_archive,
+        },
+        "updated_at": _now(),
+    }
+    journal["updated_at"] = _now()
+    _atomic_write_json(journal_path, journal)
     non_target_before = _non_target_snapshot()
     if non_target_before["digest"] != journal["non_target_digest_before"]:
         raise WarmArchiveError("non-target evidence digest drifted before archive")
@@ -1730,7 +2617,22 @@ def _process_target(
             expected_source=target["identity"],
             temporary=restore_temp,
         )
-        _exact_source_cas(target)
+        source_cas_after_archive = _exact_source_cas(
+            target, gate_name="mutation_post_archive_pre_publish", full_hash=False
+        )
+        journal["items"][index - 1] = {
+            **dict(journal["items"][index - 1]),
+            "phase": "archive_verified_pending_publish",
+            "activity_evidence": {
+                **dict(
+                    journal["items"][index - 1].get("activity_evidence") or {}
+                ),
+                "post_archive_pre_publish": source_cas_after_archive,
+            },
+            "updated_at": _now(),
+        }
+        journal["updated_at"] = _now()
+        _atomic_write_json(journal_path, journal)
         pending_manifest = {
             "contract_name": CONTRACT_NAME,
             "operation_id": operation_id,
@@ -1744,6 +2646,10 @@ def _process_target(
             "source_sqlite": target["sqlite"],
             "source_provenance": target["provenance"],
             "hold_evidence": target["hold_evidence"],
+            "activity_evidence": {
+                "pre_archive": source_cas_before_archive,
+                "post_archive_pre_publish": source_cas_after_archive,
+            },
             "archive_path": str(archive),
             "archive_size_bytes": compressed["archive_size_bytes"],
             "archive_sha256": compressed["archive_sha256"],
@@ -1769,7 +2675,9 @@ def _process_target(
         full_restore=True,
         restore_temp=restore_temp,
     )
-    source_cas = _exact_source_cas(target)
+    source_cas = _exact_source_cas(
+        target, gate_name="mutation_exact_pre_unlink", full_hash=True
+    )
     non_target_pre_unlink = _non_target_snapshot()
     if non_target_pre_unlink["digest"] != journal["non_target_digest_before"]:
         raise WarmArchiveError("non-target evidence digest drifted before unlink")
@@ -1779,6 +2687,12 @@ def _process_target(
         "phase": "pending_unlink",
         "pending_unlink_written_at": _now(),
         "source_cas": source_cas,
+        "activity_evidence": {
+            **dict(
+                journal["items"][index - 1].get("activity_evidence") or {}
+            ),
+            "exact_pre_unlink": source_cas,
+        },
         "archive_proof": published_proof,
         "capacity_before": capacity_before,
         "capacity_pre_unlink": capacity_pre_unlink,
@@ -1807,6 +2721,10 @@ def _process_target(
                 "completed_at": _now(),
             },
             "published_pair_readback": published_proof,
+            "activity_evidence": {
+                **dict(final_manifest.get("activity_evidence") or {}),
+                "exact_pre_unlink": source_cas,
+            },
             "finalized_at": _now(),
         }
     )
@@ -1958,6 +2876,18 @@ def _apply_batch_locked(
     )
     if manifest.get("deployed_sha") != deployed_sha:
         raise WarmArchiveError("manifest deployed SHA drifted")
+    projection_binding = manifest["readiness_projection"]
+    projection = _load_readiness_projection(
+        projection_path=Path(str(projection_binding["path"])),
+        projection_sha256=str(projection_binding["sha256"]),
+        deployed_sha=deployed_sha,
+    )
+    if (
+        projection["readiness_id"] != projection_binding["readiness_id"]
+        or projection["material_qualification_digest"]
+        != manifest["material_qualification_digest"]
+    ):
+        raise WarmArchiveError("manifest readiness projection drifted before mutation")
     journal_path = _journal_path(evidence_dir)
     if journal_path.exists():
         journal = _read_journal(journal_path)
@@ -2007,6 +2937,8 @@ def _apply_batch_locked(
             root_backups=root_backups,
             own_job_id=own_job_id,
             lifecycle_locks_held=True,
+            reusable_material=manifest["material"],
+            witness_name="mutation_start_lightweight_material_cas",
         )
         if _digest(fresh_material) != manifest["material_qualification_digest"]:
             raise WarmArchiveError("material CAS drifted after qualification")
@@ -2025,6 +2957,7 @@ def _apply_batch_locked(
             "filesystems_before": fresh_observations["filesystems_before"],
             "journald_before": fresh_observations["journald"],
             "services_before": fresh_observations["services"],
+            "activity_evidence_before": fresh_observations["activity_gates"],
             "non_target_digest_before": fresh_material["non_target_digest"],
             "root_policy_protected_digest_before": fresh_material["root_policy"]["protected_path_identity_digest"],
             "items": [{"key": item["key"], "phase": "pending"} for item in fresh_material["targets"]],
@@ -2274,6 +3207,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     root_backups = Path(args.root_backups)
     evidence_dir = Path(args.evidence_dir)
     deployed_sha_file = Path(args.deployed_sha_file)
+    if args.command == "readiness":
+        return readiness(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha=args.deployed_sha,
+            deployed_sha_file=deployed_sha_file,
+            evidence_dir=evidence_dir,
+            readiness_id=args.readiness_id,
+        )
     if args.command == "dry-run":
         return dry_run(
             runtime_dir=runtime_dir,
@@ -2282,6 +3224,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             deployed_sha_file=deployed_sha_file,
             evidence_dir=evidence_dir,
             operation_id=args.operation_id,
+            projection_manifest=Path(args.projection_manifest),
+            projection_manifest_sha256=args.projection_manifest_sha256,
         )
     if args.command == "apply":
         return apply_batch(
@@ -2313,12 +3257,15 @@ def main() -> int:
     try:
         result = run(build_parser().parse_args())
     except Exception as exc:
+        error = {"type": type(exc).__name__, "message": str(exc)}
+        if isinstance(exc, WarmArchiveError) and exc.evidence:
+            error["evidence"] = exc.evidence
         print(
             json.dumps(
                 {
                     "contract_name": CONTRACT_NAME,
                     "status": "failed",
-                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                    "error": error,
                 },
                 ensure_ascii=False,
                 sort_keys=True,

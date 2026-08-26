@@ -44,6 +44,8 @@ from apps.release_protocol import (  # noqa: E402
 
 APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
 APPLY_MARKER = "wb-core-production-apply-receipt"
+WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v1"
+WARM_READINESS_MARKER = "wb-core-root-warm-archive-readiness-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 MAX_QUALIFICATION_CANDIDATES = 4
@@ -98,6 +100,22 @@ def marker(operation: str) -> str:
     return f"<!-- {APPLY_MARKER} operation={operation} -->"
 
 
+def warm_readiness_id(repository: str, pr: int, release_operation: str) -> str:
+    material = canonical_json_bytes(
+        {
+            "contract": WARM_READINESS_RECEIPT_SCHEMA,
+            "repository": repository,
+            "pull_request": pr,
+            "release_operation_id": release_operation,
+        }
+    )
+    return "readiness-v1-" + digest(material)[:32]
+
+
+def warm_readiness_marker(readiness_id: str) -> str:
+    return f"<!-- {WARM_READINESS_MARKER} readiness={readiness_id} -->"
+
+
 def parse_release_receipt(
     comments: list[Mapping[str, Any]],
     *,
@@ -130,6 +148,58 @@ def parse_release_receipt(
             matches.append(payload)
     if len(matches) != 1:
         raise ApplyError("exact live-runtime release receipt is missing or ambiguous")
+    return matches[0]
+
+
+def parse_warm_readiness_receipt(
+    comments: list[Mapping[str, Any]],
+    *,
+    repository: str,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+) -> dict[str, Any]:
+    readiness = warm_readiness_id(repository, pr, release_operation)
+    matches = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if (
+            warm_readiness_marker(readiness) not in body
+            or "```json" not in body
+            or not is_actions_bot_comment(comment)
+        ):
+            continue
+        try:
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except (IndexError, json.JSONDecodeError):
+            continue
+        if (
+            payload.get("schema") == WARM_READINESS_RECEIPT_SCHEMA
+            and payload.get("state") == "ready"
+            and payload.get("readiness_id") == readiness
+            and payload.get("repository") == repository
+            and payload.get("pull_request") == pr
+            and payload.get("release_operation_id") == release_operation
+            and payload.get("merge_sha") == merge_sha
+            and payload.get("deployed_sha") == merge_sha
+            and re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+                r"readiness-v1-[0-9a-f]{32}/"
+                r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+                str(payload.get("projection_manifest_path") or ""),
+            )
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("projection_manifest_sha256") or ""),
+            )
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("material_qualification_digest") or ""),
+            )
+        ):
+            matches.append(payload)
+    if len(matches) != 1:
+        raise ApplyError("exact ready warm-archive readiness receipt is missing or ambiguous")
     return matches[0]
 
 
@@ -339,6 +409,8 @@ def _remote_command(
     manifest_path: str = "",
     manifest_sha256: str = "",
     approval_reference: str = "",
+    projection_manifest_path: str = "",
+    projection_manifest_sha256: str = "",
 ) -> list[str]:
     if mode not in {"dry-run", "apply", "readback"}:
         raise ApplyError("unsupported remote production-goal mode")
@@ -405,6 +477,30 @@ def _remote_command(
                     manifest_sha256,
                 ]
             )
+    if mode == "dry-run" and warm_archive:
+        if (
+            re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+                r"readiness-v1-[0-9a-f]{32}/"
+                r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+                projection_manifest_path,
+            )
+            is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", projection_manifest_sha256
+            )
+            is None
+        ):
+            raise ApplyError("warm archive dry-run lacks exact ready projection")
+        parts.extend(
+            [
+                "dry-run",
+                "--projection-manifest",
+                projection_manifest_path,
+                "--projection-manifest-sha256",
+                projection_manifest_sha256,
+            ]
+        )
     if mode == "apply":
         if not approval_reference or len(approval_reference) > 500:
             raise ApplyError("task authorization reference is invalid")
@@ -473,7 +569,7 @@ def _remote_command(
             )
         else:
             parts.append("--readback")
-    elif warm_archive:
+    elif warm_archive and mode != "dry-run":
         parts.append("dry-run")
     evidence_setup = (
         "install -d -m 0700 " + shlex.quote(evidence_dir)
@@ -487,6 +583,44 @@ def _remote_command(
     shell = (
         "set -eu; umask 077; "
         + evidence_setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _warm_readiness_remote_command(
+    *, target: Mapping[str, Any], merge_sha: str, readiness_id: str
+) -> list[str]:
+    if re.fullmatch(r"readiness-v1-[0-9a-f]{32}", readiness_id) is None:
+        raise ApplyError("warm archive readiness id is invalid")
+    target_dir = str(target["target_dir"])
+    evidence_dir = (
+        "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+        + readiness_id
+    )
+    parts = [
+        "python3",
+        f"{target_dir}/apps/root_storage_warm_archive.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--root-backups",
+        "/opt/wb-core-runtime/backups",
+        "--deployed-sha",
+        merge_sha,
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "--evidence-dir",
+        evidence_dir,
+        "readiness",
+        "--readiness-id",
+        readiness_id,
+    ]
+    shell = (
+        "set -eu; umask 077; install -d -m 0700 "
+        + shlex.quote(evidence_dir)
         + "; cd "
         + shlex.quote(target_dir)
         + "; "
@@ -526,7 +660,76 @@ def command_evidence(command: list[str], *, timeout_seconds: float = 3600.0) -> 
     }
 
 
-def _validate_candidate(payload: Mapping[str, Any], goal: Mapping[str, Any]) -> None:
+def _activity_receipt_summary(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    result = []
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        hold = item.get("hold_evidence") or {}
+        provenance = item.get("provenance") or {}
+        result.append(
+            {
+                "gate": item.get("gate"),
+                "source_path": item.get("source_path"),
+                "classification": item.get("classification"),
+                "identity_before": item.get("identity_before"),
+                "identity_after": item.get("identity_after"),
+                "identity_matches_expected": item.get("identity_matches_expected"),
+                "sha256_verified": item.get("sha256_verified"),
+                "sha256_matches_expected": item.get("sha256_matches_expected"),
+                "material_stable_during_gate": item.get(
+                    "material_stable_during_gate"
+                ),
+                "sidecars": item.get("sidecars"),
+                "fd_openers": item.get("fd_openers"),
+                "kernel_locks": item.get("kernel_locks"),
+                "hold_evidence": {
+                    "classification": hold.get("classification"),
+                    "marker_paths": hold.get("marker_paths"),
+                    "hold_xattr_names": hold.get("hold_xattr_names"),
+                },
+                "provenance": {
+                    "digest": provenance.get("digest"),
+                    "error": item.get("provenance_error"),
+                    "matches_expected": item.get("provenance_matches_expected"),
+                },
+                "related_process_observations": item.get(
+                    "related_process_observations"
+                ),
+                "blockers": item.get("blockers"),
+            }
+        )
+    return result
+
+
+def _readiness_callback_summary(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    result = []
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        result.append(
+            {
+                "message": item.get("message"),
+                "source_path": item.get("source_path"),
+                "classification": item.get("classification"),
+                "blockers": item.get("blockers"),
+                "fd_openers": item.get("fd_openers"),
+                "kernel_locks": item.get("kernel_locks"),
+            }
+        )
+    return result
+
+
+def _validate_candidate(
+    payload: Mapping[str, Any],
+    goal: Mapping[str, Any],
+    *,
+    warm_readiness: Mapping[str, Any] | None = None,
+) -> None:
     if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
         expected = {
             "status": "ready",
@@ -550,6 +753,19 @@ def _validate_candidate(payload: Mapping[str, Any], goal: Mapping[str, Any]) -> 
         for field in ("manifest_sha256", "material_qualification_digest", "non_target_digest"):
             if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
                 raise ApplyError(f"dynamic warm archive digest is invalid: {field}")
+        if (
+            not isinstance(warm_readiness, Mapping)
+            or payload.get("readiness_id") != warm_readiness.get("readiness_id")
+            or payload.get("projection_manifest_path")
+            != warm_readiness.get("projection_manifest_path")
+            or payload.get("projection_manifest_sha256")
+            != warm_readiness.get("projection_manifest_sha256")
+            or payload.get("material_qualification_digest")
+            != warm_readiness.get("material_qualification_digest")
+            or not isinstance(payload.get("activity_evidence"), list)
+            or len(payload["activity_evidence"]) != goal["expected_source_count"]
+        ):
+            raise ApplyError("dynamic warm archive readiness binding is invalid")
         return
     expected = {
         "status": "ready",
@@ -584,7 +800,12 @@ def run_dynamic_goal(
     goal: Mapping[str, Any],
     operation: str,
     approval_reference: str,
+    warm_readiness: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE and not isinstance(
+        warm_readiness, Mapping
+    ):
+        raise ApplyError("warm archive operation requires a ready pre-operation receipt")
     evidence_dir = f"/opt/wb-core-runtime/state/private-evidence/production-goals/{operation}"
     attempts: list[dict[str, Any]] = []
     previous_material_digest = ""
@@ -598,6 +819,16 @@ def run_dynamic_goal(
                 operation=operation,
                 evidence_dir=evidence_dir,
                 mode="dry-run",
+                projection_manifest_path=(
+                    str(warm_readiness["projection_manifest_path"])
+                    if warm_readiness is not None
+                    else ""
+                ),
+                projection_manifest_sha256=(
+                    str(warm_readiness["projection_manifest_sha256"])
+                    if warm_readiness is not None
+                    else ""
+                ),
             )
         )
         payload = evidence.get("result")
@@ -609,7 +840,7 @@ def run_dynamic_goal(
                 "qualification_attempts": [*attempts, evidence],
             }
         try:
-            _validate_candidate(payload, goal)
+            _validate_candidate(payload, goal, warm_readiness=warm_readiness)
         except ApplyError as exc:
             return {
                 "state": "blocked",
@@ -637,6 +868,13 @@ def run_dynamic_goal(
                         "expected_reclaimed_allocated_bytes"
                     ],
                     "non_target_digest": payload["non_target_digest"],
+                    "readiness_id": payload["readiness_id"],
+                    "projection_manifest_sha256": payload[
+                        "projection_manifest_sha256"
+                    ],
+                    "activity_evidence": _activity_receipt_summary(
+                        payload["activity_evidence"]
+                    ),
                 }
             )
         else:
@@ -1286,17 +1524,169 @@ def _run_legacy_mode(
     return 0
 
 
+def _run_warm_readiness_mode(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    if not args.release_operation_id:
+        raise ApplyError("warm archive readiness requires --release-operation-id")
+    merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
+    release_receipt = parse_release_receipt(
+        comments,
+        pr=args.pr,
+        release_operation=args.release_operation_id,
+        merge_sha=merge_sha,
+    )
+    readiness = warm_readiness_id(
+        args.repository, args.pr, args.release_operation_id
+    )
+    prior = [
+        item
+        for item in comments
+        if warm_readiness_marker(readiness) in str(item.get("body") or "")
+        and is_actions_bot_comment(item)
+    ]
+    if prior:
+        if len(prior) != 1 or "```json" not in str(prior[0].get("body") or ""):
+            raise ApplyError("duplicate or ambiguous warm archive readiness receipt")
+        payload = json.loads(
+            str(prior[0]["body"]).split("```json", 1)[1].split("```", 1)[0]
+        )
+        if (
+            payload.get("schema") != WARM_READINESS_RECEIPT_SCHEMA
+            or payload.get("readiness_id") != readiness
+            or payload.get("pull_request") != args.pr
+            or payload.get("merge_sha") != merge_sha
+        ):
+            raise ApplyError("existing warm archive readiness receipt is invalid")
+        receipt = {**payload, "idempotent": True}
+        _write_receipt(args.output, receipt)
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    subprocess.run(["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True)
+    subprocess.run(["git", "checkout", "--detach", merge_sha], cwd=ROOT, check=True)
+    target = _canonical_target()
+    with tempfile.TemporaryDirectory(prefix="wb-core-warm-archive-readiness-") as directory:
+        configure_deploy_environment(Path(directory))
+        evidence = command_evidence(
+            _warm_readiness_remote_command(
+                target=target, merge_sha=merge_sha, readiness_id=readiness
+            ),
+            timeout_seconds=14_400.0,
+        )
+    payload = evidence.get("result")
+    valid_payload = bool(
+        evidence.get("return_code") == 0
+        and isinstance(payload, Mapping)
+        and payload.get("status") in {"ready", "blocked"}
+        and payload.get("query_only") is True
+        and payload.get("database_written") is False
+        and payload.get("readiness_id") == readiness
+        and payload.get("deployed_sha") == merge_sha
+        and (
+            payload.get("status") != "ready"
+            or (
+                payload.get("source_count") == 6
+                and payload.get("capacity_guard_passed") is True
+                and payload.get("root_minimum_after_bytes") == 25 * 1024**3
+            )
+        )
+    )
+    if not valid_payload:
+        state = "blocked"
+        reason = "readiness-transport-or-contract-failed"
+        payload = None
+    else:
+        state = str(payload["status"])
+        reason = "bounded-readiness-clean" if state == "ready" else str(
+            payload.get("reason") or "bounded-readiness-blocked"
+        )
+    receipt: dict[str, Any] = {
+        "schema": WARM_READINESS_RECEIPT_SCHEMA,
+        "state": state,
+        "reason": reason,
+        "query_only": True,
+        "database_written": False,
+        "readiness_id": readiness,
+        "repository": args.repository,
+        "pull_request": args.pr,
+        "release_operation_id": release_receipt["operation_id"],
+        "merge_sha": merge_sha,
+        "deployed_sha": merge_sha,
+        "evidence": evidence,
+    }
+    if isinstance(payload, Mapping):
+        receipt.update(
+            {
+                "projection_manifest_path": payload.get(
+                    "projection_manifest_path"
+                ),
+                "projection_manifest_sha256": payload.get(
+                    "projection_manifest_sha256"
+                ),
+                "material_qualification_digest": payload.get(
+                    "material_qualification_digest"
+                ),
+                "expected_reclaimed_allocated_bytes": payload.get(
+                    "expected_reclaimed_allocated_bytes"
+                ),
+                "required_backup_floor_bytes": payload.get(
+                    "required_backup_floor_bytes"
+                ),
+                "root_minimum_after_bytes": payload.get(
+                    "root_minimum_after_bytes"
+                ),
+                "callback": _readiness_callback_summary(
+                    payload.get("callback", [])
+                ),
+            }
+        )
+    if state == "ready":
+        for field in (
+            "projection_manifest_path",
+            "projection_manifest_sha256",
+            "material_qualification_digest",
+        ):
+            if not receipt.get(field):
+                raise ApplyError(f"ready warm archive receipt lacks {field}")
+    _write_receipt(args.output, receipt)
+    comment_receipt = {
+        key: value for key, value in receipt.items() if key != "evidence"
+    }
+    comment_receipt["evidence_sha256"] = "sha256:" + digest(
+        canonical_json_bytes(evidence)
+    )
+    body = (
+        warm_readiness_marker(readiness)
+        + "\nBounded query-only warm archive readiness receipt:\n```json\n"
+        + json.dumps(comment_receipt, ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n```"
+    )
+    client.post(f"/issues/{args.pr}/comments", {"body": body})
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--authorization-mode",
-        choices=("scope-goal", "exact-manifest", "receipt-recovery"),
+        choices=(
+            "scope-goal",
+            "exact-manifest",
+            "receipt-recovery",
+            "warm-archive-readiness",
+        ),
         default="scope-goal",
     )
     parser.add_argument("--repository", default=CANONICAL_REPOSITORY)
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--release-operation-id")
-    parser.add_argument("--authorization-comment-id", required=True, type=int)
+    parser.add_argument("--authorization-comment-id", type=int, default=0)
     parser.add_argument("--merge-sha")
     parser.add_argument("--deployed-sha")
     parser.add_argument("--manifest-sha256")
@@ -1314,7 +1704,16 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode == "warm-archive-readiness":
+        return _run_warm_readiness_mode(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
     if args.authorization_mode == "receipt-recovery":
+        if args.authorization_comment_id <= 0:
+            raise ApplyError("receipt recovery requires --authorization-comment-id")
         return _run_receipt_recovery(
             args=args,
             client=client,
@@ -1322,6 +1721,8 @@ def main() -> int:
             comments=comments,
         )
     if args.authorization_mode == "exact-manifest":
+        if args.authorization_comment_id <= 0:
+            raise ApplyError("exact-manifest mode requires --authorization-comment-id")
         required = {
             "merge_sha": args.merge_sha,
             "deployed_sha": args.deployed_sha,
@@ -1341,6 +1742,8 @@ def main() -> int:
         )
     if not args.release_operation_id:
         raise ApplyError("scope-goal mode requires --release-operation-id")
+    if args.authorization_comment_id <= 0:
+        raise ApplyError("scope-goal mode requires --authorization-comment-id")
     merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
     release_receipt = parse_release_receipt(
         comments,
@@ -1353,6 +1756,17 @@ def main() -> int:
         authorization,
         repository=args.repository,
         pr=args.pr,
+    )
+    warm_readiness = (
+        parse_warm_readiness_receipt(
+            comments,
+            repository=args.repository,
+            pr=args.pr,
+            release_operation=args.release_operation_id,
+            merge_sha=merge_sha,
+        )
+        if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE
+        else None
     )
     operation = operation_id(
         args.repository,
@@ -1395,6 +1809,7 @@ def main() -> int:
             goal=goal,
             operation=operation,
             approval_reference=approval_reference,
+            warm_readiness=warm_readiness,
         )
     receipt = {
         "schema": APPLY_RECEIPT_SCHEMA,
@@ -1408,6 +1823,7 @@ def main() -> int:
         "authorization_comment_id": args.authorization_comment_id,
         "authorization_body_sha256": digest(approval_body.encode("utf-8")),
         "goal": goal,
+        "warm_archive_readiness": warm_readiness,
         "apply_count": result["apply_count"],
         "evidence": result,
     }

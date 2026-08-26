@@ -250,6 +250,27 @@ job/archive readback; ambiguous transport не запускает submit пов�
 six archive/restore/unlink и capacity/non-target/service reconciliation описаны
 в `migration/159_root_storage_warm_archive_wbc0008_006.md`.
 
+После WBC0008 block-007 этому profile обязательно предшествует отдельный
+`warm-archive-readiness` mode того же default-off workflow. Он не принимает
+owner authorization comment, не выводит production-goal operation id и не
+имеет submit/mutation primitive: exact merged PR и единственный
+`live_runtime/done` Release receipt определяют canonical deployed SHA, после
+чего repo-owned runner выполняет один полный query-only compression/material
+projection и требует три consecutive clean lightweight activity/material-CAS
+witness внутри максимум 60 секунд. Один transient sample не terminalizes
+будущий apply. Persistent write-capable/unknown FD opener, kernel lock,
+sidecar, hold или material drift публикует один structured readiness callback;
+scope-goal operation после такого receipt не допускается.
+
+Ready receipt cryptographically binds the private projection path/SHA,
+material digest, exact six source identities/SHA and conservative capacity
+guard. Subsequent JIT witnesses and mutation-start qualification reuse that
+projection only while fresh stat/sidecar/FD/lock/hold/provenance/material CAS,
+capacity and non-target checks remain exact. They do not repeat compression
+measurement, full SQLite integrity or full source hashing merely to obtain two
+equivalent witnesses. Actual archive/independent full restore/SQLite proof and
+one exact full pre-unlink source hash remain mandatory inside mutation.
+
 Passport фиксирует business task, canonical target, profile, bounded dates,
 exact expected insertions/quality и one-submit boundary; manifest hash в нём
 не является human gate. Для supported profile Runner checkout-ит exact merge,

@@ -271,6 +271,21 @@ def _run_dynamic_sequence(
             repository="orenvlad-ai/wb-core",
             pr=1050,
         )
+        readiness = (
+            {
+                "readiness_id": "readiness-v1-" + "6" * 32,
+                "projection_manifest_path": (
+                    "/opt/wb-core-runtime/state/private-evidence/"
+                    "root-warm-archive-readiness/readiness-v1-"
+                    + "6" * 32
+                    + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
+                ),
+                "projection_manifest_sha256": "sha256:" + "5" * 64,
+                "material_qualification_digest": "sha256:" + "8" * 64,
+            }
+            if goal["profile"] == apply.WARM_ARCHIVE_GOAL_PROFILE
+            else None
+        )
         return apply.run_dynamic_goal(
             target={
                 "target_dir": "/opt/wb-core-runtime/app",
@@ -280,6 +295,7 @@ def _run_dynamic_sequence(
             goal=goal,
             operation="op",
             approval_reference="github:scope-authorization",
+            warm_readiness=readiness,
         )
     finally:
         apply.command_evidence = original
@@ -299,6 +315,41 @@ def main() -> None:
     )
     assert warm_goal["expected_source_count"] == 6
     assert warm_goal["expected_reclaimed_allocated_bytes"] == 27_591_725_056
+    projection_path = (
+        "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+        "readiness-v1-"
+        + "6" * 32
+        + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
+    )
+    warm_dry_command = apply._remote_command(
+        target={
+            "target_dir": "/opt/wb-core-runtime/app",
+            "ssh_destination": "wb-core-eu-root",
+        },
+        merge_sha=MERGE_SHA,
+        goal=warm_goal,
+        operation="production-goal-v1-" + "4" * 32,
+        evidence_dir=(
+            "/opt/wb-core-runtime/state/private-evidence/production-goals/"
+            "production-goal-v1-"
+            + "4" * 32
+        ),
+        mode="dry-run",
+        projection_manifest_path=projection_path,
+        projection_manifest_sha256="sha256:" + "5" * 64,
+    )
+    assert warm_dry_command[-1].count(" dry-run ") == 1
+    assert projection_path in warm_dry_command[-1]
+    readiness_command = apply._warm_readiness_remote_command(
+        target={
+            "target_dir": "/opt/wb-core-runtime/app",
+            "ssh_destination": "wb-core-eu-root",
+        },
+        merge_sha=MERGE_SHA,
+        readiness_id="readiness-v1-" + "6" * 32,
+    )
+    assert "production-goal-v1" not in readiness_command[-1]
+    assert " readiness " in readiness_command[-1]
     try:
         apply.validate_authorization(
             authorization(body=WARM_AUTH_BODY.replace("sources 6", "sources 5")),
@@ -331,6 +382,42 @@ def main() -> None:
         merge_sha=MERGE_SHA,
     )
     assert parsed["state"] == "done"
+    readiness_id = apply.warm_readiness_id(
+        "orenvlad-ai/wb-core", 1050, "release-v2-test"
+    )
+    readiness_payload = {
+        "schema": apply.WARM_READINESS_RECEIPT_SCHEMA,
+        "state": "ready",
+        "readiness_id": readiness_id,
+        "repository": "orenvlad-ai/wb-core",
+        "pull_request": 1050,
+        "release_operation_id": "release-v2-test",
+        "merge_sha": MERGE_SHA,
+        "deployed_sha": MERGE_SHA,
+        "projection_manifest_path": (
+            "/opt/wb-core-runtime/state/private-evidence/"
+            f"root-warm-archive-readiness/{readiness_id}/"
+            "root-warm-archive-readiness-projection-20260826T120000Z.json"
+        ),
+        "projection_manifest_sha256": "sha256:" + "5" * 64,
+        "material_qualification_digest": "sha256:" + "8" * 64,
+    }
+    parsed_readiness = apply.parse_warm_readiness_receipt(
+        [
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": apply.warm_readiness_marker(readiness_id)
+                + "\n```json\n"
+                + json.dumps(readiness_payload)
+                + "\n```",
+            }
+        ],
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+        release_operation="release-v2-test",
+        merge_sha=MERGE_SHA,
+    )
+    assert parsed_readiness == readiness_payload
     try:
         apply.parse_release_receipt(
             [{**release_comment(), "user": {"login": "contributor"}}],
@@ -433,6 +520,15 @@ def main() -> None:
         "manifest_sha256": warm_manifest_sha,
         "material_qualification_digest": "sha256:" + "8" * 64,
         "non_target_digest": "sha256:" + "7" * 64,
+        "readiness_id": "readiness-v1-" + "6" * 32,
+        "projection_manifest_path": (
+            "/opt/wb-core-runtime/state/private-evidence/"
+            "root-warm-archive-readiness/readiness-v1-"
+            + "6" * 32
+            + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
+        ),
+        "projection_manifest_sha256": "sha256:" + "5" * 64,
+        "activity_evidence": [{"classification": "clean"} for _ in range(6)],
     }
     warm_readback = {
         "status": "reconciled",
@@ -657,6 +753,8 @@ def main() -> None:
     assert "pull-requests: read" not in workflow
     apply_job, recovery_job = workflow.split("\n  recover_receipt:\n", 1)
     assert "pull-requests: write" in apply_job
+    assert "--authorization-mode warm-archive-readiness" in apply_job
+    assert "root-warm-archive-readiness-receipt.json" in apply_job
     assert "actions: read" in recovery_job
     assert "pull-requests: write" in recovery_job
     assert "--authorization-mode receipt-recovery" in recovery_job
