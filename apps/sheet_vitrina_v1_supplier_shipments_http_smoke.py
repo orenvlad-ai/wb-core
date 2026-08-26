@@ -38,6 +38,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
+from packages.application.ff_pool_dense_fbs import DenseFbsService  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -46,7 +47,35 @@ INACTIVE_TARGET_FACILITY_ID = "fac_supplier_smoke_inactive"
 
 
 def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
+    staged_at = "2026-05-30T08:00:00Z"
     with sqlite3.connect(runtime.db_path) as conn:
+        latest_epoch = conn.execute(
+            """SELECT epoch,writer_enabled
+                 FROM sheet_vitrina_v1_ff_pool_feature_epochs
+                ORDER BY epoch DESC LIMIT 1"""
+        ).fetchone()
+        if latest_epoch is None or not bool(latest_epoch[1]):
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ff_pool_feature_epochs(
+                       epoch,writer_enabled,reader_enabled,source_revision,
+                       created_at,metadata_json
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    1 if latest_epoch is None else int(latest_epoch[0]) + 1,
+                    1,
+                    1,
+                    "supplier-shipments-http-dense-fixture-v1",
+                    staged_at,
+                    json.dumps(
+                        {
+                            "fixture": "supplier_shipments_http",
+                            "purpose": "production_shaped_dense_fbs_activation",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
         conn.executemany(
             """
             INSERT INTO sheet_vitrina_v1_ff_facilities(
@@ -58,10 +87,10 @@ def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
                     TARGET_FACILITY_ID,
                     "SMOKE",
                     "FF Smoke",
-                    1,
+                    0,
                     "Europe/Moscow",
-                    "2026-05-30T08:00:00Z",
-                    "2026-05-30T08:00:00Z",
+                    staged_at,
+                    staged_at,
                 ),
                 (
                     INACTIVE_TARGET_FACILITY_ID,
@@ -69,12 +98,88 @@ def _seed_target_facilities(runtime: RegistryUploadDbBackedRuntime) -> None:
                     "FF Smoke inactive",
                     0,
                     "Europe/Moscow",
-                    "2026-05-30T08:00:00Z",
-                    "2026-05-30T08:00:00Z",
+                    staged_at,
+                    staged_at,
                 ),
             ),
         )
         conn.commit()
+    DenseFbsService(
+        db_path=runtime.db_path,
+        runtime_dir=runtime.runtime_dir,
+        timestamp_factory=lambda: "2026-05-30T10:00:00Z",
+    ).activate_facility(
+        facility_id=TARGET_FACILITY_ID,
+        expected_updated_at=staged_at,
+        request_id="supplier-shipments-http-facility-activation",
+        request_identity="sha256:"
+        + hashlib.sha256(b"supplier-shipments-http-facility-activation").hexdigest(),
+        actor="supplier-shipments-http-smoke",
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        incomplete = conn.execute(
+            """SELECT item.nm_id,balance.quantity,balance.capital_rub,balance.wac_rub
+                 FROM sheet_vitrina_v1_nomenclature_items item
+                 LEFT JOIN sheet_vitrina_v1_ff_pool_balances balance
+                   ON balance.facility_id=? AND balance.pool='FBS'
+                  AND balance.nm_id=item.nm_id
+                WHERE item.is_active=1 AND item.is_hidden=0 AND item.nm_id>0
+                  AND (balance.nm_id IS NULL OR balance.quantity<>0
+                       OR CAST(balance.capital_rub AS NUMERIC)<>0
+                       OR balance.wac_rub IS NOT NULL)
+                ORDER BY item.nm_id""",
+            (TARGET_FACILITY_ID,),
+        ).fetchall()
+        if incomplete:
+            raise AssertionError(
+                "supplier fixture facility must have complete canonical-zero FBS coverage: "
+                f"{incomplete}"
+            )
+
+
+def _assert_dense_sku_activation(
+    runtime: RegistryUploadDbBackedRuntime, *, nm_id: int
+) -> None:
+    with sqlite3.connect(runtime.db_path) as conn:
+        item = conn.execute(
+            """SELECT item_id,is_active,is_hidden
+                 FROM sheet_vitrina_v1_nomenclature_items WHERE nm_id=?""",
+            (int(nm_id),),
+        ).fetchone()
+        balance = conn.execute(
+            """SELECT quantity,capital_rub,wac_rub
+                 FROM sheet_vitrina_v1_ff_pool_balances
+                WHERE facility_id=? AND pool='FBS' AND nm_id=?""",
+            (TARGET_FACILITY_ID, int(nm_id)),
+        ).fetchone()
+        intent = conn.execute(
+            """SELECT intent.intent_id
+                 FROM sheet_vitrina_v1_ff_pool_fbs_dense_intents intent,
+                      json_each(intent.plan_json,'$.materialize_nm_ids') materialized_nm
+                WHERE intent.subject_kind='sku_activation'
+                  AND CAST(materialized_nm.value AS INTEGER)=?
+                ORDER BY intent.created_at DESC,intent.intent_id DESC LIMIT 1""",
+            (int(nm_id),),
+        ).fetchone()
+        states = (
+            {
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT state
+                         FROM sheet_vitrina_v1_ff_pool_fbs_dense_intent_events
+                        WHERE intent_id=? ORDER BY event_sequence""",
+                    (str(intent[0]),),
+                ).fetchall()
+            }
+            if intent is not None
+            else set()
+        )
+    if item is None or tuple(item[1:]) != (1, 0):
+        raise AssertionError(f"dense SKU must publish active only after coverage: {item}")
+    if balance is None or tuple(balance) != (0, "0", None):
+        raise AssertionError(f"dense SKU must materialize canonical explicit zero: {balance}")
+    if not {"staged", "materializing", "materialized", "active"} <= states:
+        raise AssertionError(f"dense SKU lifecycle receipt is incomplete: {states}")
 
 
 def _assert_price_conformity_application_smoke() -> None:
@@ -121,6 +226,7 @@ def _assert_price_conformity_application_smoke() -> None:
                 "purchase_price_yuan": None,
             }
         )
+        _assert_dense_sku_activation(runtime, nm_id=501003)
         block.create_nomenclature_item(
             {
                 "is_active": True,
