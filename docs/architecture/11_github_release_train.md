@@ -269,8 +269,12 @@ content digest и mutable canonical identity-topology digest. Только яв�
 root-policy resolver bindings для current Finance raw/operational и
 Autoanswers относятся ко второй группе: их same-inode content/size/mtime
 эволюция сохраняется как evidence, но не меняет material CAS; path/device/
-mount/inode/type/symlink/owner/classification/StoreRegistry или owning-service
-relationship drift блокирует. Subsequent JIT witnesses and mutation-start qualification reuse that
+mount/inode/type/symlink/owner/classification/StoreRegistry или service-access
+relationship drift блокирует. После block 013 relationship задаётся versioned
+explicit access-role matrix: каждый FD обязан совпасть с exact device/inode и
+exact healthy declared systemd MainPID, а его mode — с reader/writer policy;
+PID ambiguity, pathname/process fallback и unknown mode fail closed. Эта matrix
+входит в stable topology digest. Subsequent JIT witnesses and mutation-start qualification reuse that
 projection only while fresh stat/sidecar/FD/lock/hold/provenance/material CAS,
 capacity and non-target checks remain exact. They do not repeat compression
 measurement, full SQLite integrity or full source hashing merely to obtain two

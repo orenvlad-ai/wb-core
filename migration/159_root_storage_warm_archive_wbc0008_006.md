@@ -102,9 +102,35 @@ root-storage policy rather than by filename:
   resolves the first two and the literal Autoanswers binding resolves the
   third. Their stable CAS contains canonical path, device/mount, inode/type,
   no-symlink proof, owner/classification, StoreRegistry generation identity
-  where applicable and the declared owning-service relationship. Ordinary
+  where applicable and the declared service-access relationship. Ordinary
   same-inode content, allocated-byte, size and mtime/ctime evolution is retained
   as observation evidence but is excluded from the stable topology digest.
+
+WBC0008 block 013 makes that relationship an explicit access-role matrix
+(`wb_core_non_target_cas_v2`) for every active mutable binding. Each literal
+repo-owned systemd unit has one declared `reader`, `writer` or `reader_writer`
+role and an exact allowed FD-mode set; wildcard, pathname, process-name,
+cgroup-parent and generic persistent-service fallbacks are absent. Registry
+HTTP is explicitly declared for Autoanswers because the live module constructs
+the isolated Autoanswers repository and the active unit legitimately held its
+exact read-only FD. The current Finance raw/operational and Autoanswers matrices
+also enumerate their other repo-owned direct readers and writers from the
+checked-in entrypoints and unit contracts.
+
+Every observed opener must bind the canonical path's exact device/inode through
+its actual FD and must be the exact positive `MainPID` of exactly one declared,
+healthy unit in the 27-row snapshot. A read-only FD needs declared read access;
+read-write needs declared writer access; no current SQLite binding allows
+write-only. Unknown mode, undeclared or non-MainPID process, PID reuse across
+multiple units, unhealthy/ambiguous unit state, or path text without the exact
+FD device/inode proof fails closed. Per-opener evidence retains canonical
+path/device/inode, PID/FD/mode/comm and FD target, all matching units, exact
+matched unit/MainPID, classified service health, declared role/modes and one
+accepted or rejected reason. The sorted access-role matrix is part of the
+stable mutable topology digest; policy drift therefore blocks even when the
+file inode is unchanged. Terminal block-012 readiness
+`readiness-v1-32faefe2d84925376c40b932f4d8e829` remains immutable and is never
+retried or reused; it created no production-goal operation or mutation.
 
 An unknown resolver, owner, classification, path, destination object or
 unrelated FD owner fails closed. Mutation authority remains the six literal
@@ -169,7 +195,7 @@ created. The immutable ready receipt binds the release operation, deployed SHA,
 exact source material/SHA, conservative capacity proof, separate immutable
 non-target and mutable canonical topology digests and one private full
 compression projection. Its durable evidence records ordinary mutable fields
-and owning-service/open-handle relationships without placing those volatile
+and exact service-role/open-handle relationships without placing those volatile
 content fields in the qualification digest.
 
 The trusted Apply Runner accepts the later task-scoped operation only with that

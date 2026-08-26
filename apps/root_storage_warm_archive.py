@@ -46,6 +46,7 @@ from packages.application.finance_storage_snapshot_retention import (  # noqa: E
 )
 from packages.application.root_storage_policy import (  # noqa: E402
     CLASS_ESSENTIAL,
+    MUTABLE_STORE_ACCESS_ROLES,
     collect_root_storage_status,
     load_policy,
     read_root_storage_status_artifact,
@@ -1396,46 +1397,104 @@ def _stable_file_topology(path: Path) -> dict[str, Any]:
     }
 
 
-def _process_parent_pid(pid: int) -> int | None:
-    try:
-        raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
-        tail = raw.rsplit(")", 1)[1].strip().split()
-        return int(tail[1])
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _opener_owning_service(
-    pid: int,
+def _mutable_opener_access_relationship(
+    opener: Mapping[str, Any],
     *,
-    expected_services: tuple[str, ...],
+    path: Path,
+    topology: Mapping[str, Any],
+    access_roles: tuple[Mapping[str, Any], ...],
     service_snapshot: Mapping[str, Mapping[str, Any]],
-) -> str | None:
-    try:
-        cgroup = (Path("/proc") / str(pid) / "cgroup").read_text(encoding="utf-8")
-    except OSError:
-        cgroup = ""
-    direct = [name for name in expected_services if f"/{name}" in cgroup]
-    if len(direct) == 1:
-        return direct[0]
-    expected_pids = {
-        int((service_snapshot.get(name) or {}).get("MainPID") or 0): name
-        for name in expected_services
-        if int((service_snapshot.get(name) or {}).get("MainPID") or 0) > 0
+) -> dict[str, Any]:
+    """Bind one inode-proven FD to one exact healthy declared systemd MainPID."""
+
+    relationship = {
+        **dict(opener),
+        "canonical_store_binding": {
+            "path": str(path),
+            "device": int(topology["device"]),
+            "inode": int(topology["inode"]),
+        },
+        "matched_units": [],
+        "matched_unit": None,
+        "service_main_pid": None,
+        "service_health": None,
+        "declared_role": None,
+        "allowed_access_modes": [],
+        "accepted": False,
+        "accepted_reason": None,
+        "rejected_reason": None,
     }
-    current = int(pid)
-    seen = set()
-    for _ in range(64):
-        if current in expected_pids:
-            return expected_pids[current]
-        if current <= 1 or current in seen:
-            break
-        seen.add(current)
-        parent = _process_parent_pid(current)
-        if parent is None:
-            break
-        current = parent
-    return None
+    path_bound = bool(
+        opener.get("source_path") == str(path)
+        and opener.get("binds_source_device_inode") is True
+        and _systemd_int(opener.get("target_device")) == int(topology["device"])
+        and _systemd_int(opener.get("target_inode")) == int(topology["inode"])
+    )
+    if not path_bound:
+        relationship["rejected_reason"] = "fd_device_inode_binding_mismatch"
+        return relationship
+
+    mode = str(opener.get("access_mode") or "unknown")
+    if mode not in {"read_only", "read_write", "write_only"}:
+        relationship["rejected_reason"] = "unknown_access_mode"
+        return relationship
+    pid = _systemd_int(opener.get("pid"))
+    if pid is None or pid <= 0:
+        relationship["rejected_reason"] = "invalid_opener_pid"
+        return relationship
+    matched_units = sorted(
+        name
+        for name in SERVICE_NAMES
+        if _systemd_int((service_snapshot.get(name) or {}).get("MainPID")) == pid
+    )
+    relationship["matched_units"] = matched_units
+    if not matched_units:
+        relationship["rejected_reason"] = "undeclared_or_non_main_pid"
+        return relationship
+    if len(matched_units) != 1:
+        relationship["rejected_reason"] = "multiple_unit_mainpid_ambiguity"
+        return relationship
+    matched_unit = matched_units[0]
+    service_gate = _systemd_service_gate(service_snapshot)
+    unit_row = next(
+        row for row in service_gate["units"] if row["name"] == matched_unit
+    )
+    relationship["matched_unit"] = matched_unit
+    relationship["service_main_pid"] = _systemd_int(unit_row.get("MainPID"))
+    relationship["service_health"] = {
+        "healthy": bool(unit_row.get("healthy")),
+        "classification": unit_row.get("state_classification"),
+        "phase": unit_row.get("phase"),
+        "pair_classification": unit_row.get("pair_classification"),
+        "pair_healthy": unit_row.get("pair_healthy"),
+        "reason_codes": list(unit_row.get("reason_codes") or []),
+    }
+    if (
+        unit_row.get("healthy") is not True
+        or unit_row.get("phase")
+        not in {"persistent_running", "oneshot_active_success"}
+        or relationship["service_main_pid"] != pid
+    ):
+        relationship["rejected_reason"] = "matched_service_unhealthy"
+        return relationship
+
+    roles_by_service = {
+        str(item.get("service") or ""): item for item in access_roles
+    }
+    declared = roles_by_service.get(matched_unit)
+    if declared is None:
+        relationship["rejected_reason"] = "undeclared_service"
+        return relationship
+    relationship["declared_role"] = str(declared.get("declared_role") or "")
+    relationship["allowed_access_modes"] = list(
+        declared.get("allowed_access_modes") or []
+    )
+    if mode not in relationship["allowed_access_modes"]:
+        relationship["rejected_reason"] = "access_mode_not_allowed"
+        return relationship
+    relationship["accepted"] = True
+    relationship["accepted_reason"] = "exact_healthy_declared_mainpid_and_access_mode"
+    return relationship
 
 
 def _active_mutable_canonical_snapshot(
@@ -1477,15 +1536,36 @@ def _active_mutable_canonical_snapshot(
         classification = str(binding.get("classification") or "")
         producer = producers.get(owner)
         resolver = binding.get("resolver")
-        expected_services = tuple(str(item) for item in binding.get("expected_owning_services") or [])
+        raw_access_roles = binding.get("access_roles")
+        access_roles = tuple(
+            dict(item) for item in raw_access_roles or [] if isinstance(item, Mapping)
+        )
+        declared_services = tuple(
+            str(item.get("service") or "") for item in access_roles
+        )
         if (
             not key
             or not isinstance(resolver, Mapping)
             or producer is None
             or classification != CLASS_ESSENTIAL
             or producer.get("classification") != classification
-            or not expected_services
-            or any(name not in SERVICE_NAMES for name in expected_services)
+            or not isinstance(raw_access_roles, list)
+            or len(access_roles) != len(raw_access_roles)
+            or not declared_services
+            or len(set(declared_services)) != len(declared_services)
+            or any(name not in SERVICE_NAMES for name in declared_services)
+            or any(
+                item.get("declared_role") not in MUTABLE_STORE_ACCESS_ROLES
+                or not isinstance(item.get("allowed_access_modes"), list)
+                or set(item.get("allowed_access_modes") or [])
+                != set(
+                    MUTABLE_STORE_ACCESS_ROLES.get(
+                        str(item.get("declared_role") or ""),
+                        frozenset(),
+                    )
+                )
+                for item in access_roles
+            )
         ):
             raise WarmArchiveError("unknown/unregistered mutable canonical classification")
         registry_identity = None
@@ -1521,22 +1601,19 @@ def _active_mutable_canonical_snapshot(
             raise WarmArchiveError("mutable canonical store overlaps exact mutation scope")
         topology = _stable_file_topology(path)
         openers = opener_reader(path)
-        opener_relationships = []
-        for opener in openers:
-            owning_service = _opener_owning_service(
-                int(opener.get("pid") or 0),
-                expected_services=expected_services,
+        opener_relationships = [
+            _mutable_opener_access_relationship(
+                opener,
+                path=path,
+                topology=topology,
+                access_roles=access_roles,
                 service_snapshot=service_snapshot,
             )
-            relationship = {
-                **dict(opener),
-                "owning_service": owning_service,
-                "expected_relationship": owning_service is not None,
-            }
-            opener_relationships.append(relationship)
-        if any(not item["expected_relationship"] for item in opener_relationships):
+            for opener in openers
+        ]
+        if any(item["accepted"] is not True for item in opener_relationships):
             raise WarmArchiveError(
-                "mutable canonical store has an unexpected open-handle owner",
+                "mutable canonical store has an invalid open-handle access relationship",
                 evidence={"key": key, "path": str(path), "openers": opener_relationships},
             )
         if not openers and binding.get("allow_no_open_handles") is not True:
@@ -1547,7 +1624,14 @@ def _active_mutable_canonical_snapshot(
             "owner": owner,
             "classification": classification,
             "resolver": dict(resolver),
-            "expected_owning_services": list(expected_services),
+            "access_roles": [
+                {
+                    "service": str(item["service"]),
+                    "declared_role": str(item["declared_role"]),
+                    "allowed_access_modes": list(item["allowed_access_modes"]),
+                }
+                for item in sorted(access_roles, key=lambda role: str(role["service"]))
+            ],
             "allow_no_open_handles": bool(binding.get("allow_no_open_handles")),
             "registry_identity": dict(registry_identity) if registry_identity else None,
             "topology": topology,

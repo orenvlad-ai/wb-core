@@ -460,7 +460,10 @@ by the WBC0008 exact-six runner. Current Finance raw/operational resolve through
 StoreRegistry and Autoanswers through one literal canonical binding. Ordinary
 same-inode content/size/mtime evolution is observation evidence, while path,
 device/mount, inode/type, symlink, owner/classification, StoreRegistry identity
-and owning-service/open-handle relationship remain stable topology guards.
+and the versioned explicit service access-role matrix remain stable topology
+guards. Each opener must be the exact healthy declared systemd MainPID, bind the
+canonical device/inode through its FD and use an allowed read/write mode;
+pathname/process/cgroup fallback, PID ambiguity and undeclared modes fail closed.
 Unknown/unregistered objects never acquire mutable status by name similarity.
 The target-bound policy and historical block-003 journald drop-in
 source are

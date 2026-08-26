@@ -38,11 +38,13 @@ an unbounded backup/evidence writer.
 The same versioned policy owns the non-target CAS resolver registry used by the
 exact-six warm archive. Mutable treatment is available only to explicit
 `active_mutable_canonical_stores` bindings with a registered essential owner,
-one supported literal or StoreRegistry resolver and named owning services. The
-current Finance raw and operational stores resolve through StoreRegistry;
-Autoanswers resolves through its literal canonical path. This registry does not
-derive mutability from a filename or broad directory pattern. Unknown owner,
-classification, resolver, path or open-handle relationship fails closed.
+one supported literal or StoreRegistry resolver and an explicit repo-owned
+service access-role/mode matrix. The current Finance raw and operational stores
+resolve through StoreRegistry; Autoanswers resolves through its literal
+canonical path. This registry does not derive mutability from a filename or
+broad directory pattern. Every FD must bind the exact device/inode and exact
+healthy declared systemd MainPID; unknown mode, undeclared/non-MainPID/
+PID-ambiguous service, role/mode drift or pathname-only matching fails closed.
 
 `apps/storage_recovery_writer_inventory_static_smoke.py` retains the existing
 SQLite backup-writer catalog and additionally fails when an observed backup

@@ -21,6 +21,7 @@ from apps import root_storage_policy as app
 from packages.application import root_storage_policy as policy_module
 from packages.application.root_storage_policy import (
     GIB,
+    MUTABLE_STORE_SERVICE_UNITS,
     RootStoragePolicyError,
     admit_root_write,
     collect_root_storage_status,
@@ -78,6 +79,40 @@ def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
         "type": "literal",
         "path": "/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3",
     }
+    assert autoanswers["access_roles"] == [
+        {
+            "service": "wb-core-registry-http.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"],
+        },
+        {
+            "service": "wb-core-autoanswers-readonly-sync.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"],
+        },
+        {
+            "service": "wb-core-autoanswers-worker.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"],
+        },
+    ]
+    declared_services = {
+        role["service"]
+        for binding in bindings
+        for role in binding["access_roles"]
+    }
+    assert declared_services <= MUTABLE_STORE_SERVICE_UNITS
+    assert "wb-ai-api.service" not in declared_services
+    unit_root = (
+        ROOT / "artifacts" / "registry_upload_http_entrypoint" / "systemd"
+    )
+    for service in declared_services:
+        assert "*" not in service and "?" not in service and "[" not in service
+        unit_path = unit_root / service
+        assert unit_path.is_file(), f"mutable-store service has no repo-owned unit: {service}"
+        unit_text = unit_path.read_text(encoding="utf-8")
+        assert "ExecStart=" in unit_text
+        assert "/opt/wb-core-runtime/app" in unit_text or " apps/" in unit_text
     broken = deepcopy(policy)
     broken["non_target_cas"]["active_mutable_canonical_stores"][-1][
         "owner"
@@ -91,6 +126,19 @@ def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
             assert "mutable canonical store binding is invalid" in str(exc)
         else:
             raise AssertionError("unknown mutable canonical owner did not fail closed")
+    invalid_role = deepcopy(policy)
+    invalid_role["non_target_cas"]["active_mutable_canonical_stores"][-1][
+        "access_roles"
+    ][0]["allowed_access_modes"] = ["read_only", "write_only"]
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(invalid_role), encoding="utf-8")
+        try:
+            load_policy(path)
+        except RootStoragePolicyError as exc:
+            assert "access role is invalid" in str(exc)
+        else:
+            raise AssertionError("invalid mutable access mode did not fail closed")
 
 
 def _assert_admission(policy: dict[str, object]) -> None:

@@ -26,7 +26,29 @@ STATUS_ARTIFACT_MAX_AGE_SECONDS = 10 * 60
 CLASS_DISCRETIONARY = "discretionary_root_writer"
 CLASS_ESSENTIAL = "essential_bounded_business_writer"
 CLASS_RETAINED = "retained_no_active_writer"
-NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v1"
+NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v2"
+MUTABLE_STORE_ACCESS_MODES = frozenset({"read_only", "read_write", "write_only"})
+MUTABLE_STORE_ACCESS_ROLES = {
+    "reader": frozenset({"read_only"}),
+    "writer": frozenset({"read_write"}),
+    "reader_writer": frozenset({"read_only", "read_write"}),
+}
+MUTABLE_STORE_SERVICE_UNITS = frozenset(
+    {
+        "wb-core-registry-http.service",
+        "wb-core-data-mcp.service",
+        "wb-core-sheet-vitrina-refresh.service",
+        "wb-core-sheet-vitrina-closure-retry.service",
+        "wb-core-feedbacks-auto-complaints-tick.service",
+        "wb-core-wb-finance-weekly.service",
+        "wb-core-finance-backup-rotation.service",
+        "wb-core-warehouse-functional-sync.service",
+        "wb-core-fbs-shadow-collector.service",
+        "wb-core-fbs-warehouse-registry.service",
+        "wb-core-autoanswers-readonly-sync.service",
+        "wb-core-autoanswers-worker.service",
+    }
+)
 DEFAULT_POLICY_PATH = (
     Path(__file__).resolve().parents[2]
     / "artifacts"
@@ -116,7 +138,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         owner = str(binding.get("owner") or "").strip()
         classification = str(binding.get("classification") or "").strip()
         resolver = binding.get("resolver")
-        services = binding.get("expected_owning_services")
+        access_roles = binding.get("access_roles")
         producer = producers_by_owner.get(owner)
         if (
             not key
@@ -125,18 +147,34 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
             or classification != CLASS_ESSENTIAL
             or producer.get("classification") != classification
             or not isinstance(resolver, dict)
-            or not isinstance(services, list)
-            or not services
-            or len(set(str(item) for item in services)) != len(services)
-            or not all(
-                isinstance(item, str)
-                and item.startswith("wb-")
-                and item.endswith(".service")
-                for item in services
-            )
+            or not isinstance(access_roles, list)
+            or not access_roles
             or not isinstance(binding.get("allow_no_open_handles"), bool)
         ):
             raise RootStoragePolicyError("mutable canonical store binding is invalid")
+        role_services: set[str] = set()
+        for access_role in access_roles:
+            if not isinstance(access_role, dict):
+                raise RootStoragePolicyError(
+                    "mutable canonical store access role is invalid"
+                )
+            service = str(access_role.get("service") or "").strip()
+            declared_role = str(access_role.get("declared_role") or "").strip()
+            allowed_modes = access_role.get("allowed_access_modes")
+            canonical_modes = MUTABLE_STORE_ACCESS_ROLES.get(declared_role)
+            if (
+                service not in MUTABLE_STORE_SERVICE_UNITS
+                or service in role_services
+                or canonical_modes is None
+                or not isinstance(allowed_modes, list)
+                or len(set(allowed_modes)) != len(allowed_modes)
+                or set(allowed_modes) != set(canonical_modes)
+                or any(mode not in MUTABLE_STORE_ACCESS_MODES for mode in allowed_modes)
+            ):
+                raise RootStoragePolicyError(
+                    "mutable canonical store access role is invalid"
+                )
+            role_services.add(service)
         resolver_type = str(resolver.get("type") or "")
         if resolver_type == "store_registry":
             if resolver.get("logical_store") not in {"finance_raw", "operational"}:
