@@ -87,6 +87,18 @@ heartbeat и polling неизменного CI запрещены полност
 event/terminal wait не требует промежуточного status-текста. Настоящий
 blocker/terminal transition публикуется сразу.
 
+## Post-task protocol audit boundary
+
+[`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) —
+внутреннее read-only guidance только для одного куратора, который оптимизирует
+production protocol и process documentation после завершившихся задач. Это не
+часть execution lifecycle. Обычные main/domain curators и implementation
+subagents не читают и не вызывают его как checklist и не меняют из-за него
+исполнение: их единственный operational entrypoint — root `AGENTS.md` и
+релевантные authoritative domain docs. Audit checklist сам не добавляет gate,
+approval, test, task, PR или mutation; возможное изменение протокола проходит
+отдельным обычным repo block только после отдельного решения.
+
 ## Human-only boundary
 
 Human decision требуется только для нового business meaning, material scope
