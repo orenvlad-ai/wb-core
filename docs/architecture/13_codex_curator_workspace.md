@@ -15,10 +15,17 @@ blocker-ом.
 
 Same-scope corrections в одном PR продолжают его. Новый PR, включая recovery,
 возможен только после terminal handoff и получает следующий `SSS`. Pause/blocker
-терминален, не indefinitely Active. Progress публикуется на meaningful
-transitions через event/terminal waits, без повторных «ещё идёт» и частого
-polling неизменного CI. Subagent возвращает один terminal handoff либо exact
-gate callback и становится Done.
+терминален, не indefinitely Active. После successful spawn main сохраняет
+текущий turn активным до meaningful callback/terminal handoff, держит ровно
+один outstanding event/terminal wait и не публикует final, не становится idle
+и не возвращает управление пользователю, пока subagent non-terminal. Quiet
+mode не завершает turn. Progress публикуется только на meaningful transitions:
+tool timeout разрешает немедленно и молча re-arm тот же wait, но не является
+progress evidence и не разрешает `list_agents`, worktree/Git/CI/status reads
+или heartbeat. После meaningful callback/event wait можно повторить. Callback
+или terminal handoff будит main для owner-facing transition в том же turn, без
+пользовательского `посмотри`. Subagent возвращает terminal payload ровно один
+раз без межканального дублирования и становится Done.
 
 Post-task
 [`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) доступен

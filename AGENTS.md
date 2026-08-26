@@ -66,10 +66,23 @@ Current canonical source acquisition остаётся server-side.
   возвращает точный callback с одним требуемым действием и не остаётся
   неопределённо `Active`; pause/blocker является немедленным terminal
   transition, а не причиной держать implementation task активной.
+- После successful internal spawn main curator сохраняет текущий turn активным
+  до meaningful callback либо terminal handoff: пока subagent non-terminal,
+  main не публикует final, не становится idle и не возвращает управление
+  пользователю. Main держит ровно один outstanding event/terminal wait. Quiet
+  mode означает отсутствие heartbeat/status-текста, а не completion turn.
 - Main/subagent публикуют только meaningful state transitions. Heartbeat-
-  сообщения, «ещё идёт» и polling неизменного CI запрещены полностью. Один
-  bounded event/terminal wait не требует промежуточного status-текста; новый
-  blocker или terminal state сообщается сразу.
+  сообщения, «ещё идёт» и polling неизменного CI запрещены полностью. Timeout
+  tool-level wait разрешает только немедленный silent re-arm того же event
+  wait: это renewal lease/subscription, а не progress evidence. На timeout
+  запрещены `list_agents`, worktree/Git/CI/status reads и user-facing status.
+  После meaningful callback/event wait можно повторить; silent timeout re-arm
+  — единственное отдельное исключение. Meaningful blocker/callback либо
+  terminal handoff будит main, и он в том же turn публикует owner-facing
+  transition: пользователь не должен писать `посмотри` ради уже доставленного
+  handoff. Один terminal payload возвращается ровно один раз, без дублирования
+  идентичного terminal handoff несколькими каналами, после чего subagent
+  становится `Done`.
 - Post-task checklist
   [`docs/architecture/14_codex_task_audit_checklist.md`](docs/architecture/14_codex_task_audit_checklist.md)
   является внутренним read-only инструментом только одного куратора,

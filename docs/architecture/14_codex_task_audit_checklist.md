@@ -46,9 +46,14 @@ tightening. Любое замедление допустимо только дл
    завершённый business outcome.
 4. **Contour.** Отнеси наблюдение ровно к одному execution contour из таблицы
    ниже. Если наблюдений несколько, раздели их на независимые findings.
-5. **Wait review.** Нормой является один долгий bounded terminal/event wait.
-   Повторный wait оправдан только после meaningful callback/event; polling
-   неизменного состояния и heartbeat не являются evidence прогресса.
+5. **Wait review.** Нормой является ровно один outstanding bounded
+   terminal/event wait, сохраняющий main turn активным, пока subagent
+   non-terminal. Чистый tool timeout разрешает немедленный silent re-arm того
+   же wait как renewal lease/subscription; это не polling и не evidence
+   прогресса. Любой status read (`list_agents`, worktree/Git/CI/status) либо
+   heartbeat/user-facing «ещё идёт» на timeout остаётся нарушением. После
+   meaningful callback/event wait можно повторить; кроме silent timeout re-arm,
+   иных повторов без нового event быть не должно.
 6. **Classification.** Пройди decision order и назначь finding ровно один code.
 7. **Cost test.** Для любой предлагаемой protocol/documentation change заполни
    все delta fields. Если данных недостаточно, оставь `NO_CHANGE`; не добавляй
