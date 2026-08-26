@@ -272,11 +272,16 @@ equivalent witnesses. Actual archive/independent full restore/SQLite proof and
 one exact full pre-unlink source hash remain mandatory inside mutation.
 
 Before that projection the readiness receipt persists the complete 27-literal
-systemd unit snapshot and per-unit classification defined by migration 159,
-including timer last/next trigger evidence. A failed service gate publishes the
-same exact rows and failing predicates in its durable callback; the trusted
-workflow never substitutes a generic service-health message or creates a
-production-goal operation from that blocked receipt.
+systemd unit snapshot plus all 12 derived timer/owning-service classifications
+defined by migration 159, including timer last/next trigger evidence. Waiting
+plus successful inactive one-shot and running plus successful active/activating
+one-shot are the only healthy pair predicates. A possible sequential-snapshot
+edge receives one bounded paired resample contour whose exact samples remain in
+the receipt; timeout, unknown state or failed Result/ExecMainStatus remains
+blocked. A failed service gate publishes the same exact final rows, pair
+evidence and failing predicates in its durable callback; the trusted workflow
+never substitutes a generic service-health message or creates a production-
+goal operation from that blocked receipt.
 
 Passport фиксирует business task, canonical target, profile, bounded dates,
 exact expected insertions/quality и one-submit boundary; manifest hash в нём

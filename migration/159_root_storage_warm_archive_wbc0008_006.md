@@ -43,19 +43,32 @@ command-line contents are represented by a digest and matched terms, not copied
 as potentially secret text.
 
 Every fresh readiness also persists one complete query-only snapshot of the 27
-literal required systemd units before compression projection. Each unit records
+literal required systemd units before compression projection. The classifier
+derives all 12 timer/owning-service pairs from the literal names; no warehouse-
+specific exception exists. Each unit records
 `LoadState`, `ActiveState`, `SubState`, `Result`, `MainPID`,
 `ExecMainStatus` and `UnitFileState`; timer rows additionally retain
 `LastTriggerUSec` and `NextElapseUSecRealtime` when systemd exposes them. The
-gate classifies current persistent ownership, a correct inactive one-shot, an
-expected active/waiting timer, a current active one-shot, an absent/masked unit,
-a real unhealthy owning service/timer control, stale result/exit fields whose
-current PID or waiting predicate is authoritative, and a query/predicate/literal
-unit-list defect. Missing fields, a failed query or an `Id` mismatch fail closed.
-Any service-gate block writes the complete 27-row snapshot, exact failing rows
-and reason codes to the private readiness receipt and the trusted callback; it
-must not collapse the failure to a generic health string. The same structured
-gate is repeated in final readiness qualification and terminal readback.
+gate accepts an enabled loaded `active/waiting` timer only with its successful
+inactive/dead one-shot owner, and accepts `active/running` only while that owner
+is `activating/start` or `active/running` with `Result` empty/success,
+`ExecMainStatus=0` and a positive `MainPID`. The post-trigger waiting plus
+inactive/dead success pair is the ordinary steady state. Failed, unknown,
+masked or absent controls, nonzero/invalid owner `ExecMainStatus`, failed
+`Result`, an impossible pair and a query/predicate/literal-unit defect fail
+closed. Timer properties that systemd does not expose remain recorded as empty;
+an exposed nonzero timer status is unhealthy.
+
+Because sequential `systemctl show` reads can straddle one trigger edge, only a
+pair whose individual states are valid or a known in-flight transition receives
+up to three exact paired resamples inside five seconds. The original affected
+rows, every resampled row, pair classification and bounded-deadline evidence are
+durable. A resample may succeed only after the pair reaches one of the two
+accepted predicates; an unknown or still-impossible transition never becomes
+healthy by timeout. Any service-gate block writes the complete final 27-row and
+12-pair snapshot, exact failing rows/pairs and reason codes to the private
+readiness receipt and trusted callback. The same structured gate is repeated in
+final readiness qualification, mutation reconciliation and terminal readback.
 
 ## Capacity and lifecycle
 

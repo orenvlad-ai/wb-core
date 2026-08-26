@@ -79,6 +79,12 @@ def run() -> None:
     assert warm.EMERGENCY_RESERVE_BYTES == 8 * 1024**3
     assert warm.READINESS_REQUIRED_CONSECUTIVE_CLEAN == 3
     assert len(warm.SERVICE_NAMES) == 27
+    assert len(warm.TIMER_SERVICE_PAIRS) == 12
+    assert {
+        owner for _timer, owner in warm.TIMER_SERVICE_PAIRS
+    } == set(warm.SERVICE_NAMES) - set(warm.PERSISTENT_SERVICE_NAMES) - {
+        name for name in warm.SERVICE_NAMES if name.endswith(".timer")
+    }
     healthy_systemd = warm._systemd_service_gate(_healthy_systemd_snapshot())
     assert healthy_systemd["healthy"] is True
     assert healthy_systemd["expected_unit_count"] == 27
@@ -88,6 +94,9 @@ def run() -> None:
         "expected_waiting_timer": 12,
         "healthy_persistent_service": 3,
     }
+    assert healthy_systemd["pair_classification_counts"] == {
+        "waiting_with_inactive_success_owner": 12,
+    }
     for row in healthy_systemd["units"]:
         for field in warm.SYSTEMD_REQUIRED_PROPERTIES:
             assert field in row
@@ -95,32 +104,122 @@ def run() -> None:
             for field in warm.SYSTEMD_TIMER_PROPERTIES:
                 assert field in row
 
-    failed_oneshot_snapshot = _healthy_systemd_snapshot()
-    failed_oneshot_snapshot["wb-core-warehouse-functional-sync.service"].update(
+    for timer_name, owner_name in warm.TIMER_SERVICE_PAIRS:
+        activating = _healthy_systemd_snapshot()
+        activating[timer_name].update({"ActiveState": "active", "SubState": "running"})
+        activating[owner_name].update(
+            {
+                "ActiveState": "activating",
+                "SubState": "start",
+                "Result": "",
+                "ExecMainStatus": "0",
+                "MainPID": "504093",
+            }
+        )
+        activating_gate = warm._systemd_service_gate(activating)
+        assert activating_gate["healthy"] is True
+        activating_pair = next(
+            item for item in activating_gate["pairs"] if item["timer_name"] == timer_name
+        )
+        assert activating_pair["classification"] == (
+            "trigger_in_progress_with_active_owner"
+        )
+
+        active = _healthy_systemd_snapshot()
+        active[timer_name].update({"ActiveState": "active", "SubState": "running"})
+        active[owner_name].update(
+            {
+                "ActiveState": "active",
+                "SubState": "running",
+                "Result": "success",
+                "ExecMainStatus": "0",
+                "MainPID": "504094",
+            }
+        )
+        active_gate = warm._systemd_service_gate(active)
+        assert active_gate["healthy"] is True
+        assert next(
+            item for item in active_gate["pairs"] if item["timer_name"] == timer_name
+        )["classification"] == "trigger_in_progress_with_active_owner"
+
+    failed_owner_snapshot = _healthy_systemd_snapshot()
+    failed_owner_snapshot["wb-core-warehouse-functional-sync.service"].update(
         {"Result": "exit-code", "ExecMainStatus": "1"}
     )
-    failed_oneshot = warm._systemd_service_gate(failed_oneshot_snapshot)
-    assert failed_oneshot["healthy"] is False
-    assert failed_oneshot["failing_unit_count"] == 1
-    assert failed_oneshot["failing_units"][0]["classification"] == (
-        "real_unhealthy_owning_service"
+    failed_owner = warm._systemd_service_gate(failed_owner_snapshot)
+    assert failed_owner["healthy"] is False
+    assert failed_owner["failing_pair_count"] == 1
+    assert failed_owner["resample_required_pair_names"] == []
+    failed_owner_row = next(
+        item
+        for item in failed_owner["units"]
+        if item["name"] == "wb-core-warehouse-functional-sync.service"
     )
-    assert failed_oneshot["failing_units"][0]["reason_codes"] == [
-        "last_oneshot_invocation_failed"
+    assert failed_owner_row["classification"] == "real_unhealthy_owning_service"
+    assert failed_owner_row["reason_codes"][:2] == [
+        "failed_result",
+        "nonzero_or_invalid_exec_main_status",
     ]
 
-    stale_timer_snapshot = _healthy_systemd_snapshot()
-    stale_timer_snapshot["wb-core-warehouse-functional-sync.timer"].update(
-        {"Result": "exit-code", "ExecMainStatus": "1"}
+    failed_timer_snapshot = _healthy_systemd_snapshot()
+    failed_timer_snapshot["wb-core-warehouse-functional-sync.timer"].update(
+        {"ActiveState": "failed", "SubState": "failed", "Result": "exit-code"}
     )
-    stale_timer = warm._systemd_service_gate(stale_timer_snapshot)
-    stale_timer_row = next(
-        item
-        for item in stale_timer["units"]
-        if item["name"] == "wb-core-warehouse-functional-sync.timer"
+    failed_timer = warm._systemd_service_gate(failed_timer_snapshot)
+    assert failed_timer["healthy"] is False
+    assert failed_timer["failing_pair_count"] == 1
+    assert failed_timer["resample_required_pair_names"] == []
+
+    ambiguous_snapshot = _healthy_systemd_snapshot()
+    ambiguous_snapshot["wb-core-warehouse-functional-sync.timer"].update(
+        {"ActiveState": "active", "SubState": "mystery-transition"}
     )
-    assert stale_timer["healthy"] is True
-    assert stale_timer_row["classification"] == "stale_result_or_exec_main_status"
+    ambiguous = warm._systemd_service_gate(ambiguous_snapshot)
+    assert ambiguous["healthy"] is False
+    assert ambiguous["failing_pairs"][0]["classification"] == (
+        "bounded_snapshot_transition"
+    )
+    unresolved = warm._systemd_service_gate_with_resample(
+        ambiguous_snapshot,
+        snapshot_reader=lambda names: {
+            name: ambiguous_snapshot[name] for name in names
+        },
+        max_attempts=1,
+        max_seconds=1,
+        interval_seconds=0,
+    )
+    assert unresolved["healthy"] is False
+    assert unresolved["pair_resample_evidence"]["attempt_count"] == 1
+    assert unresolved["pair_resample_evidence"]["resolved_healthy"] is False
+
+    raced_snapshot = _healthy_systemd_snapshot()
+    raced_snapshot["wb-core-warehouse-functional-sync.timer"].update(
+        {"ActiveState": "active", "SubState": "running"}
+    )
+    resolved_snapshot = _healthy_systemd_snapshot()
+    resolved_snapshot["wb-core-warehouse-functional-sync.timer"].update(
+        {"ActiveState": "active", "SubState": "running"}
+    )
+    resolved_snapshot["wb-core-warehouse-functional-sync.service"].update(
+        {
+            "ActiveState": "activating",
+            "SubState": "start",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "MainPID": "504093",
+        }
+    )
+    raced = warm._systemd_service_gate_with_resample(
+        raced_snapshot,
+        snapshot_reader=lambda names: {name: resolved_snapshot[name] for name in names},
+        max_attempts=1,
+        max_seconds=1,
+        interval_seconds=0,
+    )
+    assert raced["healthy"] is True
+    assert raced["pair_resample_evidence"]["attempt_count"] == 1
+    assert raced["pair_resample_evidence"]["resolved_healthy"] is True
+    assert len(raced["pair_resample_evidence"]["samples"]) == 2
 
     masked_snapshot = _healthy_systemd_snapshot()
     masked_snapshot["wb-core-autoanswers-worker.timer"].update(
@@ -128,7 +227,11 @@ def run() -> None:
     )
     masked = warm._systemd_service_gate(masked_snapshot)
     assert masked["healthy"] is False
-    assert masked["failing_units"][0]["classification"] == "absent_or_masked"
+    assert next(
+        item
+        for item in masked["failing_units"]
+        if item["name"] == "wb-core-autoanswers-worker.timer"
+    )["classification"] == "absent_or_masked"
 
     missing_snapshot = _healthy_systemd_snapshot()
     missing_snapshot.pop("wb-core-data-mcp.service")

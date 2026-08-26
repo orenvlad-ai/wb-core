@@ -116,6 +116,54 @@ def warm_readiness_marker(readiness_id: str) -> str:
     return f"<!-- {WARM_READINESS_MARKER} readiness={readiness_id} -->"
 
 
+def _valid_warm_systemd_service_gate(
+    service_gate: Any, *, require_healthy: bool
+) -> bool:
+    if not isinstance(service_gate, Mapping):
+        return False
+    units = service_gate.get("units")
+    pairs = service_gate.get("pairs")
+    resample = service_gate.get("pair_resample_evidence")
+    if (
+        service_gate.get("expected_unit_count") != 27
+        or service_gate.get("observed_unit_count") != 27
+        or service_gate.get("expected_pair_count") != 12
+        or service_gate.get("observed_pair_count") != 12
+        or not isinstance(units, list)
+        or len(units) != 27
+        or not isinstance(pairs, list)
+        or len(pairs) != 12
+        or not isinstance(resample, Mapping)
+        or not isinstance(resample.get("samples"), list)
+        or not all(
+            isinstance(row, Mapping)
+            and row.get("name")
+            and row.get("classification")
+            and "healthy" in row
+            for row in units
+        )
+        or not all(
+            isinstance(pair, Mapping)
+            and pair.get("timer_name")
+            and pair.get("owner_name")
+            and pair.get("classification")
+            and "healthy" in pair
+            and "resample_required" in pair
+            for pair in pairs
+        )
+    ):
+        return False
+    return bool(
+        not require_healthy
+        or (
+            service_gate.get("healthy") is True
+            and service_gate.get("failing_unit_count") == 0
+            and service_gate.get("failing_pair_count") == 0
+            and not service_gate.get("resample_required_pair_names")
+        )
+    )
+
+
 def parse_release_receipt(
     comments: list[Mapping[str, Any]],
     *,
@@ -197,13 +245,9 @@ def parse_warm_readiness_receipt(
                 r"sha256:[0-9a-f]{64}",
                 str(payload.get("material_qualification_digest") or ""),
             )
-            and isinstance(service_gate, Mapping)
-            and service_gate.get("expected_unit_count") == 27
-            and service_gate.get("observed_unit_count") == 27
-            and service_gate.get("healthy") is True
-            and service_gate.get("failing_unit_count") == 0
-            and isinstance(service_gate.get("units"), list)
-            and len(service_gate["units"]) == 27
+            and _valid_warm_systemd_service_gate(
+                service_gate, require_healthy=True
+            )
         ):
             matches.append(payload)
     if len(matches) != 1:
@@ -728,6 +772,23 @@ def _readiness_callback_summary(rows: Any) -> list[dict[str, Any]]:
                 "classification": service_gate.get("classification"),
                 "failing_unit_count": service_gate.get("failing_unit_count"),
                 "failing_units": service_gate.get("failing_units"),
+                "failing_pair_count": service_gate.get("failing_pair_count"),
+                "failing_pairs": service_gate.get("failing_pairs"),
+                "pair_resample_summary": (
+                    {
+                        key: service_gate["pair_resample_evidence"].get(key)
+                        for key in (
+                            "attempted",
+                            "attempt_count",
+                            "resolved_healthy",
+                            "remaining_resample_required_pair_names",
+                        )
+                    }
+                    if isinstance(
+                        service_gate.get("pair_resample_evidence"), Mapping
+                    )
+                    else None
+                ),
             }
             if isinstance(service_gate, Mapping)
             else None
@@ -1612,19 +1673,15 @@ def _run_warm_readiness_mode(
         and payload.get("database_written") is False
         and payload.get("readiness_id") == readiness
         and payload.get("deployed_sha") == merge_sha
-        and isinstance(systemd_service_gate, Mapping)
-        and systemd_service_gate.get("expected_unit_count") == 27
-        and systemd_service_gate.get("observed_unit_count") == 27
-        and isinstance(systemd_service_gate.get("units"), list)
-        and len(systemd_service_gate["units"]) == 27
+        and _valid_warm_systemd_service_gate(
+            systemd_service_gate, require_healthy=payload.get("status") == "ready"
+        )
         and (
             payload.get("status") != "ready"
             or (
                 payload.get("source_count") == 6
                 and payload.get("capacity_guard_passed") is True
                 and payload.get("root_minimum_after_bytes") == 25 * 1024**3
-                and systemd_service_gate.get("healthy") is True
-                and systemd_service_gate.get("failing_unit_count") == 0
             )
         )
     )
