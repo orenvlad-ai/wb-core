@@ -62,6 +62,7 @@ from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridg
 from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
+from packages.application.sku_inventory_balance import SkuInventoryBalanceBlock
 from packages.application.wb_incident_policy import get_policy_state
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -1036,6 +1037,7 @@ class RegistryUploadHttpEntrypoint:
         buyer_session_block: WbBuyerSessionBlock | None = None,
         buyer_session_recovery_controller: WbBuyerSessionRecoveryController | None = None,
         sku_management_block: SkuManagementBlock | None = None,
+        sku_inventory_balance_block: SkuInventoryBalanceBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -1292,6 +1294,15 @@ class RegistryUploadHttpEntrypoint:
             sales_history=self.factory_order_supply_block.sales_history,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
+        )
+        self.sku_inventory_balance_block = (
+            sku_inventory_balance_block
+            or SkuInventoryBalanceBlock(
+                runtime=self.runtime,
+                sku_management_block=self.sku_management_block,
+                now_factory=self.now_factory,
+                timestamp_factory=self.activated_at_factory,
+            )
         )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
@@ -2342,6 +2353,86 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sku_management_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.sku_management_block.history(params or {})
+
+    def handle_sku_inventory_balance_request(self, *, user_key: str) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.latest(user_key=user_key)
+
+    def handle_sku_inventory_balance_calculate_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.calculate(
+            payload,
+            user_key=user_key,
+            actor=actor,
+        )
+
+    def handle_sku_inventory_balance_settings_save_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.save_settings(payload, user_key=user_key)
+
+    def handle_sku_inventory_balance_calculation_request(
+        self,
+        calculation_id: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.get_calculation(calculation_id)
+
+    def handle_sku_inventory_balance_registry_request(
+        self,
+        *,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.list_registry(limit=limit)
+
+    def handle_sku_inventory_balance_override_request(
+        self,
+        calculation_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.save_override(
+            calculation_id,
+            payload,
+            actor=actor,
+        )
+
+    def handle_sku_inventory_balance_workbook_request(
+        self,
+        calculation_id: str,
+    ) -> tuple[bytes, str]:
+        return self.sku_inventory_balance_block.build_workbook(calculation_id)
+
+    def handle_sku_inventory_balance_apply_start_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.start_apply(payload, actor=actor)
+
+    def handle_sku_inventory_balance_apply_job_request(self, job_id: str) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.get_apply_job(job_id)
+
+    def handle_sku_inventory_balance_apply_resume_request(
+        self,
+        job_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.resume_apply(
+            job_id,
+            actor=actor,
+            limit=int(payload.get("limit") or 10),
+        )
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()

@@ -216,6 +216,11 @@ DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price
 DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/preview"
 DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/commit"
 DEFAULT_SKU_MANAGEMENT_HISTORY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/history"
+DEFAULT_SKU_INVENTORY_BALANCE_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/inventory-balance"
+DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/settings"
+DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculate"
+DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculations"
+DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/apply-jobs"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -1426,6 +1431,77 @@ def _build_handler(
                         self,
                         HTTPStatus(exc.http_status),
                         response_payload,
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            inventory_balance_post = parsed.path in {
+                DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
+                DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+                DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH,
+            } or (
+                parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX + "/")
+                and parsed.path.endswith("/override")
+            ) or (
+                parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH + "/")
+                and parsed.path.endswith("/resume")
+            )
+            if inventory_balance_post:
+                try:
+                    body = _load_request_payload(self)
+                    actor = _current_web_user_config_key(self)
+                    if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH:
+                        result = entrypoint.handle_sku_inventory_balance_settings_save_request(
+                            body,
+                            user_key=actor,
+                        )
+                    elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH:
+                        result = entrypoint.handle_sku_inventory_balance_calculate_request(
+                            body,
+                            user_key=actor,
+                            actor=actor,
+                        )
+                    elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH:
+                        result = entrypoint.handle_sku_inventory_balance_apply_start_request(
+                            body,
+                            actor=actor,
+                        )
+                    elif parsed.path.endswith("/override"):
+                        calculation_id = parsed.path[
+                            len(DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX) + 1 : -len("/override")
+                        ].strip("/")
+                        if not calculation_id or "/" in calculation_id:
+                            raise SkuManagementError("invalid inventory balance calculation path")
+                        result = entrypoint.handle_sku_inventory_balance_override_request(
+                            calculation_id,
+                            body,
+                            actor=actor,
+                        )
+                    else:
+                        job_id = parsed.path[
+                            len(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH) + 1 : -len("/resume")
+                        ].strip("/")
+                        if not job_id or "/" in job_id:
+                            raise SkuManagementError("invalid inventory balance apply-job path")
+                        result = entrypoint.handle_sku_inventory_balance_apply_resume_request(
+                            job_id,
+                            body,
+                            actor=actor,
+                        )
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except (TypeError, ValueError) as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "inventory balance operation failed with a controlled server error"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -3132,6 +3208,102 @@ def _build_handler(
                         embedded_tab=embedded_tab,
                     ),
                 )
+                return
+
+            if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_PATH:
+                try:
+                    actor = _current_web_user_config_key(self)
+                    payload = entrypoint.handle_sku_inventory_balance_request(user_key=actor)
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "inventory balance read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX:
+                try:
+                    params = urllib_parse.parse_qs(parsed.query)
+                    limit = int((params.get("limit") or [20])[0])
+                    payload = entrypoint.handle_sku_inventory_balance_registry_request(limit=limit)
+                except (SkuManagementError, TypeError, ValueError) as exc:
+                    status = HTTPStatus(exc.http_status) if isinstance(exc, SkuManagementError) else HTTPStatus.BAD_REQUEST
+                    _write_json_response(self, status, {"error": str(exc)})
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "inventory balance registry read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX + "/"):
+                suffix = parsed.path[len(DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX) + 1 :].strip("/")
+                try:
+                    if suffix.endswith("/xlsx"):
+                        calculation_id = suffix[:-len("/xlsx")].strip("/")
+                        if not calculation_id or "/" in calculation_id:
+                            raise SkuManagementError("invalid inventory balance workbook path")
+                        workbook, filename = entrypoint.handle_sku_inventory_balance_workbook_request(
+                            calculation_id
+                        )
+                        _write_binary_response(
+                            self,
+                            HTTPStatus.OK,
+                            workbook,
+                            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            filename=filename,
+                            as_attachment=True,
+                        )
+                        return
+                    if not suffix or "/" in suffix:
+                        raise SkuManagementError("invalid inventory balance calculation path")
+                    payload = entrypoint.handle_sku_inventory_balance_calculation_request(suffix)
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "inventory balance calculation read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH + "/"):
+                job_id = parsed.path[len(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH) + 1 :].strip("/")
+                try:
+                    if not job_id or "/" in job_id:
+                        raise SkuManagementError("invalid inventory balance apply-job path")
+                    payload = entrypoint.handle_sku_inventory_balance_apply_job_request(job_id)
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "inventory balance apply-job read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path.startswith(DEFAULT_SKU_MANAGEMENT_SKU_PREFIX + "/"):
@@ -9859,6 +10031,11 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "sku_management_bid_preview_path": DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH,
         "sku_management_bid_commit_path": DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH,
         "sku_management_history_path": DEFAULT_SKU_MANAGEMENT_HISTORY_PATH,
+        "sku_inventory_balance_path": DEFAULT_SKU_INVENTORY_BALANCE_PATH,
+        "sku_inventory_balance_settings_path": DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
+        "sku_inventory_balance_calculate_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+        "sku_inventory_balance_calculations_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX,
+        "sku_inventory_balance_apply_jobs_path": DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "instructions_path": DEFAULT_INSTRUCTIONS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,

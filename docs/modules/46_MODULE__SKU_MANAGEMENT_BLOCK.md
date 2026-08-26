@@ -24,6 +24,7 @@ related_modules:
   - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "53_MODULE__SKU_INVENTORY_BALANCE.md"
 related_tables:
   - "registry_upload_config_v2"
   - "sheet_vitrina_v1_user_configs"
@@ -48,13 +49,13 @@ related_runners:
   - "apps/sku_management_metrics_smoke.py"
   - "apps/wb_incident_policy_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Narrow timed Vitrina quick-SKU read, stable focus/backdrop lifecycle, full success identity and bounded exact price/bid readback over the existing guarded write state machine."
+update_note: "Existing surface is preserved as subtab `Общее`; sibling `Баланс запасов` is owned by module 53 and does not change this block's calculation/write semantics."
 ---
 
 # 1. Identity, authorization and truth
 
 - `module_id`: `sku_management_block`.
-- Unified tab: `Управление SKU` inside `/sheet-vitrina-v1/vitrina`.
+- Unified tab: `Управление SKU` inside `/sheet-vitrina-v1/vitrina`; this module owns its subtab `Общее`. Sibling `Баланс запасов` is specified by module 53.
 - Authorization section: `sku_management`; it uses the existing `allowed_sections` model and WebCore session. There is no parallel user system.
 - Row universe: enabled rows of canonical `registry_upload_config_v2`; nomenclature only enriches display identity.
 - Forecast and table are read/calculation projections. They do not create orders, supplies, stock operations or accepted business truth.
@@ -66,6 +67,8 @@ The warehouse incident policy is seller/account-level and edited only in `Ост
 # 2. Forecast semantics
 
 The forecast consumes existing contours only: active registry mapping, `stocks_block`, `ff_stock_ledger`, availability-adjusted sales history, registered supplier shipments/factory-order evidence, registered WB supplies and existing regional-demand/allocation results.
+
+The additive `build_inventory_balance_evidence` read model exposes explicit `stock_wb`/`stock_ff`, recalculates availability-adjusted demand for the Balance-owned 7/14/30/60-day setting, and emits only supplier-registry `production`/`in_transit` milestones with empirical completed-shipment ETA evidence. It does not change the existing `Общее` forecast or write behavior; module 53 owns the all-fronts opening and pacing semantics.
 
 For each SKU the engine forms a dated inbound stream, deduplicated by `source + source_id + date + district`; repeated goods lines inside one WB supply are aggregated by nmID before that identity is emitted. Current WB stock is saleable immediately. Current FF stock becomes a WB inbound only after the configured FF-to-WB lead; quantities reserved by a registered WB supply are removed from that generic FF transfer. A WB supply forecasts only `planned goods composition − max(factual ready/accepted/added quantity)`, because the progressed part is already covered by current WB stock. A supply without an FF-ledger debit reserves its full planned composition in the initial FF pool while adding only that remaining quantity; a supply with an idempotent full ledger debit returns only the remaining quantity as a dated WB inbound. Invalid and overdue transfers are excluded before they can reserve FF. This prevents accepted partial units from existing in WB stock, FF stock and future inbound simultaneously. Supplier registry rows use only `production`/`in_transit`, positive product quantities and exact `matched_by_barcode` nmID evidence; legacy `matched`/`matched_by_compatibility` rows remain readable, while extras, manual overrides, unmatched/ambiguous and accepted-FF rows are excluded. Repeated eligible SKU lines are aggregated inside one invoice. The supplier arrival date prefers actual shipment date to planned shipment date and adds the same configured factory-to-FF plus FF-to-WB leads used by the forecast timeline. Manual factory-order evidence is reused only when it is not the supplier-registry projection, preventing the same goods from entering two contours. Missing dates, overdue plans, partial quantities, duplicate identity and insufficient FF reservations remain explicit warnings instead of optimistic arrivals. Each day adds that day's valid inbound, consumes the selected availability-adjusted daily demand and measures stock against `daily demand × safety-stock days`.
 
