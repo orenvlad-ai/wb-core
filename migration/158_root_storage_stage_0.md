@@ -148,7 +148,9 @@ on the existing `/dev/sdb1` backup mount. It does not alter this policy,
 journald, Promo, business data or generation storage. Its full material CAS,
 capacity, crash-resume, one-submit and terminal readback contract is
 `migration/159_root_storage_warm_archive_wbc0008_006.md`. Block 007 is not
-authorized by block 006 completion.
+authorized merely by block 006 completion; its separately accepted correction
+may only repair pre-submit repeatability/readiness and execute the unchanged
+literal six-target contract. It grants no later storage stage or new target.
 
 ## Deploy and acceptance
 

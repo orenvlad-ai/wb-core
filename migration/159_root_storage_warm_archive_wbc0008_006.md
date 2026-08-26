@@ -23,6 +23,25 @@ evidence for every source. StoreRegistry current paths and the root-storage
 owner/classification are independently checked. Reclaimed bytes are calculated
 from 512-byte allocated blocks.
 
+WBC0008 block 007 is the same exact-six lifecycle scope and only corrects the
+pre-submit repeatability defect found by the first block-006 operation. Every
+new readiness/manifest/apply record uses contract
+`root_storage_warm_archive_wbc0008_006_v2`; v1 evidence and the terminal old
+operation stay immutable and are never resumed or replayed. Every
+qualification and mutation CAS gate now retains structured per-source activity
+evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
+and device/inode binding, kernel locks, sidecars, before/after identity and hash
+state, hold/provenance evidence and observation-only related-process matches.
+A read-only FD may remain open only while source identity/SHA and sidecars stay
+exact and no lock or hold exists. Write-only, read-write or unknown access,
+any kernel lock, sidecar, hold, provenance/material drift blocks. A process
+whose command line merely contains a source/family string without an exact FD
+or lock binding is retained as an observation and is never classified as file
+activity. Unknown access mode fails closed. Error JSON, qualification receipt
+and detached-job failure state name the exact source and structured blocker;
+command-line contents are represented by a digest and matched terms, not copied
+as potentially secret text.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
@@ -64,11 +83,30 @@ is:
 /wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 unlinks 6 reclaimed-allocated-bytes <exact-allocated-byte-total> root-minimum-bytes 26843545600 backup-floor-bytes <finance-next-replacement-plus-8GiB>
 ```
 
-The trusted Apply Runner creates at most four private JIT candidates and
-requires two consecutive identical material-qualification digests. It then
-submits exactly one caller-known detached job. A nonzero/ambiguous submit is
-never repeated; the only next action is query-only job and archive readback.
-The material hash is evidence, not a second owner authorization field.
+Before a new production-goal operation exists, the trusted Apply workflow's
+`warm-archive-readiness` mode runs one canonical query-only contour against the
+exact deployed SHA. It tolerates a transient activity sample and requires three
+consecutive clean post-projection witnesses inside a maximum 60-second
+stabilization window. Persistent write-capable/unknown FD, lock, sidecar, hold
+or material drift returns one terminal structured callback and no operation is
+created. The immutable ready receipt binds the release operation, deployed SHA,
+exact source material/SHA, conservative capacity proof and one private full
+compression projection.
+
+The trusted Apply Runner accepts the later task-scoped operation only with that
+single exact ready receipt. It creates at most four private JIT candidates and
+requires two consecutive identical material-qualification digests. Both JIT
+witnesses cryptographically reuse the ready projection only after fresh
+lightweight stat/sidecar/FD/lock/hold/provenance/material-CAS and capacity/
+non-target checks; they never repeat compression measurement, full SQLite
+integrity or full source hashing solely to obtain equivalent witnesses. The
+mutation-start CAS also reuses the exact projection under the same guards. A
+fresh full source hash is still mandatory immediately before each unlink, and
+the actual archive plus independent stream/full-restore SHA, SQLite quick,
+integrity and schema proofs remain mandatory. The Runner then submits exactly
+one caller-known detached job. A nonzero/ambiguous submit is never repeated;
+the only next action is query-only job and archive readback. The material hash
+is evidence, not a second owner authorization field.
 
 ## Terminal acceptance
 

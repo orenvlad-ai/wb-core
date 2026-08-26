@@ -391,6 +391,11 @@ def run_worker(
                 code="sanitation_runner_failed",
                 error_type=type(exc).__name__,
                 message=str(exc),
+                evidence=(
+                    dict(exc.evidence)
+                    if isinstance(getattr(exc, "evidence", None), dict)
+                    else None
+                ),
             )
 
         result_record = {
@@ -476,12 +481,15 @@ def _finish_failed(
     code: str,
     error_type: str,
     message: str,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error = {
         "code": code,
         "type": error_type,
         "message": message,
     }
+    if evidence:
+        error["evidence"] = evidence
     result_record = {
         "contract_name": CONTRACT_NAME,
         "job_id": request["job_id"],
