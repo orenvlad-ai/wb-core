@@ -37,7 +37,7 @@ related_runners:
   - "apps/sku_inventory_balance_smoke.py"
   - "apps/sku_inventory_balance_browser_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Initial immutable calculation registry, server preferences, expanded XLSX and durable dry-run apply state machine; live WB remains unreachable."
+update_note: "Formula v2 adds a Balance-only exact aggregate-WB opening fallback with immutable provenance; warehouse/regional incident semantics and live WB boundaries remain unchanged."
 ---
 
 # 1. Product surface and ownership
@@ -61,7 +61,9 @@ update_note: "Initial immutable calculation registry, server preferences, expand
 
 # 3. Conservative stock pacing
 
-Формула `sku_inventory_balance_conservative_pace_v1` использует отдельный SKU Management evidence contract. Текущий opening по всем фронтам равен `stock_ff + wb_confidence_coefficient × stock_wb`; default coefficient `0.5` применяется только к WB. Оба stock-поля должны присутствовать явно: missing не реконструируется из forecast timeline и не превращается в zero. Текущий FF/FBS входит в opening сейчас и никогда не показывается как будущая поставка.
+Формула `sku_inventory_balance_conservative_pace_v2` использует отдельный SKU Management evidence contract. Текущий opening по всем фронтам равен `stock_ff + wb_confidence_coefficient × stock_wb`; server-owned user setting имеет default `0.5`, диапазон `0..1`, не nullable и применяется только к WB (`0` полностью исключает WB, `1` учитывает его полностью). Каждый immutable calculation сохраняет выбранный коэффициент в settings и в per-SKU WB evidence lineage. Оба stock-поля должны присутствовать явно: missing не реконструируется из forecast timeline и не превращается в zero. Текущий FF/FBS входит в opening сейчас и никогда не показывается как будущая поставка.
+
+Обычный источник `stock_wb` остаётся strict warehouse-granular incident projection SKU Management. Единственное Balance-specific исключение: если complete official current snapshot покрывает exact requested nmID universe, имеет `pagination_complete=true`, exact snapshot date, raw-row SHA-256 digest и конечное неотрицательное numeric `stock_total` для каждого SKU, но `warehouse_granularity_complete=false`, Balance может использовать этот per-SKU aggregate total как opening WB evidence. Calculation row и lineage сохраняют source contract, snapshot/fetched time, digest, quantity, `mode=aggregate_per_sku_total`, `incident_projection_applied=false`, выбранный коэффициент и explicit quality warning. Агрегат не становится warehouse, region или incident row и не распределяется по складам. Partial coverage, duplicate/missing SKU identity, missing/malformed quantity/date/digest или incomplete pagination оставляют `stock_wb` unknown; zero допустим только как exact value внутри принятого complete snapshot.
 
 Demand пересчитывается для самого balance calculation по выбранному `sales_period_days=7|14|30|60` через shared availability-adjusted sales history. Lineage хранит exact lookup window, requested valid-day period и demand mode; период Ads statistics совпадает с этим окном, но не подменяет sales evidence.
 
@@ -108,14 +110,14 @@ Download строится из выбранного immutable calculation плю
 - `Источники` — calculation/source digest, lineage, settings и no-training boundary;
 - `История расчётов` — immutable registry chain.
 
-`Решения` содержит отдельные колонки `Следующая поставка` и `Последующая поставка`. Перед response workbook повторно открывается через XLSX reader и проверяет primary/campaign/inbound sheets. XLSX остаётся export artifact и не становится calculation/source truth.
+`Решения` содержит отдельные колонки `Следующая поставка`, `Последующая поставка` и `WB источник`. `Расчёт` отдельно показывает raw WB, коэффициент, учтённый WB и evidence mode; `Источники` сохраняет полный per-SKU WB evidence lineage. Aggregate mode в UI/XLSX всегда подписан как aggregate-only без складской раскладки. Перед response workbook повторно открывается через XLSX reader и проверяет primary/campaign/inbound sheets. XLSX остаётся export artifact и не становится calculation/source truth.
 
 # 7. Verification and exclusions
 
-`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`0.5 × WB + FF`), before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook readback, durable progress and disabled live adapter without preview/commit calls.
+`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook provenance readback, durable progress and disabled live adapter without preview/commit calls.
 
 `apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings, columns, grouped CPC/CPM recommendations, inline override, select-all, confirmation, server-backed terminal progress and отсутствие browser `PATCH`.
 
 Explicit exclusion policy `sku_inventory_balance_exclusions_v1` удаляет из calculation rows/UI/XLSX только exact nmID `497413772`, `497415593`, `497416931` с reason `iPhone Air glass is outside inventory-balance scope`; name substring matching запрещён. Policy version, полный configured list и matched rows сохраняются в lineage и `Источники`.
 
-В initial scope не входят merge/deploy, production backfill, production-data mutation, live WB write enablement, automatic campaign management, ML/training, autonomous observation collection и изменение существующей логики `Общее`.
+В scope не входят production backfill, production-data mutation, live WB write enablement, automatic campaign management, ML/training, autonomous observation collection и изменение существующей логики `Общее`.
