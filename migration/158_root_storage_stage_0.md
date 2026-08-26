@@ -1,9 +1,11 @@
 # Migration 158 — Root storage Stage 0
 
-Status: authoritative root-capacity, large-writer admission and journald
-retention activation contract. This migration does not authorize cleanup,
-archival, compression, movement or relocation of any non-journal file and does
-not introduce the future full capacity-reservation ledger.
+Status: authoritative root-capacity/large-writer admission contract and the
+bounded block-004 rollback of the failed journald-retention activation. The
+active target does not retain a journald retention override. This migration
+does not authorize cleanup, archival, compression, movement or relocation of
+any journal or non-journal file and does not introduce the future full
+capacity-reservation ledger.
 
 ## Root policy
 
@@ -35,17 +37,16 @@ an unbounded backup/evidence writer.
 `apps/storage_recovery_writer_inventory_static_smoke.py` retains the existing
 SQLite backup-writer catalog and additionally fails when an observed backup
 primitive lacks the common admission call or its owner is absent from the
-root-storage registry. The five-minute repo-owned systemd monitor executes
-`apps/root_storage_policy.py status`, publishes JSON at
-`/run/wb-core-root-storage/status.json`, emits the same warning/critical/hard
-alert payload to journald, and scans the configured root directories for files
-at least 256 MiB. A large artifact/backup/evidence path that matches no exact
-registered producer is a critical `unregistered_large_root_producer` alert.
-No status scan deletes, compresses, moves or opens SQLite.
+root-storage registry. `apps/root_storage_policy.py status` publishes the same
+warning/critical/hard and exact producer inventory read model without deleting,
+compressing, moving or opening SQLite. The repo-owned monitor service/timer
+artifacts remain dormant code: they are absent from the active target's
+`managed_systemd_units`, and block 004 neither installs nor starts them and does
+not claim monitor production acceptance.
 
-## Journald retention
+## Failed block-003 activation
 
-The versioned repo-owned drop-in is
+Block 003 introduced the repo-owned drop-in
 `artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf`:
 
 ```ini
@@ -55,59 +56,43 @@ SystemKeepFree=15G
 MaxRetentionSec=14day
 ```
 
-For systemd 255, the `G` suffix is binary, so the first two settings are
-exactly 2 GiB and 15 GiB. `SystemMaxUse` and `SystemKeepFree` are jointly
-enforced through the smaller effective limit; only archived journal files are
-removed for space limits. When KeepFree is already violated at journald start,
-systemd raises that limit to observed free space and does not retroactively
-delete existing journals merely to reach the configured KeepFree floor.
-`14day` parses to exactly 1,209,600 seconds. Activation fails before config
-installation unless the production major is exactly 255 and those semantics
-are recorded with the deployed binary/man-page digests.
+The block-003 Release Runner installed this exact file and submitted one
+journald restart. Its fresh manifest contained zero eligible files, but
+query-only readback found one protected 128 MiB younger archived journal
+missing. The service PID did transition and the settings became effective, but
+that protected deletion made PR #1054 terminal `blocked`. The missing archive
+is not restored or synthesized. The old activation evidence remains immutable
+under `/var/lib/wb-core/root-storage-policy/activations/`; it is never replayed
+as corrective proof.
 
-The canonical deploy adapter runs `journald-activate` once per exact config
-digest. It does not call `journalctl --vacuum-*`, does not unlink a journal and
-does not run a manual cleanup. Before the one allowed
-`systemctl restart systemd-journald.service`, it writes a private mode-0600
-manifest below `/var/lib/wb-core/root-storage-policy/activations/`. Each entry
-records path, device, inode, size, mtime, journal header state/file/machine id,
-head/tail realtime, exact cutoff, filename/archive classification, `/proc/*/fd`
-opener proof and incident/forensic/legal-hold proof. Every other regular file
-below the journal root is inventoried as an immutable non-target.
+## Block-004 corrective removal
 
-Eligibility is the intersection of all of these facts:
+The current machine policy has `journald.mode=remove_block_003_dropin`. The
+legacy retention source remains only as dormant repository evidence and is not
+an installation input. Canonical deploy calls `journald-corrective-remove`.
+Before mutation it requires the exact active drop-in path and SHA-256, the
+three exact block-003 effective values, an active journald PID, fresh complete
+regular-file inventory below `/var/log/journal`, opener evidence, exact
+journal headers, protected identity/inventory digests and root/backup/generation
+capacity, inode and mount evidence.
 
-- current machine-id journal directory;
-- matching machine id in the journal header;
-- archived `@…journal` filename;
-- journal header state `ARCHIVED`;
-- tail realtime strictly older than the fresh 14-day cutoff;
-- no matching active incident, forensic or legal hold.
+The operation writes a private mode-0600 manifest and durable state below
+`/var/lib/wb-core/root-storage-policy/corrections/`. It then unlinks exactly
+`/etc/systemd/journald.conf.d/60-wb-core-root-retention.conf`, fsyncs that
+directory, records removal, records `restart_submit_count=1`, and submits
+exactly one `systemctl restart systemd-journald.service`. It contains no vacuum,
+rotate, archive, compression or journal unlink command. A transport ambiguity
+may invoke only `journald-corrective-readback`; the drop-in removal and restart
+are never retried.
 
-The exact device+inode opener snapshot is retained in every entry; an opener
-does not widen or narrow the authorized age/hold subset. Immediately before
-config installation, every eligible and immutable protected identity, the
-hold-registry proof and the cutoff classification are rechecked. Drift stops
-before the single restart.
-
-The supported optional hold registry is
-`/etc/wb-core/journal-retention-holds.json`, contract
-`wb_core_journal_retention_holds_v1`. An invalid registry fails closed. An
-active `incident`, `forensic` or `legal` hold can bind all journals, exact paths
-or exact `device:inode` identities. Any aged archived entry with a matching
-hold blocks activation before config installation and returns the exact hold
-and callback; held files are never silently omitted from the activation proof.
-
-The manifest stores an exact eligible count/bytes/digest and a protected
-non-target digest. Before restart the runner durably records submit intent and
-`restart_submit_count=1`. A transport loss never permits another restart:
-only `journald-retention-readback` is allowed. Reconciliation classifies every
-manifest entry as exact deleted, exact retained or ambiguous; requires every
-pre-existing protected path/device/inode to remain; requires exact immutable
-younger/held/foreign journal identity; proves the service generation changed;
-and reads effective settings plus journal/root/backup/generation status.
-Ambiguous eligible identity, protected deletion/movement/drift, wrong config,
-wrong service generation or a second submit fails closed.
+Query-only reconciliation requires the drop-in absent, no remaining effective
+`SystemMaxUse`, `SystemKeepFree` or `MaxRetentionSec` override, one attributed
+PID transition, an active journald service and every pre-existing journal-root
+device/inode still present. A current journal may appear under its normal
+post-restart archived name with the same device/inode; immutable journal and
+non-journal movement, shrinkage, deletion or drift fails closed. Newly created
+current journal files are inventoried separately and never mask a missing
+pre-existing identity.
 
 ## Deploy and acceptance
 
@@ -116,28 +101,31 @@ canonical target. The normal exact-merge `live_runtime` deploy performs:
 
 1. repo sync and deployed-SHA marker;
 2. root status plus unregistered-producer gate;
-3. private journald manifest and at-most-once activation;
-4. ordinary bounded deploy, managed monitor service/timer install and runtime
-   probes;
-5. query-only journald reconciliation and root-status readback.
+3. ordinary bounded deploy without root-monitor unit installation;
+4. as the final operational submit, a private fresh journald inventory and one
+   corrective drop-in removal/restart;
+5. query-only corrective reconciliation and root-status readback.
 
 Production acceptance requires exact merged/deployed SHA; manifest digest,
-count and bytes; exact deleted/retained/ambiguous reconciliation; zero active
-holds or the exact hold callback; effective 2 GiB / 15 GiB / 14-day settings;
-journal disk usage; root/backup/generation available bytes, inodes, mount ids,
-sources, types and UUIDs; synthetic hard/predicted-free admission proof;
-published status/timer and zero unregistered large root producers; core
-service/timer/refresh/business health; and proof that no non-target journal or
-other file/database/backup/evidence datum was deleted or moved.
+pre/post journal inventory and protected identity digests; zero deleted or
+drifted pre-existing journal-root files; drop-in absence; empty effective values
+for `SystemMaxUse`, `SystemKeepFree` and `MaxRetentionSec`; exactly one recorded
+unlink and restart submit; exactly one attributed PID transition; journal disk
+usage; root/backup/generation available bytes, inodes, mount ids, sources,
+types and UUIDs; exact root-status readback with zero unregistered large root
+producers; Registry HTTP, AI API and applicable canonical service health. The
+root-storage monitor/timer is explicitly not an acceptance claim in block 004.
 
 ## Strict exclusions
 
-This stage does not run raw SQLite copies, Promo GC or terminalization,
+This correction does not restore the already missing 128 MiB archive and does
+not run raw SQLite copies, Promo GC or terminalization,
 producer-specific retention migration, Finance/warehouse/monolith/generation/
 Autoanswers data mutation, another backup cleanup, a new destination/mount, or
-capacity expansion. It never removes, archives, compresses or relocates any
-file outside the exact expired archived-journal manifest subset. Tests use
-temporary sparse fixtures only and create no real large production file.
+capacity expansion. It introduces no replacement retention or GC design and
+never removes, archives, compresses or relocates any file except the exact
+repo-owned journald drop-in. Tests use temporary sparse fixtures only and
+create no real large production file.
 
 ## Required checks
 

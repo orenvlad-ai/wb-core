@@ -4497,6 +4497,20 @@ def main() -> None:
                 < deploy_sequence.index("sync current checked-out worktree to target_dir via rsync")
             ):
                 raise AssertionError("retired SPP schedule units must be stopped before runtime sync")
+            corrective_deploy_sequence = hosted_runtime.build_deploy_plan(
+                hosted_runtime.load_hosted_runtime_target(deploy_target_file)
+            )["deploy_sequence"]
+            corrective_step = (
+                "remove the exact block-003 journald drop-in and submit one corrective journald restart"
+            )
+            if not (
+                corrective_deploy_sequence.index("restart hosted runtime via restart_command")
+                < corrective_deploy_sequence.index(corrective_step)
+                < corrective_deploy_sequence.index("probe loopback/runtime contour")
+            ):
+                raise AssertionError(
+                    "corrective journald submit must follow all ordinary deploy mutations"
+                )
             nginx_routes = print_plan["deploy_plan"].get("nginx_public_routes") or {}
             if nginx_routes.get("route_count", 0) < 20:
                 raise AssertionError("print-plan must expose nginx public route allowlist")
@@ -4553,18 +4567,20 @@ def main() -> None:
             ):
                 raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
             root_status_command = " ".join(deploy_dry_run["commands"]["root_storage_status"])
-            journald_activate_command = " ".join(
-                deploy_dry_run["commands"]["journald_retention_activate"]
+            journald_operation_command = " ".join(
+                deploy_dry_run["commands"]["journald_operation"]
             )
             journald_readback_command = " ".join(
-                deploy_dry_run["commands"]["journald_retention_readback"]
+                deploy_dry_run["commands"]["journald_operation_readback"]
             )
             if "status --fail-on-unregistered" not in root_status_command:
                 raise AssertionError("deploy must publish status and reject unregistered large root producers")
-            if "journald-activate" not in journald_activate_command:
-                raise AssertionError("deploy must expose one canonical journald activation")
-            if "journald-readback" not in journald_readback_command:
-                raise AssertionError("deploy must expose query-only journald reconciliation")
+            if deploy_dry_run["commands"]["journald_operation_name"] != "corrective_remove":
+                raise AssertionError("deploy must select the corrective journald operation")
+            if "journald-corrective-remove" not in journald_operation_command:
+                raise AssertionError("deploy must expose one canonical journald correction")
+            if "journald-corrective-readback" not in journald_readback_command:
+                raise AssertionError("deploy must expose query-only corrective reconciliation")
             preparing_metadata = " ".join(
                 deploy_dry_run["commands"]["deploy_metadata"]
             )
@@ -4649,6 +4665,7 @@ def main() -> None:
                 "root-storage-status",
                 "root-storage-admission",
                 "journald-retention-readback",
+                "journald-corrective-readback",
             ):
                 if required_command not in command_choices:
                     raise AssertionError(f"hosted adapter must expose {required_command}")
@@ -4664,15 +4681,15 @@ def main() -> None:
                     ["ssh", "readback"], 0, '{"ok":true}', ""
                 ),
             ) as activation_readback:
-                hosted_runtime._run_journald_activation_once(
-                    activate_command=["ssh", "activate"],
+                hosted_runtime._run_journald_operation_once(
+                    operation_command=["ssh", "correct"],
                     readback_command=["ssh", "readback"],
                     summary=transport_summary,
                 )
             if activation_submit.call_count != 1 or activation_readback.call_count != 1:
-                raise AssertionError("ambiguous journald activation must submit once then read back once")
-            if transport_summary["journald_transport_reconciliation"]["activation_retried"] is not False:
-                raise AssertionError("ambiguous journald activation must never retry")
+                raise AssertionError("ambiguous journald correction must submit once then read back once")
+            if transport_summary["journald_transport_reconciliation"]["operation_retried"] is not False:
+                raise AssertionError("ambiguous journald operation must never retry")
             refresh_unit = (
                 ROOT
                 / "artifacts"

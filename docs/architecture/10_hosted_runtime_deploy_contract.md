@@ -448,14 +448,17 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-root-storage-policy.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is retained as an archived read-only compatibility boundary, not a normal Codex/ChatGPT data path. The current deploy implementation still manages the loopback-only `127.0.0.1:8766` unit for backward compatibility; its historical OAuth, concurrency, deadline, result-size, audit and redaction constraints remain fail-closed when that compatibility surface is explicitly maintained.
 
-The root-storage monitor publishes warning/critical/hard capacity state and
-exact large-producer registration to `/run/wb-core-root-storage/status.json`
-without deleting or moving data. The target-bound policy and repo-owned
-journald drop-in are
+The root-storage status command publishes warning/critical/hard capacity state
+and exact large-producer registration without deleting or moving data. The
+repo-owned monitor service/timer artifacts above are dormant and absent from
+the active target's `managed_systemd_units`; block 004 neither installs nor
+starts them. The target-bound policy and historical block-003 journald drop-in
+source are
 `artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json` and
 `artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf`;
-their at-most-once activation, private manifest, hold and reconciliation
-contract is authoritative in `migration/158_root_storage_stage_0.md`.
+the latter is no longer an installation input. Their failed activation and the
+at-most-once corrective removal/reconciliation contract are authoritative in
+`migration/158_root_storage_stage_0.md`.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads the existing runtime JSON schedules (editable only in `Настройки → Автообновления` through the unchanged web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The backend auto-refresh cycle first refreshes the web-vitrina ready snapshot and then runs a nonfatal WB supplies official incremental sync; the result payload/logs expose `wb_supplies_auto_sync_status` and `wb_supplies_auto_sync` diagnostics, while WB supplies failure or Seller Portal transit-cost preflight failure is warning metadata rather than a critical web-vitrina snapshot failure. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
 
@@ -500,7 +503,8 @@ Supported commands:
 - `deploy-and-verify`
 - `root-storage-status`
 - `root-storage-admission`
-- `journald-retention-readback`
+- `journald-corrective-readback` (`journald-retention-readback` remains a
+  compatibility alias to the current target-bound readback)
 
 ## One-shot Release Runner Binding
 
@@ -589,7 +593,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
 - `root_storage_policy_file = artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json`
-- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/FBS-shadow/Autoanswers/root-storage service+timer units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`. The dedicated read-only FBS-shadow and root-storage timers are deploy-enabled/restarted; unrelated business timers and the detached restore template retain their explicit target flags.
+- `managed_systemd_units = registry-http + wb-ai-api + refresh/closure/auto-complaints/Finance/warehouse/FBS-shadow/Autoanswers units + the fixed detached business-data restore template + archived-compatibility wb-core-data-mcp.service`; deploy installs every listed unit and runs `daemon-reload`. The dedicated read-only FBS-shadow timer is deploy-enabled/restarted. The dormant root-storage monitor service/timer are deliberately absent from this active list; unrelated business timers and the detached restore template retain their explicit target flags.
 - `retired_systemd_units = wb-core-spp-tester-schedule-tick.timer + wb-core-spp-tester-schedule-tick.service`; immediately after auth preflight and before runtime sync/dependency work, deploy idempotently disables/stops both obsolete schedule units, removes their unit files and performs `daemon-reload`. This is the deployment proof that the removed SPP Autocheck cannot start inside a long rollout window or keep running from a previous release.
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
@@ -944,7 +948,7 @@ Google Sheets, GAS, `clasp`, `/v1/sheet-vitrina-v1/load` and `invalid_grant` are
 Current deploy contract note:
 - `deploy` does more than `rsync + restart`:
   - sync current checkout;
-  - publish root/backup/generation capacity and large-producer status, fail on an unregistered large root producer, then run the exact versioned journald manifest/activation boundary at most once;
+  - publish root/backup/generation capacity and large-producer status and fail on an unregistered large root producer;
   - ensure host OS dependencies for SellerPortalBot recovery are present (`python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`);
   - use the same installed headed-browser dependencies for the independent WB buyer-session recovery while preserving separate state, lock and ports;
   - ensure host OS dependencies for SellerPortalBot owner runtime are present (`postgresql`, `postgresql-client`);
@@ -954,6 +958,7 @@ Current deploy contract note:
   - install/update repo-owned systemd units when configured;
   - render the repo-owned nginx public route allowlist into the configured server block, create a timestamped backup before changing the file, validate with `nginx -t`, and reload nginx only after validation succeeds;
   - restart runtime;
+  - after all ordinary deploy mutations, run the exact versioned block-004 journald drop-in corrective removal/restart boundary at most once;
   - only after that run loopback/public verification.
 - nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block, prior `WB-CORE MANAGED TLS` block and matching legacy/manual locations from the configured server config, rewrites the target `server_name` directive to the target's explicit `nginx_public_routes.server_names` when provided, then inserts generated TLS and route blocks from target/manifest truth. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
 - The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/warehouses/`, `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
@@ -1119,14 +1124,15 @@ Public probe validates:
   refresh-integrated light GC remains bounded and does not replace this exact
   operator pass;
 - Hosted `root-storage-status`, `root-storage-admission` and
-  `journald-retention-readback` are the Stage 0 read-only operator surfaces.
-  Deploy alone may invoke `journald-activate`: it records one private exact
-  manifest and submit intent before one journald restart. An SSH ambiguity is
-  reconciled only through readback and never repeats activation. It can remove
-  only fresh-preflight archived journal identities whose tail realtime is
-  older than 14 days and which have no incident/forensic/legal hold. Exact
-  opener evidence is recorded without widening or narrowing that age/hold
-  subset; no vacuum command or direct journal unlink exists;
+  `journald-corrective-readback` are the current read-only operator surfaces.
+  Deploy alone may invoke `journald-corrective-remove`: it records a private
+  fresh inventory of every regular file below the journal root, unlinks only
+  the exact block-003 drop-in and records one submit intent before one journald
+  restart. An SSH ambiguity is reconciled only through readback and never
+  repeats removal or restart. Reconciliation requires every pre-existing
+  journal/non-journal device+inode, permits only normal current-journal rotation
+  with the same identity, and rejects immutable movement, deletion, shrinkage
+  or drift. No vacuum, rotate, archive or journal-unlink command exists;
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/registry/compare-quote` is the protected temporary КП comparison route for the shipment registry. It accepts multipart `file` + `shipment_id`, reuses the logistics quote parser, returns grouped `КП` vs `Поставка факт` comparison rows, and must not persist the uploaded PDF as a supplier shipment or financial document.
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync` is the ordinary protected latest-window refresh: it fetches `offset=0`, additionally fetches bounded active `statusIDs=[1,2,3,4]` and recent historical `statusIDs=[5,6]` slices when no explicit status filter is requested, compares raw hashes/`updatedDate`/status, upserts new/changed rows, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, retries old critical-missing rows only when explicitly requested with `enrich=missing_critical`, exposes counters such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`, and returns controlled JSON errors with sanitized upstream status/content-type/body prefix.
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill` starts a protected background full-history backfill and returns `202` with `run_id`; the job walks WB list pagination by `limit/offset`, saves resumable progress after each page, keeps old rows, and records partial/blocker state on 429/timeout/non-JSON/upstream failures.

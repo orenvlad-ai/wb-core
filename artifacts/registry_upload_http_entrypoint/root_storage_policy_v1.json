@@ -20,14 +20,19 @@
     "/var/backups"
   ],
   "journald": {
-    "expected_systemd_major": 255,
-    "configuration_source": "artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf",
+    "contract_version": "wb_core_journald_retention_correction_v1",
+    "mode": "remove_block_003_dropin",
     "configuration_destination": "/etc/systemd/journald.conf.d/60-wb-core-root-retention.conf",
     "evidence_directory": "/var/lib/wb-core/root-storage-policy",
-    "hold_registry": "/etc/wb-core/journal-retention-holds.json",
-    "system_max_use_bytes": 2147483648,
-    "system_keep_free_bytes": 16106127360,
-    "max_retention_seconds": 1209600
+    "journal_root": "/var/log/journal",
+    "legacy_activation_operation_id": "journald-retention-554deaa90141347d711f01df",
+    "legacy_configuration_sha256": "sha256:554deaa90141347d711f01dfaf49083cd060927cfcdd48027f497194b99fd88b",
+    "legacy_effective_values": {
+      "SystemMaxUse": "2G",
+      "SystemKeepFree": "15G",
+      "MaxRetentionSec": "14day"
+    },
+    "expected_effective_values_after": {}
   },
   "producers": [
     {

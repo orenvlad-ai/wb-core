@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-storage status/admission and one-shot journald retention activation."""
+"""Root-storage status/admission and versioned journald operations."""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ from packages.application.root_storage_policy import (
 
 
 JOURNAL_ACTIVATION_CONTRACT = "wb_core_journald_retention_activation_v1"
+JOURNAL_CORRECTION_CONTRACT = "wb_core_journald_retention_correction_v1"
+JOURNAL_CORRECTION_MODE = "remove_block_003_dropin"
 JOURNAL_HOLD_CONTRACT = "wb_core_journal_retention_holds_v1"
 _HEADER_HEX_TIMESTAMP = re.compile(
     r"^(Head|Tail) realtime timestamp: .*\(([0-9a-fA-F]+)\)$"
@@ -55,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("journald-activate")
     subparsers.add_parser("journald-readback")
+    subparsers.add_parser("journald-corrective-remove")
+    subparsers.add_parser("journald-corrective-readback")
     return parser
 
 
@@ -86,10 +90,359 @@ def main(argv: list[str] | None = None) -> int:
             result = readback_journald_retention(policy)
             print(_canonical_json(result))
             return 0 if result.get("ok") else 3
+        if args.command == "journald-corrective-remove":
+            print(_canonical_json(remove_journald_retention_dropin(policy)))
+            return 0
+        if args.command == "journald-corrective-readback":
+            result = readback_journald_correction(policy)
+            print(_canonical_json(result))
+            return 0 if result.get("ok") else 3
     except (RootStoragePolicyError, ValueError) as exc:
         print(_canonical_json({"ok": False, "error": str(exc), "command": args.command}))
         return 2
     raise AssertionError("unreachable root storage policy command")
+
+
+def remove_journald_retention_dropin(policy: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove the exact block-003 drop-in and submit one journald restart."""
+
+    correction = _journald_correction_policy(policy)
+    destination = Path(str(correction["configuration_destination"]))
+    evidence_dir = Path(str(correction["evidence_directory"]))
+    correction_digest = _digest_payload(correction)
+    operation_id = f"journald-correction-{correction_digest.removeprefix('sha256:')[:24]}"
+    operation_dir = evidence_dir / "corrections" / operation_id
+    state_path = operation_dir / "state.json"
+    manifest_path = operation_dir / "preflight-manifest.json"
+    evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(evidence_dir, 0o700)
+    lock_path = evidence_dir / "correction.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "r+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        if state_path.exists():
+            state = _read_json(state_path)
+            if state.get("correction_digest") != correction_digest:
+                raise RootStoragePolicyError("journald correction operation digest drift")
+            readback = readback_journald_correction(policy)
+            if readback.get("ok"):
+                return {**readback, "idempotent": True, "operation_retried": False}
+            raise RootStoragePolicyError(
+                "journald correction is already submitted and did not reconcile; "
+                "do not retry removal or restart, inspect journald-corrective-readback"
+            )
+
+        operation_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        preflight = build_journald_correction_preflight(policy)
+        _write_json_atomic(manifest_path, preflight, mode=0o600)
+        prepared = {
+            "contract_version": JOURNAL_CORRECTION_CONTRACT,
+            "operation_id": operation_id,
+            "phase": "prepared",
+            "created_at": _utc_now(),
+            "correction_digest": correction_digest,
+            "legacy_activation_operation_id": correction[
+                "legacy_activation_operation_id"
+            ],
+            "configuration_destination": str(destination),
+            "legacy_configuration_sha256": correction[
+                "legacy_configuration_sha256"
+            ],
+            "manifest_path": str(manifest_path),
+            "manifest_digest": preflight["manifest_digest"],
+            "journal_inventory_digest_before": preflight[
+                "journal_inventory_digest"
+            ],
+            "protected_identity_digest_before": preflight[
+                "protected_identity_digest"
+            ],
+            "service_before": preflight["service_before"],
+            "dropin_unlink_submit_count": 0,
+            "restart_submit_count": 0,
+        }
+        _write_json_atomic(state_path, prepared, mode=0o600)
+        _assert_journald_correction_preflight_fresh(policy, preflight)
+        removal_intent = {
+            **prepared,
+            "phase": "dropin_removal_submit_intent",
+            "dropin_unlink_submit_count": 1,
+            "dropin_removal_submit_recorded_at": _utc_now(),
+        }
+        _write_json_atomic(state_path, removal_intent, mode=0o600)
+        destination.unlink()
+        _fsync_directory(destination.parent)
+        removed = {
+            **removal_intent,
+            "phase": "dropin_removed",
+            "dropin_removed_at": _utc_now(),
+        }
+        _write_json_atomic(state_path, removed, mode=0o600)
+        restart_intent = {
+            **removed,
+            "phase": "restart_submit_intent",
+            "restart_submit_count": 1,
+            "restart_submit_recorded_at": _utc_now(),
+        }
+        _write_json_atomic(state_path, restart_intent, mode=0o600)
+        completed = subprocess.run(
+            ["systemctl", "restart", "systemd-journald.service"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RootStoragePolicyError(
+                "journald corrective restart returned nonzero after one submit; do not retry: "
+                + _bounded_text(completed.stderr or completed.stdout)
+            )
+        readback = _wait_for_journald_correction_readback(
+            policy,
+            before_service=preflight["service_before"],
+        )
+        if not readback.get("ok"):
+            raise RootStoragePolicyError(
+                "journald correction did not reconcile after one submit; "
+                "do not retry removal or restart"
+            )
+        done = {
+            **restart_intent,
+            "phase": "done",
+            "completed_at": _utc_now(),
+            "service_after": readback["service_after_attributed"],
+            "readback_digest": _digest_payload(readback),
+            "completion_readback": readback,
+        }
+        _write_json_atomic(state_path, done, mode=0o600)
+        return {
+            **readback,
+            "phase": "done",
+            "idempotent": False,
+            "operation_retried": False,
+        }
+
+
+def build_journald_correction_preflight(
+    policy: Mapping[str, Any],
+    *,
+    inventory_reader: Any = None,
+) -> dict[str, Any]:
+    correction = _journald_correction_policy(policy)
+    destination = Path(str(correction["configuration_destination"]))
+    _assert_exact_legacy_dropin(destination, correction)
+    effective = _effective_journald_config(
+        expected=dict(correction["legacy_effective_values"])
+    )
+    if not effective["matches_expected"]:
+        raise RootStoragePolicyError(
+            "journald effective configuration drifted before corrective removal"
+        )
+    journal_root = Path(str(correction["journal_root"]))
+    entries = (inventory_reader or _collect_correction_journal_inventory)(journal_root)
+    service_before = _journald_service_identity()
+    if (
+        service_before.get("active_state") != "active"
+        or not service_before.get("main_pid")
+    ):
+        raise RootStoragePolicyError("journald must be active before corrective removal")
+    root_status = collect_root_storage_status(policy=policy)
+    payload = {
+        "contract_version": JOURNAL_CORRECTION_CONTRACT,
+        "observed_at": _utc_now(),
+        "legacy_activation_operation_id": correction[
+            "legacy_activation_operation_id"
+        ],
+        "configuration_destination": str(destination),
+        "legacy_configuration_sha256": correction["legacy_configuration_sha256"],
+        "effective_config_before": effective,
+        "journal_root": str(journal_root),
+        "journal_entries": entries,
+        "journal_entry_count": len(entries),
+        "journal_file_count": sum(1 for item in entries if item["is_journal_file"]),
+        "non_journal_file_count": sum(
+            1 for item in entries if not item["is_journal_file"]
+        ),
+        "journal_total_bytes": sum(int(item["size_bytes"]) for item in entries),
+        "journal_inventory_digest": _journal_inventory_digest(entries),
+        "protected_identity_digest": _journal_identity_digest(entries),
+        "service_before": service_before,
+        "root_storage_status_before": root_status,
+    }
+    payload["manifest_digest"] = _digest_payload(payload)
+    return payload
+
+
+def readback_journald_correction(policy: Mapping[str, Any]) -> dict[str, Any]:
+    correction = _journald_correction_policy(policy)
+    correction_digest = _digest_payload(correction)
+    operation_id = f"journald-correction-{correction_digest.removeprefix('sha256:')[:24]}"
+    operation_dir = (
+        Path(str(correction["evidence_directory"])) / "corrections" / operation_id
+    )
+    state_path = operation_dir / "state.json"
+    manifest_path = operation_dir / "preflight-manifest.json"
+    if not state_path.is_file() or not manifest_path.is_file():
+        return {
+            "ok": False,
+            "contract_version": JOURNAL_CORRECTION_CONTRACT,
+            "operation_id": operation_id,
+            "reason": "correction_evidence_absent",
+        }
+    state = _read_json(state_path)
+    manifest = _read_json(manifest_path)
+    if state.get("operation_id") != operation_id:
+        raise RootStoragePolicyError("journald correction operation identity drift")
+    if state.get("correction_digest") != correction_digest:
+        raise RootStoragePolicyError("journald correction policy digest drift")
+    if manifest.get("manifest_digest") != _digest_payload(
+        {key: value for key, value in manifest.items() if key != "manifest_digest"}
+    ):
+        raise RootStoragePolicyError("journald correction preflight manifest digest mismatch")
+    if state.get("manifest_digest") != manifest.get("manifest_digest"):
+        raise RootStoragePolicyError("journald correction state/manifest mismatch")
+
+    if state.get("phase") == "done":
+        completion = state.get("completion_readback")
+        if not isinstance(completion, dict) or not completion.get("ok"):
+            raise RootStoragePolicyError(
+                "journald correction durable completion readback is invalid"
+            )
+        if state.get("readback_digest") != _digest_payload(completion):
+            raise RootStoragePolicyError(
+                "journald correction durable completion readback digest mismatch"
+            )
+        destination = Path(str(correction["configuration_destination"]))
+        destination_absent = not destination.exists() and not destination.is_symlink()
+        effective = _effective_journald_config(
+            expected=dict(correction["expected_effective_values_after"])
+        )
+        service_current = _journald_service_identity()
+        disk_usage = subprocess.run(
+            ["journalctl", "--disk-usage"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        current_ok = bool(
+            destination_absent
+            and effective["matches_expected"]
+            and service_current.get("active_state") == "active"
+            and service_current.get("sub_state") == "running"
+        )
+        return {
+            **completion,
+            "ok": bool(completion.get("ok") and current_ok),
+            "phase": "done",
+            "dropin_absent": destination_absent,
+            "effective_config": effective,
+            "service_current": service_current,
+            "journal_disk_usage": _bounded_text(
+                disk_usage.stdout or disk_usage.stderr
+            ),
+            "root_storage_status_after": collect_root_storage_status(policy=policy),
+            "durable_completion_readback_digest": state["readback_digest"],
+            "durable_completion_reused": True,
+        }
+
+    destination = Path(str(correction["configuration_destination"]))
+    destination_absent = not destination.exists() and not destination.is_symlink()
+    effective = _effective_journald_config(
+        expected=dict(correction["expected_effective_values_after"])
+    )
+    service_current = _journald_service_identity()
+    service_before = dict(manifest.get("service_before") or {})
+    service_after_attributed = dict(state.get("service_after") or service_current)
+    pid_transition = bool(
+        service_before.get("main_pid")
+        and service_after_attributed.get("main_pid")
+        and (
+            service_after_attributed.get("main_pid") != service_before.get("main_pid")
+            or service_after_attributed.get("exec_main_start_timestamp")
+            != service_before.get("exec_main_start_timestamp")
+        )
+    )
+    entries_after = _collect_correction_journal_inventory(
+        Path(str(correction["journal_root"]))
+    )
+    reconciliation = _reconcile_correction_journal_inventory(
+        list(manifest.get("journal_entries") or []),
+        entries_after,
+    )
+    disk_usage = subprocess.run(
+        ["journalctl", "--disk-usage"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    root_status = collect_root_storage_status(policy=policy)
+    removal_recorded_at = str(state.get("dropin_removed_at") or "")
+    restart_recorded_at = str(state.get("restart_submit_recorded_at") or "")
+    removal_precedes_restart = bool(
+        removal_recorded_at
+        and restart_recorded_at
+        and removal_recorded_at <= restart_recorded_at
+    )
+    ok = bool(
+        state.get("dropin_unlink_submit_count") == 1
+        and state.get("restart_submit_count") == 1
+        and destination_absent
+        and effective["matches_expected"]
+        and removal_precedes_restart
+        and pid_transition
+        and service_current.get("active_state") == "active"
+        and service_current.get("sub_state") == "running"
+        and not reconciliation["deleted_entries"]
+        and not reconciliation["protected_drift"]
+        and reconciliation["protected_identity_digest_matches"]
+    )
+    return {
+        "ok": ok,
+        "contract_version": JOURNAL_CORRECTION_CONTRACT,
+        "operation_id": operation_id,
+        "phase": state.get("phase"),
+        "legacy_activation_operation_id": correction[
+            "legacy_activation_operation_id"
+        ],
+        "manifest_path": str(manifest_path),
+        "manifest_digest": manifest["manifest_digest"],
+        "dropin_path": str(destination),
+        "dropin_absent": destination_absent,
+        "dropin_unlink_submit_count": state.get("dropin_unlink_submit_count"),
+        "dropin_removed_at": state.get("dropin_removed_at"),
+        "restart_submit_count": state.get("restart_submit_count"),
+        "restart_submit_recorded_at": state.get("restart_submit_recorded_at"),
+        "dropin_removal_precedes_restart": removal_precedes_restart,
+        "effective_config": effective,
+        "service_before": service_before,
+        "service_after_attributed": service_after_attributed,
+        "service_current": service_current,
+        "pid_transition_count": 1 if pid_transition else 0,
+        "journal_inventory_before": {
+            "entry_count": manifest["journal_entry_count"],
+            "journal_file_count": manifest["journal_file_count"],
+            "non_journal_file_count": manifest["non_journal_file_count"],
+            "total_bytes": manifest["journal_total_bytes"],
+            "inventory_digest": manifest["journal_inventory_digest"],
+            "protected_identity_digest": manifest["protected_identity_digest"],
+        },
+        "journal_inventory_after": {
+            "entry_count": len(entries_after),
+            "journal_file_count": sum(
+                1 for item in entries_after if item["is_journal_file"]
+            ),
+            "non_journal_file_count": sum(
+                1 for item in entries_after if not item["is_journal_file"]
+            ),
+            "total_bytes": sum(int(item["size_bytes"]) for item in entries_after),
+            "inventory_digest": _journal_inventory_digest(entries_after),
+            "protected_identity_digest": reconciliation[
+                "protected_identity_digest_after"
+            ],
+        },
+        **reconciliation,
+        "journal_disk_usage": _bounded_text(disk_usage.stdout or disk_usage.stderr),
+        "root_storage_status_before": manifest["root_storage_status_before"],
+        "root_storage_status_after": root_status,
+    }
 
 
 def activate_journald_retention(policy: Mapping[str, Any]) -> dict[str, Any]:
@@ -546,6 +899,258 @@ def _assert_preflight_fresh(
             )
 
 
+def _assert_journald_correction_preflight_fresh(
+    policy: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> None:
+    correction = _journald_correction_policy(policy)
+    destination = Path(str(correction["configuration_destination"]))
+    _assert_exact_legacy_dropin(destination, correction)
+    effective = _effective_journald_config(
+        expected=dict(correction["legacy_effective_values"])
+    )
+    if not effective["matches_expected"]:
+        raise RootStoragePolicyError(
+            "journald effective configuration drifted after corrective preflight"
+        )
+    current_service = _journald_service_identity()
+    if current_service != manifest.get("service_before"):
+        raise RootStoragePolicyError(
+            "journald service identity drifted after corrective preflight"
+        )
+    entries_after = _collect_correction_journal_inventory(
+        Path(str(correction["journal_root"]))
+    )
+    reconciliation = _reconcile_correction_journal_inventory(
+        list(manifest.get("journal_entries") or []), entries_after
+    )
+    if (
+        reconciliation["deleted_entries"]
+        or reconciliation["moved_current_entries"]
+        or reconciliation["protected_drift"]
+        or reconciliation["new_entries"]
+        or not reconciliation["protected_identity_digest_matches"]
+    ):
+        raise RootStoragePolicyError(
+            "journal inventory drifted after corrective preflight"
+        )
+
+
+def _wait_for_journald_correction_readback(
+    policy: Mapping[str, Any], *, before_service: Mapping[str, Any]
+) -> dict[str, Any]:
+    for _ in range(40):
+        after = _journald_service_identity()
+        changed = bool(
+            after.get("main_pid")
+            and (
+                after.get("main_pid") != before_service.get("main_pid")
+                or after.get("exec_main_start_timestamp")
+                != before_service.get("exec_main_start_timestamp")
+            )
+        )
+        if changed and after.get("active_state") == "active":
+            return readback_journald_correction(policy)
+        time.sleep(0.25)
+    return readback_journald_correction(policy)
+
+
+def _collect_correction_journal_inventory(journal_root: Path) -> list[dict[str, Any]]:
+    if not journal_root.is_dir():
+        raise RootStoragePolicyError("journal root is absent before corrective operation")
+    openers = _journal_openers()
+    entries: list[dict[str, Any]] = []
+    for path in sorted(journal_root.rglob("*")):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            stat_before = path.stat()
+            is_journal_file = path.name.endswith(".journal")
+            header = (
+                _journal_header(path)
+                if is_journal_file
+                else {
+                    "state": None,
+                    "file_id": None,
+                    "machine_id": None,
+                    "head_realtime_epoch_us": None,
+                    "tail_realtime_epoch_us": None,
+                }
+            )
+            stat_after = path.stat()
+        except FileNotFoundError as exc:
+            raise RootStoragePolicyError(
+                f"journal inventory changed during capture: {path}"
+            ) from exc
+        mutable_current = bool(
+            is_journal_file
+            and (header["state"] != "ARCHIVED" or "@" not in path.name)
+        )
+        if not mutable_current and _stat_identity(stat_before) != _stat_identity(stat_after):
+            raise RootStoragePolicyError(
+                f"immutable journal inventory changed during capture: {path}"
+            )
+        selected_stat = stat_after if mutable_current else stat_before
+        file_openers = openers.get(
+            (int(selected_stat.st_dev), int(selected_stat.st_ino)), []
+        )
+        entries.append(
+            {
+                "path": str(path),
+                "device": int(selected_stat.st_dev),
+                "inode": int(selected_stat.st_ino),
+                "size_bytes": int(selected_stat.st_size),
+                "mtime_ns": int(selected_stat.st_mtime_ns),
+                "is_journal_file": is_journal_file,
+                "mutable_current": mutable_current,
+                "journal_state": header["state"],
+                "journal_file_id": header["file_id"],
+                "journal_machine_id": header["machine_id"],
+                "head_realtime_epoch_us": header["head_realtime_epoch_us"],
+                "tail_realtime_epoch_us": header["tail_realtime_epoch_us"],
+                "opener_evidence": {
+                    "method": "proc_fd_device_inode_snapshot",
+                    "openers": file_openers,
+                    "no_openers": not file_openers,
+                },
+            }
+        )
+    return entries
+
+
+def _reconcile_correction_journal_inventory(
+    entries_before: list[Mapping[str, Any]], entries_after: list[Mapping[str, Any]]
+) -> dict[str, Any]:
+    after_by_identity: dict[tuple[int, int], list[Mapping[str, Any]]] = {}
+    for item in entries_after:
+        after_by_identity.setdefault(
+            (int(item["device"]), int(item["inode"])), []
+        ).append(item)
+    before_identities = {
+        (int(item["device"]), int(item["inode"])) for item in entries_before
+    }
+    deleted: list[dict[str, Any]] = []
+    moved_current: list[dict[str, Any]] = []
+    protected_drift: list[dict[str, Any]] = []
+    retained_identities: list[Mapping[str, Any]] = []
+    for before in entries_before:
+        identity = (int(before["device"]), int(before["inode"]))
+        candidates = after_by_identity.get(identity, [])
+        if not candidates:
+            deleted.append(
+                {
+                    **_entry_identity(before),
+                    "reason": "preexisting_journal_root_file_deleted",
+                }
+            )
+            continue
+        same_path = next(
+            (item for item in candidates if item["path"] == before["path"]), None
+        )
+        selected = same_path or candidates[0]
+        retained_identities.append(selected)
+        if same_path is None:
+            if before.get("mutable_current"):
+                moved_current.append(
+                    {
+                        **_entry_identity(before),
+                        "observed_paths": sorted(str(item["path"]) for item in candidates),
+                        "reason": "current_journal_rotated_without_deletion",
+                    }
+                )
+            else:
+                protected_drift.append(
+                    {
+                        **_entry_identity(before),
+                        "observed_paths": sorted(str(item["path"]) for item in candidates),
+                        "reason": "immutable_journal_root_file_moved",
+                    }
+                )
+                continue
+        if before.get("mutable_current"):
+            if int(selected["size_bytes"]) < int(before["size_bytes"]):
+                protected_drift.append(
+                    {
+                        **_entry_identity(before),
+                        "reason": "current_journal_identity_shrank",
+                    }
+                )
+        elif (
+            int(selected["size_bytes"]) != int(before["size_bytes"])
+            or int(selected["mtime_ns"]) != int(before["mtime_ns"])
+            or bool(selected["is_journal_file"]) != bool(before["is_journal_file"])
+        ):
+            protected_drift.append(
+                {
+                    **_entry_identity(before),
+                    "reason": "immutable_journal_root_file_drift",
+                }
+            )
+    new_entries = [
+        _entry_identity(item)
+        for item in entries_after
+        if (int(item["device"]), int(item["inode"])) not in before_identities
+    ]
+    protected_before = _journal_identity_digest(entries_before)
+    protected_after = _journal_identity_digest(retained_identities)
+    return {
+        "deleted_entries": deleted,
+        "deleted_count": len(deleted),
+        "deleted_bytes": sum(int(item["size_bytes"]) for item in deleted),
+        "moved_current_entries": moved_current,
+        "protected_drift": protected_drift,
+        "new_entries": new_entries,
+        "protected_identity_digest_before": protected_before,
+        "protected_identity_digest_after": protected_after,
+        "protected_identity_digest_matches": protected_before == protected_after,
+    }
+
+
+def _journal_inventory_digest(entries: list[Mapping[str, Any]]) -> str:
+    material = [
+        {
+            "path": item["path"],
+            "device": int(item["device"]),
+            "inode": int(item["inode"]),
+            "size_bytes": int(item["size_bytes"]),
+            "mtime_ns": int(item["mtime_ns"]),
+            "is_journal_file": bool(item["is_journal_file"]),
+            "mutable_current": bool(item["mutable_current"]),
+            "journal_state": item.get("journal_state"),
+            "journal_file_id": item.get("journal_file_id"),
+            "journal_machine_id": item.get("journal_machine_id"),
+            "head_realtime_epoch_us": item.get("head_realtime_epoch_us"),
+            "tail_realtime_epoch_us": item.get("tail_realtime_epoch_us"),
+        }
+        for item in entries
+    ]
+    return _digest_payload(material)
+
+
+def _journal_identity_digest(entries: list[Mapping[str, Any]]) -> str:
+    material = sorted(
+        [
+            {
+                "device": int(item["device"]),
+                "inode": int(item["inode"]),
+            }
+            for item in entries
+        ],
+        key=lambda item: (item["device"], item["inode"]),
+    )
+    return _digest_payload(material)
+
+
+def _assert_exact_legacy_dropin(
+    destination: Path, correction: Mapping[str, Any]
+) -> None:
+    if destination.is_symlink() or not destination.is_file():
+        raise RootStoragePolicyError(
+            "exact block-003 journald drop-in is absent or not a regular file"
+        )
+    if _sha256_file(destination) != correction["legacy_configuration_sha256"]:
+        raise RootStoragePolicyError("block-003 journald drop-in digest drift")
+
+
 def _wait_for_journald_readback(
     policy: Mapping[str, Any],
     *,
@@ -591,6 +1196,48 @@ def _journald_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
         or int(value["max_retention_seconds"]) != 14 * 24 * 60 * 60
     ):
         raise RootStoragePolicyError("journald root storage settings drift")
+    return dict(value)
+
+
+def _journald_correction_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
+    value = policy.get("journald")
+    if not isinstance(value, dict):
+        raise RootStoragePolicyError("journald correction policy is missing")
+    required = {
+        "contract_version",
+        "mode",
+        "configuration_destination",
+        "evidence_directory",
+        "journal_root",
+        "legacy_activation_operation_id",
+        "legacy_configuration_sha256",
+        "legacy_effective_values",
+        "expected_effective_values_after",
+    }
+    if set(value) != required:
+        raise RootStoragePolicyError("journald correction policy schema drift")
+    if value.get("contract_version") != JOURNAL_CORRECTION_CONTRACT:
+        raise RootStoragePolicyError("journald correction contract version mismatch")
+    if value.get("mode") != JOURNAL_CORRECTION_MODE:
+        raise RootStoragePolicyError("journald correction mode mismatch")
+    for field in ("configuration_destination", "evidence_directory", "journal_root"):
+        if not Path(str(value[field])).is_absolute():
+            raise RootStoragePolicyError(f"journald correction {field} must be absolute")
+    if not re.fullmatch(r"journald-retention-[0-9a-f]{24}", str(value["legacy_activation_operation_id"])):
+        raise RootStoragePolicyError("legacy journald activation operation id is invalid")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value["legacy_configuration_sha256"])):
+        raise RootStoragePolicyError("legacy journald configuration digest is invalid")
+    legacy_expected = {
+        "SystemMaxUse": "2G",
+        "SystemKeepFree": "15G",
+        "MaxRetentionSec": "14day",
+    }
+    if value.get("legacy_effective_values") != legacy_expected:
+        raise RootStoragePolicyError("legacy journald effective settings drift")
+    if value.get("expected_effective_values_after") != {}:
+        raise RootStoragePolicyError(
+            "corrective journald operation must restore the unoverridden settings"
+        )
     return dict(value)
 
 
@@ -801,7 +1448,11 @@ def _matching_holds(
     return matches
 
 
-def _effective_journald_config(journald: Mapping[str, Any]) -> dict[str, Any]:
+def _effective_journald_config(
+    journald: Mapping[str, Any] | None = None,
+    *,
+    expected: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     completed = subprocess.run(
         ["systemd-analyze", "cat-config", "systemd/journald.conf"],
         text=True,
@@ -823,16 +1474,20 @@ def _effective_journald_config(journald: Mapping[str, Any]) -> dict[str, Any]:
             key, value = line.split("=", 1)
             if key in {"SystemMaxUse", "SystemKeepFree", "MaxRetentionSec"}:
                 values[key] = value.strip()
-    expected = {
-        "SystemMaxUse": "2G",
-        "SystemKeepFree": "15G",
-        "MaxRetentionSec": "14day",
-    }
+    expected_values = dict(
+        expected
+        if expected is not None
+        else {
+            "SystemMaxUse": "2G",
+            "SystemKeepFree": "15G",
+            "MaxRetentionSec": "14day",
+        }
+    )
     return {
         "command_returncode": completed.returncode,
         "values": values,
-        "expected": expected,
-        "matches_expected": completed.returncode == 0 and values == expected,
+        "expected": expected_values,
+        "matches_expected": completed.returncode == 0 and values == expected_values,
         "cat_config_sha256": _sha256_bytes(completed.stdout.encode("utf-8")),
         "stderr": _bounded_text(completed.stderr),
     }
