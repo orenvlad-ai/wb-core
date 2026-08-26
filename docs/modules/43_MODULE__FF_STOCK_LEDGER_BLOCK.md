@@ -12,7 +12,7 @@ source_basis:
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/157_fbs_lifecycle_forward_recovery.md"
-  - "migration/159_applicability_gated_dense_fbs.md"
+  - "migration/160_applicability_gated_dense_fbs.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
@@ -163,7 +163,7 @@ related_runners:
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` use one append-only physical ledger plus separate reservation/order journals. Migration 159 adds staged applicability-gated dense FBS activation through canonical pool_inventory receipts: active pairs are exact/exact_zero or fail closed, dated inapplicable is explicit, and missing is never zero."
+update_note: "`Остатки ФФ` use one append-only physical ledger plus separate reservation/order journals. Migration 160 adds staged applicability-gated dense FBS activation through canonical pool_inventory receipts: active pairs are exact/exact_zero or fail closed, dated inapplicable is explicit, and missing is never zero."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -772,7 +772,7 @@ identities and never automatically starts a global backlog replay.
 
 Creating an internal facility is also audited preview/confirm. An explicitly
 inactive facility remains an empty retained registry subject with no mapping or
-WB mutation. If active publication is requested, Migration 159 first stages the
+WB mutation. If active publication is requested, Migration 160 first stages the
 facility inactive, posts and reads back the complete active-SKU `pool_inventory`
 roster, and only then publishes active. Activation, binding and transfer remain
 distinct decisions. A facility can therefore never become an active
@@ -790,7 +790,7 @@ operator preview and confirm.
 
 ### Applicability-gated dense FBS
 
-Migration 159 makes current FBS applicability explicit without adding another
+Migration 160 makes current FBS applicability explicit without adding another
 physical ledger. Every active facility × active/non-hidden positive-`nmId` SKU
 is applicable by default. The only override is a dated append-only
 `inapplicable` event with reason, actor and provenance; reinstatement is another

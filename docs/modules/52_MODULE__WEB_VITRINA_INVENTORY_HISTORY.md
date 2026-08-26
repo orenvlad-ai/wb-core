@@ -11,7 +11,7 @@ source_basis:
   - "packages/application/sheet_vitrina_v1_inventory_planning.py"
   - "apps/sheet_vitrina_v1_inventory_history_backfill.py"
   - "migration/156_web_vitrina_inventory_history.md"
-  - "migration/159_applicability_gated_dense_fbs.md"
+  - "migration/160_applicability_gated_dense_fbs.md"
 related_modules:
   - "29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
@@ -29,9 +29,9 @@ related_docs:
   - "migration/145_inventory_planning_and_fbs_orders_surfaces.md"
   - "migration/146_inventory_planning_main_vitrina_rows.md"
   - "migration/156_web_vitrina_inventory_history.md"
-  - "migration/159_applicability_gated_dense_fbs.md"
+  - "migration/160_applicability_gated_dense_fbs.md"
 source_of_truth_level: "canonical_module_contract"
-update_note: "Compact typed component history remains immutable; Migration 159 publishes current FBS exact/exact_zero/missing/inapplicable reason/provenance from dense applicability without retrocopying current zero into history."
+update_note: "Compact typed component history remains immutable; Migration 160 publishes current FBS exact/exact_zero/missing/inapplicable reason/provenance from dense applicability without retrocopying current zero into history."
 ---
 
 # 1. Public metric contract
@@ -97,7 +97,7 @@ finalization; предыдущие capture, finalization и provenance не из
 timestamp; новый доказанный ready snapshot/source revision создаёт append-only
 supersession. Stock-specific cutoff, таймер или отдельная кнопка не вводятся.
 
-Для current state после Migration 159 facility × SKU становится applicable с
+Для current state после Migration 160 facility × SKU становится applicable с
 future proven dense activation `T0`: active facility и active/non-hidden
 positive-`nmId` SKU применимы по умолчанию, кроме явного датированного
 `inapplicable`. До T0 и для inactive facility/SKU текущая пара `inapplicable`;

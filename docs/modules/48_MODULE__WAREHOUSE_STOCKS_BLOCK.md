@@ -14,7 +14,7 @@ source_basis:
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
   - "migration/155_functional_economics_inventory_blend_publication.md"
-  - "migration/159_applicability_gated_dense_fbs.md"
+  - "migration/160_applicability_gated_dense_fbs.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -54,7 +54,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 159 stages facility/SKU activation until canonical dense FBS coverage is exact, preserves existing balances, emits zero movement/capital/WAC effect and leaves FBO/WB/six-stage aggregation unchanged."
+update_note: "Active truth remains versioned functional balances. Migration 160 stages facility/SKU activation until canonical dense FBS coverage is exact, preserves existing balances, emits zero movement/capital/WAC effect and leaves FBO/WB/six-stage aggregation unchanged."
 ---
 
 # 1. Active warehouse contract
@@ -174,7 +174,7 @@ and all calculation consumers are unchanged. A historical exact-date request
 is never overlaid from the current planning snapshot. Missing per-SKU physical
 FBS evidence remains unavailable and is never synthesized as zero.
 
-Migration 159 closes the current-state coverage gap at the registry boundary.
+Migration 160 closes the current-state coverage gap at the registry boundary.
 Every active facility × active stock-managed SKU is applicable to FBS by
 default, unless an immutable dated exception says otherwise. New facility/SKU
 activation is staged inactive, covered by the existing `pool_inventory`

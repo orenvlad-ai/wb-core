@@ -154,7 +154,7 @@ def main() -> int:
                     f'[data-cell-date="{CURRENT_DATE}"]'
                 )
             ).to_have_text("30")
-            # The missing row belongs to an inactive facility. Migration 159
+            # The missing row belongs to an inactive facility. Migration 160
             # retains that physical/history evidence but excludes it from the
             # current operand instead of publishing a false partial warning.
             expect(
