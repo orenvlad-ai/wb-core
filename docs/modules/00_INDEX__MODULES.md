@@ -271,6 +271,7 @@ update_note: "Обновлён through module 52: compact typed inventory histor
 | `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/ui-first-xlsx` | Single-SKU Decimal profitability report with versioned server-owned settings, indexed Finance projection, root/nested accepted ads, on-screen preview and source-digest-bound light XLSX; no active finalization/ZIP/raw export |
 | `51_MODULE__WAREHOUSE_RECOVERY_POLICY.md` | `warehouse_recovery_policy` | `warehouse/recovery/control-plane` | Central T0/T1/T2/T3 recovery, capacity, retention and query-only operator status contract |
 | `52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md` | `web_vitrina_inventory_history` | `web-vitrina/runtime-history` | Compact typed TOTAL/SKU WB+FBS history, closed-day supersession, partial numeric totals and owner-gated historical backfill |
+| `53_MODULE__SKU_INVENTORY_BALANCE.md` | `sku_inventory_balance` | `web/operator/sku-decisions` | Immutable `Управление SKU → Баланс запасов`: conservative pacing, old CPM/new CPC exact targets, separate manual overrides, primary `Решения` XLSX and durable dry-run-only apply jobs with live WB fail closed |
 
 # 5. Как эта папка используется дальше
 

@@ -4219,6 +4219,19 @@
     .sku-management-table td.wrap { white-space: normal; max-width: 280px; }
     .sku-management-table td.sku-cell-number { text-align: right; font-variant-numeric: tabular-nums; }
     .sku-management-table .sku-cell-truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inventory-balance-table { min-width: 2100px; }
+    .inventory-balance-campaign { min-width: 340px; padding: 6px 0; border-bottom: 1px solid var(--border); white-space: normal; }
+    .inventory-balance-campaign:last-child { border-bottom: 0; }
+    .inventory-balance-progress { margin-top: 12px; }
+    .inventory-balance-progress-meter { display:flex; align-items:center; gap:10px; margin:10px 0; }
+    .inventory-balance-progress-track { flex:1; height:12px; overflow:hidden; border-radius:999px; background:#10141a; border:1px solid var(--border-strong); }
+    .inventory-balance-progress-fill { height:100%; width:0; background:linear-gradient(90deg,#4786ff,#55c6a9); transition:width .25s ease; }
+    .inventory-balance-progress[data-state="completed"] .inventory-balance-progress-fill { background:#46b978; }
+    .inventory-balance-progress[data-state="completed_with_errors"] .inventory-balance-progress-fill { background:#d85f5f; }
+    .inventory-balance-progress-spinner { width:16px; height:16px; border-radius:50%; border:2px solid rgba(255,255,255,.2); border-top-color:#78a6ff; animation:inventory-balance-spin .8s linear infinite; }
+    .inventory-balance-progress:not([data-state="pending"]):not([data-state="running"]) .inventory-balance-progress-spinner { display:none; }
+    @keyframes inventory-balance-spin { to { transform:rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .inventory-balance-progress-spinner { animation:none; } .inventory-balance-progress-fill { transition:none; } }
     .sku-nearest-inbound { display: grid; gap: 2px; min-width: 0; }
     .sku-nearest-inbound strong, .sku-nearest-inbound span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sku-risk { display: inline-flex; border-radius: 999px; padding: 3px 8px; font-size: 12px; }
@@ -6519,6 +6532,11 @@
 
     <section class="unified-tab-panel" data-unified-tab-panel="sku-management" hidden>
       <section class="panel sku-management-panel" data-sku-management-panel>
+        <div class="research-section-tabs" role="tablist" aria-label="Подразделы управления SKU">
+          <button class="research-section-tab is-active" type="button" data-sku-management-subtab="general" role="tab" aria-selected="true">Общее</button>
+          <button class="research-section-tab" type="button" data-sku-management-subtab="inventory-balance" role="tab" aria-selected="false">Баланс запасов</button>
+        </div>
+        <section data-sku-management-subpanel="general">
         <div class="sku-management-toolbar">
           <div>
             <h2>Управление SKU</h2>
@@ -6563,6 +6581,51 @@
           <div class="sku-management-table-shell" style="max-height:360px;margin-top:10px"><table class="sku-management-table" style="min-width:1200px"><thead><tr><th>Время</th><th>SKU</th><th>Параметр</th><th>Старое → новое</th><th>Δ</th><th>Campaign / placement</th><th>Пользователь</th><th>Warnings / override</th><th>Статус / readback</th></tr></thead><tbody data-sku-history-body><tr><td colspan="9">История не загружена.</td></tr></tbody></table></div>
           <div class="research-actions" style="margin-top:8px"><button class="button secondary" type="button" data-sku-history-prev>Назад</button><span data-sku-history-page>1</span><button class="button secondary" type="button" data-sku-history-next>Далее</button></div>
         </details>
+        </section>
+        <section data-sku-management-subpanel="inventory-balance" hidden>
+          <div class="sku-management-toolbar">
+            <div>
+              <h2>Баланс запасов</h2>
+              <p class="panel-meta">Immutable расчёт темпа и ставок по SKU. Применение в этом контуре — только dry-run без WB PATCH.</p>
+            </div>
+            <div class="research-actions">
+              <button class="button secondary" type="button" data-inventory-balance-refresh>Обновить</button>
+              <button class="button primary" type="button" data-inventory-balance-calculate>Новый расчёт</button>
+              <button class="button secondary" type="button" data-inventory-balance-xlsx disabled>Скачать XLSX</button>
+            </div>
+          </div>
+          <details class="sku-management-settings" data-inventory-balance-settings>
+            <summary>Настройки расчёта и колонок</summary>
+            <div class="sku-management-settings-grid" style="margin-top:10px">
+              <label class="research-field"><span>Коэффициент WB</span><input class="input" type="number" min="0" max="1" step="0.05" data-inventory-balance-setting="wb_confidence_coefficient"></label>
+              <label class="research-field"><span>Страховой запас, дней</span><input class="input" type="number" min="0" max="120" data-inventory-balance-setting="safety_stock_days"></label>
+              <label class="research-field"><span>Период продаж, дней</span><select class="input" data-inventory-balance-setting="sales_period_days"><option>7</option><option>14</option><option>30</option><option>60</option></select></label>
+              <label class="research-field"><span>Пресет</span><select class="input" data-inventory-balance-preset><option value="all">Все</option><option value="deficit">Дефицит</option><option value="excess">Переизбыток</option><option value="actionable">Можно применить</option></select></label>
+            </div>
+            <div class="sku-column-controls" data-inventory-balance-column-controls style="margin-top:10px"></div>
+            <div class="research-actions" style="margin-top:10px"><button class="button primary" type="button" data-inventory-balance-settings-save>Сохранить на сервере</button></div>
+          </details>
+          <div class="sku-management-filters">
+            <label class="research-field"><span>SKU / nmID / название</span><input class="input" type="search" data-inventory-balance-search></label>
+            <button class="button secondary" type="button" data-inventory-balance-select-all>Выбрать все доступные</button>
+            <button class="button danger" type="button" data-inventory-balance-apply disabled>Проверить применение</button>
+          </div>
+          <p class="sku-management-status" data-inventory-balance-status>Расчёт ещё не загружен.</p>
+          <p class="research-error" data-inventory-balance-error></p>
+          <div class="sku-management-table-shell">
+            <table class="sku-management-table inventory-balance-table" data-inventory-balance-table><thead data-inventory-balance-head></thead><tbody data-inventory-balance-body><tr><td>Откройте подраздел для загрузки.</td></tr></tbody></table>
+          </div>
+          <section class="sku-management-history inventory-balance-progress" data-inventory-balance-progress hidden>
+            <div class="sku-management-toolbar"><h3>Прогресс dry-run</h3><button class="button secondary" type="button" data-inventory-balance-progress-resume hidden>Продолжить dry-run</button></div>
+            <p data-inventory-balance-progress-summary></p>
+            <div class="inventory-balance-progress-meter" role="progressbar" aria-label="Прогресс dry-run" aria-valuemin="0" aria-valuemax="100" data-inventory-balance-progress-meter><span class="inventory-balance-progress-spinner" aria-hidden="true"></span><div class="inventory-balance-progress-track"><div class="inventory-balance-progress-fill" data-inventory-balance-progress-fill></div></div></div>
+            <div class="sku-management-table-shell" style="max-height:300px"><table class="sku-management-table" style="min-width:900px"><thead><tr><th>nmID</th><th>Состояние строки</th><th>Целей</th></tr></thead><tbody data-inventory-balance-progress-body></tbody></table></div>
+          </section>
+          <section class="sku-management-history" data-inventory-balance-registry style="margin-top:12px">
+            <h3>Реестр расчётов и протоколов применения</h3>
+            <div class="sku-management-table-shell" style="max-height:360px"><table class="sku-management-table" style="min-width:1200px"><thead><tr><th>Расчёт</th><th>Создан</th><th>Автор</th><th>Предыдущий</th><th>SKU</th><th>Протоколы</th><th>Связанные apply jobs</th></tr></thead><tbody data-inventory-balance-registry-body><tr><td colspan="7">Реестр ещё не загружен.</td></tr></tbody></table></div>
+          </section>
+        </section>
       </section>
     </section>
 
@@ -6772,6 +6835,14 @@
       <div class="ads-modal-head"><h3 class="ads-modal-title" id="sku-management-modal-title" data-sku-modal-title>Подтверждение изменения SKU</h3><button class="button ghost" type="button" data-sku-modal-cancel>Закрыть</button></div>
       <div data-sku-modal-body></div>
       <div class="ads-modal-actions"><button class="button secondary" type="button" data-sku-modal-cancel data-sku-modal-secondary>Отменить</button><button class="button danger" type="button" data-sku-modal-confirm disabled>Изменить</button></div>
+    </section>
+  </div>
+
+  <div class="sku-management-modal-backdrop operator-modal-backdrop" data-inventory-balance-confirm hidden>
+    <section class="sku-management-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="inventory-balance-confirm-title">
+      <div class="ads-modal-head"><h3 class="ads-modal-title" id="inventory-balance-confirm-title">Подтверждение dry-run</h3><button class="button ghost" type="button" data-inventory-balance-confirm-close>Закрыть</button></div>
+      <div data-inventory-balance-confirm-body></div>
+      <div class="ads-modal-actions"><button class="button secondary" type="button" data-inventory-balance-confirm-close>Отмена</button><button class="button danger" type="button" data-inventory-balance-confirm-start>Запустить dry-run</button></div>
     </section>
   </div>
 
@@ -7181,6 +7252,29 @@
     const skuManagementModalTitleNode = document.querySelector("[data-sku-modal-title]");
     const skuManagementModalSecondaryButton = document.querySelector("[data-sku-modal-secondary]");
     const skuManagementModalConfirmButton = document.querySelector("[data-sku-modal-confirm]");
+    const skuManagementSubtabButtons = Array.from(document.querySelectorAll("[data-sku-management-subtab]"));
+    const skuManagementSubpanels = Array.from(document.querySelectorAll("[data-sku-management-subpanel]"));
+    const inventoryBalanceRefreshButton = document.querySelector("[data-inventory-balance-refresh]");
+    const inventoryBalanceCalculateButton = document.querySelector("[data-inventory-balance-calculate]");
+    const inventoryBalanceXlsxButton = document.querySelector("[data-inventory-balance-xlsx]");
+    const inventoryBalanceSettingsSaveButton = document.querySelector("[data-inventory-balance-settings-save]");
+    const inventoryBalanceSelectAllButton = document.querySelector("[data-inventory-balance-select-all]");
+    const inventoryBalanceApplyButton = document.querySelector("[data-inventory-balance-apply]");
+    const inventoryBalanceStatusNode = document.querySelector("[data-inventory-balance-status]");
+    const inventoryBalanceErrorNode = document.querySelector("[data-inventory-balance-error]");
+    const inventoryBalanceHeadNode = document.querySelector("[data-inventory-balance-head]");
+    const inventoryBalanceBodyNode = document.querySelector("[data-inventory-balance-body]");
+    const inventoryBalanceColumnControlsNode = document.querySelector("[data-inventory-balance-column-controls]");
+    const inventoryBalanceProgressNode = document.querySelector("[data-inventory-balance-progress]");
+    const inventoryBalanceProgressSummaryNode = document.querySelector("[data-inventory-balance-progress-summary]");
+    const inventoryBalanceProgressBodyNode = document.querySelector("[data-inventory-balance-progress-body]");
+    const inventoryBalanceProgressResumeButton = document.querySelector("[data-inventory-balance-progress-resume]");
+    const inventoryBalanceProgressMeterNode = document.querySelector("[data-inventory-balance-progress-meter]");
+    const inventoryBalanceProgressFillNode = document.querySelector("[data-inventory-balance-progress-fill]");
+    const inventoryBalanceRegistryBodyNode = document.querySelector("[data-inventory-balance-registry-body]");
+    const inventoryBalanceConfirmNode = document.querySelector("[data-inventory-balance-confirm]");
+    const inventoryBalanceConfirmBodyNode = document.querySelector("[data-inventory-balance-confirm-body]");
+    const inventoryBalanceConfirmStartButton = document.querySelector("[data-inventory-balance-confirm-start]");
     const pricesSubtabButtons = Array.from(document.querySelectorAll("[data-prices-subtab]"));
     const pricesSubpanels = Array.from(document.querySelectorAll("[data-prices-subpanel]"));
     const sppTestNmSelect = document.querySelector("[data-spp-test-nm]");
@@ -7394,6 +7488,17 @@
     ];
     const SKU_MANAGEMENT_DEFAULT_COLUMNS = SKU_MANAGEMENT_COLUMNS.map(function(item){ return item.id; });
     const SKU_MANAGEMENT_MANDATORY_COLUMNS = ["product"];
+    const INVENTORY_BALANCE_COLUMNS = [
+      {id:"select",label:"Выбор",width:72}, {id:"product",label:"Название / nmID",width:240},
+      {id:"status",label:"Статус",width:120}, {id:"known_stock_units",label:"Известный запас",width:130},
+      {id:"current_daily_sales",label:"Продажи/день",width:120}, {id:"target_daily_sales",label:"Целевой темп",width:120},
+      {id:"pace_change_pct",label:"Изменение темпа",width:130}, {id:"days_cover",label:"Дней запаса",width:110},
+      {id:"bottleneck_date",label:"Узкая дата",width:120}, {id:"next_inbound",label:"Следующая поставка",width:180},
+      {id:"subsequent_inbound",label:"Последующая поставка",width:180}, {id:"new_cpc_campaigns",label:"Новые CPC",width:380},
+      {id:"old_cpm_campaigns",label:"Старые CPM",width:380}, {id:"quality",label:"Качество",width:240}
+    ];
+    const INVENTORY_BALANCE_COLUMN_IDS = INVENTORY_BALANCE_COLUMNS.map(function(item){return item.id;});
+    const INVENTORY_BALANCE_MANDATORY_COLUMNS = ["select","product"];
     const RESEARCH_UNIFIED_TAB = "research";
     const INSTRUCTIONS_UNIFIED_TAB = "instructions";
     const SETTINGS_UNIFIED_TAB = "settings";
@@ -7878,6 +7983,24 @@
         historyTotal: 0,
         historyLimit: 50
       },
+      inventoryBalance: {
+        activeSubtab: "general",
+        loading: false,
+        calculating: false,
+        saving: false,
+        loaded: false,
+        settings: null,
+        revision: 0,
+        table: {visible_columns:[],column_order:[],column_widths:{},filters:{},preset:"all"},
+        calculation: null,
+        selectedNmIds: new Set(),
+        overrideSaving: new Set(),
+        applyJob: null,
+        registry: {items:[]},
+        registryLoading: false,
+        applyRunning: false,
+        error: ""
+      },
       sessionHighlights: {}
     };
     let sellerRecoveryPollHandle = null;
@@ -7953,6 +8076,21 @@
     if (skuManagementHistoryNextButton) skuManagementHistoryNextButton.addEventListener("click", function(){ if(state.skuManagement.historyOffset+state.skuManagement.historyLimit<state.skuManagement.historyTotal){state.skuManagement.historyOffset+=state.skuManagement.historyLimit;loadSkuManagementHistory({force:true});} });
     if (skuManagementModalNode) skuManagementModalNode.addEventListener("click", handleSkuManagementModalClick);
     if (skuManagementModalConfirmButton) skuManagementModalConfirmButton.addEventListener("click", handleSkuManagementModalPrimaryAction);
+    skuManagementSubtabButtons.forEach(function(button){button.addEventListener("click",function(){activateSkuManagementSubtab(button.getAttribute("data-sku-management-subtab"));});});
+    if (inventoryBalanceRefreshButton) inventoryBalanceRefreshButton.addEventListener("click",function(){loadInventoryBalance({force:true});});
+    if (inventoryBalanceCalculateButton) inventoryBalanceCalculateButton.addEventListener("click",calculateInventoryBalance);
+    if (inventoryBalanceXlsxButton) inventoryBalanceXlsxButton.addEventListener("click",downloadInventoryBalanceXlsx);
+    if (inventoryBalanceSettingsSaveButton) inventoryBalanceSettingsSaveButton.addEventListener("click",saveInventoryBalanceSettings);
+    if (inventoryBalanceSelectAllButton) inventoryBalanceSelectAllButton.addEventListener("click",selectAllAvailableInventoryBalanceRows);
+    if (inventoryBalanceApplyButton) inventoryBalanceApplyButton.addEventListener("click",openInventoryBalanceConfirmation);
+    if (inventoryBalanceConfirmStartButton) inventoryBalanceConfirmStartButton.addEventListener("click",startInventoryBalanceApply);
+    if (inventoryBalanceProgressResumeButton) inventoryBalanceProgressResumeButton.addEventListener("click",resumeLoadedInventoryBalanceApply);
+    document.querySelectorAll("[data-inventory-balance-confirm-close]").forEach(function(node){node.addEventListener("click",closeInventoryBalanceConfirmation);});
+    if (skuManagementPanelNode) {
+      skuManagementPanelNode.addEventListener("input",handleInventoryBalanceInput);
+      skuManagementPanelNode.addEventListener("change",handleInventoryBalanceInput);
+      skuManagementPanelNode.addEventListener("click",handleInventoryBalanceClick);
+    }
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
@@ -23633,6 +23771,105 @@
       }
       return normalized || "—";
     }
+
+    function activateSkuManagementSubtab(name) {
+      const normalized=name==="inventory-balance"?"inventory-balance":"general";
+      state.inventoryBalance.activeSubtab=normalized;
+      skuManagementSubtabButtons.forEach(function(button){const active=button.getAttribute("data-sku-management-subtab")===normalized;button.classList.toggle("is-active",active);button.setAttribute("aria-selected",active?"true":"false");});
+      skuManagementSubpanels.forEach(function(panel){panel.hidden=panel.getAttribute("data-sku-management-subpanel")!==normalized;});
+      if(normalized==="inventory-balance")loadInventoryBalance();else ensureSkuManagementLoaded();
+    }
+
+    function normalizeInventoryBalanceTable(raw) {
+      const source=raw&&typeof raw==="object"?raw:{};const allowed=new Set(INVENTORY_BALANCE_COLUMN_IDS);const order=[];
+      (Array.isArray(source.column_order)?source.column_order:[]).forEach(function(id){id=String(id||"");if(allowed.has(id)&&!order.includes(id))order.push(id);});
+      INVENTORY_BALANCE_COLUMN_IDS.forEach(function(id){if(!order.includes(id))order.push(id);});
+      INVENTORY_BALANCE_MANDATORY_COLUMNS.slice().reverse().forEach(function(id){const index=order.indexOf(id);if(index>=0)order.splice(index,1);order.unshift(id);});
+      let visible=(Array.isArray(source.visible_columns)&&source.visible_columns.length?source.visible_columns:INVENTORY_BALANCE_COLUMN_IDS).map(String).filter(function(id,index,items){return allowed.has(id)&&items.indexOf(id)===index;});
+      INVENTORY_BALANCE_MANDATORY_COLUMNS.slice().reverse().forEach(function(id){if(!visible.includes(id))visible.unshift(id);});
+      const widths={};Object.entries(source.column_widths||{}).forEach(function(entry){if(allowed.has(entry[0])&&Number.isFinite(Number(entry[1])))widths[entry[0]]=Math.min(600,Math.max(60,Number(entry[1])));});
+      const preset=["all","deficit","excess","actionable"].includes(String(source.preset||""))?String(source.preset):"all";
+      return {visible_columns:visible,column_order:order,column_widths:widths,filters:{search:String((source.filters||{}).search||"").slice(0,200),status:String((source.filters||{}).status||"")},preset:preset};
+    }
+
+    async function loadInventoryBalance(options) {
+      if(state.inventoryBalance.loading||(state.inventoryBalance.loaded&&!(options&&options.force)))return;
+      state.inventoryBalance.loading=true;state.inventoryBalance.error="";renderInventoryBalance();
+      try{
+        const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_path,{headers:{"Accept":"application/json"}});
+        const payload=await readJsonResponse(response,"non-json inventory balance response");
+        if(!response.ok)throw new Error((payload&&payload.error)||("inventory balance route returned "+response.status));
+        const settings=payload.settings||{};state.inventoryBalance.settings=settings.calculation||{};state.inventoryBalance.revision=Number(settings.revision||0);state.inventoryBalance.table=normalizeInventoryBalanceTable(settings.table||{});state.inventoryBalance.calculation=payload.calculation||null;state.inventoryBalance.applyJob=payload.apply_job||state.inventoryBalance.applyJob;state.inventoryBalance.registry=payload.registry||{items:[]};state.inventoryBalance.loaded=true;
+        const available=new Set((state.inventoryBalance.calculation&&state.inventoryBalance.calculation.rows||[]).filter(function(row){return row.select_available;}).map(function(row){return Number(row.nm_id);}));
+        state.inventoryBalance.selectedNmIds=new Set(Array.from(state.inventoryBalance.selectedNmIds).filter(function(id){return available.has(Number(id));}));
+        syncInventoryBalanceInputs();
+      }catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.loading=false;renderInventoryBalance();}
+    }
+
+    function syncInventoryBalanceInputs(){
+      const settings=state.inventoryBalance.settings||{};document.querySelectorAll("[data-inventory-balance-setting]").forEach(function(node){const key=node.getAttribute("data-inventory-balance-setting");if(Object.prototype.hasOwnProperty.call(settings,key))node.value=settings[key];});
+      const presetNode=document.querySelector("[data-inventory-balance-preset]");if(presetNode)presetNode.value=state.inventoryBalance.table.preset||"all";
+      const searchNode=document.querySelector("[data-inventory-balance-search]");if(searchNode)searchNode.value=String((state.inventoryBalance.table.filters||{}).search||"");
+    }
+
+    function inventoryBalanceSettingsFromInputs(){const result={};document.querySelectorAll("[data-inventory-balance-setting]").forEach(function(node){result[node.getAttribute("data-inventory-balance-setting")]=Number(node.value);});return result;}
+
+    async function loadInventoryBalanceRegistry(){if(state.inventoryBalance.registryLoading)return;state.inventoryBalance.registryLoading=true;try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_calculations_path+"?limit=20",{headers:{"Accept":"application/json"}});const payload=await readJsonResponse(response,"non-json inventory balance registry response");if(!response.ok)throw new Error((payload&&payload.error)||("registry route returned "+response.status));state.inventoryBalance.registry=payload||{items:[]};}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.registryLoading=false;renderInventoryBalanceRegistry();}}
+
+    async function saveInventoryBalanceSettings(){
+      if(state.inventoryBalance.saving)return;state.inventoryBalance.saving=true;state.inventoryBalance.error="";renderInventoryBalance();
+      try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_settings_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.inventoryBalance.revision,calculation:inventoryBalanceSettingsFromInputs(),table:state.inventoryBalance.table})});const payload=await readJsonResponse(response,"non-json inventory balance settings response");if(!response.ok)throw new Error((payload&&payload.error)||("settings route returned "+response.status));state.inventoryBalance.settings=payload.calculation||state.inventoryBalance.settings;state.inventoryBalance.table=normalizeInventoryBalanceTable(payload.table||state.inventoryBalance.table);state.inventoryBalance.revision=Number(payload.revision||state.inventoryBalance.revision);syncInventoryBalanceInputs();}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.saving=false;renderInventoryBalance();}
+    }
+
+    async function calculateInventoryBalance(){
+      if(state.inventoryBalance.calculating)return;state.inventoryBalance.calculating=true;state.inventoryBalance.error="";renderInventoryBalance();
+      try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_calculate_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({calculation:inventoryBalanceSettingsFromInputs()})});const payload=await readJsonResponse(response,"non-json inventory balance calculation response");if(!response.ok)throw new Error((payload&&payload.error)||("calculation route returned "+response.status));state.inventoryBalance.calculation=payload;state.inventoryBalance.selectedNmIds=new Set();await loadInventoryBalanceRegistry();}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.calculating=false;renderInventoryBalance();}
+    }
+
+    function inventoryBalanceOrderedColumns(){const byId=new Map(INVENTORY_BALANCE_COLUMNS.map(function(item){return [item.id,item];}));return (state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS).filter(function(id){return (state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS).includes(id)&&byId.has(id);}).map(function(id){return byId.get(id);});}
+
+    function inventoryBalanceFilteredRows(){const calculation=state.inventoryBalance.calculation||{};let rows=Array.isArray(calculation.rows)?calculation.rows.slice():[];const table=state.inventoryBalance.table||{};const search=String((table.filters||{}).search||"").trim().toLocaleLowerCase("ru");if(search)rows=rows.filter(function(row){return [row.name,row.nm_id,row.our_sku].join(" ").toLocaleLowerCase("ru").includes(search);});if(table.preset==="deficit")rows=rows.filter(function(row){return row.status==="Дефицит";});if(table.preset==="excess")rows=rows.filter(function(row){return row.status==="Переизбыток";});if(table.preset==="actionable")rows=rows.filter(function(row){return !!row.select_available;});return rows;}
+
+    function inventoryBalanceCampaignHtml(items){if(!Array.isArray(items)||!items.length)return "—";return items.map(function(item){const cpo=item.cpo_rub==null?"CPO —":"CPO "+formatNumber(Number(item.cpo_rub),2,true)+" ₽";const calculated=item.calculated_target_bid_rub==null?"—":item.calculated_target_bid_rub;const manual=item.manual_target_bid_rub==null?"":item.manual_target_bid_rub;const disabled=item.identity_valid&&item.manual_override_allowed&&item.current_bid_rub!=null?"":"disabled";return '<div class="inventory-balance-campaign" data-inventory-balance-target-row="'+escapeHtml(item.target_key)+'"><strong>'+escapeHtml(item.advert_id)+' · '+escapeHtml(item.campaign_name||"Без названия")+'</strong><br><span class="panel-meta">'+escapeHtml(cpo)+' · '+escapeHtml(item.placement||"—")+'</span><br><span class="panel-meta">'+escapeHtml(item.allocation_action||"hold")+' · evidence '+escapeHtml(item.recommendation_quality||"unknown")+'</span><br><span>'+escapeHtml(item.current_bid_rub==null?"—":item.current_bid_rub)+' → расчёт '+escapeHtml(calculated)+' → финал '+escapeHtml(item.final_target_bid_rub==null?"—":item.final_target_bid_rub)+' ₽</span><label class="panel-meta"> Ручная цель <input class="input" style="width:100px;display:inline-block" type="number" min="0.01" step="0.01" value="'+escapeHtml(manual)+'" data-inventory-balance-override="'+escapeHtml(item.target_key)+'" '+disabled+'></label></div>';}).join("");}
+
+    function inventoryBalanceCell(id,row){const td=function(value,className){return '<td'+(className?' class="'+className+'"':'')+'>'+value+'</td>';};if(id==="select")return td('<input type="checkbox" data-inventory-balance-select="'+escapeHtml(row.nm_id)+'" '+(state.inventoryBalance.selectedNmIds.has(Number(row.nm_id))?'checked ':'')+(row.select_available?'':'disabled ')+'aria-label="Выбрать SKU '+escapeHtml(row.nm_id)+'">');if(id==="product")return td('<strong>'+escapeHtml(row.name||"SKU")+'</strong><br><span class="panel-meta">nmID '+escapeHtml(row.nm_id)+'</span>',"sku-product-column");if(id==="status")return td(escapeHtml(row.status||"—"));if(id==="known_stock_units"||id==="current_daily_sales"||id==="target_daily_sales"||id==="days_cover")return td(escapeHtml(row[id]==null?"—":formatNumber(Number(row[id]),2,true)),"sku-cell-number");if(id==="pace_change_pct")return td(escapeHtml(row[id]==null?"—":formatNumber(Number(row[id]),2,true)+"%"),"sku-cell-number");if(id==="bottleneck_date")return td(escapeHtml(formatSkuInboundDate(row[id])||"—"));if(id==="next_inbound"||id==="subsequent_inbound"){const item=row[id]||{};return td(item.date?escapeHtml(formatSkuInboundDate(item.date)+" · "+formatNumber(Number(item.quantity||0),0,true)+" шт."):"—");}if(id==="new_cpc_campaigns"||id==="old_cpm_campaigns")return td(inventoryBalanceCampaignHtml(row[id]),"wrap");if(id==="quality")return td('<span>'+escapeHtml(row.quality||"—")+'</span><br><span class="panel-meta">'+escapeHtml((row.quality_warnings||[]).join("; ")||"без предупреждений")+'</span>',"wrap");return td("—");}
+
+    function renderInventoryBalance(){
+      if(!inventoryBalanceBodyNode)return;const columns=inventoryBalanceOrderedColumns();const calculation=state.inventoryBalance.calculation;
+      if(inventoryBalanceHeadNode)inventoryBalanceHeadNode.innerHTML="<tr>"+columns.map(function(column){const width=Number((state.inventoryBalance.table.column_widths||{})[column.id]||column.width||120);return '<th data-inventory-balance-column="'+escapeHtml(column.id)+'" style="width:'+width+'px;min-width:'+width+'px">'+escapeHtml(column.label)+'</th>';}).join("")+"</tr>";
+      if(state.inventoryBalance.loading||state.inventoryBalance.calculating){inventoryBalanceBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">'+(state.inventoryBalance.calculating?"Формируем immutable расчёт…":"Загрузка…")+'</td></tr>';}else{const rows=inventoryBalanceFilteredRows();inventoryBalanceBodyNode.innerHTML=rows.length?rows.map(function(row){return '<tr data-inventory-balance-nm-id="'+escapeHtml(row.nm_id)+'">'+columns.map(function(column){return inventoryBalanceCell(column.id,row);}).join("")+"</tr>";}).join(""):'<tr><td colspan="'+columns.length+'">'+(calculation?"Нет строк по текущему фильтру.":"Нажмите «Новый расчёт».")+'</td></tr>';}
+      if(inventoryBalanceStatusNode){const count=calculation&&Array.isArray(calculation.rows)?calculation.rows.length:0;inventoryBalanceStatusNode.textContent=state.inventoryBalance.calculating?"Расчёт выполняется…":calculation?("Расчёт "+calculation.calculation_id+" · SKU: "+count+" · выбрано: "+state.inventoryBalance.selectedNmIds.size+" · live WB недоступен"):"Расчёт ещё не создан.";}
+      if(inventoryBalanceErrorNode)inventoryBalanceErrorNode.textContent=state.inventoryBalance.error||"";if(inventoryBalanceXlsxButton)inventoryBalanceXlsxButton.disabled=!calculation;if(inventoryBalanceApplyButton)inventoryBalanceApplyButton.disabled=!calculation||!state.inventoryBalance.selectedNmIds.size||state.inventoryBalance.applyRunning;
+      renderInventoryBalanceColumnControls();renderInventoryBalanceProgress();renderInventoryBalanceRegistry();
+    }
+
+    function renderInventoryBalanceColumnControls(){if(!inventoryBalanceColumnControlsNode)return;const visible=new Set(state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS);const order=state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS;inventoryBalanceColumnControlsNode.innerHTML=order.map(function(id,index){const column=INVENTORY_BALANCE_COLUMNS.find(function(item){return item.id===id;});if(!column)return "";const mandatory=INVENTORY_BALANCE_MANDATORY_COLUMNS.includes(id);const width=Number((state.inventoryBalance.table.column_widths||{})[id]||column.width||120);return '<div class="sku-column-row"><label><input type="checkbox" data-inventory-balance-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked ":"")+(mandatory?"disabled ":"")+'> '+escapeHtml(column.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-inventory-balance-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-inventory-balance-column-up="'+escapeHtml(id)+'" '+(mandatory||index===0?"disabled":"")+'>↑</button><button class="button ghost" type="button" data-inventory-balance-column-down="'+escapeHtml(id)+'" '+(mandatory||index===order.length-1?"disabled":"")+'>↓</button></div>';}).join("");}
+
+    function handleInventoryBalanceInput(event){const target=event.target;if(!target)return;if(target.matches("[data-inventory-balance-search]")){state.inventoryBalance.table.filters.search=String(target.value||"").slice(0,200);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-preset]")){state.inventoryBalance.table.preset=String(target.value||"all");renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-select]")){const id=Number(target.getAttribute("data-inventory-balance-select"));target.checked?state.inventoryBalance.selectedNmIds.add(id):state.inventoryBalance.selectedNmIds.delete(id);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-column-visible]")){const id=target.getAttribute("data-inventory-balance-column-visible");const visible=new Set(state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS);target.checked?visible.add(id):visible.delete(id);INVENTORY_BALANCE_MANDATORY_COLUMNS.forEach(function(key){visible.add(key);});state.inventoryBalance.table.visible_columns=Array.from(visible);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-column-width]")){const id=target.getAttribute("data-inventory-balance-column-width");state.inventoryBalance.table.column_widths[id]=Math.min(600,Math.max(60,Number(target.value)||120));renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-override]")&&event.type==="change")saveInventoryBalanceOverride(target.getAttribute("data-inventory-balance-override"),target.value);}
+
+    function handleInventoryBalanceClick(event){const up=event.target.closest("[data-inventory-balance-column-up]");const down=event.target.closest("[data-inventory-balance-column-down]");const control=up||down;if(!control)return;const id=control.getAttribute(up?"data-inventory-balance-column-up":"data-inventory-balance-column-down");const order=(state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS).slice();const index=order.indexOf(id);const next=up?index-1:index+1;if(index<0||next<INVENTORY_BALANCE_MANDATORY_COLUMNS.length||next>=order.length)return;order.splice(index,1);order.splice(next,0,id);state.inventoryBalance.table.column_order=order;renderInventoryBalance();}
+
+    async function saveInventoryBalanceOverride(targetKey,value){const calculation=state.inventoryBalance.calculation;if(!calculation||state.inventoryBalance.overrideSaving.has(targetKey))return;state.inventoryBalance.overrideSaving.add(targetKey);state.inventoryBalance.error="";try{const path=WEB_VITRINA_CONFIG.sku_inventory_balance_calculations_path+"/"+encodeURIComponent(calculation.calculation_id)+"/override";const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({target_key:targetKey,manual_target_bid_rub:value===""?null:Number(value)})});const payload=await readJsonResponse(response,"non-json override response");if(!response.ok)throw new Error((payload&&payload.error)||("override route returned "+response.status));state.inventoryBalance.calculation=payload;}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.overrideSaving.delete(targetKey);renderInventoryBalance();}}
+
+    function selectAllAvailableInventoryBalanceRows(){const rows=inventoryBalanceFilteredRows().filter(function(row){return row.select_available;});const allSelected=rows.length&&rows.every(function(row){return state.inventoryBalance.selectedNmIds.has(Number(row.nm_id));});rows.forEach(function(row){if(allSelected)state.inventoryBalance.selectedNmIds.delete(Number(row.nm_id));else state.inventoryBalance.selectedNmIds.add(Number(row.nm_id));});renderInventoryBalance();}
+
+    function selectedInventoryBalanceTargets(){const calculation=state.inventoryBalance.calculation||{};const targets=[];(calculation.rows||[]).forEach(function(row){if(!state.inventoryBalance.selectedNmIds.has(Number(row.nm_id)))return;(row.campaign_recommendations||[]).forEach(function(target){if(target.can_apply)targets.push(target);});});return targets;}
+
+    function openInventoryBalanceConfirmation(){const calculation=state.inventoryBalance.calculation;if(!calculation)return;const targets=selectedInventoryBalanceTargets();if(!targets.length){state.inventoryBalance.error="У выбранных строк нет доступных точных campaign targets.";renderInventoryBalance();return;}const increases=targets.filter(function(item){return Number(item.final_target_bid_rub)>Number(item.current_bid_rub);}).length;const decreases=targets.filter(function(item){return Number(item.final_target_bid_rub)<Number(item.current_bid_rub);}).length;if(inventoryBalanceConfirmBodyNode)inventoryBalanceConfirmBodyNode.innerHTML='<p><strong>Расчёт:</strong> '+escapeHtml(calculation.calculation_id)+'</p><p><strong>SKU:</strong> '+state.inventoryBalance.selectedNmIds.size+' · <strong>campaign targets:</strong> '+targets.length+'</p><p>Повышений: '+increases+' · понижений: '+decreases+'</p><div class="ads-danger-note"><strong>Безопасная граница:</strong> будет создан только durable dry-run job. Реальные WB PATCH недоступны.</div>';if(inventoryBalanceConfirmNode)inventoryBalanceConfirmNode.hidden=false;}
+
+    function closeInventoryBalanceConfirmation(){if(state.inventoryBalance.applyRunning)return;if(inventoryBalanceConfirmNode)inventoryBalanceConfirmNode.hidden=true;}
+
+    async function startInventoryBalanceApply(){const calculation=state.inventoryBalance.calculation;if(!calculation||state.inventoryBalance.applyRunning)return;state.inventoryBalance.applyRunning=true;state.inventoryBalance.error="";if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.disabled=true;try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_apply_jobs_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({calculation_id:calculation.calculation_id,nm_ids:Array.from(state.inventoryBalance.selectedNmIds),mode:"dry_run",confirmed:true})});const job=await readJsonResponse(response,"non-json apply job response");if(!response.ok)throw new Error((job&&job.error)||("apply job route returned "+response.status));await resumeInventoryBalanceApplyJob(job);}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.applyRunning=false;if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.disabled=false;if(inventoryBalanceConfirmNode)inventoryBalanceConfirmNode.hidden=true;renderInventoryBalance();}}
+
+    async function resumeInventoryBalanceApplyJob(initialJob){let job=initialJob;state.inventoryBalance.applyJob=job;renderInventoryBalance();let guard=0;while(["pending","running"].includes(String(job.state||""))&&guard<100){guard+=1;const resumePath=WEB_VITRINA_CONFIG.sku_inventory_balance_apply_jobs_path+"/"+encodeURIComponent(job.job_id)+"/resume";const resume=await fetch(resumePath,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({limit:5})});job=await readJsonResponse(resume,"non-json apply resume response");if(!resume.ok)throw new Error((job&&job.error)||("apply resume returned "+resume.status));state.inventoryBalance.applyJob=job;renderInventoryBalance();}await loadInventoryBalanceRegistry();return job;}
+
+    async function resumeLoadedInventoryBalanceApply(){const job=state.inventoryBalance.applyJob;if(!job||state.inventoryBalance.applyRunning||!["pending","running"].includes(String(job.state||"")))return;state.inventoryBalance.applyRunning=true;state.inventoryBalance.error="";renderInventoryBalance();try{await resumeInventoryBalanceApplyJob(job);}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.applyRunning=false;renderInventoryBalance();}}
+
+    function renderInventoryBalanceProgress(){if(!inventoryBalanceProgressNode)return;const job=state.inventoryBalance.applyJob;inventoryBalanceProgressNode.hidden=!job;if(!job)return;const stateName=String(job.state||"unknown");const percent=Math.min(100,Math.max(0,Number((job.progress||{}).percent)||0));inventoryBalanceProgressNode.setAttribute("data-state",stateName);if(inventoryBalanceProgressSummaryNode)inventoryBalanceProgressSummaryNode.textContent="Job "+job.job_id+" · "+stateName+" · "+job.progress.terminal+" / "+job.progress.total+" ("+percent+"%) · WB PATCH: нет";if(inventoryBalanceProgressMeterNode){inventoryBalanceProgressMeterNode.setAttribute("aria-valuenow",String(percent));inventoryBalanceProgressMeterNode.setAttribute("aria-valuetext",stateName+" "+percent+"%");}if(inventoryBalanceProgressFillNode)inventoryBalanceProgressFillNode.style.width=percent+"%";if(inventoryBalanceProgressBodyNode)inventoryBalanceProgressBodyNode.innerHTML=(job.sku_states||[]).map(function(row){return '<tr><td>'+escapeHtml(row.nm_id)+'</td><td>'+escapeHtml(row.state)+'</td><td>'+escapeHtml(row.target_count)+'</td></tr>';}).join("");if(inventoryBalanceProgressResumeButton){inventoryBalanceProgressResumeButton.hidden=!["pending","running"].includes(stateName);inventoryBalanceProgressResumeButton.disabled=state.inventoryBalance.applyRunning;}}
+
+    function renderInventoryBalanceRegistry(){if(!inventoryBalanceRegistryBodyNode)return;const entries=(state.inventoryBalance.registry&&state.inventoryBalance.registry.items)||[];inventoryBalanceRegistryBodyNode.innerHTML=entries.length?entries.map(function(entry){const protocols=(entry.apply_protocols||[]).map(function(item){return escapeHtml(item.protocol)+" · "+escapeHtml(item.mode)+(item.available===false?" · disabled":"");}).join("<br>")||"—";const jobs=(entry.apply_jobs||[]).map(function(job){return '<span data-inventory-balance-registry-job="'+escapeHtml(job.job_id)+'">'+escapeHtml(job.job_id)+' · '+escapeHtml(job.state)+' · '+escapeHtml(job.terminal_count)+'/'+escapeHtml(job.target_count)+'<br><span class="panel-meta">manifest '+escapeHtml(job.apply_manifest_digest||"—")+'</span></span>';}).join("<br>")||"—";return '<tr data-inventory-balance-registry-calculation="'+escapeHtml(entry.calculation_id)+'"><td>'+escapeHtml(entry.calculation_id)+'</td><td>'+escapeHtml(entry.created_at)+'</td><td>'+escapeHtml(entry.created_by)+'</td><td>'+escapeHtml(entry.previous_calculation_id||"—")+'</td><td>'+escapeHtml(entry.row_count)+'</td><td class="wrap">'+protocols+'</td><td class="wrap">'+jobs+'</td></tr>';}).join(""):'<tr><td colspan="7">Расчётов пока нет.</td></tr>';}
+
+    function downloadInventoryBalanceXlsx(){const calculation=state.inventoryBalance.calculation;if(!calculation)return;window.location.assign(WEB_VITRINA_CONFIG.sku_inventory_balance_calculations_path+"/"+encodeURIComponent(calculation.calculation_id)+"/xlsx");}
 
     function ensureSkuManagementLoaded() {
       if (!state.skuManagement.loaded && !state.skuManagement.loading) loadSkuManagement();

@@ -1038,6 +1038,8 @@ class SkuManagementBlock:
                 {
                     **sku,
                     **forecast,
+                    "stock_wb": item_evidence.get("stock_wb"),
+                    "stock_ff": item_evidence.get("stock_ff"),
                     "nearest_supplier_inbound": select_nearest_supplier_inbound(
                         item_evidence.get("supplier_inbounds", []),
                         as_of_date=str(item_evidence.get("as_of_date") or ""),
@@ -1115,6 +1117,231 @@ class SkuManagementBlock:
                 },
             },
         }
+
+    def build_inventory_balance_evidence(
+        self,
+        *,
+        user_key: str,
+        sales_period_days: int,
+    ) -> dict[str, Any]:
+        """Build the explicit all-fronts stock/demand/supplier read model."""
+
+        source = self.build_table(user_key=user_key)
+        rows = [dict(item) for item in source.get("rows") or []]
+        nm_ids = [int(item.get("nm_id") or 0) for item in rows if int(item.get("nm_id") or 0) > 0]
+        as_of_date = str(
+            ((source.get("meta") or {}).get("metric_policy") or {}).get("business_date")
+            or current_business_date_iso(self.now_factory())
+        )
+        period = int(sales_period_days)
+        lookup_days = sales_lookup_days(period)
+        demand_by_nm: dict[int, dict[str, Any]] = {}
+        if self.sales_history is None:
+            for nm_id in nm_ids:
+                demand_by_nm[nm_id] = {
+                    "daily_demand": None,
+                    "quality": "unknown",
+                    "warning": "sales history contour is unavailable",
+                }
+        else:
+            try:
+                samples = self.sales_history.load_order_count_samples_by_date(
+                    date_from=(date.fromisoformat(as_of_date) - timedelta(days=lookup_days)).isoformat(),
+                    date_to=(date.fromisoformat(as_of_date) - timedelta(days=1)).isoformat(),
+                    nm_ids=nm_ids,
+                    clamp_to_coverage=True,
+                )
+                for nm_id in nm_ids:
+                    sku_samples = list(samples.get(nm_id, []))
+                    if not sku_samples:
+                        demand_by_nm[nm_id] = {
+                            "daily_demand": None,
+                            "quality": "unknown",
+                            "warning": "authoritative sales history has no dated samples for this SKU",
+                        }
+                        continue
+                    estimate = estimate_availability_adjusted_demand(
+                        sku_samples,
+                        report_date=date.fromisoformat(as_of_date),
+                        sales_avg_period_days=period,
+                        sales_lookup_days=lookup_days,
+                    )
+                    demand_by_nm[nm_id] = {
+                        **asdict(estimate),
+                        "daily_demand": estimate.daily_demand_total,
+                        "quality": "partial" if estimate.demand_warning else "complete",
+                        "warning": estimate.demand_warning,
+                    }
+            except Exception as exc:
+                for nm_id in nm_ids:
+                    demand_by_nm[nm_id] = {
+                        "daily_demand": None,
+                        "quality": "unknown",
+                        "warning": f"sales history evidence error: {exc}",
+                    }
+        forecast_settings = validate_forecast_settings(
+            ((source.get("settings") or {}).get("forecast") or {})
+        )
+        supplier = self._inventory_balance_supplier_inbounds(
+            nm_ids=nm_ids,
+            as_of_date=as_of_date,
+            configured_fallback_days=forecast_settings.factory_to_ff_lead_days,
+        )
+        for row in rows:
+            nm_id = int(row.get("nm_id") or 0)
+            demand = demand_by_nm.get(nm_id) or {}
+            row["daily_demand"] = demand.get("daily_demand")
+            row["demand_evidence"] = demand
+            row["inventory_balance_as_of_date"] = as_of_date
+            row["inventory_balance_inbounds"] = list(
+                (supplier.get("by_nm_id") or {}).get(nm_id, [])
+            )
+            warning = str(demand.get("warning") or "")
+            if warning:
+                row["quality_warnings"] = list(row.get("quality_warnings") or []) + [warning]
+            if supplier.get("warnings"):
+                row["quality_warnings"] = list(row.get("quality_warnings") or []) + list(
+                    supplier.get("warnings") or []
+                )
+        result = dict(source)
+        result["rows"] = rows
+        result["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v1"
+        result["meta"] = {
+            **dict(source.get("meta") or {}),
+            "inventory_balance_evidence": {
+                "sales_period_days": period,
+                "sales_lookup_days": lookup_days,
+                "date_from": (date.fromisoformat(as_of_date) - timedelta(days=lookup_days)).isoformat(),
+                "date_to": (date.fromisoformat(as_of_date) - timedelta(days=1)).isoformat(),
+                "demand_mode": "availability_adjusted",
+                "supplier_eta": supplier.get("eta_evidence") or {},
+                "supplier_warnings": supplier.get("warnings") or [],
+            },
+        }
+        return result
+
+    def _inventory_balance_supplier_inbounds(
+        self,
+        *,
+        nm_ids: Sequence[int],
+        as_of_date: str,
+        configured_fallback_days: int,
+    ) -> dict[str, Any]:
+        wanted = {int(item) for item in nm_ids}
+        by_nm_id: dict[int, list[dict[str, Any]]] = {nm_id: [] for nm_id in wanted}
+        warnings: list[str] = []
+        try:
+            summaries = list(self.runtime.list_supplier_shipments())
+        except Exception as exc:
+            return {
+                "by_nm_id": by_nm_id,
+                "eta_evidence": {"quality": "unknown", "error": str(exc)},
+                "warnings": [f"supplier shipment evidence error: {exc}"],
+            }
+        loaded: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+        samples: list[dict[str, Any]] = []
+        for summary in summaries:
+            shipment_id = str(summary.get("shipment_id") or "")
+            try:
+                detail = self.runtime.load_supplier_shipment(shipment_id) or {}
+            except Exception as exc:
+                warnings.append(f"supplier shipment {shipment_id} evidence error: {exc}")
+                continue
+            header = dict(detail.get("header") or {})
+            loaded.append((summary, detail))
+            shipped = str(header.get("actual_shipment_date") or summary.get("actual_shipment_date") or "")[:10]
+            accepted = str(header.get("actual_ff_acceptance_date") or summary.get("actual_ff_acceptance_date") or "")[:10]
+            if _is_iso_date(shipped) and _is_iso_date(accepted):
+                lead_days = (date.fromisoformat(accepted) - date.fromisoformat(shipped)).days
+                if lead_days >= 0:
+                    samples.append(
+                        {
+                            "shipment_id": shipment_id,
+                            "actual_shipment_date": shipped,
+                            "actual_ff_acceptance_date": accepted,
+                            "lead_days": lead_days,
+                        }
+                    )
+        samples.sort(
+            key=lambda item: (item["actual_ff_acceptance_date"], item["shipment_id"]),
+            reverse=True,
+        )
+        selected_samples = samples[:4]
+        if len(selected_samples) >= 3:
+            exact_mean = sum(float(item["lead_days"]) for item in selected_samples) / len(selected_samples)
+            eta_days = int(Decimal(str(exact_mean)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            eta_quality = "complete"
+            eta_method = "empirical_last_completed_shipments"
+        else:
+            exact_mean = None
+            eta_days = int(configured_fallback_days)
+            eta_quality = "partial"
+            eta_method = "configured_fallback_insufficient_completed_samples"
+            warnings.append(
+                f"supplier ETA fallback: only {len(selected_samples)} completed samples; configured {eta_days} days used"
+            )
+        eta_evidence = {
+            "method": eta_method,
+            "quality": eta_quality,
+            "sample_count": len(selected_samples),
+            "samples": selected_samples,
+            "mean_days_exact": exact_mean,
+            "applied_days": eta_days,
+            "configured_fallback_days": int(configured_fallback_days),
+        }
+        today = date.fromisoformat(as_of_date)
+        for summary, detail in loaded:
+            header = dict(detail.get("header") or {})
+            shipment_id = str(summary.get("shipment_id") or "")
+            if str(header.get("actual_ff_acceptance_date") or summary.get("actual_ff_acceptance_date") or ""):
+                continue
+            status = str(header.get("order_status") or summary.get("order_status") or "")
+            if status not in {"production", "in_transit"}:
+                continue
+            actual_shipment = str(header.get("actual_shipment_date") or summary.get("actual_shipment_date") or "")[:10]
+            planned_shipment = str(
+                header.get("planned_shipment_date")
+                or header.get("shipment_date")
+                or summary.get("planned_shipment_date")
+                or summary.get("shipment_date")
+                or ""
+            )[:10]
+            base_date = actual_shipment if status == "in_transit" else planned_shipment
+            date_source = "actual_shipment_date" if status == "in_transit" else "planned_shipment_date"
+            if not _is_iso_date(base_date):
+                warnings.append(f"supplier shipment {shipment_id} has no exact {date_source}")
+                continue
+            eta = date.fromisoformat(base_date) + timedelta(days=eta_days)
+            if eta < today:
+                warnings.append(f"supplier shipment {shipment_id} ETA {eta.isoformat()} is overdue and excluded")
+                continue
+            quantity_by_nm: dict[int, float] = {}
+            for line in detail.get("lines") or []:
+                if str(line.get("line_type") or "product") != "product" or bool(line.get("manual_override")):
+                    continue
+                if str(line.get("match_status") or "") not in {
+                    MATCH_STATUS_MATCHED_BY_BARCODE,
+                }:
+                    continue
+                nm_id = _optional_int(line.get("internal_nm_id"))
+                quantity = _optional_float(line.get("qty"))
+                if nm_id in wanted and quantity is not None and quantity > 0:
+                    quantity_by_nm[nm_id] = quantity_by_nm.get(nm_id, 0.0) + quantity
+            for nm_id, quantity in quantity_by_nm.items():
+                by_nm_id[nm_id].append(
+                    {
+                        "date": eta.isoformat(),
+                        "quantity": round(quantity, 2),
+                        "source": "supplier_shipment",
+                        "source_id": f"{shipment_id}:{nm_id}",
+                        "district_key": "",
+                        "status": status,
+                        "date_source": date_source,
+                        "eta_quality": eta_quality,
+                        "consumes_current_ff": False,
+                    }
+                )
+        return {"by_nm_id": by_nm_id, "eta_evidence": eta_evidence, "warnings": warnings}
 
     def build_sku_detail(self, nm_id: int, *, user_key: str) -> dict[str, Any]:
         """Build the quick mutation read model without the forecast/table fanout."""
