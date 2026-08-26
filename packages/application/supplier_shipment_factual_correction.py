@@ -23,6 +23,10 @@ from packages.application.canonical_cost_engine import (
     ensure_canonical_cost_schema,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.supplier_financial_document_exact_policy import (
     AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY,
@@ -3058,6 +3062,11 @@ def _correction_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
+    admit_root_write(
+        owner="supplier_factual_date_correction",
+        destination=destination,
+        predicted_output_bytes=predict_sqlite_backup_bytes(source),
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         destination.unlink()
@@ -3079,6 +3088,11 @@ def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
 
 
 def _restore_backup_in_place(backup: Path, destination: Path) -> None:
+    admit_root_write(
+        owner="registry_operational_store",
+        destination=destination,
+        predicted_output_bytes=predict_sqlite_backup_bytes(backup),
+    )
     with closing(sqlite3.connect(backup)) as source_conn, closing(
         sqlite3.connect(destination, timeout=60)
     ) as destination_conn:

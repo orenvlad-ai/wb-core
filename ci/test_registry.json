@@ -39,6 +39,7 @@
         ["python3", "apps/user_artifact_xlsx_smoke.py"],
         ["python3", "apps/hosted_runtime_auth_preflight_smoke.py"],
         ["python3", "apps/hosted_runtime_transport_reconcile_smoke.py"],
+        ["python3", "apps/root_storage_policy_smoke.py"],
         ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"]
       ]
     },
@@ -247,6 +248,12 @@
       "id": "hosted-runtime-transport",
       "paths": ["apps/hosted_runtime_transport_reconcile.py"],
       "suites": ["release_safety"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "root-storage-policy",
+      "paths": ["apps/root_storage_policy*", "apps/promo_metric_eligibility_recompute.py", "apps/spp_metric_recompute.py", "apps/sqlite_failed_backup_cleanup_smoke.py", "apps/wb_autoanswers_activation.py", "packages/application/ads_historical_recovery.py", "packages/application/root_storage_policy.py", "packages/application/wb_autoanswers_runtime.py"],
+      "suites": ["release_safety", "warehouse_recovery"],
       "release": "live_runtime"
     },
     {

@@ -54,6 +54,9 @@ continued to grow after Stage 1.
 `apps/storage_recovery_writer_inventory_static_smoke.py` is the
 machine-readable writer catalog and fails when a new production
 `sqlite3.Connection.backup`/`backup_database` source is not classified.
+Migration 158 additionally requires every observed backup primitive to use the
+common root-storage admission contract and detects a new unregistered large
+root artifact/backup/evidence producer without granting any new cleanup scope.
 `apps/warehouse_recovery_policy_static_smoke.py` independently proves the 30
 warehouse/cost entrypoints and the single central T3 call.
 

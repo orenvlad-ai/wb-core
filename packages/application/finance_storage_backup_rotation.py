@@ -52,6 +52,10 @@ from packages.application.finance_storage_snapshot_retention import (
     _sha256_file,
 )
 from packages.application.finance_raw_storage import CONSUMER_ID, storage_health
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.storage_registry import (
     StoreRegistry,
     build_manifest,
@@ -353,6 +357,11 @@ def _copy_sqlite(source: Path, destination: Path) -> dict[str, Any]:
         raise FinanceStorageBackupRotationError("SQLite copy boundary is unsafe")
     captured_at = _utc_now()
     source_identity = _sqlite_source_identity(source)
+    admission = admit_root_write(
+        owner="finance_post_cutover_backup_rotation",
+        destination=destination,
+        predicted_output_bytes=predict_sqlite_backup_bytes(source),
+    )
     source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     source_connection.row_factory = sqlite3.Row
     destination_connection = sqlite3.connect(destination)
@@ -387,6 +396,7 @@ def _copy_sqlite(source: Path, destination: Path) -> dict[str, Any]:
         "integrity_check": "ok",
         "foreign_key_violation_count": 0,
         "logical_tables": source_logical,
+        "root_storage_admission": admission,
     }
 
 

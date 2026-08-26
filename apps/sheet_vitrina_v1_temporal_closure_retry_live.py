@@ -407,7 +407,10 @@ def apply_explicit_recovery(
         raise TemporalRecoveryError("deployed SHA drifted from the approved apply")
 
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
-    backup = runtime.backup_database(Path(before["backup_destination"]))
+    backup = runtime.backup_database(
+        Path(before["backup_destination"]),
+        admission_owner="sheet_vitrina_exact_date_recovery",
+    )
     try:
         if cycle_runner is None:
             activated_at_override = os.environ.get(

@@ -1,0 +1,14 @@
+[Unit]
+Description=WB Core Root Storage Policy Status
+After=local-fs.target
+RequiresMountsFor=/opt/wb-core-runtime/state/backups /opt/wb-core-runtime/state/generations
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+RuntimeDirectory=wb-core-root-storage
+UMask=0022
+ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/root_storage_policy.py status --output /run/wb-core-root-storage/status.json
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,226 @@
+{
+  "contract_version": "wb_core_root_storage_policy_v1",
+  "thresholds_bytes": {
+    "normal_available": 26843545600,
+    "warning_below": 21474836480,
+    "critical_below": 16106127360,
+    "hard_deny_below": 12884901888,
+    "large_output": 268435456,
+    "large_predicted_free_after_floor": 16106127360
+  },
+  "filesystems": {
+    "root": "/",
+    "backup": "/opt/wb-core-runtime/state/backups",
+    "generation": "/opt/wb-core-runtime/state/generations"
+  },
+  "scan_roots": [
+    "/opt/wb-core-runtime/backups",
+    "/opt/wb-core-runtime/evidence",
+    "/opt/wb-core-runtime/state",
+    "/var/backups"
+  ],
+  "journald": {
+    "expected_systemd_major": 255,
+    "configuration_source": "artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf",
+    "configuration_destination": "/etc/systemd/journald.conf.d/60-wb-core-root-retention.conf",
+    "evidence_directory": "/var/lib/wb-core/root-storage-policy",
+    "hold_registry": "/etc/wb-core/journal-retention-holds.json",
+    "system_max_use_bytes": 2147483648,
+    "system_keep_free_bytes": 16106127360,
+    "max_retention_seconds": 1209600
+  },
+  "producers": [
+    {
+      "owner": "registry_operational_store",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "registry_legacy_monolith",
+      "classification": "retained_no_active_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/registry_upload_runtime.sqlite3"]
+    },
+    {
+      "owner": "autoanswers_operational_store",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3"]
+    },
+    {
+      "owner": "promo_collector_artifacts",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/promo_xlsx_collector_runs/**"]
+    },
+    {
+      "owner": "warehouse_recovery_policy",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/backups/warehouse-recovery/**"]
+    },
+    {
+      "owner": "calculation_parameters_and_economics",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "finance_post_cutover_backup_rotation",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/backups/finance/**"]
+    },
+    {
+      "owner": "root_legacy_backup_families",
+      "classification": "discretionary_root_writer",
+      "path_patterns": [
+        "/opt/wb-core-runtime/backups/ads-historical/**",
+        "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill/**",
+        "/opt/wb-core-runtime/backups/ff-stock-targeted-reconciliation/**",
+        "/opt/wb-core-runtime/backups/warehouse-archival-estimate/**",
+        "/opt/wb-core-runtime/backups/warehouse-functional/**",
+        "/opt/wb-core-runtime/backups/warehouse-functional-economics/**",
+        "/opt/wb-core-runtime/backups/warehouse-functional-recovery/**",
+        "/opt/wb-core-runtime/backups/warehouse-functional-sync/**",
+        "/opt/wb-core-runtime/backups/warehouse-opening/**",
+        "/opt/wb-core-runtime/backups/warehouse-supplier-certification-replay/**",
+        "/opt/wb-core-runtime/backups/wb-finance-canonical/**",
+        "/opt/wb-core-runtime/backups/registry_upload_runtime.own-capital-backup-*.sqlite3.zst"
+      ]
+    },
+    {
+      "owner": "task_evidence_full_copies",
+      "classification": "discretionary_root_writer",
+      "path_patterns": [
+        "/opt/wb-core-runtime/evidence/buyout-mature-backfill-pr*/backups/**",
+        "/opt/wb-core-runtime/evidence/proxy-v4-pr*/backups/**",
+        "/opt/wb-core-runtime/evidence/proxy-v4-transit-pr*/backups/**"
+      ]
+    },
+    {
+      "owner": "autoanswers_schema_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/recovery_backups/**"]
+    },
+    {
+      "owner": "incident_backup_full_copies",
+      "classification": "discretionary_root_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/incident_backups/**"]
+    },
+    {
+      "owner": "private_evidence_full_copies",
+      "classification": "discretionary_root_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/private-evidence/**"]
+    },
+    {
+      "owner": "forensics_full_copies",
+      "classification": "discretionary_root_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/forensics/**"]
+    },
+    {
+      "owner": "retired_dev_control_plane_archive",
+      "classification": "retained_no_active_writer",
+      "path_patterns": ["/var/backups/dev-control-plane-legacy/**"]
+    },
+    {
+      "owner": "registry_sqlite_backup_primitive",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "finance_storage_split_coherent_source",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "finance_rollback_candidate",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "finance_legacy_helper",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "ads_historical_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "supplier_26gn390_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "supplier_26gn527_legacy_apply",
+      "classification": "retained_no_active_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "supplier_cny_payment_10_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "ff_transit_cost_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "ff_pool_overhead_backfill",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "supplier_factual_date_correction",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "autoanswers_first_schema",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "autoanswers_activation_candidate",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "proxy_margin_historical_backfill",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "buyout_mature_backfill",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "proxy_v4_transit_repair",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "sheet_vitrina_exact_date_recovery",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "promo_metric_eligibility_recompute",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "spp_metric_recompute",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "canonical_cost_diagnostic_candidate",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "canonical_cost_preflight_candidate",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    }
+  ]
+}

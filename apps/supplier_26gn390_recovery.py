@@ -22,6 +22,10 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.own_product_capital import (  # noqa: E402
     OwnProductCapitalBlock,
 )
@@ -994,6 +998,11 @@ def _readonly_sqlite_copy(source: Path, target: Path) -> None:
 
     if target.exists():
         raise ValueError(f"backup target already exists: {target}")
+    admit_root_write(
+        owner="supplier_26gn390_recovery",
+        destination=target,
+        predicted_output_bytes=predict_sqlite_backup_bytes(source),
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     with (
         sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True) as source_conn,

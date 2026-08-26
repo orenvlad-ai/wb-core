@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish WB Core root-storage status every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+Unit=wb-core-root-storage-policy.service
+
+[Install]
+WantedBy=timers.target

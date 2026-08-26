@@ -20,6 +20,10 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
     load_promo_campaign_archive,
     materialize_promo_result_from_archive,
 )
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -510,8 +514,13 @@ def _to_jsonable(value: Any) -> Any:
 
 def _backup_sqlite(db_path: Path) -> str:
     backup_dir = db_path.parent / "backups" / "promo_metric_eligibility_recompute"
-    backup_dir.mkdir(parents=True, exist_ok=True)
     backup_path = backup_dir / f"{db_path.stem}__{_now_stamp()}.sqlite3"
+    admit_root_write(
+        owner="promo_metric_eligibility_recompute",
+        destination=backup_path,
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
+    backup_dir.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(db_path)) as source, sqlite3.connect(str(backup_path)) as target:
         source.backup(target)
     return str(backup_path)

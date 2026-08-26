@@ -4414,6 +4414,7 @@ def main() -> None:
                 "service_name": "wb-core-registry-http.service",
                 "restart_command": "systemctl restart wb-core-registry-http.service",
                 "status_command": "systemctl status --no-pager --full wb-core-registry-http.service",
+                "root_storage_policy_file": "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json",
             }
         )
         deploy_target_payload["runtime_env"] = {
@@ -4551,6 +4552,19 @@ def main() -> None:
                 deploy_dry_run["commands"]["chown_target_dir"]
             ):
                 raise AssertionError("deploy --dry-run must expose target_dir ownership normalization")
+            root_status_command = " ".join(deploy_dry_run["commands"]["root_storage_status"])
+            journald_activate_command = " ".join(
+                deploy_dry_run["commands"]["journald_retention_activate"]
+            )
+            journald_readback_command = " ".join(
+                deploy_dry_run["commands"]["journald_retention_readback"]
+            )
+            if "status --fail-on-unregistered" not in root_status_command:
+                raise AssertionError("deploy must publish status and reject unregistered large root producers")
+            if "journald-activate" not in journald_activate_command:
+                raise AssertionError("deploy must expose one canonical journald activation")
+            if "journald-readback" not in journald_readback_command:
+                raise AssertionError("deploy must expose query-only journald reconciliation")
             preparing_metadata = " ".join(
                 deploy_dry_run["commands"]["deploy_metadata"]
             )
@@ -4630,6 +4644,35 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose systemd enable command")
             if "restart" not in " ".join(deploy_dry_run["commands"]["systemd_restart"]):
                 raise AssertionError("deploy --dry-run must expose systemd restart command")
+            command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
+            for required_command in (
+                "root-storage-status",
+                "root-storage-admission",
+                "journald-retention-readback",
+            ):
+                if required_command not in command_choices:
+                    raise AssertionError(f"hosted adapter must expose {required_command}")
+            transport_summary: dict[str, object] = {}
+            with mock.patch.object(
+                hosted_runtime,
+                "_run_command",
+                side_effect=subprocess.CalledProcessError(255, ["ssh", "activate"]),
+            ) as activation_submit, mock.patch.object(
+                hosted_runtime.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["ssh", "readback"], 0, '{"ok":true}', ""
+                ),
+            ) as activation_readback:
+                hosted_runtime._run_journald_activation_once(
+                    activate_command=["ssh", "activate"],
+                    readback_command=["ssh", "readback"],
+                    summary=transport_summary,
+                )
+            if activation_submit.call_count != 1 or activation_readback.call_count != 1:
+                raise AssertionError("ambiguous journald activation must submit once then read back once")
+            if transport_summary["journald_transport_reconciliation"]["activation_retried"] is not False:
+                raise AssertionError("ambiguous journald activation must never retry")
             refresh_unit = (
                 ROOT
                 / "artifacts"

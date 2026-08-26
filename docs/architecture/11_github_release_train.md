@@ -190,6 +190,15 @@ manifest binding и stable reason codes. States:
 Existing exact receipt запрещает duplicate action. Ambiguous merge transport
 получает один readback; отсутствие exact proof не разрешает второй merge/deploy.
 
+The active target's versioned root-storage Stage 0 policy is part of that same
+canonical `live_runtime` adapter, not a manual post-release cleanup. Its first
+exact-config deploy privately materializes the fresh expired-archived-journal
+manifest and submits one journald restart; later exact deploys are readback
+no-ops. An ambiguous activation transport runs only
+`journald-retention-readback` and never submits a second restart. The exact
+scope/hold/non-target reconciliation contract is migration 158; no other file
+or production-data mutation is admitted by this deploy binding.
+
 ## Default-off Apply Runner
 
 Apply workflow имеет только manual `workflow_dispatch` и production

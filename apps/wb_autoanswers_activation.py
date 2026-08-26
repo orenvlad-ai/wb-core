@@ -30,6 +30,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.wb_autoanswers_runtime import (
     AUTOANSWERS_DB_FILENAME,
     COMPRESSED_SCHEMA_BACKUP_CONTRACT,
@@ -606,9 +610,14 @@ def _create_current_compressed_schema_backup(
 
     database = runtime_dir / "registry_upload_runtime.sqlite3"
     staging_dir = runtime_dir / ".wb_autoanswers_capacity_recovery"
+    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
+    admit_root_write(
+        owner="autoanswers_activation_candidate",
+        destination=staging,
+        predicted_output_bytes=predict_sqlite_backup_bytes(database),
+    )
     staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(staging_dir, 0o700)
-    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     staging_manifest = staging.with_suffix(staging.suffix + ".manifest.json")
     backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -366,6 +366,7 @@ class HostedRuntimeTarget:
     finance_generation_filesystem: dict[str, Any] = field(
         default_factory=dict
     )
+    root_storage_policy_file: str = ""
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
     managed_systemd_units: tuple[ManagedSystemdUnit, ...] = field(default_factory=tuple)
@@ -479,6 +480,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
             str(key): value
             for key, value in raw_finance_generation_filesystem.items()
         },
+        root_storage_policy_file=str(payload.get("root_storage_policy_file", "")).strip(),
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
         managed_systemd_units=tuple(managed_systemd_units),
@@ -534,8 +536,15 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
                 "daemon-reload systemd after retired unit removal",
             ]
         )
+    deploy_sequence.append("sync current checked-out worktree to target_dir via rsync")
+    if target.root_storage_policy_file:
+        deploy_sequence.extend(
+            [
+                "publish root-storage warning/critical/hard status and reject unregistered large root producers",
+                "materialize the private expired-archived-journal manifest and activate versioned journald retention at most once",
+            ]
+        )
     deploy_sequence.extend([
-        "sync current checked-out worktree to target_dir via rsync",
         "install required host OS packages for seller-portal recovery and browser launch",
         "install required host OS packages for seller-portal owner capture runtime",
         "install required Python runtime packages on the hosted system python",
@@ -580,6 +589,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
         "environment_file": target.environment_file or "<missing>",
         "systemd_unit_directory": target.systemd_unit_directory or None,
         "systemd_units_source_dir": target.systemd_units_source_dir or None,
+        "root_storage_policy_file": target.root_storage_policy_file or None,
         "managed_systemd_units": _describe_managed_systemd_units(target),
         "retired_systemd_units": list(target.retired_systemd_units),
         "nginx_public_routes": _describe_nginx_public_routes(target),
@@ -1047,6 +1057,7 @@ def deploy_current_checkout(
     autoanswers_node_dependencies_command = _build_autoanswers_node_dependencies_command(target)
     autoanswers_prepare_capacity_command = _build_autoanswers_prepare_capacity_command(target)
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
+    root_storage_commands = _build_root_storage_policy_commands(target)
     systemd_commands = _build_managed_systemd_commands(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
@@ -1079,6 +1090,9 @@ def deploy_current_checkout(
             "autoanswers_node_dependencies": autoanswers_node_dependencies_command,
             "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
+            "root_storage_status": root_storage_commands["status"],
+            "journald_retention_activate": root_storage_commands["activate"],
+            "journald_retention_readback": root_storage_commands["readback"],
             "systemd_install": systemd_commands["install"],
             "systemd_retire": systemd_commands["retire"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -1164,6 +1178,14 @@ def deploy_current_checkout(
     run_stage("sync", rsync_plan)
     run_stage("chown", chown_target_dir_command)
     run_stage("metadata", deploy_metadata_command)
+    if root_storage_commands["status"]:
+        run_stage("root-storage-status", root_storage_commands["status"])
+    if root_storage_commands["activate"]:
+        _run_journald_activation_once(
+            activate_command=root_storage_commands["activate"],
+            readback_command=root_storage_commands["readback"],
+            summary=summary,
+        )
     run_stage("dependencies", seller_recovery_os_dependencies_command)
     run_stage("dependencies", seller_owner_os_dependencies_command)
     run_stage("dependencies", runtime_pip_install_command)
@@ -1198,6 +1220,8 @@ def deploy_current_checkout(
             reconcile_transport_failure("readback", exc)
     # Read back the same contract after all managed-unit operations.
     run_stage("readback", auth_env_preflight_command)
+    if root_storage_commands["readback"]:
+        run_stage("readback", root_storage_commands["readback"])
     # The exact SHA markers are written before dependency/schema work so an
     # interrupted rollout is observable, but only this final atomic metadata
     # update proves that every required deploy stage completed.  A disconnect
@@ -2049,6 +2073,43 @@ def run_print_plan_command(args: argparse.Namespace) -> int:
     }
     _print_json(payload)
     return 0
+
+
+def run_root_storage_status_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    _warn_if_rollback_read_only_target(target, action="root-storage-status")
+    command = _build_root_storage_policy_commands(target)["status_read_only"]
+    if not command:
+        raise ValueError("root storage policy is not configured for this target")
+    return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def run_root_storage_admission_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    _warn_if_rollback_read_only_target(target, action="root-storage-admission")
+    commands = _build_root_storage_policy_commands(target)
+    policy_path = commands["remote_policy_path"]
+    if not policy_path:
+        raise ValueError("root storage policy is not configured for this target")
+    command = _remote_shell_command(
+        target,
+        f"cd {shlex.quote(target.target_dir)} && "
+        "python3 apps/root_storage_policy.py "
+        f"--policy-file {shlex.quote(policy_path)} admission "
+        f"--owner {shlex.quote(args.owner)} "
+        f"--destination {shlex.quote(args.destination)} "
+        f"--predicted-output-bytes {int(args.predicted_output_bytes)}",
+    )
+    return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def run_journald_retention_readback_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    _warn_if_rollback_read_only_target(target, action="journald-retention-readback")
+    command = _build_root_storage_policy_commands(target)["readback"]
+    if not command:
+        raise ValueError("root storage policy is not configured for this target")
+    return subprocess.run(command, cwd=ROOT, check=False).returncode
 
 
 def run_deploy_command(args: argparse.Namespace) -> int:
@@ -10701,6 +10762,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_probe_args(loopback_probe)
     loopback_probe.set_defaults(handler=run_loopback_probe_command)
 
+    root_storage_status = subparsers.add_parser(
+        "root-storage-status",
+        help="Read published root/backup/generation status and large-producer registration.",
+    )
+    root_storage_status.set_defaults(handler=run_root_storage_status_command)
+
+    root_storage_admission = subparsers.add_parser(
+        "root-storage-admission",
+        help="Evaluate one explicit large-writer owner/destination/output tuple.",
+    )
+    root_storage_admission.add_argument("--owner", required=True)
+    root_storage_admission.add_argument("--destination", required=True)
+    root_storage_admission.add_argument("--predicted-output-bytes", type=int, required=True)
+    root_storage_admission.set_defaults(handler=run_root_storage_admission_command)
+
+    journald_readback = subparsers.add_parser(
+        "journald-retention-readback",
+        help="Query-only reconcile the versioned journald retention activation.",
+    )
+    journald_readback.set_defaults(handler=run_journald_retention_readback_command)
+
     deploy = subparsers.add_parser("deploy", help="Sync current checkout to hosted runtime and restart the service.")
     deploy.add_argument("--dry-run", action="store_true", help="Print commands without executing remote update.")
     deploy.add_argument("--allow-dirty", action="store_true", help="Allow deploy from dirty checkout.")
@@ -14638,6 +14720,70 @@ def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, li
     }
 
 
+def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str, Any]:
+    if not target.root_storage_policy_file:
+        return {
+            "remote_policy_path": None,
+            "status": None,
+            "status_read_only": None,
+            "activate": None,
+            "readback": None,
+        }
+    local_policy = _resolve_repo_relative_path(target.root_storage_policy_file)
+    remote_policy_path = _remote_repo_relative_path(target, local_policy)
+    prefix = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "python3 apps/root_storage_policy.py "
+        f"--policy-file {shlex.quote(remote_policy_path)}"
+    )
+    return {
+        "remote_policy_path": remote_policy_path,
+        "status": _remote_shell_command(
+            target,
+            prefix + " status --fail-on-unregistered",
+        ),
+        "status_read_only": _remote_shell_command(target, prefix + " status"),
+        "activate": _remote_shell_command(target, prefix + " journald-activate"),
+        "readback": _remote_shell_command(target, prefix + " journald-readback"),
+    }
+
+
+def _run_journald_activation_once(
+    *,
+    activate_command: list[str],
+    readback_command: list[str] | None,
+    summary: dict[str, Any],
+) -> None:
+    """Submit activation once; SSH ambiguity permits query-only readback only."""
+
+    try:
+        _run_command(activate_command)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 255:
+            raise
+        if not readback_command:
+            raise RuntimeError(
+                "transport-indeterminate during journald retention activation; readback command is unavailable"
+            ) from exc
+        readback = subprocess.run(
+            readback_command,
+            check=False,
+            text=True,
+            cwd=ROOT,
+            capture_output=True,
+        )
+        summary["journald_transport_reconciliation"] = {
+            "returncode": readback.returncode,
+            "stdout": readback.stdout.strip(),
+            "stderr": readback.stderr.strip(),
+            "activation_retried": False,
+        }
+        if readback.returncode != 0:
+            raise RuntimeError(
+                "transport-indeterminate during journald retention activation; query-only reconciliation halted"
+            ) from exc
+
+
 def _ensure_clean_worktree() -> None:
     if _git_output(["git", "status", "--short"]):
         raise ValueError("deploy requires a clean git worktree; use --allow-dirty only when intentional")
@@ -14658,6 +14804,8 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
         required["systemd_unit_directory"] = target.systemd_unit_directory
     if target.has_managed_systemd_units:
         required["systemd_units_source_dir"] = target.systemd_units_source_dir
+    if target.root_storage_policy_file:
+        required["root_storage_policy_file"] = target.root_storage_policy_file
     for key, value in required.items():
         if _is_placeholder(value):
             missing.append(key)
@@ -14668,6 +14816,11 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
     for unit_name in target.retired_systemd_units:
         if _is_placeholder(unit_name):
             missing.append("retired_systemd_units[]")
+    if target.root_storage_policy_file:
+        try:
+            _resolve_repo_relative_path(target.root_storage_policy_file)
+        except Exception:
+            missing.append("root_storage_policy_file")
     if target.nginx_public_routes:
         nginx_required = {
             "nginx_public_routes.server_config_path": target.nginx_public_routes.server_config_path,

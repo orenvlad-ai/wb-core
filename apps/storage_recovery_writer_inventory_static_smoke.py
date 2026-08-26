@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
-import re
-
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKUP_CALL = re.compile(r"(?:\.backup\(|backup_database\()")
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from packages.application.root_storage_policy import load_policy  # noqa: E402
+from apps.root_storage_policy_smoke import main as root_storage_policy_smoke  # noqa: E402
+
 
 # Machine-readable ownership/cadence inventory. A full-store writer is allowed
 # only behind a one-shot reviewed mutation/migration boundary; scheduled paths
@@ -66,6 +71,15 @@ WRITERS = [
             "retained through cutover observation; separate exact "
             "retirement gate"
         ),
+    },
+    {
+        "owner": "finance_rollback_candidate",
+        "source": "packages/application/finance_storage_migration.py",
+        "cadence": "human_authorized_rollback_prepare",
+        "artifact": "temporary legacy monolith rollback candidate",
+        "full_monolith": True,
+        "guard": "reviewed rollback plan + exact generation filesystem + approval reference",
+        "lifecycle": "candidate state machine and explicit rollback terminalization",
     },
     {
         "owner": "finance_post_cutover_backup_rotation",
@@ -250,6 +264,8 @@ WRITERS = [
 def build_inventory() -> dict[str, object]:
     classified_sources = {str(item["source"]) for item in WRITERS}
     observed = set()
+    backup_call_counts: dict[str, int] = {}
+    admission_call_counts: dict[str, int] = {}
     for base in ("apps", "packages"):
         for path in (ROOT / base).rglob("*.py"):
             relative = str(path.relative_to(ROOT))
@@ -260,11 +276,28 @@ def build_inventory() -> dict[str, object]:
             ):
                 continue
             source = path.read_text(encoding="utf-8")
-            if BACKUP_CALL.search(source):
+            backup_count, admission_count = _writer_call_counts(source)
+            if backup_count:
                 observed.add(relative)
+                backup_call_counts[relative] = backup_count
+                admission_call_counts[relative] = admission_count
     unclassified = sorted(observed - classified_sources)
     missing = sorted(
         source for source in classified_sources if not (ROOT / source).is_file()
+    )
+    producer_registry = {
+        str(item["owner"]): str(item["classification"])
+        for item in load_policy()["producers"]
+    }
+    unregistered_owners = sorted(
+        str(item["owner"])
+        for item in WRITERS
+        if str(item["owner"]) not in producer_registry
+    )
+    admission_missing = sorted(
+        source
+        for source in observed
+        if admission_call_counts[source] < backup_call_counts[source]
     )
     scheduled_full = [
         item
@@ -278,20 +311,52 @@ def build_inventory() -> dict[str, object]:
         "observed_backup_call_sources": sorted(observed),
         "unclassified_backup_call_sources": unclassified,
         "catalog_sources_missing": missing,
+        "unregistered_root_storage_owners": unregistered_owners,
+        "backup_call_counts": backup_call_counts,
+        "admission_call_counts": admission_call_counts,
+        "large_write_admission_missing": admission_missing,
         "scheduled_full_monolith_writers": scheduled_full,
         "routine_full_monolith_count": len(scheduled_full),
         "status": (
             "ready"
-            if not unclassified and not missing and not scheduled_full
+            if not unclassified
+            and not missing
+            and not scheduled_full
+            and not unregistered_owners
+            and not admission_missing
             else "failed"
         ),
     }
+
+
+def _writer_call_counts(source: str) -> tuple[int, int]:
+    tree = ast.parse(source)
+    backup_count = 0
+    admission_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "backup":
+            backup_count += 1
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "backup_database":
+            backup_count += 1
+            if any(keyword.arg == "admission_owner" for keyword in node.keywords):
+                admission_count += 1
+        elif isinstance(node.func, ast.Name) and node.func.id == "backup_database":
+            backup_count += 1
+            if any(keyword.arg == "admission_owner" for keyword in node.keywords):
+                admission_count += 1
+        elif isinstance(node.func, ast.Name) and node.func.id == "admit_root_write":
+            admission_count += 1
+    return backup_count, admission_count
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if not args.json and root_storage_policy_smoke() != 0:
+        return 1
     result = build_inventory()
     if args.json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))

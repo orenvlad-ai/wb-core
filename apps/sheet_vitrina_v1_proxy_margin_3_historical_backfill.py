@@ -17,6 +17,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import DB_FILENAME  # noqa: E402
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.sheet_vitrina_v1_proxy_margin_3_historical_backfill import (  # noqa: E402
     BackfillPreflight,
     ReadySnapshotInput,
@@ -250,9 +254,14 @@ def _load_ready_snapshots(conn: sqlite3.Connection) -> list[ReadySnapshotInput]:
 
 def _backup_and_verify(db_path: Path, *, expected_fingerprint: str) -> Path:
     backup_dir = db_path.parent / "backups" / BACKUP_SUBDIR
-    backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = backup_dir / f"{db_path.stem}__{stamp}__{expected_fingerprint[:12]}.sqlite3"
+    admit_root_write(
+        owner="proxy_margin_historical_backfill",
+        destination=backup_path,
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     source_uri = f"file:{quote(str(db_path))}?mode=ro"
     source = sqlite3.connect(source_uri, uri=True)

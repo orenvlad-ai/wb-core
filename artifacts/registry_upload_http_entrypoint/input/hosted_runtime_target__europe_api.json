@@ -16,6 +16,7 @@
   "environment_file": "/opt/wb-ai/.env",
   "systemd_unit_directory": "/etc/systemd/system",
   "systemd_units_source_dir": "artifacts/registry_upload_http_entrypoint/systemd",
+  "root_storage_policy_file": "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json",
   "nginx_public_routes": {
     "server_config_path": "/etc/nginx/sites-enabled/wb-ai",
     "backup_dir": "/etc/nginx/sites-available",
@@ -145,6 +146,16 @@
       "name": "wb-core-business-data-maintenance-restore@.service",
       "enable": false,
       "restart": false
+    },
+    {
+      "name": "wb-core-root-storage-policy.service",
+      "enable": false,
+      "restart": true
+    },
+    {
+      "name": "wb-core-root-storage-policy.timer",
+      "enable": true,
+      "restart": true
     },
     {
       "name": "wb-core-data-mcp.service",

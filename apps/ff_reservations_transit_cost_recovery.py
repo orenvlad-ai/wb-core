@@ -36,6 +36,10 @@ from packages.application.our_wb_costs import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.warehouse_functional import WarehouseFunctionalBlock  # noqa: E402
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
@@ -956,6 +960,11 @@ def _readonly_sqlite_copy(source: Path, target: Path) -> None:
 
     if target.exists():
         raise ValueError(f"snapshot target already exists: {target}")
+    admit_root_write(
+        owner="ff_transit_cost_recovery",
+        destination=target,
+        predicted_output_bytes=predict_sqlite_backup_bytes(source),
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     with (
         sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True) as source_conn,
