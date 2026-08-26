@@ -24,7 +24,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import quote
 
 
@@ -66,6 +66,9 @@ CHUNK_SIZE = 8 * 1024**2
 READINESS_REQUIRED_CONSECUTIVE_CLEAN = 3
 READINESS_MAX_STABILIZATION_SECONDS = 60
 READINESS_SAMPLE_INTERVAL_SECONDS = 2.0
+SYSTEMD_PAIR_RESAMPLE_MAX_ATTEMPTS = 3
+SYSTEMD_PAIR_RESAMPLE_MAX_SECONDS = 5.0
+SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS = 0.25
 JOB_ID_RE = re.compile(r"[0-9a-f]{64}")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -112,6 +115,11 @@ SERVICE_NAMES = (
     "wb-core-autoanswers-readonly-sync.timer",
     "wb-core-autoanswers-worker.service",
     "wb-core-autoanswers-worker.timer",
+)
+TIMER_SERVICE_PAIRS = tuple(
+    (name, name.removesuffix(".timer") + ".service")
+    for name in SERVICE_NAMES
+    if name.endswith(".timer")
 )
 SYSTEMD_REQUIRED_PROPERTIES = (
     "LoadState",
@@ -1450,189 +1458,410 @@ def _systemd_int(value: Any) -> int | None:
         return None
 
 
+def _systemd_unit_row(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    kind = (
+        "timer"
+        if name.endswith(".timer")
+        else "persistent_service"
+        if name in PERSISTENT_SERVICE_NAMES
+        else "oneshot_service"
+    )
+    row = {
+        "name": name,
+        "unit_kind": kind,
+        "Id": values.get("Id", ""),
+        **{
+            property_name: values.get(property_name, "")
+            for property_name in SYSTEMD_REQUIRED_PROPERTIES
+        },
+        "QueryReturnCode": values.get("QueryReturnCode"),
+        "QueryError": values.get("QueryError"),
+        "QueryStderrSha256": values.get("QueryStderrSha256"),
+        "ObservedProperties": values.get("ObservedProperties"),
+    }
+    if kind == "timer":
+        row.update(
+            {
+                property_name: values.get(property_name, "")
+                for property_name in SYSTEMD_TIMER_PROPERTIES
+            }
+        )
+    reasons: list[str] = []
+    observed_properties = set(
+        values.get("ObservedProperties")
+        if isinstance(values.get("ObservedProperties"), list)
+        else values
+    )
+    mandatory_properties = (
+        ("Id", "LoadState", "ActiveState", "SubState", "Result", "UnitFileState")
+        if kind == "timer"
+        else ("Id", *SYSTEMD_REQUIRED_PROPERTIES)
+    )
+    missing_properties = [
+        property_name
+        for property_name in mandatory_properties
+        if property_name not in observed_properties
+    ]
+    query_failed = (
+        values.get("QueryReturnCode") != 0 or values.get("QueryError") is not None
+    )
+    identity_mismatch = values.get("Id") != name
+    absent_or_masked = (
+        values.get("LoadState") in {"not-found", "masked", "error"}
+        or str(values.get("UnitFileState") or "").startswith("masked")
+    )
+    result_failed = values.get("Result") not in {"", "success"}
+    exec_raw = values.get("ExecMainStatus")
+    exec_status = _systemd_int(exec_raw)
+    exec_failed = (
+        exec_status != 0
+        if kind != "timer"
+        else exec_raw not in {None, ""} and exec_status != 0
+    )
+    main_pid = _systemd_int(values.get("MainPID"))
+    phase = "invalid"
+    resample_candidate = False
+
+    if missing_properties or query_failed or identity_mismatch:
+        classification = "predicate_or_literal_unit_list_defect"
+        healthy = False
+        if missing_properties:
+            reasons.append("required_properties_missing")
+        if query_failed:
+            reasons.append("systemctl_query_failed")
+        if identity_mismatch:
+            reasons.append("literal_unit_identity_mismatch")
+    elif absent_or_masked:
+        classification = "absent_or_masked"
+        healthy = False
+        reasons.append("required_unit_absent_or_masked")
+    elif result_failed or exec_failed:
+        classification = (
+            "real_unhealthy_timer_control"
+            if kind == "timer"
+            else "real_unhealthy_owning_service"
+        )
+        healthy = False
+        if result_failed:
+            reasons.append("failed_result")
+        if exec_failed:
+            reasons.append("nonzero_or_invalid_exec_main_status")
+    elif kind == "persistent_service":
+        if (
+            values.get("LoadState") == "loaded"
+            and values.get("ActiveState") == "active"
+            and values.get("SubState") == "running"
+            and main_pid is not None
+            and main_pid > 0
+        ):
+            classification = "healthy_persistent_service"
+            healthy = True
+            phase = "persistent_running"
+        else:
+            classification = "real_unhealthy_owning_service"
+            healthy = False
+            reasons.append("persistent_service_not_active_running_with_pid")
+    elif kind == "timer":
+        common_timer = (
+            values.get("LoadState") == "loaded"
+            and values.get("ActiveState") == "active"
+            and values.get("UnitFileState") == "enabled"
+        )
+        if common_timer and values.get("SubState") == "waiting":
+            classification = "expected_waiting_timer"
+            healthy = True
+            phase = "timer_waiting"
+        elif common_timer and values.get("SubState") == "running":
+            classification = "healthy_trigger_running_timer"
+            healthy = True
+            phase = "timer_running"
+        else:
+            classification = "unrecognized_timer_state"
+            healthy = False
+            reasons.append("timer_not_loaded_active_waiting_or_running_enabled")
+            resample_candidate = bool(
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState") in {"active", "activating"}
+                and values.get("UnitFileState") == "enabled"
+                and values.get("SubState") not in {"dead", "failed"}
+            )
+    else:
+        inactive_success = (
+            values.get("LoadState") == "loaded"
+            and values.get("ActiveState") == "inactive"
+            and values.get("SubState") in {"dead", "exited"}
+            and main_pid == 0
+        )
+        active_success = (
+            values.get("LoadState") == "loaded"
+            and values.get("ActiveState") in {"active", "activating"}
+            and values.get("SubState") in {"start", "running", "exited"}
+            and main_pid is not None
+            and main_pid > 0
+        )
+        if inactive_success:
+            classification = "correct_inactive_oneshot"
+            healthy = True
+            phase = "oneshot_inactive_success"
+        elif active_success:
+            classification = "healthy_active_oneshot"
+            healthy = True
+            phase = "oneshot_active_success"
+        else:
+            classification = "unrecognized_oneshot_state"
+            healthy = False
+            reasons.append("oneshot_state_predicate_failed")
+            resample_candidate = bool(
+                values.get("LoadState") == "loaded"
+                and values.get("ActiveState")
+                in {"inactive", "activating", "active", "deactivating"}
+                and values.get("SubState") not in {"failed"}
+            )
+
+    row.update(
+        {
+            "state_classification": classification,
+            "classification": classification,
+            "state_healthy": healthy,
+            "healthy": healthy,
+            "phase": phase,
+            "resample_candidate": resample_candidate,
+            "reason_codes": reasons,
+        }
+    )
+    return row
+
+
 def _systemd_service_gate(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    """Classify every literal unit without collapsing evidence to one bool."""
+    """Classify all literal units and every timer/owning-service pair."""
 
     expected_names = list(SERVICE_NAMES)
     observed_names = list(snapshot)
     missing_names = [name for name in expected_names if name not in snapshot]
     unexpected_names = [name for name in observed_names if name not in SERVICE_NAMES]
-    rows = []
-    for name in expected_names:
-        source = snapshot.get(name)
-        values = source if isinstance(source, Mapping) else {}
-        kind = (
-            "timer"
-            if name.endswith(".timer")
-            else "persistent_service"
-            if name in PERSISTENT_SERVICE_NAMES
-            else "oneshot_service"
+    rows = [
+        _systemd_unit_row(
+            name,
+            snapshot.get(name) if isinstance(snapshot.get(name), Mapping) else {},
         )
-        row = {
-            "name": name,
-            "unit_kind": kind,
-            "Id": values.get("Id", ""),
-            **{
-                property_name: values.get(property_name, "")
-                for property_name in SYSTEMD_REQUIRED_PROPERTIES
-            },
-            "QueryReturnCode": values.get("QueryReturnCode"),
-            "QueryError": values.get("QueryError"),
-            "QueryStderrSha256": values.get("QueryStderrSha256"),
-            "ObservedProperties": values.get("ObservedProperties"),
-        }
-        if kind == "timer":
-            row.update(
-                {
-                    property_name: values.get(property_name, "")
-                    for property_name in SYSTEMD_TIMER_PROPERTIES
-                }
+        for name in expected_names
+    ]
+    rows_by_name = {row["name"]: row for row in rows}
+    pair_rows = []
+    missing_pair_owners = []
+    for timer_name, owner_name in TIMER_SERVICE_PAIRS:
+        timer = rows_by_name[timer_name]
+        owner = rows_by_name.get(owner_name)
+        if owner is None:
+            missing_pair_owners.append(owner_name)
+            pair_classification = "pair_definition_defect"
+            pair_healthy = False
+            resample_required = False
+            reasons = ["paired_owning_service_missing_from_literal_scope"]
+        elif not timer["state_healthy"] or not owner["state_healthy"]:
+            transition_candidate = bool(
+                (timer["state_healthy"] or timer["resample_candidate"])
+                and (owner["state_healthy"] or owner["resample_candidate"])
             )
-        reasons: list[str] = []
-        observed_properties = set(
-            values.get("ObservedProperties")
-            if isinstance(values.get("ObservedProperties"), list)
-            else values
-        )
-        mandatory_properties = (
-            ("Id", "LoadState", "ActiveState", "SubState", "Result", "UnitFileState")
-            if kind == "timer"
-            else ("Id", *SYSTEMD_REQUIRED_PROPERTIES)
-        )
-        missing_properties = [
-            property_name
-            for property_name in mandatory_properties
-            if property_name not in observed_properties
-        ]
-        query_failed = (
-            values.get("QueryReturnCode") != 0 or values.get("QueryError") is not None
-        )
-        identity_mismatch = values.get("Id") != name
-        absent_or_masked = (
-            values.get("LoadState") in {"not-found", "masked", "error"}
-            or str(values.get("UnitFileState") or "").startswith("masked")
-        )
-        result_stale = values.get("Result") not in {"", "success"}
-        exec_status = _systemd_int(values.get("ExecMainStatus"))
-        exec_stale = exec_status not in {None, 0}
-        main_pid = _systemd_int(values.get("MainPID"))
-
-        if missing_properties or query_failed or identity_mismatch:
-            classification = "predicate_or_literal_unit_list_defect"
-            healthy = False
-            if missing_properties:
-                reasons.append("required_properties_missing")
-            if query_failed:
-                reasons.append("systemctl_query_failed")
-            if identity_mismatch:
-                reasons.append("literal_unit_identity_mismatch")
-        elif absent_or_masked:
-            classification = "absent_or_masked"
-            healthy = False
-            reasons.append("required_unit_absent_or_masked")
-        elif kind == "timer":
-            waiting = (
-                values.get("LoadState") == "loaded"
-                and values.get("ActiveState") == "active"
-                and values.get("SubState") == "waiting"
-                and values.get("UnitFileState") == "enabled"
+            pair_classification = (
+                "bounded_snapshot_transition"
+                if transition_candidate
+                else "failed_timer_or_owner"
             )
-            if waiting and (result_stale or exec_stale):
-                classification = "stale_result_or_exec_main_status"
-                healthy = True
-                reasons.append("timer_waiting_predicate_owns_current_health")
-            elif waiting:
-                classification = "expected_waiting_timer"
-                healthy = True
-            else:
-                classification = "real_unhealthy_timer_control"
-                healthy = False
-                reasons.append("timer_not_loaded_active_waiting_enabled")
-        elif kind == "persistent_service":
-            owns_current_process = (
-                values.get("LoadState") == "loaded"
-                and values.get("ActiveState") == "active"
-                and values.get("SubState") == "running"
-                and main_pid is not None
-                and main_pid > 0
-            )
-            if owns_current_process and (result_stale or exec_stale):
-                classification = "stale_result_or_exec_main_status"
-                healthy = True
-                reasons.append("active_main_pid_owns_current_health")
-            elif owns_current_process:
-                classification = "healthy_persistent_service"
-                healthy = True
-            else:
-                classification = "real_unhealthy_owning_service"
-                healthy = False
-                reasons.append("persistent_service_not_active_running_with_pid")
+            pair_healthy = False
+            resample_required = transition_candidate
+            reasons = [
+                "paired_snapshot_requires_bounded_resample"
+                if transition_candidate
+                else "paired_timer_or_owner_state_unhealthy"
+            ]
+        elif (
+            timer["phase"] == "timer_waiting"
+            and owner["phase"] == "oneshot_inactive_success"
+        ):
+            pair_classification = "waiting_with_inactive_success_owner"
+            pair_healthy = True
+            resample_required = False
+            reasons = []
+        elif (
+            timer["phase"] == "timer_running"
+            and owner["phase"] == "oneshot_active_success"
+        ):
+            pair_classification = "trigger_in_progress_with_active_owner"
+            pair_healthy = True
+            resample_required = False
+            reasons = []
         else:
-            correct_inactive = (
-                values.get("LoadState") == "loaded"
-                and values.get("ActiveState") == "inactive"
-                and values.get("SubState") in {"dead", "exited"}
-                and main_pid in {None, 0}
-            )
-            active_invocation = (
-                values.get("LoadState") == "loaded"
-                and values.get("ActiveState") in {"active", "activating"}
-                and values.get("SubState") in {"start", "running", "exited"}
-                and main_pid is not None
-                and main_pid > 0
-            )
-            if correct_inactive and not result_stale and not exec_stale:
-                classification = "correct_inactive_oneshot"
-                healthy = True
-            elif active_invocation and (result_stale or exec_stale):
-                classification = "stale_result_or_exec_main_status"
-                healthy = True
-                reasons.append("active_oneshot_pid_owns_current_health")
-            elif active_invocation:
-                classification = "healthy_active_oneshot"
-                healthy = True
-            else:
-                classification = "real_unhealthy_owning_service"
-                healthy = False
-                if correct_inactive and (result_stale or exec_stale):
-                    reasons.append("last_oneshot_invocation_failed")
-                else:
-                    reasons.append("oneshot_state_predicate_failed")
+            pair_classification = "bounded_snapshot_transition"
+            pair_healthy = False
+            resample_required = True
+            reasons = ["paired_snapshot_requires_bounded_resample"]
+        pair = {
+            "timer_name": timer_name,
+            "owner_name": owner_name,
+            "classification": pair_classification,
+            "healthy": pair_healthy,
+            "resample_required": resample_required,
+            "reason_codes": reasons,
+            "timer_state_classification": timer["state_classification"],
+            "owner_state_classification": (
+                owner["state_classification"] if owner is not None else None
+            ),
+        }
+        pair_rows.append(pair)
+        for unit in (timer, owner):
+            if unit is None:
+                continue
+            unit["paired_unit_name"] = owner_name if unit is timer else timer_name
+            unit["pair_classification"] = pair_classification
+            unit["pair_healthy"] = pair_healthy
+            unit["pair_resample_required"] = resample_required
+            if not pair_healthy:
+                unit["healthy"] = False
+                if reasons[0] not in unit["reason_codes"]:
+                    unit["reason_codes"].append(reasons[0])
 
-        row.update(
-            {
-                "classification": classification,
-                "healthy": healthy,
-                "reason_codes": reasons,
-            }
-        )
-        rows.append(row)
-
-    list_defect = bool(missing_names or unexpected_names or len(rows) != len(SERVICE_NAMES))
+    list_defect = bool(
+        missing_names
+        or unexpected_names
+        or missing_pair_owners
+        or len(rows) != len(SERVICE_NAMES)
+        or len(pair_rows) != len(TIMER_SERVICE_PAIRS)
+    )
     failing = [row for row in rows if row.get("healthy") is not True]
+    failing_pairs = [pair for pair in pair_rows if pair.get("healthy") is not True]
+    resample_pairs = [
+        pair for pair in pair_rows if pair.get("resample_required") is True
+    ]
     counts: dict[str, int] = {}
     for row in rows:
         classification = str(row["classification"])
         counts[classification] = counts.get(classification, 0) + 1
+    pair_counts: dict[str, int] = {}
+    for pair in pair_rows:
+        classification = str(pair["classification"])
+        pair_counts[classification] = pair_counts.get(classification, 0) + 1
     return {
         "expected_unit_count": len(SERVICE_NAMES),
         "observed_unit_count": len(snapshot),
         "expected_unit_names": expected_names,
         "missing_unit_names": missing_names,
         "unexpected_unit_names": unexpected_names,
+        "expected_pair_count": len(TIMER_SERVICE_PAIRS),
+        "observed_pair_count": len(pair_rows),
+        "missing_pair_owner_names": missing_pair_owners,
         "classification": (
             "predicate_or_literal_unit_list_defect"
             if list_defect
             else "required_units_unhealthy"
-            if failing
+            if failing or failing_pairs
             else "healthy"
         ),
         "classification_counts": counts,
-        "healthy": not list_defect and not failing,
+        "pair_classification_counts": pair_counts,
+        "healthy": not list_defect and not failing and not failing_pairs,
         "failing_unit_count": len(failing),
         "failing_units": failing,
+        "failing_pair_count": len(failing_pairs),
+        "failing_pairs": failing_pairs,
+        "resample_required_pair_names": [
+            {"timer_name": pair["timer_name"], "owner_name": pair["owner_name"]}
+            for pair in resample_pairs
+        ],
+        "pairs": pair_rows,
         "units": rows,
     }
+
+
+def _systemd_service_gate_with_resample(
+    initial_snapshot: Mapping[str, Any] | None = None,
+    *,
+    snapshot_reader: Callable[[tuple[str, ...]], Mapping[str, Any]] | None = None,
+    max_attempts: int = SYSTEMD_PAIR_RESAMPLE_MAX_ATTEMPTS,
+    max_seconds: float = SYSTEMD_PAIR_RESAMPLE_MAX_SECONDS,
+    interval_seconds: float = SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    """Bound only plausible paired-snapshot races and retain every sample."""
+
+    reader = snapshot_reader or _systemd_snapshot
+    current_snapshot = dict(initial_snapshot or reader(SERVICE_NAMES))
+    initial_gate = _systemd_service_gate(current_snapshot)
+    gate = initial_gate
+    started = time.monotonic()
+    initial_resample_names = {
+        name
+        for pair in initial_gate["resample_required_pair_names"]
+        for name in (pair["owner_name"], pair["timer_name"])
+    }
+    samples: list[dict[str, Any]] = []
+    if initial_resample_names:
+        samples.append(
+            {
+                "attempt": 0,
+                "captured_at": _now(),
+                "unit_names": sorted(initial_resample_names),
+                "units": [
+                    row
+                    for row in initial_gate["units"]
+                    if row["name"] in initial_resample_names
+                ],
+                "pairs": [
+                    pair
+                    for pair in initial_gate["pairs"]
+                    if pair["timer_name"] in initial_resample_names
+                ],
+            }
+        )
+    attempts = 0
+    while gate["resample_required_pair_names"] and attempts < max_attempts:
+        if time.monotonic() - started >= max_seconds:
+            break
+        if interval_seconds > 0:
+            time.sleep(interval_seconds)
+        attempts += 1
+        requested_names = tuple(
+            dict.fromkeys(
+                name
+                for pair in gate["resample_required_pair_names"]
+                for name in (pair["owner_name"], pair["timer_name"])
+            )
+        )
+        resampled = reader(requested_names)
+        for name in requested_names:
+            current_snapshot[name] = resampled.get(name, {})
+        gate = _systemd_service_gate(current_snapshot)
+        sampled_names = set(requested_names)
+        samples.append(
+            {
+                "attempt": attempts,
+                "captured_at": _now(),
+                "unit_names": list(requested_names),
+                "units": [
+                    row for row in gate["units"] if row["name"] in sampled_names
+                ],
+                "pairs": [
+                    pair
+                    for pair in gate["pairs"]
+                    if pair["timer_name"] in sampled_names
+                ],
+            }
+        )
+    gate["pair_resample_evidence"] = {
+        "attempted": attempts > 0,
+        "max_attempts": max_attempts,
+        "max_seconds": max_seconds,
+        "interval_seconds": interval_seconds,
+        "attempt_count": attempts,
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+        "resolved_healthy": bool(
+            initial_gate["resample_required_pair_names"] and gate["healthy"]
+        ),
+        "remaining_resample_required_pair_names": gate[
+            "resample_required_pair_names"
+        ],
+        "samples": samples,
+    }
+    return gate
 
 
 def _services_healthy(snapshot: Mapping[str, Any]) -> bool:
@@ -1779,7 +2008,7 @@ def _material_snapshot(
     if projected_root < ROOT_MINIMUM_AFTER_BYTES:
         raise WarmArchiveError("exact six do not project root above 25 GiB")
     services = _systemd_snapshot()
-    service_gate = _systemd_service_gate(services)
+    service_gate = _systemd_service_gate_with_resample(services)
     if not service_gate["healthy"]:
         raise WarmArchiveError(
             "required production service/timer health is not ready",
@@ -2019,7 +2248,7 @@ def readiness(
             raise WarmArchiveError("existing readiness receipt binding is invalid")
         return {**payload, "idempotent": True}
 
-    initial_systemd_service_gate = _systemd_service_gate(_systemd_snapshot())
+    initial_systemd_service_gate = _systemd_service_gate_with_resample()
     if not initial_systemd_service_gate["healthy"]:
         result = {
             "contract_name": CONTRACT_NAME,
@@ -3166,12 +3395,13 @@ def _apply_batch_locked(
             fresh_material["targets"], require_targets=False
         )
         services_now = _systemd_snapshot()
+        services_gate_now = _systemd_service_gate_with_resample(services_now)
         journald_now = _journald_snapshot()
         if (
             non_target_now["digest"] != journal["non_target_digest_before"]
             or root_policy_now["protected_path_identity_digest"]
             != journal["root_policy_protected_digest_before"]
-            or not _services_healthy(services_now)
+            or not services_gate_now["healthy"]
             or journald_now["service"].get("MainPID")
             != journal["journald_before"]["service"].get("MainPID")
             or journald_now["effective"]["values"]
@@ -3206,6 +3436,9 @@ def _apply_batch_locked(
             "filesystems_before": fresh_observations["filesystems_before"],
             "journald_before": fresh_observations["journald"],
             "services_before": fresh_observations["services"],
+            "systemd_service_gate_before": fresh_observations[
+                "systemd_service_gate"
+            ],
             "activity_evidence_before": fresh_observations["activity_gates"],
             "non_target_digest_before": fresh_material["non_target_digest"],
             "root_policy_protected_digest_before": fresh_material["root_policy"]["protected_path_identity_digest"],
@@ -3240,6 +3473,7 @@ def _apply_batch_locked(
         fresh_material["targets"], require_targets=False
     )
     services_after = _systemd_snapshot()
+    services_gate_after = _systemd_service_gate_with_resample(services_after)
     journald_after = _journald_snapshot()
     journal_reconciliation = _reconcile_correction_journal_inventory(
         journal["journald_before"]["inventory"], journald_after["inventory"]
@@ -3248,7 +3482,7 @@ def _apply_batch_locked(
         non_target_after["digest"] != journal["non_target_digest_before"]
         or root_policy_after["protected_path_identity_digest"]
         != journal["root_policy_protected_digest_before"]
-        or not _services_healthy(services_after)
+        or not services_gate_after["healthy"]
         or journald_after["service"].get("MainPID")
         != journal["journald_before"]["service"].get("MainPID")
         or journald_after["effective"]["values"]
@@ -3279,9 +3513,10 @@ def _apply_batch_locked(
             - reclaimed
         ),
         "filesystems_after": filesystems_after,
+        "services_after": services_after,
+        "systemd_service_gate_after": services_gate_after,
         "finance_after": finance_after,
         "monitor": monitor,
-        "services_after": services_after,
         "journald_after": journald_after,
         "journald_reconciliation": journal_reconciliation,
         "non_target_digest_after": non_target_after["digest"],
@@ -3371,7 +3606,7 @@ def readback_batch(
     finance = _finance_snapshot(runtime_dir)
     non_target = _non_target_snapshot()
     services = _systemd_snapshot()
-    systemd_service_gate = _systemd_service_gate(services)
+    systemd_service_gate = _systemd_service_gate_with_resample(services)
     journald = _journald_snapshot()
     root_readback = read_root_storage_status_artifact(policy=load_policy())
     journald_reconciliation = (

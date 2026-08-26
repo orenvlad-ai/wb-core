@@ -388,11 +388,45 @@ def main() -> None:
     healthy_systemd_gate = {
         "expected_unit_count": 27,
         "observed_unit_count": 27,
+        "expected_pair_count": 12,
+        "observed_pair_count": 12,
         "healthy": True,
         "failing_unit_count": 0,
         "failing_units": [],
-        "units": [{"name": f"unit-{index}"} for index in range(27)],
+        "failing_pair_count": 0,
+        "failing_pairs": [],
+        "resample_required_pair_names": [],
+        "units": [
+            {
+                "name": f"unit-{index}",
+                "classification": "healthy-fixture",
+                "healthy": True,
+            }
+            for index in range(27)
+        ],
+        "pairs": [
+            {
+                "timer_name": f"timer-{index}",
+                "owner_name": f"owner-{index}",
+                "classification": "waiting_with_inactive_success_owner",
+                "healthy": True,
+                "resample_required": False,
+            }
+            for index in range(12)
+        ],
+        "pair_resample_evidence": {
+            "attempted": False,
+            "attempt_count": 0,
+            "samples": [],
+        },
     }
+    assert apply._valid_warm_systemd_service_gate(
+        healthy_systemd_gate, require_healthy=True
+    )
+    assert not apply._valid_warm_systemd_service_gate(
+        {key: value for key, value in healthy_systemd_gate.items() if key != "pairs"},
+        require_healthy=True,
+    )
     readiness_payload = {
         "schema": apply.WARM_READINESS_RECEIPT_SCHEMA,
         "state": "ready",
@@ -453,6 +487,9 @@ def main() -> None:
         "classification": "required_units_unhealthy",
         "failing_unit_count": 1,
         "failing_units": systemd_gate["failing_units"],
+        "failing_pair_count": None,
+        "failing_pairs": None,
+        "pair_resample_summary": None,
     }
     try:
         apply.parse_release_receipt(
