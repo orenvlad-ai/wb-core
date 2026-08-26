@@ -37,7 +37,9 @@ For the unrelated WBC0008 exact-six lifecycle, the selected Finance raw and
 operational files are active mutable canonical stores resolved by
 StoreRegistry. Their ordinary same-inode writes may change content/size/mtime,
 but path, mount/device, inode/type, owner/classification, generation identity
-and expected owning-service/open-handle relationship remain fail-closed. This
+and the explicit reader/writer service MainPID plus FD access-mode relationship
+remain fail-closed. Same-inode content evolution is allowed only while that
+versioned access-role topology remains exact. This
 does not grant warm-archive authority over a Finance generation or retained
 restore set; Finance lifecycle locks still serialize the operation.
 

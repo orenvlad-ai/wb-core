@@ -41,7 +41,7 @@ def _seed(path: Path) -> None:
 
 def _healthy_systemd_snapshot() -> dict[str, dict[str, object]]:
     snapshot: dict[str, dict[str, object]] = {}
-    for name in warm.SERVICE_NAMES:
+    for unit_index, name in enumerate(warm.SERVICE_NAMES, start=1):
         values: dict[str, object] = {
             "Id": name,
             "LoadState": "loaded",
@@ -72,7 +72,7 @@ def _healthy_systemd_snapshot() -> dict[str, dict[str, object]]:
                 {
                     "ActiveState": "active",
                     "SubState": "running",
-                    "MainPID": "101",
+                    "MainPID": str(1000 + unit_index),
                     "UnitFileState": "enabled",
                 }
             )
@@ -328,7 +328,28 @@ def _exercise_apply_lock_path(root: Path) -> None:
             setattr(warm, name, value)
 
 
-def _mutable_fixture_policy(path: Path, *, resolver_type: str = "literal") -> dict[str, object]:
+def _access_role(
+    service: str,
+    declared_role: str,
+) -> dict[str, object]:
+    modes = {
+        "reader": ["read_only"],
+        "writer": ["read_write"],
+        "reader_writer": ["read_only", "read_write"],
+    }[declared_role]
+    return {
+        "service": service,
+        "declared_role": declared_role,
+        "allowed_access_modes": modes,
+    }
+
+
+def _mutable_fixture_policy(
+    path: Path,
+    *,
+    resolver_type: str = "literal",
+    access_roles: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     resolver: dict[str, object]
     if resolver_type == "literal":
         resolver = {"type": "literal", "path": str(path)}
@@ -336,15 +357,19 @@ def _mutable_fixture_policy(path: Path, *, resolver_type: str = "literal") -> di
         resolver = {"type": "store_registry", "logical_store": "operational"}
     return {
         "non_target_cas": {
-            "contract_version": "wb_core_non_target_cas_v1",
+            "contract_version": "wb_core_non_target_cas_v2",
             "active_mutable_canonical_stores": [
                 {
                     "key": "fixture_current",
                     "owner": "fixture_operational_store",
                     "classification": "essential_bounded_business_writer",
                     "resolver": resolver,
-                    "expected_owning_services": [
-                        "wb-core-autoanswers-worker.service"
+                    "access_roles": access_roles
+                    or [
+                        _access_role(
+                            "wb-core-autoanswers-worker.service",
+                            "reader_writer",
+                        )
                     ],
                     "allow_no_open_handles": True,
                 }
@@ -357,6 +382,31 @@ def _mutable_fixture_policy(path: Path, *, resolver_type: str = "literal") -> di
                 "path_patterns": [str(path)] if resolver_type == "literal" else [],
             }
         ],
+    }
+
+
+def _fd_opener(
+    path: Path,
+    *,
+    pid: int,
+    access_mode: str,
+    device: int | None = None,
+    inode: int | None = None,
+) -> dict[str, object]:
+    value = path.stat()
+    return {
+        "source_path": str(path),
+        "pid": pid,
+        "fd": 7,
+        "access_mode": access_mode,
+        "comm": "python3",
+        "fd_target": str(path),
+        "real_fd_target": str(path.resolve()),
+        "target_device": int(value.st_dev if device is None else device),
+        "target_device_major": int(os.major(value.st_dev)),
+        "target_device_minor": int(os.minor(value.st_dev)),
+        "target_inode": int(value.st_ino if inode is None else inode),
+        "binds_source_device_inode": True,
     }
 
 
@@ -562,8 +612,171 @@ def _exercise_non_target_cas_split(root: Path) -> None:
     else:
         raise AssertionError("StoreRegistry identity replacement was admitted")
 
+    access_policy = _mutable_fixture_policy(
+        mutable,
+        access_roles=[
+            _access_role("wb-core-registry-http.service", "reader"),
+            _access_role("wb-core-autoanswers-worker.service", "writer"),
+        ],
+    )
+    registry_pid = int(
+        service_snapshot["wb-core-registry-http.service"]["MainPID"]
+    )
+    registry_reader = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=access_policy,
+        store_registry=registry,
+        service_snapshot=service_snapshot,
+        opener_reader=lambda _path: [
+            _fd_opener(mutable, pid=registry_pid, access_mode="read_only")
+        ],
+    )
+    accepted_reader = registry_reader["observation_rows"][0][
+        "open_handle_relationships"
+    ][0]
+    assert accepted_reader["accepted"] is True
+    assert accepted_reader["matched_unit"] == "wb-core-registry-http.service"
+    assert accepted_reader["service_main_pid"] == registry_pid
+    assert accepted_reader["service_health"]["healthy"] is True
+    assert accepted_reader["declared_role"] == "reader"
+    assert accepted_reader["accepted_reason"] == (
+        "exact_healthy_declared_mainpid_and_access_mode"
+    )
+
+    data_mcp_pid = int(service_snapshot["wb-core-data-mcp.service"]["MainPID"])
+    for opener, reason in (
+        (
+            _fd_opener(mutable, pid=data_mcp_pid, access_mode="read_only"),
+            "undeclared_service",
+        ),
+        (
+            _fd_opener(mutable, pid=999999, access_mode="read_only"),
+            "undeclared_or_non_main_pid",
+        ),
+        (
+            _fd_opener(mutable, pid=registry_pid, access_mode="read_write"),
+            "access_mode_not_allowed",
+        ),
+        (
+            _fd_opener(
+                mutable,
+                pid=registry_pid,
+                access_mode="read_only",
+                device=mutable.stat().st_dev + 1,
+            ),
+            "fd_device_inode_binding_mismatch",
+        ),
+        (
+            _fd_opener(mutable, pid=registry_pid, access_mode="unknown"),
+            "unknown_access_mode",
+        ),
+    ):
+        try:
+            warm._active_mutable_canonical_snapshot(
+                runtime_dir=root,
+                policy=access_policy,
+                store_registry=registry,
+                service_snapshot=service_snapshot,
+                opener_reader=lambda _path, value=opener: [value],
+            )
+        except warm.WarmArchiveError as exc:
+            assert "invalid open-handle access relationship" in str(exc)
+            assert exc.evidence["openers"][0]["rejected_reason"] == reason
+        else:
+            raise AssertionError(f"invalid mutable opener was admitted: {reason}")
+
+    active_writer_snapshot = json.loads(json.dumps(service_snapshot))
+    writer_pid = 42002
+    active_writer_snapshot["wb-core-autoanswers-worker.service"].update(
+        {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": str(writer_pid),
+        }
+    )
+    active_writer_snapshot["wb-core-autoanswers-worker.timer"].update(
+        {"ActiveState": "active", "SubState": "running"}
+    )
+    accepted_writer = warm._active_mutable_canonical_snapshot(
+        runtime_dir=root,
+        policy=access_policy,
+        store_registry=registry,
+        service_snapshot=active_writer_snapshot,
+        opener_reader=lambda _path: [
+            _fd_opener(mutable, pid=writer_pid, access_mode="read_write")
+        ],
+    )
+    writer_relationship = accepted_writer["observation_rows"][0][
+        "open_handle_relationships"
+    ][0]
+    assert writer_relationship["accepted"] is True
+    assert writer_relationship["declared_role"] == "writer"
+
+    unhealthy_writer_snapshot = json.loads(json.dumps(active_writer_snapshot))
+    unhealthy_writer_snapshot["wb-core-autoanswers-worker.service"].update(
+        {"Result": "exit-code", "ExecMainStatus": "1"}
+    )
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=access_policy,
+            store_registry=registry,
+            service_snapshot=unhealthy_writer_snapshot,
+            opener_reader=lambda _path: [
+                _fd_opener(mutable, pid=writer_pid, access_mode="read_write")
+            ],
+        )
+    except warm.WarmArchiveError as exc:
+        assert exc.evidence["openers"][0]["rejected_reason"] == (
+            "matched_service_unhealthy"
+        )
+    else:
+        raise AssertionError("unhealthy writer MainPID was admitted")
+
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=access_policy,
+            store_registry=registry,
+            service_snapshot=active_writer_snapshot,
+            opener_reader=lambda _path: [
+                _fd_opener(mutable, pid=writer_pid + 1, access_mode="read_write")
+            ],
+        )
+    except warm.WarmArchiveError as exc:
+        assert exc.evidence["openers"][0]["rejected_reason"] == (
+            "undeclared_or_non_main_pid"
+        )
+    else:
+        raise AssertionError("non-MainPID writer was admitted")
+
+    ambiguous_snapshot = json.loads(json.dumps(active_writer_snapshot))
+    ambiguous_snapshot["wb-core-autoanswers-readonly-sync.service"].update(
+        {
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": str(writer_pid),
+        }
+    )
+    try:
+        warm._active_mutable_canonical_snapshot(
+            runtime_dir=root,
+            policy=access_policy,
+            store_registry=registry,
+            service_snapshot=ambiguous_snapshot,
+            opener_reader=lambda _path: [
+                _fd_opener(mutable, pid=writer_pid, access_mode="read_write")
+            ],
+        )
+    except warm.WarmArchiveError as exc:
+        assert exc.evidence["openers"][0]["rejected_reason"] == (
+            "multiple_unit_mainpid_ambiguity"
+        )
+    else:
+        raise AssertionError("multiple-unit MainPID ambiguity was admitted")
+
     unexpected_opener = lambda _path: [
-        {"pid": 999999, "fd": 4, "comm": "unknown", "access_mode": "read_write"}
+        _fd_opener(mutable, pid=999999, access_mode="read_write")
     ]
     try:
         warm._active_mutable_canonical_snapshot(
@@ -574,9 +787,27 @@ def _exercise_non_target_cas_split(root: Path) -> None:
             opener_reader=unexpected_opener,
         )
     except warm.WarmArchiveError as exc:
-        assert "unexpected open-handle owner" in str(exc)
+        assert "invalid open-handle access relationship" in str(exc)
     else:
         raise AssertionError("unexpected mutable canonical opener was admitted")
+
+    access_policy_drift = json.loads(json.dumps(grown))
+    access_policy_drift["topology_rows"][0]["access_roles"][0][
+        "allowed_access_modes"
+    ] = ["read_only"]
+    access_policy_drift["topology_digest"] = warm._digest(
+        access_policy_drift["topology_rows"]
+    )
+    try:
+        warm._reconcile_non_target(
+            _non_target_fixture(grown),
+            _non_target_fixture(access_policy_drift),
+            phase="mutable_access_policy_drift",
+        )
+    except warm.WarmArchiveError:
+        pass
+    else:
+        raise AssertionError("mutable canonical access-policy drift was admitted")
 
     for reason in ("add", "remove", "content", "stat"):
         try:
@@ -666,8 +897,17 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
     autoanswers = root / "wb_autoanswers_runtime.sqlite3"
     autoanswers.unlink(missing_ok=True)
     _seed(autoanswers)
-    policy = _mutable_fixture_policy(autoanswers)
+    policy = _mutable_fixture_policy(
+        autoanswers,
+        access_roles=[
+            _access_role("wb-core-registry-http.service", "reader"),
+            _access_role("wb-core-autoanswers-worker.service", "writer"),
+        ],
+    )
     service_snapshot = _healthy_systemd_snapshot()
+    registry_pid = int(
+        service_snapshot["wb-core-registry-http.service"]["MainPID"]
+    )
     original_mount_identity = warm._mount_identity
     original_material_snapshot = warm._material_snapshot
     original_service_gate = warm._systemd_service_gate_with_resample
@@ -713,7 +953,13 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             policy=policy,
             store_registry={"stores": {}},
             service_snapshot=service_snapshot,
-            opener_reader=lambda _path: [],
+            opener_reader=lambda _path: [
+                _fd_opener(
+                    autoanswers,
+                    pid=registry_pid,
+                    access_mode="read_only",
+                )
+            ],
         )
         targets = [
             {
@@ -813,6 +1059,15 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         assert ready["mutable_canonical_observations"][0][
             "ordinary_mutable_fields"
         ]["apparent_size_bytes"] > 0
+        live_shape_opener = ready["mutable_canonical_observations"][0][
+            "open_handle_relationships"
+        ][0]
+        assert live_shape_opener["matched_unit"] == (
+            "wb-core-registry-http.service"
+        )
+        assert live_shape_opener["declared_role"] == "reader"
+        assert live_shape_opener["access_mode"] == "read_only"
+        assert live_shape_opener["accepted"] is True
         dry = warm.dry_run(
             runtime_dir=runtime,
             root_backups=root_backups,
