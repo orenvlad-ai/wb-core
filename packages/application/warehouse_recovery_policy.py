@@ -1211,7 +1211,10 @@ class WarehouseRecoveryRegistry:
             next_action="verify_allowlisted_full_backup",
         )
         try:
-            backup = runtime.backup_database(Path(destination))
+            backup = runtime.backup_database(
+                Path(destination),
+                admission_owner="warehouse_recovery_policy",
+            )
             if str(backup.get("integrity_check") or "").lower() != "ok":
                 raise RecoveryPolicyError("T3 coherent backup integrity check failed")
             backup_path = Path(str(backup["path"]))

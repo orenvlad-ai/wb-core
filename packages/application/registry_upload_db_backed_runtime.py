@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 from packages.business_time import business_date_from_timestamp
 
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
+from packages.application.root_storage_policy import admit_root_write
 from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
 from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_schema
 from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
@@ -170,15 +171,25 @@ class RegistryUploadDbBackedRuntime:
         self.bundle_block = bundle_block or RegistryUploadBundleV1Block()
         self.cost_price_block = cost_price_block or CostPriceUploadBlock()
 
-    def backup_database(self, destination: Path) -> dict[str, Any]:
+    def backup_database(
+        self,
+        destination: Path,
+        *,
+        admission_owner: str,
+    ) -> dict[str, Any]:
         """Create a coherent SQLite backup without copying a live WAL file set."""
         if not self.db_path.is_file():
             raise ValueError(f"Runtime SQLite database does not exist: {self.db_path}")
         target = Path(destination)
         if target.exists():
             raise ValueError(f"Backup destination already exists: {target}")
-        target.parent.mkdir(parents=True, exist_ok=True)
         source_size = self.coherent_backup_size_bytes()
+        admission = admit_root_write(
+            owner=admission_owner,
+            destination=target,
+            predicted_output_bytes=source_size,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
         safety_margin = max(256 * 1024 * 1024, source_size // 20)
         required_free_bytes = source_size + safety_margin
         available_free_bytes = shutil.disk_usage(target.parent).free
@@ -215,6 +226,7 @@ class RegistryUploadDbBackedRuntime:
             "size_bytes": size_bytes,
             "sha256": digest.hexdigest(),
             "integrity_check": "ok",
+            "root_storage_admission": admission,
         }
 
     def coherent_backup_size_bytes(self) -> int:

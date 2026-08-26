@@ -34,6 +34,10 @@ from packages.application.finance_generation_filesystem import (
     inspect_generation_filesystem,
     stable_generation_filesystem_identity,
 )
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.storage_registry import (
     MANIFEST_FILENAME,
     MONOLITH_FILENAME,
@@ -1622,6 +1626,11 @@ class FinanceStorageCoherentSnapshot:
                     "database_without_manifest_validated"
                 )
             else:
+                admit_root_write(
+                    owner="finance_storage_split_coherent_source",
+                    destination=Path(temporary),
+                    predicted_output_bytes=predict_sqlite_backup_bytes(source_path),
+                )
                 destination = sqlite3.connect(
                     temporary,
                     timeout=60,
@@ -5132,6 +5141,14 @@ class FinanceStorageRollback:
         )
         target_path = Path(str(reviewed_plan["target"]["path"])).resolve()
         target_path.relative_to(self.runtime_dir)
+        admit_root_write(
+            owner="finance_rollback_candidate",
+            destination=target_path,
+            predicted_output_bytes=(
+                predict_sqlite_backup_bytes(operational_path)
+                + predict_sqlite_backup_bytes(raw_path)
+            ),
+        )
         target_path.parent.mkdir(parents=True, exist_ok=True)
         evidence_path = target_path.parent / "rollback_candidate.json"
         if evidence_path.exists() and target_path.is_file():

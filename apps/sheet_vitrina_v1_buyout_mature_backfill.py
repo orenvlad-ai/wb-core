@@ -28,6 +28,10 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
     DB_FILENAME,
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.sales_funnel_history_block import (  # noqa: E402
     SalesFunnelHistoryBlock,
 )
@@ -517,6 +521,11 @@ def _temporal_non_target_digest(
 
 
 def _backup_and_verify(db_path: Path, backup_path: Path) -> str:
+    admit_root_write(
+        owner="buyout_mature_backfill",
+        destination=backup_path,
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
     source = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
     target = sqlite3.connect(str(backup_path))
     try:

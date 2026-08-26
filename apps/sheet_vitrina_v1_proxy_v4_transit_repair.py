@@ -399,7 +399,10 @@ def _apply_manifest(
     backup_path = evidence_dir / "backups" / (
         f"proxy-v4-transit-{applied_at.replace(':', '').replace('-', '')}-{manifest_sha256[-12:]}.sqlite3"
     )
-    backup = runtime.backup_database(backup_path)
+    backup = runtime.backup_database(
+        backup_path,
+        admission_owner="proxy_v4_transit_repair",
+    )
     backup_descriptor = os.open(backup_path, os.O_RDONLY)
     try:
         os.fsync(backup_descriptor)

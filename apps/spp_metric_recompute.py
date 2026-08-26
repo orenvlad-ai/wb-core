@@ -20,6 +20,10 @@ from packages.adapters.spp_block import (  # noqa: E402
     _discount_on_site_goods_to_spp_items,
 )
 from packages.contracts.spp_block import SppRequest  # noqa: E402
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
 ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
@@ -388,8 +392,13 @@ def _coerce_float(value: Any) -> float | None:
 
 def _backup_db(db_path: Path) -> Path:
     backup_dir = db_path.parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
     target = backup_dir / f"spp_recompute__{_utc_now().replace(':', '').replace('-', '')}.sqlite3"
+    admit_root_write(
+        owner="spp_metric_recompute",
+        destination=target,
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
+    backup_dir.mkdir(parents=True, exist_ok=True)
     src = sqlite3.connect(str(db_path))
     try:
         dst = sqlite3.connect(str(target))

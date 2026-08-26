@@ -19,6 +19,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.cny_ledger import CnyLedgerBlock  # noqa: E402
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
@@ -411,6 +415,11 @@ def _non_target_digest(conn: sqlite3.Connection) -> str:
 def _sqlite_backup(source: Path, target: Path) -> None:
     if target.exists():
         raise ValueError(f"backup target already exists: {target}")
+    admit_root_write(
+        owner="supplier_cny_payment_10_recovery",
+        destination=target,
+        predicted_output_bytes=predict_sqlite_backup_bytes(source),
+    )
     with sqlite3.connect(source) as source_conn, sqlite3.connect(target) as target_conn:
         source_conn.backup(target_conn)
     if target.stat().st_size <= 0:

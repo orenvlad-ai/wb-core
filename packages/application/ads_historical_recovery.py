@@ -22,6 +22,10 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.sqlite_contention import connect_sqlite
 
 
@@ -119,8 +123,13 @@ def create_coherent_sqlite_backup(
 
     if not db_path.is_file():
         raise AdsHistoricalRecoveryError(f"runtime SQLite database is absent: {db_path}")
-    backup_dir.mkdir(parents=True, exist_ok=True)
     source_size = db_path.stat().st_size
+    admission = admit_root_write(
+        owner="ads_historical_recovery",
+        destination=backup_dir / "ads-historical-admission.sqlite3",
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
+    backup_dir.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(backup_dir).free
     required_free_bytes = max(source_size * 2, 16 * 1024 * 1024)
     if free_bytes < required_free_bytes:
@@ -167,6 +176,7 @@ def create_coherent_sqlite_backup(
             "permissions": format(backup_path.stat().st_mode & 0o777, "04o"),
             "integrity_check": integrity,
             "sha256": f"sha256:{sha256.hexdigest()}",
+            "root_storage_admission": admission,
         }
     except Exception:
         backup_path.unlink(missing_ok=True)

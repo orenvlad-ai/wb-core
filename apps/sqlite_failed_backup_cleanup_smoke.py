@@ -77,7 +77,10 @@ def main() -> int:
             conn.execute("CREATE TABLE source(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
             conn.execute("INSERT INTO source(value) VALUES('evidence')")
         completed_destination = Path(tmp) / "backups" / "warehouse-functional" / "complete.sqlite3"
-        completed = runtime.backup_database(completed_destination)
+        completed = runtime.backup_database(
+            completed_destination,
+            admission_owner="registry_sqlite_backup_primitive",
+        )
         _assert(completed["integrity_check"] == "ok", "coherent backup succeeds")
         _assert((completed_destination.stat().st_mode & 0o777) == 0o600, "backup private from creation")
         completed_destination.unlink()
@@ -88,7 +91,10 @@ def main() -> int:
             return_value=mock.Mock(free=0),
         ):
             try:
-                runtime.backup_database(destination)
+                runtime.backup_database(
+                    destination,
+                    admission_owner="registry_sqlite_backup_primitive",
+                )
             except ValueError as exc:
                 _assert("insufficient filesystem capacity" in str(exc), "capacity preflight fails closed")
             else:
@@ -106,6 +112,9 @@ def main() -> int:
             def __exit__(self, *_args: object) -> None:
                 return None
 
+            def close(self) -> None:
+                return None
+
             def backup(self, target: "FakeConnection") -> None:
                 target.path.parent.mkdir(parents=True, exist_ok=True)
                 target.path.write_bytes(b"\x00" * 4096)
@@ -116,9 +125,15 @@ def main() -> int:
             resolved = Path(path)
             return FakeConnection(resolved, source=(resolved == runtime.db_path))
 
-        with mock.patch.object(runtime_module.sqlite3, "connect", side_effect=fake_connect):
+        with (
+            mock.patch.object(runtime, "coherent_backup_size_bytes", return_value=runtime.db_path.stat().st_size),
+            mock.patch.object(runtime_module.sqlite3, "connect", side_effect=fake_connect),
+        ):
             try:
-                runtime.backup_database(destination)
+                runtime.backup_database(
+                    destination,
+                    admission_owner="registry_sqlite_backup_primitive",
+                )
             except sqlite3.OperationalError as exc:
                 _assert("disk is full" in str(exc), "original backup failure preserved")
             else:

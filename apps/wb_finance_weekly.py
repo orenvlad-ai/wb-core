@@ -20,6 +20,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.wb_finance_weekly import WbFinanceApiClient, block_from_env  # noqa: E402
+from packages.application.root_storage_policy import (  # noqa: E402
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     BeforeImageQuery,
     RecoveryState,
@@ -303,8 +307,13 @@ def _create_sqlite_backup(
     fingerprint: str,
     prefix: str = "wb-finance-stale-cost",
 ) -> dict[str, object]:
-    backup_dir.mkdir(parents=True, exist_ok=True)
     source_size = db_path.stat().st_size
+    admission = admit_root_write(
+        owner="finance_legacy_helper",
+        destination=backup_dir / f"{prefix}-admission.sqlite3",
+        predicted_output_bytes=predict_sqlite_backup_bytes(db_path),
+    )
+    backup_dir.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(backup_dir).free
     required_free_bytes = max(source_size * 2, 16 * 1024 * 1024)
     if free_bytes < required_free_bytes:
@@ -338,6 +347,7 @@ def _create_sqlite_backup(
         "free_space_before_bytes": free_bytes,
         "required_free_bytes": required_free_bytes,
         "sha256": f"sha256:{sha256.hexdigest()}",
+        "root_storage_admission": admission,
         "integrity_check": integrity,
     }
 

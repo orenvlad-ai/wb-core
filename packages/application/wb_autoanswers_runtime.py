@@ -64,6 +64,10 @@ from packages.contracts.wb_autoanswers import (
     validate_mode,
 )
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.root_storage_policy import (
+    admit_root_write,
+    predict_sqlite_backup_bytes,
+)
 from packages.application.wb_autoanswers_owner_policy import (
     OWNER_POLICY_VERSION,
     apply_owner_policy,
@@ -1516,12 +1520,17 @@ class AutoanswersRepository:
                 / str(compressed["latest_filename"])
             )
         backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(backup_dir, 0o700)
         stamp = self._now().strftime("%Y%m%dT%H%M%SZ")
         backup_path = backup_dir / (
             f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__{stamp}__{uuid4().hex[:8]}.sqlite3"
         )
+        admit_root_write(
+            owner="autoanswers_first_schema",
+            destination=backup_path,
+            predicted_output_bytes=predict_sqlite_backup_bytes(self.db_path),
+        )
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
         source_uri = f"file:{self.db_path.resolve()}?mode=ro"
         try:
             with sqlite3.connect(source_uri, uri=True, timeout=60) as source:
