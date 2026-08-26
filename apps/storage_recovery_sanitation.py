@@ -51,6 +51,14 @@ FAMILY_POLICIES: dict[str, dict[str, dict[str, Any]]] = {
         "canonical-cost-engine": {"retain_verified": 1},
         "canonical-vitrina-publication": {"retain_verified": 1},
         "promo_metric_eligibility_recompute": {"retain_verified": 1},
+        # WBC0008 block 006 is populated only by the dedicated exact-six
+        # cross-filesystem warm-archive contract.  It is registered for
+        # inventory/retention ownership, but the generic family-at-a-time
+        # mutator must never act on it.
+        "root-warm-archive-wbc0008-006": {
+            "retain_verified": 6,
+            "managed_by": "root_storage_warm_archive_wbc0008_006_v1",
+        },
         "sheet_vitrina_v1_proxy_margin_3_historical_backfill": {
             "retain_verified": 1
         },
@@ -197,6 +205,10 @@ def plan_family(
         root_name=root_name,
         family=family,
     )
+    if policy.get("managed_by"):
+        raise SanitationError(
+            "family is owned by a dedicated exact lifecycle contract"
+        )
     if int(reserved_free_bytes) < 0:
         raise SanitationError("reserved free bytes must be non-negative")
     analysis = _analyze_family(family_path)

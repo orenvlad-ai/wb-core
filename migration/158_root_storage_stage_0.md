@@ -139,6 +139,17 @@ non-journal movement, shrinkage, deletion or drift fails closed. Newly created
 current journal files are inventoried separately and never mask a missing
 pre-existing identity.
 
+## Block-006 bounded warm archive
+
+After the block-005 monitor activation, block 006 is a separate
+production-mutation contour. It may replace only the six literal inactive raw
+SQLite recovery/evidence copies with exact independently restored warm archives
+on the existing `/dev/sdb1` backup mount. It does not alter this policy,
+journald, Promo, business data or generation storage. Its full material CAS,
+capacity, crash-resume, one-submit and terminal readback contract is
+`migration/159_root_storage_warm_archive_wbc0008_006.md`. Block 007 is not
+authorized by block 006 completion.
+
 ## Deploy and acceptance
 
 `root_storage_policy_file` in the active hosted target binds the policy to the

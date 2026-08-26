@@ -172,7 +172,12 @@ The large Stage 4 allowlist is:
   `calculation-parameters`, `canonical-cost-engine`,
   `canonical-vitrina-publication`, both supplier factual-date family names,
   `warehouse-functional-sync`, `promo_metric_eligibility_recompute` and
-  `sheet_vitrina_v1_proxy_margin_3_historical_backfill`.
+  `sheet_vitrina_v1_proxy_margin_3_historical_backfill`. The inventory also
+  registers `root-warm-archive-wbc0008-006` with retain count six, but its
+  `managed_by` binding makes the generic family planner/apply fail closed. Only
+  the exact cross-filesystem contract in
+  `migration/159_root_storage_warm_archive_wbc0008_006.md` may populate or
+  mutate that family.
 
 Autoanswers custom-manifest families, `lost+found`, `.tmp`, control-plane
 archives, root-level files and every unlisted family are inventory-only in this
@@ -242,6 +247,7 @@ to retire the original monolith or any Finance generation.
 - `python3 apps/storage_recovery_writer_inventory_static_smoke.py`
 - `python3 apps/storage_recovery_sanitation_smoke.py`
 - `python3 apps/storage_recovery_sanitation_job_smoke.py`
+- `python3 apps/root_storage_warm_archive_smoke.py`
 - `python3 apps/promo_campaign_archive_gc_smoke.py`
 - `python3 apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py`
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`

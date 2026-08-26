@@ -45,6 +45,7 @@ from apps.release_protocol import (  # noqa: E402
 APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
 APPLY_MARKER = "wb-core-production-apply-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
+WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 MAX_QUALIFICATION_CANDIDATES = 4
 RECOVERY_WORKFLOW_NAME = "Production Apply Runner"
 RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
@@ -67,6 +68,16 @@ AUTH_RE = re.compile(
     r"components (?P<components>[1-9][0-9]*) "
     r"finalizations (?P<finalizations>[1-9][0-9]*) "
     r"full-days (?P<full_days>[0-9]+) partial-days (?P<partial_days>[0-9]+)$"
+)
+WARM_ARCHIVE_AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC[0-9]{4}) "
+    r"profile (?P<profile>root-warm-archive-six) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"sources (?P<sources>[1-9][0-9]*) archives (?P<archives>[1-9][0-9]*) "
+    r"manifests (?P<manifests>[1-9][0-9]*) unlinks (?P<unlinks>[1-9][0-9]*) "
+    r"reclaimed-allocated-bytes (?P<reclaimed>[1-9][0-9]*) "
+    r"root-minimum-bytes (?P<root_minimum>[1-9][0-9]*) "
+    r"backup-floor-bytes (?P<backup_floor>[1-9][0-9]*)$"
 )
 LEGACY_AUTH_RE = re.compile(
     r"^/wb-core apply-v2 pr (?P<pr>[1-9][0-9]*) merge (?P<merge>[0-9a-f]{40}) "
@@ -196,14 +207,44 @@ def validate_authorization(
     expected_suffix = f"/repos/{repository}/issues/{pr}"
     if not issue_url.endswith(expected_suffix):
         raise ApplyError("task authorization is not attached to the exact pull request")
-    match = AUTH_RE.fullmatch(str(comment.get("body") or "").strip())
-    if match is None:
+    body = str(comment.get("body") or "").strip()
+    match = AUTH_RE.fullmatch(body)
+    warm_match = WARM_ARCHIVE_AUTH_RE.fullmatch(body)
+    if match is None and warm_match is None:
         raise ApplyError("task authorization body is not exact goal-v1 syntax")
-    raw = match.groupdict()
-    if raw["profile"] != GOAL_PROFILE:
-        raise ApplyError("task authorization profile is unsupported")
+    raw = (match or warm_match).groupdict()
     if raw["target"] != CANONICAL_PRODUCTION_TARGET_ID:
         raise ApplyError("task authorization target is not canonical production")
+    if warm_match is not None:
+        goal = {
+            "contract": "wb-core.production-goal-passport/v1",
+            "task": raw["task"],
+            "profile": raw["profile"],
+            "target_id": raw["target"],
+            "expected_source_count": int(raw["sources"]),
+            "expected_archive_count": int(raw["archives"]),
+            "expected_manifest_count": int(raw["manifests"]),
+            "expected_unlink_count": int(raw["unlinks"]),
+            "expected_reclaimed_allocated_bytes": int(raw["reclaimed"]),
+            "root_minimum_after_bytes": int(raw["root_minimum"]),
+            "required_backup_floor_bytes": int(raw["backup_floor"]),
+            "max_mutation_submits": 1,
+            "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
+            "reversible": True,
+        }
+        if (
+            goal["task"] != "WBC0008"
+            or goal["expected_source_count"] != 6
+            or goal["expected_archive_count"] != 6
+            or goal["expected_manifest_count"] != 6
+            or goal["expected_unlink_count"] != 6
+            or goal["root_minimum_after_bytes"] != 25 * 1024**3
+            or goal["required_backup_floor_bytes"] <= 8 * 1024**3
+        ):
+            raise ApplyError("warm archive authorization scope is not exact block 006")
+        return goal
+    if raw["profile"] != GOAL_PROFILE:
+        raise ApplyError("task authorization profile is unsupported")
     date_from = date.fromisoformat(raw["date_from"])
     date_to = date.fromisoformat(raw["date_to"])
     date_count = (date_to - date_from).days + 1
@@ -292,6 +333,7 @@ def _remote_command(
     target: Mapping[str, Any],
     merge_sha: str,
     goal: Mapping[str, Any],
+    operation: str,
     evidence_dir: str,
     mode: str,
     manifest_path: str = "",
@@ -301,22 +343,41 @@ def _remote_command(
     if mode not in {"dry-run", "apply", "readback"}:
         raise ApplyError("unsupported remote production-goal mode")
     target_dir = str(target["target_dir"])
-    parts = [
-        "python3",
-        f"{target_dir}/apps/sheet_vitrina_v1_inventory_history_backfill.py",
-        "--runtime-dir",
-        "/opt/wb-core-runtime/state",
-        "--evidence-dir",
-        evidence_dir,
-        "--deployed-sha",
-        merge_sha,
-        "--deployed-sha-file",
-        f"{target_dir}/.wb-core-runtime-sha",
-        "--date-from",
-        str(goal["date_from"]),
-        "--date-to",
-        str(goal["date_to"]),
-    ]
+    warm_archive = goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE
+    if warm_archive:
+        parts = [
+            "python3",
+            f"{target_dir}/apps/root_storage_warm_archive.py",
+            "--runtime-dir",
+            "/opt/wb-core-runtime/state",
+            "--root-backups",
+            "/opt/wb-core-runtime/backups",
+            "--deployed-sha",
+            merge_sha,
+            "--deployed-sha-file",
+            f"{target_dir}/.wb-core-runtime-sha",
+            "--evidence-dir",
+            evidence_dir,
+            "--operation-id",
+            operation,
+        ]
+    else:
+        parts = [
+            "python3",
+            f"{target_dir}/apps/sheet_vitrina_v1_inventory_history_backfill.py",
+            "--runtime-dir",
+            "/opt/wb-core-runtime/state",
+            "--evidence-dir",
+            evidence_dir,
+            "--deployed-sha",
+            merge_sha,
+            "--deployed-sha-file",
+            f"{target_dir}/.wb-core-runtime-sha",
+            "--date-from",
+            str(goal["date_from"]),
+            "--date-to",
+            str(goal["date_to"]),
+        ]
     if mode in {"apply", "readback"}:
         normalized_manifest_path = posixpath.normpath(manifest_path)
         normalized_evidence_dir = posixpath.normpath(evidence_dir)
@@ -325,27 +386,95 @@ def _remote_command(
             or posixpath.dirname(normalized_manifest_path)
             != normalized_evidence_dir
             or re.fullmatch(
-                r"inventory-history-backfill-plan-[0-9]{8}T[0-9]{6}Z\.json",
+                (
+                    r"root-warm-archive-plan-[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?\.json"
+                    if warm_archive
+                    else r"inventory-history-backfill-plan-[0-9]{8}T[0-9]{6}Z\.json"
+                ),
                 posixpath.basename(normalized_manifest_path),
-            )
-            is None
+            ) is None
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256)
         ):
             raise ApplyError("remote manifest binding escapes authorized evidence scope")
-        parts.extend(
-            [
+        if not warm_archive:
+            parts.extend(
+                [
+                    "--manifest",
+                    manifest_path,
+                    "--manifest-sha256",
+                    manifest_sha256,
+                ]
+            )
+    if mode == "apply":
+        if not approval_reference or len(approval_reference) > 500:
+            raise ApplyError("task authorization reference is invalid")
+        if warm_archive:
+            job_id = digest(
+                canonical_json_bytes(
+                    {
+                        "contract": "root-warm-archive-job-v1",
+                        "operation": operation,
+                        "manifest_sha256": manifest_sha256,
+                        "deployed_sha": merge_sha,
+                    }
+                )
+            )
+            parts = [
+                "python3",
+                f"{target_dir}/apps/storage_recovery_sanitation_job.py",
+                "--runtime-dir",
+                "/opt/wb-core-runtime/state",
+                "--root-backups",
+                "/opt/wb-core-runtime/backups",
+                "--deployed-sha-file",
+                f"{target_dir}/.wb-core-runtime-sha",
+                "submit",
+                "--job-id",
+                job_id,
+                "--deployed-sha",
+                merge_sha,
+                "--operation",
+                "warm-archive-apply",
                 "--manifest",
                 manifest_path,
                 "--manifest-sha256",
                 manifest_sha256,
+                "--goal-operation-id",
+                operation,
+                "--approval-reference",
+                approval_reference,
             ]
-        )
-    if mode == "apply":
-        if not approval_reference or len(approval_reference) > 500:
-            raise ApplyError("task authorization reference is invalid")
-        parts.extend(["--apply", "--approval-reference", approval_reference])
+        else:
+            parts.extend(["--apply", "--approval-reference", approval_reference])
     elif mode == "readback":
-        parts.append("--readback")
+        if warm_archive:
+            job_id = digest(
+                canonical_json_bytes(
+                    {
+                        "contract": "root-warm-archive-job-v1",
+                        "operation": operation,
+                        "manifest_sha256": manifest_sha256,
+                        "deployed_sha": merge_sha,
+                    }
+                )
+            )
+            parts.extend(
+                [
+                    "readback",
+                    "--manifest",
+                    manifest_path,
+                    "--manifest-sha256",
+                    manifest_sha256,
+                    "--job-id",
+                    job_id,
+                    "--wait-seconds",
+                    "43200",
+                ]
+            )
+        else:
+            parts.append("--readback")
+    elif warm_archive:
+        parts.append("dry-run")
     evidence_setup = (
         "install -d -m 0700 " + shlex.quote(evidence_dir)
         if mode == "dry-run"
@@ -398,6 +527,30 @@ def command_evidence(command: list[str], *, timeout_seconds: float = 3600.0) -> 
 
 
 def _validate_candidate(payload: Mapping[str, Any], goal: Mapping[str, Any]) -> None:
+    if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
+        expected = {
+            "status": "ready",
+            "source_count": goal["expected_source_count"],
+            "expected_unlink_count": goal["expected_unlink_count"],
+            "expected_reclaimed_allocated_bytes": goal[
+                "expected_reclaimed_allocated_bytes"
+            ],
+            "root_minimum_after_bytes": goal["root_minimum_after_bytes"],
+            "required_backup_floor_bytes": goal["required_backup_floor_bytes"],
+            "capacity_guard_passed": True,
+            "openers_count": 0,
+            "locks_count": 0,
+            "holds_count": 0,
+        }
+        for field, value in expected.items():
+            if payload.get(field) != value:
+                raise ApplyError(f"dynamic manifest escaped authorized goal: {field}")
+        if payload.get("database_written") is not False:
+            raise ApplyError("warm archive qualification unexpectedly wrote data")
+        for field in ("manifest_sha256", "material_qualification_digest", "non_target_digest"):
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
+                raise ApplyError(f"dynamic warm archive digest is invalid: {field}")
+        return
     expected = {
         "status": "ready",
         "date_from": goal["date_from"],
@@ -442,6 +595,7 @@ def run_dynamic_goal(
                 target=target,
                 merge_sha=merge_sha,
                 goal=goal,
+                operation=operation,
                 evidence_dir=evidence_dir,
                 mode="dry-run",
             )
@@ -465,20 +619,34 @@ def run_dynamic_goal(
             }
         if payload.get("deployed_sha") != merge_sha:
             raise ApplyError("dynamic manifest is not bound to exact deployed merge SHA")
-        attempts.append(
-            {
-                **{key: value for key, value in evidence.items() if key != "result"},
-                "attempt": attempt,
-                "manifest_path": payload["manifest_path"],
-                "manifest_sha256": payload["manifest_sha256"],
-                "material_qualification_digest": payload[
-                    "material_qualification_digest"
-                ],
-                "source_watermarks_digest": payload["source_watermarks_digest"],
-                "target_history_digest": payload["target_history_digest"],
-                "qualification_state": "candidate",
-            }
-        )
+        candidate_evidence = {
+            **{key: value for key, value in evidence.items() if key != "result"},
+            "attempt": attempt,
+            "manifest_path": payload["manifest_path"],
+            "manifest_sha256": payload["manifest_sha256"],
+            "material_qualification_digest": payload[
+                "material_qualification_digest"
+            ],
+            "qualification_state": "candidate",
+        }
+        if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
+            candidate_evidence.update(
+                {
+                    "source_count": payload["source_count"],
+                    "expected_reclaimed_allocated_bytes": payload[
+                        "expected_reclaimed_allocated_bytes"
+                    ],
+                    "non_target_digest": payload["non_target_digest"],
+                }
+            )
+        else:
+            candidate_evidence.update(
+                {
+                    "source_watermarks_digest": payload["source_watermarks_digest"],
+                    "target_history_digest": payload["target_history_digest"],
+                }
+            )
+        attempts.append(candidate_evidence)
         current_material_digest = str(payload["material_qualification_digest"])
         if current_material_digest == previous_material_digest:
             attempts[-2]["qualification_state"] = "matching_witness"
@@ -507,6 +675,7 @@ def run_dynamic_goal(
             target=target,
             merge_sha=merge_sha,
             goal=goal,
+            operation=operation,
             evidence_dir=evidence_dir,
             mode="apply",
             manifest_path=manifest_path,
@@ -528,35 +697,63 @@ def run_dynamic_goal(
             target=target,
             merge_sha=merge_sha,
             goal=goal,
+            operation=operation,
             evidence_dir=evidence_dir,
             mode="readback",
             manifest_path=manifest_path,
             manifest_sha256=manifest_sha256,
-        )
+        ),
+        timeout_seconds=(
+            43260.0
+            if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE
+            else 3600.0
+        ),
     )
     readback = readback_evidence.get("result")
-    reconciled = (
-        readback_evidence.get("return_code") == 0
-        and isinstance(readback, Mapping)
-        and readback.get("status") == "reconciled"
-        and readback.get("query_only") is True
-        and readback.get("inserted_capture_count")
-        == goal["expected_inserted_capture_count"]
-        and readback.get("inserted_component_count")
-        == goal["expected_inserted_component_count"]
-        and readback.get("inserted_finalization_count")
-        == goal["expected_inserted_finalization_count"]
-        and readback.get("visible_history_date_count") == goal["date_count"]
-        and readback.get("visible_history_quality")
-        == {
-            "full": goal["expected_full_date_count"],
-            "partial": goal["expected_partial_date_count"],
-            "unavailable": 0,
-        }
-        and readback.get("exact_manifest_apply_receipt_count") == 1
-        and readback.get("total_inventory_history_apply_receipt_count") == 1
-        and readback.get("non_target_preserved") is True
-    )
+    if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
+        reconciled = bool(
+            readback_evidence.get("return_code") == 0
+            and isinstance(readback, Mapping)
+            and readback.get("status") == "reconciled"
+            and readback.get("query_only") is True
+            and readback.get("source_count") == goal["expected_source_count"]
+            and readback.get("source_absent_count") == goal["expected_source_count"]
+            and readback.get("archive_count") == goal["expected_archive_count"]
+            and readback.get("manifest_count") == goal["expected_manifest_count"]
+            and readback.get("raw_unlink_count") == goal["expected_unlink_count"]
+            and readback.get("reclaimed_allocated_bytes")
+            == goal["expected_reclaimed_allocated_bytes"]
+            and readback.get("root_minimum_passed") is True
+            and readback.get("backup_capacity_guard_passed") is True
+            and readback.get("services_healthy") is True
+            and readback.get("non_target_preserved") is True
+            and readback.get("promo_action_count") == 0
+            and readback.get("business_data_mutation_count") == 0
+            and readback.get("exact_manifest_apply_receipt_count") == 1
+        )
+    else:
+        reconciled = bool(
+            readback_evidence.get("return_code") == 0
+            and isinstance(readback, Mapping)
+            and readback.get("status") == "reconciled"
+            and readback.get("query_only") is True
+            and readback.get("inserted_capture_count")
+            == goal["expected_inserted_capture_count"]
+            and readback.get("inserted_component_count")
+            == goal["expected_inserted_component_count"]
+            and readback.get("inserted_finalization_count")
+            == goal["expected_inserted_finalization_count"]
+            and readback.get("visible_history_date_count") == goal["date_count"]
+            and readback.get("visible_history_quality")
+            == {
+                "full": goal["expected_full_date_count"],
+                "partial": goal["expected_partial_date_count"],
+                "unavailable": 0,
+            }
+            and readback.get("exact_manifest_apply_receipt_count") == 1
+            and readback.get("total_inventory_history_apply_receipt_count") == 1
+            and readback.get("non_target_preserved") is True
+        )
     return {
         "state": "done" if reconciled else "blocked",
         "reason": "reconciled" if reconciled else "post-submit-readback-not-reconciled",
@@ -741,6 +938,47 @@ def _validate_recovery_receipt(
     ):
         raise ApplyError("recovery receipt terminal evidence is incomplete")
     readback = readback_evidence.get("result")
+    manifest_sha = qualified.get("sha256")
+    apply_result = apply_evidence.get("result")
+    if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
+        readback_job = (
+            readback.get("job") if isinstance(readback, Mapping) else None
+        )
+        apply_request = (
+            readback_job.get("request")
+            if isinstance(readback_job, Mapping)
+            else None
+        )
+        if (
+            readback_evidence.get("return_code") != 0
+            or readback_evidence.get("transport_ambiguous") is not False
+            or not isinstance(readback, Mapping)
+            or readback.get("status") != "reconciled"
+            or readback.get("query_only") is not True
+            or readback.get("deployed_sha") != merge_sha
+            or readback.get("source_count") != goal["expected_source_count"]
+            or readback.get("source_absent_count") != goal["expected_source_count"]
+            or readback.get("archive_count") != goal["expected_archive_count"]
+            or readback.get("manifest_count") != goal["expected_manifest_count"]
+            or readback.get("raw_unlink_count") != goal["expected_unlink_count"]
+            or readback.get("reclaimed_allocated_bytes")
+            != goal["expected_reclaimed_allocated_bytes"]
+            or readback.get("manifest_sha256") != manifest_sha
+            or readback.get("exact_manifest_apply_receipt_count") != 1
+            or readback.get("root_minimum_passed") is not True
+            or readback.get("backup_capacity_guard_passed") is not True
+            or readback.get("services_healthy") is not True
+            or readback.get("non_target_preserved") is not True
+            or readback.get("promo_action_count") != 0
+            or readback.get("business_data_mutation_count") != 0
+            or not isinstance(manifest_sha, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha) is None
+            or not isinstance(apply_request, Mapping)
+            or apply_request.get("manifest_sha256") != manifest_sha
+            or apply_request.get("operation") != "warm-archive-apply"
+        ):
+            raise ApplyError("recovery receipt warm archive proof is inconsistent")
+        return
     if (
         readback_evidence.get("return_code") != 0
         or readback_evidence.get("transport_ambiguous") is not False
@@ -768,8 +1006,6 @@ def _validate_recovery_receipt(
         or readback.get("non_target_preserved") is not True
     ):
         raise ApplyError("recovery receipt readback is not exact reconciled proof")
-    manifest_sha = qualified.get("sha256")
-    apply_result = apply_evidence.get("result")
     if (
         not isinstance(manifest_sha, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha) is None

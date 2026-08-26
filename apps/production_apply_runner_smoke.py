@@ -28,6 +28,12 @@ AUTH_BODY = (
     "target wb_core_eu_hosted_runtime_active dates 2026-03-01..2026-08-24 "
     "captures 177 components 18054 finalizations 177 full-days 172 partial-days 5"
 )
+WARM_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six "
+    "target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 "
+    "unlinks 6 reclaimed-allocated-bytes 27591725056 "
+    "root-minimum-bytes 26843545600 backup-floor-bytes 41105612800"
+)
 
 
 def authorization(**updates: object) -> dict[str, object]:
@@ -244,7 +250,11 @@ class RecoveryClient:
         return comment
 
 
-def _run_dynamic_sequence(sequence: list[dict[str, object]]) -> dict[str, object]:
+def _run_dynamic_sequence(
+    sequence: list[dict[str, object]],
+    *,
+    authorization_comment: dict[str, object] | None = None,
+) -> dict[str, object]:
     original = apply.command_evidence
     original_sleep = apply.time.sleep
 
@@ -257,7 +267,9 @@ def _run_dynamic_sequence(sequence: list[dict[str, object]]) -> dict[str, object
     apply.time.sleep = lambda _seconds: None
     try:
         goal = apply.validate_authorization(
-            authorization(), repository="orenvlad-ai/wb-core", pr=1050
+            authorization_comment or authorization(),
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
         )
         return apply.run_dynamic_goal(
             target={
@@ -281,6 +293,22 @@ def main() -> None:
     assert goal["date_count"] == 177
     assert goal["max_mutation_submits"] == 1
     assert goal["max_pre_submit_regenerations"] == 3
+    warm_authorization = authorization(body=WARM_AUTH_BODY)
+    warm_goal = apply.validate_authorization(
+        warm_authorization, repository="orenvlad-ai/wb-core", pr=1050
+    )
+    assert warm_goal["expected_source_count"] == 6
+    assert warm_goal["expected_reclaimed_allocated_bytes"] == 27_591_725_056
+    try:
+        apply.validate_authorization(
+            authorization(body=WARM_AUTH_BODY.replace("sources 6", "sources 5")),
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("warm archive count drift must fail closed")
     for invalid in (
         authorization(author_association="CONTRIBUTOR"),
         authorization(body=AUTH_BODY.replace("full-days 172", "full-days 171")),
@@ -383,6 +411,105 @@ def main() -> None:
     )
     assert ambiguous_but_reconciled["state"] == "done"
     assert ambiguous_but_reconciled["apply_count"] == 1
+
+    warm_manifest_sha = "sha256:" + "9" * 64
+    warm_candidate = {
+        "status": "ready",
+        "database_written": False,
+        "deployed_sha": MERGE_SHA,
+        "source_count": 6,
+        "expected_unlink_count": 6,
+        "expected_reclaimed_allocated_bytes": 27_591_725_056,
+        "root_minimum_after_bytes": 26_843_545_600,
+        "required_backup_floor_bytes": 41_105_612_800,
+        "capacity_guard_passed": True,
+        "openers_count": 0,
+        "locks_count": 0,
+        "holds_count": 0,
+        "manifest_path": (
+            "/opt/wb-core-runtime/state/private-evidence/production-goals/op/"
+            "root-warm-archive-plan-20260826T120000Z.json"
+        ),
+        "manifest_sha256": warm_manifest_sha,
+        "material_qualification_digest": "sha256:" + "8" * 64,
+        "non_target_digest": "sha256:" + "7" * 64,
+    }
+    warm_readback = {
+        "status": "reconciled",
+        "query_only": True,
+        "source_count": 6,
+        "source_absent_count": 6,
+        "archive_count": 6,
+        "manifest_count": 6,
+        "raw_unlink_count": 6,
+        "reclaimed_allocated_bytes": 27_591_725_056,
+        "root_minimum_passed": True,
+        "backup_capacity_guard_passed": True,
+        "services_healthy": True,
+        "non_target_preserved": True,
+        "promo_action_count": 0,
+        "business_data_mutation_count": 0,
+        "exact_manifest_apply_receipt_count": 1,
+    }
+    warm_success = _run_dynamic_sequence(
+        [
+            {**common, "result": warm_candidate},
+            {**common, "result": warm_candidate},
+            {**common, "result": {"status": "queued"}},
+            {**common, "result": warm_readback},
+        ],
+        authorization_comment=warm_authorization,
+    )
+    assert warm_success["state"] == "done"
+    assert warm_success["apply_count"] == 1
+    warm_operation = apply.operation_id(
+        "orenvlad-ai/wb-core", 1050, AUTHORIZATION_COMMENT_ID, warm_goal
+    )
+    warm_recovery_readback = {
+        **warm_readback,
+        "deployed_sha": MERGE_SHA,
+        "manifest_sha256": warm_manifest_sha,
+        "job": {
+            "request": {
+                "operation": "warm-archive-apply",
+                "manifest_sha256": warm_manifest_sha,
+            }
+        },
+    }
+    apply._validate_recovery_receipt(
+        {
+            "schema": apply.APPLY_RECEIPT_SCHEMA,
+            "state": "done",
+            "operation_id": warm_operation,
+            "repository": "orenvlad-ai/wb-core",
+            "pull_request": 1050,
+            "release_operation_id": RECOVERY_RELEASE_OPERATION,
+            "merge_sha": MERGE_SHA,
+            "deployed_sha": MERGE_SHA,
+            "authorization_comment_id": AUTHORIZATION_COMMENT_ID,
+            "goal": warm_goal,
+            "apply_count": 1,
+            "evidence": {
+                "state": "done",
+                "reason": "reconciled",
+                "apply_count": 1,
+                "qualified_manifest": {"sha256": warm_manifest_sha},
+                "apply": {"transport_ambiguous": True},
+                "readback": {
+                    "return_code": 0,
+                    "transport_ambiguous": False,
+                    "result": warm_recovery_readback,
+                },
+            },
+        },
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+        merge_sha=MERGE_SHA,
+        run_head_sha=MERGE_SHA,
+        authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+        expected_operation=warm_operation,
+        goal=warm_goal,
+    )
 
     drift = _run_dynamic_sequence(
         [

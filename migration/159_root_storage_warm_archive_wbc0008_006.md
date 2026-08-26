@@ -1,0 +1,98 @@
+# Root storage warm archive — WBC0008 block 006
+
+Status: implementation and production-mutation contract. This migration grants
+authority only to replace the six exact inactive raw SQLite recovery/evidence
+copies encoded in `apps/root_storage_warm_archive.py` with verified compressed
+warm archives on the existing backup filesystem.
+
+## Fixed scope
+
+The destination is exactly
+`/opt/wb-core-runtime/state/backups/root-warm-archive-wbc0008-006` on
+`/dev/sdb1`. The six source paths, archive names, owner/family provenance and
+restore roles are literal policy entries. No discovery result can add or
+substitute a target. An opener, lock, sidecar, hold marker, provenance mismatch,
+SQLite integrity failure, mount drift, count drift or material identity drift
+blocks the whole pre-submit contour.
+
+The dedicated runner records device/inode, apparent and allocated bytes, mode,
+uid/gid, mtime/ctime, SHA-256, SQLite header/schema identity, immutable
+query-only `quick_check` and `integrity_check`, sidecars, process openers,
+kernel locks, related operations, provenance and incident/forensic/legal-hold
+evidence for every source. StoreRegistry current paths and the root-storage
+owner/classification are independently checked. Reclaimed bytes are calculated
+from 512-byte allocated blocks.
+
+## Capacity and lifecycle
+
+Compression is zstd level 1 with one thread and one source at a time. Temporary
+archive and full restore files exist only in the destination family, mode 0600.
+The worker accounts for every already-published archive, the current archive,
+manifest/control reserve and a complete restored SQLite copy. Available backup
+bytes must remain at or above the live Finance
+`next_replacement_required_bytes` plus an additional 8 GiB emergency reserve at
+every stage. Projected terminal root availability must be at least 25 GiB.
+
+For each source the worker:
+
+1. verifies exact source CAS and non-target digest;
+2. compresses and fsyncs the destination temp;
+3. stream-decompresses to the exact original byte count and SHA-256;
+4. materializes a full restored file and repeats SQLite quick/integrity/schema
+   proof;
+5. durably publishes and independently rereads the archive/manifest pair;
+6. repeats source identity/hash/sidecar/opener/lock/hold/provenance CAS,
+   non-target digest and capacity immediately before unlink;
+7. writes an fsynced pending-unlink intent, submits one source unlink, fsyncs
+   the source directory, and reconciles absence before proceeding.
+
+An interrupted owned temp or pair publication is resumed only from the exact
+operation identity. An absent source is accepted only with its pending/completed
+unlink intent and a fresh full restore proof. The durable detached sanitation
+job serializes the batch and holds the Finance storage lock. It never launches
+parallel compression or a second whole-operation submit.
+
+## Trusted apply
+
+The PR planner classifies this capability as `live_runtime`: the trusted
+Release Runner merges and deploys only inert code and managed-unit permissions,
+then emits its exact `done` receipt. The separate default-off Apply Runner owns
+the production-mutation boundary. The task-scoped owner authorization syntax
+is:
+
+```text
+/wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 unlinks 6 reclaimed-allocated-bytes <exact-allocated-byte-total> root-minimum-bytes 26843545600 backup-floor-bytes <finance-next-replacement-plus-8GiB>
+```
+
+The trusted Apply Runner creates at most four private JIT candidates and
+requires two consecutive identical material-qualification digests. It then
+submits exactly one caller-known detached job. A nonzero/ambiguous submit is
+never repeated; the only next action is query-only job and archive readback.
+The material hash is evidence, not a second owner authorization field.
+
+## Terminal acceptance
+
+`COMPLETE` requires exactly six absent sources, six private archives and six
+private manifests on `/dev/sdb1`; independent full restore, exact size/SHA and
+SQLite quick/integrity proof for each; unlink count six; exact allocated-byte
+reconciliation; root available at least 25 GiB; backup above the Finance plus
+8 GiB floor; fresh normal root-monitor status; healthy Registry HTTP, AI API,
+Data MCP, root-monitor and Finance timers; preserved StoreRegistry/non-target
+identities; unchanged journald PID, effective values and protected inventory;
+and zero Promo or business-data mutation. Anything else is terminal
+`BLOCKED` with no substitute file and no replay.
+
+Strict exclusions are all other raw or compressed copies, incident/forensic or
+legal-hold material, the sole DCP archive, active/rollback monoliths, Finance,
+warehouse and Autoanswers restore sets, Promo GC, journald changes, generation
+retirement, a new mount/destination, capacity expansion and WBC0008 block 007.
+
+Required checks:
+
+- `python3 apps/root_storage_warm_archive_smoke.py`
+- `python3 apps/storage_recovery_sanitation_smoke.py`
+- `python3 apps/storage_recovery_sanitation_job_smoke.py`
+- `python3 apps/production_apply_runner_smoke.py`
+- `python3 apps/root_storage_policy_smoke.py`
+- `python3 apps/finance_storage_backup_rotation_smoke.py`
+- every suite selected by the exact-base PR planner
