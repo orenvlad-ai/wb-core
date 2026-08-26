@@ -2647,14 +2647,30 @@ class _exclusive_finance_lock:
         self.path = runtime_dir / FINANCE_STORAGE_LOCK_FILENAME
         self.handle: Any = None
 
-    def __enter__(self):
+    def __enter__(self) -> Any:
         if self.path.is_symlink():
             raise WarmArchiveError("Finance storage lock is a symlink")
-        self.handle = self.path.open("a+b")
-        os.chmod(self.path, 0o600)
         try:
+            self.handle = self.path.open("a+b")
+            os.chmod(self.path, 0o600)
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
+            if self.handle is not None:
+                self.handle.close()
+            raise WarmArchiveError(
+                "Finance storage operation/reservation is active"
+            ) from exc
+        except BaseException:
+            if self.handle is not None and not self.handle.closed:
+                self.handle.close()
+            raise
+        return self.handle
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        assert self.handle is not None
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
             self.handle.close()
 
 
@@ -2668,17 +2684,23 @@ class _exclusive_other_lifecycle_locks:
             for path in self.paths:
                 if path.is_symlink():
                     raise WarmArchiveError(f"lifecycle lock is a symlink: {path}")
-                handle = path.open("a+b")
-                os.chmod(path, 0o600)
+                handle: Any = None
                 try:
+                    handle = path.open("a+b")
+                    os.chmod(path, 0o600)
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as exc:
-                    handle.close()
+                    if handle is not None:
+                        handle.close()
                     raise WarmArchiveError(
                         "another storage lifecycle operation is active"
                     ) from exc
+                except BaseException:
+                    if handle is not None and not handle.closed:
+                        handle.close()
+                    raise
                 self.handles.append(handle)
-        except Exception:
+        except BaseException:
             self.__exit__(None, None, None)
             raise
         return self.handles
@@ -2690,15 +2712,6 @@ class _exclusive_other_lifecycle_locks:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
                 handle.close()
-            raise WarmArchiveError("Finance storage operation/reservation is active") from exc
-        return self.handle
-
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        assert self.handle is not None
-        try:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self.handle.close()
 
 
 def _compress(source: Path, temporary: Path) -> dict[str, Any]:

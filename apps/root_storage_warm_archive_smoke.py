@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -20,6 +22,14 @@ from apps.storage_recovery_sanitation_job import submit_job
 
 
 OPERATION = "production-goal-v1-" + "a" * 32
+
+
+class _BodyFailure(RuntimeError):
+    pass
+
+
+class _MutationBoundary(RuntimeError):
+    pass
 
 
 def _seed(path: Path) -> None:
@@ -70,6 +80,251 @@ def _healthy_systemd_snapshot() -> dict[str, dict[str, object]]:
     return snapshot
 
 
+def _open_fd_count() -> int | None:
+    for candidate in (Path("/proc/self/fd"), Path("/dev/fd")):
+        if candidate.is_dir():
+            return len(os.listdir(candidate))
+    return None
+
+
+def _assert_lock_available(path: Path) -> None:
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _exercise_lock_contexts(root: Path) -> None:
+    runtime = root / "lock-runtime"
+    runtime.mkdir()
+    fd_count_before = _open_fd_count()
+
+    finance = warm._exclusive_finance_lock(runtime)
+    with finance as finance_handle:
+        assert finance_handle is finance.handle
+        assert finance_handle.closed is False
+        contender = warm._exclusive_finance_lock(runtime)
+        try:
+            contender.__enter__()
+        except warm.WarmArchiveError as exc:
+            assert str(exc) == "Finance storage operation/reservation is active"
+        else:
+            raise AssertionError("Finance lock contention was not rejected")
+        assert contender.handle is not None and contender.handle.closed
+    assert finance_handle.closed
+    _assert_lock_available(finance.path)
+
+    finance_body = warm._exclusive_finance_lock(runtime)
+    try:
+        with finance_body:
+            raise _BodyFailure("finance body failure")
+    except _BodyFailure as exc:
+        assert str(exc) == "finance body failure"
+    else:
+        raise AssertionError("Finance lock suppressed the body exception")
+    assert finance_body.handle.closed
+    with warm._exclusive_finance_lock(runtime) as repeated_finance:
+        assert repeated_finance.closed is False
+    assert repeated_finance.closed
+
+    finance_symlink_runtime = root / "finance-symlink-runtime"
+    finance_symlink_runtime.mkdir()
+    symlink_target = finance_symlink_runtime / "symlink-target"
+    symlink_target.touch()
+    (finance_symlink_runtime / warm.FINANCE_STORAGE_LOCK_FILENAME).symlink_to(
+        symlink_target
+    )
+    try:
+        with warm._exclusive_finance_lock(finance_symlink_runtime):
+            raise AssertionError("Finance symlink lock unexpectedly entered")
+    except warm.WarmArchiveError as exc:
+        assert str(exc) == "Finance storage lock is a symlink"
+
+    lifecycle = warm._exclusive_other_lifecycle_locks(runtime)
+    unlock_order: list[int] = []
+    original_flock = warm.fcntl.flock
+
+    def traced_flock(descriptor: int, operation: int) -> object:
+        if operation == fcntl.LOCK_UN:
+            unlock_order.append(os.fstat(descriptor).st_ino)
+        return original_flock(descriptor, operation)
+
+    warm.fcntl.flock = traced_flock
+    try:
+        with lifecycle:
+            lifecycle_handles = list(lifecycle.handles)
+            acquired_order = [os.fstat(item.fileno()).st_ino for item in lifecycle_handles]
+    finally:
+        warm.fcntl.flock = original_flock
+    assert unlock_order == list(reversed(acquired_order))
+    assert lifecycle.handles == []
+    assert all(handle.closed for handle in lifecycle_handles)
+
+    lifecycle_body = warm._exclusive_other_lifecycle_locks(runtime)
+    lifecycle_body_handles: list[object] = []
+    try:
+        with lifecycle_body:
+            lifecycle_body_handles = list(lifecycle_body.handles)
+            raise _BodyFailure("lifecycle body failure")
+    except _BodyFailure as exc:
+        assert str(exc) == "lifecycle body failure"
+    else:
+        raise AssertionError("lifecycle locks suppressed the body exception")
+    assert lifecycle_body.handles == []
+    assert all(handle.closed for handle in lifecycle_body_handles)
+
+    partial_runtime = root / "partial-runtime"
+    partial_runtime.mkdir()
+    partial_paths = [partial_runtime / name for name in warm.OTHER_LIFECYCLE_LOCKS]
+    with partial_paths[1].open("a+b") as blocking_handle:
+        fcntl.flock(blocking_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        partial = warm._exclusive_other_lifecycle_locks(partial_runtime)
+        try:
+            partial.__enter__()
+        except warm.WarmArchiveError as exc:
+            assert str(exc) == "another storage lifecycle operation is active"
+        else:
+            raise AssertionError("partial lifecycle contention was not rejected")
+        assert partial.handles == []
+        _assert_lock_available(partial_paths[0])
+        fcntl.flock(blocking_handle.fileno(), fcntl.LOCK_UN)
+    with warm._exclusive_other_lifecycle_locks(partial_runtime):
+        pass
+    for path in partial_paths:
+        _assert_lock_available(path)
+
+    lifecycle_symlink_runtime = root / "lifecycle-symlink-runtime"
+    lifecycle_symlink_runtime.mkdir()
+    lifecycle_symlink_target = lifecycle_symlink_runtime / "symlink-target"
+    lifecycle_symlink_target.touch()
+    (lifecycle_symlink_runtime / warm.OTHER_LIFECYCLE_LOCKS[0]).symlink_to(
+        lifecycle_symlink_target
+    )
+    symlink_lifecycle = warm._exclusive_other_lifecycle_locks(
+        lifecycle_symlink_runtime
+    )
+    try:
+        symlink_lifecycle.__enter__()
+    except warm.WarmArchiveError as exc:
+        assert str(exc).startswith("lifecycle lock is a symlink:")
+    else:
+        raise AssertionError("lifecycle symlink lock unexpectedly entered")
+    assert symlink_lifecycle.handles == []
+
+    fd_count_after = _open_fd_count()
+    if fd_count_before is not None and fd_count_after is not None:
+        assert fd_count_after == fd_count_before
+
+
+def _exercise_apply_lock_path(root: Path) -> None:
+    runtime = root / "apply-runtime"
+    runtime.mkdir()
+    root_backups = root / "apply-root-backups"
+    root_backups.mkdir()
+    evidence_dir = root / "apply-evidence"
+    evidence_dir.mkdir()
+    deployed_sha = "b" * 40
+    readiness_id = "readiness-v1-" + "c" * 32
+    fresh_material = {
+        "expected_reclaimed_allocated_bytes": 512,
+        "non_target_digest": "sha256:" + "d" * 64,
+        "root_policy": {
+            "protected_path_identity_digest": "sha256:" + "e" * 64,
+        },
+        "targets": [{"key": "fixture"}],
+    }
+    material_digest = warm._digest(fresh_material)
+    manifest = {
+        "deployed_sha": deployed_sha,
+        "material": fresh_material,
+        "material_qualification_digest": material_digest,
+        "readiness_projection": {
+            "readiness_id": readiness_id,
+            "path": str(root / "projection.json"),
+            "sha256": "sha256:" + "f" * 64,
+            "material_qualification_digest": material_digest,
+        },
+    }
+    observations = {
+        "filesystems_before": {"root": {}, "backup": {}},
+        "journald": {},
+        "services": {},
+        "systemd_service_gate": {},
+        "activity_gates": [],
+    }
+    original_functions = {
+        name: getattr(warm, name)
+        for name in (
+            "_verify_deployed_sha",
+            "_load_manifest",
+            "_load_readiness_projection",
+            "_journal_path",
+            "_material_snapshot",
+            "_atomic_write_json",
+        )
+    }
+    mutation_calls: list[tuple[Path, object]] = []
+
+    def first_mutation(path: Path, payload: object) -> None:
+        mutation_calls.append((path, payload))
+        raise _MutationBoundary("first durable mutation reached")
+
+    warm._verify_deployed_sha = lambda **_kwargs: None
+    warm._load_manifest = lambda **_kwargs: manifest
+    warm._load_readiness_projection = lambda **_kwargs: {
+        "readiness_id": readiness_id,
+        "material_qualification_digest": material_digest,
+    }
+    warm._journal_path = lambda _evidence_dir: root / "first-mutation.json"
+    warm._material_snapshot = lambda **_kwargs: (fresh_material, observations)
+    warm._atomic_write_json = first_mutation
+    apply_kwargs = {
+        "runtime_dir": runtime,
+        "root_backups": root_backups,
+        "deployed_sha": deployed_sha,
+        "deployed_sha_file": root / ".wb-core-runtime-sha",
+        "evidence_dir": evidence_dir,
+        "operation_id": OPERATION,
+        "manifest_path": root / "manifest.json",
+        "manifest_sha256": "sha256:" + "1" * 64,
+        "approval_reference": "github:owner:bounded-wbc0008-006",
+    }
+    try:
+        try:
+            warm.apply_batch(**apply_kwargs)
+        except _MutationBoundary as exc:
+            assert str(exc) == "first durable mutation reached"
+        else:
+            raise AssertionError("apply_batch did not reach its first mutation boundary")
+        assert len(mutation_calls) == 1
+        for lock_name in (
+            warm.FINANCE_STORAGE_LOCK_FILENAME,
+            *warm.OTHER_LIFECYCLE_LOCKS,
+        ):
+            _assert_lock_available(runtime / lock_name)
+
+        mutation_calls.clear()
+
+        def fail_before_boundary(**_kwargs: object) -> None:
+            raise warm.WarmArchiveError("fixture pre-boundary failure")
+
+        warm._verify_deployed_sha = fail_before_boundary
+        try:
+            warm.apply_batch(**apply_kwargs)
+        except warm.WarmArchiveError as exc:
+            assert str(exc) == "fixture pre-boundary failure"
+        else:
+            raise AssertionError("apply_batch pre-boundary failure was suppressed")
+        assert mutation_calls == []
+        for lock_name in (
+            warm.FINANCE_STORAGE_LOCK_FILENAME,
+            *warm.OTHER_LIFECYCLE_LOCKS,
+        ):
+            _assert_lock_available(runtime / lock_name)
+    finally:
+        for name, value in original_functions.items():
+            setattr(warm, name, value)
+
+
 def run() -> None:
     assert len(warm.TARGET_POLICIES) == 6
     assert len({item["source_path"] for item in warm.TARGET_POLICIES}) == 6
@@ -80,6 +335,10 @@ def run() -> None:
     assert warm.READINESS_REQUIRED_CONSECUTIVE_CLEAN == 3
     assert len(warm.SERVICE_NAMES) == 27
     assert len(warm.TIMER_SERVICE_PAIRS) == 12
+    with tempfile.TemporaryDirectory(prefix="root-warm-archive-lock-smoke-") as raw:
+        lock_root = Path(raw)
+        _exercise_lock_contexts(lock_root)
+        _exercise_apply_lock_path(lock_root)
     assert {
         owner for _timer, owner in warm.TIMER_SERVICE_PAIRS
     } == set(warm.SERVICE_NAMES) - set(warm.PERSISTENT_SERVICE_NAMES) - {
