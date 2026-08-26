@@ -183,6 +183,12 @@ Autoanswers custom-manifest families, `lost+found`, `.tmp`, control-plane
 archives, root-level files and every unlisted family are inventory-only in this
 runner. They cannot be adopted by filename similarity.
 
+The separately managed exact-six warm archive uses the producer-owned split in
+migration 159: immutable objects inside its affected families remain content-
+exact, while only policy-declared mutable canonical stores may evolve in place
+under stable path/device/mount/inode/type/owner/StoreRegistry topology. This is
+not a generic sanitation relaxation and grants this runner no new family.
+
 ## Promo artifact GC
 
 The ordinary Promo GC remains `apps/promo_campaign_archive_gc.py`. A full

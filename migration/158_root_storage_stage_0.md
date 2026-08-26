@@ -35,6 +35,15 @@ recovery and readback guards and are not converted into discretionary work by
 root pressure. This preserves ordinary business continuity without permitting
 an unbounded backup/evidence writer.
 
+The same versioned policy owns the non-target CAS resolver registry used by the
+exact-six warm archive. Mutable treatment is available only to explicit
+`active_mutable_canonical_stores` bindings with a registered essential owner,
+one supported literal or StoreRegistry resolver and named owning services. The
+current Finance raw and operational stores resolve through StoreRegistry;
+Autoanswers resolves through its literal canonical path. This registry does not
+derive mutability from a filename or broad directory pattern. Unknown owner,
+classification, resolver, path or open-handle relationship fails closed.
+
 `apps/storage_recovery_writer_inventory_static_smoke.py` retains the existing
 SQLite backup-writer catalog and additionally fails when an observed backup
 primitive lacks the common admission call or its owner is absent from the
@@ -151,6 +160,10 @@ capacity, crash-resume, one-submit and terminal readback contract is
 authorized merely by block 006 completion; its separately accepted correction
 may only repair pre-submit repeatability/readiness and execute the unchanged
 literal six-target contract. It grants no later storage stage or new target.
+Block 012 is the same authorized exact-six contract: it separates immutable
+non-target content CAS from mutable canonical identity topology so ordinary
+same-inode business-store writes do not invalidate an unrelated long archive.
+It does not relax exact target CAS or authorize any additional lifecycle path.
 
 ## Deploy and acceptance
 

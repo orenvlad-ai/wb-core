@@ -33,6 +33,14 @@ Protected `/dev/sdc1` non-targets are the selected `c540…` generation, prior
 no deletion primitive whose resolved path can enter `generations/` or the
 original `registry_upload_runtime.sqlite3`.
 
+For the unrelated WBC0008 exact-six lifecycle, the selected Finance raw and
+operational files are active mutable canonical stores resolved by
+StoreRegistry. Their ordinary same-inode writes may change content/size/mtime,
+but path, mount/device, inode/type, owner/classification, generation identity
+and expected owning-service/open-handle relationship remain fail-closed. This
+does not grant warm-archive authority over a Finance generation or retained
+restore set; Finance lifecycle locks still serialize the operation.
+
 ## Root cause and exact accumulation delta
 
 The nine full snapshots correspond to nine distinct Finance split recovery

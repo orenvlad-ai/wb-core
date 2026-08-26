@@ -35,6 +35,7 @@ def main() -> int:
     policy = load_policy()
     legacy_policy = _legacy_activation_policy(policy)
     _assert_thresholds(policy)
+    _assert_non_target_cas_registry(policy)
     _assert_admission(policy)
     _assert_unregistered_detection(policy)
     _assert_status_artifact(policy)
@@ -62,6 +63,34 @@ def _assert_thresholds(policy: dict[str, object]) -> None:
         "large_output": 256 * 1024**2,
         "large_predicted_free_after_floor": 15 * GIB,
     }
+
+
+def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
+    bindings = policy["non_target_cas"]["active_mutable_canonical_stores"]
+    assert [item["key"] for item in bindings] == [
+        "finance_raw_current",
+        "operational_current",
+        "autoanswers_current",
+    ]
+    autoanswers = bindings[-1]
+    assert autoanswers["owner"] == "autoanswers_operational_store"
+    assert autoanswers["resolver"] == {
+        "type": "literal",
+        "path": "/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3",
+    }
+    broken = deepcopy(policy)
+    broken["non_target_cas"]["active_mutable_canonical_stores"][-1][
+        "owner"
+    ] = "unknown-owner"
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        try:
+            load_policy(path)
+        except RootStoragePolicyError as exc:
+            assert "mutable canonical store binding is invalid" in str(exc)
+        else:
+            raise AssertionError("unknown mutable canonical owner did not fail closed")
 
 
 def _assert_admission(policy: dict[str, object]) -> None:
