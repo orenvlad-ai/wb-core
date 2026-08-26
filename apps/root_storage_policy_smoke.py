@@ -32,12 +32,15 @@ from packages.application.root_storage_policy import (
 
 def main() -> int:
     policy = load_policy()
+    legacy_policy = _legacy_activation_policy(policy)
     _assert_thresholds(policy)
     _assert_admission(policy)
     _assert_unregistered_detection(policy)
-    _assert_journal_manifest(policy)
-    _assert_one_shot_activation(policy)
-    _assert_reconciliation(policy)
+    _assert_journal_manifest(legacy_policy)
+    _assert_one_shot_activation(legacy_policy)
+    _assert_reconciliation(legacy_policy)
+    _assert_one_shot_correction(policy)
+    _assert_corrective_reconciliation(policy)
     _assert_static_safety()
     print("root_storage_policy_smoke: ok")
     return 0
@@ -401,6 +404,225 @@ def _assert_reconciliation(policy: dict[str, object]) -> None:
         assert not readback["protected_missing"]
 
 
+def _assert_one_shot_correction(policy: dict[str, object]) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        destination = root / "etc" / "journald.conf.d" / "60-wb-core-root-retention.conf"
+        destination.parent.mkdir(parents=True)
+        source = (
+            ROOT
+            / "artifacts"
+            / "registry_upload_http_entrypoint"
+            / "journald"
+            / "60-wb-core-root-retention.conf"
+        )
+        destination.write_bytes(source.read_bytes())
+        evidence = root / "evidence"
+        journal_root = root / "journal"
+        journal_root.mkdir()
+        fixture = deepcopy(policy)
+        fixture["journald"]["configuration_destination"] = str(destination)
+        fixture["journald"]["evidence_directory"] = str(evidence)
+        fixture["journald"]["journal_root"] = str(journal_root)
+        service_before = {
+            "main_pid": 10,
+            "exec_main_start_timestamp": "before",
+            "active_state": "active",
+            "sub_state": "running",
+        }
+        preflight = {
+            "contract_version": app.JOURNAL_CORRECTION_CONTRACT,
+            "legacy_activation_operation_id": fixture["journald"][
+                "legacy_activation_operation_id"
+            ],
+            "configuration_destination": str(destination),
+            "legacy_configuration_sha256": fixture["journald"][
+                "legacy_configuration_sha256"
+            ],
+            "effective_config_before": {"matches_expected": True},
+            "journal_root": str(journal_root),
+            "journal_entries": [],
+            "journal_entry_count": 0,
+            "journal_file_count": 0,
+            "non_journal_file_count": 0,
+            "journal_total_bytes": 0,
+            "journal_inventory_digest": app._journal_inventory_digest([]),
+            "protected_identity_digest": app._journal_identity_digest([]),
+            "service_before": service_before,
+            "root_storage_status_before": {"status": "hard"},
+        }
+        preflight["manifest_digest"] = app._digest_payload(preflight)
+        readback = {
+            "ok": True,
+            "service_after_attributed": {
+                "main_pid": 11,
+                "exec_main_start_timestamp": "after",
+                "active_state": "active",
+                "sub_state": "running",
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            ["systemctl", "restart", "systemd-journald.service"], 0, "", ""
+        )
+        with mock.patch.object(
+            app, "build_journald_correction_preflight", return_value=preflight
+        ), mock.patch.object(
+            app, "_assert_journald_correction_preflight_fresh"
+        ), mock.patch.object(
+            app, "_wait_for_journald_correction_readback", return_value=readback
+        ), mock.patch.object(
+            app, "readback_journald_correction", return_value=readback
+        ), mock.patch.object(
+            app.subprocess, "run", return_value=completed
+        ) as runner:
+            first = app.remove_journald_retention_dropin(fixture)
+            second = app.remove_journald_retention_dropin(fixture)
+        restart_calls = [
+            call
+            for call in runner.call_args_list
+            if call.args
+            and call.args[0] == ["systemctl", "restart", "systemd-journald.service"]
+        ]
+        assert len(restart_calls) == 1
+        assert destination.exists() is False
+        assert first["operation_retried"] is False
+        assert second["idempotent"] is True
+
+
+def _assert_corrective_reconciliation(policy: dict[str, object]) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        journal_root = root / "journal"
+        journal_root.mkdir()
+        archived = journal_root / "system@archived.journal"
+        current = journal_root / "system.journal"
+        non_journal = journal_root / "note.txt"
+        archived.write_bytes(b"archived")
+        current.write_bytes(b"current")
+        non_journal.write_bytes(b"note")
+        before = [
+            _correction_entry(archived, mutable=False, state="ARCHIVED"),
+            _correction_entry(current, mutable=True, state="ONLINE"),
+            _correction_entry(non_journal, mutable=False, state=None),
+        ]
+        rotated = journal_root / "system@rotated.journal"
+        current.rename(rotated)
+        new_current = journal_root / "system.journal"
+        new_current.write_bytes(b"new-current")
+        after = [
+            _correction_entry(archived, mutable=False, state="ARCHIVED"),
+            _correction_entry(rotated, mutable=False, state="ARCHIVED"),
+            _correction_entry(non_journal, mutable=False, state=None),
+            _correction_entry(new_current, mutable=True, state="ONLINE"),
+        ]
+        fixture = deepcopy(policy)
+        destination = root / "etc" / "journald.conf.d" / "60-wb-core-root-retention.conf"
+        evidence = root / "evidence"
+        fixture["journald"]["configuration_destination"] = str(destination)
+        fixture["journald"]["evidence_directory"] = str(evidence)
+        fixture["journald"]["journal_root"] = str(journal_root)
+        correction = app._journald_correction_policy(fixture)
+        correction_digest = app._digest_payload(correction)
+        operation_id = f"journald-correction-{correction_digest.removeprefix('sha256:')[:24]}"
+        operation_dir = evidence / "corrections" / operation_id
+        operation_dir.mkdir(parents=True)
+        service_before = {
+            "main_pid": 10,
+            "exec_main_start_timestamp": "before",
+            "active_state": "active",
+            "sub_state": "running",
+        }
+        service_after = {
+            "main_pid": 11,
+            "exec_main_start_timestamp": "after",
+            "active_state": "active",
+            "sub_state": "running",
+        }
+        manifest = {
+            "contract_version": app.JOURNAL_CORRECTION_CONTRACT,
+            "journal_entries": before,
+            "journal_entry_count": len(before),
+            "journal_file_count": 2,
+            "non_journal_file_count": 1,
+            "journal_total_bytes": sum(item["size_bytes"] for item in before),
+            "journal_inventory_digest": app._journal_inventory_digest(before),
+            "protected_identity_digest": app._journal_identity_digest(before),
+            "service_before": service_before,
+            "root_storage_status_before": {"status": "hard"},
+        }
+        manifest["manifest_digest"] = app._digest_payload(manifest)
+        state = {
+            "contract_version": app.JOURNAL_CORRECTION_CONTRACT,
+            "operation_id": operation_id,
+            "phase": "restart_submit_intent",
+            "correction_digest": correction_digest,
+            "manifest_digest": manifest["manifest_digest"],
+            "dropin_unlink_submit_count": 1,
+            "dropin_removed_at": "2026-08-26T09:00:00Z",
+            "restart_submit_count": 1,
+            "restart_submit_recorded_at": "2026-08-26T09:00:01Z",
+            "service_before": service_before,
+            "service_after": service_after,
+        }
+        app._write_json_atomic(operation_dir / "preflight-manifest.json", manifest, mode=0o600)
+        app._write_json_atomic(operation_dir / "state.json", state, mode=0o600)
+        with mock.patch.object(
+            app,
+            "_effective_journald_config",
+            return_value={"matches_expected": True, "values": {}, "expected": {}},
+        ), mock.patch.object(
+            app, "_journald_service_identity", return_value=service_after
+        ), mock.patch.object(
+            app, "_collect_correction_journal_inventory", return_value=after
+        ), mock.patch.object(
+            app, "collect_root_storage_status", return_value={"status": "hard"}
+        ), mock.patch.object(
+            app.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["journalctl", "--disk-usage"], 0, "Archived journals take up 1G", ""
+            ),
+        ):
+            readback = app.readback_journald_correction(fixture)
+        assert readback["ok"] is True
+        assert readback["deleted_count"] == 0
+        assert len(readback["moved_current_entries"]) == 1
+        assert len(readback["new_entries"]) == 1
+        assert readback["protected_identity_digest_matches"] is True
+        assert readback["pid_transition_count"] == 1
+        done_state = {
+            **state,
+            "phase": "done",
+            "service_after": service_after,
+            "completion_readback": readback,
+            "readback_digest": app._digest_payload(readback),
+        }
+        app._write_json_atomic(operation_dir / "state.json", done_state, mode=0o600)
+        with mock.patch.object(
+            app,
+            "_effective_journald_config",
+            return_value={"matches_expected": True, "values": {}, "expected": {}},
+        ), mock.patch.object(
+            app, "_journald_service_identity", return_value=service_after
+        ), mock.patch.object(
+            app,
+            "_collect_correction_journal_inventory",
+            side_effect=AssertionError("durable completion must not replay old inventory"),
+        ), mock.patch.object(
+            app, "collect_root_storage_status", return_value={"status": "hard"}
+        ), mock.patch.object(
+            app.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["journalctl", "--disk-usage"], 0, "Archived journals take up 1G", ""
+            ),
+        ):
+            durable = app.readback_journald_correction(fixture)
+        assert durable["ok"] is True
+        assert durable["durable_completion_reused"] is True
+        assert durable["journal_inventory_before"] == readback["journal_inventory_before"]
+
+
 def _assert_static_safety() -> None:
     source = Path(app.__file__).read_text(encoding="utf-8")
     app._validate_journald_config_bytes(
@@ -415,8 +637,63 @@ def _assert_static_safety() -> None:
     else:
         raise AssertionError("journald setting drift did not fail before activation")
     assert "journalctl\", \"--vacuum" not in source
+    assert "journalctl\", \"--rotate" not in source
     assert "unlink" not in source.split("def activate_journald_retention", 1)[1].split("def build_journal_preflight", 1)[0]
-    assert source.count('["systemctl", "restart", "systemd-journald.service"]') == 1
+    correction_source = source.split("def remove_journald_retention_dropin", 1)[1].split(
+        "def build_journald_correction_preflight", 1
+    )[0]
+    assert correction_source.count("destination.unlink()") == 1
+    assert correction_source.count('["systemctl", "restart", "systemd-journald.service"]') == 1
+    policy = load_policy()
+    assert policy["journald"]["mode"] == app.JOURNAL_CORRECTION_MODE
+    assert "configuration_source" not in policy["journald"]
+    active_target = json.loads(
+        (
+            ROOT
+            / "artifacts"
+            / "registry_upload_http_entrypoint"
+            / "input"
+            / "hosted_runtime_target__europe_api.json"
+        ).read_text(encoding="utf-8")
+    )
+    managed = {item["name"] for item in active_target["managed_systemd_units"]}
+    assert "wb-core-root-storage-policy.service" not in managed
+    assert "wb-core-root-storage-policy.timer" not in managed
+
+
+def _legacy_activation_policy(policy: dict[str, object]) -> dict[str, object]:
+    fixture = deepcopy(policy)
+    fixture["journald"] = {
+        "expected_systemd_major": 255,
+        "configuration_source": "artifacts/registry_upload_http_entrypoint/journald/60-wb-core-root-retention.conf",
+        "configuration_destination": "/etc/systemd/journald.conf.d/60-wb-core-root-retention.conf",
+        "evidence_directory": "/var/lib/wb-core/root-storage-policy",
+        "hold_registry": "/etc/wb-core/journal-retention-holds.json",
+        "system_max_use_bytes": 2 * GIB,
+        "system_keep_free_bytes": 15 * GIB,
+        "max_retention_seconds": 14 * 24 * 60 * 60,
+    }
+    return fixture
+
+
+def _correction_entry(path: Path, *, mutable: bool, state: str | None) -> dict[str, object]:
+    stat = path.stat()
+    is_journal = path.name.endswith(".journal")
+    return {
+        "path": str(path),
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "size_bytes": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "is_journal_file": is_journal,
+        "mutable_current": mutable,
+        "journal_state": state,
+        "journal_file_id": "fixture" if is_journal else None,
+        "journal_machine_id": "a" * 32 if is_journal else None,
+        "head_realtime_epoch_us": 1 if is_journal else None,
+        "tail_realtime_epoch_us": 2 if is_journal else None,
+        "opener_evidence": {"method": "fixture", "openers": [], "no_openers": True},
+    }
 
 
 def _header(state: str, machine_id: str, tail: int) -> dict[str, object]:

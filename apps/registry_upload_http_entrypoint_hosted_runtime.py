@@ -537,13 +537,20 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
             ]
         )
     deploy_sequence.append("sync current checked-out worktree to target_dir via rsync")
+    journald_operation_step: str | None = None
     if target.root_storage_policy_file:
-        deploy_sequence.extend(
-            [
-                "publish root-storage warning/critical/hard status and reject unregistered large root producers",
-                "materialize the private expired-archived-journal manifest and activate versioned journald retention at most once",
-            ]
+        root_storage_commands = _build_root_storage_policy_commands(target)
+        deploy_sequence.append(
+            "publish root-storage warning/critical/hard status and reject unregistered large root producers"
         )
+        if root_storage_commands["action_name"] == "corrective_remove":
+            journald_operation_step = (
+                "remove the exact block-003 journald drop-in and submit one corrective journald restart"
+            )
+        elif root_storage_commands["action"]:
+            journald_operation_step = (
+                "materialize the private expired-archived-journal manifest and activate versioned journald retention at most once"
+            )
     deploy_sequence.extend([
         "install required host OS packages for seller-portal recovery and browser launch",
         "install required host OS packages for seller-portal owner capture runtime",
@@ -566,6 +573,7 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     deploy_sequence.extend(
         [
             "restart hosted runtime via restart_command",
+            *([journald_operation_step] if journald_operation_step else []),
             "probe loopback/runtime contour",
             "probe public contour",
         ]
@@ -1091,8 +1099,9 @@ def deploy_current_checkout(
             "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "root_storage_status": root_storage_commands["status"],
-            "journald_retention_activate": root_storage_commands["activate"],
-            "journald_retention_readback": root_storage_commands["readback"],
+            "journald_operation": root_storage_commands["action"],
+            "journald_operation_name": root_storage_commands["action_name"],
+            "journald_operation_readback": root_storage_commands["readback"],
             "systemd_install": systemd_commands["install"],
             "systemd_retire": systemd_commands["retire"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -1180,12 +1189,6 @@ def deploy_current_checkout(
     run_stage("metadata", deploy_metadata_command)
     if root_storage_commands["status"]:
         run_stage("root-storage-status", root_storage_commands["status"])
-    if root_storage_commands["activate"]:
-        _run_journald_activation_once(
-            activate_command=root_storage_commands["activate"],
-            readback_command=root_storage_commands["readback"],
-            summary=summary,
-        )
     run_stage("dependencies", seller_recovery_os_dependencies_command)
     run_stage("dependencies", seller_owner_os_dependencies_command)
     run_stage("dependencies", runtime_pip_install_command)
@@ -1220,6 +1223,15 @@ def deploy_current_checkout(
             reconcile_transport_failure("readback", exc)
     # Read back the same contract after all managed-unit operations.
     run_stage("readback", auth_env_preflight_command)
+    # All ordinary deploy mutations precede the bounded journald operation.
+    # After this one submit, only query-only readback and durable receipt
+    # publication remain; no dependency, nginx or other service mutation runs.
+    if root_storage_commands["action"]:
+        _run_journald_operation_once(
+            operation_command=root_storage_commands["action"],
+            readback_command=root_storage_commands["readback"],
+            summary=summary,
+        )
     if root_storage_commands["readback"]:
         run_stage("readback", root_storage_commands["readback"])
     # The exact SHA markers are written before dependency/schema work so an
@@ -2110,6 +2122,15 @@ def run_journald_retention_readback_command(args: argparse.Namespace) -> int:
     if not command:
         raise ValueError("root storage policy is not configured for this target")
     return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def run_journald_corrective_readback_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    _warn_if_rollback_read_only_target(target, action="journald-corrective-readback")
+    commands = _build_root_storage_policy_commands(target)
+    if commands["action_name"] != "corrective_remove" or not commands["readback"]:
+        raise ValueError("journald corrective removal is not configured for this target")
+    return subprocess.run(commands["readback"], cwd=ROOT, check=False).returncode
 
 
 def run_deploy_command(args: argparse.Namespace) -> int:
@@ -10779,9 +10800,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     journald_readback = subparsers.add_parser(
         "journald-retention-readback",
-        help="Query-only reconcile the versioned journald retention activation.",
+        help="Compatibility alias for the current target-bound journald readback.",
     )
     journald_readback.set_defaults(handler=run_journald_retention_readback_command)
+
+    journald_corrective_readback = subparsers.add_parser(
+        "journald-corrective-readback",
+        help="Query-only reconcile the versioned removal of the block-003 journald drop-in.",
+    )
+    journald_corrective_readback.set_defaults(
+        handler=run_journald_corrective_readback_command
+    )
 
     deploy = subparsers.add_parser("deploy", help="Sync current checkout to hosted runtime and restart the service.")
     deploy.add_argument("--dry-run", action="store_true", help="Print commands without executing remote update.")
@@ -14726,10 +14755,18 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             "remote_policy_path": None,
             "status": None,
             "status_read_only": None,
-            "activate": None,
+            "action": None,
+            "action_name": None,
             "readback": None,
         }
     local_policy = _resolve_repo_relative_path(target.root_storage_policy_file)
+    policy_payload = json.loads(local_policy.read_text(encoding="utf-8"))
+    if not isinstance(policy_payload, dict):
+        raise ValueError("root storage policy must contain a JSON object")
+    journald_policy = policy_payload.get("journald") or {}
+    if not isinstance(journald_policy, dict):
+        raise ValueError("root storage journald policy must contain a JSON object")
+    correction_mode = journald_policy.get("mode") == "remove_block_003_dropin"
     remote_policy_path = _remote_repo_relative_path(target, local_policy)
     prefix = (
         f"cd {shlex.quote(target.target_dir)} && "
@@ -14743,27 +14780,44 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             prefix + " status --fail-on-unregistered",
         ),
         "status_read_only": _remote_shell_command(target, prefix + " status"),
-        "activate": _remote_shell_command(target, prefix + " journald-activate"),
-        "readback": _remote_shell_command(target, prefix + " journald-readback"),
+        "action": _remote_shell_command(
+            target,
+            prefix
+            + (
+                " journald-corrective-remove"
+                if correction_mode
+                else " journald-activate"
+            ),
+        ),
+        "action_name": "corrective_remove" if correction_mode else "activate_retention",
+        "readback": _remote_shell_command(
+            target,
+            prefix
+            + (
+                " journald-corrective-readback"
+                if correction_mode
+                else " journald-readback"
+            ),
+        ),
     }
 
 
-def _run_journald_activation_once(
+def _run_journald_operation_once(
     *,
-    activate_command: list[str],
+    operation_command: list[str],
     readback_command: list[str] | None,
     summary: dict[str, Any],
 ) -> None:
-    """Submit activation once; SSH ambiguity permits query-only readback only."""
+    """Submit one journald operation; SSH ambiguity permits readback only."""
 
     try:
-        _run_command(activate_command)
+        _run_command(operation_command)
     except subprocess.CalledProcessError as exc:
         if exc.returncode != 255:
             raise
         if not readback_command:
             raise RuntimeError(
-                "transport-indeterminate during journald retention activation; readback command is unavailable"
+                "transport-indeterminate during journald operation; readback command is unavailable"
             ) from exc
         readback = subprocess.run(
             readback_command,
@@ -14776,11 +14830,11 @@ def _run_journald_activation_once(
             "returncode": readback.returncode,
             "stdout": readback.stdout.strip(),
             "stderr": readback.stderr.strip(),
-            "activation_retried": False,
+            "operation_retried": False,
         }
         if readback.returncode != 0:
             raise RuntimeError(
-                "transport-indeterminate during journald retention activation; query-only reconciliation halted"
+                "transport-indeterminate during journald operation; query-only reconciliation halted"
             ) from exc
 
 
