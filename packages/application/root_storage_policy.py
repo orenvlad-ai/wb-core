@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
+import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 from typing import Any, Mapping
 
@@ -19,6 +22,7 @@ CRITICAL_AVAILABLE_BYTES = 15 * GIB
 HARD_DENY_AVAILABLE_BYTES = 12 * GIB
 LARGE_OUTPUT_BYTES = 256 * MIB
 CONTRACT_VERSION = "wb_core_root_storage_policy_v1"
+STATUS_ARTIFACT_MAX_AGE_SECONDS = 10 * 60
 CLASS_DISCRETIONARY = "discretionary_root_writer"
 CLASS_ESSENTIAL = "essential_bounded_business_writer"
 CLASS_RETAINED = "retained_no_active_writer"
@@ -59,6 +63,18 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     }
     if thresholds != expected_thresholds:
         raise RootStoragePolicyError("root storage policy threshold drift")
+    status_artifact = payload.get("status_artifact")
+    if not isinstance(status_artifact, dict):
+        raise RootStoragePolicyError("root storage status artifact policy is missing")
+    status_path = Path(str(status_artifact.get("path") or ""))
+    max_age_seconds = status_artifact.get("max_age_seconds")
+    if (
+        not status_path.is_absolute()
+        or not isinstance(max_age_seconds, int)
+        or isinstance(max_age_seconds, bool)
+        or max_age_seconds != STATUS_ARTIFACT_MAX_AGE_SECONDS
+    ):
+        raise RootStoragePolicyError("root storage status artifact policy drift")
     producers = payload.get("producers")
     if not isinstance(producers, list) or not producers:
         raise RootStoragePolicyError("root storage policy producers must be a non-empty array")
@@ -197,8 +213,10 @@ def collect_root_storage_status(
     *,
     policy: Mapping[str, Any] | None = None,
     root_path: Path = Path("/"),
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved_policy = dict(policy or load_policy())
+    collected_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     filesystems = {
         name: _filesystem_status(Path(path))
         for name, path in dict(resolved_policy.get("filesystems") or {}).items()
@@ -228,6 +246,8 @@ def collect_root_storage_status(
         )
     return {
         "contract_version": CONTRACT_VERSION,
+        "collected_at": collected_at.isoformat().replace("+00:00", "Z"),
+        "policy_sha256": _payload_digest(resolved_policy),
         "status": level,
         "thresholds_bytes": dict(resolved_policy["thresholds_bytes"]),
         "filesystems": filesystems,
@@ -235,6 +255,78 @@ def collect_root_storage_status(
         "unregistered_large_root_files": unregistered,
         "alerts": alerts,
         "safe_for_discretionary_root_writes": level != "hard" and not unregistered,
+    }
+
+
+def root_storage_status_artifact_path(policy: Mapping[str, Any]) -> Path:
+    artifact = policy.get("status_artifact")
+    if not isinstance(artifact, Mapping):
+        raise RootStoragePolicyError("root storage status artifact policy is missing")
+    path = Path(str(artifact.get("path") or ""))
+    if not path.is_absolute():
+        raise RootStoragePolicyError("root storage status artifact path must be absolute")
+    return path
+
+
+def read_root_storage_status_artifact(
+    *,
+    policy: Mapping[str, Any] | None = None,
+    artifact_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate the atomic server-owned status artifact without rescanning storage."""
+
+    resolved_policy = dict(policy or load_policy())
+    path = Path(artifact_path or root_storage_status_artifact_path(resolved_policy))
+    if path.is_symlink() or not path.is_file():
+        raise RootStoragePolicyError(f"root storage status artifact is unavailable: {path}")
+    if stat.S_IMODE(path.stat().st_mode) != 0o644:
+        raise RootStoragePolicyError("root storage status artifact mode must be 0644")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RootStoragePolicyError("root storage status artifact is unreadable") from exc
+    if not isinstance(payload, dict) or payload.get("contract_version") != CONTRACT_VERSION:
+        raise RootStoragePolicyError("root storage status artifact contract mismatch")
+    if payload.get("policy_sha256") != _payload_digest(resolved_policy):
+        raise RootStoragePolicyError("root storage status artifact policy binding drift")
+    raw_collected_at = str(payload.get("collected_at") or "")
+    try:
+        collected_at = datetime.fromisoformat(raw_collected_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RootStoragePolicyError("root storage status artifact timestamp is invalid") from exc
+    if collected_at.tzinfo is None:
+        raise RootStoragePolicyError("root storage status artifact timestamp lacks timezone")
+    observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_seconds = (observed_at - collected_at.astimezone(timezone.utc)).total_seconds()
+    max_age_seconds = int(dict(resolved_policy["status_artifact"])["max_age_seconds"])
+    if age_seconds < -5 or age_seconds > max_age_seconds:
+        raise RootStoragePolicyError(
+            "root storage status artifact is stale or future-dated: "
+            f"age_seconds={age_seconds:.3f}, max_age_seconds={max_age_seconds}"
+        )
+    filesystems = payload.get("filesystems")
+    if not isinstance(filesystems, dict) or not isinstance(filesystems.get("root"), dict):
+        raise RootStoragePolicyError("root storage status artifact lacks root filesystem evidence")
+    raw_root_available = filesystems["root"].get("available_bytes")
+    if not isinstance(raw_root_available, int):
+        raise RootStoragePolicyError("root storage status artifact available bytes are invalid")
+    root_available = raw_root_available
+    if root_available < 0 or payload.get("status") != storage_level(root_available):
+        raise RootStoragePolicyError("root storage status artifact classification drift")
+    unregistered = payload.get("unregistered_large_root_files")
+    if not isinstance(unregistered, list):
+        raise RootStoragePolicyError("root storage status artifact producer inventory is invalid")
+    expected_safe = payload.get("status") != "hard" and not unregistered
+    if payload.get("safe_for_discretionary_root_writes") is not expected_safe:
+        raise RootStoragePolicyError("root storage status artifact safety flag drift")
+    return {
+        "ok": not unregistered,
+        "fresh": True,
+        "artifact_path": str(path),
+        "age_seconds": round(age_seconds, 3),
+        "max_age_seconds": max_age_seconds,
+        "status": payload,
     }
 
 
@@ -384,3 +476,13 @@ def _filesystem_uuid(source: str) -> str | None:
     )
     value = completed.stdout.strip()
     return value or None
+
+
+def _payload_digest(payload: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()

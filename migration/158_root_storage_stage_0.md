@@ -1,11 +1,12 @@
 # Migration 158 — Root storage Stage 0
 
-Status: authoritative root-capacity/large-writer admission contract and the
-bounded block-004 rollback of the failed journald-retention activation. The
-active target does not retain a journald retention override. This migration
-does not authorize cleanup, archival, compression, movement or relocation of
-any journal or non-journal file and does not introduce the future full
-capacity-reservation ledger.
+Status: authoritative root-capacity/large-writer admission contract, the
+block-005 activation of its read-only monitor, and the bounded block-004
+rollback of the failed journald-retention activation. The active target does
+not retain a journald retention override. This migration does not authorize
+cleanup, archival, compression, movement or relocation of any journal or
+non-journal file and does not introduce the future full capacity-reservation
+ledger.
 
 ## Root policy
 
@@ -39,10 +40,54 @@ SQLite backup-writer catalog and additionally fails when an observed backup
 primitive lacks the common admission call or its owner is absent from the
 root-storage registry. `apps/root_storage_policy.py status` publishes the same
 warning/critical/hard and exact producer inventory read model without deleting,
-compressing, moving or opening SQLite. The repo-owned monitor service/timer
-artifacts remain dormant code: they are absent from the active target's
-`managed_systemd_units`, and block 004 neither installs nor starts them and does
-not claim monitor production acceptance.
+compressing, moving or opening SQLite. Every payload binds the exact policy
+digest and UTC collection time.
+
+## Block-005 monitor activation and runbook
+
+The active target manages `wb-core-root-storage-policy.service` and
+`wb-core-root-storage-policy.timer`. The timer is enabled and runs the oneshot
+service every five minutes; deploy also starts the oneshot once after unit
+installation. The service atomically replaces the mode-0644,
+server-owned artifact
+`/var/lib/wb-core-root-storage-policy/status.json`; its state directory is
+created by systemd. `root-storage-readback` validates the artifact's policy
+binding, classification and maximum age of ten minutes without rescanning or
+writing. A stale, malformed, future-dated or policy-mismatched artifact fails
+closed.
+
+The service uses `--fail-on-unregistered`: it still publishes the complete
+status artifact and then returns nonzero if a large root file inside a
+configured producer scan root has no exact registered path owner. A current
+hard-capacity result is valid monitoring evidence, but carries
+`safe_for_discretionary_root_writes=false`; admission, not the monitor, rejects
+the actual write. The monitor contains no cleanup, retention, compression,
+movement, SQLite-open or journald operation.
+
+Operator recovery is bounded:
+
+1. read live state with `root-storage-status` and the durable artifact with
+   `root-storage-readback`;
+2. for a stale artifact inspect the service/timer result and run the same
+   repo-owned oneshot once, then repeat readback;
+3. for an unregistered large file, do not bypass the gate or delete/move the
+   file: identify the exact producer and add an authoritative classification
+   and path pattern through an ordinary reviewed release;
+4. for a denied discretionary writer, do not retry blindly. Resume only after
+   a separately authorized capacity/file-lifecycle action restores the policy
+   boundary, or after a proven distinct-filesystem destination is introduced
+   through its own target/capacity change;
+5. never reclassify an artifact/debug/full-copy writer as essential merely to
+   bypass pressure. Essential bounded business writes retain their domain
+   capacity, transaction, CAS, restore and readback guards.
+
+The AST inventory publishes exact source, function, backup line, primitive,
+admission line and owner for every observed SQLite full-copy entrypoint. It
+fails when an entrypoint lacks a preceding common admission call, uses an
+unregistered literal owner, or is absent from the reviewed writer catalog.
+Scheduled full-monolith writers remain forbidden; bounded warehouse
+checkpoints, target before-images, Finance split restore sets and ordinary
+business stores keep their explicit essential classifications.
 
 ## Failed block-003 activation
 
@@ -100,11 +145,13 @@ pre-existing identity.
 canonical target. The normal exact-merge `live_runtime` deploy performs:
 
 1. repo sync and deployed-SHA marker;
-2. root status plus unregistered-producer gate;
-3. ordinary bounded deploy without root-monitor unit installation;
-4. as the final operational submit, a private fresh journald inventory and one
-   corrective drop-in removal/restart;
-5. query-only corrective reconciliation and root-status readback.
+2. root status, durable artifact publication and unregistered-producer gate;
+3. ordinary bounded deploy, including installation and activation of the
+   root-monitor timer;
+4. fresh artifact readback after managed-unit activation;
+5. the already-established block-004 corrective boundary, which is an
+   idempotent query-only readback no-op after its durable completion;
+6. final query-only reconciliation.
 
 Production acceptance requires exact merged/deployed SHA; manifest digest,
 pre/post journal inventory and protected identity digests; zero deleted or
@@ -113,19 +160,22 @@ for `SystemMaxUse`, `SystemKeepFree` and `MaxRetentionSec`; exactly one recorded
 unlink and restart submit; exactly one attributed PID transition; journal disk
 usage; root/backup/generation available bytes, inodes, mount ids, sources,
 types and UUIDs; exact root-status readback with zero unregistered large root
-producers; Registry HTTP, AI API and applicable canonical service health. The
-root-storage monitor/timer is explicitly not an acceptance claim in block 004.
+producers; installed repo-owned monitor units, enabled/active timer, successful
+oneshot result and fresh policy-bound status artifact; Registry HTTP, AI API,
+Data MCP and applicable canonical service health. Block 005 separately proves
+that journald PID, effective configuration and file identity inventory did not
+change during this monitor activation.
 
 ## Strict exclusions
 
-This correction does not restore the already missing 128 MiB archive and does
-not run raw SQLite copies, Promo GC or terminalization,
+This monitor activation does not restore the already missing 128 MiB archive,
+change journald configuration or submit a journald restart. It does not run raw
+SQLite copies, Promo GC or terminalization,
 producer-specific retention migration, Finance/warehouse/monolith/generation/
 Autoanswers data mutation, another backup cleanup, a new destination/mount, or
 capacity expansion. It introduces no replacement retention or GC design and
-never removes, archives, compresses or relocates any file except the exact
-repo-owned journald drop-in. Tests use temporary sparse fixtures only and
-create no real large production file.
+never removes, archives, compresses or relocates any file. Tests use temporary
+sparse fixtures only and create no real large production file.
 
 ## Required checks
 
@@ -133,4 +183,5 @@ create no real large production file.
 - `python3 apps/storage_recovery_writer_inventory_static_smoke.py`
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`
 - all suites selected by the exact-base PR planner
-- exact Release Runner receipt and production readback above
+- exact Release Runner receipt, `root-storage-readback`, managed-unit readback,
+  journald non-change proof and production service reconciliation above

@@ -1099,6 +1099,9 @@ def deploy_current_checkout(
             "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
             "autoanswers_prepare_deploy": autoanswers_prepare_deploy_command,
             "root_storage_status": root_storage_commands["status"],
+            "root_storage_status_artifact_readback": root_storage_commands[
+                "status_artifact_readback"
+            ],
             "journald_operation": root_storage_commands["action"],
             "journald_operation_name": root_storage_commands["action_name"],
             "journald_operation_readback": root_storage_commands["readback"],
@@ -1214,6 +1217,8 @@ def deploy_current_checkout(
         run_stage("restart", systemd_commands["enable"])
     if systemd_commands["restart"]:
         run_stage("restart", systemd_commands["restart"])
+    if root_storage_commands["status_artifact_readback"]:
+        run_stage("readback", root_storage_commands["status_artifact_readback"])
     if status_command:
         try:
             _run_deploy_status_readback(status_command)
@@ -2091,6 +2096,15 @@ def run_root_storage_status_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file)
     _warn_if_rollback_read_only_target(target, action="root-storage-status")
     command = _build_root_storage_policy_commands(target)["status_read_only"]
+    if not command:
+        raise ValueError("root storage policy is not configured for this target")
+    return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def run_root_storage_readback_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file)
+    _warn_if_rollback_read_only_target(target, action="root-storage-readback")
+    command = _build_root_storage_policy_commands(target)["status_artifact_readback"]
     if not command:
         raise ValueError("root storage policy is not configured for this target")
     return subprocess.run(command, cwd=ROOT, check=False).returncode
@@ -10789,6 +10803,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     root_storage_status.set_defaults(handler=run_root_storage_status_command)
 
+    root_storage_readback = subparsers.add_parser(
+        "root-storage-readback",
+        help="read and validate the fresh server-owned root-storage status artifact",
+    )
+    root_storage_readback.set_defaults(handler=run_root_storage_readback_command)
+
     root_storage_admission = subparsers.add_parser(
         "root-storage-admission",
         help="Evaluate one explicit large-writer owner/destination/output tuple.",
@@ -14755,6 +14775,7 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             "remote_policy_path": None,
             "status": None,
             "status_read_only": None,
+            "status_artifact_readback": None,
             "action": None,
             "action_name": None,
             "readback": None,
@@ -14763,6 +14784,12 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
     policy_payload = json.loads(local_policy.read_text(encoding="utf-8"))
     if not isinstance(policy_payload, dict):
         raise ValueError("root storage policy must contain a JSON object")
+    status_artifact = policy_payload.get("status_artifact") or {}
+    if not isinstance(status_artifact, dict):
+        raise ValueError("root storage status artifact policy must contain a JSON object")
+    status_artifact_path = str(status_artifact.get("path") or "")
+    if not status_artifact_path.startswith("/"):
+        raise ValueError("root storage status artifact path must be absolute")
     journald_policy = policy_payload.get("journald") or {}
     if not isinstance(journald_policy, dict):
         raise ValueError("root storage journald policy must contain a JSON object")
@@ -14777,9 +14804,16 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
         "remote_policy_path": remote_policy_path,
         "status": _remote_shell_command(
             target,
-            prefix + " status --fail-on-unregistered",
+            prefix
+            + " status "
+            + f"--output {shlex.quote(status_artifact_path)} "
+            + "--fail-on-unregistered",
         ),
         "status_read_only": _remote_shell_command(target, prefix + " status"),
+        "status_artifact_readback": _remote_shell_command(
+            target,
+            prefix + " status-readback",
+        ),
         "action": _remote_shell_command(
             target,
             prefix
