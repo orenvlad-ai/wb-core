@@ -15,6 +15,7 @@ source_basis:
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
   - "migration/155_functional_economics_inventory_blend_publication.md"
   - "migration/161_applicability_gated_dense_fbs.md"
+  - "migration/162_dense_fbs_zero_and_historical_material_recovery.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -39,6 +40,7 @@ related_modules:
   - "apps/warehouse_functional_runner.py"
   - "apps/ff_pool_overhead_backfill.py"
   - "apps/warehouse_fbs_material_rematerialization_smoke.py"
+  - "apps/warehouse_fbs_historical_recovery.py"
   - "apps/warehouse_cost_queue_replay.py"
   - "apps/sqlite_backup_archive.py"
   - "apps/ff_stage_7a_production.py"
@@ -56,7 +58,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 161 stages facility/SKU activation until canonical dense FBS coverage is exact and makes every post-T FBS material effect publish a coherent functional/business successor with durable economics invalidation; FBO/WB stay outside dense initialization."
+update_note: "Active truth remains versioned functional balances. Migration 162 shares the exact precision-38 ledger WAC contract and adds owner-gated historical one-SKU recovery that preserves current active/pool truth; deploy remains inert."
 ---
 
 # 1. Active warehouse contract
@@ -237,7 +239,14 @@ complete bounded plan persists across process restart, and exact readback
 reconciles a lost response without blind retry. Typed evidence publishes only
 dependencies, invariant reasons, repairability and candidate/readback identity
 for a future WBC0012 consumer. It defines no color, severity or health UI and
-does not apply the historical incident.
+does not apply the historical incident automatically. Migration 162 adds a
+separate manifest-bound historical lane for one accepted immutable version and
+one handoff event. It uses the ledger writer's exact finite Decimal precision-38
+ratio contract (no tolerance and no stored-value rewrite), reconstructs the
+historical FF target and target+TOTAL economics closure, and publishes a new
+historical good version while preserving the current active/sync pointer and
+every current facility/pool row. Explicit apply requires plan fingerprint,
+approval and actor; deploy, timers and ordinary refresh never call it.
 
 # 2. Physical and cost rules
 

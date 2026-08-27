@@ -31,6 +31,7 @@ from packages.application.ff_pool_foundation import (
     OPERATIONS_TABLE,
     RELATIONS_TABLE,
     canonical_decimal_text,
+    canonical_decimal_ratio_text,
     evaluate_ff_pool_aggregate_parity,
     ensure_ff_pool_foundation_schema,
     record_ff_pool_parity_diagnostic,
@@ -7026,9 +7027,7 @@ def _positive_decimal(value: Any, *, field: str) -> Decimal:
 def _ratio_text(capital_cents: int, quantity: int) -> str:
     if capital_cents <= 0 or quantity <= 0:
         raise FfPoolDocumentError("positive_wac_required", "Positive quantity/capital are required for WAC")
-    with localcontext() as context:
-        context.prec = 38
-        return canonical_decimal_text(Decimal(capital_cents) / Decimal(100) / Decimal(quantity))
+    return canonical_decimal_ratio_text(Decimal(capital_cents) / Decimal(100), quantity)
 
 
 def _decimal_ratio_text(capital_rub: Decimal, quantity: int) -> str:
@@ -7036,9 +7035,7 @@ def _decimal_ratio_text(capital_rub: Decimal, quantity: int) -> str:
         raise FfPoolDocumentError(
             "positive_wac_required", "Positive quantity/capital are required for WAC"
         )
-    with localcontext() as context:
-        context.prec = 38
-        return canonical_decimal_text(capital_rub / Decimal(quantity))
+    return canonical_decimal_ratio_text(capital_rub, quantity)
 
 
 def _cents_text(value: int) -> str:

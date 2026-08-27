@@ -113,6 +113,8 @@
       {"owner":"supplier_26gn527_legacy_apply","current":false,"data_class":"disabled","destination_role":"backup","relative_roots":["supplier-26gn527-vtb-recovery"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"ff_transit_cost_recovery","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["ff-reservations-transit-cost-recovery"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"ff_pool_overhead_backfill","current":true,"data_class":"full_copy_and_evidence","destination_role":"backup","relative_roots":["ff-pool-overhead-backfill"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_pool_dense_fbs_plan","current":true,"data_class":"private_evidence","destination_role":"backup","relative_roots":["private-evidence/wbc0013/dense-fbs-zero-repair"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":1073741824},
+      {"owner":"warehouse_fbs_historical_recovery_plan","current":true,"data_class":"private_evidence","destination_role":"backup","relative_roots":["private-evidence/wbc0013/historical-fbs-recovery"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":1073741824},
       {"owner":"supplier_factual_date_correction","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["supplier-factual-date-corrections","supplier_factual_date_corrections"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"autoanswers_first_schema","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["wb_autoanswers_schema_v1","wb_autoanswers_schema_v2","wb_autoanswers_schema_v3","wb_autoanswers_schema_v4","wb_autoanswers_schema_v5","wb_autoanswers_schema_v6","wb_autoanswers_schema_v7","wb_autoanswers_schema_v8","wb_autoanswers_schema_v9","wb_autoanswers_schema_v10"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"autoanswers_activation_candidate","current":true,"data_class":"temporary_full_copy","destination_role":"backup","relative_roots":["autoanswers-activation-candidates","wb_autoanswers_schema_v10"],"lifecycle_policy":"temporary_candidate","capacity_mode":"shared_backup_floor","max_single_write_bytes":68719476736},
@@ -426,6 +428,16 @@
     },
     {
       "owner": "ff_pool_overhead_backfill",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "ff_pool_dense_fbs_plan",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "warehouse_fbs_historical_recovery_plan",
       "classification": "discretionary_root_writer",
       "path_patterns": []
     },
