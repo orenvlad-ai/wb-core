@@ -410,11 +410,26 @@ idempotent `already_terminal`, а второй comment не создаётся.
 уже submitted exact-six WBC0008 operation, у которой source Apply run завершён
 success, detached job имеет `succeeded/attempt=1`, а immutable source receipt и
 единственный Actions-bot marker имеют ровно `state=blocked`, `apply_count=1` и
-reason `post-submit-readback-not-reconciled`. Inputs обязаны exact-bind source
+reason `post-submit-readback-not-reconciled`. Legacy reconciliation `a01`
+остаётся immutable: run `33069817619`, artifact id `9645283377`, artifact
+`root-warm-archive-reconciliation-pr-1075-run-33069817619`, receipt
+`sha256:1b99b7a01127f963af31b0cafb2a764e928eb839662af665b1afa4646b9c4847`
+и marker `5438726868` обязаны подтвердить `blocked/query-only-reconciliation-
+not-proven`, zero mutation и единственный exact blocker старого timer predicate
+для `wb-core-sheet-vitrina-refresh.timer`. Inputs обязаны exact-bind source
 PR/run/artifact name/artifact SHA-256, owner authorization comment, blocked
-marker, release/readiness/operation/job/manifest identities, deployed SHA и
-отдельный merged `repo_only/done` Release receipt новой trusted-main
-reconciliation code. Любой другой state/reason/scope или digest fails closed.
+marker, release/readiness/operation/job/manifest identities, deployed SHA,
+legacy `a01` marker/artifact/digest и отдельный merged `repo_only/done` Release
+receipt новой trusted-main reconciliation code. Любой другой state/reason/scope
+или digest fails closed.
+
+После exact legacy `a01` допускается только детерминированный `a02`. Его
+sequence id привязан к тому же operation/job, a01 marker/artifact digest, а
+attempt binding — также к новому repo-only merge/release SHA. `a01` не
+переписывается и не redispatch-ится. Exact existing `a02` возвращает
+`already_terminal` без SSH и comment; duplicate/foreign/different binding и
+любой `a03` отклоняются. Blocked `a02` исчерпывает sequence и не создаёт queue,
+retry или новый reconciliation attempt.
 
 После GitHub-only preflight workflow выполняет не более одного SSH process с
 `PYTHONDONTWRITEBYTECODE=1`. Переданный через stdin probe имеет только direct
@@ -429,7 +444,16 @@ restore/SQLite proof digests, six unlink intents/completions и reclaimed bytes.
 Он также требует отсутствие active sanitation jobs/held locks, три стабильных
 capacity sample выше root/Finance floors, свежий natural monitor `normal`, все
 27 units/12 pairs, unchanged journald, direct non-target/StoreRegistry
-identities и zero Promo/business/non-target mutation.
+identities и zero Promo/business/non-target mutation. Общий pair classifier без
+unit-specific исключений принимает только enabled loaded timer
+`active/waiting` + successful owner `inactive/dead`, либо coherent firing
+timer `active/running` + owner `activating/start|active/running` с exact
+`ExecMainStatus=0` и positive `MainPID`. Idle требует exact next trigger и
+timer `Triggers=<owner>`. Sequential mismatch этих уже известных фаз получает
+не более трёх paired resamples за пять секунд; original и каждый resample с
+raw fields/classification сохраняются. Failed/unknown/masked/not-found/disabled,
+stale/nonzero result/status, missing next trigger, wrong relation и exhausted
+transition fail closed.
 
 Полный canonical terminal receipt публикуется immutable Actions artifact до
 любого нового PR comment. Затем на original operation PR добавляется один

@@ -1,4 +1,4 @@
-# Migration 159 terminal addendum: WBC0008 block 024
+# Migration 159 terminal addendum: WBC0008 blocks 024 and 026
 
 This is the authoritative repo-only terminal-receipt addendum to
 `159_root_storage_warm_archive_wbc0008_006.md`. It does not change the archive
@@ -29,6 +29,35 @@ Any source/job/journal/hash/proof drift, source presence, missing/foreign/temp
 destination object, active job/lock, unstable or below-floor capacity, stale or
 non-normal monitor, 27/12/service, journald/non-target/StoreRegistry drift, or
 nonzero Promo/business/non-target effect blocks `done`.
+
+Block 026 preserves the terminal legacy `a01` from block 024 exactly: run
+`33069817619`, artifact id `9645283377`, artifact
+`root-warm-archive-reconciliation-pr-1075-run-33069817619`, receipt
+`sha256:1b99b7a01127f963af31b0cafb2a764e928eb839662af665b1afa4646b9c4847`
+and marker `5438726868`. It must validate that artifact and marker as
+`blocked/query-only-reconciliation-not-proven`, production mutation count zero,
+the same source operation/job, and the exact legacy blocker
+`systemd timer/service pair is unhealthy: wb-core-sheet-vitrina-refresh.timer`.
+They are never rewritten or redispatched.
+
+The only continuation is derived `a02`, bound to that a01 artifact/marker
+digest, the same source operation/job and a new merged `repo_only/done` release.
+One exact existing a02 returns `already_terminal` without SSH or publication.
+Duplicate/foreign/different evidence and `a03` fail closed. If a02 blocks, the
+sequence is exhausted with no queue or retry.
+
+The probe's general 27/12 pair classifier has no Sheet-Vitrina exception. Idle
+is exactly enabled loaded timer `active/waiting` with exact next trigger and
+`Triggers=<owner>`, plus successful owner `inactive/dead`,
+`ExecMainStatus=0`, `MainPID=0`. Coherent natural firing is timer
+`active/running` plus owner `activating/start` or `active/running`, empty/success
+Result, exact zero ExecMainStatus and positive MainPID. Only a sequential
+snapshot mismatch between those allowlisted phases receives up to three exact
+paired resamples inside five seconds. Original and every resampled raw field and
+classification are retained in the immutable artifact. Failed/unknown/masked/
+not-found/disabled units, stale or failed Result, nonzero status, missing idle
+next trigger, wrong trigger relation and impossible/ambiguous exhaustion remain
+terminal fail-closed.
 
 ## Receipt and terminal acceptance
 
