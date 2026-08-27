@@ -39,12 +39,13 @@
     "expected_effective_values_after": {}
   },
   "non_target_cas": {
-    "contract_version": "wb_core_non_target_cas_v2",
+    "contract_version": "wb_core_non_target_cas_v3",
     "active_mutable_canonical_stores": [
       {
         "key": "finance_raw_current",
         "owner": "registry_operational_store",
         "classification": "essential_bounded_business_writer",
+        "filesystem_role": "generation",
         "resolver": {
           "type": "store_registry",
           "logical_store": "finance_raw"
@@ -77,6 +78,7 @@
         "key": "operational_current",
         "owner": "registry_operational_store",
         "classification": "essential_bounded_business_writer",
+        "filesystem_role": "generation",
         "resolver": {
           "type": "store_registry",
           "logical_store": "operational"
@@ -139,6 +141,7 @@
         "key": "autoanswers_current",
         "owner": "autoanswers_operational_store",
         "classification": "essential_bounded_business_writer",
+        "filesystem_role": "root",
         "resolver": {
           "type": "literal",
           "path": "/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3"

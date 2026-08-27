@@ -492,12 +492,15 @@ def _mutable_fixture_policy(
         resolver = {"type": "store_registry", "logical_store": "operational"}
     return {
         "non_target_cas": {
-            "contract_version": "wb_core_non_target_cas_v2",
+            "contract_version": "wb_core_non_target_cas_v3",
             "active_mutable_canonical_stores": [
                 {
                     "key": "fixture_current",
                     "owner": "fixture_operational_store",
                     "classification": "essential_bounded_business_writer",
+                    "filesystem_role": (
+                        "root" if resolver_type == "literal" else "generation"
+                    ),
                     "resolver": resolver,
                     "access_roles": access_roles
                     or [
@@ -545,6 +548,240 @@ def _fd_opener(
     }
 
 
+def _fixture_filesystem_role_policy(
+    root: Path, device: int, *, role: str
+) -> dict[str, object]:
+    return {
+        "device": int(device),
+        "device_major": int(os.major(device)),
+        "device_minor": int(os.minor(device)),
+        "source": "fixture-device",
+        "filesystem_uuid": "fixture-uuid",
+        "filesystem_type": "fixture",
+        "family_root": str(root.resolve()),
+        "policy_owner": f"fixture.filesystems.{role}",
+        "required_mount_options": ["rw"],
+    }
+
+
+def _fixture_raw_mount(
+    root: Path, device: int, *, mount_id: int = 1
+) -> dict[str, object]:
+    return {
+        "mount_id": mount_id,
+        "parent_mount_id": 0,
+        "device_major": int(os.major(device)),
+        "device_minor": int(os.minor(device)),
+        "major_minor": f"{os.major(device)}:{os.minor(device)}",
+        "mount_root": "/",
+        "mount_point": str(root.resolve()),
+        "mount_options": ["rw"],
+        "optional_fields": [],
+        "filesystem_type": "fixture",
+        "source": "fixture-device",
+        "super_options": ["rw"],
+        "filesystem_uuid": "fixture-uuid",
+        "source_device": int(device),
+    }
+
+
+def _proven_mount_record(role: str, line: str) -> dict[str, object]:
+    record = warm._parse_mountinfo_line(line)
+    policy = warm.FILESYSTEM_ROLE_POLICIES[role]
+    record["filesystem_uuid"] = policy["filesystem_uuid"]
+    record["source_device"] = policy["device"]
+    return record
+
+
+def _exercise_namespace_stable_mount_semantics() -> None:
+    host_lines = {
+        "root": (
+            "29 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 "
+            "rw,discard,nobarrier,commit=30"
+        ),
+        "backup": (
+            "88 29 8:17 / /opt/wb-core-runtime/state/backups rw,relatime "
+            "shared:243 - ext4 /dev/sdb1 rw"
+        ),
+        "generation": (
+            "219 29 8:33 / /opt/wb-core-runtime/state/generations "
+            "rw,nosuid,nodev,noexec,noatime shared:262 - ext4 /dev/sdc1 "
+            "rw,errors=remount-ro"
+        ),
+    }
+    worker_lines = {
+        "root": (
+            "438 29 8:1 /opt/wb-core-runtime/backups "
+            "/opt/wb-core-runtime/backups rw,nosuid,relatime - ext4 "
+            "/dev/sda1 rw,discard,nobarrier,commit=30"
+        ),
+        "backup": (
+            "434 29 8:17 / /opt/wb-core-runtime/state/backups rw,relatime "
+            "- ext4 /dev/sdb1 rw"
+        ),
+        "generation": (
+            "435 29 8:33 / /opt/wb-core-runtime/state/generations "
+            "rw,nosuid,nodev,noexec,noatime - ext4 /dev/sdc1 "
+            "rw,errors=remount-ro"
+        ),
+    }
+    paths = {
+        "root": Path("/opt/wb-core-runtime/backups"),
+        "backup": warm.DESTINATION_ROOT,
+        "generation": warm.GENERATION_ROOT,
+    }
+    host_semantic = {}
+    worker_semantic = {}
+    host_observations = {}
+    worker_observations = {}
+    for role in ("root", "backup", "generation"):
+        policy = warm.FILESYSTEM_ROLE_POLICIES[role]
+        host_raw = _proven_mount_record(role, host_lines[role])
+        worker_raw = _proven_mount_record(role, worker_lines[role])
+        host_semantic[role], host_observations[role] = (
+            warm._semantic_mount_identity(
+                paths[role],
+                host_raw,
+                filesystem_role=role,
+                policy_owner=str(policy["policy_owner"]),
+                path_device=int(policy["device"]),
+            )
+        )
+        worker_semantic[role], worker_observations[role] = (
+            warm._semantic_mount_identity(
+                paths[role],
+                worker_raw,
+                filesystem_role=role,
+                policy_owner=str(policy["policy_owner"]),
+                path_device=int(policy["device"]),
+            )
+        )
+        assert warm._digest(host_semantic[role]) == warm._digest(
+            worker_semantic[role]
+        )
+        assert host_observations[role]["raw_mount"] != worker_observations[role][
+            "raw_mount"
+        ]
+        serialized = json.dumps(host_semantic[role], sort_keys=True)
+        for namespace_local_field in (
+            "mount_id",
+            "parent_mount_id",
+            "mount_point",
+            "mount_root",
+            "optional_fields",
+            "namespace_restrictive_options",
+        ):
+            assert namespace_local_field not in serialized
+    assert warm._digest(host_semantic) == warm._digest(worker_semantic)
+    assert host_observations["root"]["raw_mount"]["mount_id"] == 29
+    assert worker_observations["root"]["raw_mount"]["mount_id"] == 438
+    assert host_observations["backup"]["raw_mount"]["mount_id"] == 88
+    assert worker_observations["backup"]["raw_mount"]["mount_id"] == 434
+    assert host_observations["generation"]["raw_mount"]["mount_id"] == 219
+    assert worker_observations["generation"]["raw_mount"]["mount_id"] == 435
+
+    weakened_generation = _proven_mount_record(
+        "generation", host_lines["generation"]
+    )
+    weakened_generation["mount_options"].remove("nodev")
+    try:
+        warm._semantic_mount_identity(
+            warm.GENERATION_ROOT,
+            weakened_generation,
+            filesystem_role="generation",
+            policy_owner=str(
+                warm.FILESYSTEM_ROLE_POLICIES["generation"]["policy_owner"]
+            ),
+            path_device=int(
+                warm.FILESYSTEM_ROLE_POLICIES["generation"]["device"]
+            ),
+        )
+    except warm.WarmArchiveError as exc:
+        assert "mount safety option drifted" in str(exc)
+    else:
+        raise AssertionError("declared generation mount safety was weakened")
+
+    backup_policy = warm.FILESYSTEM_ROLE_POLICIES["backup"]
+    baseline_backup = _proven_mount_record("backup", host_lines["backup"])
+    rejected_variants = []
+    for field, value in (
+        ("source", "/dev/sdc1"),
+        ("filesystem_uuid", "00000000-0000-0000-0000-000000000000"),
+        ("filesystem_type", "xfs"),
+        ("source_device", int(backup_policy["device"]) + 1),
+    ):
+        drifted = json.loads(json.dumps(baseline_backup))
+        drifted[field] = value
+        rejected_variants.append(drifted)
+    device_drift = json.loads(json.dumps(baseline_backup))
+    device_drift.update(
+        {"device_major": 8, "device_minor": 33, "major_minor": "8:33"}
+    )
+    rejected_variants.append(device_drift)
+    read_only = json.loads(json.dumps(baseline_backup))
+    read_only["mount_options"] = ["ro", "relatime"]
+    read_only["super_options"] = ["ro"]
+    rejected_variants.append(read_only)
+    missing_identity = json.loads(json.dumps(baseline_backup))
+    missing_identity.pop("filesystem_uuid")
+    rejected_variants.append(missing_identity)
+    unknown_option = json.loads(json.dumps(baseline_backup))
+    unknown_option["mount_options"].append("mystery-write-mode")
+    rejected_variants.append(unknown_option)
+    for drifted in rejected_variants:
+        try:
+            warm._semantic_mount_identity(
+                warm.DESTINATION_ROOT,
+                drifted,
+                filesystem_role="backup",
+                policy_owner=str(backup_policy["policy_owner"]),
+                path_device=int(backup_policy["device"]),
+            )
+        except warm.WarmArchiveError:
+            pass
+        else:
+            raise AssertionError("unsafe semantic mount identity was admitted")
+
+    try:
+        warm._semantic_mount_identity(
+            Path("/opt/wb-core-runtime/backups"),
+            baseline_backup,
+            filesystem_role="backup",
+            policy_owner=str(backup_policy["policy_owner"]),
+            path_device=int(backup_policy["device"]),
+        )
+    except warm.WarmArchiveError as exc:
+        assert "path-to-device role binding drifted" in str(exc)
+    else:
+        raise AssertionError("backup filesystem role accepted a root path")
+
+    ambiguous = [
+        _proven_mount_record("backup", worker_lines["backup"]),
+        _proven_mount_record(
+            "backup", worker_lines["backup"].replace("434 29", "439 29", 1)
+        ),
+    ]
+    try:
+        warm._select_mount_identity(warm.DESTINATION_ROOT, ambiguous)
+    except warm.WarmArchiveError as exc:
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("ambiguous mount identity was admitted")
+
+    integrity_drift = json.loads(json.dumps(baseline_backup))
+    integrity_drift["super_options"] = ["rw", "commit=31"]
+    integrity_semantic, _ = warm._semantic_mount_identity(
+        warm.DESTINATION_ROOT,
+        integrity_drift,
+        filesystem_role="backup",
+        policy_owner=str(backup_policy["policy_owner"]),
+        path_device=int(backup_policy["device"]),
+    )
+    assert warm._digest(integrity_semantic) != warm._digest(
+        host_semantic["backup"]
+    )
+
+
 def _non_target_fixture(
     snapshot: dict[str, object], *, immutable_digest: str = "sha256:" + "1" * 64
 ) -> dict[str, object]:
@@ -558,15 +795,20 @@ def _non_target_fixture(
 def _exercise_non_target_cas_split(root: Path) -> None:
     root = root.resolve()
     original_mount_identity = warm._mount_identity
-    warm._mount_identity = lambda path: {
-        "mount_id": 1,
-        "mount_point": str(root.anchor),
-        "filesystem_type": "fixture",
-        "source": "fixture-device",
-        "options": "rw",
-    }
+    original_filesystem_roles = warm.FILESYSTEM_ROLE_POLICIES
     mutable = root / "wb_autoanswers_runtime.sqlite3"
     _seed(mutable)
+    fixture_device = int(mutable.stat().st_dev)
+    warm.FILESYSTEM_ROLE_POLICIES = {
+        **original_filesystem_roles,
+        "root": _fixture_filesystem_role_policy(
+            root, fixture_device, role="root"
+        ),
+        "generation": _fixture_filesystem_role_policy(
+            root, fixture_device, role="generation"
+        ),
+    }
+    warm._mount_identity = lambda path: _fixture_raw_mount(root, fixture_device)
     policy = _mutable_fixture_policy(mutable)
     service_snapshot = _healthy_systemd_snapshot()
     registry = {"stores": {}}
@@ -1008,6 +1250,7 @@ def _exercise_non_target_cas_split(root: Path) -> None:
     escaped_journal["items"][0]["archive_path"] = str(mutable)
     assert warm._mutation_scope_reconciliation(escaped_journal)["exact"] is False
     warm._mount_identity = original_mount_identity
+    warm.FILESYSTEM_ROLE_POLICIES = original_filesystem_roles
 
 
 def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
@@ -1044,19 +1287,39 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         service_snapshot["wb-core-registry-http.service"]["MainPID"]
     )
     original_mount_identity = warm._mount_identity
+    original_filesystem_roles = warm.FILESYSTEM_ROLE_POLICIES
     original_material_snapshot = warm._material_snapshot
     original_service_gate = warm._systemd_service_gate_with_resample
     original_stabilize = warm._stabilize_activity
     original_readiness_root = warm.READINESS_EVIDENCE_ROOT
     original_production_root = warm.PRODUCTION_GOAL_EVIDENCE_ROOT
     original_atomic_write = warm._atomic_write_json
-    warm._mount_identity = lambda path: {
-        "mount_id": 1,
-        "mount_point": str(root.anchor),
-        "filesystem_type": "fixture",
-        "source": "fixture-device",
-        "options": "rw",
+    fixture_device = int(autoanswers.stat().st_dev)
+    warm.FILESYSTEM_ROLE_POLICIES = {
+        **original_filesystem_roles,
+        "root": _fixture_filesystem_role_policy(
+            root, fixture_device, role="root"
+        ),
     }
+    namespace_phase = {"worker": False}
+
+    def namespace_mount(path: Path) -> dict[str, object]:
+        raw_mount = _fixture_raw_mount(
+            root,
+            fixture_device,
+            mount_id=438 if namespace_phase["worker"] else 29,
+        )
+        raw_mount["mount_options"] = (
+            ["rw", "nosuid", "relatime"]
+            if namespace_phase["worker"]
+            else ["rw", "relatime"]
+        )
+        if namespace_phase["worker"] and path.resolve() == root_backups:
+            raw_mount["mount_root"] = str(root_backups)
+            raw_mount["mount_point"] = str(root_backups)
+        return raw_mount
+
+    warm._mount_identity = namespace_mount
     warm.READINESS_EVIDENCE_ROOT = readiness_root
     warm.PRODUCTION_GOAL_EVIDENCE_ROOT = production_root
     healthy_gate = {
@@ -1074,10 +1337,12 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         "pair_resample_evidence": {"samples": []},
     }
     calls = 0
+    namespace_mount_ids: list[int] = []
 
     def material_snapshot(**_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
         nonlocal calls
         calls += 1
+        namespace_phase["worker"] = calls > 2
         service_for_call = json.loads(json.dumps(service_snapshot))
         if calls == 2:
             with autoanswers.open("ab") as handle:
@@ -1110,6 +1375,24 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
                 )
             ],
         )
+        raw_filesystem_mount = namespace_mount(root_backups)
+        namespace_mount_ids.append(int(raw_filesystem_mount["mount_id"]))
+        semantic_filesystem_mount, mount_observation = (
+            warm._semantic_mount_identity(
+                root_backups,
+                raw_filesystem_mount,
+                filesystem_role="root",
+                policy_owner="fixture.filesystems.root",
+                path_device=fixture_device,
+            )
+        )
+        filesystem_row = {
+            "path": str(root_backups),
+            "device": fixture_device,
+            "available_bytes": 10,
+            "mount": semantic_filesystem_mount,
+            "mount_observation": mount_observation,
+        }
         targets = [
             {
                 "key": item["key"],
@@ -1134,7 +1417,13 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
                 warm.DESTINATION_ROOT / warm.DESTINATION_FAMILY_NAME
             ),
             "targets": targets,
-            "filesystems": {},
+            "filesystems": {
+                "root": {
+                    "path": filesystem_row["path"],
+                    "device": filesystem_row["device"],
+                    "mount": filesystem_row["mount"],
+                }
+            },
             "store_registry": {"identity_digest": "sha256:" + "2" * 64},
             "root_policy": {
                 "policy_sha256": "sha256:" + "3" * 64,
@@ -1163,7 +1452,7 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         }
         observations = {
             "activity_gates": activity,
-            "filesystems_before": {"root": {}, "backup": {}},
+            "filesystems_before": {"root": filesystem_row},
             "journald": {},
             "services": service_for_call,
             "systemd_service_gate": healthy_gate,
@@ -1240,6 +1529,9 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         assert dry["material_qualification_digest"] == ready[
             "material_qualification_digest"
         ]
+        assert namespace_mount_ids[:2] == [29, 29]
+        assert namespace_mount_ids[2:]
+        assert set(namespace_mount_ids[2:]) == {438}
         first_mutations: list[Path] = []
 
         def first_mutation(path: Path, _payload: object) -> None:
@@ -1268,6 +1560,7 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         ]
     finally:
         warm._mount_identity = original_mount_identity
+        warm.FILESYSTEM_ROLE_POLICIES = original_filesystem_roles
         warm._material_snapshot = original_material_snapshot
         warm._systemd_service_gate_with_resample = original_service_gate
         warm._stabilize_activity = original_stabilize
@@ -2010,6 +2303,7 @@ def run() -> None:
     assert len(warm.TIMER_SERVICE_PAIRS) == 12
     with tempfile.TemporaryDirectory(prefix="root-warm-archive-lock-smoke-") as raw:
         lock_root = Path(raw)
+        _exercise_namespace_stable_mount_semantics()
         _exercise_lock_contexts(lock_root)
         _exercise_apply_lock_path(lock_root)
         _exercise_non_target_cas_split(lock_root)

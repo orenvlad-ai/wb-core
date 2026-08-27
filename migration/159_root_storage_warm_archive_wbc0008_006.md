@@ -28,9 +28,9 @@ pre-submit repeatability defect found by the first block-006 operation. WBC0008
 block 012 retains that unchanged scope and corrects the producer-ownership CAS
 boundary after a legitimate same-inode 4,096-byte Autoanswers write changed the
 old global protected-file `size/mtime` digest between readiness and the first
-JIT witness. Block 020 supersedes the block-017 observation model with contract
-`root_storage_warm_archive_wbc0008_006_v5`; v1/v2/v3/v4 evidence and terminal old
-operations stay immutable and are never resumed or replayed. Every
+JIT witness. Block 021 supersedes the block-020 model with contract
+`root_storage_warm_archive_wbc0008_006_v6`; v1/v2/v3/v4/v5 evidence and terminal
+old operations stay immutable and are never resumed or replayed. Every
 qualification and mutation CAS gate now retains structured per-source activity
 evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
 and device/inode binding, kernel locks, sidecars, before/after identity and hash
@@ -108,8 +108,9 @@ root-storage policy rather than by filename:
   same-inode content, allocated-byte, size and mtime/ctime evolution is retained
   as observation evidence but is excluded from the stable topology digest.
 
-WBC0008 block 013 makes that relationship an explicit access-role matrix
-(`wb_core_non_target_cas_v2`) for every active mutable binding. Each literal
+WBC0008 block 013 makes that relationship an explicit access-role matrix.
+Block 021 advances it to `wb_core_non_target_cas_v3` and adds the exact declared
+`root|generation` filesystem role for every active mutable binding. Each literal
 repo-owned systemd unit has one declared `reader`, `writer` or `reader_writer`
 role and an exact allowed FD-mode set; wildcard, pathname, process-name,
 cgroup-parent and generic persistent-service fallbacks are absent. Registry
@@ -202,6 +203,45 @@ _mutable_safety_predicates` contour with four observations per target, then the
 JIT and mutation-start predicates before the first durable mutation write.
 Unsafe, missing, foreign and identity-drift cases are separately rejected.
 
+WBC0008 block 021 corrects the namespace-local mount CAS defect proven by the
+single terminal PR #1073 operation
+`production-goal-v1-b1c08aecb19d5d4ee46941f9be8474fe`. Qualification ran in
+the host mount namespace while the detached systemd worker ran in its private
+namespace. The backing devices, sources, UUIDs, filesystem types and path
+bindings were unchanged, but backup mount id `88 -> 434`, generation mount id
+`219 -> 435`, and the root observation changed from mount id `29`, mount point
+`/`, options `rw,relatime` to mount id `438`, mount point
+`/opt/wb-core-runtime/backups`, options `rw,nosuid,relatime`. Those raw values
+caused seven false immutable component changes before the mutation journal;
+the terminal failure remains immutable and is never retried or reused.
+
+Stable mount CAS is now `wb_core_semantic_filesystem_identity_v1`. It binds the
+literal role and repo policy owner, canonical path-to-family placement, exact
+`st_dev` plus major/minor, `/dev/sda1|sdb1|sdc1`, the corresponding filesystem
+UUID, ext4 type, mandatory writable state and stable integrity/write options.
+The destination family must remain under the existing backup role/device; root
+and generation can never substitute for it. Active Finance raw/operational
+stores are declared `generation`, while Autoanswers is declared `root`; this
+role, existing owner/classification, StoreRegistry identity, inode/type/path and
+access-role matrix all remain in the stable mutable topology digest.
+
+Mount id, parent id, mount root, namespace-relative mount point, propagation
+fields, atime observation and additional restrictive `nosuid|nodev|noexec`
+flags remain structured observation evidence and are excluded from stable CAS.
+Role-declared generation requirements `noatime|nosuid|nodev|noexec` remain
+mandatory; only additional namespace restrictions outside that baseline may
+differ.
+`rw` is mandatory and `ro` is terminal. Known integrity/write semantics such as
+`errors=`, `data=`, `commit=`, barrier/discard/sync/journal options remain stable
+CAS fields; unknown or ambiguous options/records fail closed. The regression
+uses the exact host/worker records above and proves equal semantic digests while
+retaining unequal raw observations. Negative cases cover source/device/UUID/
+fstype drift, backup-on-root placement, read-only, missing/ambiguous identity,
+path binding, policy owner/access-role and topology drift. The production-shaped
+fixture crosses host readiness into systemd-worker JIT and mutation-start
+qualification and reaches the first durable mutation call only after all exact
+six source SHA, sidecar, FD, lock, hold and provenance predicates remain intact.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
@@ -286,7 +326,7 @@ manufacture a readiness identity. Exhaustion creates no production command,
 queue or unbounded retry. The later scope-goal parser accepts exactly one final
 `state=ready` receipt for that same binding.
 
-After a code/runtime correction such as block 020, the prior deployed-SHA
+After a code/runtime correction such as block 021, the prior deployed-SHA
 readiness sequence remains terminal and cannot authorize the new release. The
 new exact `live_runtime/done` receipt, the same durable owner passport and its
 derived goal operation bind a fresh readiness-v2 base whose first attempt is

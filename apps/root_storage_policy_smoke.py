@@ -75,6 +75,11 @@ def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
     ]
     autoanswers = bindings[-1]
     assert autoanswers["owner"] == "autoanswers_operational_store"
+    assert [item["filesystem_role"] for item in bindings] == [
+        "generation",
+        "generation",
+        "root",
+    ]
     assert autoanswers["resolver"] == {
         "type": "literal",
         "path": "/opt/wb-core-runtime/state/wb_autoanswers_runtime.sqlite3",
@@ -139,6 +144,19 @@ def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
             assert "access role is invalid" in str(exc)
         else:
             raise AssertionError("invalid mutable access mode did not fail closed")
+    invalid_filesystem_role = deepcopy(policy)
+    invalid_filesystem_role["non_target_cas"]["active_mutable_canonical_stores"][0][
+        "filesystem_role"
+    ] = "root"
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(invalid_filesystem_role), encoding="utf-8")
+        try:
+            load_policy(path)
+        except RootStoragePolicyError as exc:
+            assert "filesystem role is invalid" in str(exc)
+        else:
+            raise AssertionError("wrong mutable filesystem role did not fail closed")
 
 
 def _assert_admission(policy: dict[str, object]) -> None:

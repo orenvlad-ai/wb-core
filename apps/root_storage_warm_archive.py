@@ -58,7 +58,10 @@ from packages.application.storage_registry import (  # noqa: E402
 )
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v5"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v6"
+SEMANTIC_FILESYSTEM_IDENTITY_CONTRACT = (
+    "wb_core_semantic_filesystem_identity_v1"
+)
 MATERIAL_CAS_DIFF_SCHEMA = "wb-core.root-warm-archive-material-cas-diff/v1"
 MATERIAL_CAS_FAILURE_SCHEMA = "wb-core.root-warm-archive-material-cas-failure/v1"
 MATERIAL_CAS_FAILURE_FILENAME = "root-warm-archive-material-cas-failure.json"
@@ -153,6 +156,82 @@ OTHER_LIFECYCLE_LOCKS = (
     ".finance-storage-split.lock",
     ".finance-storage-stale-writer-recovery.lock",
     ".business-data-maintenance-restore.lock",
+)
+FILESYSTEM_ROLE_POLICIES: dict[str, dict[str, Any]] = {
+    "root": {
+        "device": 2049,
+        "device_major": 8,
+        "device_minor": 1,
+        "source": "/dev/sda1",
+        "filesystem_uuid": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
+        "filesystem_type": "ext4",
+        "family_root": "/opt/wb-core-runtime",
+        "policy_owner": "root_storage_policy.filesystems.root",
+        "required_mount_options": ["rw"],
+    },
+    "backup": {
+        "device": 2065,
+        "device_major": 8,
+        "device_minor": 17,
+        "source": "/dev/sdb1",
+        "filesystem_uuid": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
+        "filesystem_type": "ext4",
+        "family_root": "/opt/wb-core-runtime/state/backups",
+        "policy_owner": "root_storage_policy.filesystems.backup",
+        "required_mount_options": ["rw"],
+    },
+    "generation": {
+        "device": 2081,
+        "device_major": 8,
+        "device_minor": 33,
+        "source": "/dev/sdc1",
+        "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
+        "filesystem_type": "ext4",
+        "family_root": "/opt/wb-core-runtime/state/generations",
+        "policy_owner": "root_storage_policy.filesystems.generation",
+        "required_mount_options": ["rw", "noatime", "nodev", "noexec", "nosuid"],
+    },
+}
+MOUNT_NAMESPACE_RESTRICTIVE_OPTIONS = frozenset({"nosuid", "nodev", "noexec"})
+MOUNT_OBSERVATION_ONLY_OPTIONS = frozenset(
+    {"relatime", "noatime", "strictatime", "nodiratime", "lazytime"}
+)
+MOUNT_STABLE_INTEGRITY_OPTIONS = frozenset(
+    {
+        "acl",
+        "async",
+        "barrier",
+        "dax",
+        "delalloc",
+        "dev",
+        "dirsync",
+        "discard",
+        "exec",
+        "grpquota",
+        "journal_async_commit",
+        "journal_checksum",
+        "noacl",
+        "nobarrier",
+        "nodelalloc",
+        "nodiscard",
+        "noquota",
+        "prjquota",
+        "quota",
+        "suid",
+        "sync",
+        "user_xattr",
+        "usrquota",
+    }
+)
+MOUNT_STABLE_INTEGRITY_PREFIXES = (
+    "barrier=",
+    "commit=",
+    "data=",
+    "dax=",
+    "errors=",
+    "grpjquota=",
+    "jqfmt=",
+    "usrjquota=",
 )
 
 
@@ -1134,12 +1213,262 @@ def _lightweight_target_witness(
     )
 
 
-def _filesystem(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_dir():
+def _unescape_mountinfo(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def _parse_mountinfo_line(line: str) -> dict[str, Any]:
+    fields = line.split()
+    try:
+        separator = fields.index("-")
+    except ValueError as exc:
+        raise WarmArchiveError("mount identity record is malformed") from exc
+    if separator < 6 or len(fields) <= separator + 3:
+        raise WarmArchiveError("mount identity record is incomplete")
+    try:
+        mount_id = int(fields[0])
+        parent_mount_id = int(fields[1])
+        device_major_text, device_minor_text = fields[2].split(":", 1)
+        device_major = int(device_major_text)
+        device_minor = int(device_minor_text)
+    except (ValueError, IndexError) as exc:
+        raise WarmArchiveError("mount backing-device identity is malformed") from exc
+    mount_options = sorted(
+        {item.strip().lower() for item in fields[5].split(",") if item.strip()}
+    )
+    super_options = sorted(
+        {
+            item.strip().lower()
+            for item in fields[separator + 3].split(",")
+            if item.strip()
+        }
+    )
+    return {
+        "mount_id": mount_id,
+        "parent_mount_id": parent_mount_id,
+        "device_major": device_major,
+        "device_minor": device_minor,
+        "major_minor": f"{device_major}:{device_minor}",
+        "mount_root": _unescape_mountinfo(fields[3]),
+        "mount_point": _unescape_mountinfo(fields[4]),
+        "mount_options": mount_options,
+        "optional_fields": sorted(fields[6:separator]),
+        "filesystem_type": fields[separator + 1].strip().lower(),
+        "source": _unescape_mountinfo(fields[separator + 2]),
+        "super_options": super_options,
+    }
+
+
+def _filesystem_uuid(source: str) -> str:
+    if not source.startswith("/dev/"):
+        return ""
+    try:
+        completed = subprocess.run(
+            ["blkid", "-s", "UUID", "-o", "value", source],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return completed.stdout.strip().lower() if completed.returncode == 0 else ""
+
+
+def _source_device(source: str) -> int | None:
+    try:
+        value = Path(source).stat()
+    except OSError:
+        return None
+    return int(value.st_rdev) if stat.S_ISBLK(value.st_mode) else None
+
+
+def _mount_option_semantics(mount: Mapping[str, Any]) -> dict[str, Any]:
+    mount_options = mount.get("mount_options")
+    super_options = mount.get("super_options")
+    if not isinstance(mount_options, list) or not isinstance(super_options, list):
+        raise WarmArchiveError("mount option identity is missing or ambiguous")
+    options = {
+        str(item).strip().lower()
+        for item in [*mount_options, *super_options]
+        if str(item).strip()
+    }
+    if "rw" not in options or "ro" in options:
+        raise WarmArchiveError("filesystem is not unambiguously writable")
+    namespace_restrictive = sorted(options & MOUNT_NAMESPACE_RESTRICTIVE_OPTIONS)
+    observation_only = sorted(options & MOUNT_OBSERVATION_ONLY_OPTIONS)
+    stable_integrity = sorted(
+        item
+        for item in options
+        if item in MOUNT_STABLE_INTEGRITY_OPTIONS
+        or any(item.startswith(prefix) for prefix in MOUNT_STABLE_INTEGRITY_PREFIXES)
+    )
+    recognized = {
+        "rw",
+        *namespace_restrictive,
+        *observation_only,
+        *stable_integrity,
+    }
+    unknown = sorted(options - recognized)
+    if unknown:
+        raise WarmArchiveError(
+            "mount option semantics are unknown",
+            evidence={"unknown_mount_options": unknown},
+        )
+    return {
+        "writable": True,
+        "required_access_option": "rw",
+        "namespace_restrictive_options": namespace_restrictive,
+        "observation_only_options": observation_only,
+        "stable_integrity_options": stable_integrity,
+    }
+
+
+def _path_matches_filesystem_role(path: Path, role: str) -> bool:
+    resolved = path.resolve()
+    policy = FILESYSTEM_ROLE_POLICIES[role]
+    family_root = Path(str(policy["family_root"])).resolve()
+    try:
+        resolved.relative_to(family_root)
+    except ValueError:
+        return False
+    if role != "root":
+        return True
+    for excluded in (
+        Path("/opt/wb-core-runtime/state/backups"),
+        Path("/opt/wb-core-runtime/state/generations"),
+    ):
+        try:
+            resolved.relative_to(excluded)
+        except ValueError:
+            continue
+        return False
+    return True
+
+
+def _semantic_mount_identity(
+    path: Path,
+    raw_mount: Mapping[str, Any],
+    *,
+    filesystem_role: str,
+    policy_owner: str,
+    path_device: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = FILESYSTEM_ROLE_POLICIES.get(filesystem_role)
+    if policy is None or not policy_owner:
+        raise WarmArchiveError("filesystem role/policy ownership is unknown")
+    required_raw = {
+        "device_major",
+        "device_minor",
+        "major_minor",
+        "mount_point",
+        "mount_options",
+        "filesystem_type",
+        "source",
+        "super_options",
+        "filesystem_uuid",
+        "source_device",
+    }
+    if not required_raw.issubset(raw_mount):
+        raise WarmArchiveError("semantic mount identity is missing or ambiguous")
+    option_semantics = _mount_option_semantics(raw_mount)
+    observed_options = {
+        str(item).strip().lower()
+        for item in [
+            *list(raw_mount["mount_options"]),
+            *list(raw_mount["super_options"]),
+        ]
+        if str(item).strip()
+    }
+    required_options = sorted(
+        {str(item) for item in policy.get("required_mount_options") or []}
+    )
+    missing_required_options = sorted(set(required_options) - observed_options)
+    if missing_required_options:
+        raise WarmArchiveError(
+            "declared filesystem mount safety option drifted",
+            evidence={"missing_required_mount_options": missing_required_options},
+        )
+    expected_device = int(policy["device"])
+    expected_major = int(policy["device_major"])
+    expected_minor = int(policy["device_minor"])
+    try:
+        observed_path_device = int(path_device)
+        observed_major = int(raw_mount["device_major"])
+        observed_minor = int(raw_mount["device_minor"])
+        observed_source_device = int(raw_mount["source_device"])
+    except (TypeError, ValueError) as exc:
+        raise WarmArchiveError(
+            "filesystem backing-device identity is missing or ambiguous"
+        ) from exc
+    if (
+        observed_path_device != expected_device
+        or observed_major != expected_major
+        or observed_minor != expected_minor
+        or str(raw_mount["major_minor"]) != f"{expected_major}:{expected_minor}"
+        or observed_source_device != expected_device
+    ):
+        raise WarmArchiveError("filesystem backing-device identity drifted")
+    if (
+        str(raw_mount["source"]) != str(policy["source"])
+        or str(raw_mount["filesystem_uuid"]).lower()
+        != str(policy["filesystem_uuid"])
+        or str(raw_mount["filesystem_type"]).lower()
+        != str(policy["filesystem_type"])
+    ):
+        raise WarmArchiveError("filesystem source/UUID/type identity drifted")
+    if not _path_matches_filesystem_role(path, filesystem_role):
+        raise WarmArchiveError("filesystem path-to-device role binding drifted")
+    semantic = {
+        "contract_version": SEMANTIC_FILESYSTEM_IDENTITY_CONTRACT,
+        "filesystem_role": filesystem_role,
+        "policy_owner": policy_owner,
+        "path_binding": {
+            "path": str(path.resolve()),
+            "family_root": str(policy["family_root"]),
+            "placement": "inside_declared_family",
+        },
+        "backing_device": {
+            "device": expected_device,
+            "device_major": expected_major,
+            "device_minor": expected_minor,
+            "major_minor": f"{expected_major}:{expected_minor}",
+            "source": str(policy["source"]),
+            "filesystem_uuid": str(policy["filesystem_uuid"]),
+        },
+        "filesystem_type": str(policy["filesystem_type"]),
+        "required_writable": True,
+        "declared_required_mount_options": required_options,
+        "stable_integrity_options": option_semantics[
+            "stable_integrity_options"
+        ],
+    }
+    observation = {
+        "raw_mount": copy.deepcopy(dict(raw_mount)),
+        "option_semantics": option_semantics,
+        "semantic_identity_digest": _digest(semantic),
+    }
+    return semantic, observation
+
+
+def _filesystem(path: Path, *, filesystem_role: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_dir() or path.resolve() != path:
         raise WarmArchiveError(f"filesystem path is unavailable: {path}")
     value = path.stat()
     fs = os.statvfs(path)
-    mount = _mount_identity(path)
+    raw_mount = _mount_identity(path)
+    policy_owner = str(FILESYSTEM_ROLE_POLICIES[filesystem_role]["policy_owner"])
+    mount, mount_observation = _semantic_mount_identity(
+        path,
+        raw_mount,
+        filesystem_role=filesystem_role,
+        policy_owner=policy_owner,
+        path_device=int(value.st_dev),
+    )
     return {
         "path": str(path.resolve()),
         "device": int(value.st_dev),
@@ -1150,19 +1479,17 @@ def _filesystem(path: Path) -> dict[str, Any]:
         "inode_free": int(fs.f_ffree),
         "inode_total": int(fs.f_files),
         "mount": mount,
+        "mount_observation": mount_observation,
     }
 
 
-def _mount_identity(path: Path) -> dict[str, Any]:
-    matches = []
-    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if "-" not in fields:
-            continue
-        separator = fields.index("-")
-        mount_point = Path(
-            fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
-        )
+def _select_mount_identity(
+    path: Path, records: list[Mapping[str, Any]]
+) -> dict[str, Any]:
+    matches: list[tuple[int, dict[str, Any]]] = []
+    for source_record in records:
+        record = dict(source_record)
+        mount_point = Path(str(record["mount_point"]))
         try:
             path.resolve().relative_to(mount_point)
         except ValueError:
@@ -1170,30 +1497,40 @@ def _mount_identity(path: Path) -> dict[str, Any]:
         matches.append(
             (
                 len(mount_point.parts),
-                {
-                    "mount_id": int(fields[0]),
-                    "mount_point": str(mount_point),
-                    "filesystem_type": fields[separator + 1],
-                    "source": fields[separator + 2],
-                    "options": fields[5],
-                },
+                record,
             )
         )
     if not matches:
         raise WarmArchiveError(f"mount identity is unavailable: {path}")
-    return max(matches, key=lambda item: item[0])[1]
+    deepest = max(item[0] for item in matches)
+    selected = [record for depth, record in matches if depth == deepest]
+    if len(selected) != 1:
+        raise WarmArchiveError(f"mount identity is ambiguous: {path}")
+    return selected[0]
+
+
+def _mount_identity(path: Path) -> dict[str, Any]:
+    records = []
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        try:
+            records.append(_parse_mountinfo_line(line))
+        except WarmArchiveError:
+            continue
+    result = _select_mount_identity(path, records)
+    result["filesystem_uuid"] = _filesystem_uuid(str(result["source"]))
+    result["source_device"] = _source_device(str(result["source"]))
+    return result
 
 
 def _filesystem_snapshot(runtime_dir: Path, root_backups: Path) -> dict[str, Any]:
     result = {
-        "root": _filesystem(root_backups),
-        "backup": _filesystem(DESTINATION_ROOT),
-        "generation": _filesystem(GENERATION_ROOT),
+        "root": _filesystem(root_backups, filesystem_role="root"),
+        "backup": _filesystem(DESTINATION_ROOT, filesystem_role="backup"),
+        "generation": _filesystem(GENERATION_ROOT, filesystem_role="generation"),
     }
-    expected = {"root": "/dev/sda1", "backup": "/dev/sdb1", "generation": "/dev/sdc1"}
-    for name, source in expected.items():
-        if result[name]["mount"]["source"] != source:
-            raise WarmArchiveError(f"{name} filesystem source drifted")
+    for name in ("root", "backup", "generation"):
+        if result[name]["mount"]["filesystem_role"] != name:
+            raise WarmArchiveError(f"{name} filesystem role drifted")
     if len({int(item["device"]) for item in result.values()}) != 3:
         raise WarmArchiveError("root/backup/generation devices are not distinct")
     if runtime_dir.resolve() != Path("/opt/wb-core-runtime/state"):
@@ -1422,7 +1759,12 @@ def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
     }
 
 
-def _stable_file_topology(path: Path) -> dict[str, Any]:
+def _stable_file_topology(
+    path: Path,
+    *,
+    filesystem_role: str,
+    policy_owner: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not path.is_absolute() or path.is_symlink() or not path.is_file():
         raise WarmArchiveError(f"mutable canonical store path is unsafe: {path}")
     resolved = path.resolve(strict=True)
@@ -1431,10 +1773,17 @@ def _stable_file_topology(path: Path) -> dict[str, Any]:
     value = path.lstat()
     if not stat.S_ISREG(value.st_mode):
         raise WarmArchiveError(f"mutable canonical store type drifted: {path}")
-    mount = _mount_identity(path)
+    raw_mount = _mount_identity(path)
     if int(value.st_dev) != int(path.stat().st_dev):
         raise WarmArchiveError(f"mutable canonical store device drifted: {path}")
-    return {
+    mount, mount_observation = _semantic_mount_identity(
+        path,
+        raw_mount,
+        filesystem_role=filesystem_role,
+        policy_owner=policy_owner,
+        path_device=int(value.st_dev),
+    )
+    topology = {
         "path": str(path),
         "device": int(value.st_dev),
         "device_major": int(os.major(value.st_dev)),
@@ -1447,6 +1796,7 @@ def _stable_file_topology(path: Path) -> dict[str, Any]:
         "nlink": int(value.st_nlink),
         "mount": mount,
     }
+    return topology, mount_observation
 
 
 def _mutable_opener_access_relationship(
@@ -1586,6 +1936,7 @@ def _active_mutable_canonical_snapshot(
         key = str(binding.get("key") or "")
         owner = str(binding.get("owner") or "")
         classification = str(binding.get("classification") or "")
+        filesystem_role = str(binding.get("filesystem_role") or "")
         producer = producers.get(owner)
         resolver = binding.get("resolver")
         raw_access_roles = binding.get("access_roles")
@@ -1601,6 +1952,7 @@ def _active_mutable_canonical_snapshot(
             or producer is None
             or classification != CLASS_ESSENTIAL
             or producer.get("classification") != classification
+            or filesystem_role not in {"root", "generation"}
             or not isinstance(raw_access_roles, list)
             or len(access_roles) != len(raw_access_roles)
             or not declared_services
@@ -1626,8 +1978,14 @@ def _active_mutable_canonical_snapshot(
             registry_identity = (store_registry.get("stores") or {}).get(logical_store)
             if not isinstance(registry_identity, Mapping):
                 raise WarmArchiveError("StoreRegistry mutable resolver identity is unavailable")
+            if filesystem_role != "generation":
+                raise WarmArchiveError(
+                    "StoreRegistry mutable filesystem role drifted"
+                )
             path = Path(str(registry_identity.get("path") or ""))
         elif resolver.get("type") == "literal":
+            if filesystem_role != "root":
+                raise WarmArchiveError("literal mutable filesystem role drifted")
             path = Path(str(resolver.get("path") or ""))
             registered = registered_producer_for_path(policy, path)
             if (
@@ -1651,7 +2009,11 @@ def _active_mutable_canonical_snapshot(
             or str(path).startswith(str(DESTINATION_ROOT / DESTINATION_FAMILY_NAME) + "/")
         ):
             raise WarmArchiveError("mutable canonical store overlaps exact mutation scope")
-        topology = _stable_file_topology(path)
+        topology, mount_observation = _stable_file_topology(
+            path,
+            filesystem_role=filesystem_role,
+            policy_owner=f"root_storage_policy.non_target_cas.{key}.{owner}",
+        )
         openers = opener_reader(path)
         opener_relationships = [
             _mutable_opener_access_relationship(
@@ -1675,6 +2037,7 @@ def _active_mutable_canonical_snapshot(
             "key": key,
             "owner": owner,
             "classification": classification,
+            "filesystem_role": filesystem_role,
             "resolver": dict(resolver),
             "access_roles": [
                 {
@@ -1699,6 +2062,7 @@ def _active_mutable_canonical_snapshot(
                     "ctime_ns": int(value.st_ctime_ns),
                 },
                 "open_handle_relationships": opener_relationships,
+                "mount_observation": mount_observation,
             }
         )
         resolved_paths.add(str(path))
@@ -1789,6 +2153,18 @@ def _reconcile_non_target(
                 ),
                 "open_handles_after": (later or {}).get(
                     "open_handle_relationships"
+                ),
+                "mount_observation_before": (earlier or {}).get(
+                    "mount_observation"
+                ),
+                "mount_observation_after": (later or {}).get(
+                    "mount_observation"
+                ),
+                "namespace_mount_observation_changed": bool(
+                    earlier
+                    and later
+                    and earlier.get("mount_observation")
+                    != later.get("mount_observation")
                 ),
             }
         )
@@ -2770,7 +3146,10 @@ def _safe_identity(value: Any) -> dict[str, Any] | None:
         "sha256",
         "kind",
     )
-    return {key: value.get(key) for key in fields if key in value}
+    result = {key: value.get(key) for key in fields if key in value}
+    if isinstance(value.get("mount"), Mapping):
+        result["mount"] = copy.deepcopy(dict(value["mount"]))
+    return result
 
 
 def _json_pointer_token(value: Any) -> str:
@@ -2891,6 +3270,7 @@ def _safe_topology_evidence(row: Any) -> dict[str, Any] | None:
         "key": row.get("key"),
         "owner": row.get("owner"),
         "classification": row.get("classification"),
+        "filesystem_role": row.get("filesystem_role"),
         "resolver": {
             "type": resolver.get("type") if isinstance(resolver, Mapping) else None,
             "logical_store": (
@@ -3162,6 +3542,27 @@ def _material_cas_components(
             cas_role="observation_only",
         )
     )
+    filesystem_mount_observations = [
+        {
+            "filesystem_role": str(name),
+            "path": row.get("path"),
+            "device": row.get("device"),
+            "semantic_mount": row.get("mount"),
+            "mount_observation": row.get("mount_observation"),
+        }
+        for name, row in sorted(
+            (observations.get("filesystems_before") or {}).items()
+        )
+        if isinstance(row, Mapping)
+    ]
+    result.append(
+        _component(
+            path="/observations/filesystem_mounts",
+            value=filesystem_mount_observations,
+            safe_evidence=filesystem_mount_observations,
+            cas_role="observation_only",
+        )
+    )
     capacity_summary = {
         "finance": {
             key: (observations.get("finance") or {}).get(key)
@@ -3247,7 +3648,9 @@ def _material_cas_components(
                         "key": row.get("key"),
                         "owner": row.get("owner"),
                         "classification": row.get("classification"),
+                        "filesystem_role": row.get("filesystem_role"),
                         "topology": _safe_identity(row.get("topology")),
+                        "mount_observation": row.get("mount_observation"),
                         "ordinary_mutable_fields": row.get(
                             "ordinary_mutable_fields"
                         ),
@@ -5131,7 +5534,7 @@ def _capacity_guard(
     minimum_floor_bytes: int = 0,
 ) -> dict[str, Any]:
     finance = _finance_snapshot(runtime_dir)
-    capacity = _filesystem(DESTINATION_ROOT)
+    capacity = _filesystem(DESTINATION_ROOT, filesystem_role="backup")
     required_floor = max(
         int(finance["required_available_floor_bytes"]),
         int(minimum_floor_bytes),
