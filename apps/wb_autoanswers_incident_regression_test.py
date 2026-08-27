@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -23,6 +24,7 @@ from packages.application.wb_autoanswers_runtime import (
     autoanswers_settings_revision,
     rating_only_template,
 )
+from packages.application.wb_autoanswers_publication import AutoanswersPublicationWorker
 from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
 
@@ -39,6 +41,60 @@ class DowngradeDuringMedia:
     def process(self, **_kwargs: object) -> dict:
         self.repository.update_settings(mode="manual", actor_id="admin")
         return {"media_uncertain": False}
+
+
+class CertainMedia:
+    def process(self, **_kwargs: object) -> dict:
+        return {"media_uncertain": False}
+
+
+class SequencedBridge:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = list(replies)
+        self.calls = 0
+
+    def run(self, **_kwargs: object) -> dict:
+        reply = self.replies[self.calls]
+        self.calls += 1
+        return {
+            "audit": [
+                {"type": "route_guard", "payload": {"final_route": "public_only"}},
+                {
+                    "type": "job_complete",
+                    "payload": {
+                        "outcome": "ready",
+                        "model_call_count": 1,
+                        "cost": {"total_usd": "0.03366850"},
+                        "final_reply": reply,
+                    },
+                },
+            ],
+            "pipeline": {
+                "result": {
+                    "route": "public_only",
+                    "final_reply": reply,
+                    "case_code": None,
+                    "outcome": "ready",
+                    "publication_action": "draft",
+                },
+                "estimated_cost_usd": "0.03366850",
+                "usage": {"writer": {"output_tokens": 1}},
+                "model_calls_this_run": 1,
+            },
+        }
+
+
+class WriteSpy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create_answer(self, **_kwargs: object) -> int:
+        self.calls += 1
+        return 204
+
+    def fetch_detail(self, *_args: object, **_kwargs: object) -> dict:
+        self.calls += 1
+        return {}
 
 
 def empty_feedback(feedback_id: str, rating: int) -> dict:
@@ -103,6 +159,265 @@ class IncidentRegressionTest(unittest.TestCase):
         self.assertEqual(self.repo.budget_status()["daily_actual_usd"], 0)
         with sqlite3.connect(self.repo.db_path) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations").fetchone()[0], 0)
+
+    def test_unsafe_owner_reply_terminalizes_primary_once_and_next_job_progresses(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(
+            feedback("unsafe-primary", text="Стекло треснуло через неделю"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        unsafe = self.repo.enqueue_processing(
+            "unsafe-primary", trigger_source="steady_sync", actor_id="sync"
+        )
+        bridge = SequencedBridge(
+            [
+                "Защитное стекло треснуло, но экран остался цел.",
+                "Здравствуйте. Спасибо за отзыв.",
+            ]
+        )
+        worker = AutoanswersProcessingWorker(
+            repository=self.repo,
+            bridge=bridge,  # type: ignore[arg-type]
+            media_processor=CertainMedia(),  # type: ignore[arg-type]
+            worker_id="primary-worker",
+        )
+
+        outcome = worker.run_once()
+        self.assertEqual(outcome["processing_key"], unsafe["processing_key"])
+        self.assertEqual(outcome["state"], "terminal_error")
+        self.assertEqual(bridge.calls, 1)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT j.state,j.attempts,j.lease_owner,j.lease_until,j.last_error_code,
+                       j.actual_cost_usd,r.status,r.actual_cost_usd,r.settled_at,
+                       (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs p
+                        WHERE p.processing_key=j.processing_key),
+                       (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_attempts a
+                        JOIN sheet_vitrina_v1_wb_publication_jobs p
+                          ON p.publication_key=a.publication_key
+                        WHERE p.processing_key=j.processing_key)
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                JOIN sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+                  ON r.processing_key=j.processing_key
+                WHERE j.processing_key=?
+                """,
+                (unsafe["processing_key"],),
+            ).fetchone()
+            audit = conn.execute(
+                """
+                SELECT details_json
+                FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+                WHERE aggregate_id=?
+                  AND event_type='owner_policy_unsafe_public_reply_terminalized'
+                """,
+                (unsafe["processing_key"],),
+            ).fetchall()
+        self.assertEqual(
+            row,
+            (
+                "terminal_error",
+                1,
+                None,
+                None,
+                "owner_policy_unsafe_public_reply",
+                "0.03366850",
+                "settled",
+                "0.03366850",
+                self.clock().isoformat().replace("+00:00", "Z"),
+                0,
+                0,
+            ),
+        )
+        self.assertEqual(len(audit), 1)
+        terminal_evidence = json.loads(audit[0][0])
+        self.assertEqual(terminal_evidence["error_code"], "owner_policy_unsafe_public_reply")
+        self.assertEqual(terminal_evidence["settled_cost_usd"], "0.03366850")
+        self.assertEqual(terminal_evidence["publication_jobs"], 0)
+        self.assertEqual(terminal_evidence["wb_post_attempts"], 0)
+
+        write_spy = WriteSpy()
+        publication = AutoanswersPublicationWorker(
+            repository=self.repo,
+            transport=write_spy,  # type: ignore[arg-type]
+            worker_id="publication-worker",
+        )
+        self.assertIsNone(publication.run_once())
+        self.assertEqual(write_spy.calls, 0)
+
+        self.assertIsNone(worker.run_once())
+        self.assertEqual(bridge.calls, 1)
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT attempts FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                    (unsafe["processing_key"],),
+                ).fetchone()[0],
+                1,
+            )
+
+        self.repo.upsert_feedback(
+            feedback("next-safe", text="Спасибо, всё хорошо"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        self.repo.enqueue_processing(
+            "next-safe", trigger_source="steady_sync", actor_id="sync"
+        )
+        next_outcome = worker.run_once()
+        self.assertEqual(next_outcome["state"], "approved")
+        self.assertEqual(bridge.calls, 2)
+
+    def test_settled_audit_recovery_terminalizes_without_repeated_provider_or_post(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(
+            feedback("unsafe-recovery", text="Стекло треснуло через неделю"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        job = self.repo.enqueue_processing(
+            "unsafe-recovery", trigger_source="steady_sync", actor_id="sync"
+        )
+        claimed = self.repo.claim_processing_job(worker_id="first-worker")
+        self.repo.mark_provider_call_started(
+            claimed["processing_key"], worker_id="first-worker"
+        )
+        unsafe_reply = "Защитное стекло треснуло, но экран остался цел."
+        self.repo.append_node_audit(
+            claimed["processing_key"],
+            [
+                {"type": "route_guard", "payload": {"final_route": "public_only"}},
+                {
+                    "type": "job_complete",
+                    "payload": {
+                        "outcome": "ready",
+                        "model_call_count": 3,
+                        "cost": {"total_usd": "0.03366850"},
+                        "final_reply": unsafe_reply,
+                    },
+                },
+            ],
+        )
+        self.repo.settle_budget(
+            claimed["processing_key"], actual_cost_usd="0.03366850"
+        )
+        self.clock.advance(301)
+        worker = AutoanswersProcessingWorker(
+            repository=self.repo,
+            bridge=NeverCalled(),  # type: ignore[arg-type]
+            media_processor=CertainMedia(),  # type: ignore[arg-type]
+            worker_id="recovery-worker",
+        )
+
+        outcome = worker.run_once()
+        self.assertEqual(outcome["processing_key"], job["processing_key"])
+        self.assertEqual(outcome["state"], "terminal_error")
+        self.assertTrue(outcome["recovered_from_audit"])
+        with sqlite3.connect(self.repo.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT j.state,j.attempts,j.lease_owner,j.lease_until,j.last_error_code,
+                       j.actual_cost_usd,r.status,r.actual_cost_usd,r.provider_call_started_at,
+                       (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs p
+                        WHERE p.processing_key=j.processing_key),
+                       (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_audit_events e
+                        WHERE e.aggregate_id=j.processing_key
+                          AND e.event_type='provider_call_boundary_entered')
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                JOIN sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+                  ON r.processing_key=j.processing_key
+                WHERE j.processing_key=?
+                """,
+                (job["processing_key"],),
+            ).fetchone()
+            audit = conn.execute(
+                """
+                SELECT details_json
+                FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+                WHERE aggregate_id=?
+                  AND event_type='owner_policy_unsafe_public_reply_terminalized'
+                """,
+                (job["processing_key"],),
+            ).fetchone()
+        self.assertEqual(row[:8], (
+            "terminal_error",
+            2,
+            None,
+            None,
+            "owner_policy_unsafe_public_reply",
+            "0.03366850",
+            "settled",
+            "0.03366850",
+        ))
+        self.assertIsNotNone(row[8])
+        self.assertEqual(row[9:], (0, 1))
+        recovery_evidence = json.loads(audit[0])
+        self.assertEqual(recovery_evidence["source"], "settled_audit_recovery")
+        self.assertEqual(recovery_evidence["provider_calls_replayed"], 0)
+
+        self.clock.advance(301)
+        self.assertIsNone(worker.run_once())
+        with sqlite3.connect(self.repo.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT attempts,actual_cost_usd FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                    (job["processing_key"],),
+                ).fetchone(),
+                (2, "0.03366850"),
+            )
+        write_spy = WriteSpy()
+        publication = AutoanswersPublicationWorker(
+            repository=self.repo,
+            transport=write_spy,  # type: ignore[arg-type]
+            worker_id="publication-worker",
+        )
+        self.assertIsNone(publication.run_once())
+        self.assertEqual(write_spy.calls, 0)
+
+    def test_unknown_owner_policy_runtime_error_still_surfaces_fail_closed(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(
+            feedback("unknown-policy-error", text="Нужен ответ"),
+            source_stream="unanswered",
+            run_kind="steady",
+        )
+        job = self.repo.enqueue_processing(
+            "unknown-policy-error", trigger_source="steady_sync", actor_id="sync"
+        )
+        bridge = SequencedBridge(["Здравствуйте. Спасибо за отзыв."])
+        worker = AutoanswersProcessingWorker(
+            repository=self.repo,
+            bridge=bridge,  # type: ignore[arg-type]
+            media_processor=CertainMedia(),  # type: ignore[arg-type]
+            worker_id="unknown-error-worker",
+        )
+        with patch(
+            "packages.application.wb_autoanswers_runtime.apply_owner_policy",
+            side_effect=RuntimeError("unknown owner-policy invariant"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unknown owner-policy invariant"):
+                worker.run_once()
+        with sqlite3.connect(self.repo.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT j.state,j.attempts,j.lease_owner,j.last_error_code,
+                       r.status,r.actual_cost_usd,
+                       (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs p
+                        WHERE p.processing_key=j.processing_key)
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs j
+                JOIN sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+                  ON r.processing_key=j.processing_key
+                WHERE j.processing_key=?
+                """,
+                (job["processing_key"],),
+            ).fetchone()
+        self.assertEqual(row[0], "processing")
+        self.assertEqual(row[1], 1)
+        self.assertIsNotNone(row[2])
+        self.assertIsNone(row[3])
+        self.assertEqual(row[4:6], ("settled", "0.03366850"))
+        self.assertEqual(row[6], 0)
 
     def test_exact_five_prefilter_skips_remain_terminal_across_policy_epoch(self) -> None:
         self.repo.update_settings(

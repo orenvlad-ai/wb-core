@@ -21,6 +21,8 @@ from apps.wb_autoanswers_policy_v5_reconciliation import (
 from apps.wb_autoanswers_runtime_test import feedback, successful_result
 from packages.application.wb_autoanswers_owner_policy import (
     OWNER_POLICY_VERSION,
+    OWNER_POLICY_UNSAFE_PUBLIC_REPLY_CODE,
+    OwnerPolicyUnsafePublicReplyError,
     apply_owner_policy,
     classify_return_guard,
     normalize_unfortunately,
@@ -52,6 +54,27 @@ def policy_result(feedback_id: str, text: str, *, reply: str = "Исходный
 
 
 class OwnerPolicyV5Test(unittest.TestCase):
+    def test_unsafe_intact_screen_claim_raises_typed_semantic_error(self) -> None:
+        with self.assertRaises(OwnerPolicyUnsafePublicReplyError) as captured:
+            apply_owner_policy(
+                feedback_id="unsafe-intact-screen",
+                rating=1,
+                content_json=content("Стекло треснуло через неделю"),
+                result=successful_result(
+                    "public_only",
+                    final_reply="Защитное стекло треснуло, но экран остался цел.",
+                ),
+            )
+        self.assertEqual(
+            captured.exception.code,
+            OWNER_POLICY_UNSAFE_PUBLIC_REPLY_CODE,
+        )
+        self.assertEqual(
+            captured.exception.evidence["publication_route"],
+            "public_only",
+        )
+        self.assertEqual(len(captured.exception.evidence["reply_sha256"]), 64)
+
     def test_ordinary_post_use_breakage_is_public_for_timing_and_word_variants(self) -> None:
         fixtures = (
             "Треснуло через день, телефон не падал",

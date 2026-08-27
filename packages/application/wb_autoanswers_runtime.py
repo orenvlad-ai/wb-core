@@ -70,6 +70,7 @@ from packages.application.root_storage_policy import (
 )
 from packages.application.wb_autoanswers_owner_policy import (
     OWNER_POLICY_VERSION,
+    OwnerPolicyUnsafePublicReplyError,
     apply_owner_policy,
 )
 
@@ -6888,6 +6889,105 @@ class AutoanswersRepository:
                     at=now,
                 )
 
+    def _terminalize_owner_policy_unsafe_reply(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        job: Mapping[str, Any],
+        error: OwnerPolicyUnsafePublicReplyError,
+        actor_id: str,
+        source: str,
+        at: datetime,
+        source_evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist the one terminalizable owner-policy semantic refusal."""
+
+        key = _clean_text(job["processing_key"])
+        current = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+            (key,),
+        ).fetchone()
+        if current is None:
+            raise RuntimeError("owner-policy terminalization lost its processing job")
+        if str(current["state"]) == STATE_TERMINAL_ERROR:
+            if str(current["last_error_code"] or "") != error.code:
+                raise RuntimeError("owner-policy terminalization conflicts with terminal evidence")
+            return dict(current)
+        if conn.execute(
+            "SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=? LIMIT 1",
+            (key,),
+        ).fetchone() is not None:
+            raise RuntimeError("owner-policy terminalization found publication evidence")
+        assert_transition(str(current["state"]), STATE_TERMINAL_ERROR)
+        reservation = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations WHERE processing_key=?",
+            (key,),
+        ).fetchone()
+        if reservation is not None and str(reservation["status"]) == "reserved":
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
+                SET reserved_usd=0,status='released',expires_at=NULL,
+                    released_reason=?,updated_at=?
+                WHERE processing_key=? AND status='reserved'
+                """,
+                (error.code, iso_utc(at), key),
+            )
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+            SET state=?,lease_owner=NULL,lease_until=NULL,last_error_code=?,
+                completed_at=COALESCE(completed_at,?),updated_at=?
+            WHERE processing_key=?
+            """,
+            (
+                STATE_TERMINAL_ERROR,
+                error.code,
+                iso_utc(at),
+                iso_utc(at),
+                key,
+            ),
+        )
+        self._audit(
+            conn,
+            aggregate_type="processing_job",
+            aggregate_id=key,
+            event_type="owner_policy_unsafe_public_reply_terminalized",
+            actor_type="policy" if source == "primary_completion" else "recovery",
+            actor_id=_clean_text(actor_id),
+            details={
+                "error_code": error.code,
+                "source": source,
+                "semantic_error": dict(error.evidence),
+                "source_evidence": dict(source_evidence or {}),
+                "reservation_status": (
+                    str(reservation["status"]) if reservation is not None else None
+                ),
+                "settled_cost_usd": (
+                    str(reservation["actual_cost_usd"])
+                    if reservation is not None
+                    and str(reservation["status"]) == "settled"
+                    else None
+                ),
+                "provider_call_started_at": (
+                    reservation["provider_call_started_at"]
+                    if reservation is not None
+                    else None
+                ),
+                "publication_jobs": 0,
+                "wb_post_attempts": 0,
+                "provider_calls_replayed": 0,
+            },
+            at=at,
+            previous_state=str(current["state"]),
+            next_state=STATE_TERMINAL_ERROR,
+        )
+        stored = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+            (key,),
+        ).fetchone()
+        return dict(stored)
+
     @staticmethod
     def _completed_node_evidence(
         conn: sqlite3.Connection,
@@ -7036,12 +7136,27 @@ class AutoanswersRepository:
                     "route": route,
                     "source_route": "seller_chat",
                 }
-            result = apply_owner_policy(
-                feedback_id=str(job["feedback_id"]),
-                rating=int(feedback["rating"] or 0),
-                content_json=feedback["content_json"],
-                result=result,
-            )
+            try:
+                result = apply_owner_policy(
+                    feedback_id=str(job["feedback_id"]),
+                    rating=int(feedback["rating"] or 0),
+                    content_json=feedback["content_json"],
+                    result=result,
+                )
+            except OwnerPolicyUnsafePublicReplyError as exc:
+                return self._terminalize_owner_policy_unsafe_reply(
+                    conn,
+                    job=job,
+                    error=exc,
+                    actor_id=actor_id,
+                    source="settled_audit_recovery",
+                    at=now,
+                    source_evidence={
+                        "source_invocation_id": evidence["invocation_id"],
+                        "source_reply_sha256": evidence["reply_sha256"],
+                        "source_model_calls": evidence["model_call_count"],
+                    },
+                )
             route = str(result["final_route"])
             reply = str(result["final_reply"])
             reply_sha = final_reply_hash(reply)
@@ -7389,12 +7504,26 @@ class AutoanswersRepository:
             if settings.policy_version == DEFAULT_POLICY_VERSION and feedback is not None:
                 before_policy_route = route
                 before_policy_reply_sha = final_reply_hash(reply)
-                stored_result = apply_owner_policy(
-                    feedback_id=str(job["feedback_id"]),
-                    rating=int(feedback["rating"] or 0),
-                    content_json=feedback["content_json"],
-                    result=stored_result,
-                )
+                try:
+                    stored_result = apply_owner_policy(
+                        feedback_id=str(job["feedback_id"]),
+                        rating=int(feedback["rating"] or 0),
+                        content_json=feedback["content_json"],
+                        result=stored_result,
+                    )
+                except OwnerPolicyUnsafePublicReplyError as exc:
+                    return self._terminalize_owner_policy_unsafe_reply(
+                        conn,
+                        job=job,
+                        error=exc,
+                        actor_id=worker_id,
+                        source="primary_completion",
+                        at=now,
+                        source_evidence={
+                            "source_route": before_policy_route,
+                            "source_reply_sha256": before_policy_reply_sha,
+                        },
+                    )
                 route = str(stored_result["final_route"])
                 reply = str(stored_result["final_reply"])
                 fallback_used = bool(stored_result.get("fallback_used"))

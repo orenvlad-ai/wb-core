@@ -50,6 +50,14 @@ Readback must prove persisted settings, exact run/cap, timer enabled/active stat
 and no drift. `starting` remains non-success until a post-request scheduler tick.
 After the grace interval, a stale tick is `worker_unavailable`.
 
+A typed owner-policy semantic refusal
+`owner_policy_unsafe_public_reply` is a successful bounded worker outcome, not
+a lifecycle failure: the exact job is durably terminal, its lease is absent and
+the next natural timer-owned tick may select later work. This path never
+requires or authorizes lifecycle reconciliation, a manual service run or a
+timer change. Untyped owner-policy/runtime invariant failures retain the
+ordinary process-error lifecycle.
+
 ## UI ownership migration
 
 The Web-vitrina schedule editor moves from `Витрина` to the

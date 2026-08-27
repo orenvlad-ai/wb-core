@@ -53,6 +53,17 @@ policy deterministically inserts it first into a knowledge limitation such as
 CTA, neutral instruction or positive sentence. Some negative templates use it
 naturally; others deliberately do not, preserving live variation.
 
+If the final public guard nevertheless detects an assertion prohibited by this
+section, it raises the typed semantic error
+`owner_policy_unsafe_public_reply`. Only that exact per-review error is a
+terminal business outcome: the processing job becomes `terminal_error`, its
+lease is cleared, the matched-pattern and reply-hash evidence is appended, and
+no publication aggregate, WB POST or readback is created. A previously settled
+Node result follows the same path from its append-only audit without another
+bridge/provider call or cost change. Owner-policy identity/configuration,
+empty-template and any unknown `RuntimeError` remain fail-closed process
+errors; they are not converted by this rule.
+
 ## Existing zero-write queue activation
 
 Deploy alone does not activate v5 in an existing v4 store. While the exact

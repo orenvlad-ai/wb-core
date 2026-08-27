@@ -195,6 +195,17 @@ variable, do not invent an impact or intact screen, and mention force/angle/
 contact point only for a positively described impact. The same policy limits
 `к сожалению` to one natural occurrence and prevents double empathy.
 
+The final public guard has one typed per-review refusal,
+`owner_policy_unsafe_public_reply`. Primary completion and recovery of an
+already settled append-only Node result atomically move only that job to
+`terminal_error`, clear its lease and append exact hash/pattern evidence. A
+settled reservation and job cost are not released, zeroed or settled again;
+recovery performs zero bridge/provider calls. No publication job, WB POST or
+readback is created. Repeated claims are therefore no-ops and normal scheduler
+ordering can continue with the next job. Identity/config/template failures and
+unknown `RuntimeError` instances remain process failures and are never caught
+as semantic refusals.
+
 The dedicated lifecycle maps those modes to two components. Readonly sync is
 enabled for every mode except a global master pause; the worker is enabled for
 `manual`, `draft_only`, `auto_safe` and `auto_all`. The global master is a
@@ -640,6 +651,17 @@ main card, captures its opaque dark render, submits exactly the seven current
 values once, confirms the new settings revision and exact readback, and proves
 that every global value and the active transition-run cap stayed unchanged.
 It never substitutes a dangerous value or creates a preview/run.
+
+For a release that repairs an existing
+`owner_policy_unsafe_public_reply` lease loop, do not manually run/restart the
+worker or change either timer. Observe the next natural
+`wb-core-autoanswers-worker.timer` invocation, then query the isolated store
+with `mode=ro` and `PRAGMA query_only=ON`. Acceptance requires the exact job in
+`terminal_error` with that code, no lease, unchanged settlement/cost identity,
+no new Node/provider boundary, no publication/attempt/readback evidence, and no
+later attempts growth. A following natural invocation must complete
+successfully and either advance the next eligible job or prove a legitimate
+no-work/pause reason while the timer remains enabled and active.
 
 Emergency rollback sets `WB_AUTOANSWERS_FORCE_OFF=true`. Before older code is deployed, `autoanswers-store-rollback-plan` binds the current isolated and retained legacy table digests; exact-fingerprint `autoanswers-store-rollback-apply` enters the deploy quiet window, creates and verifies a private legacy-table snapshot, replaces only the Autoanswers table set in one transaction and proves digest/foreign-key readback. The current isolated source and all non-Autoanswers registry tables remain intact. Restore a verified database only for demonstrated corruption and only after reconciling any ambiguous publication by GET. Never delete audit/revisions or replay a WB POST to simulate rollback.
 
