@@ -14,7 +14,7 @@ source_basis:
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/153_vitrina_wb_ff_inventory_cost_blend.md"
   - "migration/155_functional_economics_inventory_blend_publication.md"
-  - "migration/160_applicability_gated_dense_fbs.md"
+  - "migration/161_applicability_gated_dense_fbs.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -56,7 +56,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 160 stages facility/SKU activation until canonical dense FBS coverage is exact and makes every post-T FBS material effect publish a coherent functional/business successor with durable economics invalidation; FBO/WB stay outside dense initialization."
+update_note: "Active truth remains versioned functional balances. Migration 161 stages facility/SKU activation until canonical dense FBS coverage is exact and makes every post-T FBS material effect publish a coherent functional/business successor with durable economics invalidation; FBO/WB stay outside dense initialization."
 ---
 
 # 1. Active warehouse contract
@@ -176,7 +176,7 @@ and all calculation consumers are unchanged. A historical exact-date request
 is never overlaid from the current planning snapshot. Missing per-SKU physical
 FBS evidence remains unavailable and is never synthesized as zero.
 
-Migration 160 closes the current-state coverage gap at the registry boundary.
+Migration 161 closes the current-state coverage gap at the registry boundary.
 Every active facility × active stock-managed SKU is applicable to FBS by
 default, unless an immutable dated exception says otherwise. New facility/SKU
 activation is staged inactive, covered by the existing `pool_inventory`
@@ -202,7 +202,7 @@ streamed proof of existing coverage; it does not persist the default
 applicability cross-product. Current applicability uses the canonical EKT
 business date.
 
-The 26-August Migration 160 addendum prevents a later FBS business effect from
+The 26-August Migration 161 addendum prevents a later FBS business effect from
 mixing accepted versions. A lifecycle debit, guided receipt/recovery or pool
 overhead first commits the canonical facility/pool effect and derives the exact
 aggregate FF quantity, capital, WAC, cost-covered quantity and location
