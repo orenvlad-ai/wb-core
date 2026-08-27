@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.ff_pool_dense_fbs import (  # noqa: E402
+    _strict_domain_manifest_v2,
     _write_private,
     run as run_orenburg_cli,
 )
@@ -31,6 +33,7 @@ from packages.application.ff_pool_dense_fbs import (  # noqa: E402
     DenseFbsError,
     DenseFbsResumableError,
     DenseFbsService,
+    ZERO_REPAIR_MANIFEST_SCHEMA,
 )
 from packages.application.ff_pool_documents import (  # noqa: E402
     DOCUMENT_LINES_TABLE,
@@ -79,28 +82,85 @@ ORENBURG_SELLER_WAREHOUSE_ID = 854205
 ORENBURG_OFFICIAL_OFFICE_ID = 12223
 ORENBURG_HISTORICAL_ZERO_DATE = "2026-08-24"
 ORENBURG_EXISTING_NM_IDS = (
-    210183142, 210183919, 210184534, 245720334, 259460529, 259465495,
-    259473237, 391659990, 428850065, 428853741, 428854140, 428854299,
-    428855306, 428855560, 428855758, 428855978, 497414010, 497414624,
-    497416271, 497417163, 497417474,
+    210183142,
+    210183919,
+    210184534,
+    245720334,
+    259460529,
+    259465495,
+    259473237,
+    391659990,
+    428850065,
+    428853741,
+    428854140,
+    428854299,
+    428855306,
+    428855560,
+    428855758,
+    428855978,
+    497414010,
+    497414624,
+    497416271,
+    497417163,
+    497417474,
 )
 ORENBURG_TARGET_NM_IDS = (
-    259466031, 391660889, 391661710, 391662410, 391662965, 391663632,
-    428849827, 428854502, 497413772, 497415593, 497416559, 497416931,
-    1221231049, 1221235702, 1221244040, 1221249681, 1235346302,
-    1235353505, 1235356960, 1235358879, 1235360281, 1235361692,
-    1235365622, 1235366828, 1235368116, 1235369738, 1235373410,
-    1235374572, 1235375860, 1235377899, 1235379341, 1235381785,
-    1235384726, 1235387930, 1235392011, 1235393709, 1235398515,
-    1235399866, 1235404761, 1235405720, 1235406475, 1235406984,
-    1235407826, 1235409896, 1235411727, 1235412880, 1235413454,
-    1235414081, 1235419785, 1235421650,
+    259466031,
+    391660889,
+    391661710,
+    391662410,
+    391662965,
+    391663632,
+    428849827,
+    428854502,
+    497413772,
+    497415593,
+    497416559,
+    497416931,
+    1221231049,
+    1221235702,
+    1221244040,
+    1221249681,
+    1235346302,
+    1235353505,
+    1235356960,
+    1235358879,
+    1235360281,
+    1235361692,
+    1235365622,
+    1235366828,
+    1235368116,
+    1235369738,
+    1235373410,
+    1235374572,
+    1235375860,
+    1235377899,
+    1235379341,
+    1235381785,
+    1235384726,
+    1235387930,
+    1235392011,
+    1235393709,
+    1235398515,
+    1235399866,
+    1235404761,
+    1235405720,
+    1235406475,
+    1235406984,
+    1235407826,
+    1235409896,
+    1235411727,
+    1235412880,
+    1235413454,
+    1235414081,
+    1235419785,
+    1235421650,
 )
 ORENBURG_ORIGINAL_TARGET_NM_IDS = ORENBURG_TARGET_NM_IDS[:12]
 ORENBURG_WB_CONTENT_TARGET_NM_IDS = ORENBURG_TARGET_NM_IDS[12:]
 ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS = len(ORENBURG_EXISTING_NM_IDS)
-ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER = (
-    len(ORENBURG_TARGET_NM_IDS) + len(ORENBURG_EXISTING_NM_IDS)
+ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER = len(ORENBURG_TARGET_NM_IDS) + len(
+    ORENBURG_EXISTING_NM_IDS
 )
 
 
@@ -212,9 +272,12 @@ def _lifecycle_contract() -> dict[str, Any]:
             assert _count(conn, LINES_TABLE) == 0
             assert _count(conn, DOCUMENTS_TABLE) == 1
             assert _count(conn, DENSE_INTENTS_TABLE) == 2  # first SKU + facility
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {DENSE_INTENT_EVENTS_TABLE} WHERE state='active'"
-            ).fetchone()[0] == 2
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {DENSE_INTENT_EVENTS_TABLE} WHERE state='active'"
+                ).fetchone()[0]
+                == 2
+            )
             line = conn.execute(
                 f"SELECT quantity,capital_rub,metadata_json FROM {DOCUMENT_LINES_TABLE} "
                 "WHERE facility_id=? AND pool='FBS' AND nm_id=101",
@@ -306,7 +369,9 @@ def _lifecycle_contract() -> dict[str, Any]:
                 assert exc.code == "fbs_sku_retirement_blocked"
                 assert exc.details["blockers"]["nonzero_fbs_rows"]
             else:
-                raise AssertionError("save/update retirement must keep non-zero SKU active")
+                raise AssertionError(
+                    "save/update retirement must keep non-zero SKU active"
+                )
         try:
             runtime.delete_nomenclature_item(
                 str(second["item_id"]), updated_at="2026-08-26T08:03:00Z"
@@ -370,12 +435,15 @@ def _lifecycle_contract() -> dict[str, Any]:
             assert tuple(retained) == (0, "0", None)
             assert _count(conn, LINES_TABLE) == movement_count
             assert _count(conn, DOCUMENT_LINES_TABLE) >= document_line_count
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {DOCUMENT_LINES_TABLE} "
-                "WHERE facility_id=? AND pool='FBS' AND nm_id=202 "
-                "AND json_extract(metadata_json,'$.explicit_physical_zero')=1",
-                (facility_id,),
-            ).fetchone()[0] == 2
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {DOCUMENT_LINES_TABLE} "
+                    "WHERE facility_id=? AND pool='FBS' AND nm_id=202 "
+                    "AND json_extract(metadata_json,'$.explicit_physical_zero')=1",
+                    (facility_id,),
+                ).fetchone()[0]
+                == 2
+            )
 
         # Active lifecycle reservations and unfinished official orders are
         # independent retirement blockers even when physical stock is zero.
@@ -587,10 +655,13 @@ def _lifecycle_contract() -> dict[str, Any]:
                 assert exc.code == "applicable_fbs_balance_missing"
             else:
                 raise AssertionError("receipt must not create a missing FBS row")
-            assert conn.execute(
-                f"SELECT 1 FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=101",
-                (facility_id,),
-            ).fetchone() is None
+            assert (
+                conn.execute(
+                    f"SELECT 1 FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=101",
+                    (facility_id,),
+                ).fetchone()
+                is None
+            )
             conn.rollback()
 
         # The immutable dense document proves T0 even after a later watermark.
@@ -623,11 +694,13 @@ def _lifecycle_contract() -> dict[str, Any]:
                 operation_id="fbo-receipt",
                 business_date=TODAY,
             )
-            assert tuple(conn.execute(
-                f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
-                "WHERE facility_id=? AND pool='FBO' AND nm_id=101",
-                (facility_id,),
-            ).fetchone()) == (1, "1")
+            assert tuple(
+                conn.execute(
+                    f"SELECT quantity,capital_rub FROM {BALANCES_TABLE} "
+                    "WHERE facility_id=? AND pool='FBO' AND nm_id=101",
+                    (facility_id,),
+                ).fetchone()
+            ) == (1, "1")
             conn.rollback()
 
         # The common warehouse writer lock serializes nomenclature staging and
@@ -707,7 +780,9 @@ def _lifecycle_contract() -> dict[str, Any]:
             actor="dense-smoke",
         )
         assert resumed["state"] == "active"
-        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == documents_before_loss + 1
+        assert (
+            _table_count(runtime.db_path, DOCUMENTS_TABLE) == documents_before_loss + 1
+        )
 
         # A two-facility SKU activation proves that exact resume reads back the
         # first completed document and posts only the second ready request.
@@ -747,7 +822,9 @@ def _lifecycle_contract() -> dict[str, Any]:
             assert exc.details["canonical_state"] == "ready"
         else:
             raise AssertionError("second canonical submit loss must remain resumable")
-        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 1
+        assert (
+            _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 1
+        )
         staged_multi = runtime.load_nomenclature_item("dense-sku-304")
         assert staged_multi is not None and staged_multi["is_active"] is False
         multi_resumed = DenseFbsService(
@@ -766,7 +843,9 @@ def _lifecycle_contract() -> dict[str, Any]:
             actor="dense-smoke",
         )
         assert multi_resumed["state"] == "active"
-        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 2
+        assert (
+            _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 2
+        )
         multi_repeated = DenseFbsService(
             db_path=runtime.db_path,
             runtime_dir=runtime_dir,
@@ -783,7 +862,9 @@ def _lifecycle_contract() -> dict[str, Any]:
             actor="dense-smoke",
         )
         assert multi_repeated["idempotent"] is True
-        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 2
+        assert (
+            _table_count(runtime.db_path, DOCUMENTS_TABLE) == multi_documents_before + 2
+        )
 
         # Ambiguous post transport is reconciled by canonical request readback;
         # the document is not blindly submitted twice.
@@ -835,7 +916,9 @@ def _lifecycle_contract() -> dict[str, Any]:
         )
         drifted_id = str(drifted["facility"]["facility_id"])
         drifted_updated_at = str(drifted["facility"]["updated_at"])
-        drift_service = DenseFbsService(db_path=runtime.db_path, runtime_dir=runtime_dir)
+        drift_service = DenseFbsService(
+            db_path=runtime.db_path, runtime_dir=runtime_dir
+        )
         intent = drift_service._load_or_plan_facility_intent(
             orchestration_key="facility:dense-smoke-drift:dense-fbs",
             facility_id=drifted_id,
@@ -908,15 +991,21 @@ def _lifecycle_contract() -> dict[str, Any]:
         else:
             raise AssertionError("subject CAS drift must terminally block publication")
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                f"""SELECT event.state FROM {DENSE_INTENT_EVENTS_TABLE} event
+            assert (
+                conn.execute(
+                    f"""SELECT event.state FROM {DENSE_INTENT_EVENTS_TABLE} event
                      WHERE event.intent_id=? ORDER BY event.event_sequence DESC LIMIT 1""",
-                (subject_intent["intent_id"],),
-            ).fetchone()[0] == "blocked"
-            assert conn.execute(
-                f"SELECT active FROM {FACILITIES_TABLE} WHERE facility_id=?",
-                (subject_drift_id,),
-            ).fetchone()[0] == 0
+                    (subject_intent["intent_id"],),
+                ).fetchone()[0]
+                == "blocked"
+            )
+            assert (
+                conn.execute(
+                    f"SELECT active FROM {FACILITIES_TABLE} WHERE facility_id=?",
+                    (subject_drift_id,),
+                ).fetchone()[0]
+                == 0
+            )
 
         # A new SKU cannot opportunistically repair a legacy gap belonging to
         # already-active SKU/facility pairs.  It stays staged inactive and the
@@ -930,9 +1019,7 @@ def _lifecycle_contract() -> dict[str, Any]:
             )
             conn.commit()
         try:
-            runtime.save_nomenclature_item(
-                _sku(404, updated_at="2026-08-26T08:06:00Z")
-            )
+            runtime.save_nomenclature_item(_sku(404, updated_at="2026-08-26T08:06:00Z"))
         except DenseFbsError as exc:
             assert exc.code == "preexisting_dense_fbs_coverage_incomplete"
         else:
@@ -940,9 +1027,12 @@ def _lifecycle_contract() -> dict[str, Any]:
         staged_404 = runtime.load_nomenclature_item("dense-sku-404")
         assert staged_404 is not None and staged_404["is_active"] is False
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id='fff_legacy_gap'"
-            ).fetchone()[0] == 0
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id='fff_legacy_gap'"
+                ).fetchone()[0]
+                == 0
+            )
 
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -953,7 +1043,12 @@ def _lifecycle_contract() -> dict[str, Any]:
                 ).fetchall()
             }
             assert {
-                "staged", "materializing", "resumable", "materialized", "active", "blocked"
+                "staged",
+                "materializing",
+                "resumable",
+                "materialized",
+                "active",
+                "blocked",
             } <= states
             assert _count(conn, APPLICABILITY_EVENTS_TABLE) == 2
         return {
@@ -983,7 +1078,9 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             conn.row_factory = sqlite3.Row
             _ensure_schema(conn)
             _enable_writer(conn)
-            _insert_facility(conn, ORENBURG_FACILITY_ID, "FF-ORENBURG-EXACT", active=True)
+            _insert_facility(
+                conn, ORENBURG_FACILITY_ID, "FF-ORENBURG-EXACT", active=True
+            )
             _insert_facility(conn, "fff_moscow_non_target", "FF-MOSCOW", active=True)
             _insert_facility(conn, "fff_unrelated_noise", "FF-NOISE", active=False)
             for nm_id in (*ORENBURG_TARGET_NM_IDS, *non_target_nm_ids):
@@ -1029,8 +1126,22 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                        operation_type,created_at,diagnostics_json)
                    VALUES(?,?,?,?,?,?, '{}')""",
                 (
-                    ("legacy-net-plus", "legacy-net-plus", "legacy-supply", "r1", "reserve", NOW),
-                    ("legacy-net-minus", "legacy-net-minus", "legacy-supply", "r2", "release", NOW),
+                    (
+                        "legacy-net-plus",
+                        "legacy-net-plus",
+                        "legacy-supply",
+                        "r1",
+                        "reserve",
+                        NOW,
+                    ),
+                    (
+                        "legacy-net-minus",
+                        "legacy-net-minus",
+                        "legacy-supply",
+                        "r2",
+                        "release",
+                        NOW,
+                    ),
                 ),
             )
             conn.executemany(
@@ -1071,7 +1182,11 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             )
             conn.commit()
         before = _file_sha256(runtime.db_path)
-        service = DenseFbsService(db_path=runtime.db_path, runtime_dir=runtime_dir)
+        service = DenseFbsService(
+            db_path=runtime.db_path,
+            runtime_dir=runtime_dir,
+            timestamp_factory=lambda: NOW,
+        )
         canonical_target = {
             "accepted": True,
             "target_id": "wb_core_eu_hosted_runtime_active",
@@ -1094,7 +1209,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         }
         plan = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
-            nm_ids=ORENBURG_TARGET_NM_IDS,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1105,7 +1221,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         repeated = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
-            nm_ids=ORENBURG_TARGET_NM_IDS,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1120,6 +1237,12 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["apply_allowed"] is True
         assert plan["apply_entrypoint_exposed"] is True
         assert plan["blockers"] == []
+        assert plan["input_manifest"]["qualified_at"] == NOW
+        assert plan["dense_fbs_initialization"]["effective_from"] == "2026-08-26"
+        assert (
+            plan["dense_fbs_initialization"]["effective_from"]
+            != ORENBURG_HISTORICAL_ZERO_DATE
+        )
         assert plan["nm_ids"] == sorted(ORENBURG_TARGET_NM_IDS)
         assert plan["expected_effects"] == {
             "balance_insert_count": 50,
@@ -1131,7 +1254,10 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             "pool_inventory_document_count": 1,
         }
         assert plan["non_targets"]["target_facility_existing_fbs_row_count"] == 21
-        assert plan["non_targets"]["target_facility_existing_fbs_nm_ids"] == non_target_nm_ids
+        assert (
+            plan["non_targets"]["target_facility_existing_fbs_nm_ids"]
+            == non_target_nm_ids
+        )
         assert plan["non_targets"]["wb_snapshots_count"] == 0
         assert str(plan["non_targets"]["wb_snapshots_digest"]).startswith("sha256:")
         assert plan["storage"]["whole_database_copy"] is False
@@ -1141,12 +1267,15 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["stock_managed_roster"]["exact_partition_proven"] is True
         assert len(ORENBURG_ORIGINAL_TARGET_NM_IDS) == 12
         assert len(ORENBURG_WB_CONTENT_TARGET_NM_IDS) == 38
-        assert sorted(
-            {
-                *ORENBURG_ORIGINAL_TARGET_NM_IDS,
-                *ORENBURG_WB_CONTENT_TARGET_NM_IDS,
-            }
-        ) == plan["nm_ids"]
+        assert (
+            sorted(
+                {
+                    *ORENBURG_ORIGINAL_TARGET_NM_IDS,
+                    *ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+                }
+            )
+            == plan["nm_ids"]
+        )
         assert plan["mapping_evidence"]["seller_warehouse_id"] == 854205
         assert plan["mapping_evidence"]["official_office_id"] == 12223
         assert plan["mapping_evidence"]["allocation_count"] == 21
@@ -1161,31 +1290,51 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["target_effects"]["effect_row_count"] == 0
         assert plan["target_effects"]["legacy_reservations_count"] == 0
         assert plan["target_effects"]["identity_mapped_order_evidence_count"] == 0
-        assert plan["historical_zero_evidence"]["exact_zero_count"] == 50
+        assert plan["historical_zero_evidence"]["exact_zero_count"] == 12
         assert (
-            plan["historical_zero_evidence"]["mapping_extension_provenance_count"]
-            == 50
+            plan["historical_zero_evidence"]["mapping_extension_provenance_count"] == 12
         )
-        assert plan["historical_zero_evidence"]["forbidden_next_day_retrocopy_count"] == 0
+        assert (
+            plan["default_absent_history_evidence"][
+                "accepted_target_facility_history_count"
+            ]
+            == 0
+        )
+        assert len(plan["default_absent_history_evidence"]["lifecycle_rows"]) == 38
+        assert (
+            plan["historical_zero_evidence"]["forbidden_next_day_retrocopy_count"] == 0
+        )
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
-                f"AND nm_id IN ({','.join('?' for _ in ORENBURG_TARGET_NM_IDS)})",
-                (ORENBURG_FACILITY_ID, *ORENBURG_TARGET_NM_IDS),
-            ).fetchone()[0] == 0
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS'",
-                (ORENBURG_FACILITY_ID,),
-            ).fetchone()[0] == 21
-            assert conn.execute(
-                f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id='fff_moscow_non_target' "
-                "AND pool='FBS' AND nm_id=700000000"
-            ).fetchone()[0] == 9
-            assert conn.execute(
-                f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? "
-                "AND pool='FBO' AND nm_id=700000000",
-                (ORENBURG_FACILITY_ID,),
-            ).fetchone()[0] == 8
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
+                    f"AND nm_id IN ({','.join('?' for _ in ORENBURG_TARGET_NM_IDS)})",
+                    (ORENBURG_FACILITY_ID, *ORENBURG_TARGET_NM_IDS),
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS'",
+                    (ORENBURG_FACILITY_ID,),
+                ).fetchone()[0]
+                == 21
+            )
+            assert (
+                conn.execute(
+                    f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id='fff_moscow_non_target' "
+                    "AND pool='FBS' AND nm_id=700000000"
+                ).fetchone()[0]
+                == 9
+            )
+            assert (
+                conn.execute(
+                    f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? "
+                    "AND pool='FBO' AND nm_id=700000000",
+                    (ORENBURG_FACILITY_ID,),
+                ).fetchone()[0]
+                == 8
+            )
 
         # The CLI accepts only an explicit active target and explicit
         # StoreRegistry generation, both opened query-only.
@@ -1225,10 +1374,14 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         domain_manifest_file.write_text(
             json.dumps(
                 {
-                    "operation_id": "wbc-0013-a-fixture",
-                    "qualified_at": NOW,
+                    "schema": ZERO_REPAIR_MANIFEST_SCHEMA,
                     "facility_id": ORENBURG_FACILITY_ID,
-                    "nm_ids": list(ORENBURG_TARGET_NM_IDS),
+                    "partitions": {
+                        "historical_exact_zero": list(ORENBURG_ORIGINAL_TARGET_NM_IDS),
+                        "default_applicable_absent_history": list(
+                            ORENBURG_WB_CONTENT_TARGET_NM_IDS
+                        ),
+                    },
                     "seller_warehouse_id": ORENBURG_SELLER_WAREHOUSE_ID,
                     "official_office_id": ORENBURG_OFFICIAL_OFFICE_ID,
                     "expected_roster_nm_ids": roster_nm_ids,
@@ -1239,6 +1392,41 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             ),
             encoding="utf-8",
         )
+        valid_domain_manifest = json.loads(
+            domain_manifest_file.read_text(encoding="utf-8")
+        )
+        _strict_domain_manifest_v2(valid_domain_manifest)
+        invalid_manifests = []
+        extra = deepcopy(valid_domain_manifest)
+        extra["unknown"] = True
+        invalid_manifests.append(extra)
+        missing = deepcopy(valid_domain_manifest)
+        missing.pop("expected_existing_nm_ids")
+        invalid_manifests.append(missing)
+        duplicate = deepcopy(valid_domain_manifest)
+        duplicate["partitions"]["historical_exact_zero"].append(
+            duplicate["partitions"]["historical_exact_zero"][0]
+        )
+        invalid_manifests.append(duplicate)
+        overlap = deepcopy(valid_domain_manifest)
+        overlap["partitions"]["default_applicable_absent_history"].append(
+            overlap["partitions"]["historical_exact_zero"][0]
+        )
+        invalid_manifests.append(overlap)
+        incomplete_union = deepcopy(valid_domain_manifest)
+        incomplete_union["expected_roster_nm_ids"] = incomplete_union[
+            "expected_roster_nm_ids"
+        ][:-1]
+        invalid_manifests.append(incomplete_union)
+        for invalid_manifest in invalid_manifests:
+            try:
+                _strict_domain_manifest_v2(invalid_manifest)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    "invalid strict-v2 dense manifest must fail closed"
+                )
         cli_stdout = io.StringIO()
         cli_stderr = io.StringIO()
         with redirect_stdout(cli_stdout), redirect_stderr(cli_stderr):
@@ -1279,6 +1467,121 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         assert fallback["mode"] == "stdout_only"
         assert not (runtime_dir / "not-written.json").exists()
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            original_evidence = conn.execute(
+                "SELECT wb_sync_evidence_json FROM sheet_vitrina_v1_nomenclature_items "
+                "WHERE nm_id=?",
+                (ORENBURG_WB_CONTENT_TARGET_NM_IDS[0],),
+            ).fetchone()[0]
+            drifted_evidence = json.loads(original_evidence)
+            drifted_evidence["source"] = "foreign"
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_nomenclature_items "
+                "SET wb_sync_evidence_json=? WHERE nm_id=?",
+                (
+                    json.dumps(drifted_evidence, sort_keys=True),
+                    ORENBURG_WB_CONTENT_TARGET_NM_IDS[0],
+                ),
+            )
+            conn.commit()
+        source_drift = service.build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert source_drift["apply_allowed"] is False
+        assert any("WB Content" in item for item in source_drift["blockers"])
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_nomenclature_items "
+                "SET wb_sync_evidence_json=? WHERE nm_id=?",
+                (original_evidence, ORENBURG_WB_CONTENT_TARGET_NM_IDS[0]),
+            )
+            conn.commit()
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_nomenclature_items "
+                "SET wb_sync_status='matched_vendor_code' WHERE nm_id=?",
+                (ORENBURG_WB_CONTENT_TARGET_NM_IDS[0],),
+            )
+            conn.commit()
+        lifecycle_status_drift = service.build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert lifecycle_status_drift["apply_allowed"] is False
+        assert any("WB Content" in item for item in lifecycle_status_drift["blockers"])
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_nomenclature_items "
+                "SET wb_sync_status='created' WHERE nm_id=?",
+                (ORENBURG_WB_CONTENT_TARGET_NM_IDS[0],),
+            )
+            conn.commit()
+
+        wrong_date = service.build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            historical_business_date="2026-08-23",
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert wrong_date["apply_allowed"] is False
+        assert wrong_date["historical_zero_evidence"]["rows"] == []
+
+        drift_nm_id = non_target_nm_ids[0]
+        with sqlite3.connect(runtime.db_path) as conn:
+            prior_updated_at = conn.execute(
+                f"SELECT updated_at FROM {BALANCES_TABLE} WHERE facility_id=? "
+                "AND pool='FBS' AND nm_id=?",
+                (ORENBURG_FACILITY_ID, drift_nm_id),
+            ).fetchone()[0]
+            conn.execute(
+                f"UPDATE {BALANCES_TABLE} SET updated_at='2026-08-26T09:00:00Z' "
+                "WHERE facility_id=? AND pool='FBS' AND nm_id=?",
+                (ORENBURG_FACILITY_ID, drift_nm_id),
+            )
+            conn.commit()
+        try:
+            service.apply_zero_repair_plan(
+                plan,
+                confirm_fingerprint=str(plan["fingerprint"]),
+                approval_reference="WBC-0013-digest-drift-fixture",
+                actor="dense-fbs-smoke",
+            )
+        except DenseFbsError as exc:
+            assert exc.code == "repair_plan_cas_drift"
+        else:
+            raise AssertionError("non-target material digest drift must fail closed")
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                f"UPDATE {BALANCES_TABLE} SET updated_at=? WHERE facility_id=? "
+                "AND pool='FBS' AND nm_id=?",
+                (prior_updated_at, ORENBURG_FACILITY_ID, drift_nm_id),
+            )
+            conn.commit()
         documents_before_apply = _table_count(runtime.db_path, DOCUMENTS_TABLE)
         non_target_before_apply = _fingerprint_rows(
             runtime.db_path,
@@ -1300,12 +1603,14 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             actor="dense-fbs-smoke",
         )
         assert repeated_apply["state"] == "active" and repeated_apply["idempotent"]
-        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == documents_before_apply + 1
+        assert (
+            _table_count(runtime.db_path, DOCUMENTS_TABLE) == documents_before_apply + 1
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             inserted = conn.execute(
                 f"""SELECT COUNT(*) FROM {BALANCES_TABLE}
                      WHERE facility_id=? AND pool='FBS'
-                       AND nm_id IN ({','.join('?' for _ in ORENBURG_TARGET_NM_IDS)})
+                       AND nm_id IN ({",".join("?" for _ in ORENBURG_TARGET_NM_IDS)})
                        AND quantity=0 AND capital_rub='0' AND wac_rub IS NULL""",
                 (ORENBURG_FACILITY_ID, *ORENBURG_TARGET_NM_IDS),
             ).fetchone()[0]
@@ -1318,7 +1623,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         post_effect_plan = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
-            nm_ids=ORENBURG_TARGET_NM_IDS,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1394,13 +1700,14 @@ def _assert_orenburg_allocation_drift_blocks() -> None:
                 runtime_dir=runtime_dir,
             ).build_zero_repair_plan(
                 facility_id=ORENBURG_FACILITY_ID,
-                nm_ids=ORENBURG_TARGET_NM_IDS,
+                historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+                default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
                 seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
                 official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
-                expected_roster_count=ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
-                expected_existing_non_target_count=(
-                    ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS
+                expected_roster_nm_ids=sorted(
+                    (*ORENBURG_TARGET_NM_IDS, *non_target_nm_ids)
                 ),
+                expected_existing_nm_ids=non_target_nm_ids,
                 historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
                 canonical_target={"accepted": True},
                 storage_generation={"implicit": False, "query_only": True},
@@ -1414,7 +1721,9 @@ def _assert_orenburg_allocation_drift_blocks() -> None:
                 )
             else:
                 assert plan["mapping_evidence"]["allocation_count"] == 21
-                assert plan["mapping_evidence"]["allocation_nm_ids"] != non_target_nm_ids
+                assert (
+                    plan["mapping_evidence"]["allocation_nm_ids"] != non_target_nm_ids
+                )
                 assert any(
                     "allocation identities do not exactly match" in blocker
                     for blocker in plan["blockers"]
@@ -1532,7 +1841,8 @@ def _seed_orenburg_mapping_and_history(
                 business_date,
                 capture_id,
                 "accepted-refresh:" + business_date,
-                "sha256:" + hashlib.sha256((business_date + "final").encode()).hexdigest(),
+                "sha256:"
+                + hashlib.sha256((business_date + "final").encode()).hexdigest(),
                 f"{business_date}T18:05:00Z",
                 json.dumps({"status": "accepted", "source": "ready_plan"}),
             ),
@@ -1560,14 +1870,12 @@ def _seed_orenburg_mapping_and_history(
                     }
                 ),
             )
-            for nm_id in ORENBURG_TARGET_NM_IDS
+            for nm_id in ORENBURG_ORIGINAL_TARGET_NM_IDS
         ),
     )
 
 
-def _mapping_allocation_digest(
-    *, extension_id: str, nm_id: int, position: int
-) -> str:
+def _mapping_allocation_digest(*, extension_id: str, nm_id: int, position: int) -> str:
     material = {
         "extension_id": str(extension_id),
         "nm_id": int(nm_id),
@@ -1576,14 +1884,17 @@ def _mapping_allocation_digest(
         "frozen_wac_rub": "1",
         "source_balance_watermark": "mapping-extension-2026-08-24",
     }
-    return "sha256:" + hashlib.sha256(
-        json.dumps(
-            material,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def _production_shaped_benchmark() -> dict[str, Any]:
@@ -1633,10 +1944,13 @@ def _production_shaped_benchmark() -> dict[str, Any]:
                 ).fetchone()[0]
             )
             assert pair_count == (sku_count + 1) * facility_count
-            assert conn.execute(
-                f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE pool='FBS' "
-                "AND (quantity<>0 OR capital_rub<>'0' OR wac_rub IS NOT NULL)"
-            ).fetchone()[0] == 0
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE pool='FBS' "
+                    "AND (quantity<>0 OR capital_rub<>'0' OR wac_rub IS NOT NULL)"
+                ).fetchone()[0]
+                == 0
+            )
             assert _count(conn, LINES_TABLE) == 0
             assert _count(conn, DOCUMENTS_TABLE) == facility_count * 2
             assert _count(conn, DOCUMENT_LINES_TABLE) == pair_count
@@ -1732,17 +2046,39 @@ def _insert_facility(
 
 
 def _insert_nomenclature(conn: sqlite3.Connection, nm_id: int) -> None:
+    wb_content = int(nm_id) in set(ORENBURG_WB_CONTENT_TARGET_NM_IDS)
+    vendor_code = f"wb-vendor-{nm_id}" if wb_content else ""
+    evidence = (
+        {
+            "source": "wb_content_cards",
+            "endpoint": "/content/v2/get/cards/list",
+            "result": "created",
+            "match_type": "nm_id",
+            "nm_id": int(nm_id),
+            "vendor_code": vendor_code,
+            "barcode_count": 1,
+        }
+        if wb_content
+        else {}
+    )
     conn.execute(
         """INSERT INTO sheet_vitrina_v1_nomenclature_items(
                item_id,is_active,is_hidden,nm_id,nomenclature_name,product_type,
-               match_key,aliases_json,created_at,updated_at
-           ) VALUES(?,1,0,?,?,?,?,'[]',?,?)""",
+               match_key,aliases_json,vendor_code,wb_title,wb_updated_at,
+               wb_synced_at,wb_sync_status,wb_sync_evidence_json,created_at,updated_at
+           ) VALUES(?,1,0,?,?,?,?,'[]',?,?,?,?,?,?,?,?)""",
         (
             f"repair-nm-{nm_id}",
             nm_id,
             f"Repair SKU {nm_id}",
             "fixture",
             f"repair-{nm_id}",
+            vendor_code,
+            f"WB SKU {nm_id}" if wb_content else "",
+            NOW if wb_content else "",
+            NOW if wb_content else "",
+            "created" if wb_content else "",
+            json.dumps(evidence, sort_keys=True),
             NOW,
             NOW,
         ),
@@ -1819,9 +2155,12 @@ def _non_fbs_digest(db_path: Path) -> str:
             table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
             for table in selected
         }
-    return "sha256:" + hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
 
 
 def _count(conn: sqlite3.Connection, table: str) -> int:
@@ -1883,14 +2222,15 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _fingerprint_rows(
-    db_path: Path, sql: str, parameters: tuple[Any, ...]
-) -> str:
+def _fingerprint_rows(db_path: Path, sql: str, parameters: tuple[Any, ...]) -> str:
     with sqlite3.connect(db_path) as conn:
         rows = [list(row) for row in conn.execute(sql, parameters).fetchall()]
-    return "sha256:" + hashlib.sha256(
-        json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 if __name__ == "__main__":

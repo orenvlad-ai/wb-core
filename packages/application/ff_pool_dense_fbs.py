@@ -14,7 +14,6 @@ from typing import Any, Mapping, Sequence
 
 from packages.application.ff_pool_documents import (
     DOCUMENT_LINES_TABLE,
-    DOCUMENTS_TABLE,
     LINES_TABLE,
     REQUESTS_TABLE,
     FfPoolDocumentService,
@@ -24,7 +23,6 @@ from packages.application.ff_pool_fbs_applicability import (
     DENSE_INTENT_EVENTS_TABLE,
     DENSE_INTENTS_TABLE,
     FBS_CURRENT_TABLE,
-    FbsApplicabilityError,
     append_applicability_event,
     append_dense_intent_event,
     coverage_receipt,
@@ -48,11 +46,15 @@ from packages.application.ff_pool_foundation import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.business_data_write_barrier import barrier_status
 from packages.contracts.ff_pool_documents import DocumentIdentity
 
 
 CONTRACT_NAME = "ff_pool_dense_fbs_initialization_v1"
 SOURCE_SYSTEM = "wb_core_dense_fbs"
+ZERO_REPAIR_MANIFEST_SCHEMA = "ff_pool_dense_fbs_zero_repair_manifest_v2"
+ZERO_REPAIR_PLAN_SCHEMA = "ff_pool_dense_fbs_zero_repair_plan_v2"
+ZERO_REPAIR_OPERATION_NAMESPACE = "wbc0013:dense-fbs-zero-repair:v2"
 SOURCE_TYPE = CONTRACT_NAME
 NOMENCLATURE_TABLE = "sheet_vitrina_v1_nomenclature_items"
 
@@ -125,7 +127,9 @@ class DenseFbsService:
                     raise self._terminal_publication_error(
                         conn,
                         intent,
-                        DenseFbsError("facility_not_found", "Staged facility disappeared"),
+                        DenseFbsError(
+                            "facility_not_found", "Staged facility disappeared"
+                        ),
                     )
                 if bool(row["active"]):
                     if not intent_already_active:
@@ -192,13 +196,16 @@ class DenseFbsService:
                             "Facility activation CAS did not match exactly one staged row",
                         ),
                     )
-                change_id = "fffc_" + _fingerprint(
-                    {
-                        "request_id": request_id,
-                        "action": "activated",
-                        "facility_id": facility_id,
-                    }
-                ).removeprefix("sha256:")[:28]
+                change_id = (
+                    "fffc_"
+                    + _fingerprint(
+                        {
+                            "request_id": request_id,
+                            "action": "activated",
+                            "facility_id": facility_id,
+                        }
+                    ).removeprefix("sha256:")[:28]
+                )
                 conn.execute(
                     f"""INSERT OR IGNORE INTO {FACILITY_CHANGES_TABLE}(
                            change_id,request_id,request_identity,facility_id,action,actor,
@@ -256,7 +263,11 @@ class DenseFbsService:
             key=lambda item: (item["nm_id"], item["item_id"]),
         )
         if not normalized:
-            return {"contract_name": CONTRACT_NAME, "state": "active", "idempotent": True}
+            return {
+                "contract_name": CONTRACT_NAME,
+                "state": "active",
+                "idempotent": True,
+            }
         if len({item["nm_id"] for item in normalized}) != len(normalized):
             raise DenseFbsError(
                 "staged_nomenclature_ambiguous",
@@ -426,33 +437,73 @@ class DenseFbsService:
         self,
         *,
         facility_id: str,
-        nm_ids: Sequence[int],
+        historical_exact_zero_nm_ids: Sequence[int],
+        default_applicable_absent_history_nm_ids: Sequence[int],
         seller_warehouse_id: int,
         official_office_id: int,
-        expected_roster_nm_ids: Sequence[int] | None = None,
-        expected_existing_nm_ids: Sequence[int] | None = None,
-        expected_roster_count: int | None = None,
-        expected_existing_non_target_count: int | None = None,
+        expected_roster_nm_ids: Sequence[int],
+        expected_existing_nm_ids: Sequence[int],
         historical_business_date: str,
         canonical_target: Mapping[str, Any],
         storage_generation: Mapping[str, Any],
-        operation_id: str = "",
         qualified_at: str = "",
     ) -> dict[str, Any]:
         """Query-only deterministic plan using the same dense pool_inventory shape."""
 
-        selected_nm_ids = sorted({int(value) for value in nm_ids})
-        if not selected_nm_ids or any(value <= 0 for value in selected_nm_ids):
-            raise DenseFbsError("repair_scope_invalid", "Repair nmId scope must be non-empty and positive")
+        historical_nm_ids = _strict_positive_partition(
+            historical_exact_zero_nm_ids,
+            name="historical_exact_zero",
+        )
+        absent_history_nm_ids = _strict_positive_partition(
+            default_applicable_absent_history_nm_ids,
+            name="default_applicable_absent_history",
+        )
+        overlap = sorted(set(historical_nm_ids) & set(absent_history_nm_ids))
+        if overlap:
+            raise DenseFbsError(
+                "repair_manifest_partition_overlap",
+                "Dense FBS repair partitions must be disjoint",
+                details={"overlap_nm_ids": overlap},
+            )
+        selected_nm_ids = sorted((*historical_nm_ids, *absent_history_nm_ids))
+        if not selected_nm_ids:
+            raise DenseFbsError(
+                "repair_scope_invalid",
+                "Repair nmId scope must be non-empty and positive",
+            )
+        expected_roster = _strict_positive_partition(
+            expected_roster_nm_ids,
+            name="expected_roster_nm_ids",
+        )
+        expected_existing = _strict_positive_partition(
+            expected_existing_nm_ids,
+            name="expected_existing_nm_ids",
+        )
+        expected_partition = sorted((*selected_nm_ids, *expected_existing))
+        if expected_partition != expected_roster:
+            raise DenseFbsError(
+                "repair_manifest_roster_partition_invalid",
+                "Expected roster must equal the exact target and existing-row union",
+                details={
+                    "expected_roster_nm_ids": expected_roster,
+                    "partition_union_nm_ids": expected_partition,
+                },
+            )
         with self._read() as conn:
             ensure_tables = _tables(conn)
-            if not {
-                FACILITIES_TABLE,
-                BALANCES_TABLE,
-                FEATURE_EPOCHS_TABLE,
-                NOMENCLATURE_TABLE,
-            } <= ensure_tables:
-                raise DenseFbsError("repair_schema_unavailable", "Dense FBS repair schema is unavailable")
+            if (
+                not {
+                    FACILITIES_TABLE,
+                    BALANCES_TABLE,
+                    FEATURE_EPOCHS_TABLE,
+                    NOMENCLATURE_TABLE,
+                }
+                <= ensure_tables
+            ):
+                raise DenseFbsError(
+                    "repair_schema_unavailable",
+                    "Dense FBS repair schema is unavailable",
+                )
             conn.execute("PRAGMA query_only=ON")
             facility = conn.execute(
                 f"SELECT facility_id,code,name,active,display_timezone,updated_at "
@@ -464,29 +515,26 @@ class DenseFbsService:
             exact_target = dict(canonical_target)
             exact_storage = dict(storage_generation)
             if not bool(exact_target.get("accepted")):
-                blockers.append("explicit canonical hosted-runtime target was not accepted")
+                blockers.append(
+                    "explicit canonical hosted-runtime target was not accepted"
+                )
             if bool(exact_storage.get("implicit")) or not bool(
                 exact_storage.get("query_only")
             ):
-                blockers.append("operational StoreRegistry generation is implicit or not query-only")
+                blockers.append(
+                    "operational StoreRegistry generation is implicit or not query-only"
+                )
             if facility is None or not bool(facility["active"]):
                 blockers.append("exact target facility is missing or inactive")
             roster = stock_managed_nomenclature(conn)
             roster_nm_ids = [int(item["nm_id"]) for item in roster]
-            expected_roster = sorted(
-                {int(value) for value in (expected_roster_nm_ids or roster_nm_ids)}
-            )
-            expected_existing = sorted(
-                {int(value) for value in (expected_existing_nm_ids or [])}
-            )
-            if expected_roster_nm_ids is not None and roster_nm_ids != expected_roster:
-                blockers.append("stock-managed roster identities drifted from the manifest")
-            if expected_roster_count is not None and len(roster_nm_ids) != int(expected_roster_count):
+            if roster_nm_ids != expected_roster:
                 blockers.append(
-                    "stock-managed roster count drifted: "
-                    f"expected {int(expected_roster_count)}, found {len(roster_nm_ids)}"
+                    "stock-managed roster identities drifted from the manifest"
                 )
-            missing_target_identities = sorted(set(selected_nm_ids) - set(roster_nm_ids))
+            missing_target_identities = sorted(
+                set(selected_nm_ids) - set(roster_nm_ids)
+            )
             if missing_target_identities:
                 blockers.append(
                     "target SKU lacks one exact active nomenclature identity: "
@@ -535,8 +583,7 @@ class DenseFbsService:
             conflicts = [
                 int(row["nm_id"])
                 for row in target_rows
-                if bool(row["row_present"])
-                and not _canonical_zero_row(row)
+                if bool(row["row_present"]) and not _canonical_zero_row(row)
             ]
             if conflicts:
                 blockers.append(
@@ -546,15 +593,28 @@ class DenseFbsService:
             placeholders = ",".join("?" for _ in selected_nm_ids)
             target_facility_non_target_count, target_facility_non_target_digest = (
                 _streaming_query_digest(
-                conn,
-                f"""SELECT facility_id,pool,nm_id,projection_epoch,quantity,
+                    conn,
+                    f"""SELECT facility_id,pool,nm_id,projection_epoch,quantity,
                            capital_rub,wac_rub,source_watermark,updated_at
                       FROM {BALANCES_TABLE}
                      WHERE facility_id=? AND pool='FBS'
                        AND nm_id NOT IN ({placeholders})
                      ORDER BY nm_id""",
-                (str(facility_id), *selected_nm_ids),
+                    (str(facility_id), *selected_nm_ids),
                 )
+            )
+            (
+                target_facility_non_target_material_count,
+                target_facility_non_target_material_digest,
+            ) = _streaming_query_digest(
+                conn,
+                f"""SELECT facility_id,pool,nm_id,projection_epoch,quantity,
+                           capital_rub,wac_rub,source_watermark
+                      FROM {BALANCES_TABLE}
+                     WHERE facility_id=? AND pool='FBS'
+                       AND nm_id NOT IN ({placeholders})
+                     ORDER BY nm_id""",
+                (str(facility_id), *selected_nm_ids),
             )
             non_target_nm_ids = [
                 int(row[0])
@@ -566,19 +626,9 @@ class DenseFbsService:
                     (str(facility_id), *selected_nm_ids),
                 ).fetchall()
             ]
-            if expected_existing_nm_ids is not None and non_target_nm_ids != expected_existing:
+            if non_target_nm_ids != expected_existing:
                 blockers.append(
                     "target facility existing identities drifted from the manifest"
-                )
-            if (
-                expected_existing_non_target_count is not None
-                and target_facility_non_target_count
-                != int(expected_existing_non_target_count)
-            ):
-                blockers.append(
-                    "target facility non-target FBS row count drifted: "
-                    f"expected {int(expected_existing_non_target_count)}, "
-                    f"found {target_facility_non_target_count}"
                 )
             exact_roster_partition = sorted(selected_nm_ids + non_target_nm_ids)
             if roster_nm_ids != exact_roster_partition:
@@ -594,18 +644,20 @@ class DenseFbsService:
                 expected_allocation_nm_ids=non_target_nm_ids,
             )
             blockers.extend(mapping_evidence["blockers"])
-            expected_existing_count = (
-                len(expected_existing)
-                if expected_existing_nm_ids is not None
-                else int(expected_existing_non_target_count or 0)
-            )
-            if int(mapping_evidence.get("allocation_count") or 0) != expected_existing_count:
+            expected_existing_count = len(expected_existing)
+            if (
+                int(mapping_evidence.get("allocation_count") or 0)
+                != expected_existing_count
+            ):
                 blockers.append(
                     "mapping-extension allocation count drifted: "
                     f"expected {expected_existing_count}, found "
                     f"{int(mapping_evidence.get('allocation_count') or 0)}"
                 )
-            if list(mapping_evidence.get("allocation_nm_ids") or []) != non_target_nm_ids:
+            if (
+                list(mapping_evidence.get("allocation_nm_ids") or [])
+                != non_target_nm_ids
+            ):
                 blockers.append(
                     "mapping-extension allocation identities do not exactly match "
                     "the current target-facility FBS non-target identities"
@@ -625,10 +677,18 @@ class DenseFbsService:
             history_evidence = _historical_zero_evidence(
                 conn,
                 facility_id=str(facility_id),
-                nm_ids=selected_nm_ids,
+                nm_ids=historical_nm_ids,
                 business_date=str(historical_business_date),
             )
             blockers.extend(history_evidence["blockers"])
+            absent_history_evidence = _default_absent_history_evidence(
+                conn,
+                facility_id=str(facility_id),
+                seller_warehouse_id=int(seller_warehouse_id),
+                nm_ids=absent_history_nm_ids,
+                as_of_date=current_business_date(),
+            )
+            blockers.extend(absent_history_evidence["blockers"])
 
             scoped_non_targets = _scoped_repair_non_targets(
                 conn,
@@ -638,19 +698,29 @@ class DenseFbsService:
                 historical_business_date=str(historical_business_date),
                 seller_warehouse_id=int(seller_warehouse_id),
             )
-            repair_operation_id = str(operation_id).strip() or (
-                "dense-fbs-repair-"
-                + _fingerprint(
-                    {
-                        "facility_id": str(facility_id),
-                        "nm_ids": selected_nm_ids,
-                        "historical_business_date": str(historical_business_date),
-                    }
-                )[7:31]
+            operation_material = {
+                "schema": ZERO_REPAIR_MANIFEST_SCHEMA,
+                "namespace": ZERO_REPAIR_OPERATION_NAMESPACE,
+                "facility_id": str(facility_id),
+                "seller_warehouse_id": int(seller_warehouse_id),
+                "official_office_id": int(official_office_id),
+                "historical_business_date": str(historical_business_date),
+                "partitions": {
+                    "historical_exact_zero": historical_nm_ids,
+                    "default_applicable_absent_history": absent_history_nm_ids,
+                },
+                "expected_roster_nm_ids": expected_roster,
+                "expected_existing_nm_ids": expected_existing,
+            }
+            repair_operation_id = (
+                ZERO_REPAIR_OPERATION_NAMESPACE
+                + ":"
+                + _fingerprint(operation_material)[7:39]
             )
-            repair_qualified_at = str(qualified_at).strip() or (
-                f"{str(historical_business_date)}T00:00:00Z"
-            )
+            # Qualification/publication time is current operational evidence;
+            # the immutable historical date is proof for only the 12-row
+            # historical partition and must never be reused as a document date.
+            repair_qualified_at = str(qualified_at).strip() or self._now()
             dense_manifest = _activation_plan(
                 conn,
                 subject_kind="repair",
@@ -670,8 +740,17 @@ class DenseFbsService:
                     "target_nm_ids": selected_nm_ids,
                 },
             )
+            dense_manifest["zero_repair_receipt_boundary"] = {
+                "facility_id": str(facility_id),
+                "target_nm_ids": selected_nm_ids,
+                "expected_non_target_nm_ids": non_target_nm_ids,
+                "expected_non_target_row_count": target_facility_non_target_count,
+                "expected_non_target_digest": target_facility_non_target_digest,
+            }
             if len(dense_manifest.get("documents") or []) != 1:
-                blockers.append("repair must resolve to one exact pool_inventory document")
+                blockers.append(
+                    "repair must resolve to one exact pool_inventory document"
+                )
             plan_boundary = {
                 "projection_epoch": int(epoch),
                 "sqlite_schema_version": int(
@@ -680,8 +759,9 @@ class DenseFbsService:
                 "mapping_fingerprint": str(mapping_evidence["fingerprint"]),
                 "roster_fingerprint": _fingerprint(roster),
                 "target_effects_fingerprint": str(target_effects["fingerprint"]),
-                "historical_evidence_fingerprint": str(
-                    history_evidence["fingerprint"]
+                "historical_evidence_fingerprint": str(history_evidence["fingerprint"]),
+                "absent_history_lifecycle_fingerprint": str(
+                    absent_history_evidence["fingerprint"]
                 ),
                 "scoped_non_targets_fingerprint": str(
                     scoped_non_targets["fingerprint"]
@@ -691,7 +771,7 @@ class DenseFbsService:
             }
             plan_boundary["fingerprint"] = _fingerprint(plan_boundary)
             plan = {
-                "contract_name": "ff_pool_dense_fbs_zero_repair_plan_v1",
+                "contract_name": ZERO_REPAIR_PLAN_SCHEMA,
                 "mode": "dry_run",
                 "facility": dict(facility) if facility is not None else {},
                 "pool": "FBS",
@@ -709,32 +789,44 @@ class DenseFbsService:
                     "exact_partition_proven": roster_nm_ids == exact_roster_partition,
                 },
                 "nm_ids": selected_nm_ids,
+                "partitions": {
+                    "historical_exact_zero": historical_nm_ids,
+                    "default_applicable_absent_history": absent_history_nm_ids,
+                    "historical_exact_zero_digest": _fingerprint(historical_nm_ids),
+                    "default_applicable_absent_history_digest": _fingerprint(
+                        absent_history_nm_ids
+                    ),
+                    "union_digest": _fingerprint(selected_nm_ids),
+                },
                 "targets": [
-                    {"nm_id": nm_id, "target_fbs": 0}
-                    for nm_id in selected_nm_ids
+                    {"nm_id": nm_id, "target_fbs": 0} for nm_id in selected_nm_ids
                 ],
                 "dense_fbs_initialization": dense_manifest,
                 "input_manifest": {
+                    "schema": ZERO_REPAIR_MANIFEST_SCHEMA,
+                    "namespace": ZERO_REPAIR_OPERATION_NAMESPACE,
                     "operation_id": repair_operation_id,
                     "qualified_at": repair_qualified_at,
                     "facility_id": str(facility_id),
-                    "nm_ids": selected_nm_ids,
                     "seller_warehouse_id": int(seller_warehouse_id),
                     "official_office_id": int(official_office_id),
                     "expected_roster_nm_ids": expected_roster,
-                    "expected_existing_nm_ids": (
-                        expected_existing
-                        if expected_existing_nm_ids is not None
-                        else non_target_nm_ids
-                    ),
+                    "expected_existing_nm_ids": expected_existing,
                     "historical_business_date": str(historical_business_date),
+                    "partitions": {
+                        "historical_exact_zero": historical_nm_ids,
+                        "default_applicable_absent_history": absent_history_nm_ids,
+                    },
                 },
                 "target_rows": target_rows,
                 "target_applicability": target_applicability,
                 "target_effects": target_effects,
                 "historical_zero_evidence": history_evidence,
+                "default_absent_history_evidence": absent_history_evidence,
                 "expected_effects": {
-                    "balance_insert_count": sum(not row["row_present"] for row in target_rows),
+                    "balance_insert_count": sum(
+                        not row["row_present"] for row in target_rows
+                    ),
                     "balance_update_count": 0,
                     "quantity_delta": 0,
                     "capital_delta_rub": "0",
@@ -746,6 +838,8 @@ class DenseFbsService:
                     "target_facility_existing_fbs_row_count": target_facility_non_target_count,
                     "target_facility_existing_fbs_nm_ids": non_target_nm_ids,
                     "target_facility_existing_fbs_digest": target_facility_non_target_digest,
+                    "target_facility_existing_fbs_material_count": target_facility_non_target_material_count,
+                    "target_facility_existing_fbs_material_digest": target_facility_non_target_material_digest,
                     **scoped_non_targets,
                 },
                 "storage": {
@@ -761,6 +855,7 @@ class DenseFbsService:
                 "blockers": blockers,
                 "apply_entrypoint_exposed": True,
             }
+            plan["material_qualification_digest"] = _zero_repair_material_digest(plan)
             plan["fingerprint"] = _fingerprint(plan)
             return plan
 
@@ -781,7 +876,11 @@ class DenseFbsService:
             or fingerprint != str(confirm_fingerprint)
             or fingerprint
             != _fingerprint(
-                {key: value for key, value in normalized.items() if key != "fingerprint"}
+                {
+                    key: value
+                    for key, value in normalized.items()
+                    if key != "fingerprint"
+                }
             )
             or not bool(normalized.get("apply_allowed"))
         ):
@@ -811,17 +910,13 @@ class DenseFbsService:
                         "approval_reference": str(approval_reference),
                     }
                 )
-                intent = _intent_from_row(
-                    existing, expected_identity=expected_identity
-                )
+                intent = _intent_from_row(existing, expected_identity=expected_identity)
                 if str(intent["actor"]) != str(actor):
                     raise DenseFbsError(
                         "repair_owner_gate_conflict",
                         "Zero repair resume actor differs from its durable intent",
                     )
-                existing_state = dense_intent_state(
-                    conn, str(intent["intent_id"])
-                )
+                existing_state = dense_intent_state(conn, str(intent["intent_id"]))
                 if existing_state.get("state") == "active":
                     materialized = conn.execute(
                         f"SELECT receipt_json FROM {DENSE_INTENT_EVENTS_TABLE} "
@@ -854,8 +949,22 @@ class DenseFbsService:
                 "repair_document_scope_invalid",
                 "Zero repair must contain one exact all-zero pool_inventory document",
             )
+        before_barrier = barrier_status(self.runtime_dir)
+        if before_barrier.get("active") is not False:
+            raise DenseFbsError(
+                "repair_write_barrier_active",
+                "Dense FBS repair requires one inactive read-only barrier readback",
+            )
         self._revalidate_zero_repair_plan(normalized)
         with warehouse_functional_write_lock(self.runtime_dir):
+            under_lock_barrier = barrier_status(self.runtime_dir)
+            if under_lock_barrier.get("active") is not False or under_lock_barrier.get(
+                "status"
+            ) != before_barrier.get("status"):
+                raise DenseFbsError(
+                    "repair_write_barrier_drift",
+                    "Dense FBS write barrier changed at the shared-lock boundary",
+                )
             self._revalidate_zero_repair_plan(normalized)
             with self._write() as conn:
                 ensure_ff_pool_fbs_applicability_schema(conn)
@@ -920,11 +1029,79 @@ class DenseFbsService:
             ).fetchone()
             if row is None:
                 return {"contract_name": CONTRACT_NAME, "state": "not_found"}
-            intent = _intent_from_row(row, expected_identity=str(row["request_identity"]))
+            intent = _intent_from_row(
+                row, expected_identity=str(row["request_identity"])
+            )
+            dense_plan = dict(intent.get("plan") or {})
+            documents = list(dense_plan.get("documents") or [])
+            targets = sorted(
+                int(item["nm_id"])
+                for document in documents
+                for item in document.get("targets") or []
+            )
+            receipt_boundary = dict(
+                dense_plan.get("zero_repair_receipt_boundary") or {}
+            )
+            facility_id = str(receipt_boundary.get("facility_id") or "")
+            placeholders = ",".join("?" for _ in targets) or "NULL"
+            zero_row_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? "
+                    f"AND pool='FBS' AND nm_id IN ({placeholders}) "
+                    "AND quantity=0 AND CAST(capital_rub AS NUMERIC)=0 "
+                    "AND wac_rub IS NULL",
+                    (facility_id, *targets),
+                ).fetchone()[0]
+            )
+            document_count = int(
+                conn.execute(
+                    f"SELECT COUNT(DISTINCT document_id) FROM {DOCUMENT_LINES_TABLE} "
+                    f"WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders}) "
+                    "AND line_role='absolute_target'",
+                    (facility_id, *targets),
+                ).fetchone()[0]
+            )
+            target_line_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {DOCUMENT_LINES_TABLE} "
+                    f"WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders}) "
+                    "AND line_role='absolute_target'",
+                    (facility_id, *targets),
+                ).fetchone()[0]
+            )
+            non_target_count, non_target_digest = _streaming_query_digest(
+                conn,
+                f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+                f"wac_rub,source_watermark,updated_at FROM {BALANCES_TABLE} "
+                f"WHERE facility_id=? AND pool='FBS' AND nm_id NOT IN ({placeholders}) "
+                "ORDER BY nm_id",
+                (facility_id, *targets),
+            )
+            non_target_preserved = bool(receipt_boundary) and (
+                non_target_count
+                == int(receipt_boundary.get("expected_non_target_row_count") or -1)
+                and non_target_digest
+                == str(receipt_boundary.get("expected_non_target_digest") or "")
+            )
             return {
                 "contract_name": CONTRACT_NAME,
                 "operation_id": str(operation_id),
                 "intent_id": str(intent["intent_id"]),
+                "query_only": True,
+                "expected_target_count": len(targets),
+                "zero_row_count": zero_row_count,
+                "pool_inventory_document_count": document_count,
+                "absolute_target_line_count": target_line_count,
+                "non_target_row_count": non_target_count,
+                "non_target_digest": non_target_digest,
+                "non_target_preserved": non_target_preserved,
+                "exact_reconciled": (
+                    bool(targets)
+                    and zero_row_count == len(targets)
+                    and document_count == 1
+                    and target_line_count == len(targets)
+                    and non_target_preserved
+                ),
                 **dense_intent_state(conn, str(intent["intent_id"])),
             }
 
@@ -932,7 +1109,12 @@ class DenseFbsService:
         manifest = dict(plan.get("input_manifest") or {})
         fresh = self.build_zero_repair_plan(
             facility_id=str(manifest["facility_id"]),
-            nm_ids=list(manifest["nm_ids"]),
+            historical_exact_zero_nm_ids=list(
+                manifest["partitions"]["historical_exact_zero"]
+            ),
+            default_applicable_absent_history_nm_ids=list(
+                manifest["partitions"]["default_applicable_absent_history"]
+            ),
             seller_warehouse_id=int(manifest["seller_warehouse_id"]),
             official_office_id=int(manifest["official_office_id"]),
             expected_roster_nm_ids=list(manifest["expected_roster_nm_ids"]),
@@ -940,7 +1122,6 @@ class DenseFbsService:
             historical_business_date=str(manifest["historical_business_date"]),
             canonical_target=dict(plan["canonical_target"]),
             storage_generation=dict(plan["storage_generation"]),
-            operation_id=str(manifest["operation_id"]),
             qualified_at=str(manifest["qualified_at"]),
         )
         if str(fresh["fingerprint"]) != str(plan["fingerprint"]):
@@ -976,7 +1157,9 @@ class DenseFbsService:
             if facility is None:
                 raise DenseFbsError("facility_not_found", "Facility was not found")
             if bool(facility["active"]):
-                raise DenseFbsError("facility_already_active", "Facility is already active")
+                raise DenseFbsError(
+                    "facility_already_active", "Facility is already active"
+                )
             if str(facility["updated_at"]) != expected_updated_at:
                 raise DenseFbsError(
                     "facility_activation_cas_drift",
@@ -1042,9 +1225,13 @@ class DenseFbsService:
                     "WHERE item_id=?",
                     (str(item["item_id"]),),
                 ).fetchone()
-                if row is None or bool(row[0]) or bool(row[1]) or (
-                    int(row[2] or 0), str(row[3])
-                ) != (int(item["nm_id"]), str(item["updated_at"])):
+                if (
+                    row is None
+                    or bool(row[0])
+                    or bool(row[1])
+                    or (int(row[2] or 0), str(row[3]))
+                    != (int(item["nm_id"]), str(item["updated_at"]))
+                ):
                     raise DenseFbsError(
                         "staged_nomenclature_cas_drift",
                         "Nomenclature is not in the exact staged inactive state",
@@ -1084,7 +1271,9 @@ class DenseFbsService:
                 epoch=epoch,
                 effective_from=business_date,
                 cutover_at=now,
-                expected_subject={"staged_items": [dict(item) for item in staged_items]},
+                expected_subject={
+                    "staged_items": [dict(item) for item in staged_items]
+                },
             )
             intent = persist_dense_intent(
                 conn,
@@ -1149,7 +1338,9 @@ class DenseFbsService:
                     ],
                     as_of_date=str(intent["effective_from"]),
                     projection_epoch=int(plan["projection_epoch"]),
-                    assumed_active_facility_ids=list(plan.get("assumed_active_facility_ids") or []),
+                    assumed_active_facility_ids=list(
+                        plan.get("assumed_active_facility_ids") or []
+                    ),
                     assumed_active_nm_ids=list(plan.get("assumed_active_nm_ids") or []),
                 )
             if not receipt["complete"]:
@@ -1354,7 +1545,9 @@ class DenseFbsService:
             ],
             as_of_date=str(intent["effective_from"]),
             projection_epoch=int(plan["projection_epoch"]),
-            assumed_active_facility_ids=list(plan.get("assumed_active_facility_ids") or []),
+            assumed_active_facility_ids=list(
+                plan.get("assumed_active_facility_ids") or []
+            ),
             assumed_active_nm_ids=list(plan.get("assumed_active_nm_ids") or []),
         )
         if not receipt["complete"]:
@@ -1444,7 +1637,9 @@ class DenseFbsService:
     def _now(self) -> str:
         value = str(self.timestamp_factory())
         if not value.endswith("Z"):
-            raise DenseFbsError("invalid_timestamp", "Dense FBS timestamp must be UTC Z")
+            raise DenseFbsError(
+                "invalid_timestamp", "Dense FBS timestamp must be UTC Z"
+            )
         return value
 
 
@@ -1580,7 +1775,9 @@ def _activation_plan(
         "assumed_active_facility_ids": sorted(
             {str(value) for value in assumed_active_facility_ids}
         ),
-        "assumed_active_nm_ids": sorted({int(value) for value in assumed_active_nm_ids}),
+        "assumed_active_nm_ids": sorted(
+            {int(value) for value in assumed_active_nm_ids}
+        ),
         "materialize_nm_ids": sorted(selected_materialize_nm_ids),
         "existing_coverage_proof": existing_coverage_proof,
         "expected_subject": dict(expected_subject),
@@ -1608,9 +1805,7 @@ def _document_transport_readback(
         return {
             "request_id": request_id,
             "document_id": str(document.get("document_id") or ""),
-            "posted_manifest_sha256": str(
-                status.get("posted_manifest_sha256") or ""
-            ),
+            "posted_manifest_sha256": str(status.get("posted_manifest_sha256") or ""),
             "state": "complete",
             "transport_reconciled": True,
         }
@@ -1684,9 +1879,7 @@ def _compact_existing_coverage(
                 "nm_id": nm_id,
                 "coverage_state": coverage_state,
                 "applicability_event": str(
-                    applicability.get("event")
-                    or applicability.get("event_id")
-                    or ""
+                    applicability.get("event") or applicability.get("event_id") or ""
                 ),
                 "applicability_reason": str(applicability.get("reason") or ""),
                 "applicability_effective_from": str(
@@ -1724,9 +1917,7 @@ def _verify_compact_existing_coverage(
     planned = dict(plan.get("existing_coverage_proof") or {})
     if not planned or int(planned.get("pair_count") or 0) == 0:
         return planned
-    materialize_nm_ids = {
-        int(value) for value in plan.get("materialize_nm_ids") or []
-    }
+    materialize_nm_ids = {int(value) for value in plan.get("materialize_nm_ids") or []}
     roster = dict(plan.get("roster") or {})
     existing_nm_ids = [
         int(item["nm_id"])
@@ -1869,7 +2060,12 @@ def _exact_repair_mapping_evidence(
     blockers: list[str] = []
     if {mappings, extensions, allocations} - tables:
         blockers.append("exact mapping-extension evidence schema is unavailable")
-        result = {"mapping": {}, "extension": {}, "allocation_count": 0, "blockers": blockers}
+        result = {
+            "mapping": {},
+            "extension": {},
+            "allocation_count": 0,
+            "blockers": blockers,
+        }
         result["fingerprint"] = _fingerprint(result)
         return result
     required_mapping_columns = {
@@ -1886,7 +2082,12 @@ def _exact_repair_mapping_evidence(
     }
     if required_mapping_columns - mapping_columns:
         blockers.append("official warehouse mapping evidence columns are unavailable")
-        result = {"mapping": {}, "extension": {}, "allocation_count": 0, "blockers": blockers}
+        result = {
+            "mapping": {},
+            "extension": {},
+            "allocation_count": 0,
+            "blockers": blockers,
+        }
         result["fingerprint"] = _fingerprint(result)
         return result
     mapping_rows = conn.execute(
@@ -1934,7 +2135,9 @@ def _exact_repair_mapping_evidence(
         else []
     )
     if len(extension_rows) != 1:
-        blockers.append("exact accepted facility mapping extension is missing or ambiguous")
+        blockers.append(
+            "exact accepted facility mapping extension is missing or ambiguous"
+        )
     extension = dict(extension_rows[0]) if len(extension_rows) == 1 else {}
     if extension and (
         str(extension.get("mapping_digest") or "")
@@ -1954,7 +2157,9 @@ def _exact_repair_mapping_evidence(
             )
         )
     ):
-        blockers.append("facility mapping-extension provenance is incomplete or drifted")
+        blockers.append(
+            "facility mapping-extension provenance is incomplete or drifted"
+        )
     allocation_count, allocation_digest = (
         _streaming_query_digest(
             conn,
@@ -2129,7 +2334,8 @@ def _repair_allocation_balance_consistency(
     evidence = {
         "expected_nm_ids": selected,
         "current_nm_ids": current_nm_ids,
-        "positive_receipt_allocation_count": len(rows) - len(set(invalid_allocation_nm_ids)),
+        "positive_receipt_allocation_count": len(rows)
+        - len(set(invalid_allocation_nm_ids)),
         "same_source_watermark_nm_ids": same_source_nm_ids,
         "same_source_value_match_count": len(same_source_nm_ids)
         - len(set(same_source_value_drift_nm_ids)),
@@ -2162,7 +2368,9 @@ def _target_effect_evidence(
                    AND line.nm_id IN ({placeholders})
                  ORDER BY line.operation_id,line.line_no""",
             (str(facility_id), *selected),
-        ) if LINES_TABLE in tables else None,
+        )
+        if LINES_TABLE in tables
+        else None,
         "document_lines": (
             f"""SELECT document_id,line_no,facility_id,pool,nm_id,line_role,
                        quantity,capital_rub,expense_rub,metadata_json
@@ -2170,7 +2378,9 @@ def _target_effect_evidence(
                  WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
                  ORDER BY document_id,line_no""",
             (str(facility_id), *selected),
-        ) if DOCUMENT_LINES_TABLE in tables else None,
+        )
+        if DOCUMENT_LINES_TABLE in tables
+        else None,
         "lifecycle_events": (
             f"""SELECT event_sequence,event_id,order_id,event_type,facility_id,nm_id,
                        physical_quantity_delta,evidence_digest,occurred_at
@@ -2178,14 +2388,18 @@ def _target_effect_evidence(
                  WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
                  ORDER BY event_sequence""",
             (str(facility_id), *selected),
-        ) if "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events" in tables else None,
+        )
+        if "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events" in tables
+        else None,
         "lifecycle_current": (
             f"""SELECT cutover_id,order_id,state,facility_id,nm_id,quantity,updated_at
                   FROM {FBS_CURRENT_TABLE}
                  WHERE facility_id=? AND pool='FBS' AND nm_id IN ({placeholders})
                  ORDER BY cutover_id,order_id""",
             (str(facility_id), *selected),
-        ) if FBS_CURRENT_TABLE in tables else None,
+        )
+        if FBS_CURRENT_TABLE in tables
+        else None,
         "legacy_reservations": (
             f"""SELECT line.nm_id,SUM(line.quantity_delta) net_quantity
                   FROM sheet_vitrina_v1_ff_stock_reservation_lines line
@@ -2195,10 +2409,13 @@ def _target_effect_evidence(
                  GROUP BY line.nm_id HAVING SUM(line.quantity_delta)<>0
                  ORDER BY line.nm_id""",
             tuple(selected),
-        ) if {
+        )
+        if {
             "sheet_vitrina_v1_ff_stock_reservation_lines",
             "sheet_vitrina_v1_ff_stock_reservation_operations",
-        } <= tables else None,
+        }
+        <= tables
+        else None,
         "official_orders": (
             f"""SELECT observation_sequence,order_id,source_revision,warehouse_id,
                        office_id,nm_id,observed_at
@@ -2206,7 +2423,9 @@ def _target_effect_evidence(
                  WHERE warehouse_id=? AND nm_id IN ({placeholders})
                  ORDER BY observation_sequence""",
             (int(seller_warehouse_id), *selected),
-        ) if "sheet_vitrina_v1_wb_supplies_fbs_order_observations" in tables else None,
+        )
+        if "sheet_vitrina_v1_wb_supplies_fbs_order_observations" in tables
+        else None,
         "identity_mapped_order_evidence": (
             f"""SELECT evidence.evidence_sequence,evidence.order_id,
                        evidence.order_revision,evidence.warehouse_id,
@@ -2219,10 +2438,13 @@ def _target_effect_evidence(
                    AND mapping.target_nm_id IN ({placeholders})
                  ORDER BY evidence.evidence_sequence""",
             (int(seller_warehouse_id), *selected),
-        ) if {
+        )
+        if {
             "sheet_vitrina_v1_wb_supplies_fbs_identity_evidence",
             "sheet_vitrina_v1_wb_supplies_fbs_identity_mappings",
-        } <= tables else None,
+        }
+        <= tables
+        else None,
     }
     result: dict[str, Any] = {}
     total = 0
@@ -2238,6 +2460,247 @@ def _target_effect_evidence(
     result["effect_row_count"] = total
     result["fingerprint"] = _fingerprint(result)
     return result
+
+
+def _strict_positive_partition(values: Sequence[int], *, name: str) -> list[int]:
+    """Validate an exact manifest partition without silently de-duplicating it."""
+
+    if not isinstance(values, (list, tuple)):
+        raise DenseFbsError(
+            "repair_manifest_partition_invalid",
+            f"{name} must be one JSON array of positive integer nmIds",
+        )
+    normalized: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int) or int(value) <= 0:
+            raise DenseFbsError(
+                "repair_manifest_partition_invalid",
+                f"{name} must contain only positive integer nmIds",
+            )
+        normalized.append(int(value))
+    duplicates = sorted(
+        value for value in set(normalized) if normalized.count(value) > 1
+    )
+    if duplicates:
+        raise DenseFbsError(
+            "repair_manifest_partition_duplicate",
+            f"{name} contains duplicate nmIds",
+            details={"duplicate_nm_ids": duplicates},
+        )
+    return sorted(normalized)
+
+
+def _default_absent_history_evidence(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    seller_warehouse_id: int,
+    nm_ids: Sequence[int],
+    as_of_date: str,
+) -> dict[str, Any]:
+    """Prove the default-applicable partition is WB-Content sourced and history-free."""
+
+    selected = sorted(int(value) for value in nm_ids)
+    placeholders = ",".join("?" for _ in selected)
+    blockers: list[str] = []
+    tables = _tables(conn)
+    rows = []
+    if NOMENCLATURE_TABLE in tables and selected:
+        rows = conn.execute(
+            f"""SELECT item_id,is_active,is_hidden,nm_id,vendor_code,wb_title,
+                       wb_updated_at,wb_synced_at,wb_sync_status,
+                       wb_sync_evidence_json,updated_at
+                  FROM {NOMENCLATURE_TABLE}
+                 WHERE nm_id IN ({placeholders})
+                 ORDER BY nm_id,item_id""",
+            tuple(selected),
+        ).fetchall()
+    lifecycle_rows: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            evidence = json.loads(str(row[9] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence = {}
+        lifecycle_rows.append(
+            {
+                "item_id": str(row[0]),
+                "is_active": bool(row[1]),
+                "is_hidden": bool(row[2]),
+                "nm_id": int(row[3]),
+                "vendor_code": str(row[4] or ""),
+                "wb_title": str(row[5] or ""),
+                "wb_updated_at": str(row[6] or ""),
+                "wb_synced_at": str(row[7] or ""),
+                "wb_sync_status": str(row[8] or ""),
+                "wb_sync_evidence": evidence,
+                "updated_at": str(row[10] or ""),
+            }
+        )
+    if [row["nm_id"] for row in lifecycle_rows] != selected:
+        blockers.append(
+            "default-applicable absent-history partition lacks one exact active nomenclature identity"
+        )
+    invalid_lifecycle = [
+        row["nm_id"]
+        for row in lifecycle_rows
+        if not row["is_active"]
+        or row["is_hidden"]
+        or row["wb_sync_evidence"].get("source") != "wb_content_cards"
+        or row["wb_sync_evidence"].get("endpoint") != "/content/v2/get/cards/list"
+        or row["wb_sync_evidence"].get("nm_id") != row["nm_id"]
+        or str(row["wb_sync_evidence"].get("vendor_code") or "") != row["vendor_code"]
+        or str(row["wb_sync_evidence"].get("result") or "")
+        not in {"created", "matched"}
+        or not str(row["wb_sync_evidence"].get("match_type") or "")
+        or not row["wb_synced_at"]
+        or row["wb_sync_status"]
+        != (
+            "created"
+            if row["wb_sync_evidence"].get("result") == "created"
+            else "matched_"
+            + str(row["wb_sync_evidence"].get("match_type") or "")
+        )
+    ]
+    if invalid_lifecycle:
+        blockers.append(
+            "default-applicable targets lack canonical WB Content lifecycle/source identity: "
+            + ", ".join(map(str, invalid_lifecycle))
+        )
+
+    history_count = 0
+    history_digest = _fingerprint([])
+    captures = "sheet_vitrina_v1_inventory_history_captures"
+    components = "sheet_vitrina_v1_inventory_history_components"
+    finalizations = "sheet_vitrina_v1_inventory_history_finalizations"
+    if selected and {captures, components, finalizations} <= tables:
+        history_count, history_digest = _streaming_query_digest(
+            conn,
+            f"""SELECT finalization.business_date,component.capture_id,
+                       component.scope_kind,component.scope_key,component.nm_id,
+                       component.component_kind,component.component_id,
+                       component.state,component.quantity,component.source_revision,
+                       component.source_digest,component.source_watermark,
+                       component.provenance_json
+                  FROM {finalizations} finalization
+                  JOIN {components} component
+                    ON component.capture_id=finalization.capture_id
+                 WHERE component.component_kind='FBS_FACILITY'
+                   AND component.component_id=?
+                   AND component.nm_id IN ({placeholders})
+                 ORDER BY finalization.business_date,component.capture_id,
+                          component.nm_id""",
+            (str(facility_id), *selected),
+        )
+    if history_count:
+        blockers.append(
+            "default-applicable absent-history targets already have accepted target-facility history"
+        )
+    result = {
+        "as_of_date": str(as_of_date),
+        "facility_id": str(facility_id),
+        "seller_warehouse_id": int(seller_warehouse_id),
+        "nm_ids": selected,
+        "lifecycle_rows": lifecycle_rows,
+        "lifecycle_digest": _fingerprint(lifecycle_rows),
+        "accepted_target_facility_history_count": history_count,
+        "accepted_target_facility_history_digest": history_digest,
+        "default_applicability_required": True,
+        "blockers": blockers,
+    }
+    result["fingerprint"] = _fingerprint(result)
+    return result
+
+
+_VOLATILE_QUALIFICATION_KEYS = {
+    "qualified_at",
+    "cutover_at",
+    "created_at",
+    "updated_at",
+    "recorded_at",
+    "posted_at",
+    "observed_at",
+    "captured_at",
+    "finalized_at",
+    "wb_synced_at",
+    "wb_updated_at",
+}
+
+
+def _without_volatile_qualification_fields(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_volatile_qualification_fields(item)
+            for key, item in value.items()
+            if str(key) not in _VOLATILE_QUALIFICATION_KEYS
+            and str(key) not in {"fingerprint", "material_qualification_digest"}
+        }
+    if isinstance(value, list):
+        return [_without_volatile_qualification_fields(item) for item in value]
+    return value
+
+
+def _zero_repair_material_digest(plan: Mapping[str, Any]) -> str:
+    """Stable JIT qualification digest; wall-clock evidence is intentionally excluded."""
+
+    non_targets = dict(plan.get("non_targets") or {})
+    target_effects = dict(plan.get("target_effects") or {})
+    effect_counts = {
+        key: value
+        for key, value in target_effects.items()
+        if key.endswith("_count")
+    }
+    mapping = dict(plan.get("mapping_evidence") or {})
+    material = {
+        "contract_name": plan.get("contract_name"),
+        "facility": plan.get("facility"),
+        "pool": plan.get("pool"),
+        "canonical_target": plan.get("canonical_target"),
+        "storage_generation": plan.get("storage_generation"),
+        "stock_managed_roster": plan.get("stock_managed_roster"),
+        "nm_ids": plan.get("nm_ids"),
+        "partitions": plan.get("partitions"),
+        "input_manifest": plan.get("input_manifest"),
+        "target_rows": plan.get("target_rows"),
+        "target_applicability": plan.get("target_applicability"),
+        "target_effect_counts": effect_counts,
+        "historical_zero_evidence": plan.get("historical_zero_evidence"),
+        "default_absent_history_evidence": plan.get(
+            "default_absent_history_evidence"
+        ),
+        "mapping_evidence": {
+            "seller_warehouse_id": mapping.get("seller_warehouse_id"),
+            "official_office_id": mapping.get("official_office_id"),
+            "facility_id": mapping.get("facility_id"),
+            "mapping": mapping.get("mapping"),
+            "extension": mapping.get("extension"),
+            "allocation_count": mapping.get("allocation_count"),
+            "allocation_nm_ids": mapping.get("allocation_nm_ids"),
+            "allocation_balance_consistency": mapping.get(
+                "allocation_balance_consistency"
+            ),
+            "blockers": mapping.get("blockers"),
+        },
+        "non_targets": {
+            "target_facility_existing_fbs_row_count": non_targets.get(
+                "target_facility_existing_fbs_row_count"
+            ),
+            "target_facility_existing_fbs_nm_ids": non_targets.get(
+                "target_facility_existing_fbs_nm_ids"
+            ),
+            "target_facility_existing_fbs_material_count": non_targets.get(
+                "target_facility_existing_fbs_material_count"
+            ),
+            "target_facility_existing_fbs_material_digest": non_targets.get(
+                "target_facility_existing_fbs_material_digest"
+            ),
+        },
+        "expected_effects": plan.get("expected_effects"),
+        "blockers": plan.get("blockers"),
+        "apply_allowed": plan.get("apply_allowed"),
+    }
+    return _fingerprint(
+        _without_volatile_qualification_fields(material)
+    )
 
 
 def _historical_zero_evidence(
@@ -2319,8 +2782,7 @@ def _historical_zero_evidence(
             + ", ".join(map(str, invalid))
         )
     next_date = (
-        datetime.fromisoformat(str(business_date)).date()
-        + timedelta(days=1)
+        datetime.fromisoformat(str(business_date)).date() + timedelta(days=1)
     ).isoformat()
     next_finalization = conn.execute(
         f"""SELECT capture_id,finalization_digest FROM {finalizations}
@@ -2434,7 +2896,8 @@ def _scoped_repair_non_targets(
              WHERE line.facility_id=? AND line.pool='FBS'
                AND line.nm_id IN ({non_target_placeholders})
              ORDER BY line.operation_id,line.line_no"""
-        if {LINES_TABLE, OPERATIONS_TABLE} <= tables else None,
+        if {LINES_TABLE, OPERATIONS_TABLE} <= tables
+        else None,
         (str(facility_id), *non_targets),
     )
     record(
@@ -2443,7 +2906,9 @@ def _scoped_repair_non_targets(
                    metadata_json FROM {DOCUMENT_LINES_TABLE}
              WHERE facility_id=? AND pool='FBS'
                AND nm_id IN ({non_target_placeholders})
-             ORDER BY document_id,line_no""" if DOCUMENT_LINES_TABLE in tables else None,
+             ORDER BY document_id,line_no"""
+        if DOCUMENT_LINES_TABLE in tables
+        else None,
         (str(facility_id), *non_targets),
     )
     record(
@@ -2452,7 +2917,9 @@ def _scoped_repair_non_targets(
                    frozen_wac_rub,updated_at FROM {FBS_CURRENT_TABLE}
              WHERE facility_id=? AND pool='FBS'
                AND nm_id IN ({non_target_placeholders})
-             ORDER BY cutover_id,order_id""" if FBS_CURRENT_TABLE in tables else None,
+             ORDER BY cutover_id,order_id"""
+        if FBS_CURRENT_TABLE in tables
+        else None,
         (str(facility_id), *non_targets),
     )
     record(
@@ -2500,7 +2967,8 @@ def _scoped_repair_non_targets(
         if {
             "sheet_vitrina_v1_warehouse_functional_active",
             "sheet_vitrina_v1_warehouse_wb_snapshots",
-        } <= tables
+        }
+        <= tables
         else None,
     )
     history_captures = "sheet_vitrina_v1_inventory_history_captures"
@@ -2533,7 +3001,8 @@ def _scoped_repair_non_targets(
              WHERE capture_id IN ({history_placeholders})
                AND (nm_id IS NULL OR nm_id IN ({roster_placeholders}))
              ORDER BY capture_id,scope_kind,scope_key,component_kind,component_id"""
-        if history_capture_ids else None,
+        if history_capture_ids
+        else None,
         (*history_capture_ids, *roster),
     )
     record(
@@ -2543,7 +3012,8 @@ def _scoped_repair_non_targets(
               FROM {APPLICABILITY_EVENTS_TABLE}
              WHERE nm_id IN ({roster_placeholders})
              ORDER BY event_sequence"""
-        if APPLICABILITY_EVENTS_TABLE in tables else None,
+        if APPLICABILITY_EVENTS_TABLE in tables
+        else None,
         tuple(roster),
     )
     result["scope"] = {
@@ -2575,10 +3045,7 @@ def _streaming_query_digest(
             break
         for row in rows:
             payload = _json(
-                {
-                    column: row[index]
-                    for index, column in enumerate(columns)
-                }
+                {column: row[index] for index, column in enumerate(columns)}
             ).encode("utf-8")
             digest.update(len(payload).to_bytes(8, "big"))
             digest.update(payload)
@@ -2586,9 +3053,7 @@ def _streaming_query_digest(
     return count, "sha256:" + digest.hexdigest()
 
 
-def _intent_from_row(
-    row: Sequence[Any], *, expected_identity: str
-) -> dict[str, Any]:
+def _intent_from_row(row: Sequence[Any], *, expected_identity: str) -> dict[str, Any]:
     if str(row[2]) != str(expected_identity):
         raise DenseFbsError(
             "dense_intent_identity_conflict",
@@ -2659,4 +3124,6 @@ def _fingerprint(value: Any) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )

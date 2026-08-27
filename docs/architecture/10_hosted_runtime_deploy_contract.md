@@ -1269,3 +1269,13 @@ deploy or UI acceptance. It requires a separate exact protocol-v2 production
 manifest, owner apply authorization, backup/reversibility and reconciliation.
 Production verification before that apply remains read-only
 schema/status/readback plus isolated UI revision-flow evidence.
+
+Migration 162 SSS008 deploys only inert WBC0013 recovery code. The separate
+default-off Production Apply profile requires an exact target file, deployed
+SHA and one explicit StoreRegistry generation. It performs dense A and
+historical B only after private-0600 double JIT qualification, with one submit
+per phase and query-only reconciliation after each. Apply checks the read-only
+business-data barrier before and under the shared warehouse lock; it does not
+stop or change the 06:30/07:30 or any other ordinary service/timer. Deploy and
+post-deploy verification do not run A or B and do not mutate production
+business data.

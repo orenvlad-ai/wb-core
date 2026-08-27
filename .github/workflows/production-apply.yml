@@ -126,7 +126,7 @@ permissions:
 
 jobs:
   apply_once:
-    name: One exact production apply and reconciliation
+    name: Exact bounded production goal apply and reconciliation
     if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation'
     permissions:
       contents: read
@@ -150,6 +150,9 @@ jobs:
           pypdf==6.4.1 reportlab==4.4.5
 
       - name: Validate exact task passport, qualify dynamic manifest and apply once
+        # WBC0013 is the sole exact two-phase exception: the runner enforces
+        # one dense-A submit, query-only A reconciliation, then one historical-B
+        # submit and query-only B reconciliation under the same goal passport.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}

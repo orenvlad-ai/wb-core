@@ -246,7 +246,21 @@ profile без manifest hash в owner passport:
 /wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 unlinks 6 reclaimed-allocated-bytes <exact-bytes> root-minimum-bytes 26843545600 backup-floor-bytes <finance-next-replacement-plus-8GiB>
 ```
 
-Этот profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
+WBC0013 имеет отдельный exact двухфазный profile:
+
+```text
+/wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery target wb_core_eu_hosted_runtime_active roster 71 existing 21 historical-zero 12 absent-history 38 zero-inserts 50 historical-repairs 1
+```
+
+Он принимает только равенство `71 = 21 + (12 + 38)`, создаёт private-0600 JIT
+планы и требует два consecutive одинаковых material witness для A и B, максимум
+с тремя регенерациями до submit. Runner делает ровно один A submit, только
+query-only A reconciliation, затем fresh B plan, ровно один B submit и
+query-only B reconciliation. Потерянный ответ ведёт к same-operation readback,
+а не к повторному submit. Profile default-off, deploy его не вызывает; обычные
+service/timer не останавливаются и не меняются.
+
+WBC0008 profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
 caller-known detached sanitation job. После submit разрешён только query-only
 job/archive readback; ambiguous transport не запускает submit повторно. Exact
 six archive/restore/unlink и capacity/non-target/service reconciliation описаны

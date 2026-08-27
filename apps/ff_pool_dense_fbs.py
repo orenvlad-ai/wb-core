@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.ff_pool_dense_fbs import DenseFbsService  # noqa: E402
+from packages.application.ff_pool_dense_fbs import (  # noqa: E402
+    DenseFbsService,
+    ZERO_REPAIR_MANIFEST_SCHEMA,
+)
 from packages.application.root_storage_policy import (  # noqa: E402
     RootStoragePolicyError,
     admit_root_write,
@@ -35,9 +38,11 @@ def run(args: argparse.Namespace) -> int:
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
     target_file = Path(args.target_file).expanduser().resolve()
     target = load_hosted_runtime_target(target_file)
-    target_runtime_dir = Path(
-        str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "")
-    ).expanduser().resolve()
+    target_runtime_dir = (
+        Path(str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""))
+        .expanduser()
+        .resolve()
+    )
     accepted_target = bool(
         target.target_status == "active"
         and target.target_id == ACTIVE_HOSTED_RUNTIME_TARGET_ID
@@ -141,25 +146,29 @@ def run(args: argparse.Namespace) -> int:
         )
         if not isinstance(domain_manifest, dict):
             raise ValueError("--manifest-file must contain one JSON object")
+        domain_manifest = _strict_domain_manifest_v2(domain_manifest)
         result = service.build_zero_repair_plan(
             facility_id=str(domain_manifest["facility_id"]),
-            nm_ids=list(domain_manifest["nm_ids"]),
+            historical_exact_zero_nm_ids=list(
+                domain_manifest["partitions"]["historical_exact_zero"]
+            ),
+            default_applicable_absent_history_nm_ids=list(
+                domain_manifest["partitions"]["default_applicable_absent_history"]
+            ),
             seller_warehouse_id=int(domain_manifest["seller_warehouse_id"]),
             official_office_id=int(domain_manifest["official_office_id"]),
             expected_roster_nm_ids=list(domain_manifest["expected_roster_nm_ids"]),
             expected_existing_nm_ids=list(domain_manifest["expected_existing_nm_ids"]),
-            historical_business_date=str(
-                domain_manifest["historical_business_date"]
-            ),
+            historical_business_date=str(domain_manifest["historical_business_date"]),
             canonical_target=canonical_target,
             storage_generation=storage_generation,
-            operation_id=str(domain_manifest["operation_id"]),
-            qualified_at=str(domain_manifest["qualified_at"]),
         )
     if args.output:
         output = _write_private(Path(args.output), result)
         if not output["written"]:
-            print(json.dumps(output, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            print(
+                json.dumps(output, ensure_ascii=False, sort_keys=True), file=sys.stderr
+            )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0 if action != "plan" or result.get("apply_allowed") else 2
 
@@ -172,9 +181,12 @@ def _write_private(
     owner: str = "ff_pool_dense_fbs_plan",
 ) -> dict[str, object]:
     output = path.resolve()
-    rendered = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, indent=2
-    ).encode("utf-8") + b"\n"
+    rendered = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
     try:
         admission = admission_factory(
             owner=str(owner),
@@ -215,6 +227,71 @@ def _file_sha256(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
+    required = {
+        "schema",
+        "facility_id",
+        "seller_warehouse_id",
+        "official_office_id",
+        "historical_business_date",
+        "partitions",
+        "expected_roster_nm_ids",
+        "expected_existing_nm_ids",
+    }
+    actual = set(payload)
+    if actual != required:
+        raise ValueError(
+            "zero-repair manifest fields must be exact; "
+            f"missing={sorted(required - actual)} extra={sorted(actual - required)}"
+        )
+    if payload.get("schema") != ZERO_REPAIR_MANIFEST_SCHEMA:
+        raise ValueError(
+            f"zero-repair manifest schema must be {ZERO_REPAIR_MANIFEST_SCHEMA}"
+        )
+    partitions = payload.get("partitions")
+    if not isinstance(partitions, dict):
+        raise ValueError("zero-repair manifest partitions must be one JSON object")
+    partition_fields = {
+        "historical_exact_zero",
+        "default_applicable_absent_history",
+    }
+    if set(partitions) != partition_fields:
+        raise ValueError(
+            "zero-repair manifest partition fields must be exact; "
+            f"missing={sorted(partition_fields - set(partitions))} "
+            f"extra={sorted(set(partitions) - partition_fields)}"
+        )
+    for field in (
+        "historical_exact_zero",
+        "default_applicable_absent_history",
+        "expected_roster_nm_ids",
+        "expected_existing_nm_ids",
+    ):
+        values = partitions[field] if field in partitions else payload[field]
+        if not isinstance(values, list):
+            raise ValueError(f"{field} must be one JSON array")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in values
+        ):
+            raise ValueError(f"{field} must contain positive integer nmIds")
+        if len(values) != len(set(values)):
+            raise ValueError(f"{field} must not contain duplicate nmIds")
+    historical = set(partitions["historical_exact_zero"])
+    absent = set(partitions["default_applicable_absent_history"])
+    existing = set(payload["expected_existing_nm_ids"])
+    roster = set(payload["expected_roster_nm_ids"])
+    if historical & absent:
+        raise ValueError("zero-repair manifest partitions must be disjoint")
+    if historical & existing or absent & existing:
+        raise ValueError(
+            "zero-repair target and existing-row partitions must be disjoint"
+        )
+    if historical | absent | existing != roster:
+        raise ValueError("zero-repair partitions must exactly cover the roster")
+    return payload
 
 
 def main() -> int:

@@ -36,6 +36,175 @@ WARM_AUTH_BODY = (
     "unlinks 6 reclaimed-allocated-bytes 27591725056 "
     "root-minimum-bytes 26843545600 backup-floor-bytes 41105612800"
 )
+WBC0013_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery "
+    "target wb_core_eu_hosted_runtime_active roster 71 existing 21 "
+    "historical-zero 12 absent-history 38 zero-inserts 50 historical-repairs 1"
+)
+
+
+def _exercise_wbc0013_two_phase_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=WBC0013_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["max_a_submits"] == goal["max_b_submits"] == 1
+    operation = "production-goal-v1-" + "7" * 32
+    base = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        + operation
+    )
+    common = {
+        "return_code": 0,
+        "transport_ambiguous": False,
+        "command_sha256": "c" * 64,
+        "stdout_sha256": "d" * 64,
+        "stderr_sha256": "e" * 64,
+    }
+
+    def candidate(phase: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": "ready",
+            "phase": phase,
+            "deployed_sha": MERGE_SHA,
+            "query_only": True,
+            "database_written": False,
+            "manifest_path": f"{base}/wbc0013-{phase}-plan-20260828T120000Z.json",
+            "manifest_sha256": "sha256:" + phase * 64,
+            "material_qualification_digest": "sha256:"
+            + ("1" if phase == "a" else "2") * 64,
+            "file_mode": "0600",
+            "barrier_inactive": True,
+            "target_generation_bound": True,
+            "timer_change_count": 0,
+        }
+        if phase == "a":
+            payload.update(
+                {
+                    "roster_count": 71,
+                    "existing_count": 21,
+                    "historical_zero_count": 12,
+                    "absent_history_count": 38,
+                    "zero_insert_count": 50,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "historical_repair_count": 1,
+                    "current_active_preserved": True,
+                    "current_sync_preserved": True,
+                    "current_pool_preserved": True,
+                }
+            )
+        return payload
+
+    # A release interruption before either durable phase is allowed to supersede
+    # the candidate, but the old-SHA candidate can never cross the submit boundary.
+    for phase in ("a", "b"):
+        interrupted = {**candidate(phase), "deployed_sha": "f" * 40}
+        try:
+            apply._validate_wbc0013_candidate(
+                interrupted,
+                goal,
+                phase=phase,
+                merge_sha=MERGE_SHA,
+            )
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError(f"WBC0013 {phase} release interruption must fail closed")
+
+    # The adapter has no default execution mode, and every apply command requires
+    # one exact private reviewed manifest plus its digest and approval reference.
+    plan_command = apply._wbc0013_remote_command(
+        target={
+            "target_dir": "/opt/wb-core-runtime/app",
+            "ssh_destination": "wb-core-eu-root",
+        },
+        merge_sha=MERGE_SHA,
+        operation=operation,
+        evidence_dir=base,
+        phase="plan-a",
+    )
+    assert "apply-a" not in plan_command[-1]
+    try:
+        apply._wbc0013_remote_command(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            operation=operation,
+            evidence_dir=base,
+            phase="apply-a",
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("WBC0013 unbound apply command must remain inert")
+
+    sequence = iter(
+        [
+            {**common, "result": candidate("a")},
+            {**common, "result": candidate("a")},
+            {**common, "return_code": None, "transport_ambiguous": True},
+            {
+                **common,
+                "result": {
+                    "status": "reconciled",
+                    "query_only": True,
+                    "zero_row_count": 50,
+                    "document_count": 1,
+                    "non_target_preserved": True,
+                },
+            },
+            {**common, "result": candidate("b")},
+            {**common, "result": candidate("b")},
+            {**common, "return_code": None, "transport_ambiguous": True},
+            {
+                **common,
+                "result": {
+                    "status": "reconciled",
+                    "query_only": True,
+                    "historical_repair_count": 1,
+                    "current_active_preserved": True,
+                    "current_sync_preserved": True,
+                    "current_pool_preserved": True,
+                    "ready_target_total_closed": True,
+                    "non_target_preserved": True,
+                },
+            },
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    apply.command_evidence = lambda *_args, **_kwargs: next(sequence)
+    apply.time.sleep = lambda *_args, **_kwargs: None
+    try:
+        result = apply.run_wbc0013_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture",
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert result["state"] == "done"
+    assert result["apply_count"] == 2
+    assert result["a_submit_count"] == result["b_submit_count"] == 1
+    assert [
+        item["qualification_state"] for item in result["qualification_attempts"]["a"]
+    ] == ["matching_witness", "qualified"]
+    assert [
+        item["qualification_state"] for item in result["qualification_attempts"]["b"]
+    ] == ["matching_witness", "qualified"]
 
 
 def authorization(**updates: object) -> dict[str, object]:
@@ -89,8 +258,7 @@ def warm_mount_probe_comment() -> dict[str, object]:
             "unit_instance": f"wb-core-storage-recovery-sanitation@{job_id}.service",
             "repo_template_sha256": "sha256:" + "f" * 64,
             "installed_template_path": (
-                "/etc/systemd/system/"
-                "wb-core-storage-recovery-sanitation@.service"
+                "/etc/systemd/system/wb-core-storage-recovery-sanitation@.service"
             ),
             "installed_template_sha256": "sha256:" + "f" * 64,
             "installed_template_matches_repo": True,
@@ -142,9 +310,7 @@ def recovery_release_comment() -> dict[str, object]:
         "user": {"login": "github-actions[bot]"},
         "body": (
             f"<!-- wb-core-release-receipt operation={RECOVERY_RELEASE_OPERATION} -->"
-            "\n```json\n"
-            + json.dumps(payload)
-            + "\n```"
+            "\n```json\n" + json.dumps(payload) + "\n```"
         ),
     }
 
@@ -323,7 +489,9 @@ def _run_dynamic_sequence(
     original = apply.command_evidence
     original_sleep = apply.time.sleep
 
-    def fake(_command: list[str], *, timeout_seconds: float = 3600.0) -> dict[str, object]:
+    def fake(
+        _command: list[str], *, timeout_seconds: float = 3600.0
+    ) -> dict[str, object]:
         del timeout_seconds
         assert sequence
         return sequence.pop(0)
@@ -398,7 +566,9 @@ def _exercise_compact_oversized_blocked_receipt() -> None:
                 "before_material_digest": "sha256:" + "1" * 64,
                 "after_material_digest": "sha256:" + "2" * 64,
                 "changed_component_count": 200,
-                "changed_json_paths": [f"/targets/{index}/identity" for index in range(200)],
+                "changed_json_paths": [
+                    f"/targets/{index}/identity" for index in range(200)
+                ],
                 "components": [
                     {
                         "json_path": f"/targets/{index}/identity",
@@ -560,8 +730,7 @@ def _exercise_worker_mount_probe() -> None:
             "unit_instance": f"wb-core-storage-recovery-sanitation@{job_id}.service",
             "repo_template_sha256": "sha256:" + "f" * 64,
             "installed_template_path": (
-                "/etc/systemd/system/"
-                "wb-core-storage-recovery-sanitation@.service"
+                "/etc/systemd/system/wb-core-storage-recovery-sanitation@.service"
             ),
             "installed_template_sha256": "sha256:" + "f" * 64,
             "installed_template_matches_repo": True,
@@ -679,6 +848,7 @@ def _exercise_worker_mount_probe() -> None:
 def main() -> None:
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
+    _exercise_wbc0013_two_phase_runner()
     goal = apply.validate_authorization(
         authorization(), repository="orenvlad-ai/wb-core", pr=1050
     )
@@ -708,8 +878,7 @@ def main() -> None:
         operation="production-goal-v1-" + "4" * 32,
         evidence_dir=(
             "/opt/wb-core-runtime/state/private-evidence/production-goals/"
-            "production-goal-v1-"
-            + "4" * 32
+            "production-goal-v1-" + "4" * 32
         ),
         mode="dry-run",
         projection_manifest_path=projection_path,
@@ -741,7 +910,9 @@ def main() -> None:
         authorization(author_association="CONTRIBUTOR"),
         authorization(body=AUTH_BODY.replace("full-days 172", "full-days 171")),
         authorization(body=AUTH_BODY.replace("2026-08-24", "2026-08-23")),
-        authorization(issue_url="https://api.github.com/repos/orenvlad-ai/wb-core/issues/1051"),
+        authorization(
+            issue_url="https://api.github.com/repos/orenvlad-ai/wb-core/issues/1051"
+        ),
     ):
         try:
             apply.validate_authorization(
@@ -861,7 +1032,11 @@ def main() -> None:
         "mutable_safety_predicates": {"passed": True},
         "mutable_canonical_observations": [
             {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
-            for key in ("finance_raw_current", "operational_current", "autoanswers_current")
+            for key in (
+                "finance_raw_current",
+                "operational_current",
+                "autoanswers_current",
+            )
         ],
         "systemd_service_gate": healthy_systemd_gate,
     }
@@ -874,7 +1049,7 @@ def main() -> None:
                 + "\n```json\n"
                 + json.dumps(readiness_payload)
                 + "\n```",
-            }
+            },
         ],
         repository="orenvlad-ai/wb-core",
         pr=1050,
@@ -1106,7 +1281,9 @@ def main() -> None:
     assert success["state"] == "done"
     assert success["apply_count"] == 1
     assert len(success["qualification_attempts"]) == 2
-    assert [item["qualification_state"] for item in success["qualification_attempts"]] == [
+    assert [
+        item["qualification_state"] for item in success["qualification_attempts"]
+    ] == [
         "matching_witness",
         "qualified",
     ]
@@ -1162,7 +1339,11 @@ def main() -> None:
         ],
         "mutable_canonical_observations": [
             {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
-            for key in ("finance_raw_current", "operational_current", "autoanswers_current")
+            for key in (
+                "finance_raw_current",
+                "operational_current",
+                "autoanswers_current",
+            )
         ],
         "readiness_id": "readiness-v2-" + "6" * 32 + "-a01",
         "projection_manifest_path": (
@@ -1212,11 +1393,14 @@ def main() -> None:
     assert warm_success["state"] == "done"
     assert warm_success["apply_count"] == 1
     assert len(warm_success["qualification_attempts"]) == 2
-    assert warm_success["qualification_attempts"][0][
-        "mutable_canonical_observations"
-    ][2]["ordinary_mutable_fields"] != warm_success["qualification_attempts"][1][
-        "mutable_canonical_observations"
-    ][2]["ordinary_mutable_fields"]
+    assert (
+        warm_success["qualification_attempts"][0]["mutable_canonical_observations"][2][
+            "ordinary_mutable_fields"
+        ]
+        != warm_success["qualification_attempts"][1]["mutable_canonical_observations"][
+            2
+        ]["ordinary_mutable_fields"]
+    )
     warm_operation = apply.operation_id(
         "orenvlad-ai/wb-core", 1050, AUTHORIZATION_COMMENT_ID, warm_goal
     )
@@ -1342,7 +1526,9 @@ def main() -> None:
         AssertionError("receipt recovery must not execute a production command")
     )
     try:
-        with tempfile.TemporaryDirectory(prefix="production-receipt-recovery-smoke-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="production-receipt-recovery-smoke-"
+        ) as directory:
             recovery_args.output = Path(directory) / "receipt.json"
             assert (
                 apply._run_receipt_recovery(
@@ -1353,7 +1539,10 @@ def main() -> None:
                 )
                 == 0
             )
-            assert json.loads(recovery_args.output.read_text(encoding="utf-8")) == recovered_receipt
+            assert (
+                json.loads(recovery_args.output.read_text(encoding="utf-8"))
+                == recovered_receipt
+            )
             assert recovery_client.post_count == 1
             recovery_args.output = Path(directory) / "receipt-repeat.json"
             assert (
@@ -1396,7 +1585,9 @@ def main() -> None:
         except apply.ApplyError:
             pass
         else:
-            raise AssertionError("non-done or wrongly bound recovery receipt must fail closed")
+            raise AssertionError(
+                "non-done or wrongly bound recovery receipt must fail closed"
+            )
     try:
         apply._extract_recovery_receipt(
             recovery_client.raw_zip,
@@ -1436,7 +1627,9 @@ def main() -> None:
         *recovery_client.comments,
         {**recovery_client.comments[-1], "id": 100},
     ]
-    with tempfile.TemporaryDirectory(prefix="production-receipt-duplicate-smoke-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="production-receipt-duplicate-smoke-"
+    ) as directory:
         recovery_args.output = Path(directory) / "duplicate.json"
         try:
             apply._run_receipt_recovery(
@@ -1477,7 +1670,9 @@ def main() -> None:
     assert "environment: production" in reconciliation_job
     assert "actions: read" in reconciliation_job
     assert "ref: ${{ github.sha }}" in reconciliation_job
-    assert "--authorization-mode warm-archive-receipt-reconciliation" in reconciliation_job
+    assert (
+        "--authorization-mode warm-archive-receipt-reconciliation" in reconciliation_job
+    )
     assert "--reconciliation-phase preflight" in reconciliation_job
     assert "--reconciliation-phase collect" in reconciliation_job
     assert "--reconciliation-phase publish" in reconciliation_job
@@ -1490,9 +1685,9 @@ def main() -> None:
         "--prior-reconciliation-comment-id",
     ):
         assert reconciliation_job.count(exact_a02_input) == 3
-    assert reconciliation_job.index("Upload full immutable reconciliation evidence first") < (
-        reconciliation_job.index("publish one compact supersession marker")
-    )
+    assert reconciliation_job.index(
+        "Upload full immutable reconciliation evidence first"
+    ) < (reconciliation_job.index("publish one compact supersession marker"))
     assert reconciliation_job.count("Execute one bounded query-only SSH probe") == 1
     assert "pip install" not in reconciliation_job
     print("production_apply_runner_smoke: ok")

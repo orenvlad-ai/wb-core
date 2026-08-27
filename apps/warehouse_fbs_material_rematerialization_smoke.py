@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from decimal import Decimal, localcontext
 import errno
 import json
@@ -50,6 +49,7 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (
 from packages.application.warehouse_fbs_material_rematerialization import (
     CRITICAL_TOTAL_METRIC_KEYS,
     HISTORICAL_RECOVERY_REQUIRED,
+    HISTORICAL_MANIFEST_SCHEMA,
     MAX_PERSISTED_PLAN_BYTES,
     MAX_READY_CLOSURE_BYTES,
     REPAIRABLE,
@@ -73,8 +73,10 @@ from packages.application.warehouse_functional_lock import (
 
 
 DAY = "2026-08-26"
+LEGACY_WAC_161 = "10." + "0" * 158
 NOW = "2026-08-26T12:00:00Z"
 FACILITY_ID = "fac_incident"
+MOSCOW_FACILITY_ID = "fac_moscow_preserved"
 TARGET_NM_ID = 101
 NON_TARGET_NM_ID = 202
 WAC_CURRENT_ONLY_NM_ID = 8_028
@@ -112,10 +114,68 @@ def main() -> None:
     print("warehouse_fbs_material_cas_bounds_benchmark: OK")
 
 
+def _build_historical_plan(
+    service: WarehouseFbsMaterialRematerializer,
+    runtime: RegistryUploadDbBackedRuntime,
+    manifest: dict[str, object],
+) -> dict[str, object]:
+    uri = f"file:{runtime.db_path.resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as dependency_conn:
+        dependency_conn.row_factory = sqlite3.Row
+        dependency_conn.execute("PRAGMA query_only=ON")
+        statements: list[str] = []
+        dependency_conn.set_trace_callback(statements.append)
+        result = service.build_historical_plan(
+            manifest,
+            dependency_conn=dependency_conn,
+        )
+        assert not any(
+            statement.lstrip().upper().startswith(
+                (
+                    "CREATE ",
+                    "ALTER ",
+                    "DROP ",
+                    "INSERT ",
+                    "UPDATE ",
+                    "DELETE ",
+                    "REPLACE ",
+                    "BEGIN ",
+                    "COMMIT",
+                )
+            )
+            for statement in statements
+        ), statements
+        return result
+
+
 def _test_shared_wac_precision_contract() -> None:
     prime_quantities = (
-        101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163,
-        167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233,
+        101,
+        103,
+        107,
+        109,
+        113,
+        127,
+        131,
+        137,
+        139,
+        149,
+        151,
+        157,
+        163,
+        167,
+        173,
+        179,
+        181,
+        191,
+        193,
+        197,
+        199,
+        211,
+        223,
+        227,
+        229,
+        233,
     )
     with tempfile.TemporaryDirectory(prefix="fbs-material-wac-28-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=False)
@@ -171,9 +231,9 @@ def _test_shared_wac_precision_contract() -> None:
             conn.commit()
             aggregates = _pool_aggregates(conn, precision_nm_ids)
             assert sorted(aggregates) == precision_nm_ids
-            assert _functional_pool_mismatches(
-                conn, "whfv_incident_source"
-            ) == [WAC_CURRENT_ONLY_NM_ID]
+            assert _functional_pool_mismatches(conn, "whfv_incident_source") == [
+                WAC_CURRENT_ONLY_NM_ID
+            ]
         assert len(precision_nm_ids) == 26
 
 
@@ -214,10 +274,13 @@ def _test_atomic_root_prevention() -> None:
             # the 1952 candidate and projection are uncommitted.
             visible = _active_ff(observer, TARGET_NM_ID)
             assert visible[0:2] == ("1953", "1953"), visible
-            assert observer.execute(
-                f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=?",
-                (FACILITY_ID, TARGET_NM_ID),
-            ).fetchone()[0] == 1953
+            assert (
+                observer.execute(
+                    f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=?",
+                    (FACILITY_ID, TARGET_NM_ID),
+                ).fetchone()[0]
+                == 1953
+            )
             writer.commit()
         finally:
             writer.close()
@@ -226,19 +289,28 @@ def _test_atomic_root_prevention() -> None:
             conn.row_factory = sqlite3.Row
             after = _active_ff(conn, TARGET_NM_ID)
             assert after[0:4] == ("1952", "1952", "19520", "10"), after
-            assert conn.execute(
-                f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=?",
-                (FACILITY_ID, TARGET_NM_ID),
-            ).fetchone()[0] == 1952
-            assert conn.execute(
-                "SELECT status FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?",
-                (result["target_version_id"],),
-            ).fetchone()[0] == "good"
-            assert conn.execute(
-                "SELECT status FROM sheet_vitrina_v1_warehouse_business_projection_revisions "
-                "WHERE published_version_id=?",
-                (result["target_version_id"],),
-            ).fetchone()[0] == "active"
+            assert (
+                conn.execute(
+                    f"SELECT quantity FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' AND nm_id=?",
+                    (FACILITY_ID, TARGET_NM_ID),
+                ).fetchone()[0]
+                == 1952
+            )
+            assert (
+                conn.execute(
+                    "SELECT status FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?",
+                    (result["target_version_id"],),
+                ).fetchone()[0]
+                == "good"
+            )
+            assert (
+                conn.execute(
+                    "SELECT status FROM sheet_vitrina_v1_warehouse_business_projection_revisions "
+                    "WHERE published_version_id=?",
+                    (result["target_version_id"],),
+                ).fetchone()[0]
+                == "active"
+            )
             queue = conn.execute(
                 """SELECT status,affected_nm_ids_json
                    FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
@@ -310,11 +382,14 @@ def _test_lifecycle_canonical_zero_shape() -> None:
             ).fetchone()
             assert tuple(physical) == (0, "0", None), tuple(physical)
             assert _active_ff(conn, TARGET_NM_ID) == ("0", "0", "0", None)
-            assert conn.execute(
-                """SELECT status FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+            assert (
+                conn.execute(
+                    """SELECT status FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
                    WHERE stable_source_id=?""",
-                (f"fbs_lifecycle:{event_id}",),
-            ).fetchone()[0] == "queued"
+                    (f"fbs_lifecycle:{event_id}",),
+                ).fetchone()[0]
+                == "queued"
+            )
 
 
 def _test_historical_bounded_recovery_preserves_current() -> None:
@@ -391,6 +466,20 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
                 "SELECT * FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
                 "WHERE event_id='handoff-debit-1'"
             ).fetchone()
+            accepted_target = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id='whfv_incident_source' AND warehouse_key='ff' "
+                "AND nm_id=?",
+                (TARGET_NM_ID,),
+            ).fetchone()
+            current_pool_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {BALANCES_TABLE} WHERE projection_epoch=1 "
+                    "AND nm_id=? ORDER BY facility_id,pool,nm_id",
+                    (TARGET_NM_ID,),
+                ).fetchall()
+            ]
             pool_before = list(
                 conn.execute(
                     f"SELECT * FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
@@ -405,18 +494,34 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
             runtime=runtime,
             timestamp_factory=lambda: "2026-08-28T09:00:00Z",
         )
+
+        def forbid_hidden_dependency(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError(
+                "historical qualification must not open a hidden runtime dependency"
+            )
+
+        runtime.load_our_wb_cost_daily_state = forbid_hidden_dependency  # type: ignore[method-assign]
+        runtime.store_registry.resolve = forbid_hidden_dependency  # type: ignore[method-assign]
         historical_manifest = {
+            "schema": HISTORICAL_MANIFEST_SCHEMA,
             "business_date": DAY,
             "facility_id": FACILITY_ID,
             "pool": "FBS",
             "nm_ids": [TARGET_NM_ID],
             "accepted_version_id": "whfv_incident_source",
-            "accepted_version_fingerprint": str(source["plan_fingerprint"]),
+            "accepted_version_plan_digest": str(source["plan_fingerprint"]),
+            "accepted_version_row_digest": _fingerprint(dict(source)),
+            "accepted_target_row_digest": _fingerprint(dict(accepted_target)),
+            "accepted_provenance_digest": _fingerprint(
+                json.loads(str(accepted_target["provenance_json"]))
+            ),
             "accepted_effective_at": str(source["effective_at"]),
             "accepted_published_at": str(source["published_at"]),
             "expected_current_active_version_id": current_version,
+            "expected_current_sync_version_id": current_version,
+            "expected_current_pool_digest": _fingerprint(current_pool_rows),
             "event_id": "handoff-debit-1",
-            "event_source_revision": str(event["source_revision"]),
+            "event_source_digest": _fingerprint(str(event["source_revision"])),
             "event_status_digest": str(event["status_digest"]),
             "event_evidence_digest": str(event["evidence_digest"]),
             "event_row_digest": _fingerprint(
@@ -454,13 +559,36 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
             "accepted_quantity": "1952",
             "accepted_cost_covered_quantity": "1953",
             "accepted_capital_rub": "19520",
+            "canonical_target": {"accepted": True},
+            "storage_generation": {
+                "implicit": False,
+                "query_only": True,
+                "manifest_sha256": "sha256:" + "a" * 64,
+                "operational_generation_id": "fixture-generation",
+            },
         }
+        with sqlite3.connect(runtime.db_path) as forbidden_rw_dependency:
+            forbidden_rw_dependency.row_factory = sqlite3.Row
+            try:
+                service.build_historical_plan(
+                    historical_manifest,
+                    dependency_conn=forbidden_rw_dependency,
+                )
+            except Exception as exc:
+                assert (
+                    getattr(exc, "code", "")
+                    == "historical_dependency_session_not_query_only"
+                )
+            else:
+                raise AssertionError(
+                    "historical qualification must reject a read-write dependency session"
+                )
         missing_binding = dict(historical_manifest)
         missing_binding.pop("event_row_digest")
-        blocked = service.build_historical_plan(missing_binding)
+        blocked = _build_historical_plan(service, runtime, missing_binding)
         assert blocked["status"] == UNSAFE_AMBIGUOUS
-        assert blocked["reason"] == "historical_manifest_binding_missing"
-        plan = service.build_historical_plan(historical_manifest)
+        assert blocked["reason"] == "historical_manifest_fields_invalid"
+        plan = _build_historical_plan(service, runtime, historical_manifest)
         assert plan["status"] == REPAIRABLE, plan
         assert plan["mode"] == "historical"
         assert plan["nm_ids"] == [TARGET_NM_ID]
@@ -471,6 +599,23 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
         }
         assert plan["typed_evidence"]["after"]["quantity"] == "1952"
         assert plan["typed_evidence"]["after"]["cost_covered_quantity"] == "1952"
+        assert len(LEGACY_WAC_161) == 161
+        assert plan["typed_evidence"]["after"]["wac_rub"] == "10"
+        historical_ff_line = next(
+            item
+            for item in plan["candidate"]["lines"]
+            if item["warehouse_key"] == "ff" and item["nm_id"] == TARGET_NM_ID
+        )
+        historical_locations = json.loads(historical_ff_line["provenance_json"])[
+            "source_records"
+        ][-1]["locations"]
+        assert [
+            (item["facility_id"], item["quantity"], item["capital_rub"])
+            for item in historical_locations
+        ] == [
+            (FACILITY_ID, "0", "0"),
+            (MOSCOW_FACILITY_ID, "1952", "19520"),
+        ]
         assert plan["typed_evidence"]["economics_dependency_closure"] == {
             "affected_positive_order_nm_ids": [TARGET_NM_ID],
             "missing_critical_total_dependencies_before": sorted(
@@ -483,6 +628,48 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
         }
         assert all(update["non_target_digest"] for update in plan["ready_updates"])
         assert plan["bounds"]["current_pool_rows_used_as_candidate_source"] is False
+
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET wac_rub='11' WHERE version_id='whfv_incident_source' "
+                "AND warehouse_key='ff' AND nm_id=?",
+                (TARGET_NM_ID,),
+            )
+            conn.commit()
+        changed = _build_historical_plan(service, runtime, historical_manifest)
+        assert changed["reason"] == "accepted_historical_typed_digest_drift"
+        for invalid_wac in (None, "-10"):
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                    "SET wac_rub=? WHERE version_id='whfv_incident_source' "
+                    "AND warehouse_key='ff' AND nm_id=?",
+                    (invalid_wac, TARGET_NM_ID),
+                )
+                invalid_target = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+                    "WHERE version_id='whfv_incident_source' AND warehouse_key='ff' "
+                    "AND nm_id=?",
+                    (TARGET_NM_ID,),
+                ).fetchone()
+                conn.commit()
+            invalid_manifest = dict(historical_manifest)
+            invalid_manifest["accepted_target_row_digest"] = _fingerprint(
+                dict(invalid_target)
+            )
+            invalid = _build_historical_plan(service, runtime, invalid_manifest)
+            assert invalid["reason"] == "historical_accepted_wac_invalid"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
+                "SET wac_rub=? WHERE version_id='whfv_incident_source' "
+                "AND warehouse_key='ff' AND nm_id=?",
+                (LEGACY_WAC_161, TARGET_NM_ID),
+            )
+            conn.commit()
         applied = service.apply_plan(
             plan,
             confirm_fingerprint=str(plan["plan_fingerprint"]),
@@ -499,14 +686,20 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
         assert repeated["status"] == REPAIRED and repeated["idempotent"]
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            assert conn.execute(
-                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active "
-                "WHERE slot=1"
-            ).fetchone()[0] == current_version
-            assert conn.execute(
-                "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
-                "WHERE slot=1"
-            ).fetchone()[0] == current_version
+            assert (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active "
+                    "WHERE slot=1"
+                ).fetchone()[0]
+                == current_version
+            )
+            assert (
+                conn.execute(
+                    "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
+                    "WHERE slot=1"
+                ).fetchone()[0]
+                == current_version
+            )
             repaired = conn.execute(
                 """SELECT quantity,cost_covered_quantity,wac_rub
                      FROM sheet_vitrina_v1_warehouse_functional_balances
@@ -514,17 +707,25 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
                 (str(plan["target_version_id"]), TARGET_NM_ID),
             ).fetchone()
             assert tuple(repaired) == ("1952", "1952", "10")
-            assert list(
+            assert (
+                list(
+                    conn.execute(
+                        f"SELECT * FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
+                    ).fetchall()
+                )
+                == pool_before
+            )
+            assert (
                 conn.execute(
-                    f"SELECT * FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
-                ).fetchall()
-            ) == pool_before
-            assert conn.execute(
-                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
-                "WHERE bundle_version='other-date-bundle' AND as_of_date='2026-08-25'"
-            ).fetchone()[0] == other_ready_before
+                    "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                    "WHERE bundle_version='other-date-bundle' AND as_of_date='2026-08-25'"
+                ).fetchone()[0]
+                == other_ready_before
+            )
             cells = _ready_cells(conn)
-            assert cells[f"SKU:{TARGET_NM_ID}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"] not in {
+            assert cells[
+                f"SKU:{TARGET_NM_ID}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"
+            ] not in {
                 None,
                 "",
             }
@@ -586,9 +787,7 @@ def _test_incident_plan_apply_idempotency_and_bounds() -> None:
         assert plan_bytes < 1_000_000
         assert elapsed_ms < 2_000, elapsed_ms
         before = _fingerprints(runtime.db_path)
-        applied = service.apply_plan(
-            plan, confirm_fingerprint=plan["plan_fingerprint"]
-        )
+        applied = service.apply_plan(plan, confirm_fingerprint=plan["plan_fingerprint"])
         assert applied["status"] == REPAIRED and not applied["idempotent"]
         repeated = service.apply_plan(
             plan, confirm_fingerprint=plan["plan_fingerprint"]
@@ -602,12 +801,18 @@ def _test_incident_plan_apply_idempotency_and_bounds() -> None:
                 cells[f"TOTAL|{key}"] not in {None, ""}
                 for key in CRITICAL_TOTAL_METRIC_KEYS
             )
-            assert conn.execute(
-                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_fbs_material_intents"
-            ).fetchone()[0] == 1
-            assert conn.execute(
-                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_fbs_material_intent_events"
-            ).fetchone()[0] >= 3
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_fbs_material_intents"
+                ).fetchone()[0]
+                == 1
+            )
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_fbs_material_intent_events"
+                ).fetchone()[0]
+                >= 3
+            )
             storage_bytes = {
                 "intent_bytes": int(
                     conn.execute(
@@ -723,11 +928,14 @@ def _test_resume_before_and_after_commit_transport_loss() -> None:
         )
         assert reconciled["status"] == REPAIRED and reconciled["idempotent"]
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_functional_versions "
-                "WHERE version_id=?",
-                (plan["target_version_id"],),
-            ).fetchone()[0] == 1
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_functional_versions "
+                    "WHERE version_id=?",
+                    (plan["target_version_id"],),
+                ).fetchone()[0]
+                == 1
+            )
 
     with tempfile.TemporaryDirectory(prefix="fbs-material-retry-budget-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
@@ -760,9 +968,12 @@ def _test_resume_before_and_after_commit_transport_loss() -> None:
         ]
         assert outcomes[-1]["attempt_count"] == 3
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-            ).fetchone()[0] == "whfv_incident_source"
+            assert (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()[0]
+                == "whfv_incident_source"
+            )
 
     with tempfile.TemporaryDirectory(prefix="fbs-material-unknown-loss-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
@@ -788,9 +999,12 @@ def _test_resume_before_and_after_commit_transport_loss() -> None:
         assert unsafe["status"] == UNSAFE_AMBIGUOUS
         assert unsafe["attempt_count"] == 1
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-            ).fetchone()[0] == "whfv_incident_source"
+            assert (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()[0]
+                == "whfv_incident_source"
+            )
 
     for label, error in (
         ("timeout", TimeoutError("bounded transport timeout")),
@@ -810,9 +1024,7 @@ def _test_resume_before_and_after_commit_transport_loss() -> None:
         assert outcome["attempt_count"] == 1, (label, outcome)
 
 
-def _precommit_failure_outcome(
-    *, error: Exception, label: str
-) -> dict[str, object]:
+def _precommit_failure_outcome(*, error: Exception, label: str) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix=f"fbs-material-{label}-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
         service = WarehouseFbsMaterialRematerializer(
@@ -835,9 +1047,12 @@ def _precommit_failure_outcome(
             transport_hook=fail_before_commit,
         )
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-            ).fetchone()[0] == "whfv_incident_source"
+            assert (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()[0]
+                == "whfv_incident_source"
+            )
         return outcome
 
 
@@ -860,10 +1075,21 @@ def _test_drift_concurrency_and_fail_closed_boundaries() -> None:
                 (FACILITY_ID, TARGET_NM_ID),
             )
             conn.commit()
-        drifted = service.apply_plan(
-            plan, confirm_fingerprint=plan["plan_fingerprint"]
-        )
-        assert drifted["status"] == UNSAFE_AMBIGUOUS
+        try:
+            service.apply_plan(plan, confirm_fingerprint=plan["plan_fingerprint"])
+        except Exception as exc:
+            assert getattr(exc, "code", "") == "repair_source_material_cas_drift"
+        else:
+            raise AssertionError(
+                "under-lock CAS drift must reject before durable intent"
+            )
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_warehouse_fbs_material_intents"
+                ).fetchone()[0]
+                == 0
+            )
 
     with tempfile.TemporaryDirectory(prefix="fbs-material-source-proof-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
@@ -928,9 +1154,12 @@ def _test_drift_concurrency_and_fail_closed_boundaries() -> None:
             else:
                 raise AssertionError("missing canonical snapshot must fail closed")
         with sqlite3.connect(runtime.db_path) as conn:
-            assert conn.execute(
-                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-            ).fetchone()[0] == "whfv_incident_source"
+            assert (
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()[0]
+                == "whfv_incident_source"
+            )
 
     with tempfile.TemporaryDirectory(prefix="fbs-material-broad-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
@@ -956,18 +1185,24 @@ def _test_drift_concurrency_and_fail_closed_boundaries() -> None:
         )
         assert broad["status"] == UNSAFE_AMBIGUOUS
         assert broad["reason"] == "broad_or_unknown_mismatch"
-        assert service.build_plan(
-            business_date=DAY,
-            facility_id=FACILITY_ID,
-            pool="FBO",
-            nm_ids=[TARGET_NM_ID],
-        )["status"] == UNSAFE_AMBIGUOUS
-        assert service.build_plan(
-            business_date="2026-08-25",
-            facility_id=FACILITY_ID,
-            pool="FBS",
-            nm_ids=[TARGET_NM_ID],
-        )["status"] == HISTORICAL_RECOVERY_REQUIRED
+        assert (
+            service.build_plan(
+                business_date=DAY,
+                facility_id=FACILITY_ID,
+                pool="FBO",
+                nm_ids=[TARGET_NM_ID],
+            )["status"]
+            == UNSAFE_AMBIGUOUS
+        )
+        assert (
+            service.build_plan(
+                business_date="2026-08-25",
+                facility_id=FACILITY_ID,
+                pool="FBS",
+                nm_ids=[TARGET_NM_ID],
+            )["status"]
+            == HISTORICAL_RECOVERY_REQUIRED
+        )
 
     with tempfile.TemporaryDirectory(prefix="fbs-material-lock-") as temp_dir:
         runtime = _seed(Path(temp_dir), mixed=True)
@@ -991,7 +1226,9 @@ def _test_drift_concurrency_and_fail_closed_boundaries() -> None:
             )
             worker.start()
             time.sleep(0.1)
-            assert worker.is_alive(), "material repair must wait for the shared writer lock"
+            assert worker.is_alive(), (
+                "material repair must wait for the shared writer lock"
+            )
         worker.join(timeout=10)
         assert not worker.is_alive() and result[0]["status"] == REPAIRED
 
@@ -1026,7 +1263,12 @@ def _seed(
             ("fbs-material-smoke", NOW, "{}"),
         )
         for nm_id, quantity, capital, wac in (
-            (TARGET_NM_ID, 1952 if mixed else 1953, "19520" if mixed else "19530", "10"),
+            (
+                TARGET_NM_ID,
+                1952 if mixed else 1953,
+                "19520" if mixed else "19530",
+                "10",
+            ),
             (NON_TARGET_NM_ID, 21, "420", "20"),
         ):
             conn.execute(
@@ -1056,17 +1298,18 @@ def _seed(
                        status_digest,supplier_status,wb_status,source_observed_at,
                        facility_id,pool,nm_id,quantity,physical_quantity_delta,
                        capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at)
-                   VALUES(?,?,?,1,'handoff_debit',1,1,?,'status-digest',
+                   VALUES(?,?,?,1,'handoff_debit',1,1,?,?,
                           'complete','sorted',?,?,'FBS',?,1,-1,'-10','10',?,?)""",
                 (
                     event_id,
                     "warehouse_functional_cutover_v1",
                     order_id,
                     f"revision-{order_id}",
+                    _fingerprint(f"status-{order_id}"),
                     occurred_at,
                     FACILITY_ID,
                     TARGET_NM_ID,
-                    f"evidence-{order_id}",
+                    _fingerprint(f"evidence-{order_id}"),
                     occurred_at,
                 ),
             )
@@ -1110,8 +1353,8 @@ def _seed(
                 NOW,
                 DAY,
                 NOW,
-                "sha256:source-version",
-                "sha256:source-local",
+                _fingerprint("source-version"),
+                _fingerprint("source-local"),
                 "{}",
                 NOW,
             ),
@@ -1121,7 +1364,7 @@ def _seed(
                 if nm_id == TARGET_NM_ID and stage == "ff":
                     quantity = "1952" if mixed else "1953"
                     capital = "19520" if mixed else "19530"
-                    wac = "10"
+                    wac = LEGACY_WAC_161 if mixed else "10"
                     covered = "1953"
                     locations_quantity = "1953"
                     locations_capital = "19530"
@@ -1144,14 +1387,31 @@ def _seed(
                                 "cost_freshness": "exact",
                                 "quality": "exact",
                                 "expenses_complete_certification": True,
-                                "locations": [
-                                    {
-                                        "facility_id": FACILITY_ID,
-                                        "pool": "FBS",
-                                        "quantity": locations_quantity,
-                                        "capital_rub": locations_capital,
-                                    }
-                                ],
+                                "locations": (
+                                    [
+                                        {
+                                            "facility_id": FACILITY_ID,
+                                            "pool": "FBS",
+                                            "quantity": "1",
+                                            "capital_rub": "10",
+                                        },
+                                        {
+                                            "facility_id": MOSCOW_FACILITY_ID,
+                                            "pool": "FBS",
+                                            "quantity": "1952",
+                                            "capital_rub": "19520",
+                                        },
+                                    ]
+                                    if mixed and nm_id == TARGET_NM_ID and stage == "ff"
+                                    else [
+                                        {
+                                            "facility_id": FACILITY_ID,
+                                            "pool": "FBS",
+                                            "quantity": locations_quantity,
+                                            "capital_rub": locations_capital,
+                                        }
+                                    ]
+                                ),
                             }
                         ]
                         if stage == "ff"
@@ -1351,7 +1611,11 @@ def _seed_ready_snapshot(
     )
     params = CalculationParametersBlock(runtime=runtime).parameters_for_date(DAY)
     transformed = _transform_snapshot(
-        {"bundle_version": "incident-bundle", "as_of_date": DAY, "plan_json": json.dumps(base)},
+        {
+            "bundle_version": "incident-bundle",
+            "as_of_date": DAY,
+            "plan_json": json.dumps(base),
+        },
         costs={DAY: costs},
         warehouse_metrics={DAY: warehouse},
         warehouse_exact_dates={DAY},
