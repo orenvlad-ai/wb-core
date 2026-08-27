@@ -69,6 +69,15 @@ data/неallowlisted irreversible deltas. Слова `material`, `risky`, generi
 Router действует только для blocks, начатых после merge его редакции, и не
 переклассифицирует существующие `wbc 0008`/`wbc 0010`.
 
+Когда exact live resource меняют background producers, curator/executor сам
+выбирает cheapest safe consistency strategy из root `AGENTS.md` и
+[`07_codex_execution_protocol.md`](07_codex_execution_protocol.md); user mode,
+questionnaire или gate не создаются. Ordinary repo/read-only work без consistent
+boundary claim не меняется. Blanket producer stop запрещён, unknown writer/
+timer/cron/job/FD даёт `EVIDENCE_BLOCKED` с automatic diagnosis, а любой
+selective pause начинается late и не считается завершённым без exact
+prior-state restore и catch-up/readback proof.
+
 Post-task
 [`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) доступен
 только одному куратору production protocol/documentation как внутреннее

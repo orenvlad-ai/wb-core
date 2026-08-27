@@ -161,6 +161,40 @@ Routine repo/GitHub/tests/merge, existing live deploy и technical remediation
 readiness, target/destination binding, backup/recovery, one-submit, no secrets и
 readback/reconciliation остаются независимыми machine guards.
 
+## Consistency живого ресурса
+
+`Live resource` — DB/store, snapshot, queue/outbox, file/manifest/cache,
+process-owned state или иной exact ресурс, который может менять timer, service,
+cron, HTTP/manual action либо external producer. Правило включается, когда
+операция требует consistent boundary для его mutation/copy/rebuild/cutover;
+обычная repo/user-artifact работа и query-only observation без такого claim не
+получают новых требований.
+
+- Пользователь не выбирает consistency mode. Curator/executor по exact resource
+  и producer semantics автоматически выбирает самый дешёвый safe вариант:
+  semantic/material revalidation либо rebase под коротким lock для допустимого
+  append-only/unrelated drift; selective quiet window только для exact pauseable
+  producers на участке `fresh preflight -> one submit -> readback`; online
+  snapshot/generation с tail/catch-up и коротким atomic switch для долгой работы;
+  immutable exact CAS, когда ресурс обязан не меняться.
+- Blanket stop всех cron/timers/services запрещён.
+  `business-data-maintenance` — reusable domain mechanism для подходящих exact
+  resource scopes, не universal answer. Producer, чьи пропущенные work/events
+  нельзя durably replay-ить, не pause-ится ради quietness; continuous observers
+  остаются active, а unrelated writes исключаются semantically либо проходят
+  revalidation.
+- До pause фиксируются exact resource identity, полный classified producer set
+  и exact prior desired/actual control state. Unknown/unclassified writer,
+  timer, cron, job или FD означает `EVIDENCE_BLOCKED` с automatic diagnosis, а
+  не human gate. Pause начинается как можно позже; design/PR/CI, preparation и
+  long copy остаются online, когда это безопасно.
+- `COMPLETE` после pause требует exact prior-state restore и catch-up proof:
+  timer/service health и next trigger, backlog/watermark/freshness, отсутствие
+  gaps/loss/duplicates, а также crash/timeout-safe durable recovery и readback.
+  Простого enable timer недостаточно. Это правило не заменяет target/destination
+  binding, one-submit/no-blind-retry, backup/recovery, readback/reconciliation
+  или domain contracts.
+
 Эта revision router-а применяется только к technical blocks, начатым после её
 merge. Она не будит, не меняет и не reclassify задним числом `wbc 0008` или
 `wbc 0010`.
