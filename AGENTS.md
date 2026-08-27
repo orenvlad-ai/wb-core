@@ -29,8 +29,10 @@ Current canonical source acquisition остаётся server-side.
 - При первом substantive сообщении новой WBC-задачи main chat автоматически
   получает номер, имя `wbc NNNN <короткое русское название>` и pin. Только
   semantic часть имеет максимум 25 символов.
-- Ясное намерение `реализуй` / `исправь` / `сделай` разрешает implementation
-  dispatch. После design-интервью его разрешают `запускай` / `принимаю`.
+- Ясное намерение `реализуй` / `исправь` / `сделай` автоматически компилирует
+  accepted goal в authorization envelope и разрешает автономный implementation
+  до `COMPLETE`. После design-интервью тот же контракт активируют `запускай` /
+  `принимаю` / `доведи до конца`; пользователь не выбирает режим или trust tier.
 - `Read-only` задаёт mutation/authority boundary, но не выбирает actor. Любой
   substantive technical execution образует bounded block одного из двух видов:
   diagnostic/read-only block без branch/worktree/PR/mutation либо implementation
@@ -112,26 +114,56 @@ Current canonical source acquisition остаётся server-side.
   mutation.
 - Пользователь не подтверждает повторно уже выбранную цель, business meaning,
   accepted exact plan или обычные технические решения внутри scope.
+- На goal существует одна owner-facing surface. Перед любым owner-facing gate
+  обязателен canonical receipt валидатора
+  [`apps/codex_authorization_gate.py`](apps/codex_authorization_gate.py) по
+  контракту
+  [`docs/architecture/15_codex_authorization_router.md`](docs/architecture/15_codex_authorization_router.md).
+  Другой curator/subagent только маршрутизирует structured evidence owner-у;
+  duplicate pending/answered gate и subset accepted extension не создают второй
+  вопрос.
 
 Минимальный task passport main chat: цель; accepted decisions; included и
 excluded scope; acceptance; текущий technical execution block и subagent identity;
 PR/plan hash/terminal receipt после появления.
 
-## Human gates
+## Authorization router и human gates
 
-Остановись только перед одним из следующих событий:
+Внутри системы существует только три outcome:
+`AUTO_CONTINUE`, `EVIDENCE_BLOCKED`, `HUMAN_REQUIRED`. Их reason codes закрыты,
+receipt и `decision_digest` byte-stable. Storage medium (`SQLite`, file, server,
+service, production location) не участвует в gate classification; учитывается
+только semantic/final effect. Protected business facts отделены от repo-declared
+operational control metadata.
 
-1. genuinely new business/product meaning, не выводимый из accepted goal;
-2. material scope expansion;
-3. credentials/login/2FA/captcha без разрешённого non-interactive пути;
-4. exact security/access/ruleset/new-destination change, не preauthorized;
-5. proven irreversible action либо production-data scope, который ещё не
-   покрыт accepted task-scoped authorization/passport.
+`HUMAN_REQUIRED` допустим только когда exact machine delta доказывает хотя бы
+одно из: новый business semantic; новый final target; новый destination; новый
+external/publication/financial/security-access effect; credential/login/2FA/
+captcha capability; protected-data final delta; irreversible final delta, не
+покрытый allowlist. Слова `material`, `risky`, `production DB write`,
+`business-data mutation`, `scope expansion` или `irreversible` без exact delta
+не являются reason code и не разрешают вопрос. Если эти predicates не доказаны,
+owner-facing permission question protocol-invalid.
+
+Missing identity/evidence даёт `EVIDENCE_BLOCKED` и automatic diagnosis/
+correction, а не вопрос. Pre-submit same-goal defect, fresh readiness/operation
+identity, unrelated/stale warning и allowlisted bounded dependency remediation
+дают `AUTO_CONTINUE`; terminal identity повторно не используется. После
+`submitted`/`ambiguous` mutation разрешены только same-operation query-only
+readback/reconciliation, blind retry запрещён. Required dependency не
+обходится: automatic remediation требует exact allowlist, zero undeclared
+business/financial/external/publication/security/destination effects и
+preservation/readback predicates.
 
 Routine repo/GitHub/tests/merge, existing live deploy и technical remediation
-автономны внутри authorized scope. Accepted exact plan заранее разрешает
-перечисленные в нём settings changes. Missing capability сообщает точный
-tooling blocker; оно не превращается в запрос покомандных approvals.
+автономны внутри envelope. `approval_policy=never`/полный technical execution —
+обычный standing profile, не предлагаемый пользователю режим. Exact CAS,
+readiness, target/destination binding, backup/recovery, one-submit, no secrets и
+readback/reconciliation остаются независимыми machine guards.
+
+Эта revision router-а применяется только к technical blocks, начатым после её
+merge. Она не будит, не меняет и не reclassify задним числом `wbc 0008` или
+`wbc 0010`.
 
 ## Repository и release flow
 
