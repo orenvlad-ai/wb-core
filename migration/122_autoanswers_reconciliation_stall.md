@@ -46,6 +46,12 @@ Candidate ordering is:
 but do not hold the automatic barrier. Started WB writes retain mandatory GET
 readback priority and cannot create another POST.
 
+This includes `terminal_error` rows carrying
+`owner_policy_unsafe_public_reply`: their settled provider evidence remains
+immutable, they have no publication aggregate, and neither lease reclaim nor
+reconciliation may replay their audited Node result. The next candidate stays
+eligible under the same literal priority rules.
+
 Runtime observability exposes exact acknowledged/action/preserved/unchanged
 counts, remaining membership, recent delta rate, ETA, last progress/action,
 repeated candidate fingerprint, bucket age, real AI completions, confirmed WB

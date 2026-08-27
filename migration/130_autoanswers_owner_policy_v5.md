@@ -23,3 +23,12 @@ publication immutability. A zero-attempt publication may be atomically rekeyed
 to the owner-policy reply hash while its prior key/reply hash/route and reason
 are retained in append-only audit. Started writes/readbacks are never changed,
 deleted, repeated or superseded.
+
+The ordinary processing path has one separate typed semantic refusal:
+`owner_policy_unsafe_public_reply`. It terminalizes only the exact processing
+job, clears its lease and appends hash/pattern evidence before any publication
+aggregate exists. If Node audit and settlement already committed, recovery
+reuses that exact audited result, preserves the settled amount, performs zero
+new provider calls and reaches the same `terminal_error`. Repeated worker ticks
+cannot reclaim the terminal job. No generic `RuntimeError` is caught or
+terminalized by this contract.

@@ -18,6 +18,22 @@ OWNER_POLICY_PATH = (
     / "contracts"
     / "wb_autoanswers_owner_policy_v1.json"
 )
+OWNER_POLICY_UNSAFE_PUBLIC_REPLY_CODE = "owner_policy_unsafe_public_reply"
+
+
+class OwnerPolicyUnsafePublicReplyError(RuntimeError):
+    """Typed semantic refusal for one composed public reply.
+
+    Configuration, identity and template failures intentionally remain ordinary
+    ``RuntimeError`` instances so callers cannot mistake an invariant failure
+    for a safely terminalizable per-review outcome.
+    """
+
+    code = OWNER_POLICY_UNSAFE_PUBLIC_REPLY_CODE
+
+    def __init__(self, message: str, *, evidence: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.evidence = dict(evidence)
 
 
 @lru_cache(maxsize=1)
@@ -464,10 +480,25 @@ def apply_owner_policy(
 
     reply, unfortunately_action = normalize_unfortunately(reply)
     forbidden = [str(item) for item in policy.get("forbidden_reply_patterns") or []]
-    if route == "public_only" and any(
-        re.search(pattern, reply, flags=re.IGNORECASE) for pattern in forbidden
-    ):
-        raise RuntimeError("WB Autoanswers owner-policy composed an unsafe public reply")
+    matched_forbidden = [
+        pattern
+        for pattern in forbidden
+        if route == "public_only" and re.search(pattern, reply, flags=re.IGNORECASE)
+    ]
+    if matched_forbidden:
+        raise OwnerPolicyUnsafePublicReplyError(
+            "WB Autoanswers owner-policy composed an unsafe public reply",
+            evidence={
+                "contract": OWNER_POLICY_CONTRACT,
+                "policy_version": OWNER_POLICY_VERSION,
+                "source_route": source_route,
+                "publication_route": route,
+                "owner_policy_reason": reason,
+                "reply_sha256": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
+                "semantic_text_sha256": decision["semantic_text_sha256"],
+                "matched_forbidden_patterns": matched_forbidden,
+            },
+        )
     if len(re.findall(r"\bк\s+сожалению\b", reply, flags=re.IGNORECASE)) > 1:
         raise RuntimeError("WB Autoanswers owner-policy duplicated 'к сожалению'")
 
