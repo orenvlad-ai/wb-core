@@ -67,6 +67,7 @@ from packages.application.sqlite_contention import connect_sqlite
 from packages.application.root_storage_policy import (
     admit_root_write,
     predict_sqlite_backup_bytes,
+    storage_destination_root,
 )
 from packages.application.wb_autoanswers_owner_policy import (
     OWNER_POLICY_VERSION,
@@ -1520,7 +1521,16 @@ class AutoanswersRepository:
                 / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
                 / str(compressed["latest_filename"])
             )
-        backup_dir = self.runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        schema_root = f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+        backup_dir = (
+            storage_destination_root(
+                "autoanswers_first_schema",
+                relative_root=schema_root,
+            )
+            if self.runtime_dir.resolve(strict=False)
+            == Path("/opt/wb-core-runtime/state")
+            else self.runtime_dir / "backups" / schema_root
+        )
         stamp = self._now().strftime("%Y%m%dT%H%M%SZ")
         backup_path = backup_dir / (
             f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__{stamp}__{uuid4().hex[:8]}.sqlite3"

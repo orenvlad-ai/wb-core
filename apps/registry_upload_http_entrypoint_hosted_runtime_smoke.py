@@ -2355,7 +2355,7 @@ def main() -> None:
                     "sha256:ads-reviewed",
                     "--approval-reference",
                     "human-gate-ads",
-                    "/opt/wb-core-runtime/backups/ads-historical",
+                    "/opt/wb-core-runtime/state/backups/ads-historical",
                     "--reviewed-plan-stdin",
                 )
             ):
@@ -2585,7 +2585,7 @@ def main() -> None:
                 "--reviewed-plan-stdin",
                 zero_fingerprint,
                 "github-pr#issuecomment-apply-gate",
-                "/opt/wb-core-runtime/backups/ff-pool-zero-physical-production",
+                "/opt/wb-core-runtime/state/backups/ff-pool-zero-physical-production",
             )
         ):
             raise AssertionError("zero-physical hosted apply lost exact scope, SHA, or gate")
@@ -2697,7 +2697,7 @@ def main() -> None:
                 "--reviewed-plan-stdin",
                 overhead_fingerprint,
                 "github-pr#issuecomment-apply-gate",
-                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill",
+                "/opt/wb-core-runtime/state/backups/ff-pool-overhead-backfill",
             )
         ):
             raise AssertionError("overhead hosted apply lost exact SHA, plan, or gate")
@@ -2807,7 +2807,7 @@ def main() -> None:
                 "--reviewed-plan-stdin",
                 mapping_fingerprint,
                 "github-pr#issuecomment-orenburg-apply-gate",
-                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+                "/opt/wb-core-runtime/state/backups/ff-fbs-mapping-extension-production",
             )
         ):
             raise AssertionError(

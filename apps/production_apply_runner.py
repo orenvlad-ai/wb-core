@@ -41,6 +41,9 @@ from apps.release_protocol import (  # noqa: E402
     CANONICAL_REPOSITORY,
     validate_production_manifest,
 )
+from packages.application.root_storage_policy import (  # noqa: E402
+    storage_destination_root,
+)
 
 
 APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v4"
@@ -54,6 +57,9 @@ WARM_MOUNT_PROBE_RECEIPT_SCHEMA = (
 WARM_MOUNT_PROBE_MARKER = "wb-core-root-warm-archive-mount-probe-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
+WARM_ARCHIVE_LEGACY_EVIDENCE_BASE = (
+    Path("/opt/wb-core-runtime/state") / "private-evidence" / "production-goals"
+)
 MAX_QUALIFICATION_CANDIDATES = 4
 MAX_WARM_READINESS_ATTEMPTS = 3
 MAX_GITHUB_COMMENT_BYTES = 65_536
@@ -1476,11 +1482,21 @@ def run_dynamic_goal(
     approval_reference: str,
     warm_readiness: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE and not isinstance(
-        warm_readiness, Mapping
-    ):
+    warm_archive = goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE
+    if warm_archive and not isinstance(warm_readiness, Mapping):
         raise ApplyError("warm archive operation requires a ready pre-operation receipt")
-    evidence_dir = f"/opt/wb-core-runtime/state/private-evidence/production-goals/{operation}"
+    # The completed WBC 0008 exact-six protocol is immutable: its operation
+    # identities and manifest bindings remain on the historical evidence path.
+    # Only future/current generic production-goal evidence is registry-routed.
+    evidence_dir = (
+        str(WARM_ARCHIVE_LEGACY_EVIDENCE_BASE / operation)
+        if warm_archive
+        else str(
+            storage_destination_root("production_apply_evidence")
+            / "production-goals"
+            / operation
+        )
+    )
     attempts: list[dict[str, Any]] = []
     previous_material_digest = ""
     previous_material_components: Any = None

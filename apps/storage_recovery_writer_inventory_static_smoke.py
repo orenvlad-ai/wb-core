@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -270,6 +271,46 @@ WRITERS = [
 ]
 
 
+FORBIDDEN_ROOT_ARTIFACT_PREFIXES = (
+    "/opt/wb-core-runtime/backups",
+    "/opt/wb-core-runtime/evidence",
+    "/opt/wb-core-runtime/state/private-evidence",
+    "/opt/wb-core-runtime/state/incident_backups",
+    "/opt/wb-core-runtime/state/forensics",
+    "/opt/wb-core-runtime/state/recovery_backups",
+)
+
+# These byte-stable literal sets are historical exact-six/sanitation readers or
+# terminal identity validators. Any added literal, including inside one of these
+# files, must fail CI until it is removed or this reviewed baseline is changed.
+LEGACY_ROOT_LITERAL_DIGESTS = {
+    "apps/root_storage_warm_archive.py": (
+        27,
+        "b2cd120f0000048c4a0b3a827fc310ca855c33521b141e053d5825d429f0e76d",
+    ),
+    "apps/storage_recovery_sanitation.py": (
+        1,
+        "5ca4a47efe26326d425949a68e3b3d6ef0829e1a18a19405dc4a9149944823e0",
+    ),
+    "apps/storage_recovery_sanitation_job.py": (
+        3,
+        "635069f957f18490d66d4cd2fc5e07a2b2d62f179adf46c5dc9ceec4b6ae6c1f",
+    ),
+    "apps/production_apply_runner.py": (
+        9,
+        "5021bf7901dfe93b2f4efba3e9108b0f05456a5ec5bad94e1f46a03afdda3169",
+    ),
+    "apps/registry_upload_http_entrypoint_hosted_runtime.py": (
+        5,
+        "a897490610c81eebb9485146e1a17d8132eb5032f76d7ce068386782c2217f4e",
+    ),
+    "apps/wbc0008_warm_archive_receipt_reconciliation_probe.py": (
+        2,
+        "12a05e132e42e11be5fa40f62f6e66a3cf0d3ad400f88e5c6f43f274f7efcdd6",
+    ),
+}
+
+
 def build_inventory() -> dict[str, object]:
     classified_sources = {str(item["source"]) for item in WRITERS}
     observed = set()
@@ -300,11 +341,38 @@ def build_inventory() -> dict[str, object]:
         str(item["owner"]): str(item["classification"])
         for item in load_policy()["producers"]
     }
+    policy = load_policy()
+    storage_registry = dict(policy["storage_registry"])
+    storage_producers = {
+        str(item["owner"]): dict(item)
+        for item in storage_registry["producers"]
+    }
     unregistered_owners = sorted(
         str(item["owner"])
         for item in WRITERS
         if str(item["owner"]) not in producer_registry
     )
+    unregistered_storage_owners = sorted(
+        str(item["owner"])
+        for item in WRITERS
+        if str(item["owner"]) not in storage_producers
+    )
+    current_root_storage_producers = sorted(
+        str(item["owner"])
+        for item in storage_producers.values()
+        if item.get("current") is True
+        and item.get("destination_role") == "root"
+        and item.get("data_class")
+        not in {"canonical_business_store", "protected_excluded_promo_artifact"}
+    )
+    incomplete_lifecycle_owners = sorted(
+        owner
+        for owner, item in storage_producers.items()
+        if not str(item.get("lifecycle_policy") or "")
+        or str(item.get("lifecycle_policy") or "")
+        not in storage_registry["lifecycle_policies"]
+    )
+    root_literal_violations, legacy_root_literal_evidence = _root_literal_inventory()
     admission_missing = sorted(
         {
             str(item["source"])
@@ -351,6 +419,11 @@ def build_inventory() -> dict[str, object]:
         "unclassified_backup_call_sources": unclassified,
         "catalog_sources_missing": missing,
         "unregistered_root_storage_owners": unregistered_owners,
+        "unregistered_storage_registry_owners": unregistered_storage_owners,
+        "current_root_storage_producers": current_root_storage_producers,
+        "incomplete_lifecycle_owners": incomplete_lifecycle_owners,
+        "root_artifact_literal_violations": root_literal_violations,
+        "legacy_root_literal_evidence": legacy_root_literal_evidence,
         "backup_call_counts": backup_call_counts,
         "admission_call_counts": admission_call_counts,
         "backup_entrypoints": backup_entrypoints,
@@ -365,12 +438,74 @@ def build_inventory() -> dict[str, object]:
             and not missing
             and not scheduled_full
             and not unregistered_owners
+            and not unregistered_storage_owners
+            and not current_root_storage_producers
+            and not incomplete_lifecycle_owners
+            and not root_literal_violations
             and not unregistered_entrypoint_owners
             and not unbounded_dynamic_entrypoint_owners
             and not admission_missing
             else "failed"
         ),
     }
+
+
+def _root_literal_inventory() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    violations: list[dict[str, object]] = []
+    evidence: list[dict[str, object]] = []
+    for base in ("apps", "packages"):
+        for path in (ROOT / base).rglob("*.py"):
+            relative = str(path.relative_to(ROOT))
+            if (
+                relative == "apps/storage_recovery_writer_inventory_static_smoke.py"
+                or relative.endswith("_smoke.py")
+                or relative.endswith("_test.py")
+                or "/tests/" in relative
+            ):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            rows = sorted(
+                [
+                    {
+                    "line": int(node.lineno),
+                    "literal": node.value,
+                    }
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith(FORBIDDEN_ROOT_ARTIFACT_PREFIXES)
+                ],
+                key=lambda item: (int(item["line"]), str(item["literal"])),
+            )
+            values = sorted(str(item["literal"]) for item in rows)
+            if not values:
+                continue
+            expected = LEGACY_ROOT_LITERAL_DIGESTS.get(relative)
+            digest = hashlib.sha256(
+                json.dumps(values, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            record = {
+                "source": relative,
+                "count": len(values),
+                "sha256": digest,
+                "rows": rows,
+            }
+            if expected == (len(values), digest):
+                evidence.append(record)
+            else:
+                violations.append(record)
+    missing_legacy_files = sorted(
+        set(LEGACY_ROOT_LITERAL_DIGESTS)
+        - {str(item["source"]) for item in evidence}
+    )
+    violations.extend(
+        {"source": source, "reason": "legacy_literal_baseline_missing_or_changed"}
+        for source in missing_legacy_files
+    )
+    return sorted(violations, key=lambda item: str(item["source"])), sorted(
+        evidence,
+        key=lambda item: str(item["source"]),
+    )
 
 
 def _writer_call_counts(source: str) -> tuple[int, int]:

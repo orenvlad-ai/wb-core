@@ -17,6 +17,130 @@
     "backup": "/opt/wb-core-runtime/state/backups",
     "generation": "/opt/wb-core-runtime/state/generations"
   },
+  "storage_registry": {
+    "contract_version": "wb_core_storage_registry_v1",
+    "filesystems": {
+      "root": {
+        "path": "/",
+        "source": "/dev/sda1",
+        "filesystem_uuid": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
+        "filesystem_type": "ext4",
+        "required_mount_options": ["rw"],
+        "reserve_mode": "root_stage_0_normal",
+        "reserve_bytes": 26843545600
+      },
+      "backup": {
+        "path": "/opt/wb-core-runtime/state/backups",
+        "source": "/dev/sdb1",
+        "filesystem_uuid": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
+        "filesystem_type": "ext4",
+        "required_mount_options": ["rw"],
+        "reserve_mode": "finance_next_replacement_plus_emergency",
+        "emergency_reserve_bytes": 8589934592
+      },
+      "generation": {
+        "path": "/opt/wb-core-runtime/state/generations",
+        "source": "/dev/sdc1",
+        "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
+        "filesystem_type": "ext4",
+        "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
+        "reserve_mode": "fixed",
+        "reserve_bytes": 8589934592
+      }
+    },
+    "lifecycle_policies": {
+      "domain_checkpoint": {
+        "retention_rule": "domain registry eligibility plus verified rollback state; no age/count-only deletion",
+        "hold_rule": "current, failed, quarantined, incomplete, foreign and rollback-required artifacts are protected",
+        "compression": "producer-specific",
+        "restore_path": "domain recovery registry and exact checkpoint readback",
+        "rpo_seconds": null,
+        "rto_seconds": null
+      },
+      "finance_restore_set": {
+        "retention_rule": "one verified current set; temporary second set only during atomic replacement",
+        "hold_rule": "current, replacement, failed, incomplete and transaction-bound sets are protected",
+        "compression": "none",
+        "restore_path": "isolated raw and operational restore readback then current-set selection",
+        "rpo_seconds": 604800,
+        "rto_seconds": 14400
+      },
+      "verified_reconciliation_evidence": {
+        "retention_rule": "retain through exact terminal reconciliation; later release requires a reviewed family lifecycle operation",
+        "hold_rule": "active, ambiguous, failed, legal, incident, forensic and unreconciled evidence is protected",
+        "compression": "verified zstd when the producer contract provides it; otherwise exact raw copy",
+        "restore_path": "manifest-bound full restore or producer-specific verified rollback",
+        "rpo_seconds": null,
+        "rto_seconds": null
+      },
+      "verified_compressed_evidence": {
+        "retention_rule": "retain the minimal verified compressed recovery generation; release only after terminal restore proof",
+        "hold_rule": "active, ambiguous, failed, legal, incident, forensic and sole restore evidence is protected",
+        "compression": "zstd plus source size and SHA readback",
+        "restore_path": "stream/full restore with exact SHA and SQLite integrity where applicable",
+        "rpo_seconds": null,
+        "rto_seconds": null
+      },
+      "temporary_candidate": {
+        "retention_rule": "release only by the same candidate state machine after terminal success or exact abort",
+        "hold_rule": "active, ambiguous, opened, drifted and unjournaled candidates are protected",
+        "compression": "none",
+        "restore_path": "producer-specific candidate abort or no-op cleanup",
+        "rpo_seconds": null,
+        "rto_seconds": null
+      },
+      "retained_legacy_no_writer": {
+        "retention_rule": "no current writer and no automatic deletion; later exact allowlisted lifecycle only",
+        "hold_rule": "all legacy artifacts remain protected until separately classified",
+        "compression": "as retained",
+        "restore_path": "family-specific historical restore evidence",
+        "rpo_seconds": null,
+        "rto_seconds": null
+      }
+    },
+    "producers": [
+      {"owner":"warehouse_recovery_policy","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-recovery","warehouse-functional-sync"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"calculation_parameters_and_economics","current":true,"data_class":"target_before_image","destination_role":"backup","relative_roots":["calculation-parameters"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"promo_collector_artifacts","current":true,"data_class":"protected_excluded_promo_artifact","destination_role":"root","relative_roots":["opt/wb-core-runtime/state/promo_xlsx_collector_runs"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"finance_post_cutover_backup_rotation","current":true,"data_class":"finance_restore_set","destination_role":"backup","relative_roots":["finance-storage-split-snapshots"],"lifecycle_policy":"finance_restore_set","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"finance_storage_split_coherent_source","current":true,"data_class":"generation_candidate","destination_role":"generation","relative_roots":[""],"lifecycle_policy":"temporary_candidate","capacity_mode":"domain_guard","max_single_write_bytes":68719476736},
+      {"owner":"finance_rollback_candidate","current":true,"data_class":"generation_candidate","destination_role":"generation","relative_roots":[""],"lifecycle_policy":"temporary_candidate","capacity_mode":"domain_guard","max_single_write_bytes":68719476736},
+      {"owner":"registry_operational_store","current":true,"data_class":"canonical_business_store","destination_role":"canonical_store","relative_roots":[],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":68719476736},
+      {"owner":"registry_sqlite_backup_primitive","current":true,"data_class":"caller_bound_full_copy","destination_role":"caller_bound","relative_roots":[],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"caller_owner","max_single_write_bytes":34359738368},
+      {"owner":"ads_historical_recovery","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["ads-historical"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"supplier_26gn390_recovery","current":false,"data_class":"full_copy","destination_role":"backup","relative_roots":["supplier-26gn390-recovery"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"supplier_cny_payment_10_recovery","current":false,"data_class":"full_copy","destination_role":"backup","relative_roots":["supplier-cny-payment-10-recovery"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"supplier_26gn527_legacy_apply","current":false,"data_class":"disabled","destination_role":"backup","relative_roots":["supplier-26gn527-vtb-recovery"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
+      {"owner":"ff_transit_cost_recovery","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["ff-reservations-transit-cost-recovery"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_pool_overhead_backfill","current":true,"data_class":"full_copy_and_evidence","destination_role":"backup","relative_roots":["ff-pool-overhead-backfill"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"supplier_factual_date_correction","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["supplier-factual-date-corrections","supplier_factual_date_corrections"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"autoanswers_first_schema","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["wb_autoanswers_schema_v1","wb_autoanswers_schema_v2","wb_autoanswers_schema_v3","wb_autoanswers_schema_v4","wb_autoanswers_schema_v5","wb_autoanswers_schema_v6","wb_autoanswers_schema_v7","wb_autoanswers_schema_v8","wb_autoanswers_schema_v9","wb_autoanswers_schema_v10"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"autoanswers_activation_candidate","current":true,"data_class":"temporary_full_copy","destination_role":"backup","relative_roots":["autoanswers-activation-candidates","wb_autoanswers_schema_v10"],"lifecycle_policy":"temporary_candidate","capacity_mode":"shared_backup_floor","max_single_write_bytes":68719476736},
+      {"owner":"proxy_margin_historical_backfill","current":false,"data_class":"full_copy","destination_role":"backup","relative_roots":["sheet_vitrina_v1_proxy_margin_3_historical_backfill"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"buyout_mature_backfill","current":true,"data_class":"full_copy_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"proxy_v4_transit_repair","current":true,"data_class":"full_copy_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"sheet_vitrina_exact_date_recovery","current":true,"data_class":"full_copy_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"promo_metric_eligibility_recompute","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["promo_metric_eligibility_recompute"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"spp_metric_recompute","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["spp_metric_recompute"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"finance_legacy_helper","current":false,"data_class":"full_copy","destination_role":"backup","relative_roots":["wb_finance_stale_cost"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
+      {"owner":"canonical_cost_diagnostic_candidate","current":true,"data_class":"ephemeral_candidate","destination_role":"ephemeral","relative_roots":[],"lifecycle_policy":"temporary_candidate","capacity_mode":"ephemeral","max_single_write_bytes":34359738368},
+      {"owner":"canonical_cost_preflight_candidate","current":true,"data_class":"ephemeral_candidate","destination_role":"ephemeral","relative_roots":[],"lifecycle_policy":"temporary_candidate","capacity_mode":"ephemeral","max_single_write_bytes":34359738368},
+      {"owner":"production_apply_evidence","current":true,"data_class":"private_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_stage_7a_production","current":true,"data_class":"checkpoint_and_evidence","destination_role":"backup","relative_roots":["ff-stage-7a-production"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_pool_zero_physical_production","current":true,"data_class":"private_evidence","destination_role":"backup","relative_roots":["ff-pool-zero-physical-production"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_fbs_mapping_extension_production","current":true,"data_class":"checkpoint_and_evidence","destination_role":"backup","relative_roots":["ff-fbs-mapping-extension-production"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"ff_pool_cutover_production","current":true,"data_class":"checkpoint_and_evidence","destination_role":"backup","relative_roots":["ff-pool-cutover-production"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_archival_estimate","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-archival-estimate"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_functional_cutover","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-functional"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_functional_recovery","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-functional-recovery"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_functional_economics","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-functional-economics"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_supplier_certification","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-supplier-certification-replay"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_opening","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-opening"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"legacy_backup_artifacts","current":false,"data_class":"retained_legacy","destination_role":"backup","relative_roots":["proxy-v4-pr948","supplier-26gn527-vtb-recovery","canonical-vitrina-publication","supplier_factual_date_corrections","canonical-cost-engine","wb_finance_stale_cost","lost+found"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
+      {"owner":"root_legacy_backup_families","current":false,"data_class":"retained_legacy","destination_role":"root","relative_roots":["opt/wb-core-runtime/backups","opt/wb-core-runtime/evidence","opt/wb-core-runtime/state/private-evidence","opt/wb-core-runtime/state/incident_backups","opt/wb-core-runtime/state/forensics","opt/wb-core-runtime/state/recovery_backups"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
+      {"owner":"root_warm_archive_exact_six","current":false,"data_class":"terminal_exact_six","destination_role":"backup","relative_roots":["root-warm-archive-wbc0008-006"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"disabled","max_single_write_bytes":0}
+    ]
+  },
   "scan_roots": [
     "/opt/wb-core-runtime/backups",
     "/opt/wb-core-runtime/evidence",

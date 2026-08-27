@@ -29,6 +29,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.root_storage_policy import (  # noqa: E402
+    storage_destination_root,
+)
+
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
 WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
@@ -7761,7 +7765,7 @@ def _run_remote_ads_historical_recovery(
                 "--confirm-fingerprint",
                 fingerprint,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/ads-historical",
+                str(storage_destination_root("ads_historical_recovery")),
                 "--approval-reference",
                 approval_reference.strip(),
                 "--reviewed-plan-stdin",
@@ -7872,7 +7876,7 @@ def _run_remote_ff_stage_7a_production(
                 "--actor",
                 actor.strip(),
                 "--backup-dir",
-                "/opt/wb-core-runtime/state/backups/ff-stage-7a-production",
+                str(storage_destination_root("ff_stage_7a_production")),
             ]
         )
     runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
@@ -8018,7 +8022,7 @@ def _run_remote_ff_pool_zero_physical_production(
                 "--actor",
                 actor.strip(),
                 "--evidence-dir",
-                "/opt/wb-core-runtime/backups/ff-pool-zero-physical-production",
+                str(storage_destination_root("ff_pool_zero_physical_production")),
             ]
         )
     runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
@@ -8199,9 +8203,9 @@ def _run_remote_ff_pool_overhead_backfill(
                 "--actor",
                 actor.strip(),
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill",
+                str(storage_destination_root("ff_pool_overhead_backfill")),
                 "--evidence-dir",
-                "/opt/wb-core-runtime/backups/ff-pool-overhead-backfill/evidence",
+                str(storage_destination_root("ff_pool_overhead_backfill") / "evidence"),
             ]
         )
     runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
@@ -8380,7 +8384,7 @@ def _run_remote_ff_fbs_mapping_extension_production(
                 "--actor",
                 actor.strip(),
                 "--evidence-dir",
-                "/opt/wb-core-runtime/backups/ff-fbs-mapping-extension-production",
+                str(storage_destination_root("ff_fbs_mapping_extension_production")),
             ]
         )
     runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
@@ -8732,7 +8736,7 @@ def _run_remote_ff_pool_cutover_runner(
                 "--actor",
                 actor,
                 "--backup-dir",
-                "/opt/wb-core-runtime/state/backups/ff-pool-cutover-production",
+                str(storage_destination_root("ff_pool_cutover_production")),
             ]
         )
         runner_input = json.dumps(reviewed_envelope, ensure_ascii=False, sort_keys=True)
@@ -9149,7 +9153,7 @@ def _run_remote_warehouse_archival_estimate_action(
                 "--approval-reference",
                 approval_reference.strip(),
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-archival-estimate",
+                str(storage_destination_root("warehouse_archival_estimate")),
             ]
         )
     elif action == "rollback":
@@ -9162,7 +9166,7 @@ def _run_remote_warehouse_archival_estimate_action(
                 "--reason",
                 reason.strip(),
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-archival-estimate",
+                str(storage_destination_root("warehouse_archival_estimate")),
             ]
         )
     command = " && ".join(
@@ -9228,7 +9232,10 @@ def _run_remote_warehouse_functional_action(
     if not target.environment_file:
         raise ValueError("warehouse functional runner requires the hosted environment file")
     warehouse_sync_backup_dir = str(
-        Path(runtime_dir) / "backups" / "warehouse-functional-sync"
+        storage_destination_root(
+            "warehouse_recovery_policy",
+            relative_root="warehouse-functional-sync",
+        )
     )
 
     if action == "enable-hourly":
@@ -9294,7 +9301,9 @@ def _run_remote_warehouse_functional_action(
             raise ValueError("warehouse functional plan and --fingerprint do not match")
         runner_args.extend(["--plan-file", "/dev/stdin", "--fingerprint", fingerprint])
         if action == "cutover-apply":
-            runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional"])
+            runner_args.extend(
+                ["--backup-dir", str(storage_destination_root("warehouse_functional_cutover"))]
+            )
         elif action == "sync-apply":
             runner_args.extend(
                 [
@@ -9306,16 +9315,18 @@ def _run_remote_warehouse_functional_action(
             runner_args.extend(
                 [
                     "--backup-dir",
-                    "/opt/wb-core-runtime/backups/warehouse-functional-recovery",
+                    str(storage_destination_root("warehouse_functional_recovery")),
                 ]
             )
         elif action == "economics-backfill-apply":
-            runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional-economics"])
+            runner_args.extend(
+                ["--backup-dir", str(storage_destination_root("warehouse_functional_economics"))]
+            )
         elif action == "supplier-certification-apply":
             runner_args.extend(
                 [
                     "--backup-dir",
-                    "/opt/wb-core-runtime/backups/warehouse-supplier-certification-replay",
+                    str(storage_destination_root("warehouse_supplier_certification")),
                 ]
             )
     elif action == "supplier-certification-rollback":
@@ -9328,7 +9339,7 @@ def _run_remote_warehouse_functional_action(
                 "--reason",
                 reason,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-supplier-certification-replay",
+                str(storage_destination_root("warehouse_supplier_certification")),
             ]
         )
     elif action == "rollback":
@@ -9337,7 +9348,7 @@ def _run_remote_warehouse_functional_action(
                 "--fingerprint",
                 fingerprint,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-functional",
+                str(storage_destination_root("warehouse_functional_cutover")),
             ]
         )
     elif action == "backup":
@@ -10093,7 +10104,7 @@ def _run_remote_warehouse_opening_action(
                 "--fingerprint",
                 fingerprint,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-opening",
+                str(storage_destination_root("warehouse_opening")),
             ]
         )
     elif action == "rollback":
@@ -10102,7 +10113,7 @@ def _run_remote_warehouse_opening_action(
                 "--fingerprint",
                 fingerprint,
                 "--backup-dir",
-                "/opt/wb-core-runtime/backups/warehouse-opening",
+                str(storage_destination_root("warehouse_opening")),
             ]
         )
     elif action == "diagnose-discrepancy":

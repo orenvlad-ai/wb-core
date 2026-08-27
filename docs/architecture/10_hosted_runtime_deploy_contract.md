@@ -465,6 +465,18 @@ guards. Each opener must be the exact healthy declared systemd MainPID, bind the
 canonical device/inode through its FD and use an allowed read/write mode;
 pathname/process/cgroup fallback, PID ambiguity and undeclared modes fail closed.
 Unknown/unregistered objects never acquire mutable status by name similarity.
+After WBC0008 block 029 the same atomic artifact also owns
+`wb_core_storage_registry_v1`: exact root/backup/generation mount identity,
+root normal reserve, fresh Finance-next-replacement plus 8 GiB backup reserve,
+an 8 GiB generation reserve, per-owner destination/lifecycle/quota and
+deterministic violation/reservation fields. Current repository-owned
+backup/evidence/full-copy producers resolve through this registry; a literal
+root destination, unknown owner, mount ambiguity or predicted peak below the
+role reserve fails before file creation. The periodic monitor also walks the
+backup and generation roles without crossing devices and alerts on any large
+file outside every registered destination root. The machine-complete lifecycle matrix
+and production inventory are authoritative in
+`migration/160_root_storage_prevention_wbc0008_029.md`.
 The target-bound policy and historical block-003 journald drop-in
 source are
 `artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json` and

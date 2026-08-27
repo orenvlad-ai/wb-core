@@ -8,6 +8,14 @@ cleanup, archival, compression, movement or relocation of any journal or
 non-journal file and does not introduce the future full capacity-reservation
 ledger.
 
+WBC0008 block 029 extends this same monitor/admission contour across the
+existing root, backup and generation filesystems without changing the Stage-0
+thresholds. Its canonical producer routing, dynamic Finance+8-GiB backup
+reserve, generation reserve, lifecycle matrix and static literal guard are
+authoritative in
+`migration/160_root_storage_prevention_wbc0008_029.md`. The completed exact-six
+operation and all Stage-0 journald evidence remain unchanged.
+
 ## Root policy
 
 The canonical machine-readable policy is

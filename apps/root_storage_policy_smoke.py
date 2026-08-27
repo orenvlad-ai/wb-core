@@ -28,6 +28,7 @@ from packages.application.root_storage_policy import (
     load_policy,
     predict_sqlite_backup_bytes,
     read_root_storage_status_artifact,
+    storage_destination_root,
     storage_level,
 )
 
@@ -37,8 +38,10 @@ def main() -> int:
     legacy_policy = _legacy_activation_policy(policy)
     _assert_thresholds(policy)
     _assert_non_target_cas_registry(policy)
+    _assert_storage_registry(policy)
     _assert_admission(policy)
     _assert_unregistered_detection(policy)
+    _assert_unregistered_destination_detection(policy)
     _assert_status_artifact(policy)
     _assert_journal_manifest(legacy_policy)
     _assert_one_shot_activation(legacy_policy)
@@ -159,6 +162,47 @@ def _assert_non_target_cas_registry(policy: dict[str, object]) -> None:
             raise AssertionError("wrong mutable filesystem role did not fail closed")
 
 
+def _assert_storage_registry(policy: dict[str, object]) -> None:
+    registry = policy["storage_registry"]
+    assert registry["contract_version"] == "wb_core_storage_registry_v1"
+    assert registry["filesystems"]["root"]["reserve_bytes"] == 25 * GIB
+    assert registry["filesystems"]["backup"]["emergency_reserve_bytes"] == 8 * GIB
+    assert registry["filesystems"]["generation"]["reserve_bytes"] == 8 * GIB
+    producers = {item["owner"]: item for item in registry["producers"]}
+    assert storage_destination_root(
+        "ads_historical_recovery",
+        policy=policy,
+    ) == Path("/opt/wb-core-runtime/state/backups/ads-historical")
+    assert producers["production_apply_evidence"]["destination_role"] == "backup"
+    assert producers["finance_storage_split_coherent_source"]["destination_role"] == "generation"
+    assert not [
+        item["owner"]
+        for item in producers.values()
+        if item["current"] is True
+        and item["destination_role"] == "root"
+        and item["data_class"]
+        not in {"canonical_business_store", "protected_excluded_promo_artifact"}
+    ]
+    lifecycle = registry["lifecycle_policies"]
+    for item in producers.values():
+        row = lifecycle[item["lifecycle_policy"]]
+        assert row["retention_rule"]
+        assert row["hold_rule"]
+        assert row["compression"]
+        assert row["restore_path"]
+    broken = deepcopy(policy)
+    broken["storage_registry"]["producers"][0]["lifecycle_policy"] = "unknown"
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        try:
+            load_policy(path)
+        except RootStoragePolicyError as exc:
+            assert "canonical storage producer is invalid" in str(exc)
+        else:
+            raise AssertionError("unknown storage lifecycle policy did not fail closed")
+
+
 def _assert_admission(policy: dict[str, object]) -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -277,6 +321,15 @@ def _assert_unregistered_detection(policy: dict[str, object]) -> None:
         _sparse_file(unregistered, 256 * 1024**2)
         fixture = deepcopy(policy)
         fixture["filesystems"] = {"root": str(root)}
+        fixture["storage_registry"]["filesystems"]["root"].update(
+            {
+                "path": str(root),
+                "source": "/dev/fixture",
+                "filesystem_uuid": "fixture-uuid",
+                "filesystem_type": "ext4",
+                "required_mount_options": ["rw"],
+            }
+        )
         fixture["scan_roots"] = [str(scan)]
         fixture["producers"] = [
             {
@@ -318,12 +371,47 @@ def _assert_unregistered_detection(policy: dict[str, object]) -> None:
         ]
 
 
+def _assert_unregistered_destination_detection(policy: dict[str, object]) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        backup = Path(temporary)
+        known = backup / "ads-historical" / "known.sqlite3"
+        unknown = backup / "new-producer" / "unknown.sqlite3"
+        known.parent.mkdir()
+        unknown.parent.mkdir()
+        _sparse_file(known, 256 * 1024**2)
+        _sparse_file(unknown, 256 * 1024**2)
+        violations = policy_module._scan_unregistered_large_destinations(
+            policy,
+            role="backup",
+            filesystem_root=backup,
+            filesystem_device=backup.stat().st_dev,
+        )
+        assert violations == [
+            {
+                "role": "backup",
+                "path": str(unknown.resolve()),
+                "size_bytes": 256 * 1024**2,
+                "device": unknown.stat().st_dev,
+                "reason": "no_registered_destination_root",
+            }
+        ], violations
+
+
 def _assert_status_artifact(policy: dict[str, object]) -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         fixed_now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
         fixture = deepcopy(policy)
         fixture["filesystems"] = {"root": str(root)}
+        fixture["storage_registry"]["filesystems"]["root"].update(
+            {
+                "path": str(root),
+                "source": "/dev/fixture",
+                "filesystem_uuid": "fixture-uuid",
+                "filesystem_type": "ext4",
+                "required_mount_options": ["rw"],
+            }
+        )
         fixture["scan_roots"] = [str(root)]
         with mock.patch.object(
             policy_module,
