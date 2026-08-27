@@ -243,6 +243,47 @@ readback/reconcile. Apply Runner выполняет apply не более одн
 ambiguous transport повтор mutation запрещён; только exact readback и
 reconciliation могут определить terminal state.
 
+### Live-resource consistency
+
+Live resource означает exact DB/store, snapshot, queue/outbox,
+file/manifest/cache, process-owned state либо иной ресурс, который меняется
+timer/service/cron, HTTP/manual action или external producer. Только операция,
+которая требует consistent boundary для mutation/copy/rebuild/cutover, запускает
+этот protocol; ordinary repo/user-artifact work и query-only observation без
+такого claim не меняются.
+
+Curator/executor, не пользователь, выбирает по resource/producer semantics
+самую дешёвую safe strategy:
+
+1. semantic/material revalidation или rebase под коротким lock, если concurrent
+   change append-only, unrelated или иначе допустим;
+2. selective quiet window только для exact pauseable producers и только на
+   финальном участке `fresh preflight -> one submit -> readback`;
+3. online snapshot/generation, tail/catch-up и короткий atomic switch для долгой
+   операции;
+4. immutable exact CAS, если resource обязан остаться неизменным.
+
+Blanket stop cron/timers/services запрещён. Hosted
+`business-data-maintenance` из
+[`10_hosted_runtime_deploy_contract.md`](10_hosted_runtime_deploy_contract.md)
+reusable только для подходящих exact resource scopes и не является universal
+default. Producer без durable replay пропущенных work/events не pause-ится ради
+quietness; continuous observer остаётся active, unrelated writes отделяются
+semantic/material predicates или fresh revalidation.
+
+Перед pause обязателен exact resource identity, полный classified producer set
+и exact prior desired/actual control state. Unknown/unclassified writer, timer,
+cron, job или FD даёт `EVIDENCE_BLOCKED` и automatic diagnosis/correction, не
+human gate. Pause начинается максимально поздно: design, PR/CI, preparation и
+long copy остаются online, когда safe.
+
+Если pause состоялся, `COMPLETE` требует exact prior-state restore и catch-up
+proof: timer/service health плюс next trigger; backlog/watermark/freshness; zero
+gaps/loss/duplicates; crash/timeout-safe durable recovery/readback. Одного
+`enable` недостаточно. Target/destination binding, one-submit/no-blind-retry,
+backup/recovery, readback/reconciliation и domain contracts сохраняются
+независимыми guards.
+
 Accepted bounded reversible production goal может быть сохранён как durable
 OWNER/MEMBER scope-level task passport без manifest hash. В этом режиме
 trusted deployed Apply Runner JIT создаёт immutable private manifests на
