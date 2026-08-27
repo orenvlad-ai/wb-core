@@ -13,6 +13,7 @@ source_basis:
   - "migration/152_fbs_handoff_cost_and_overhead_backfill.md"
   - "migration/157_fbs_lifecycle_forward_recovery.md"
   - "migration/161_applicability_gated_dense_fbs.md"
+  - "migration/162_dense_fbs_zero_and_historical_material_recovery.md"
 related_modules:
   - "packages/application/ff_stock_ledger.py"
   - "packages/application/ff_pool_foundation.py"
@@ -22,6 +23,8 @@ related_modules:
   - "packages/application/ff_pool_fbs_applicability.py"
   - "packages/application/ff_pool_dense_fbs.py"
   - "packages/application/warehouse_fbs_material_rematerialization.py"
+  - "apps/ff_pool_dense_fbs.py"
+  - "apps/warehouse_fbs_historical_recovery.py"
   - "packages/application/ff_pool_fbs_forward_recovery.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/russian_payment_orders.py"
@@ -167,7 +170,7 @@ related_runners:
   - "apps/ff_stage_7a_production.py"
   - "apps/ff_stage_7a_production_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` use one append-only physical ledger plus separate reservation/order journals. Migration 161 adds staged applicability-gated dense FBS activation and version-coherent post-T FBS material publication; active pairs are exact/exact_zero or fail closed, dated inapplicable is explicit, and missing is never zero."
+update_note: "`Остатки ФФ` use one append-only physical ledger plus separate reservation/order journals. Migration 162 adds manifest-driven dense zero repair and one bounded historical material lane; both are owner-gated and inert on deploy, while missing remains distinct from zero."
 ---
 
 > Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
@@ -844,15 +847,20 @@ The first explicit zero is valid only from its proven dense `T0`. Its immutable
 inventory line plus request manifest remains the coverage receipt after later
 movements advance the current balance watermark. A pre-T0 business event is
 routed to explicit reconciliation/forward recovery rather than copying current
-zero into history. The generic query-only future Orenburg repair planner uses
-the same service for the exact 12 reviewed targets and expects the exact
-33-SKU roster partitioned into those targets and 21 existing non-target FBS
-rows. It requires an explicit active target file and StoreRegistry generation,
-pins mapping `854205`/office `12223`, target-effect/history and scoped non-target
-fingerprints, requires the 21 receipt-backed positive-WAC mapping-extension
-allocation identities to equal the exact 21 current non-target FBS identities,
-performs no unscoped table hash, and has no apply entrypoint.
-Deployment performs no production repair.
+zero into history. The generic repair adapter accepts a reviewed runtime
+manifest containing the complete target identities, complete stock-managed
+roster and exact existing-row partition; no roster size or business SKU is
+compiled into the adapter. Qualification scopes mapped order identity to the
+exact seller warehouse and treats facility-less legacy reservations as an
+effect only when their immutable line sum is non-zero. The plan pins active
+target, StoreRegistry generation, mapping/allocation, target-effect/history and
+bounded non-target fingerprints. Explicit apply additionally requires the exact
+plan fingerprint, actor and approval reference, repeats qualification before
+and under the shared writer lock, persists one `repair` intent and submits one
+deterministic `pool_inventory` request containing only `0 / 0 / NULL` inserts.
+Repeat and ambiguous transport use canonical request readback; there is no blind
+second submit. Deployment performs no production repair and the adapter is inert
+until a separately approved manifest is applied.
 
 The 26-August material-version addendum closes a separate post-T publication
 gap. Lifecycle debits, guided receipt/recovery and pool overhead no longer edit
@@ -880,11 +888,20 @@ the dependent Proxy 3/4 TOTAL closure, and pins source/target/roster/provenance/
 ready CAS. Its append-only intent states are `repairable`, `repairing`,
 `repaired`, `retry_exhausted`, `historical_recovery_required` and
 `unsafe_ambiguous`; the complete bounded plan is persisted so process restart
-resumes the same identity rather than rebuilding or blindly retrying it. It has
-no CLI/HTTP/timer/automatic apply surface; broad,
-FBO, historical, unknown-source and ambiguous cases fail closed. The typed
-evidence is server data for a future WBC0012 consumer only and adds no UI or
-health policy.
+resumes the same identity rather than rebuilding or blindly retrying it. The
+active-date lane is unchanged. A separate owner-gated historical lane accepts
+only one manifest-bound `business_date × accepted good version × facility ×
+FBS × SKU × immutable handoff_debit`. It validates event source, status and
+evidence/full-row digests plus accepted-version/value/timestamp bindings,
+rebuilds the accepted target from its pre-debit location plus that event, and
+requires the positive-order, blank-own-cost and exact six-missing-TOTAL incident
+shape before recomputing only the target SKU and Proxy 3/4 TOTAL dependencies.
+It publishes a new immutable good historical version and
+same-date business projection without switching the current active/sync pointer
+and without reading current pool rows as candidate operands. The durable intent,
+bounded retry, restart and query-only ambiguous readback contracts are shared.
+No adapter is invoked by deploy, no timer or automatic apply exists, and the
+typed evidence adds no UI or health policy.
 
 ### Stage 7C exact opening and FBS lifecycle
 

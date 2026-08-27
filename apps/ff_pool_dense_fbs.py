@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query-only future Orenburg repair plan over the general dense FBS service."""
+"""Owner-gated manifest adapter for bounded dense-FBS zero repair."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 
@@ -30,28 +31,6 @@ from apps.registry_upload_http_entrypoint_hosted_runtime import (  # noqa: E402
 )
 
 
-ORENBURG_FACILITY_ID = "fff_2579bb2741ed4ab23b11bb4c4183"
-ORENBURG_TARGET_NM_IDS = (
-    259466031,
-    391660889,
-    391661710,
-    391662410,
-    391662965,
-    391663632,
-    428849827,
-    428854502,
-    497413772,
-    497415593,
-    497416559,
-    497416931,
-)
-ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS = 21
-ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER = 33
-ORENBURG_SELLER_WAREHOUSE_ID = 854205
-ORENBURG_OFFICIAL_OFFICE_ID = 12223
-ORENBURG_HISTORICAL_ZERO_DATE = "2026-08-24"
-
-
 def run(args: argparse.Namespace) -> int:
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
     target_file = Path(args.target_file).expanduser().resolve()
@@ -70,6 +49,20 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             "--target-file does not pin the exact active primary hosted runtime"
         )
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
+        raise ValueError("--deployed-sha must be one exact 40-hex SHA")
+    markers = (
+        runtime_dir / ".wb-core-runtime-sha",
+        runtime_dir.parent / "app" / ".wb-core-runtime-sha",
+    )
+    actual_shas = {
+        marker.read_text(encoding="utf-8").strip().lower()
+        for marker in markers
+        if marker.is_file()
+    }
+    if actual_shas != {deployed_sha}:
+        raise ValueError("canonical deployed SHA marker differs from --deployed-sha")
     registry = StoreRegistry(runtime_dir)
     manifest = registry.load(require_files=True)
     if manifest.implicit:
@@ -80,7 +73,7 @@ def run(args: argparse.Namespace) -> int:
     with registry.session(
         "operational",
         mode="ro",
-        operation="ff_pool_dense_fbs_orenburg_plan",
+        operation="ff_pool_dense_fbs_zero_repair_plan",
         manifest=manifest,
     ) as conn:
         query_only = bool(int(conn.execute("PRAGMA query_only").fetchone()[0]))
@@ -92,6 +85,7 @@ def run(args: argparse.Namespace) -> int:
         "target_lifecycle": target.target_lifecycle,
         "runtime_dir": str(runtime_dir),
         "target_file_sha256": _file_sha256(target_file),
+        "deployed_sha": deployed_sha,
     }
     storage_generation = {
         "implicit": bool(manifest.implicit),
@@ -113,26 +107,61 @@ def run(args: argparse.Namespace) -> int:
             ).encode("utf-8")
         ).hexdigest(),
     }
-    plan = DenseFbsService(
+    service = DenseFbsService(
         db_path=db_path,
         runtime_dir=runtime_dir,
-    ).build_zero_repair_plan(
-        facility_id=ORENBURG_FACILITY_ID,
-        nm_ids=ORENBURG_TARGET_NM_IDS,
-        seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
-        official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
-        expected_roster_count=ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
-        expected_existing_non_target_count=ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS,
-        historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
-        canonical_target=canonical_target,
-        storage_generation=storage_generation,
     )
+    action = str(getattr(args, "action", "plan") or "plan")
+    if action == "readback":
+        if not str(getattr(args, "operation_id", "") or "").strip():
+            raise ValueError("readback requires --operation-id")
+        result = service.readback_zero_repair(operation_id=str(args.operation_id))
+    elif action == "apply":
+        if getattr(args, "plan_file", None) is None:
+            raise ValueError("apply requires --plan-file")
+        plan = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
+        if (
+            dict(plan.get("canonical_target") or {}) != canonical_target
+            or dict(plan.get("storage_generation") or {}) != storage_generation
+        ):
+            raise ValueError(
+                "reviewed plan target or StoreRegistry generation is no longer current"
+            )
+        result = service.apply_zero_repair_plan(
+            plan,
+            confirm_fingerprint=str(args.confirm_fingerprint),
+            approval_reference=str(args.approval_reference),
+            actor=str(args.actor),
+        )
+    else:
+        if getattr(args, "manifest_file", None) is None:
+            raise ValueError("plan requires --manifest-file")
+        domain_manifest = json.loads(
+            Path(args.manifest_file).read_text(encoding="utf-8")
+        )
+        if not isinstance(domain_manifest, dict):
+            raise ValueError("--manifest-file must contain one JSON object")
+        result = service.build_zero_repair_plan(
+            facility_id=str(domain_manifest["facility_id"]),
+            nm_ids=list(domain_manifest["nm_ids"]),
+            seller_warehouse_id=int(domain_manifest["seller_warehouse_id"]),
+            official_office_id=int(domain_manifest["official_office_id"]),
+            expected_roster_nm_ids=list(domain_manifest["expected_roster_nm_ids"]),
+            expected_existing_nm_ids=list(domain_manifest["expected_existing_nm_ids"]),
+            historical_business_date=str(
+                domain_manifest["historical_business_date"]
+            ),
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+            operation_id=str(domain_manifest["operation_id"]),
+            qualified_at=str(domain_manifest["qualified_at"]),
+        )
     if args.output:
-        output = _write_private(Path(args.output), plan)
+        output = _write_private(Path(args.output), result)
         if not output["written"]:
             print(json.dumps(output, ensure_ascii=False, sort_keys=True), file=sys.stderr)
-    print(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2))
-    return 0 if plan.get("apply_allowed") else 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0 if action != "plan" or result.get("apply_allowed") else 2
 
 
 def _write_private(
@@ -140,6 +169,7 @@ def _write_private(
     payload: dict[str, object],
     *,
     admission_factory: object = admit_root_write,
+    owner: str = "ff_pool_dense_fbs_plan",
 ) -> dict[str, object]:
     output = path.resolve()
     rendered = json.dumps(
@@ -147,7 +177,7 @@ def _write_private(
     ).encode("utf-8") + b"\n"
     try:
         admission = admission_factory(
-            owner="ff_pool_dense_fbs_plan",
+            owner=str(owner),
             destination=output,
             predicted_output_bytes=len(rendered),
         )
@@ -190,12 +220,19 @@ def _file_sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Build the exact query-only future Orenburg dense-FBS zero repair plan; "
-            "this command exposes no apply path."
+            "Build, apply or query one exact owner-gated dense-FBS zero repair."
         )
     )
+    parser.add_argument("action", choices=("plan", "apply", "readback"))
     parser.add_argument("--target-file", type=Path, required=True)
     parser.add_argument("--runtime-dir", required=True)
+    parser.add_argument("--deployed-sha", required=True)
+    parser.add_argument("--manifest-file", type=Path)
+    parser.add_argument("--plan-file", type=Path)
+    parser.add_argument("--confirm-fingerprint", default="")
+    parser.add_argument("--approval-reference", default="")
+    parser.add_argument("--actor", default="")
+    parser.add_argument("--operation-id", default="")
     parser.add_argument("--output", default="")
     try:
         return run(parser.parse_args())

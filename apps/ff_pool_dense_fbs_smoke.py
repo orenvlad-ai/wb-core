@@ -24,13 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.ff_pool_dense_fbs import (  # noqa: E402
-    ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
-    ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS,
-    ORENBURG_FACILITY_ID,
-    ORENBURG_HISTORICAL_ZERO_DATE,
-    ORENBURG_OFFICIAL_OFFICE_ID,
-    ORENBURG_SELLER_WAREHOUSE_ID,
-    ORENBURG_TARGET_NM_IDS,
     _write_private,
     run as run_orenburg_cli,
 )
@@ -81,6 +74,34 @@ from packages.application.warehouse_functional_lock import (  # noqa: E402
 
 NOW = "2026-08-26T08:00:00Z"
 TODAY = "2026-08-26"
+ORENBURG_FACILITY_ID = "fff_2579bb2741ed4ab23b11bb4c4183"
+ORENBURG_SELLER_WAREHOUSE_ID = 854205
+ORENBURG_OFFICIAL_OFFICE_ID = 12223
+ORENBURG_HISTORICAL_ZERO_DATE = "2026-08-24"
+ORENBURG_EXISTING_NM_IDS = (
+    210183142, 210183919, 210184534, 245720334, 259460529, 259465495,
+    259473237, 391659990, 428850065, 428853741, 428854140, 428854299,
+    428855306, 428855560, 428855758, 428855978, 497414010, 497414624,
+    497416271, 497417163, 497417474,
+)
+ORENBURG_TARGET_NM_IDS = (
+    259466031, 391660889, 391661710, 391662410, 391662965, 391663632,
+    428849827, 428854502, 497413772, 497415593, 497416559, 497416931,
+    1221231049, 1221235702, 1221244040, 1221249681, 1235346302,
+    1235353505, 1235356960, 1235358879, 1235360281, 1235361692,
+    1235365622, 1235366828, 1235368116, 1235369738, 1235373410,
+    1235374572, 1235375860, 1235377899, 1235379341, 1235381785,
+    1235384726, 1235387930, 1235392011, 1235393709, 1235398515,
+    1235399866, 1235404761, 1235405720, 1235406475, 1235406984,
+    1235407826, 1235409896, 1235411727, 1235412880, 1235413454,
+    1235414081, 1235419785, 1235421650,
+)
+ORENBURG_ORIGINAL_TARGET_NM_IDS = ORENBURG_TARGET_NM_IDS[:12]
+ORENBURG_WB_CONTENT_TARGET_NM_IDS = ORENBURG_TARGET_NM_IDS[12:]
+ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS = len(ORENBURG_EXISTING_NM_IDS)
+ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER = (
+    len(ORENBURG_TARGET_NM_IDS) + len(ORENBURG_EXISTING_NM_IDS)
+)
 
 
 class _AmbiguousAfterCommit:
@@ -956,7 +977,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         runtime_dir = Path(raw) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         runtime_dir.mkdir(parents=True)
-        non_target_nm_ids = [700_000_000 + value for value in range(21)]
+        non_target_nm_ids = list(ORENBURG_EXISTING_NM_IDS)
         roster_nm_ids = sorted((*ORENBURG_TARGET_NM_IDS, *non_target_nm_ids))
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -1001,6 +1022,44 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                 conn,
                 allocation_nm_ids=non_target_nm_ids,
             )
+            target_nm_id = ORENBURG_TARGET_NM_IDS[0]
+            conn.executemany(
+                """INSERT INTO sheet_vitrina_v1_ff_stock_reservation_operations(
+                       operation_id,source_key,supply_id,supply_revision,
+                       operation_type,created_at,diagnostics_json)
+                   VALUES(?,?,?,?,?,?, '{}')""",
+                (
+                    ("legacy-net-plus", "legacy-net-plus", "legacy-supply", "r1", "reserve", NOW),
+                    ("legacy-net-minus", "legacy-net-minus", "legacy-supply", "r2", "release", NOW),
+                ),
+            )
+            conn.executemany(
+                """INSERT INTO sheet_vitrina_v1_ff_stock_reservation_lines(
+                       operation_id,line_no,nm_id,quantity_delta,raw_json)
+                   VALUES(?,1,?,?,'{}')""",
+                (
+                    ("legacy-net-plus", target_nm_id, 1),
+                    ("legacy-net-minus", target_nm_id, -1),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_mappings(
+                       mapping_id,source_nm_id,source_chrt_id,source_barcode,
+                       source_sku,target_nm_id,mapping_digest,active,created_at,created_by)
+                   VALUES('foreign-identity-map',900000001,9001,'FOREIGN','FOREIGN',?,
+                          'sha256:foreign-map',1,?,'dense-smoke')""",
+                (target_nm_id, NOW),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_supplies_fbs_identity_evidence(
+                       evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+                       barcode,seller_sku,outcome,warehouse_mapping_id,
+                       identity_mapping_id,evidence_digest,observed_at)
+                   VALUES('foreign-identity-evidence',9900001,'foreign-r1',999999,
+                          900000001,9001,'FOREIGN','FOREIGN','matched','foreign-wh',
+                          'foreign-identity-map','sha256:foreign-evidence',?)""",
+                (NOW,),
+            )
             # Production-shaped unrelated noise proves that the planner does
             # not scan/hash entire operational tables.
             conn.executemany(
@@ -1038,8 +1097,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             nm_ids=ORENBURG_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
-            expected_roster_count=ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
-            expected_existing_non_target_count=ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
             historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
             canonical_target=canonical_target,
             storage_generation=storage_generation,
@@ -1049,8 +1108,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             nm_ids=ORENBURG_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
-            expected_roster_count=ORENBURG_EXPECTED_STOCK_MANAGED_ROSTER,
-            expected_existing_non_target_count=ORENBURG_EXPECTED_EXISTING_NON_TARGET_FBS_ROWS,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
             historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
             canonical_target=canonical_target,
             storage_generation=storage_generation,
@@ -1059,11 +1118,11 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert before == after
         assert plan == repeated
         assert plan["apply_allowed"] is True
-        assert plan["apply_entrypoint_exposed"] is False
+        assert plan["apply_entrypoint_exposed"] is True
         assert plan["blockers"] == []
         assert plan["nm_ids"] == sorted(ORENBURG_TARGET_NM_IDS)
         assert plan["expected_effects"] == {
-            "balance_insert_count": 12,
+            "balance_insert_count": 50,
             "balance_update_count": 0,
             "quantity_delta": 0,
             "capital_delta_rub": "0",
@@ -1076,10 +1135,18 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["non_targets"]["wb_snapshots_count"] == 0
         assert str(plan["non_targets"]["wb_snapshots_digest"]).startswith("sha256:")
         assert plan["storage"]["whole_database_copy"] is False
-        assert plan["storage"]["bounded_target_row_count"] == 12
+        assert plan["storage"]["bounded_target_row_count"] == 50
         assert plan["storage"]["full_operational_table_scan_allowed"] is False
-        assert plan["stock_managed_roster"]["actual_count"] == 33
+        assert plan["stock_managed_roster"]["actual_count"] == 71
         assert plan["stock_managed_roster"]["exact_partition_proven"] is True
+        assert len(ORENBURG_ORIGINAL_TARGET_NM_IDS) == 12
+        assert len(ORENBURG_WB_CONTENT_TARGET_NM_IDS) == 38
+        assert sorted(
+            {
+                *ORENBURG_ORIGINAL_TARGET_NM_IDS,
+                *ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            }
+        ) == plan["nm_ids"]
         assert plan["mapping_evidence"]["seller_warehouse_id"] == 854205
         assert plan["mapping_evidence"]["official_office_id"] == 12223
         assert plan["mapping_evidence"]["allocation_count"] == 21
@@ -1092,10 +1159,12 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert consistency["same_source_value_match_count"] == 21
         assert consistency["blockers"] == []
         assert plan["target_effects"]["effect_row_count"] == 0
-        assert plan["historical_zero_evidence"]["exact_zero_count"] == 12
+        assert plan["target_effects"]["legacy_reservations_count"] == 0
+        assert plan["target_effects"]["identity_mapped_order_evidence_count"] == 0
+        assert plan["historical_zero_evidence"]["exact_zero_count"] == 50
         assert (
             plan["historical_zero_evidence"]["mapping_extension_provenance_count"]
-            == 12
+            == 50
         )
         assert plan["historical_zero_evidence"]["forbidden_next_day_retrocopy_count"] == 0
         with sqlite3.connect(runtime.db_path) as conn:
@@ -1148,13 +1217,38 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             ),
             encoding="utf-8",
         )
+        deployed_sha = "d" * 40
+        (runtime_dir / ".wb-core-runtime-sha").write_text(
+            deployed_sha + "\n", encoding="utf-8"
+        )
+        domain_manifest_file = runtime_dir / "dense-repair-manifest.json"
+        domain_manifest_file.write_text(
+            json.dumps(
+                {
+                    "operation_id": "wbc-0013-a-fixture",
+                    "qualified_at": NOW,
+                    "facility_id": ORENBURG_FACILITY_ID,
+                    "nm_ids": list(ORENBURG_TARGET_NM_IDS),
+                    "seller_warehouse_id": ORENBURG_SELLER_WAREHOUSE_ID,
+                    "official_office_id": ORENBURG_OFFICIAL_OFFICE_ID,
+                    "expected_roster_nm_ids": roster_nm_ids,
+                    "expected_existing_nm_ids": non_target_nm_ids,
+                    "historical_business_date": ORENBURG_HISTORICAL_ZERO_DATE,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         cli_stdout = io.StringIO()
         cli_stderr = io.StringIO()
         with redirect_stdout(cli_stdout), redirect_stderr(cli_stderr):
             cli_code = run_orenburg_cli(
                 argparse.Namespace(
+                    action="plan",
                     target_file=target_file,
                     runtime_dir=str(runtime_dir),
+                    deployed_sha=deployed_sha,
+                    manifest_file=domain_manifest_file,
                     output="",
                 )
             )
@@ -1185,6 +1279,56 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         assert fallback["mode"] == "stdout_only"
         assert not (runtime_dir / "not-written.json").exists()
+        documents_before_apply = _table_count(runtime.db_path, DOCUMENTS_TABLE)
+        non_target_before_apply = _fingerprint_rows(
+            runtime.db_path,
+            f"SELECT * FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
+            f"AND nm_id IN ({','.join('?' for _ in non_target_nm_ids)}) ORDER BY nm_id",
+            (ORENBURG_FACILITY_ID, *non_target_nm_ids),
+        )
+        applied = service.apply_zero_repair_plan(
+            plan,
+            confirm_fingerprint=str(plan["fingerprint"]),
+            approval_reference="WBC-0013-SSS006-fixture",
+            actor="dense-fbs-smoke",
+        )
+        assert applied["state"] == "active" and not applied["idempotent"]
+        repeated_apply = service.apply_zero_repair_plan(
+            plan,
+            confirm_fingerprint=str(plan["fingerprint"]),
+            approval_reference="WBC-0013-SSS006-fixture",
+            actor="dense-fbs-smoke",
+        )
+        assert repeated_apply["state"] == "active" and repeated_apply["idempotent"]
+        assert _table_count(runtime.db_path, DOCUMENTS_TABLE) == documents_before_apply + 1
+        with sqlite3.connect(runtime.db_path) as conn:
+            inserted = conn.execute(
+                f"""SELECT COUNT(*) FROM {BALANCES_TABLE}
+                     WHERE facility_id=? AND pool='FBS'
+                       AND nm_id IN ({','.join('?' for _ in ORENBURG_TARGET_NM_IDS)})
+                       AND quantity=0 AND capital_rub='0' AND wac_rub IS NULL""",
+                (ORENBURG_FACILITY_ID, *ORENBURG_TARGET_NM_IDS),
+            ).fetchone()[0]
+        assert inserted == 50
+        assert non_target_before_apply == _fingerprint_rows(
+            runtime.db_path,
+            f"SELECT * FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
+            f"AND nm_id IN ({','.join('?' for _ in non_target_nm_ids)}) ORDER BY nm_id",
+            (ORENBURG_FACILITY_ID, *non_target_nm_ids),
+        )
+        post_effect_plan = service.build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            nm_ids=ORENBURG_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert post_effect_plan["apply_allowed"] is False
+        assert post_effect_plan["target_effects"]["document_lines_count"] == 50
         _assert_orenburg_allocation_drift_blocks()
         return {
             "facility_id": ORENBURG_FACILITY_ID,
@@ -1195,7 +1339,9 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             "explicit_target_and_store_registry_cli": True,
             "bounded_unrelated_noise_rows": 4_000,
             "private_output_mode": "0600_or_stdout_only",
-            "apply_exposed": False,
+            "apply_exposed": True,
+            "one_document_zero_apply_count": 50,
+            "repeat_apply_noop": True,
             "allocation_drift_failed_closed": True,
         }
 
@@ -1735,6 +1881,16 @@ def _dense_storage_bytes(db_path: Path) -> dict[str, int]:
 
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _fingerprint_rows(
+    db_path: Path, sql: str, parameters: tuple[Any, ...]
+) -> str:
+    with sqlite3.connect(db_path) as conn:
+        rows = [list(row) for row in conn.execute(sql, parameters).fetchall()]
+    return "sha256:" + hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 if __name__ == "__main__":

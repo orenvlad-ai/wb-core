@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import errno
 import json
 from pathlib import Path
@@ -26,6 +26,8 @@ from packages.application.ff_pool_foundation import (
     FACILITIES_TABLE,
     FEATURE_EPOCHS_TABLE,
     ensure_ff_pool_foundation_schema,
+    canonical_decimal_ratio_text,
+    canonical_decimal_text,
 )
 from packages.application.ff_pool_fbs_lifecycle import (
     _apply_exact_physical_delta,
@@ -55,6 +57,9 @@ from packages.application.warehouse_fbs_material_rematerialization import (
     RETRY_EXHAUSTED,
     UNSAFE_AMBIGUOUS,
     WarehouseFbsMaterialRematerializer,
+    _fingerprint,
+    _functional_pool_mismatches,
+    _pool_aggregates,
     _warehouse_metric_lookup,
     ensure_warehouse_fbs_material_schema,
     publish_fbs_pool_aggregate_revision,
@@ -72,6 +77,7 @@ NOW = "2026-08-26T12:00:00Z"
 FACILITY_ID = "fac_incident"
 TARGET_NM_ID = 101
 NON_TARGET_NM_ID = 202
+WAC_CURRENT_ONLY_NM_ID = 8_028
 STAGES = (
     "production",
     "china_to_ff",
@@ -92,14 +98,83 @@ class _Clock:
 
 
 def main() -> None:
+    _test_shared_wac_precision_contract()
     _test_atomic_root_prevention()
     _test_lifecycle_canonical_zero_shape()
     _test_incident_plan_apply_idempotency_and_bounds()
+    _test_historical_bounded_recovery_preserves_current()
     _test_resume_before_and_after_commit_transport_loss()
     _test_drift_concurrency_and_fail_closed_boundaries()
     print("warehouse_fbs_material_atomic_1953_to_1952: OK")
+    print("warehouse_fbs_material_wac_28_classification: OK")
     print("warehouse_fbs_material_single_sku_repair_resume: OK")
+    print("warehouse_fbs_material_historical_bounded_recovery: OK")
     print("warehouse_fbs_material_cas_bounds_benchmark: OK")
+
+
+def _test_shared_wac_precision_contract() -> None:
+    prime_quantities = (
+        101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163,
+        167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233,
+    )
+    with tempfile.TemporaryDirectory(prefix="fbs-material-wac-28-") as temp_dir:
+        runtime = _seed(Path(temp_dir), mixed=False)
+        precision_nm_ids: list[int] = []
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            for position, raw_quantity in enumerate(prime_quantities, start=1):
+                nm_id = 8_000 + position
+                precision_nm_ids.append(nm_id)
+                quantity = Decimal(raw_quantity)
+                capital = Decimal("100000.12345678901234567890123456789") + position
+                stored = canonical_decimal_ratio_text(capital, quantity)
+                with localcontext() as context:
+                    context.prec = 160
+                    broad_reader_value = canonical_decimal_text(capital / quantity)
+                assert stored != broad_reader_value
+                conn.execute(
+                    f"""INSERT INTO {BALANCES_TABLE}(
+                           facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                           wac_rub,source_watermark,updated_at)
+                       VALUES(?,'FBS',?,1,?,?,?,?,?)""",
+                    (
+                        FACILITY_ID,
+                        nm_id,
+                        canonical_decimal_text(quantity),
+                        canonical_decimal_text(capital),
+                        stored,
+                        f"wac-precision-{position}",
+                        NOW,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                           version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                           cost_covered_quantity,quality,certified,wb_quantity,
+                           wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+                       VALUES('whfv_incident_source','ff',?,?,?,?,?,'exact',1,'0','0','0','{}')""",
+                    (
+                        nm_id,
+                        canonical_decimal_text(quantity),
+                        stored,
+                        canonical_decimal_text(capital),
+                        canonical_decimal_text(quantity),
+                    ),
+                )
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at)
+                   VALUES(?,'FBS',?,1,1,'10','10','current-only',?)""",
+                (FACILITY_ID, WAC_CURRENT_ONLY_NM_ID, NOW),
+            )
+            conn.commit()
+            aggregates = _pool_aggregates(conn, precision_nm_ids)
+            assert sorted(aggregates) == precision_nm_ids
+            assert _functional_pool_mismatches(
+                conn, "whfv_incident_source"
+            ) == [WAC_CURRENT_ONLY_NM_ID]
+        assert len(precision_nm_ids) == 26
 
 
 def _test_atomic_root_prevention() -> None:
@@ -240,6 +315,223 @@ def _test_lifecycle_canonical_zero_shape() -> None:
                    WHERE stable_source_id=?""",
                 (f"fbs_lifecycle:{event_id}",),
             ).fetchone()[0] == "queued"
+
+
+def _test_historical_bounded_recovery_preserves_current() -> None:
+    with tempfile.TemporaryDirectory(prefix="fbs-material-historical-") as temp_dir:
+        runtime = _seed(Path(temp_dir), mixed=True)
+        current_version = "whfv_current_day_preserved"
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            source = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions "
+                "WHERE version_id='whfv_incident_source'"
+            ).fetchone()
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                       version_id,cutover_id,version_kind,effective_at,
+                       business_effective_date,published_at,status,plan_fingerprint,
+                       local_source_digest,source_watermarks_json,created_at)
+                   VALUES(?,?,?,?,?,?,'good',?,?,?,?)""",
+                (
+                    current_version,
+                    str(source["cutover_id"]),
+                    "hourly_wb_sync",
+                    "2026-08-27T12:00:00Z",
+                    "2026-08-27",
+                    "2026-08-27T12:00:00Z",
+                    "sha256:current-preserved",
+                    "sha256:current-local",
+                    "{}",
+                    "2026-08-27T12:00:00Z",
+                ),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+                   SELECT ?,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                          cost_covered_quantity,quality,certified,wb_quantity,
+                          wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                     FROM sheet_vitrina_v1_warehouse_functional_balances
+                    WHERE version_id='whfv_incident_source'""",
+                (current_version,),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_functional_active "
+                "SET version_id=?,updated_at=? WHERE slot=1",
+                (current_version, "2026-08-27T12:00:00Z"),
+            )
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_sync_status "
+                "SET active_version_id=?,updated_at=? WHERE slot=1",
+                (current_version, "2026-08-27T12:00:00Z"),
+            )
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at)
+                   VALUES(?,'FBS',303,1,0,'0',NULL,'dense-a-zero',?)""",
+                (FACILITY_ID, "2026-08-27T12:00:00Z"),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                       bundle_version,activated_at,as_of_date,snapshot_id,
+                       plan_version,refreshed_at,plan_json)
+                   VALUES('other-date-bundle',?,'2026-08-25','other-date-ready',
+                          'v1',?,?)""",
+                (
+                    NOW,
+                    NOW,
+                    json.dumps({"date_columns": ["2026-08-25"], "sentinel": 825}),
+                ),
+            )
+            event = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
+                "WHERE event_id='handoff-debit-1'"
+            ).fetchone()
+            pool_before = list(
+                conn.execute(
+                    f"SELECT * FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
+                ).fetchall()
+            )
+            other_ready_before = conn.execute(
+                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                "WHERE bundle_version='other-date-bundle' AND as_of_date='2026-08-25'"
+            ).fetchone()[0]
+            conn.commit()
+        service = WarehouseFbsMaterialRematerializer(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-08-28T09:00:00Z",
+        )
+        historical_manifest = {
+            "business_date": DAY,
+            "facility_id": FACILITY_ID,
+            "pool": "FBS",
+            "nm_ids": [TARGET_NM_ID],
+            "accepted_version_id": "whfv_incident_source",
+            "accepted_version_fingerprint": str(source["plan_fingerprint"]),
+            "accepted_effective_at": str(source["effective_at"]),
+            "accepted_published_at": str(source["published_at"]),
+            "expected_current_active_version_id": current_version,
+            "event_id": "handoff-debit-1",
+            "event_source_revision": str(event["source_revision"]),
+            "event_status_digest": str(event["status_digest"]),
+            "event_evidence_digest": str(event["evidence_digest"]),
+            "event_row_digest": _fingerprint(
+                {
+                    key: event[key]
+                    for key in (
+                        "event_id",
+                        "cutover_id",
+                        "order_id",
+                        "episode_sequence",
+                        "event_type",
+                        "source_order_observation_sequence",
+                        "source_status_observation_sequence",
+                        "source_revision",
+                        "status_digest",
+                        "supplier_status",
+                        "wb_status",
+                        "source_observed_at",
+                        "facility_id",
+                        "pool",
+                        "nm_id",
+                        "quantity",
+                        "physical_quantity_delta",
+                        "capital_delta_rub",
+                        "frozen_wac_rub",
+                        "evidence_digest",
+                        "occurred_at",
+                    )
+                }
+            ),
+            "event_quantity_delta": str(event["physical_quantity_delta"]),
+            "event_capital_delta_rub": str(event["capital_delta_rub"]),
+            "event_wac_rub": str(event["frozen_wac_rub"]),
+            "event_occurred_at": str(event["occurred_at"]),
+            "accepted_quantity": "1952",
+            "accepted_cost_covered_quantity": "1953",
+            "accepted_capital_rub": "19520",
+        }
+        missing_binding = dict(historical_manifest)
+        missing_binding.pop("event_row_digest")
+        blocked = service.build_historical_plan(missing_binding)
+        assert blocked["status"] == UNSAFE_AMBIGUOUS
+        assert blocked["reason"] == "historical_manifest_binding_missing"
+        plan = service.build_historical_plan(historical_manifest)
+        assert plan["status"] == REPAIRABLE, plan
+        assert plan["mode"] == "historical"
+        assert plan["nm_ids"] == [TARGET_NM_ID]
+        assert WAC_CURRENT_ONLY_NM_ID not in plan["nm_ids"]
+        assert plan["typed_evidence"]["before"] == {
+            "quantity": "1952",
+            "cost_covered_quantity": "1953",
+        }
+        assert plan["typed_evidence"]["after"]["quantity"] == "1952"
+        assert plan["typed_evidence"]["after"]["cost_covered_quantity"] == "1952"
+        assert plan["typed_evidence"]["economics_dependency_closure"] == {
+            "affected_positive_order_nm_ids": [TARGET_NM_ID],
+            "missing_critical_total_dependencies_before": sorted(
+                CRITICAL_TOTAL_METRIC_KEYS
+            ),
+            "missing_critical_total_dependencies_after": [],
+            "critical_total_metric_keys": list(CRITICAL_TOTAL_METRIC_KEYS),
+            "target_and_total_only": True,
+            "ready_snapshot_count": 1,
+        }
+        assert all(update["non_target_digest"] for update in plan["ready_updates"])
+        assert plan["bounds"]["current_pool_rows_used_as_candidate_source"] is False
+        applied = service.apply_plan(
+            plan,
+            confirm_fingerprint=str(plan["plan_fingerprint"]),
+            approval_reference="WBC-0013-SSS006-fixture",
+            actor="dense-smoke",
+        )
+        assert applied["status"] == REPAIRED and not applied["idempotent"], applied
+        repeated = service.apply_plan(
+            plan,
+            confirm_fingerprint=str(plan["plan_fingerprint"]),
+            approval_reference="WBC-0013-SSS006-fixture",
+            actor="dense-smoke",
+        )
+        assert repeated["status"] == REPAIRED and repeated["idempotent"]
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            assert conn.execute(
+                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active "
+                "WHERE slot=1"
+            ).fetchone()[0] == current_version
+            assert conn.execute(
+                "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
+                "WHERE slot=1"
+            ).fetchone()[0] == current_version
+            repaired = conn.execute(
+                """SELECT quantity,cost_covered_quantity,wac_rub
+                     FROM sheet_vitrina_v1_warehouse_functional_balances
+                    WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+                (str(plan["target_version_id"]), TARGET_NM_ID),
+            ).fetchone()
+            assert tuple(repaired) == ("1952", "1952", "10")
+            assert list(
+                conn.execute(
+                    f"SELECT * FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id"
+                ).fetchall()
+            ) == pool_before
+            assert conn.execute(
+                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                "WHERE bundle_version='other-date-bundle' AND as_of_date='2026-08-25'"
+            ).fetchone()[0] == other_ready_before
+            cells = _ready_cells(conn)
+            assert cells[f"SKU:{TARGET_NM_ID}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"] not in {
+                None,
+                "",
+            }
+            assert all(
+                cells[f"TOTAL|{key}"] not in {None, ""}
+                for key in CRITICAL_TOTAL_METRIC_KEYS
+            )
 
 
 def _test_incident_plan_apply_idempotency_and_bounds() -> None:

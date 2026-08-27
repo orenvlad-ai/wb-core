@@ -436,6 +436,26 @@ def canonical_decimal_text(value: Any) -> str:
     return format(amount, "f")
 
 
+def canonical_decimal_ratio_text(capital: Any, quantity: Any) -> str:
+    """Return the canonical ledger-writer WAC ratio at Decimal precision 38."""
+
+    try:
+        numerator = Decimal(str(capital))
+        denominator = Decimal(str(quantity))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("capital and quantity must be Decimal-safe") from exc
+    if (
+        not numerator.is_finite()
+        or not denominator.is_finite()
+        or numerator <= ZERO
+        or denominator <= ZERO
+    ):
+        raise ValueError("positive finite capital and quantity are required")
+    with localcontext() as context:
+        context.prec = 38
+        return canonical_decimal_text(numerator / denominator)
+
+
 def read_ff_pool_feature_state(
     conn: sqlite3.Connection,
     *,

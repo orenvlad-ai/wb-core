@@ -172,6 +172,11 @@ no production apply entrypoint and does not apply the 26-August repair.
 
 ## Future Orenburg repair boundary
 
+This subsection records the Migration 161 release boundary. Migration 162
+supersedes its hardcoded query-only planner with a generic manifest-driven,
+owner-gated adapter; Migration 162 remains inert on deploy and does not itself
+apply the reviewed repair.
+
 `apps/ff_pool_dense_fbs.py` exposes query-only dry-run planning through the same
 general service for facility `fff_2579bb2741ed4ab23b11bb4c4183`, pool `FBS` and
 the exact 12 reviewed `nmId` values. `--target-file` and `--runtime-dir` are
