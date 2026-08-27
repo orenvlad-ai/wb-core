@@ -435,3 +435,22 @@ Required checks:
 - `python3 apps/root_storage_policy_smoke.py`
 - `python3 apps/finance_storage_backup_rotation_smoke.py`
 - every suite selected by the exact-base PR planner
+
+## Block 028: partial Release Runner recovery
+
+PR #1078 merged as `52264cdf0b981e3029307a9d94644ba08424042f`, but its
+Release Runner run `33076809433` was cancelled after the checkout/runtime marker
+advanced and before deploy completion, service restart, release artifact or
+receipt publication.  The server readback therefore has that exact runtime SHA
+with `.wb-core-deploy.json` `deployment_complete=false`; the already-completed
+exact-six operation remains independently bound to source deployed SHA
+`7d83c5d0ddf6bf86d6359409ef0f9a7bb4ad4747`.
+
+This record creates one fresh ordinary Release Runner identity through the
+existing `live_runtime` route for this migration path.  Its only allowed live
+effect is the canonical exact-merge-SHA deploy and deploy receipt.  It does not
+authorize rollback, manual server patch/restart, readiness, another archive
+operation, job, unlink, temporary restore, SQL/data write or any other business
+effect.  After `deployment_complete=true` readback, closure is one query-only
+reconciliation of the existing terminal operation using the deployed canonical
+warm-archive service classifier; production mutation count remains zero.
