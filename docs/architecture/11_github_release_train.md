@@ -294,6 +294,15 @@ measurement, full SQLite integrity or full source hashing merely to obtain two
 equivalent witnesses. Actual archive/independent full restore/SQLite proof and
 one exact full pre-unlink source hash remain mandatory inside mutation.
 
+Source activity is a bounded observation stream, not a one-row-per-target
+table. Its predicate requires semantic coverage of all six literal target
+keys/paths and validates every observation against the matching exact target
+identity and clear sidecar/FD/lock/hold/provenance evidence. Multiple clean
+samples for one target are valid; a missing/foreign/malformed target, an unsafe
+sample or a duplicate with identity drift blocks. Capacity and lifecycle-lock
+collections likewise prove exact identity coverage, so equal raw row counts
+cannot hide a duplicated row and a missing target/lock.
+
 Any immutable or semantic-predicate mismatch before submit or mutation journal
 durably writes a private exclusive-create/fsynced component-diff artifact bound
 to readiness/operation/job/deployed SHA. It includes exact changed JSON paths,

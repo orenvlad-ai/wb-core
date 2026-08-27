@@ -58,7 +58,7 @@ from packages.application.storage_registry import (  # noqa: E402
 )
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v4"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v5"
 MATERIAL_CAS_DIFF_SCHEMA = "wb-core.root-warm-archive-material-cas-diff/v1"
 MATERIAL_CAS_FAILURE_SCHEMA = "wb-core.root-warm-archive-material-cas-failure/v1"
 MATERIAL_CAS_FAILURE_FILENAME = "root-warm-archive-material-cas-failure.json"
@@ -814,6 +814,7 @@ def _source_activity_gate(
     evidence = {
         "gate": gate_name,
         "observed_at": _now(),
+        "target_key": str(policy["key"]),
         "source_path": str(source),
         "expected_identity": dict(expected_identity),
         "identity_before": identity_before,
@@ -3403,41 +3404,298 @@ def _mutable_safety_predicates(
     finance = observations.get("finance") or {}
     current_floor = int(finance.get("required_available_floor_bytes") or 0)
     effective_floor = max(current_floor, int(minimum_backup_floor_bytes))
+    expected_targets = {
+        str(policy["key"]): {
+            "source_path": str(policy["source_path"]),
+            "identity": dict(policy["expected_identity"]),
+        }
+        for policy in TARGET_POLICIES
+    }
+    expected_paths = {
+        row["source_path"]: key for key, row in expected_targets.items()
+    }
+    target_policy_valid = bool(
+        len(TARGET_POLICIES) == EXPECTED_SOURCE_COUNT
+        and len(expected_targets) == EXPECTED_SOURCE_COUNT
+        and len(expected_paths) == EXPECTED_SOURCE_COUNT
+    )
+
+    raw_capacity = observations.get("capacity_stages")
     capacity_stages = [
-        dict(item)
-        for item in observations.get("capacity_stages") or []
-        if isinstance(item, Mapping)
+        dict(item) for item in raw_capacity or [] if isinstance(item, Mapping)
     ]
+    capacity_counts = {key: 0 for key in expected_targets}
+    capacity_issues: list[dict[str, Any]] = []
+    if not isinstance(raw_capacity, list):
+        capacity_issues.append({"code": "capacity_stage_inventory_malformed"})
+    for index, item in enumerate(
+        raw_capacity if isinstance(raw_capacity, list) else []
+    ):
+        if not isinstance(item, Mapping):
+            capacity_issues.append(
+                {"code": "capacity_stage_malformed", "sample_index": index}
+            )
+            continue
+        key = str(item.get("key") or "")
+        if key not in expected_targets:
+            capacity_issues.append(
+                {
+                    "code": "foreign_capacity_target",
+                    "sample_index": index,
+                    "target_key": key or None,
+                }
+            )
+            continue
+        capacity_counts[key] += 1
+        projected = item.get("projected_available_at_peak_bytes")
+        if (
+            not isinstance(projected, int)
+            or isinstance(projected, bool)
+            or projected < effective_floor
+        ):
+            capacity_issues.append(
+                {
+                    "code": "capacity_floor_not_preserved",
+                    "sample_index": index,
+                    "target_key": key,
+                    "projected_available_at_peak_bytes": projected,
+                }
+            )
+    for key, count in capacity_counts.items():
+        if count == 0:
+            capacity_issues.append(
+                {"code": "missing_capacity_target", "target_key": key}
+            )
+        elif count > 1:
+            capacity_issues.append(
+                {
+                    "code": "duplicate_capacity_target",
+                    "target_key": key,
+                    "sample_count": count,
+                }
+            )
     capacity_passed = bool(
-        len(capacity_stages) == EXPECTED_SOURCE_COUNT
-        and effective_floor > 0
-        and all(
-            int(item.get("projected_available_at_peak_bytes") or -1)
-            >= effective_floor
-            for item in capacity_stages
-        )
+        target_policy_valid and effective_floor > 0 and not capacity_issues
     )
+
+    raw_activity = observations.get("activity_gates")
     activity = [
-        dict(item)
-        for item in observations.get("activity_gates") or []
-        if isinstance(item, Mapping)
+        dict(item) for item in raw_activity or [] if isinstance(item, Mapping)
     ]
+    activity_counts = {key: 0 for key in expected_targets}
+    activity_issues: list[dict[str, Any]] = []
+    if not isinstance(raw_activity, list):
+        activity_issues.append({"code": "target_activity_inventory_malformed"})
+    for index, item in enumerate(
+        raw_activity if isinstance(raw_activity, list) else []
+    ):
+        if not isinstance(item, Mapping):
+            activity_issues.append(
+                {"code": "target_activity_sample_malformed", "sample_index": index}
+            )
+            continue
+        key = str(item.get("target_key") or "")
+        source_path = str(item.get("source_path") or "")
+        binding = expected_targets.get(key)
+        if binding is None or source_path != binding["source_path"]:
+            activity_issues.append(
+                {
+                    "code": "foreign_or_misbound_activity_target",
+                    "sample_index": index,
+                    "target_key": key or None,
+                    "source_path": source_path or None,
+                }
+            )
+            continue
+        activity_counts[key] += 1
+        expected_identity = item.get("expected_identity")
+        identity_before = item.get("identity_before")
+        identity_after = item.get("identity_after")
+        literal_identity = binding["identity"]
+        identity_fields = tuple(literal_identity)
+        stat_fields = tuple(field for field in identity_fields if field != "sha256")
+        sidecars = item.get("sidecars")
+        sidecar_suffixes = {
+            str(row.get("suffix") or "")
+            for row in sidecars or []
+            if isinstance(row, Mapping)
+        }
+        fd_openers = item.get("fd_openers")
+        hold = item.get("hold_evidence")
+        provenance = item.get("provenance")
+        sample_reasons: list[str] = []
+        if (
+            not isinstance(expected_identity, Mapping)
+            or any(
+                expected_identity.get(field) != literal_identity[field]
+                for field in identity_fields
+            )
+            or (
+                "path" in expected_identity
+                and expected_identity.get("path") != binding["source_path"]
+            )
+        ):
+            sample_reasons.append("expected_identity_mismatch")
+        if (
+            not isinstance(identity_before, Mapping)
+            or identity_before.get("path") != binding["source_path"]
+            or any(
+                identity_before.get(field) != literal_identity[field]
+                for field in stat_fields
+            )
+            or (
+                item.get("sha256_verified") is True
+                and identity_before.get("sha256") != literal_identity["sha256"]
+            )
+        ):
+            sample_reasons.append("source_identity_before_mismatch")
+        if (
+            not isinstance(identity_after, Mapping)
+            or identity_after.get("path") != binding["source_path"]
+            or any(
+                identity_after.get(field) != literal_identity[field]
+                for field in stat_fields
+            )
+        ):
+            sample_reasons.append("source_identity_after_mismatch")
+        if item.get("identity_matches_expected") is not True:
+            sample_reasons.append("source_identity_not_accepted")
+        if item.get("material_stable_during_gate") is not True:
+            sample_reasons.append("source_material_not_stable")
+        sha256_verified = item.get("sha256_verified")
+        if sha256_verified is not True and sha256_verified is not False:
+            sample_reasons.append("sha256_verification_state_unknown")
+        elif (
+            sha256_verified is True
+            and item.get("sha256_matches_expected") is not True
+        ):
+            sample_reasons.append("source_sha256_mismatch")
+        if (
+            not isinstance(sidecars, list)
+            or sidecar_suffixes != {"-wal", "-shm", "-journal"}
+            or any(
+                not isinstance(row, Mapping) or row.get("present") is not False
+                for row in sidecars or []
+            )
+        ):
+            sample_reasons.append("sidecar_inventory_not_clear")
+        if not isinstance(fd_openers, list):
+            sample_reasons.append("fd_opener_inventory_malformed")
+        else:
+            for opener in fd_openers:
+                if (
+                    not isinstance(opener, Mapping)
+                    or opener.get("source_path") != binding["source_path"]
+                    or opener.get("access_mode") != "read_only"
+                    or opener.get("binds_source_device_inode") is not True
+                    or opener.get("target_device") != literal_identity["device"]
+                    or opener.get("target_inode") != literal_identity["inode"]
+                ):
+                    sample_reasons.append("unsafe_or_misbound_fd_opener")
+                    break
+        if not isinstance(item.get("kernel_locks"), list) or item.get("kernel_locks"):
+            sample_reasons.append("kernel_lock_inventory_not_clear")
+        if (
+            not isinstance(hold, Mapping)
+            or not isinstance(hold.get("marker_paths"), list)
+            or hold.get("marker_paths")
+            or not isinstance(hold.get("hold_xattr_names"), list)
+            or hold.get("hold_xattr_names")
+            or hold.get("protected_prefix_match") is not False
+        ):
+            sample_reasons.append("hold_inventory_not_clear")
+        if (
+            not isinstance(provenance, Mapping)
+            or not SHA256_RE.fullmatch(str(provenance.get("digest") or ""))
+            or not isinstance(provenance.get("records"), list)
+            or item.get("provenance_error") is not None
+            or item.get("provenance_matches_expected") is not True
+        ):
+            sample_reasons.append("provenance_not_accepted")
+        if not isinstance(item.get("blockers"), list) or item.get("blockers"):
+            sample_reasons.append("activity_blockers_present_or_malformed")
+        if item.get("classification") not in {"clean", "clean_with_read_only_openers"}:
+            sample_reasons.append("activity_classification_not_clear")
+        if sample_reasons:
+            activity_issues.append(
+                {
+                    "code": "unsafe_or_malformed_activity_sample",
+                    "sample_index": index,
+                    "target_key": key,
+                    "source_path": source_path,
+                    "classification": item.get("classification"),
+                    "reasons": sorted(set(sample_reasons)),
+                    "blockers": item.get("blockers"),
+                }
+            )
+    for key, count in activity_counts.items():
+        if count == 0:
+            activity_issues.append(
+                {
+                    "code": "missing_activity_target",
+                    "target_key": key,
+                    "source_path": expected_targets[key]["source_path"],
+                }
+            )
     activity_passed = bool(
-        len(activity) == EXPECTED_SOURCE_COUNT
-        and all(not item.get("blockers") for item in activity)
+        target_policy_valid
+        and isinstance(raw_activity, list)
+        and len(raw_activity) >= EXPECTED_SOURCE_COUNT
+        and not activity_issues
     )
+
+    raw_lifecycle_locks = observations.get("lifecycle_locks")
     lifecycle_locks = [
         dict(item)
-        for item in observations.get("lifecycle_locks") or []
+        for item in raw_lifecycle_locks or []
         if isinstance(item, Mapping)
     ]
-    lifecycle_locks_passed = bool(
-        len(lifecycle_locks) == len(OTHER_LIFECYCLE_LOCKS)
-        and all(
-            item.get("held_by_batch") is True or item.get("locked") is not True
-            for item in lifecycle_locks
-        )
-    )
+    lifecycle_lock_counts = {name: 0 for name in OTHER_LIFECYCLE_LOCKS}
+    lifecycle_lock_issues: list[dict[str, Any]] = []
+    if not isinstance(raw_lifecycle_locks, list):
+        lifecycle_lock_issues.append({"code": "lifecycle_lock_inventory_malformed"})
+    for index, item in enumerate(
+        raw_lifecycle_locks if isinstance(raw_lifecycle_locks, list) else []
+    ):
+        if not isinstance(item, Mapping):
+            lifecycle_lock_issues.append(
+                {"code": "lifecycle_lock_sample_malformed", "sample_index": index}
+            )
+            continue
+        path = str(item.get("path") or "")
+        name = Path(path).name if path else ""
+        if name not in lifecycle_lock_counts:
+            lifecycle_lock_issues.append(
+                {
+                    "code": "foreign_lifecycle_lock",
+                    "sample_index": index,
+                    "path": path or None,
+                }
+            )
+            continue
+        lifecycle_lock_counts[name] += 1
+        if item.get("held_by_batch") is not True and item.get("locked") is True:
+            lifecycle_lock_issues.append(
+                {
+                    "code": "lifecycle_lock_busy",
+                    "sample_index": index,
+                    "path": path,
+                }
+            )
+    for name, count in lifecycle_lock_counts.items():
+        if count == 0:
+            lifecycle_lock_issues.append(
+                {"code": "missing_lifecycle_lock", "lock_name": name}
+            )
+        elif count > 1:
+            lifecycle_lock_issues.append(
+                {
+                    "code": "duplicate_lifecycle_lock",
+                    "lock_name": name,
+                    "sample_count": count,
+                }
+            )
+    lifecycle_locks_passed = not lifecycle_lock_issues
     service_gate = observations.get("systemd_service_gate") or {}
     root_projected = int(observations.get("projected_root_available_bytes") or 0)
     predicates = {
@@ -3473,26 +3731,36 @@ def _mutable_safety_predicates(
         "service_gate_classification": service_gate.get("classification"),
         "failing_units": service_gate.get("failing_units"),
         "failing_pairs": service_gate.get("failing_pairs"),
-        "activity_blockers": [
-            {
-                "source_path": item.get("source_path"),
-                "classification": item.get("classification"),
-                "blockers": item.get("blockers"),
-            }
-            for item in activity
-            if item.get("blockers")
-        ],
-        "lifecycle_lock_blockers": [
-            {
-                "path": item.get("path"),
-                "present": item.get("present"),
-                "locked": item.get("locked"),
-                "held_by_batch": item.get("held_by_batch"),
-            }
-            for item in lifecycle_locks
-            if item.get("held_by_batch") is not True
-            and item.get("locked") is True
-        ],
+        "target_activity_coverage": {
+            "expected_target_count": EXPECTED_SOURCE_COUNT,
+            "observed_sample_count": (
+                len(raw_activity) if isinstance(raw_activity, list) else 0
+            ),
+            "expected_target_keys": sorted(expected_targets),
+            "expected_source_paths": sorted(expected_paths),
+            "sample_counts_by_target": activity_counts,
+            "issues": activity_issues,
+        },
+        "activity_blockers": activity_issues,
+        "capacity_target_coverage": {
+            "expected_target_count": EXPECTED_SOURCE_COUNT,
+            "observed_stage_count": (
+                len(raw_capacity) if isinstance(raw_capacity, list) else 0
+            ),
+            "stage_counts_by_target": capacity_counts,
+            "issues": capacity_issues,
+        },
+        "lifecycle_lock_coverage": {
+            "expected_lock_count": len(OTHER_LIFECYCLE_LOCKS),
+            "observed_sample_count": (
+                len(raw_lifecycle_locks)
+                if isinstance(raw_lifecycle_locks, list)
+                else 0
+            ),
+            "sample_counts_by_lock": lifecycle_lock_counts,
+            "issues": lifecycle_lock_issues,
+        },
+        "lifecycle_lock_blockers": lifecycle_lock_issues,
         "finance": {
             key: finance.get(key)
             for key in (
