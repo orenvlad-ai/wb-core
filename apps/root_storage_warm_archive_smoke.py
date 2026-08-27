@@ -1215,6 +1215,33 @@ def run() -> None:
         "nonzero_or_invalid_exec_main_status",
     ]
 
+    failed_autoanswers_snapshot = _healthy_systemd_snapshot()
+    failed_autoanswers_snapshot["wb-core-autoanswers-worker.service"].update(
+        {"Result": "exit-code", "ExecMainStatus": "1"}
+    )
+    failed_autoanswers = warm._systemd_service_gate(failed_autoanswers_snapshot)
+    assert failed_autoanswers["healthy"] is False
+    assert failed_autoanswers["failing_pair_count"] == 1
+    assert failed_autoanswers["resample_required_pair_names"] == []
+    failed_autoanswers_row = next(
+        item
+        for item in failed_autoanswers["units"]
+        if item["name"] == "wb-core-autoanswers-worker.service"
+    )
+    assert failed_autoanswers_row["classification"] == (
+        "real_unhealthy_owning_service"
+    )
+    assert failed_autoanswers_row["reason_codes"][:2] == [
+        "failed_result",
+        "nonzero_or_invalid_exec_main_status",
+    ]
+    naturally_terminalized_autoanswers = warm._systemd_service_gate(
+        _healthy_systemd_snapshot()
+    )
+    assert naturally_terminalized_autoanswers["healthy"] is True
+    assert naturally_terminalized_autoanswers["failing_unit_count"] == 0
+    assert naturally_terminalized_autoanswers["failing_pair_count"] == 0
+
     failed_timer_snapshot = _healthy_systemd_snapshot()
     failed_timer_snapshot["wb-core-warehouse-functional-sync.timer"].update(
         {"ActiveState": "failed", "SubState": "failed", "Result": "exit-code"}

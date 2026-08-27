@@ -213,6 +213,16 @@ one caller-known detached job. A nonzero/ambiguous submit is never repeated;
 the only next action is query-only job and archive readback. The material hash
 is evidence, not a second owner authorization field.
 
+The readiness identity is deterministically bound to repository, PR and the
+exact `live_runtime/done` Release operation. A blocked service-gate receipt is
+terminal and immutable: a later natural timer/service recovery cannot turn it
+ready, and rerunning that same identity only reads back the terminal receipt.
+Only a new legitimate PR and its fresh Release operation can derive a different
+readiness identity and execute a new full query-only readiness contour. The
+later scope-goal parser accepts only the single `state=ready` receipt for that
+exact fresh Release operation; an earlier blocked or otherwise foreign receipt
+cannot satisfy the binding.
+
 ## Terminal acceptance
 
 `COMPLETE` requires exactly six absent sources, six private archives and six
