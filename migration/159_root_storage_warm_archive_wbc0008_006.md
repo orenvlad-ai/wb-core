@@ -28,9 +28,9 @@ pre-submit repeatability defect found by the first block-006 operation. WBC0008
 block 012 retains that unchanged scope and corrects the producer-ownership CAS
 boundary after a legitimate same-inode 4,096-byte Autoanswers write changed the
 old global protected-file `size/mtime` digest between readiness and the first
-JIT witness. Block 021 supersedes the block-020 model with contract
-`root_storage_warm_archive_wbc0008_006_v6`; v1/v2/v3/v4/v5 evidence and terminal
-old operations stay immutable and are never resumed or replayed. Every
+JIT witness. Block 022 supersedes the block-021 model with contract
+`root_storage_warm_archive_wbc0008_006_v7`; v1/v2/v3/v4/v5/v6 evidence and
+terminal old operations stay immutable and are never resumed or replayed. Every
 qualification and mutation CAS gate now retains structured per-source activity
 evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
 and device/inode binding, kernel locks, sidecars, before/after identity and hash
@@ -242,6 +242,59 @@ fixture crosses host readiness into systemd-worker JIT and mutation-start
 qualification and reaches the first durable mutation call only after all exact
 six source SHA, sidecar, FD, lock, hold and provenance predicates remain intact.
 
+WBC0008 block 022 corrects the remaining maximum-depth selector defect proven
+by the single terminal PR #1074 operation
+`production-goal-v1-083b70867b00f142b1a50a1169b8ca82`, detached job
+`5443d9e3ea677fef6802da9bc1438a7fab690632a23a9b7cc989dababbaf0b79`
+and immutable component `/material_collection`. The v6 selector rejected more
+than one maximum-depth record for
+`/opt/wb-core-runtime/state/backups` before the mutation journal and before any
+archive, manifest or unlink. Its failure artifact is
+`sha256:2878faf7e5339ccf7e6b868851af7808a022179ed435fee75784e651ac8de346`;
+that readiness, operation and job remain terminal and are never retried or
+reused.
+
+Before any new readiness or apply, the deployed v7 Release must run exactly one
+canonical `warm-archive-mount-probe`. The probe submits one caller-known
+`warm-archive-mount-probe` request to the existing
+`wb-core-storage-recovery-sanitation@.service`, then performs only query-only
+status readback. Its immutable server-owned result and bound Actions artifact
+record the deployed SHA, repo unit-template SHA, exact unit instance, mount
+namespace link/device/inode, canonical target and family-anchor realpaths plus
+device/inode, and every sorted raw maximum-depth mountinfo record including the
+exact raw line. It has no archive, unlink, service-restart, timer-change or
+business-data primitive. Missing, failed or contract-invalid probe evidence
+blocks readiness rather than creating a production operation.
+The fresh readiness receipt schema is
+`wb-core.root-warm-archive-readiness-receipt/v4`; it binds that exact probe job,
+evidence digest, artifact and Actions comment. Readiness additionally requires
+a newer exact OWNER comment, so a pre-probe or reused authorization comment
+cannot become the new v7 readiness identity.
+
+Stable mount CAS is now `wb_core_semantic_filesystem_identity_v2`. The selector
+may collapse multiple maximum-depth records only after independently proving
+for every candidate the exact role and repo policy owner, target/family anchor
+realpath/device/inode placement, normalized mount-root-to-target backing
+subpath, `st_dev` and major/minor, block-device source and `st_rdev`, UUID,
+filesystem type, unambiguous writable state, all role-required restrictions and
+the same stable integrity/write-option semantics. The stable identity retains
+the single distinct semantic identity plus distinct-identity count/digest.
+Namespace-local mount/parent ids, record order, optional propagation fields,
+atime observations and additional allowed restrictive flags remain observation
+evidence only. The complete sorted raw candidate set, count, digest and each
+candidate proof remain inspectable in readiness/JIT/mutation evidence.
+
+Any candidate with missing or divergent device/source/UUID/type/writable/stable
+option, normalized path/root backing subpath, path or anchor identity, role or
+policy owner is terminal ambiguous with exact component/failure evidence. A
+missing/foreign record, arbitrary same basename, unknown option, read-only
+record or partial candidate set is never collapsed. Regression uses overlapping
+production-shaped records, candidate-order permutation, allowed additional
+restrictions, and one-field negative drift for device, source, UUID, type,
+read-only state, stable option, mount root/path, anchor and owner/role. The full
+readiness-to-JIT-to-detached-worker fixture supplies an equivalent overlapping
+set and reaches the first durable mutation call only for that exact set.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
@@ -326,7 +379,7 @@ manufacture a readiness identity. Exhaustion creates no production command,
 queue or unbounded retry. The later scope-goal parser accepts exactly one final
 `state=ready` receipt for that same binding.
 
-After a code/runtime correction such as block 021, the prior deployed-SHA
+After a code/runtime correction such as block 022, the prior deployed-SHA
 readiness sequence remains terminal and cannot authorize the new release. The
 new exact `live_runtime/done` receipt, the same durable owner passport and its
 derived goal operation bind a fresh readiness-v2 base whose first attempt is

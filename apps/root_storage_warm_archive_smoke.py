@@ -594,6 +594,35 @@ def _proven_mount_record(role: str, line: str) -> dict[str, object]:
 
 
 def _exercise_namespace_stable_mount_semantics() -> None:
+    original_path_binding_identity = warm._path_binding_identity
+
+    def fixture_path_binding(
+        path: Path, *, filesystem_role: str, path_device: int
+    ) -> dict[str, object]:
+        policy = warm.FILESYSTEM_ROLE_POLICIES[filesystem_role]
+        return {
+            "requested_path": str(path),
+            "canonical_path": str(path.resolve()),
+            "path_device": int(path_device),
+            "path_device_major": int(policy["device_major"]),
+            "path_device_minor": int(policy["device_minor"]),
+            "path_inode": {"root": 101, "backup": 102, "generation": 103}[
+                filesystem_role
+            ],
+            "family_root": str(policy["family_root"]),
+            "canonical_family_anchor": str(
+                Path(str(policy["family_root"])).resolve()
+            ),
+            "anchor_device": int(path_device),
+            "anchor_device_major": int(policy["device_major"]),
+            "anchor_device_minor": int(policy["device_minor"]),
+            "anchor_inode": {"root": 201, "backup": 202, "generation": 203}[
+                filesystem_role
+            ],
+            "placement": "inside_declared_family",
+        }
+
+    warm._path_binding_identity = fixture_path_binding
     host_lines = {
         "root": (
             "29 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 "
@@ -659,9 +688,9 @@ def _exercise_namespace_stable_mount_semantics() -> None:
         assert warm._digest(host_semantic[role]) == warm._digest(
             worker_semantic[role]
         )
-        assert host_observations[role]["raw_mount"] != worker_observations[role][
-            "raw_mount"
-        ]
+        assert host_observations[role]["raw_mount_candidates"] != worker_observations[
+            role
+        ]["raw_mount_candidates"]
         serialized = json.dumps(host_semantic[role], sort_keys=True)
         for namespace_local_field in (
             "mount_id",
@@ -673,12 +702,15 @@ def _exercise_namespace_stable_mount_semantics() -> None:
         ):
             assert namespace_local_field not in serialized
     assert warm._digest(host_semantic) == warm._digest(worker_semantic)
-    assert host_observations["root"]["raw_mount"]["mount_id"] == 29
-    assert worker_observations["root"]["raw_mount"]["mount_id"] == 438
-    assert host_observations["backup"]["raw_mount"]["mount_id"] == 88
-    assert worker_observations["backup"]["raw_mount"]["mount_id"] == 434
-    assert host_observations["generation"]["raw_mount"]["mount_id"] == 219
-    assert worker_observations["generation"]["raw_mount"]["mount_id"] == 435
+    assert host_observations["root"]["raw_mount_candidates"][0]["mount_id"] == 29
+    assert host_observations["root"]["raw_mount_candidates"][0][
+        "raw_line"
+    ] == host_lines["root"]
+    assert worker_observations["root"]["raw_mount_candidates"][0]["mount_id"] == 438
+    assert host_observations["backup"]["raw_mount_candidates"][0]["mount_id"] == 88
+    assert worker_observations["backup"]["raw_mount_candidates"][0]["mount_id"] == 434
+    assert host_observations["generation"]["raw_mount_candidates"][0]["mount_id"] == 219
+    assert worker_observations["generation"]["raw_mount_candidates"][0]["mount_id"] == 435
 
     weakened_generation = _proven_mount_record(
         "generation", host_lines["generation"]
@@ -697,7 +729,8 @@ def _exercise_namespace_stable_mount_semantics() -> None:
             ),
         )
     except warm.WarmArchiveError as exc:
-        assert "mount safety option drifted" in str(exc)
+        assert "candidate proof" in str(exc)
+        assert "mount safety option drifted" in json.dumps(exc.evidence)
     else:
         raise AssertionError("declared generation mount safety was weakened")
 
@@ -741,6 +774,55 @@ def _exercise_namespace_stable_mount_semantics() -> None:
             pass
         else:
             raise AssertionError("unsafe semantic mount identity was admitted")
+        try:
+            warm._semantic_mount_identity(
+                warm.DESTINATION_ROOT,
+                [baseline_backup, drifted],
+                filesystem_role="backup",
+                policy_owner=str(backup_policy["policy_owner"]),
+                path_device=int(backup_policy["device"]),
+            )
+        except warm.WarmArchiveError as exc:
+            assert exc.evidence["raw_candidate_count"] == 2
+            assert len(exc.evidence["raw_mount_candidates"]) == 2
+            assert exc.evidence["candidate_failures"]
+        else:
+            raise AssertionError("divergent duplicate mount candidate was admitted")
+
+    divergent_root = json.loads(json.dumps(baseline_backup))
+    divergent_root["mount_root"] = "/foreign-backup-root"
+    try:
+        warm._semantic_mount_identity(
+            warm.DESTINATION_ROOT,
+            [baseline_backup, divergent_root],
+            filesystem_role="backup",
+            policy_owner=str(backup_policy["policy_owner"]),
+            path_device=int(backup_policy["device"]),
+        )
+    except warm.WarmArchiveError as exc:
+        assert "semantically divergent" in str(exc)
+        assert any(
+            row["json_path"] == "/backing_subpath"
+            for row in exc.evidence["component_diff"]
+        )
+    else:
+        raise AssertionError("divergent mount root/path binding was admitted")
+
+    for records in (
+        [],
+        [
+            {
+                **baseline_backup,
+                "mount_point": "/foreign",
+            }
+        ],
+    ):
+        try:
+            warm._select_mount_identity(warm.DESTINATION_ROOT, records)
+        except warm.WarmArchiveError as exc:
+            assert "unavailable" in str(exc)
+        else:
+            raise AssertionError("missing/foreign mount record was admitted")
 
     try:
         warm._semantic_mount_identity(
@@ -751,22 +833,42 @@ def _exercise_namespace_stable_mount_semantics() -> None:
             path_device=int(backup_policy["device"]),
         )
     except warm.WarmArchiveError as exc:
-        assert "path-to-device role binding drifted" in str(exc)
+        assert "candidate proof" in str(exc)
+        assert "path-to-device role binding drifted" in json.dumps(exc.evidence)
     else:
         raise AssertionError("backup filesystem role accepted a root path")
 
-    ambiguous = [
+    equivalent_duplicates = [
         _proven_mount_record("backup", worker_lines["backup"]),
         _proven_mount_record(
             "backup", worker_lines["backup"].replace("434 29", "439 29", 1)
         ),
     ]
-    try:
-        warm._select_mount_identity(warm.DESTINATION_ROOT, ambiguous)
-    except warm.WarmArchiveError as exc:
-        assert "ambiguous" in str(exc)
-    else:
-        raise AssertionError("ambiguous mount identity was admitted")
+    equivalent_semantic, equivalent_observation = warm._semantic_mount_identity(
+        warm.DESTINATION_ROOT,
+        equivalent_duplicates,
+        filesystem_role="backup",
+        policy_owner=str(backup_policy["policy_owner"]),
+        path_device=int(backup_policy["device"]),
+    )
+    assert equivalent_observation["raw_candidate_count"] == 2
+    assert len(equivalent_observation["raw_mount_candidates"]) == 2
+    assert equivalent_observation["distinct_semantic_identity_count"] == 1
+    assert equivalent_semantic["candidate_evidence"][
+        "distinct_semantic_identity_count"
+    ] == 1
+
+    reversed_semantic, reversed_observation = warm._semantic_mount_identity(
+        warm.DESTINATION_ROOT,
+        list(reversed(equivalent_duplicates)),
+        filesystem_role="backup",
+        policy_owner=str(backup_policy["policy_owner"]),
+        path_device=int(backup_policy["device"]),
+    )
+    assert reversed_semantic == equivalent_semantic
+    assert reversed_observation["raw_candidates_digest"] == equivalent_observation[
+        "raw_candidates_digest"
+    ]
 
     integrity_drift = json.loads(json.dumps(baseline_backup))
     integrity_drift["super_options"] = ["rw", "commit=31"]
@@ -780,6 +882,64 @@ def _exercise_namespace_stable_mount_semantics() -> None:
     assert warm._digest(integrity_semantic) != warm._digest(
         host_semantic["backup"]
     )
+    try:
+        warm._semantic_mount_identity(
+            warm.DESTINATION_ROOT,
+            [baseline_backup, integrity_drift],
+            filesystem_role="backup",
+            policy_owner=str(backup_policy["policy_owner"]),
+            path_device=int(backup_policy["device"]),
+        )
+    except warm.WarmArchiveError as exc:
+        assert "semantically divergent" in str(exc)
+        assert any(
+            row["json_path"].startswith("/stable_integrity_options")
+            for row in exc.evidence["component_diff"]
+        )
+    else:
+        raise AssertionError("divergent stable mount option was admitted")
+
+    original_fixture_binding = warm._path_binding_identity
+
+    def drifted_anchor_binding(
+        path: Path, *, filesystem_role: str, path_device: int
+    ) -> dict[str, object]:
+        binding = dict(
+            fixture_path_binding(
+                path,
+                filesystem_role=filesystem_role,
+                path_device=path_device,
+            )
+        )
+        binding["anchor_inode"] = int(binding["anchor_inode"]) + 1
+        return binding
+
+    warm._path_binding_identity = drifted_anchor_binding
+    anchor_drift_semantic, _ = warm._semantic_mount_identity(
+        warm.DESTINATION_ROOT,
+        baseline_backup,
+        filesystem_role="backup",
+        policy_owner=str(backup_policy["policy_owner"]),
+        path_device=int(backup_policy["device"]),
+    )
+    assert warm._digest(anchor_drift_semantic) != warm._digest(
+        host_semantic["backup"]
+    )
+    warm._path_binding_identity = original_fixture_binding
+
+    try:
+        warm._semantic_mount_identity(
+            warm.DESTINATION_ROOT,
+            baseline_backup,
+            filesystem_role="backup",
+            policy_owner="foreign.owner",
+            path_device=int(backup_policy["device"]),
+        )
+    except warm.WarmArchiveError as exc:
+        assert "role/policy ownership is unknown" in str(exc)
+    else:
+        raise AssertionError("foreign filesystem policy owner was admitted")
+    warm._path_binding_identity = original_path_binding_identity
 
 
 def _non_target_fixture(
@@ -1303,7 +1463,9 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
     }
     namespace_phase = {"worker": False}
 
-    def namespace_mount(path: Path) -> dict[str, object]:
+    def namespace_mount(
+        path: Path,
+    ) -> dict[str, object] | list[dict[str, object]]:
         raw_mount = _fixture_raw_mount(
             root,
             fixture_device,
@@ -1315,8 +1477,18 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             else ["rw", "relatime"]
         )
         if namespace_phase["worker"] and path.resolve() == root_backups:
-            raw_mount["mount_root"] = str(root_backups)
+            raw_mount["mount_root"] = "/" + root_backups.relative_to(root).as_posix()
             raw_mount["mount_point"] = str(root_backups)
+            overlapping = json.loads(json.dumps(raw_mount))
+            overlapping["mount_id"] = 439
+            overlapping["parent_mount_id"] = 438
+            overlapping["mount_options"] = [
+                "rw",
+                "nosuid",
+                "nodev",
+                "relatime",
+            ]
+            return [raw_mount, overlapping]
         return raw_mount
 
     warm._mount_identity = namespace_mount
@@ -1376,7 +1548,14 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             ],
         )
         raw_filesystem_mount = namespace_mount(root_backups)
-        namespace_mount_ids.append(int(raw_filesystem_mount["mount_id"]))
+        raw_filesystem_candidates = (
+            raw_filesystem_mount
+            if isinstance(raw_filesystem_mount, list)
+            else [raw_filesystem_mount]
+        )
+        namespace_mount_ids.extend(
+            int(item["mount_id"]) for item in raw_filesystem_candidates
+        )
         semantic_filesystem_mount, mount_observation = (
             warm._semantic_mount_identity(
                 root_backups,
@@ -1531,7 +1710,7 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         ]
         assert namespace_mount_ids[:2] == [29, 29]
         assert namespace_mount_ids[2:]
-        assert set(namespace_mount_ids[2:]) == {438}
+        assert set(namespace_mount_ids[2:]) == {438, 439}
         first_mutations: list[Path] = []
 
         def first_mutation(path: Path, _payload: object) -> None:

@@ -71,7 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--deployed-sha", required=True)
     submit.add_argument(
         "--operation",
-        choices=("plan", "apply", "warm-archive-apply"),
+        choices=(
+            "plan",
+            "apply",
+            "warm-archive-apply",
+            "warm-archive-mount-probe",
+        ),
         required=True,
     )
     submit.add_argument("--root", dest="root_name", choices=("root", "backup"))
@@ -125,7 +130,12 @@ def submit_job(
     job_id = _require_job_id(job_id)
     deployed_sha = _require_deployed_sha(deployed_sha)
     operation = str(operation or "").strip()
-    if operation not in {"plan", "apply", "warm-archive-apply"}:
+    if operation not in {
+        "plan",
+        "apply",
+        "warm-archive-apply",
+        "warm-archive-mount-probe",
+    }:
         raise SanitationJobError("unsupported sanitation job operation")
     if int(reserved_free_bytes) < 0:
         raise SanitationJobError("reserved free bytes must be non-negative")
@@ -163,6 +173,19 @@ def submit_job(
             or len(str(approval_reference)) > 500
         ):
             raise SanitationJobError("warm archive exact request binding is invalid")
+    if operation == "warm-archive-mount-probe" and (
+        root_name
+        or family
+        or approved
+        or manifest
+        or manifest_sha256
+        or goal_operation_id
+        or approval_reference
+        or int(reserved_free_bytes) != DEFAULT_RESERVED_FREE_BYTES
+    ):
+        raise SanitationJobError(
+            "warm archive mount probe must not carry mutation inputs"
+        )
 
     runtime_dir = _canonical_directory(runtime_dir, label="runtime")
     root_backups = _canonical_directory(root_backups, label="root backup")
@@ -196,7 +219,7 @@ def submit_job(
                 "approval_reference": str(approval_reference),
             }
         )
-    else:
+    elif operation in {"plan", "apply"}:
         request_material.update(
             {
                 "root": root_name,
@@ -470,6 +493,16 @@ def _execute_request(
             approval_reference=request["approval_reference"],
             own_job_id=request["job_id"],
         )
+    if request["operation"] == "warm-archive-mount-probe":
+        from apps.root_storage_warm_archive import mount_probe
+
+        return mount_probe(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha=request["deployed_sha"],
+            deployed_sha_file=deployed_sha_file,
+            job_id=request["job_id"],
+        )
     raise SanitationJobError("persisted sanitation operation is invalid")
 
 
@@ -594,7 +627,7 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             or len(material["approval_reference"]) > 500
         ):
             raise SanitationJobError("persisted warm archive request is invalid")
-    else:
+    elif operation in {"plan", "apply"}:
         material.update(
             {
                 "root": str(request.get("root") or ""),
@@ -603,7 +636,12 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
                 "reserved_free_bytes": int(request.get("reserved_free_bytes") or 0),
             }
         )
-    if operation not in {"plan", "apply", "warm-archive-apply"}:
+    if operation not in {
+        "plan",
+        "apply",
+        "warm-archive-apply",
+        "warm-archive-mount-probe",
+    }:
         raise SanitationJobError("persisted sanitation operation is invalid")
     if operation in {"plan", "apply"} and (
         material["root"] not in FAMILY_POLICIES

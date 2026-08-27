@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import io
 import json
@@ -45,8 +45,12 @@ from apps.release_protocol import (  # noqa: E402
 APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v4"
 APPLY_MARKER = "wb-core-production-apply-receipt"
 APPLY_COMMENT_SUMMARY_SCHEMA = "wb-core.production-apply-comment-summary/v1"
-WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v3"
+WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v4"
 WARM_READINESS_MARKER = "wb-core-root-warm-archive-readiness-receipt"
+WARM_MOUNT_PROBE_RECEIPT_SCHEMA = (
+    "wb-core.root-warm-archive-mount-probe-receipt/v1"
+)
+WARM_MOUNT_PROBE_MARKER = "wb-core-root-warm-archive-mount-probe-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 MAX_QUALIFICATION_CANDIDATES = 4
@@ -128,6 +132,32 @@ def warm_readiness_id(
 
 def warm_readiness_marker(readiness_id: str) -> str:
     return f"<!-- {WARM_READINESS_MARKER} readiness={readiness_id} -->"
+
+
+def warm_mount_probe_job_id(
+    repository: str,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+) -> str:
+    return digest(
+        canonical_json_bytes(
+            {
+                "contract": WARM_MOUNT_PROBE_RECEIPT_SCHEMA,
+                "repository": repository,
+                "pull_request": int(pr),
+                "release_operation_id": release_operation,
+                "deployed_sha": merge_sha,
+                "unit_template": (
+                    "wb-core-storage-recovery-sanitation@.service"
+                ),
+            }
+        )
+    )
+
+
+def warm_mount_probe_marker(job_id: str) -> str:
+    return f"<!-- {WARM_MOUNT_PROBE_MARKER} job={job_id} -->"
 
 
 def _valid_warm_systemd_service_gate(
@@ -213,6 +243,136 @@ def parse_release_receipt(
     return matches[0]
 
 
+def parse_warm_mount_probe_receipt(
+    comments: list[Mapping[str, Any]],
+    *,
+    repository: str,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+) -> dict[str, Any]:
+    job_id = warm_mount_probe_job_id(
+        repository,
+        pr,
+        release_operation,
+        merge_sha,
+    )
+    marker_text = warm_mount_probe_marker(job_id)
+    matches: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if marker_text not in body or not is_actions_bot_comment(comment):
+            continue
+        try:
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise ApplyError("bound warm archive mount probe receipt is malformed") from exc
+        paths = payload.get("paths")
+        artifact = payload.get("artifact")
+        worker = payload.get("worker")
+        valid = bool(
+            payload.get("schema") == WARM_MOUNT_PROBE_RECEIPT_SCHEMA
+            and payload.get("state") == "observed"
+            and payload.get("query_only") is True
+            and payload.get("database_written") is False
+            and payload.get("production_probe_count") == 1
+            and payload.get("job_id") == job_id
+            and payload.get("repository") == repository
+            and payload.get("pull_request") == pr
+            and payload.get("release_operation_id") == release_operation
+            and payload.get("merge_sha") == merge_sha
+            and payload.get("deployed_sha") == merge_sha
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("evidence_digest") or ""),
+            )
+            is not None
+            and isinstance(worker, Mapping)
+            and worker.get("unit_template")
+            == "wb-core-storage-recovery-sanitation@.service"
+            and worker.get("unit_instance")
+            == f"wb-core-storage-recovery-sanitation@{job_id}.service"
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(worker.get("repo_template_sha256") or ""),
+            )
+            is not None
+            and worker.get("installed_template_path")
+            == "/etc/systemd/system/wb-core-storage-recovery-sanitation@.service"
+            and worker.get("installed_template_sha256")
+            == worker.get("repo_template_sha256")
+            and worker.get("installed_template_matches_repo") is True
+            and isinstance(worker.get("mount_namespace"), Mapping)
+            and isinstance(paths, list)
+            and len(paths) == 3
+            and all(isinstance(item, Mapping) for item in paths)
+            and {item.get("filesystem_role") for item in paths}
+            == {"root", "backup", "generation"}
+            and any(
+                item.get("filesystem_role") == "backup"
+                and int(item.get("raw_candidate_count") or 0) > 1
+                for item in paths
+            )
+            and all(
+                re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(item.get("semantic_identity_digest") or ""),
+                )
+                is not None
+                and re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(item.get("raw_candidates_digest") or ""),
+                )
+                is not None
+                and isinstance(item.get("target"), Mapping)
+                for item in paths
+            )
+            and {
+                item.get("filesystem_role"): item["target"].get(
+                    "canonical_path"
+                )
+                for item in paths
+            }
+            == {
+                "root": "/opt/wb-core-runtime/backups",
+                "backup": "/opt/wb-core-runtime/state/backups",
+                "generation": "/opt/wb-core-runtime/state/generations",
+            }
+            and isinstance(artifact, Mapping)
+            and artifact.get("file")
+            == "root-warm-archive-mount-probe-receipt.json"
+            and re.fullmatch(
+                rf"root-warm-archive-mount-probe-pr-{pr}-run-[1-9][0-9]*",
+                str(artifact.get("name") or ""),
+            ) is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(artifact.get("sha256") or "")
+            )
+            is not None
+            and int(artifact.get("size_bytes") or 0) > 0
+        )
+        if not valid:
+            raise ApplyError("bound warm archive mount probe receipt is invalid")
+        comment_id = comment.get("id")
+        created_at = str(comment.get("created_at") or "")
+        if (
+            not isinstance(comment_id, int)
+            or comment_id <= 0
+            or not created_at.endswith("Z")
+        ):
+            raise ApplyError("bound warm archive mount probe comment identity is invalid")
+        matches.append(
+            {
+                **dict(payload),
+                "comment_id": comment_id,
+                "comment_created_at": created_at,
+            }
+        )
+    if len(matches) != 1:
+        raise ApplyError("exact worker mount probe receipt is missing or ambiguous")
+    return matches[0]
+
+
 def parse_warm_readiness_receipt(
     comments: list[Mapping[str, Any]],
     *,
@@ -223,6 +383,13 @@ def parse_warm_readiness_receipt(
     authorization_comment_id: int,
     goal_operation_id: str,
 ) -> dict[str, Any]:
+    mount_probe = parse_warm_mount_probe_receipt(
+        comments,
+        repository=repository,
+        pr=pr,
+        release_operation=release_operation,
+        merge_sha=merge_sha,
+    )
     attempts = _collect_warm_readiness_attempts(
         comments,
         repository=repository,
@@ -239,8 +406,25 @@ def parse_warm_readiness_receipt(
         raise ApplyError("exact ready warm-archive readiness receipt is missing or ambiguous")
     payload = ready_attempts[0]
     service_gate = payload.get("systemd_service_gate")
+    expected_mount_probe_job = warm_mount_probe_job_id(
+        repository,
+        pr,
+        release_operation,
+        merge_sha,
+    )
     if (
         payload.get("attempt") != max(attempts)
+        or payload.get("mount_probe_job_id") != expected_mount_probe_job
+        or payload.get("mount_probe_evidence_digest")
+        != mount_probe.get("evidence_digest")
+        or payload.get("mount_probe_artifact") != mount_probe.get("artifact")
+        or payload.get("mount_probe_comment_id") != mount_probe.get("comment_id")
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(payload.get("mount_probe_evidence_digest") or ""),
+        )
+        is None
+        or not isinstance(payload.get("mount_probe_artifact"), Mapping)
         or re.fullmatch(
             r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
             r"readiness-v2-[0-9a-f]{32}-a[0-9]{2}/"
@@ -280,6 +464,12 @@ def _collect_warm_readiness_attempts(
     goal_operation_id: str,
 ) -> dict[int, dict[str, Any]]:
     attempts: dict[int, dict[str, Any]] = {}
+    expected_mount_probe_job = warm_mount_probe_job_id(
+        repository,
+        pr,
+        release_operation,
+        merge_sha,
+    )
     expected_markers = {
         attempt: warm_readiness_marker(
             warm_readiness_id(
@@ -340,6 +530,15 @@ def _collect_warm_readiness_attempts(
             and payload.get("authorization_comment_id")
             == authorization_comment_id
             and payload.get("goal_operation_id") == goal_operation_id
+            and payload.get("mount_probe_job_id") == expected_mount_probe_job
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("mount_probe_evidence_digest") or ""),
+            )
+            is not None
+            and isinstance(payload.get("mount_probe_artifact"), Mapping)
+            and isinstance(payload.get("mount_probe_comment_id"), int)
+            and int(payload.get("mount_probe_comment_id")) > 0
             and payload.get("merge_sha") == merge_sha
             and payload.get("deployed_sha") == merge_sha
         )
@@ -779,6 +978,68 @@ def _warm_readiness_remote_command(
         "set -eu; umask 077; install -d -m 0700 "
         + shlex.quote(evidence_dir)
         + "; cd "
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _warm_mount_probe_submit_remote_command(
+    *, target: Mapping[str, Any], merge_sha: str, job_id: str
+) -> list[str]:
+    if re.fullmatch(r"[0-9a-f]{64}", job_id) is None:
+        raise ApplyError("warm archive mount probe job id is invalid")
+    target_dir = str(target["target_dir"])
+    parts = [
+        "python3",
+        f"{target_dir}/apps/storage_recovery_sanitation_job.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--root-backups",
+        "/opt/wb-core-runtime/backups",
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "submit",
+        "--job-id",
+        job_id,
+        "--deployed-sha",
+        merge_sha,
+        "--operation",
+        "warm-archive-mount-probe",
+    ]
+    shell = (
+        "set -eu; umask 077; cd "
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _warm_mount_probe_status_remote_command(
+    *, target: Mapping[str, Any], merge_sha: str, job_id: str
+) -> list[str]:
+    if re.fullmatch(r"[0-9a-f]{64}", job_id) is None:
+        raise ApplyError("warm archive mount probe job id is invalid")
+    target_dir = str(target["target_dir"])
+    parts = [
+        "python3",
+        f"{target_dir}/apps/storage_recovery_sanitation_job.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--root-backups",
+        "/opt/wb-core-runtime/backups",
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "status",
+        "--job-id",
+        job_id,
+        "--deployed-sha",
+        merge_sha,
+    ]
+    shell = (
+        "set -eu; umask 077; cd "
         + shlex.quote(target_dir)
         + "; "
         + " ".join(shlex.quote(part) for part in parts)
@@ -1610,6 +1871,10 @@ def _compact_warm_readiness_comment_body(
             "release_operation_id",
             "authorization_comment_id",
             "goal_operation_id",
+            "mount_probe_job_id",
+            "mount_probe_evidence_digest",
+            "mount_probe_artifact",
+            "mount_probe_comment_id",
             "merge_sha",
             "deployed_sha",
             "projection_manifest_path",
@@ -2261,7 +2526,32 @@ def _run_warm_readiness_mode(
         release_operation=args.release_operation_id,
         merge_sha=merge_sha,
     )
+    mount_probe = parse_warm_mount_probe_receipt(
+        comments,
+        repository=args.repository,
+        pr=args.pr,
+        release_operation=args.release_operation_id,
+        merge_sha=merge_sha,
+    )
     authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
+    try:
+        probe_created_at = datetime.fromisoformat(
+            str(mount_probe["comment_created_at"]).replace("Z", "+00:00")
+        )
+        authorization_created_at = datetime.fromisoformat(
+            str(authorization.get("created_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ApplyError("warm archive owner/probe chronology is invalid") from exc
+    if (
+        authorization.get("id") != args.authorization_comment_id
+        or str(authorization.get("author_association") or "").upper() != "OWNER"
+        or args.authorization_comment_id <= int(mount_probe["comment_id"])
+        or authorization_created_at <= probe_created_at
+    ):
+        raise ApplyError(
+            "warm archive readiness requires a fresh OWNER binding after the exact worker probe"
+        )
     goal = validate_authorization(
         authorization,
         repository=args.repository,
@@ -2313,6 +2603,10 @@ def _run_warm_readiness_mode(
             "release_operation_id": release_receipt["operation_id"],
             "authorization_comment_id": args.authorization_comment_id,
             "goal_operation_id": goal_operation_id,
+            "mount_probe_job_id": mount_probe["job_id"],
+            "mount_probe_evidence_digest": mount_probe["evidence_digest"],
+            "mount_probe_artifact": mount_probe["artifact"],
+            "mount_probe_comment_id": mount_probe["comment_id"],
             "merge_sha": merge_sha,
             "deployed_sha": merge_sha,
             "attempt_count": len(attempts),
@@ -2393,6 +2687,10 @@ def _run_warm_readiness_mode(
         "release_operation_id": release_receipt["operation_id"],
         "authorization_comment_id": args.authorization_comment_id,
         "goal_operation_id": goal_operation_id,
+        "mount_probe_job_id": mount_probe["job_id"],
+        "mount_probe_evidence_digest": mount_probe["evidence_digest"],
+        "mount_probe_artifact": mount_probe["artifact"],
+        "mount_probe_comment_id": mount_probe["comment_id"],
         "merge_sha": merge_sha,
         "deployed_sha": merge_sha,
         "evidence": evidence,
@@ -2468,6 +2766,240 @@ def _run_warm_readiness_mode(
     return 0
 
 
+def _run_warm_mount_probe_mode(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    if not args.release_operation_id:
+        raise ApplyError("warm archive mount probe requires --release-operation-id")
+    merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
+    release_receipt = parse_release_receipt(
+        comments,
+        pr=args.pr,
+        release_operation=args.release_operation_id,
+        merge_sha=merge_sha,
+    )
+    job_id = warm_mount_probe_job_id(
+        args.repository,
+        args.pr,
+        args.release_operation_id,
+        merge_sha,
+    )
+    marker_text = warm_mount_probe_marker(job_id)
+    existing = [
+        item
+        for item in comments
+        if marker_text in str(item.get("body") or "")
+        and is_actions_bot_comment(item)
+    ]
+    if len(existing) > 1:
+        raise ApplyError("duplicate warm archive mount probe receipts")
+    if existing:
+        body = str(existing[0].get("body") or "")
+        try:
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise ApplyError("existing warm archive mount probe receipt is invalid") from exc
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema") != WARM_MOUNT_PROBE_RECEIPT_SCHEMA
+            or payload.get("job_id") != job_id
+            or payload.get("deployed_sha") != merge_sha
+            or payload.get("state") != "observed"
+        ):
+            raise ApplyError("existing warm archive mount probe binding drifted")
+        receipt = {**dict(payload), "idempotent": True, "production_probe_count": 0}
+        _write_receipt(args.output, receipt)
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    subprocess.run(["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True)
+    subprocess.run(["git", "checkout", "--detach", merge_sha], cwd=ROOT, check=True)
+    target = _canonical_target()
+    with tempfile.TemporaryDirectory(prefix="wb-core-warm-mount-probe-") as directory:
+        configure_deploy_environment(Path(directory))
+        submit = command_evidence(
+            _warm_mount_probe_submit_remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                job_id=job_id,
+            ),
+            timeout_seconds=120.0,
+        )
+        status_attempts: list[dict[str, Any]] = []
+        final_status: Mapping[str, Any] | None = None
+        for _attempt in range(90):
+            status = command_evidence(
+                _warm_mount_probe_status_remote_command(
+                    target=target,
+                    merge_sha=merge_sha,
+                    job_id=job_id,
+                ),
+                timeout_seconds=60.0,
+            )
+            status_attempts.append(
+                {
+                    "command_sha256": status.get("command_sha256"),
+                    "return_code": status.get("return_code"),
+                    "stdout_sha256": status.get("stdout_sha256"),
+                    "stderr_sha256": status.get("stderr_sha256"),
+                    "transport_ambiguous": status.get("transport_ambiguous"),
+                }
+            )
+            result = status.get("result")
+            if (
+                status.get("return_code") == 0
+                and isinstance(result, Mapping)
+                and result.get("terminal") is True
+            ):
+                final_status = result
+                break
+            time.sleep(2)
+    probe = (
+        final_status.get("result")
+        if isinstance(final_status, Mapping)
+        and isinstance(final_status.get("result"), Mapping)
+        else None
+    )
+    valid = bool(
+        isinstance(final_status, Mapping)
+        and final_status.get("status") == "succeeded"
+        and final_status.get("terminal") is True
+        and isinstance(final_status.get("request"), Mapping)
+        and final_status["request"].get("job_id") == job_id
+        and final_status["request"].get("deployed_sha") == merge_sha
+        and final_status["request"].get("operation")
+        == "warm-archive-mount-probe"
+        and isinstance(probe, Mapping)
+        and probe.get("schema") == "wb-core.root-warm-archive-mount-probe/v1"
+        and probe.get("status") == "observed"
+        and probe.get("query_only") is True
+        and probe.get("database_written") is False
+        and probe.get("archive_mutation_count") == 0
+        and probe.get("source_unlink_count") == 0
+        and probe.get("service_restart_count") == 0
+        and probe.get("timer_change_count") == 0
+        and probe.get("job_id") == job_id
+        and probe.get("deployed_sha") == merge_sha
+        and probe.get("path_count") == 3
+        and isinstance(probe.get("paths"), list)
+        and all(isinstance(item, Mapping) for item in probe["paths"])
+        and {item.get("filesystem_role") for item in probe["paths"]}
+        == {"root", "backup", "generation"}
+        and any(
+            item.get("filesystem_role") == "backup"
+            and int(item.get("raw_candidate_count") or 0) > 1
+            for item in probe["paths"]
+        )
+        and all(
+            isinstance(item, Mapping)
+            and int(item.get("raw_candidate_count") or 0) >= 1
+            and isinstance(item.get("raw_mount_candidates"), list)
+            and len(item["raw_mount_candidates"])
+            == int(item["raw_candidate_count"])
+            and all(
+                isinstance(candidate, Mapping)
+                and isinstance(candidate.get("raw_line"), str)
+                and bool(candidate.get("raw_line"))
+                for candidate in item["raw_mount_candidates"]
+            )
+            and isinstance(item.get("candidate_proofs"), list)
+            and len(item["candidate_proofs"])
+            == int(item["raw_candidate_count"])
+            for item in probe["paths"]
+        )
+    )
+    state = "observed" if valid else "blocked"
+    receipt: dict[str, Any] = {
+        "schema": WARM_MOUNT_PROBE_RECEIPT_SCHEMA,
+        "state": state,
+        "reason": (
+            "exact-worker-mount-candidates-observed"
+            if valid
+            else "mount-probe-transport-or-contract-failed"
+        ),
+        "query_only": True,
+        "database_written": False,
+        "production_probe_count": 1,
+        "job_id": job_id,
+        "repository": args.repository,
+        "pull_request": args.pr,
+        "release_operation_id": release_receipt["operation_id"],
+        "merge_sha": merge_sha,
+        "deployed_sha": merge_sha,
+        "submit": submit,
+        "status_attempt_count": len(status_attempts),
+        "status_attempts": status_attempts,
+        "final_status": final_status,
+        "probe": probe,
+    }
+    _write_receipt(args.output, receipt)
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("warm archive mount probe publication lacks GitHub run identity")
+    raw_receipt = args.output.read_bytes()
+    compact_paths = [
+        {
+            "filesystem_role": item.get("filesystem_role"),
+            "target": item.get("target"),
+            "semantic_identity_digest": item.get("semantic_identity_digest"),
+            "raw_candidate_count": item.get("raw_candidate_count"),
+            "raw_candidates_digest": item.get("raw_candidates_digest"),
+        }
+        for item in (probe or {}).get("paths") or []
+        if isinstance(item, Mapping)
+    ]
+    compact = {
+        key: receipt.get(key)
+        for key in (
+            "schema",
+            "state",
+            "reason",
+            "query_only",
+            "database_written",
+            "production_probe_count",
+            "job_id",
+            "repository",
+            "pull_request",
+            "release_operation_id",
+            "merge_sha",
+            "deployed_sha",
+            "status_attempt_count",
+        )
+    }
+    compact.update(
+        {
+            "paths": compact_paths,
+            "worker": (probe or {}).get("worker"),
+            "evidence_digest": (probe or {}).get("evidence_digest"),
+            "artifact": {
+                "name": f"root-warm-archive-mount-probe-pr-{args.pr}-run-{run_id}",
+                "file": "root-warm-archive-mount-probe-receipt.json",
+                "sha256": "sha256:" + digest(raw_receipt),
+                "size_bytes": len(raw_receipt),
+                "retention_days": 90,
+            },
+        }
+    )
+    body = (
+        marker_text
+        + "\nCompact terminal exact-worker query-only mount probe; full raw candidates are in the bound Actions artifact."
+        + "\n```json\n"
+        + json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```"
+    )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        raise ApplyError("compact warm archive mount probe comment exceeds GitHub limit")
+    published = client.post(f"/issues/{args.pr}/comments", {"body": body})
+    if not isinstance(published, Mapping) or published.get("body") != body:
+        raise ApplyError("warm archive mount probe publication response mismatch")
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2477,6 +3009,7 @@ def main() -> int:
             "exact-manifest",
             "receipt-recovery",
             "warm-archive-readiness",
+            "warm-archive-mount-probe",
         ),
         default="scope-goal",
     )
@@ -2501,6 +3034,13 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode == "warm-archive-mount-probe":
+        return _run_warm_mount_probe_mode(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
     if args.authorization_mode == "warm-archive-readiness":
         return _run_warm_readiness_mode(
             args=args,
