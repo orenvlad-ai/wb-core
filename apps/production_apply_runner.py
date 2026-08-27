@@ -2763,7 +2763,7 @@ def _warm_reconciliation_context(
     if not isinstance(artifact, Mapping):
         raise ApplyError("source artifact provenance is missing")
     probe_source = (
-        ROOT / "apps" / "root_storage_warm_archive_reconciliation_probe.py"
+        ROOT / "apps" / "wbc0008_warm_archive_receipt_reconciliation_probe.py"
     ).read_bytes()
     return {
         "source": {
@@ -3115,7 +3115,7 @@ def _run_warm_reconciliation_collect(
     context["client"] = client
     if _existing_warm_reconciliation_marker(comments, context=context) is not None:
         raise ApplyError("reconciliation operation is already terminal; probe suppressed")
-    probe_path = ROOT / "apps" / "root_storage_warm_archive_reconciliation_probe.py"
+    probe_path = ROOT / "apps" / "wbc0008_warm_archive_receipt_reconciliation_probe.py"
     probe_source = probe_path.read_bytes()
     if (
         not probe_source.startswith(b"#!/usr/bin/env python3\n")

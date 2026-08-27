@@ -458,7 +458,7 @@ Required checks:
 - `python3 apps/storage_recovery_sanitation_smoke.py`
 - `python3 apps/storage_recovery_sanitation_job_smoke.py`
 - `python3 apps/production_apply_runner_smoke.py`
-- `python3 apps/root_storage_warm_archive_reconciliation_probe_smoke.py`
+- `python3 apps/wbc0008_warm_archive_receipt_reconciliation_probe_smoke.py`
 - `python3 apps/root_storage_policy_smoke.py`
 - `python3 apps/finance_storage_backup_rotation_smoke.py`
 - every suite selected by the exact-base PR planner

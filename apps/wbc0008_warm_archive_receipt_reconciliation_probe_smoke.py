@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import production_apply_runner as runner
-from apps import root_storage_warm_archive_reconciliation_probe as probe
+from apps import wbc0008_warm_archive_receipt_reconciliation_probe as probe
 
 
 MERGE = "7" * 40
@@ -533,7 +533,7 @@ def test_runner_receiver_and_command() -> None:
     assert "PYTHONDONTWRITEBYTECODE=1" in command[-1]
     forbidden = ("submit", "readback_batch", "restore.tmp", "systemctl start", "systemctl restart", "sqlite3")
     assert not any(token in command[-1] for token in forbidden)
-    source = (ROOT / "apps/root_storage_warm_archive_reconciliation_probe.py").read_text()
+    source = (ROOT / "apps/wbc0008_warm_archive_receipt_reconciliation_probe.py").read_text()
     for token in ("import sqlite3", "import tempfile", "import fcntl", ".unlink(", "systemctl\", \"start", "systemctl\", \"restart", "readback_batch("):
         assert token not in source
     calls: list[list[str]] = []
@@ -690,7 +690,7 @@ def main() -> None:
     test_runner_receiver_and_command()
     test_exact_source_receipt_gate()
     test_terminal_marker_idempotency()
-    print("root_storage_warm_archive_reconciliation_probe_smoke: ok")
+    print("wbc0008_warm_archive_receipt_reconciliation_probe_smoke: ok")
 
 
 if __name__ == "__main__":
