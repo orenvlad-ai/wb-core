@@ -39,6 +39,84 @@ def _seed(path: Path) -> None:
         connection.commit()
 
 
+def _clean_target_activity_sample(
+    policy: dict[str, object],
+    *,
+    sample_number: int,
+    sha256_verified: bool = False,
+) -> dict[str, object]:
+    expected_identity = dict(policy["expected_identity"])
+    source_path = str(policy["source_path"])
+    identity_before = {
+        "path": source_path,
+        **{
+            key: value
+            for key, value in expected_identity.items()
+            if sha256_verified or key != "sha256"
+        },
+    }
+    identity_after = {
+        "path": source_path,
+        **{key: value for key, value in expected_identity.items() if key != "sha256"},
+    }
+    return {
+        "gate": f"fixture:{sample_number}",
+        "observed_at": f"2026-08-27T00:00:{sample_number:02d}.000000Z",
+        "target_key": str(policy["key"]),
+        "source_path": source_path,
+        "expected_identity": expected_identity,
+        "identity_before": identity_before,
+        "identity_after": identity_after,
+        "identity_matches_expected": True,
+        "sha256_verified": sha256_verified,
+        "sha256_matches_expected": True if sha256_verified else None,
+        "material_stable_during_gate": True,
+        "sidecars": [
+            {
+                "suffix": suffix,
+                "path": source_path + suffix,
+                "present": False,
+            }
+            for suffix in ("-wal", "-shm", "-journal")
+        ],
+        "fd_openers": [],
+        "read_only_opener_count": 0,
+        "write_capable_or_unknown_opener_count": 0,
+        "kernel_locks": [],
+        "hold_evidence": {
+            "classification": "no_incident_forensic_legal_hold_evidence",
+            "searched_root": str(policy["hold_root"]),
+            "marker_paths": [],
+            "xattr_names": [],
+            "hold_xattr_names": [],
+            "protected_prefix_match": False,
+        },
+        "provenance": {
+            "records": [],
+            "digest": "sha256:" + "a" * 64,
+        },
+        "provenance_error": None,
+        "provenance_matches_expected": True,
+        "related_process_observations": [],
+        "blockers": [],
+        "classification": "clean",
+    }
+
+
+def _clean_target_activity_samples(
+    *, samples_per_target: int = 1
+) -> list[dict[str, object]]:
+    return [
+        _clean_target_activity_sample(
+            policy,
+            sample_number=sample_number,
+            sha256_verified=sample_number == samples_per_target,
+        )
+        for policy in warm.TARGET_POLICIES
+        for sample_number in range(1, samples_per_target + 1)
+    ]
+
+
 def _healthy_systemd_snapshot() -> dict[str, dict[str, object]]:
     snapshot: dict[str, dict[str, object]] = {}
     for unit_index, name in enumerate(warm.SERVICE_NAMES, start=1):
@@ -248,13 +326,17 @@ def _exercise_apply_lock_path(root: Path) -> None:
         "journald": {"service": {}, "effective": {}, "inventory": []},
         "services": {},
         "systemd_service_gate": {"healthy": True, "classification": "healthy"},
-        "activity_gates": [{"blockers": []} for _ in range(6)],
+        "activity_gates": _clean_target_activity_samples(),
         "finance": {
             "healthy": True,
             "required_available_floor_bytes": 1,
         },
         "capacity_stages": [
-            {"projected_available_at_peak_bytes": 2} for _ in range(6)
+            {
+                "key": str(policy["key"]),
+                "projected_available_at_peak_bytes": 2,
+            }
+            for policy in warm.TARGET_POLICIES
         ],
         "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
         "active_sanitation_jobs": [],
@@ -1071,16 +1153,7 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             "control_artifact_reserve_bytes": warm.CONTROL_ARTIFACT_RESERVE_BYTES,
             "compression": "zstd-level-1-single-thread",
         }
-        activity = [
-            {
-                "classification": "clean",
-                "read_only_opener_count": 0,
-                "write_capable_or_unknown_opener_count": 0,
-                "kernel_locks": [],
-                "hold_evidence": {"marker_paths": [], "hold_xattr_names": []},
-            }
-            for _ in range(6)
-        ]
+        activity = _clean_target_activity_samples()
         non_target = {
             "immutable_digest": immutable_digest,
             "mutable_canonical": mutable_snapshot,
@@ -1203,6 +1276,334 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         warm._atomic_write_json = original_atomic_write
 
 
+def _exercise_production_shaped_activity_coverage(root: Path) -> None:
+    fixture_root = (root / "production-shaped-activity").resolve()
+    runtime = fixture_root / "runtime"
+    root_backups = fixture_root / "root-backups"
+    destination_root = fixture_root / "destination"
+    readiness_root = fixture_root / "readiness"
+    production_root = fixture_root / "production-goals"
+    readiness_id = "readiness-v2-" + "4" * 32 + "-a01"
+    operation_id = "production-goal-v1-" + "5" * 32
+    readiness_dir = readiness_root / readiness_id
+    evidence_dir = production_root / operation_id
+    for path in (
+        runtime,
+        root_backups,
+        destination_root,
+        readiness_dir,
+        evidence_dir,
+    ):
+        path.mkdir(parents=True, mode=0o700)
+        os.chmod(path, 0o700)
+    deployed_sha = "6" * 40
+    deployed_marker = fixture_root / ".wb-core-runtime-sha"
+    deployed_marker.write_text(deployed_sha + "\n", encoding="utf-8")
+
+    originals = {
+        name: getattr(warm, name)
+        for name in (
+            "_source_activity_gate",
+            "_sqlite_probe",
+            "_measure_compressed_size",
+            "_filesystem_snapshot",
+            "_finance_snapshot",
+            "_active_sanitation_jobs",
+            "_other_lifecycle_locks",
+            "_non_target_snapshot",
+            "_journald_snapshot",
+            "_systemd_service_gate_with_resample",
+            "_stabilize_activity",
+            "_atomic_write_json",
+        )
+    }
+    original_sleep = warm.time.sleep
+    original_destination_root = warm.DESTINATION_ROOT
+    original_readiness_root = warm.READINESS_EVIDENCE_ROOT
+    original_production_root = warm.PRODUCTION_GOAL_EVIDENCE_ROOT
+    service_snapshot = _healthy_systemd_snapshot()
+    healthy_gate = warm._systemd_service_gate(service_snapshot)
+    sample_counts = {str(policy["key"]): 0 for policy in warm.TARGET_POLICIES}
+
+    def source_activity_gate(
+        *,
+        policy: dict[str, object],
+        expected_identity: dict[str, object],
+        expected_provenance_digest: str,
+        gate_name: str,
+        include_sha256: bool,
+        raise_on_block: bool = True,
+    ) -> dict[str, object]:
+        del expected_provenance_digest, raise_on_block
+        key = str(policy["key"])
+        sample_counts[key] += 1
+        sample = _clean_target_activity_sample(
+            policy,
+            sample_number=sample_counts[key],
+            sha256_verified=include_sha256,
+        )
+        sample["gate"] = gate_name
+        sample["expected_identity"] = dict(expected_identity)
+        return sample
+
+    def filesystem_snapshot(_runtime: Path, _backups: Path) -> dict[str, object]:
+        available = 100 * 1024**3
+        return {
+            "root": {
+                "path": str(runtime),
+                "device": 1,
+                "available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+                "mount": {"source": "/dev/root-fixture", "mount_id": 1},
+            },
+            "backup": {
+                "path": str(destination_root),
+                "device": 2,
+                "available_bytes": available,
+                "mount": {"source": "/dev/sdb1", "mount_id": 2},
+            },
+            "generation": {
+                "path": str(fixture_root),
+                "device": 3,
+                "available_bytes": available,
+                "mount": {"source": "/dev/generation-fixture", "mount_id": 3},
+            },
+        }
+
+    def finance_snapshot(_runtime: Path) -> dict[str, object]:
+        floor = 40 * 1024**3
+        return {
+            "status": "healthy",
+            "healthy": True,
+            "blockers": [],
+            "retained_backup_id": "fixture-retained",
+            "retained_count": 1,
+            "retained_bytes": 1,
+            "next_replacement_required_bytes": floor - warm.EMERGENCY_RESERVE_BYTES,
+            "required_available_floor_bytes": floor,
+            "available_bytes": 100 * 1024**3,
+        }
+
+    immutable_digest = "sha256:" + "7" * 64
+    topology_digest = warm._digest([])
+
+    def non_target_snapshot(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "store_registry": {"identity_digest": "sha256:" + "8" * 64},
+            "root_policy": {
+                "status": "normal",
+                "policy_sha256": "sha256:" + "9" * 64,
+                "target_rows": [],
+                "protected_path_topology": [],
+                "protected_path_topology_digest": warm._digest([]),
+                "protected_path_observations": [],
+            },
+            "immutable_digest": immutable_digest,
+            "mutable_canonical": {
+                "topology_rows": [],
+                "observation_rows": [],
+            },
+            "mutable_canonical_topology_digest": topology_digest,
+            "services": service_snapshot,
+        }
+
+    warm._source_activity_gate = source_activity_gate
+    warm._sqlite_probe = lambda _source: {
+        "open": {"mode": "ro", "immutable": True, "query_only": True},
+        "quick_check": "ok",
+        "integrity_check": "ok",
+        "schema_identity_sha256": "sha256:" + "b" * 64,
+    }
+    warm._measure_compressed_size = lambda _source: 1
+    warm._filesystem_snapshot = filesystem_snapshot
+    warm._finance_snapshot = finance_snapshot
+    warm._active_sanitation_jobs = lambda *_args, **_kwargs: []
+    warm._other_lifecycle_locks = lambda runtime_dir: [
+        {
+            "path": str(runtime_dir / name),
+            "present": False,
+            "locked": False,
+            "held_by_batch": False,
+        }
+        for name in warm.OTHER_LIFECYCLE_LOCKS
+    ]
+    warm._non_target_snapshot = non_target_snapshot
+    warm._journald_snapshot = lambda: {
+        "service": {"MainPID": "200"},
+        "effective": {"values": {}},
+        "inventory": [],
+    }
+    warm._systemd_service_gate_with_resample = lambda *_args, **_kwargs: healthy_gate
+    warm._stabilize_activity = lambda **_kwargs: {
+        "status": "clean",
+        "samples": [],
+        "callback": [],
+    }
+    warm.time.sleep = lambda _seconds: None
+    warm.DESTINATION_ROOT = destination_root
+    warm.READINESS_EVIDENCE_ROOT = readiness_root
+    warm.PRODUCTION_GOAL_EVIDENCE_ROOT = production_root
+    try:
+        material, observations = warm._material_snapshot(
+            runtime_dir=runtime,
+            root_backups=root_backups,
+            witness_name="production_shaped_full_projection",
+        )
+        assert len(material["targets"]) == 6
+        assert len(observations["activity_gates"]) == 24
+        predicates = warm._mutable_safety_predicates(observations)
+        assert predicates["passed"] is True
+        assert predicates["predicates"]["target_activity_passed"] is True
+        assert predicates["target_activity_coverage"]["sample_counts_by_target"] == {
+            str(policy["key"]): 4 for policy in warm.TARGET_POLICIES
+        }
+
+        unsafe = json.loads(json.dumps(observations))
+        unsafe_sample = unsafe["activity_gates"][0]
+        unsafe_sample["fd_openers"] = [
+            {
+                "source_path": unsafe_sample["source_path"],
+                "pid": 101,
+                "fd": 4,
+                "access_mode": "read_write",
+                "binds_source_device_inode": True,
+                "target_device": unsafe_sample["identity_before"]["device"],
+                "target_inode": unsafe_sample["identity_before"]["inode"],
+            }
+        ]
+        unsafe_sample["blockers"] = [
+            {"code": "write_capable_or_unknown_fd_opener"}
+        ]
+        unsafe_sample["classification"] = "blocked"
+        assert warm._mutable_safety_predicates(unsafe)["predicates"][
+            "target_activity_passed"
+        ] is False
+
+        missing_key = str(warm.TARGET_POLICIES[-1]["key"])
+        missing = json.loads(json.dumps(observations))
+        missing["activity_gates"] = [
+            item
+            for item in missing["activity_gates"]
+            if item["target_key"] != missing_key
+        ]
+        missing_predicates = warm._mutable_safety_predicates(missing)
+        assert missing_predicates["predicates"]["target_activity_passed"] is False
+        assert any(
+            item["code"] == "missing_activity_target"
+            and item["target_key"] == missing_key
+            for item in missing_predicates["activity_blockers"]
+        )
+
+        foreign = json.loads(json.dumps(observations))
+        foreign_sample = json.loads(json.dumps(foreign["activity_gates"][0]))
+        foreign_sample["target_key"] = "foreign-target"
+        foreign_sample["source_path"] = "/foreign/target.sqlite3"
+        foreign["activity_gates"].append(foreign_sample)
+        assert warm._mutable_safety_predicates(foreign)["predicates"][
+            "target_activity_passed"
+        ] is False
+
+        drifted = json.loads(json.dumps(observations))
+        drifted_sample = drifted["activity_gates"][1]
+        drifted_sample["identity_before"]["inode"] += 1
+        drifted_sample["identity_matches_expected"] = False
+        drifted_sample["blockers"] = [{"code": "source_identity_drift"}]
+        drifted_sample["classification"] = "blocked"
+        drifted_predicates = warm._mutable_safety_predicates(drifted)
+        assert drifted_predicates["predicates"]["target_activity_passed"] is False
+        assert "source_identity_before_mismatch" in drifted_predicates[
+            "activity_blockers"
+        ][0]["reasons"]
+
+        duplicate_capacity = json.loads(json.dumps(observations))
+        duplicate_capacity["capacity_stages"][-1] = json.loads(
+            json.dumps(duplicate_capacity["capacity_stages"][0])
+        )
+        capacity_predicates = warm._mutable_safety_predicates(duplicate_capacity)
+        assert capacity_predicates["predicates"]["capacity_passed"] is False
+        assert {
+            item["code"]
+            for item in capacity_predicates["capacity_target_coverage"]["issues"]
+        } >= {"duplicate_capacity_target", "missing_capacity_target"}
+
+        duplicate_lock = json.loads(json.dumps(observations))
+        duplicate_lock["lifecycle_locks"][-1] = json.loads(
+            json.dumps(duplicate_lock["lifecycle_locks"][0])
+        )
+        lock_predicates = warm._mutable_safety_predicates(duplicate_lock)
+        assert lock_predicates["predicates"]["lifecycle_locks_passed"] is False
+        assert {
+            item["code"]
+            for item in lock_predicates["lifecycle_lock_coverage"]["issues"]
+        } >= {"duplicate_lifecycle_lock", "missing_lifecycle_lock"}
+
+        ready = warm.readiness(
+            runtime_dir=runtime,
+            root_backups=root_backups,
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_marker,
+            evidence_dir=readiness_dir,
+            readiness_id=readiness_id,
+        )
+        assert ready["status"] == "ready"
+        projection = json.loads(
+            Path(ready["projection_manifest_path"]).read_text(encoding="utf-8")
+        )
+        assert len(projection["observations"]["activity_gates"]) == 24
+        assert projection["mutable_safety_predicates"]["predicates"][
+            "target_activity_passed"
+        ] is True
+        dry = warm.dry_run(
+            runtime_dir=runtime,
+            root_backups=root_backups,
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_marker,
+            evidence_dir=evidence_dir,
+            operation_id=operation_id,
+            projection_manifest=Path(ready["projection_manifest_path"]),
+            projection_manifest_sha256=str(ready["projection_manifest_sha256"]),
+        )
+        assert dry["status"] == "ready"
+        first_mutations: list[Path] = []
+
+        def first_mutation(path: Path, _payload: object) -> None:
+            first_mutations.append(path)
+            raise _MutationBoundary(
+                "production-shaped JIT/mutation-start predicates passed"
+            )
+
+        warm._atomic_write_json = first_mutation
+        try:
+            warm.apply_batch(
+                runtime_dir=runtime,
+                root_backups=root_backups,
+                deployed_sha=deployed_sha,
+                deployed_sha_file=deployed_marker,
+                evidence_dir=evidence_dir,
+                operation_id=operation_id,
+                manifest_path=Path(dry["manifest_path"]),
+                manifest_sha256=str(dry["manifest_sha256"]),
+                approval_reference="github:owner:wbc0008-020",
+            )
+        except _MutationBoundary as exc:
+            assert str(exc) == (
+                "production-shaped JIT/mutation-start predicates passed"
+            )
+        else:
+            raise AssertionError(
+                "production-shaped mutation start did not reach its first write"
+            )
+        assert first_mutations == [
+            evidence_dir / "root-warm-archive-apply.json"
+        ]
+    finally:
+        for name, value in originals.items():
+            setattr(warm, name, value)
+        warm.time.sleep = original_sleep
+        warm.DESTINATION_ROOT = original_destination_root
+        warm.READINESS_EVIDENCE_ROOT = original_readiness_root
+        warm.PRODUCTION_GOAL_EVIDENCE_ROOT = original_production_root
+
+
 def _exercise_material_partition_and_failure_evidence(root: Path) -> None:
     material = {
         "contract_name": warm.CONTRACT_NAME,
@@ -1323,25 +1724,18 @@ def _exercise_material_partition_and_failure_evidence(root: Path) -> None:
             "available_bytes": 100,
         },
         "capacity_stages": [
-            {"key": str(index), "projected_available_at_peak_bytes": 30}
-            for index in range(6)
+            {
+                "key": str(policy["key"]),
+                "projected_available_at_peak_bytes": 30,
+            }
+            for policy in warm.TARGET_POLICIES
         ],
         "filesystems_before": {
             "root": {"available_bytes": 1},
             "backup": {"available_bytes": 100},
         },
         "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
-        "activity_gates": [
-            {
-                "source_path": f"/safe/{index}.sqlite3",
-                "classification": "clean",
-                "blockers": [],
-                "fd_openers": [],
-                "kernel_locks": [],
-                "hold_evidence": {},
-            }
-            for index in range(6)
-        ],
+        "activity_gates": _clean_target_activity_samples(),
         "root_policy_protected_path_observations": [
             {
                 "path": "/safe/non-target.sqlite3",
@@ -1622,6 +2016,7 @@ def run() -> None:
         _exercise_material_partition_and_failure_evidence(lock_root)
         _exercise_scoped_non_target_writer_progress(lock_root)
         _exercise_readiness_to_jit_autoanswers_growth(lock_root)
+        _exercise_production_shaped_activity_coverage(lock_root)
     assert {
         owner for _timer, owner in warm.TIMER_SERVICE_PAIRS
     } == set(warm.SERVICE_NAMES) - set(warm.PERSISTENT_SERVICE_NAMES) - {

@@ -28,8 +28,8 @@ pre-submit repeatability defect found by the first block-006 operation. WBC0008
 block 012 retains that unchanged scope and corrects the producer-ownership CAS
 boundary after a legitimate same-inode 4,096-byte Autoanswers write changed the
 old global protected-file `size/mtime` digest between readiness and the first
-JIT witness. Block 017 supersedes that observation model with contract
-`root_storage_warm_archive_wbc0008_006_v4`; v1/v2/v3 evidence and terminal old
+JIT witness. Block 020 supersedes the block-017 observation model with contract
+`root_storage_warm_archive_wbc0008_006_v5`; v1/v2/v3/v4 evidence and terminal old
 operations stay immutable and are never resumed or replayed. Every
 qualification and mutation CAS gate now retains structured per-source activity
 evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
@@ -181,6 +181,27 @@ topology digests plus before/after mutable observations. Thus concurrent
 ordinary store evolution is distinguishable from replacement/misrouting or an
 operation-caused non-target mutation without weakening target CAS.
 
+WBC0008 block 020 corrects the pre-submit activity aggregation defect proven by
+terminal PR #1071 readiness
+`readiness-v2-e9d36f60986f9aef7467c7201abd707a-a02`: the real full projection
+records at least four clean observations for each of the six literal sources,
+while the old mutable predicate incorrectly required exactly six observation
+rows. Activity qualification is now semantic coverage of the exact literal
+target key/path set. Every observation must bind the matching target's literal
+identity and retain a clear accepted classification, exact identity/material,
+sidecar, FD-mode/device/inode, lock, hold and provenance evidence. Any missing
+or foreign target, malformed row, duplicate with a mismatching identity,
+write-capable/unknown opener or unsafe evidence fails closed. Multiple clean
+bounded observations of the same exact target are valid and are counted in the
+receipt; no fixed total such as 24 is part of the safety contract. The same
+review makes capacity stages cover each literal target exactly once and
+lifecycle-lock evidence cover each literal lock exactly once, preventing a
+duplicate row from hiding a missing identity. Direct smoke coverage executes
+the production-shaped `_target_probe -> _material_snapshot ->
+_mutable_safety_predicates` contour with four observations per target, then the
+JIT and mutation-start predicates before the first durable mutation write.
+Unsafe, missing, foreign and identity-drift cases are separately rejected.
+
 ## Capacity and lifecycle
 
 Compression is zstd level 1 with one thread and one source at a time. Temporary
@@ -264,6 +285,14 @@ and goal, so an otherwise-empty PR is neither required nor accepted merely to
 manufacture a readiness identity. Exhaustion creates no production command,
 queue or unbounded retry. The later scope-goal parser accepts exactly one final
 `state=ready` receipt for that same binding.
+
+After a code/runtime correction such as block 020, the prior deployed-SHA
+readiness sequence remains terminal and cannot authorize the new release. The
+new exact `live_runtime/done` receipt, the same durable owner passport and its
+derived goal operation bind a fresh readiness-v2 base whose first attempt is
+`a01`. Producer consistency is selected per exact live-resource semantics:
+semantic/material revalidation is used for ordinary online source observation;
+no blanket pause of warehouse, FBS or unrelated producers is permitted.
 
 Full readiness/apply evidence remains canonical JSON in the immutable private
 Actions artifact. PR publication is a deterministic compact summary below
