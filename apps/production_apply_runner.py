@@ -42,17 +42,20 @@ from apps.release_protocol import (  # noqa: E402
 )
 
 
-APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v3"
+APPLY_RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v4"
 APPLY_MARKER = "wb-core-production-apply-receipt"
-WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v2"
+APPLY_COMMENT_SUMMARY_SCHEMA = "wb-core.production-apply-comment-summary/v1"
+WARM_READINESS_RECEIPT_SCHEMA = "wb-core.root-warm-archive-readiness-receipt/v3"
 WARM_READINESS_MARKER = "wb-core-root-warm-archive-readiness-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 MAX_QUALIFICATION_CANDIDATES = 4
+MAX_WARM_READINESS_ATTEMPTS = 3
+MAX_GITHUB_COMMENT_BYTES = 65_536
 RECOVERY_WORKFLOW_NAME = "Production Apply Runner"
 RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
 RECOVERY_ARTIFACT_FILE = "production-apply-receipt.json"
-MAX_RECOVERY_ARTIFACT_BYTES = 262_144
+MAX_RECOVERY_ARTIFACT_BYTES = 8 * 1024 * 1024
 TARGET_FILE = (
     ROOT
     / "artifacts"
@@ -100,16 +103,27 @@ def marker(operation: str) -> str:
     return f"<!-- {APPLY_MARKER} operation={operation} -->"
 
 
-def warm_readiness_id(repository: str, pr: int, release_operation: str) -> str:
+def warm_readiness_id(
+    repository: str,
+    pr: int,
+    release_operation: str,
+    authorization_comment_id: int,
+    goal_operation_id: str,
+    attempt: int,
+) -> str:
+    if not 1 <= int(attempt) <= MAX_WARM_READINESS_ATTEMPTS:
+        raise ApplyError("warm archive readiness attempt is out of bounds")
     material = canonical_json_bytes(
         {
             "contract": WARM_READINESS_RECEIPT_SCHEMA,
             "repository": repository,
             "pull_request": pr,
             "release_operation_id": release_operation,
+            "authorization_comment_id": int(authorization_comment_id),
+            "goal_operation_id": goal_operation_id,
         }
     )
-    return "readiness-v1-" + digest(material)[:32]
+    return "readiness-v2-" + digest(material)[:32] + f"-a{int(attempt):02d}"
 
 
 def warm_readiness_marker(readiness_id: str) -> str:
@@ -206,63 +220,144 @@ def parse_warm_readiness_receipt(
     pr: int,
     release_operation: str,
     merge_sha: str,
+    authorization_comment_id: int,
+    goal_operation_id: str,
 ) -> dict[str, Any]:
-    readiness = warm_readiness_id(repository, pr, release_operation)
-    matches = []
+    attempts = _collect_warm_readiness_attempts(
+        comments,
+        repository=repository,
+        pr=pr,
+        release_operation=release_operation,
+        merge_sha=merge_sha,
+        authorization_comment_id=authorization_comment_id,
+        goal_operation_id=goal_operation_id,
+    )
+    ready_attempts = [
+        payload for payload in attempts.values() if payload.get("state") == "ready"
+    ]
+    if len(ready_attempts) != 1:
+        raise ApplyError("exact ready warm-archive readiness receipt is missing or ambiguous")
+    payload = ready_attempts[0]
+    service_gate = payload.get("systemd_service_gate")
+    if (
+        payload.get("attempt") != max(attempts)
+        or re.fullmatch(
+            r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
+            r"readiness-v2-[0-9a-f]{32}-a[0-9]{2}/"
+            r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
+            str(payload.get("projection_manifest_path") or ""),
+        )
+        is None
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or ""))
+            is None
+            for field in (
+                "projection_manifest_sha256",
+                "material_qualification_digest",
+                "immutable_non_target_digest",
+                "mutable_canonical_topology_digest",
+            )
+        )
+        or payload.get("material_partition") != "immutable_safety_v1"
+        or (payload.get("mutable_safety_predicates") or {}).get("passed")
+        is not True
+        or not isinstance(payload.get("mutable_canonical_observations"), list)
+        or len(payload["mutable_canonical_observations"]) < 3
+        or not _valid_warm_systemd_service_gate(service_gate, require_healthy=True)
+    ):
+        raise ApplyError("ready warm archive sequence receipt is invalid")
+    return payload
+
+
+def _collect_warm_readiness_attempts(
+    comments: list[Mapping[str, Any]],
+    *,
+    repository: str,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+    authorization_comment_id: int,
+    goal_operation_id: str,
+) -> dict[int, dict[str, Any]]:
+    attempts: dict[int, dict[str, Any]] = {}
+    expected_markers = {
+        attempt: warm_readiness_marker(
+            warm_readiness_id(
+                repository,
+                pr,
+                release_operation,
+                authorization_comment_id,
+                goal_operation_id,
+                attempt,
+            )
+        )
+        for attempt in range(1, MAX_WARM_READINESS_ATTEMPTS + 1)
+    }
     for comment in comments:
         body = str(comment.get("body") or "")
-        if (
-            warm_readiness_marker(readiness) not in body
-            or "```json" not in body
-            or not is_actions_bot_comment(comment)
-        ):
+        if WARM_READINESS_MARKER not in body or not is_actions_bot_comment(comment):
+            continue
+        if "```json" not in body:
+            if any(value in body for value in expected_markers.values()):
+                raise ApplyError("bound warm archive readiness receipt is malformed")
             continue
         try:
             payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
         except (IndexError, json.JSONDecodeError):
+            if any(value in body for value in expected_markers.values()):
+                raise ApplyError("bound warm archive readiness receipt is malformed")
             continue
-        service_gate = payload.get("systemd_service_gate")
-        if (
+        attempt = payload.get("attempt")
+        binding_matches = bool(
+            payload.get("repository") == repository
+            and payload.get("pull_request") == pr
+            and payload.get("release_operation_id") == release_operation
+            and payload.get("authorization_comment_id")
+            == authorization_comment_id
+            and payload.get("goal_operation_id") == goal_operation_id
+        )
+        if not binding_matches:
+            continue
+        if not isinstance(attempt, int) or not 1 <= attempt <= MAX_WARM_READINESS_ATTEMPTS:
+            raise ApplyError("bound warm archive readiness attempt is out of bounds")
+        readiness = warm_readiness_id(
+            repository,
+            pr,
+            release_operation,
+            authorization_comment_id,
+            goal_operation_id,
+            attempt,
+        )
+        if warm_readiness_marker(readiness) not in body:
+            raise ApplyError("bound warm archive readiness marker is invalid")
+        common_valid = bool(
             payload.get("schema") == WARM_READINESS_RECEIPT_SCHEMA
-            and payload.get("state") == "ready"
+            and payload.get("state") in {"ready", "blocked"}
             and payload.get("readiness_id") == readiness
             and payload.get("repository") == repository
             and payload.get("pull_request") == pr
             and payload.get("release_operation_id") == release_operation
+            and payload.get("authorization_comment_id")
+            == authorization_comment_id
+            and payload.get("goal_operation_id") == goal_operation_id
             and payload.get("merge_sha") == merge_sha
             and payload.get("deployed_sha") == merge_sha
-            and re.fullmatch(
-                r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
-                r"readiness-v1-[0-9a-f]{32}/"
-                r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
-                str(payload.get("projection_manifest_path") or ""),
-            )
-            and re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(payload.get("projection_manifest_sha256") or ""),
-            )
-            and re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(payload.get("material_qualification_digest") or ""),
-            )
-            and re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(payload.get("immutable_non_target_digest") or ""),
-            )
-            and re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(payload.get("mutable_canonical_topology_digest") or ""),
-            )
-            and isinstance(payload.get("mutable_canonical_observations"), list)
-            and len(payload["mutable_canonical_observations"]) >= 3
-            and _valid_warm_systemd_service_gate(
-                service_gate, require_healthy=True
-            )
-        ):
-            matches.append(payload)
-    if len(matches) != 1:
-        raise ApplyError("exact ready warm-archive readiness receipt is missing or ambiguous")
-    return matches[0]
+        )
+        if not common_valid:
+            raise ApplyError("bound warm archive readiness receipt is invalid")
+        if attempt in attempts:
+            raise ApplyError("duplicate warm archive readiness attempt")
+        attempts[attempt] = payload
+    if sorted(attempts) != list(range(1, len(attempts) + 1)):
+        raise ApplyError("warm archive readiness attempt sequence is not contiguous")
+    ready_numbers = [
+        attempt for attempt, payload in attempts.items() if payload.get("state") == "ready"
+    ]
+    if len(ready_numbers) > 1 or (
+        ready_numbers and ready_numbers[0] != max(attempts)
+    ):
+        raise ApplyError("warm archive readiness terminal sequence is invalid")
+    return attempts
 
 
 def parse_legacy_release_receipt(
@@ -543,7 +638,7 @@ def _remote_command(
         if (
             re.fullmatch(
                 r"/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
-                r"readiness-v1-[0-9a-f]{32}/"
+                r"readiness-v2-[0-9a-f]{32}-a[0-9]{2}/"
                 r"root-warm-archive-readiness-projection-[0-9]{8}T[0-9]{6}Z\.json",
                 projection_manifest_path,
             )
@@ -656,7 +751,7 @@ def _remote_command(
 def _warm_readiness_remote_command(
     *, target: Mapping[str, Any], merge_sha: str, readiness_id: str
 ) -> list[str]:
-    if re.fullmatch(r"readiness-v1-[0-9a-f]{32}", readiness_id) is None:
+    if re.fullmatch(r"readiness-v2-[0-9a-f]{32}-a[0-9]{2}", readiness_id) is None:
         raise ApplyError("warm archive readiness id is invalid")
     target_dir = str(target["target_dir"])
     evidence_dir = (
@@ -817,6 +912,48 @@ def _readiness_callback_summary(rows: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _material_component_diff_summary(
+    before_rows: Any, after_rows: Any
+) -> dict[str, Any]:
+    def indexed(rows: Any) -> dict[str, Mapping[str, Any]]:
+        if not isinstance(rows, list):
+            return {}
+        return {
+            str(item.get("json_path") or ""): item
+            for item in rows
+            if isinstance(item, Mapping) and item.get("json_path")
+        }
+
+    before = indexed(before_rows)
+    after = indexed(after_rows)
+    changed = []
+    for path in sorted(set(before) | set(after)):
+        earlier = before.get(path)
+        later = after.get(path)
+        if (earlier or {}).get("digest") == (later or {}).get("digest"):
+            continue
+        if (earlier or later or {}).get("cas_role") == "observation_only":
+            continue
+        changed.append(
+            {
+                "json_path": path,
+                "classification": (earlier or later or {}).get(
+                    "classification"
+                ),
+                "before_component_digest": (earlier or {}).get("digest"),
+                "after_component_digest": (later or {}).get("digest"),
+                "before_safe_evidence": (earlier or {}).get("safe_evidence"),
+                "after_safe_evidence": (later or {}).get("safe_evidence"),
+            }
+        )
+    return {
+        "schema": "wb-core.root-warm-archive-material-cas-diff/v1",
+        "changed_component_count": len(changed),
+        "changed_json_paths": [item["json_path"] for item in changed],
+        "components": changed,
+    }
+
+
 def _validate_candidate(
     payload: Mapping[str, Any],
     goal: Mapping[str, Any],
@@ -832,7 +969,6 @@ def _validate_candidate(
                 "expected_reclaimed_allocated_bytes"
             ],
             "root_minimum_after_bytes": goal["root_minimum_after_bytes"],
-            "required_backup_floor_bytes": goal["required_backup_floor_bytes"],
             "capacity_guard_passed": True,
             "openers_count": 0,
             "locks_count": 0,
@@ -841,6 +977,10 @@ def _validate_candidate(
         for field, value in expected.items():
             if payload.get(field) != value:
                 raise ApplyError(f"dynamic manifest escaped authorized goal: {field}")
+        if int(payload.get("required_backup_floor_bytes") or 0) < int(
+            goal["required_backup_floor_bytes"]
+        ):
+            raise ApplyError("dynamic warm archive backup floor weakened owner floor")
         if payload.get("database_written") is not False:
             raise ApplyError("warm archive qualification unexpectedly wrote data")
         for field in (
@@ -864,6 +1004,11 @@ def _validate_candidate(
             != warm_readiness.get("immutable_non_target_digest")
             or payload.get("mutable_canonical_topology_digest")
             != warm_readiness.get("mutable_canonical_topology_digest")
+            or payload.get("material_partition") != "immutable_safety_v1"
+            or (payload.get("mutable_safety_predicates") or {}).get("passed")
+            is not True
+            or not isinstance(payload.get("material_cas_components"), list)
+            or not payload.get("material_cas_components")
             or not isinstance(payload.get("activity_evidence"), list)
             or len(payload["activity_evidence"]) != goal["expected_source_count"]
             or not isinstance(payload.get("mutable_canonical_observations"), list)
@@ -913,6 +1058,7 @@ def run_dynamic_goal(
     evidence_dir = f"/opt/wb-core-runtime/state/private-evidence/production-goals/{operation}"
     attempts: list[dict[str, Any]] = []
     previous_material_digest = ""
+    previous_material_components: Any = None
     candidate: Mapping[str, Any] | None = None
     for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
         evidence = command_evidence(
@@ -987,6 +1133,14 @@ def run_dynamic_goal(
                     "activity_evidence": _activity_receipt_summary(
                         payload["activity_evidence"]
                     ),
+                    "material_partition": payload["material_partition"],
+                    "mutable_safety_predicates": payload[
+                        "mutable_safety_predicates"
+                    ],
+                    "material_cas_components_digest": "sha256:"
+                    + digest(
+                        canonical_json_bytes(payload["material_cas_components"])
+                    ),
                 }
             )
         else:
@@ -1005,7 +1159,15 @@ def run_dynamic_goal(
             break
         if len(attempts) > 1:
             attempts[-2]["qualification_state"] = "superseded_material_drift"
+            if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE:
+                attempts[-1]["drift_from_previous"] = (
+                    _material_component_diff_summary(
+                        previous_material_components,
+                        payload.get("material_cas_components"),
+                    )
+                )
         previous_material_digest = current_material_digest
+        previous_material_components = payload.get("material_cas_components")
         if attempt < MAX_QUALIFICATION_CANDIDATES:
             time.sleep(1.1)
     if candidate is None:
@@ -1130,6 +1292,401 @@ def run_dynamic_goal(
 def _write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(canonical_json_bytes(receipt) + b"\n")
+
+
+def _find_mapping(payload: Any, key: str) -> Mapping[str, Any] | None:
+    if isinstance(payload, Mapping):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            return value
+        for child_key in sorted(payload):
+            found = _find_mapping(payload[child_key], key)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_mapping(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _compact_component_diff(payload: Any, *, limit: int = 24) -> dict[str, Any] | None:
+    diff = _find_mapping(payload, "component_diff")
+    if diff is None and isinstance(payload, Mapping) and payload.get("schema") == (
+        "wb-core.root-warm-archive-material-cas-diff/v1"
+    ):
+        diff = payload
+    if diff is None:
+        return None
+    source_components = [
+        *(diff.get("components") or []),
+        *(diff.get("observation_changes") or []),
+    ]
+    components = [
+        {
+            "json_path": item.get("json_path"),
+            "classification": item.get("classification"),
+            "before_component_digest": item.get("before_component_digest"),
+            "after_component_digest": item.get("after_component_digest"),
+        }
+        for item in source_components
+        if isinstance(item, Mapping)
+    ]
+    changed_paths = list(diff.get("changed_json_paths") or [])
+    changed_paths.extend(diff.get("blocked_observation_json_paths") or [])
+    return {
+        "schema": diff.get("schema"),
+        "before_material_digest": diff.get("before_material_digest"),
+        "after_material_digest": diff.get("after_material_digest"),
+        "changed_component_count": int(
+            diff.get("changed_component_count") or len(components)
+        ),
+        "changed_json_paths": changed_paths[:limit],
+        "components": components[:limit],
+        "summary_truncated": len(components) > limit,
+    }
+
+
+def _compact_job(payload: Any) -> dict[str, Any] | None:
+    readback = (
+        (((payload or {}).get("evidence") or {}).get("readback") or {}).get(
+            "result"
+        )
+        if isinstance(payload, Mapping)
+        else None
+    )
+    job = readback.get("job") if isinstance(readback, Mapping) else None
+    if not isinstance(job, Mapping):
+        job = _find_mapping(payload, "job")
+    if not isinstance(job, Mapping):
+        return None
+    request = job.get("request") or {}
+    return {
+        "job_id": job.get("job_id") or request.get("job_id"),
+        "status": job.get("status"),
+        "terminal": job.get("terminal"),
+        "attempt": job.get("attempt"),
+        "request_digest": job.get("request_digest")
+        or request.get("request_digest"),
+        "result_digest": job.get("result_digest"),
+    }
+
+
+def _compact_error(payload: Any) -> dict[str, Any] | None:
+    error = _find_mapping(payload, "error")
+    if not isinstance(error, Mapping):
+        return None
+    return {
+        "code": error.get("code"),
+        "type": error.get("type"),
+        "message": str(error.get("message") or "")[:1000],
+        "evidence_digest": (
+            "sha256:" + digest(canonical_json_bytes(error.get("evidence")))
+            if isinstance(error.get("evidence"), Mapping)
+            else None
+        ),
+    }
+
+
+def _receipt_artifact_name(pr: int, run_id: int) -> str:
+    return f"production-apply-receipt-pr-{pr}-run-{run_id}"
+
+
+def _compact_apply_comment_body(
+    receipt: Mapping[str, Any],
+    *,
+    artifact_name: str,
+    receipt_sha256: str,
+    receipt_size_bytes: int,
+    component_limit: int = 24,
+) -> str:
+    operation = str(receipt["operation_id"])
+    summary = {
+        "schema": APPLY_COMMENT_SUMMARY_SCHEMA,
+        "state": receipt.get("state"),
+        "operation_id": operation,
+        "pull_request": receipt.get("pull_request"),
+        "release_operation_id": receipt.get("release_operation_id"),
+        "merge_sha": receipt.get("merge_sha"),
+        "deployed_sha": receipt.get("deployed_sha"),
+        "apply_count": receipt.get("apply_count"),
+        "reason": ((receipt.get("evidence") or {}).get("reason")),
+        "job": _compact_job(receipt),
+        "error": _compact_error(receipt),
+        "component_diff_summary": _compact_component_diff(
+            receipt, limit=component_limit
+        ),
+        "artifact": {
+            "name": artifact_name,
+            "file": RECOVERY_ARTIFACT_FILE,
+            "sha256": "sha256:" + receipt_sha256,
+            "size_bytes": int(receipt_size_bytes),
+            "retention_days": 90,
+        },
+        "full_receipt": {
+            "schema": receipt.get("schema"),
+            "sha256": "sha256:" + receipt_sha256,
+        },
+    }
+    body = (
+        marker(operation)
+        + "\nCompact terminal production apply summary; full immutable evidence is in the bound Actions artifact."
+        + "\n```json\n"
+        + json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```"
+    )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        if component_limit > 4:
+            return _compact_apply_comment_body(
+                receipt,
+                artifact_name=artifact_name,
+                receipt_sha256=receipt_sha256,
+                receipt_size_bytes=receipt_size_bytes,
+                component_limit=4,
+            )
+        summary["component_diff_summary"] = {
+            "digest": (
+                "sha256:"
+                + digest(
+                    canonical_json_bytes(
+                        _compact_component_diff(receipt, limit=component_limit)
+                    )
+                )
+            ),
+            "changed_component_count": (
+                (_compact_component_diff(receipt, limit=0) or {}).get(
+                    "changed_component_count"
+                )
+            ),
+            "summary_truncated": True,
+        }
+        if isinstance(summary.get("error"), Mapping):
+            summary["error"] = {
+                **summary["error"],
+                "message": str(summary["error"].get("message") or "")[:256],
+            }
+        body = (
+            marker(operation)
+            + "\nCompact terminal production apply summary; full immutable evidence is in the bound Actions artifact."
+            + "\n```json\n"
+            + json.dumps(
+                summary,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n```"
+        )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        raise ApplyError("compact apply receipt comment exceeds GitHub limit")
+    return body
+
+
+def _publish_compact_apply_receipt(
+    client: GitHubClient,
+    *,
+    pr: int,
+    receipt: Mapping[str, Any],
+    receipt_path: Path,
+    artifact_name: str,
+) -> Mapping[str, Any]:
+    raw = receipt_path.read_bytes()
+    expected = canonical_json_bytes(receipt) + b"\n"
+    if raw != expected:
+        raise ApplyError("immutable apply receipt bytes drifted before publication")
+    body = _compact_apply_comment_body(
+        receipt,
+        artifact_name=artifact_name,
+        receipt_sha256=digest(raw),
+        receipt_size_bytes=len(raw),
+    )
+    published = client.post(f"/issues/{pr}/comments", {"body": body})
+    if not isinstance(published, Mapping) or published.get("body") != body:
+        raise ApplyError("compact apply receipt publication response mismatch")
+    return published
+
+
+def _warm_readiness_artifact_name(pr: int, run_id: int) -> str:
+    return f"root-warm-archive-readiness-pr-{pr}-run-{run_id}"
+
+
+def _compact_warm_service_gate(service_gate: Any) -> dict[str, Any] | None:
+    if not isinstance(service_gate, Mapping):
+        return None
+    resample = service_gate.get("pair_resample_evidence") or {}
+    return {
+        "expected_unit_count": service_gate.get("expected_unit_count"),
+        "observed_unit_count": service_gate.get("observed_unit_count"),
+        "expected_pair_count": service_gate.get("expected_pair_count"),
+        "observed_pair_count": service_gate.get("observed_pair_count"),
+        "classification": service_gate.get("classification"),
+        "healthy": service_gate.get("healthy"),
+        "failing_unit_count": service_gate.get("failing_unit_count"),
+        "failing_pair_count": service_gate.get("failing_pair_count"),
+        "resample_required_pair_names": service_gate.get(
+            "resample_required_pair_names"
+        ),
+        "units": [
+            {
+                "name": row.get("name"),
+                "classification": row.get("classification"),
+                "healthy": row.get("healthy"),
+            }
+            for row in service_gate.get("units") or []
+            if isinstance(row, Mapping)
+        ],
+        "pairs": [
+            {
+                "timer_name": row.get("timer_name"),
+                "owner_name": row.get("owner_name"),
+                "classification": row.get("classification"),
+                "healthy": row.get("healthy"),
+                "resample_required": row.get("resample_required"),
+            }
+            for row in service_gate.get("pairs") or []
+            if isinstance(row, Mapping)
+        ],
+        "pair_resample_evidence": {
+            "attempted": resample.get("attempted"),
+            "attempt_count": resample.get("attempt_count"),
+            "resolved_healthy": resample.get("resolved_healthy"),
+            "remaining_resample_required_pair_names": resample.get(
+                "remaining_resample_required_pair_names"
+            ),
+            "samples": [
+                {
+                    "attempt": sample.get("attempt"),
+                    "unit_names": sample.get("unit_names"),
+                    "unit_count": len(sample.get("units") or []),
+                    "pair_count": len(sample.get("pairs") or []),
+                }
+                for sample in resample.get("samples") or []
+                if isinstance(sample, Mapping)
+            ],
+        },
+    }
+
+
+def _compact_mutable_observations(rows: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": row.get("key"),
+            "owner": row.get("owner"),
+            "classification": row.get("classification"),
+            "topology": row.get("topology"),
+            "ordinary_mutable_fields": row.get("ordinary_mutable_fields"),
+            "open_handle_relationship_count": len(
+                row.get("open_handle_relationships") or []
+            ),
+            "open_handle_relationships_digest": "sha256:"
+            + digest(canonical_json_bytes(row.get("open_handle_relationships") or [])),
+        }
+        for row in rows or []
+        if isinstance(row, Mapping)
+    ]
+
+
+def _compact_warm_readiness_comment_body(
+    receipt: Mapping[str, Any],
+    *,
+    artifact_name: str,
+    receipt_sha256: str,
+    receipt_size_bytes: int,
+) -> str:
+    readiness = str(receipt["readiness_id"])
+    comment_receipt = {
+        key: receipt.get(key)
+        for key in (
+            "schema",
+            "state",
+            "reason",
+            "attempt",
+            "query_only",
+            "database_written",
+            "readiness_id",
+            "repository",
+            "pull_request",
+            "release_operation_id",
+            "authorization_comment_id",
+            "goal_operation_id",
+            "merge_sha",
+            "deployed_sha",
+            "projection_manifest_path",
+            "projection_manifest_sha256",
+            "material_qualification_digest",
+            "material_partition",
+            "immutable_non_target_digest",
+            "mutable_canonical_topology_digest",
+            "mutable_canonical_observations",
+            "mutable_safety_predicates",
+            "expected_reclaimed_allocated_bytes",
+            "required_backup_floor_bytes",
+            "root_minimum_after_bytes",
+        )
+    }
+    comment_receipt.update(
+        {
+            "mutable_canonical_observations": _compact_mutable_observations(
+                receipt.get("mutable_canonical_observations")
+            ),
+            "systemd_service_gate": _compact_warm_service_gate(
+                receipt.get("systemd_service_gate")
+            ),
+            "callback": list(receipt.get("callback") or [])[:12],
+            "component_diff_summary": _compact_component_diff(receipt, limit=24),
+            "artifact": {
+                "name": artifact_name,
+                "file": "root-warm-archive-readiness-receipt.json",
+                "sha256": "sha256:" + receipt_sha256,
+                "size_bytes": int(receipt_size_bytes),
+                "retention_days": 90,
+            },
+            "evidence_sha256": "sha256:"
+            + digest(canonical_json_bytes(receipt.get("evidence"))),
+        }
+    )
+    body = (
+        warm_readiness_marker(readiness)
+        + "\nCompact terminal query-only warm archive readiness summary; full immutable evidence is in the bound Actions artifact."
+        + "\n```json\n"
+        + json.dumps(
+            comment_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n```"
+    )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        comment_receipt["callback"] = []
+        diff = comment_receipt.get("component_diff_summary")
+        comment_receipt["component_diff_summary"] = (
+            {
+                "digest": "sha256:" + digest(canonical_json_bytes(diff)),
+                "changed_component_count": (diff or {}).get(
+                    "changed_component_count"
+                ),
+                "summary_truncated": True,
+            }
+            if diff is not None
+            else None
+        )
+        body = (
+            warm_readiness_marker(readiness)
+            + "\nCompact terminal query-only warm archive readiness summary; full immutable evidence is in the bound Actions artifact."
+            + "\n```json\n"
+            + json.dumps(
+                comment_receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n```"
+        )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        raise ApplyError("compact warm readiness comment exceeds GitHub limit")
+    return body
 
 
 def _recovery_artifact_name(pr: int, run_id: int) -> str:
@@ -1404,15 +1961,40 @@ def _recovery_comment_body(
     artifact_name: str,
     receipt_sha256: str,
 ) -> str:
-    operation = str(receipt["operation_id"])
-    return (
-        marker(operation)
-        + "\nRecovered immutable task-scoped production apply receipt; no production command was executed."
-        + f"\nSource Actions run: {run_id}; artifact: `{artifact_name}`; "
-        + f"receipt SHA-256: `{receipt_sha256}`."
-        + "\n```json\n"
-        + json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-        + "\n```"
+    del run_id
+    return _compact_apply_comment_body(
+        receipt,
+        artifact_name=artifact_name,
+        receipt_sha256=receipt_sha256,
+        receipt_size_bytes=len(canonical_json_bytes(receipt) + b"\n"),
+    )
+
+
+def _comment_matches_receipt(
+    comment: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+    operation: str,
+    artifact_name: str,
+    receipt_sha256: str,
+) -> bool:
+    if not is_actions_bot_comment(comment):
+        return False
+    payload = _comment_payload(comment, operation)
+    if payload == dict(receipt):
+        return True
+    artifact = payload.get("artifact") or {}
+    full_receipt = payload.get("full_receipt") or {}
+    return bool(
+        payload.get("schema") == APPLY_COMMENT_SUMMARY_SCHEMA
+        and payload.get("state") == receipt.get("state")
+        and payload.get("operation_id") == operation
+        and payload.get("apply_count") == receipt.get("apply_count")
+        and artifact.get("name") == artifact_name
+        and artifact.get("file") == RECOVERY_ARTIFACT_FILE
+        and artifact.get("sha256") == "sha256:" + receipt_sha256
+        and full_receipt.get("schema") == receipt.get("schema")
+        and full_receipt.get("sha256") == "sha256:" + receipt_sha256
     )
 
 
@@ -1483,9 +2065,12 @@ def _run_receipt_recovery(
         raise ApplyError("duplicate or ambiguous durable apply receipt")
     if marked:
         existing = marked[0]
-        if (
-            not is_actions_bot_comment(existing)
-            or _comment_payload(existing, args.operation_id) != receipt
+        if not _comment_matches_receipt(
+            existing,
+            receipt=receipt,
+            operation=args.operation_id,
+            artifact_name=args.source_artifact_name,
+            receipt_sha256=args.source_receipt_sha256,
         ):
             raise ApplyError("existing durable apply receipt does not match source")
         publication_state = "already_terminal"
@@ -1506,8 +2091,13 @@ def _run_receipt_recovery(
         ]
         if (
             len(readback_marked) != 1
-            or not is_actions_bot_comment(readback_marked[0])
-            or _comment_payload(readback_marked[0], args.operation_id) != receipt
+            or not _comment_matches_receipt(
+                readback_marked[0],
+                receipt=receipt,
+                operation=args.operation_id,
+                artifact_name=args.source_artifact_name,
+                receipt_sha256=args.source_receipt_sha256,
+            )
         ):
             raise ApplyError("recovered receipt publication readback mismatch")
         published = readback_marked[0]
@@ -1639,13 +2229,16 @@ def _run_legacy_mode(
         "evidence": result,
     }
     _write_receipt(args.output, receipt)
-    body = (
-        marker(operation)
-        + "\nProtocol-v2 one-shot production apply receipt:\n```json\n"
-        + json.dumps(receipt, sort_keys=True, indent=2)
-        + "\n```"
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("production apply publication lacks GitHub run identity")
+    _publish_compact_apply_receipt(
+        client,
+        pr=args.pr,
+        receipt=receipt,
+        receipt_path=args.output,
+        artifact_name=_receipt_artifact_name(args.pr, run_id),
     )
-    client.post(f"/issues/{args.pr}/comments", {"body": body})
     print(json.dumps(receipt, sort_keys=True))
     return 0
 
@@ -1659,6 +2252,8 @@ def _run_warm_readiness_mode(
 ) -> int:
     if not args.release_operation_id:
         raise ApplyError("warm archive readiness requires --release-operation-id")
+    if args.authorization_comment_id <= 0:
+        raise ApplyError("warm archive readiness requires --authorization-comment-id")
     merge_sha = exact_sha(pr.get("merge_commit_sha"), "pr-merge")
     release_receipt = parse_release_receipt(
         comments,
@@ -1666,32 +2261,80 @@ def _run_warm_readiness_mode(
         release_operation=args.release_operation_id,
         merge_sha=merge_sha,
     )
-    readiness = warm_readiness_id(
-        args.repository, args.pr, args.release_operation_id
+    authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
+    goal = validate_authorization(
+        authorization,
+        repository=args.repository,
+        pr=args.pr,
     )
-    prior = [
-        item
-        for item in comments
-        if warm_readiness_marker(readiness) in str(item.get("body") or "")
-        and is_actions_bot_comment(item)
-    ]
-    if prior:
-        if len(prior) != 1 or "```json" not in str(prior[0].get("body") or ""):
-            raise ApplyError("duplicate or ambiguous warm archive readiness receipt")
-        payload = json.loads(
-            str(prior[0]["body"]).split("```json", 1)[1].split("```", 1)[0]
-        )
-        if (
-            payload.get("schema") != WARM_READINESS_RECEIPT_SCHEMA
-            or payload.get("readiness_id") != readiness
-            or payload.get("pull_request") != args.pr
-            or payload.get("merge_sha") != merge_sha
-        ):
-            raise ApplyError("existing warm archive readiness receipt is invalid")
-        receipt = {**payload, "idempotent": True}
+    if goal.get("profile") != WARM_ARCHIVE_GOAL_PROFILE:
+        raise ApplyError("warm archive readiness authorization profile is invalid")
+    goal_operation_id = operation_id(
+        args.repository,
+        args.pr,
+        args.authorization_comment_id,
+        goal,
+    )
+    attempts = _collect_warm_readiness_attempts(
+        comments,
+        repository=args.repository,
+        pr=args.pr,
+        release_operation=args.release_operation_id,
+        merge_sha=merge_sha,
+        authorization_comment_id=args.authorization_comment_id,
+        goal_operation_id=goal_operation_id,
+    )
+    ready = [payload for payload in attempts.values() if payload["state"] == "ready"]
+    if ready:
+        receipt = {
+            **parse_warm_readiness_receipt(
+                comments,
+                repository=args.repository,
+                pr=args.pr,
+                release_operation=args.release_operation_id,
+                merge_sha=merge_sha,
+                authorization_comment_id=args.authorization_comment_id,
+                goal_operation_id=goal_operation_id,
+            ),
+            "idempotent": True,
+        }
         _write_receipt(args.output, receipt)
         print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
         return 0
+    if len(attempts) >= MAX_WARM_READINESS_ATTEMPTS:
+        receipt = {
+            "schema": WARM_READINESS_RECEIPT_SCHEMA,
+            "state": "blocked",
+            "reason": "bounded-readiness-sequence-exhausted",
+            "query_only": True,
+            "database_written": False,
+            "repository": args.repository,
+            "pull_request": args.pr,
+            "release_operation_id": release_receipt["operation_id"],
+            "authorization_comment_id": args.authorization_comment_id,
+            "goal_operation_id": goal_operation_id,
+            "merge_sha": merge_sha,
+            "deployed_sha": merge_sha,
+            "attempt_count": len(attempts),
+            "readiness_ids": [
+                attempts[number]["readiness_id"] for number in sorted(attempts)
+            ],
+            "production_command_count": 0,
+            "comment_publication_count": 0,
+        }
+        _write_receipt(args.output, receipt)
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    attempt = len(attempts) + 1
+    readiness = warm_readiness_id(
+        args.repository,
+        args.pr,
+        args.release_operation_id,
+        args.authorization_comment_id,
+        goal_operation_id,
+        attempt,
+    )
 
     subprocess.run(["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True)
     subprocess.run(["git", "checkout", "--detach", merge_sha], cwd=ROOT, check=True)
@@ -1741,12 +2384,15 @@ def _run_warm_readiness_mode(
         "schema": WARM_READINESS_RECEIPT_SCHEMA,
         "state": state,
         "reason": reason,
+        "attempt": attempt,
         "query_only": True,
         "database_written": False,
         "readiness_id": readiness,
         "repository": args.repository,
         "pull_request": args.pr,
         "release_operation_id": release_receipt["operation_id"],
+        "authorization_comment_id": args.authorization_comment_id,
+        "goal_operation_id": goal_operation_id,
         "merge_sha": merge_sha,
         "deployed_sha": merge_sha,
         "evidence": evidence,
@@ -1763,6 +2409,7 @@ def _run_warm_readiness_mode(
                 "material_qualification_digest": payload.get(
                     "material_qualification_digest"
                 ),
+                "material_partition": payload.get("material_partition"),
                 "immutable_non_target_digest": payload.get(
                     "immutable_non_target_digest"
                 ),
@@ -1771,6 +2418,9 @@ def _run_warm_readiness_mode(
                 ),
                 "mutable_canonical_observations": payload.get(
                     "mutable_canonical_observations"
+                ),
+                "mutable_safety_predicates": payload.get(
+                    "mutable_safety_predicates"
                 ),
                 "expected_reclaimed_allocated_bytes": payload.get(
                     "expected_reclaimed_allocated_bytes"
@@ -1782,6 +2432,7 @@ def _run_warm_readiness_mode(
                     "root_minimum_after_bytes"
                 ),
                 "systemd_service_gate": payload.get("systemd_service_gate"),
+                "component_diff": payload.get("component_diff"),
                 "callback": _readiness_callback_summary(
                     payload.get("callback", [])
                 ),
@@ -1792,25 +2443,27 @@ def _run_warm_readiness_mode(
             "projection_manifest_path",
             "projection_manifest_sha256",
             "material_qualification_digest",
+            "material_partition",
             "immutable_non_target_digest",
             "mutable_canonical_topology_digest",
+            "mutable_safety_predicates",
         ):
             if not receipt.get(field):
                 raise ApplyError(f"ready warm archive receipt lacks {field}")
     _write_receipt(args.output, receipt)
-    comment_receipt = {
-        key: value for key, value in receipt.items() if key != "evidence"
-    }
-    comment_receipt["evidence_sha256"] = "sha256:" + digest(
-        canonical_json_bytes(evidence)
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("warm archive readiness publication lacks GitHub run identity")
+    raw_receipt = args.output.read_bytes()
+    body = _compact_warm_readiness_comment_body(
+        receipt,
+        artifact_name=_warm_readiness_artifact_name(args.pr, run_id),
+        receipt_sha256=digest(raw_receipt),
+        receipt_size_bytes=len(raw_receipt),
     )
-    body = (
-        warm_readiness_marker(readiness)
-        + "\nBounded query-only warm archive readiness receipt:\n```json\n"
-        + json.dumps(comment_receipt, ensure_ascii=False, sort_keys=True, indent=2)
-        + "\n```"
-    )
-    client.post(f"/issues/{args.pr}/comments", {"body": body})
+    published = client.post(f"/issues/{args.pr}/comments", {"body": body})
+    if not isinstance(published, Mapping) or published.get("body") != body:
+        raise ApplyError("warm archive readiness publication response mismatch")
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -1901,6 +2554,12 @@ def main() -> int:
         repository=args.repository,
         pr=args.pr,
     )
+    operation = operation_id(
+        args.repository,
+        args.pr,
+        args.authorization_comment_id,
+        goal,
+    )
     warm_readiness = (
         parse_warm_readiness_receipt(
             comments,
@@ -1908,15 +2567,11 @@ def main() -> int:
             pr=args.pr,
             release_operation=args.release_operation_id,
             merge_sha=merge_sha,
+            authorization_comment_id=args.authorization_comment_id,
+            goal_operation_id=operation,
         )
         if goal["profile"] == WARM_ARCHIVE_GOAL_PROFILE
         else None
-    )
-    operation = operation_id(
-        args.repository,
-        args.pr,
-        args.authorization_comment_id,
-        goal,
     )
     prior = [
         item
@@ -1972,13 +2627,16 @@ def main() -> int:
         "evidence": result,
     }
     _write_receipt(args.output, receipt)
-    body = (
-        marker(operation)
-        + "\nTask-scoped one-submit production apply receipt:\n```json\n"
-        + json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-        + "\n```"
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("production apply publication lacks GitHub run identity")
+    _publish_compact_apply_receipt(
+        client,
+        pr=args.pr,
+        receipt=receipt,
+        receipt_path=args.output,
+        artifact_name=_receipt_artifact_name(args.pr, run_id),
     )
-    client.post(f"/issues/{args.pr}/comments", {"body": body})
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 

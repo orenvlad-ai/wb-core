@@ -203,7 +203,8 @@ production-data mutation is admitted by this deploy binding.
 ## Default-off Apply Runner
 
 Apply workflow имеет только manual `workflow_dispatch` и production
-environment. Он поддерживает два fail-closed authorization mode.
+environment. Он поддерживает fail-closed scope-goal, exact-manifest,
+warm-archive-readiness и receipt-recovery modes.
 
 Legacy `exact-manifest` inputs bind PR, merge/deployed SHA, manifest SHA-256,
 durable operation id и exact authorization comment id. Authorization comment
@@ -251,21 +252,33 @@ six archive/restore/unlink и capacity/non-target/service reconciliation опи�
 в `migration/159_root_storage_warm_archive_wbc0008_006.md`.
 
 После WBC0008 block-007 этому profile обязательно предшествует отдельный
-`warm-archive-readiness` mode того же default-off workflow. Он не принимает
-owner authorization comment, не выводит production-goal operation id и не
-имеет submit/mutation primitive: exact merged PR и единственный
-`live_runtime/done` Release receipt определяют canonical deployed SHA, после
-чего repo-owned runner выполняет один полный query-only compression/material
+`warm-archive-readiness` mode того же default-off workflow. Он принимает exact
+authorization comment только как immutable scope/goal binding, выводит тот же
+production-goal operation id, но не имеет submit/mutation primitive. Exact
+merged PR, единственный `live_runtime/done` Release receipt, authorization
+comment и derived goal определяют canonical deployed SHA и readiness-v2 base
+identity. Для одной такой binding разрешены только contiguous attempts
+`a01`..`a03`; каждый выполняет один полный query-only compression/material
 projection и требует три consecutive clean lightweight activity/material-CAS
-witness внутри максимум 60 секунд. Один transient sample не terminalizes
-будущий apply. Persistent write-capable/unknown FD opener, kernel lock,
-sidecar, hold или material drift публикует один structured readiness callback;
-scope-goal operation после такого receipt не допускается.
+witness внутри максимум 60 секунд. Каждый attempt terminal и immutable;
+blocked не переписывается, ready может быть только последним, duplicate/gap/
+foreign/out-of-range fails closed. Следующий attempt под тем же deployed code и
+goal устраняет необходимость пустого PR только ради свежего readiness id, но
+не создаёт queue, automatic retry или unbounded loop. Один transient sample не
+terminalizes будущий apply. Persistent write-capable/unknown FD opener, kernel
+lock, sidecar, hold или material drift публикует structured readiness callback;
+scope-goal operation допускается только после единственного final ready
+attempt.
 
 Ready receipt cryptographically binds the private projection path/SHA,
 material digest, exact six source identities/SHA and conservative capacity
-guard. После WBC0008 block 012 он также отдельно связывает immutable non-target
-content digest и mutable canonical identity-topology digest. Только явные
+guard. После WBC0008 block 017 material partition `immutable_safety_v1`
+separately binds source/sidecar/hold/provenance, destination/mount,
+StoreRegistry/policy/ownership, protected non-target and canonical stable
+topology. Mutable Finance/capacity, service PID/timing, source-activity and
+ordinary canonical/protected size/mtime observations are re-evaluated at JIT
+and under mutation-start locks by semantic health/capacity/activity predicates,
+not by whole-snapshot byte equality. Только явные
 root-policy resolver bindings для current Finance raw/operational и
 Autoanswers относятся ко второй группе: их same-inode content/size/mtime
 эволюция сохраняется как evidence, но не меняет material CAS; path/device/
@@ -280,6 +293,13 @@ capacity and non-target checks remain exact. They do not repeat compression
 measurement, full SQLite integrity or full source hashing merely to obtain two
 equivalent witnesses. Actual archive/independent full restore/SQLite proof and
 one exact full pre-unlink source hash remain mandatory inside mutation.
+
+Any immutable or semantic-predicate mismatch before submit or mutation journal
+durably writes a private exclusive-create/fsynced component-diff artifact bound
+to readiness/operation/job/deployed SHA. It includes exact changed JSON paths,
+classification, before/after component digests and bounded safe stat/identity
+evidence. The first failure is never replaced by a later matching snapshot; no
+destination/archive/unlink primitive follows it.
 
 Before that projection the readiness receipt persists the complete 27-literal
 systemd unit snapshot plus all 12 derived timer/owning-service classifications
@@ -309,7 +329,7 @@ superseded и выполняется bounded regeneration, максимум тр
 ambiguous SSH transport никогда не повторяется. Отдельный deployed
 `--readback` открывает canonical store query-only, reconciles exact applies row,
 added capture/component/finalization counts, bounded-date visibility/quality,
-material source CAS и non-target invariants. Durable v3 receipt сохраняет все
+material source CAS и non-target invariants. Durable v4 receipt сохраняет все
 candidate hashes, exact applied manifest, command/output digests,
 `apply_count=0|1` и query-only result.
 Для exact-six readback дополнительно обязательны раздельная immutable/mutable
@@ -318,7 +338,13 @@ scope ledger с нулём non-target unlink/move/write.
 
 Terminal receipt publication использует PR timeline endpoint и явные
 `issues: write` плюс `pull-requests: write`: workflow не полагается на
-`issues: write` как достаточный permission для closed/merged PR. Если apply уже
+`issues: write` как достаточный permission для closed/merged PR. Полный
+canonical receipt всегда сначала записывается в immutable private artifact;
+PR comment — deterministic compact summary менее 65,536 bytes со state,
+operation/apply count, job/error/component-diff summary и exact artifact name,
+size/SHA-256. Поэтому oversized evidence не получает HTTP 422; любой 422 или
+другой publication failure оставляет artifact доступным и никогда не повторяет
+readiness, qualification, submit или mutation. Если apply уже
 завершён и reconciled, но publication упала после записи immutable artifact,
 режим `receipt-recovery` принимает exact merged PR, failed source run, его
 детерминированное artifact name, SHA-256 exact

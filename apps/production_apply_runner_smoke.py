@@ -273,17 +273,20 @@ def _run_dynamic_sequence(
         )
         readiness = (
             {
-                "readiness_id": "readiness-v1-" + "6" * 32,
+                "readiness_id": "readiness-v2-" + "6" * 32 + "-a01",
                 "projection_manifest_path": (
                     "/opt/wb-core-runtime/state/private-evidence/"
-                    "root-warm-archive-readiness/readiness-v1-"
+                    "root-warm-archive-readiness/readiness-v2-"
                     + "6" * 32
+                    + "-a01"
                     + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
                 ),
                 "projection_manifest_sha256": "sha256:" + "5" * 64,
                 "material_qualification_digest": "sha256:" + "8" * 64,
                 "immutable_non_target_digest": "sha256:" + "7" * 64,
                 "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
+                "material_partition": "immutable_safety_v1",
+                "mutable_safety_predicates": {"passed": True},
             }
             if goal["profile"] == apply.WARM_ARCHIVE_GOAL_PROFILE
             else None
@@ -304,7 +307,109 @@ def _run_dynamic_sequence(
         apply.time.sleep = original_sleep
 
 
+def _exercise_compact_oversized_blocked_receipt() -> None:
+    operation = "production-goal-v1-" + "9" * 32
+    receipt = {
+        "schema": apply.APPLY_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "operation_id": operation,
+        "repository": "orenvlad-ai/wb-core",
+        "pull_request": 1050,
+        "release_operation_id": "release-v2-test",
+        "merge_sha": MERGE_SHA,
+        "deployed_sha": MERGE_SHA,
+        "apply_count": 0,
+        "evidence": {
+            "state": "blocked",
+            "reason": "immutable material CAS drifted after qualification",
+            "error": {
+                "code": "material_cas_drift",
+                "type": "WarmArchiveError",
+                "message": "x" * 100_000,
+                "evidence": {"bounded": True},
+            },
+            "component_diff": {
+                "schema": "wb-core.root-warm-archive-material-cas-diff/v1",
+                "before_material_digest": "sha256:" + "1" * 64,
+                "after_material_digest": "sha256:" + "2" * 64,
+                "changed_component_count": 200,
+                "changed_json_paths": [f"/targets/{index}/identity" for index in range(200)],
+                "components": [
+                    {
+                        "json_path": f"/targets/{index}/identity",
+                        "classification": "exact_target_source",
+                        "before_component_digest": "sha256:" + "3" * 64,
+                        "after_component_digest": "sha256:" + "4" * 64,
+                        "before_safe_evidence": {"padding": "a" * 2000},
+                        "after_safe_evidence": {"padding": "b" * 2000},
+                    }
+                    for index in range(200)
+                ],
+            },
+        },
+    }
+
+    class LimitClient:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.post_count = 0
+            self.body = ""
+
+        def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+            assert path == "/issues/1050/comments"
+            self.post_count += 1
+            self.body = str(body["body"])
+            assert len(self.body.encode("utf-8")) < apply.MAX_GITHUB_COMMENT_BYTES
+            if self.fail:
+                raise apply.ApplyError("HTTP 422: body is too long")
+            return {
+                "id": 1,
+                "user": {"login": "github-actions[bot]"},
+                "body": self.body,
+            }
+
+    with tempfile.TemporaryDirectory(prefix="oversized-apply-receipt-") as directory:
+        path = Path(directory) / apply.RECOVERY_ARTIFACT_FILE
+        apply._write_receipt(path, receipt)
+        full_raw = path.read_bytes()
+        assert len(full_raw) > apply.MAX_GITHUB_COMMENT_BYTES
+        client = LimitClient()
+        apply._publish_compact_apply_receipt(
+            client,
+            pr=1050,
+            receipt=receipt,
+            receipt_path=path,
+            artifact_name=apply._receipt_artifact_name(1050, 123),
+        )
+        assert client.post_count == 1
+        summary = json.loads(client.body.split("```json", 1)[1].split("```", 1)[0])
+        assert summary["state"] == "blocked"
+        assert summary["operation_id"] == operation
+        assert summary["apply_count"] == 0
+        assert summary["error"]["code"] == "material_cas_drift"
+        assert summary["component_diff_summary"]["changed_component_count"] == 200
+        assert summary["artifact"]["sha256"] == "sha256:" + apply.digest(full_raw)
+        assert path.read_bytes() == full_raw
+
+        rejected = LimitClient(fail=True)
+        try:
+            apply._publish_compact_apply_receipt(
+                rejected,
+                pr=1050,
+                receipt=receipt,
+                receipt_path=path,
+                artifact_name=apply._receipt_artifact_name(1050, 124),
+            )
+        except apply.ApplyError as exc:
+            assert str(exc).startswith("HTTP 422")
+        else:
+            raise AssertionError("publication failure was unexpectedly hidden")
+        assert rejected.post_count == 1
+        assert path.read_bytes() == full_raw
+
+
 def main() -> None:
+    _exercise_compact_oversized_blocked_receipt()
     goal = apply.validate_authorization(
         authorization(), repository="orenvlad-ai/wb-core", pr=1050
     )
@@ -319,8 +424,9 @@ def main() -> None:
     assert warm_goal["expected_reclaimed_allocated_bytes"] == 27_591_725_056
     projection_path = (
         "/opt/wb-core-runtime/state/private-evidence/root-warm-archive-readiness/"
-        "readiness-v1-"
+        "readiness-v2-"
         + "6" * 32
+        + "-a01"
         + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
     )
     warm_dry_command = apply._remote_command(
@@ -348,7 +454,7 @@ def main() -> None:
             "ssh_destination": "wb-core-eu-root",
         },
         merge_sha=MERGE_SHA,
-        readiness_id="readiness-v1-" + "6" * 32,
+        readiness_id="readiness-v2-" + "6" * 32 + "-a01",
     )
     assert "production-goal-v1" not in readiness_command[-1]
     assert " readiness " in readiness_command[-1]
@@ -384,8 +490,19 @@ def main() -> None:
         merge_sha=MERGE_SHA,
     )
     assert parsed["state"] == "done"
+    warm_operation = apply.operation_id(
+        "orenvlad-ai/wb-core",
+        1050,
+        AUTHORIZATION_COMMENT_ID,
+        warm_goal,
+    )
     readiness_id = apply.warm_readiness_id(
-        "orenvlad-ai/wb-core", 1050, "release-v2-test"
+        "orenvlad-ai/wb-core",
+        1050,
+        "release-v2-test",
+        AUTHORIZATION_COMMENT_ID,
+        warm_operation,
+        1,
     )
     healthy_systemd_gate = {
         "expected_unit_count": 27,
@@ -432,10 +549,13 @@ def main() -> None:
     readiness_payload = {
         "schema": apply.WARM_READINESS_RECEIPT_SCHEMA,
         "state": "ready",
+        "attempt": 1,
         "readiness_id": readiness_id,
         "repository": "orenvlad-ai/wb-core",
         "pull_request": 1050,
         "release_operation_id": "release-v2-test",
+        "authorization_comment_id": AUTHORIZATION_COMMENT_ID,
+        "goal_operation_id": warm_operation,
         "merge_sha": MERGE_SHA,
         "deployed_sha": MERGE_SHA,
         "projection_manifest_path": (
@@ -447,6 +567,17 @@ def main() -> None:
         "material_qualification_digest": "sha256:" + "8" * 64,
         "immutable_non_target_digest": "sha256:" + "7" * 64,
         "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
+        "material_cas_components": [
+            {
+                "json_path": "/targets/fixture/identity",
+                "classification": "exact_target_source",
+                "cas_role": "immutable",
+                "digest": "sha256:" + "8" * 64,
+                "safe_evidence": {"key": "fixture"},
+            }
+        ],
+        "material_partition": "immutable_safety_v1",
+        "mutable_safety_predicates": {"passed": True},
         "mutable_canonical_observations": [
             {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
             for key in ("finance_raw_current", "operational_current", "autoanswers_current")
@@ -467,64 +598,141 @@ def main() -> None:
         pr=1050,
         release_operation="release-v2-test",
         merge_sha=MERGE_SHA,
+        authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+        goal_operation_id=warm_operation,
     )
     assert parsed_readiness == readiness_payload
-    fresh_release_operation = "release-v2-test-after-autoanswers-terminalization"
-    fresh_readiness_id = apply.warm_readiness_id(
-        "orenvlad-ai/wb-core", 1050, fresh_release_operation
+    second_readiness_id = apply.warm_readiness_id(
+        "orenvlad-ai/wb-core",
+        1050,
+        "release-v2-test",
+        AUTHORIZATION_COMMENT_ID,
+        warm_operation,
+        2,
     )
-    assert fresh_readiness_id != readiness_id
-    blocked_old_readiness = {
+    assert second_readiness_id != readiness_id
+    blocked_first_readiness = {
         **readiness_payload,
         "state": "blocked",
         "reason": "required_systemd_service_gate_blocked",
     }
-    old_blocked_comment = {
+    first_blocked_comment = {
         "user": {"login": "github-actions[bot]"},
         "body": apply.warm_readiness_marker(readiness_id)
         + "\n```json\n"
-        + json.dumps(blocked_old_readiness)
+        + json.dumps(blocked_first_readiness)
         + "\n```",
     }
     try:
         apply.parse_warm_readiness_receipt(
-            [old_blocked_comment],
+            [first_blocked_comment],
             repository="orenvlad-ai/wb-core",
             pr=1050,
             release_operation="release-v2-test",
             merge_sha=MERGE_SHA,
+            authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+            goal_operation_id=warm_operation,
         )
     except apply.ApplyError:
         pass
     else:
         raise AssertionError("blocked readiness receipt must never become reusable")
-    fresh_readiness_payload = {
+    second_readiness_payload = {
         **readiness_payload,
-        "readiness_id": fresh_readiness_id,
-        "release_operation_id": fresh_release_operation,
+        "attempt": 2,
+        "readiness_id": second_readiness_id,
         "projection_manifest_path": (
             "/opt/wb-core-runtime/state/private-evidence/"
-            f"root-warm-archive-readiness/{fresh_readiness_id}/"
+            f"root-warm-archive-readiness/{second_readiness_id}/"
             "root-warm-archive-readiness-projection-20260827T120000Z.json"
         ),
     }
-    parsed_fresh_readiness = apply.parse_warm_readiness_receipt(
+    parsed_second_readiness = apply.parse_warm_readiness_receipt(
         [
-            old_blocked_comment,
+            first_blocked_comment,
             {
                 "user": {"login": "github-actions[bot]"},
-                "body": apply.warm_readiness_marker(fresh_readiness_id)
+                "body": apply.warm_readiness_marker(second_readiness_id)
                 + "\n```json\n"
-                + json.dumps(fresh_readiness_payload)
+                + json.dumps(second_readiness_payload)
                 + "\n```",
             },
         ],
         repository="orenvlad-ai/wb-core",
         pr=1050,
-        release_operation=fresh_release_operation,
+        release_operation="release-v2-test",
         merge_sha=MERGE_SHA,
+        authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+        goal_operation_id=warm_operation,
     )
-    assert parsed_fresh_readiness == fresh_readiness_payload
+    assert parsed_second_readiness == second_readiness_payload
+    second_ready_comment = {
+        "user": {"login": "github-actions[bot]"},
+        "body": apply.warm_readiness_marker(second_readiness_id)
+        + "\n```json\n"
+        + json.dumps(second_readiness_payload)
+        + "\n```",
+    }
+    invalid_sequences = [
+        [second_ready_comment],
+        [first_blocked_comment, first_blocked_comment],
+        [
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": (
+                    "<!-- wb-core-root-warm-archive-readiness-receipt "
+                    "readiness=readiness-v2-"
+                    + "f" * 32
+                    + "-a04 -->\n```json\n"
+                    + json.dumps(
+                        {
+                            **second_readiness_payload,
+                            "attempt": 4,
+                            "readiness_id": "readiness-v2-" + "f" * 32 + "-a04",
+                        }
+                    )
+                    + "\n```"
+                ),
+            }
+        ],
+        [
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": apply.warm_readiness_marker(readiness_id)
+                + "\n```json\n"
+                + json.dumps(readiness_payload)
+                + "\n```",
+            },
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": apply.warm_readiness_marker(second_readiness_id)
+                + "\n```json\n"
+                + json.dumps(
+                    {
+                        **second_readiness_payload,
+                        "state": "blocked",
+                        "reason": "later-blocked-after-ready",
+                    }
+                )
+                + "\n```",
+            },
+        ],
+    ]
+    for invalid_comments in invalid_sequences:
+        try:
+            apply._collect_warm_readiness_attempts(
+                invalid_comments,
+                repository="orenvlad-ai/wb-core",
+                pr=1050,
+                release_operation="release-v2-test",
+                merge_sha=MERGE_SHA,
+                authorization_comment_id=AUTHORIZATION_COMMENT_ID,
+                goal_operation_id=warm_operation,
+            )
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError("invalid bounded readiness sequence must fail closed")
     systemd_gate = {
         "classification": "required_units_unhealthy",
         "failing_unit_count": 1,
@@ -658,15 +866,27 @@ def main() -> None:
         "material_qualification_digest": "sha256:" + "8" * 64,
         "immutable_non_target_digest": "sha256:" + "7" * 64,
         "mutable_canonical_topology_digest": "sha256:" + "6" * 64,
+        "material_partition": "immutable_safety_v1",
+        "mutable_safety_predicates": {"passed": True},
+        "material_cas_components": [
+            {
+                "json_path": "/targets/fixture/identity",
+                "classification": "exact_target_source",
+                "cas_role": "immutable",
+                "digest": "sha256:" + "8" * 64,
+                "safe_evidence": {"key": "fixture"},
+            }
+        ],
         "mutable_canonical_observations": [
             {"key": key, "ordinary_mutable_fields": {"size_bytes": 1}}
             for key in ("finance_raw_current", "operational_current", "autoanswers_current")
         ],
-        "readiness_id": "readiness-v1-" + "6" * 32,
+        "readiness_id": "readiness-v2-" + "6" * 32 + "-a01",
         "projection_manifest_path": (
             "/opt/wb-core-runtime/state/private-evidence/"
-            "root-warm-archive-readiness/readiness-v1-"
+            "root-warm-archive-readiness/readiness-v2-"
             + "6" * 32
+            + "-a01"
             + "/root-warm-archive-readiness-projection-20260826T120000Z.json"
         ),
         "projection_manifest_sha256": "sha256:" + "5" * 64,
@@ -954,6 +1174,7 @@ def main() -> None:
     apply_job, recovery_job = workflow.split("\n  recover_receipt:\n", 1)
     assert "pull-requests: write" in apply_job
     assert "--authorization-mode warm-archive-readiness" in apply_job
+    assert "--authorization-comment-id" in apply_job
     assert "root-warm-archive-readiness-receipt.json" in apply_job
     assert "actions: read" in recovery_job
     assert "pull-requests: write" in recovery_job
