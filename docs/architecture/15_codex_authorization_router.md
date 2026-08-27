@@ -181,6 +181,18 @@ marker digests и новому merged `repo_only/done` release. Exact replay `a0
 duplicate, different-digest и `a03` fail closed, не создавая human gate, queue
 или retry.
 
+Blocked legacy `a02` остаётся exhausted terminal generation и никогда не
+становится `a03` или retry. Доказанный в его immutable artifact дефект самого
+duplicated reconciliation classifier допускает только real code-delta
+generation `v2`: она exact-bind original submitted operation/source receipt,
+оба terminal `a01/a02` run/artifact archive/receipt/marker digests и новый
+merged `repo_only/done` release. В этой generation существует ровно один
+`v2-a01`; exact existing terminal marker даёт `already_terminal` до SSH/comment,
+а `v2-a02`, `v2-a03`, queue и identity-only PR запрещены. Remote contour
+по-прежнему имеет один query-only SSH probe и production mutation count zero;
+это same-operation receipt evidence correction `AUTO_CONTINUE`, а не новая
+readiness, operation или owner gate.
+
 ## Owner publication deduplication
 
 Human decision material состоит из goal, exact owner, sorted reason codes и

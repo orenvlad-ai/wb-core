@@ -22,12 +22,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import production_apply_runner as runner
+from apps import root_storage_warm_archive as warm
 from apps import wbc0008_warm_archive_receipt_reconciliation_probe as probe
 
 
-MERGE = "7" * 40
-OPERATION = "production-goal-v1-" + "8" * 32
-JOB = "d" * 64
+MERGE = probe.EXACT_DEPLOYED_SHA
+OPERATION = probe.EXACT_OPERATION_ID
+JOB = probe.EXACT_JOB_ID
 MANIFEST = (
     "/opt/wb-core-runtime/state/private-evidence/production-goals/"
     f"{OPERATION}/root-warm-archive-plan-20260827T101213Z.json"
@@ -200,6 +201,65 @@ def archive_fixture(root: Path) -> dict[str, object]:
 
 
 def valid_probe_payload() -> dict[str, object]:
+    pairs = [
+        {
+            "healthy": True,
+            "classification": "waiting_with_inactive_success_owner",
+        }
+        for _ in range(12)
+    ]
+    canonical_gate = {
+        "healthy": True,
+        "observed_unit_count": 27,
+        "observed_pair_count": 12,
+    }
+    service_resamples = {
+        "attempted": False,
+        "attempt_count": 0,
+        "max_attempts": 3,
+        "max_seconds": 5.0,
+        "interval_seconds": 0.25,
+        "samples": [],
+    }
+    next_trigger_observations = [
+        {
+            "timer_name": timer,
+            "NextElapseUSecRealtime": "",
+            "NextElapseUSecMonotonic": "123456789",
+        }
+        for timer, _owner in probe.EXPECTED_TIMER_SERVICE_PAIRS
+    ]
+    service_gate: dict[str, object] = {
+        "schema": "wb-core.systemd-canonical-health-gate/v2",
+        "classification": "healthy",
+        "healthy": True,
+        "canonical_contract": {
+            "deployed_sha": probe.EXACT_DEPLOYED_SHA,
+            "module_sha256": probe.CANONICAL_SYSTEMD_MODULE_SHA256,
+            "archive_contract": probe.ARCHIVE_CONTRACT,
+            "service_names": list(probe.EXPECTED_SERVICE_NAMES),
+            "service_names_digest": probe.payload_digest(
+                list(probe.EXPECTED_SERVICE_NAMES)
+            ),
+            "timer_service_pairs": [
+                list(item) for item in probe.EXPECTED_TIMER_SERVICE_PAIRS
+            ],
+            "query_only_symbols": list(probe.CANONICAL_QUERY_ONLY_SYMBOLS),
+        },
+        "canonical_gate": canonical_gate,
+        "canonical_gate_digest": probe.payload_digest(canonical_gate),
+        "unit_count": 27,
+        "pair_count": 12,
+        "failing_pair_count": 0,
+        "failing_persistent_service_count": 0,
+        "pair_resample_evidence": service_resamples,
+        "timer_next_trigger_observations": next_trigger_observations,
+        "timer_next_trigger_observations_digest": probe.payload_digest(
+            next_trigger_observations
+        ),
+        "pairs": pairs,
+    }
+    service_gate["gate_digest"] = probe.payload_digest(service_gate)
     value: dict[str, object] = {
         "schema": probe.SCHEMA,
         "status": "reconciled",
@@ -241,23 +301,7 @@ def valid_probe_payload() -> dict[str, object]:
             "required_available_floor_bytes": FLOOR,
         },
         "natural_root_monitor": {"fresh": True, "normal": True},
-        "systemd_service_gate": {
-            "schema": "wb-core.systemd-paired-health-gate/v1",
-            "classification": "healthy",
-            "healthy": True,
-            "unit_count": 27,
-            "pair_count": 12,
-            "failing_pair_count": 0,
-            "failing_persistent_service_count": 0,
-            "pairs": [
-                {
-                    "healthy": True,
-                    "classification": "idle_waiting_with_inactive_success_owner",
-                    "samples": [{}],
-                }
-                for _ in range(12)
-            ],
-        },
+        "systemd_service_gate": service_gate,
         "non_target_reconciliation": {"preserved": True},
         "journald_reconciliation": {"preserved": True},
         "remote_action_counts": {name: 0 for name in (
@@ -501,6 +545,37 @@ def test_jobs_locks_and_capacity() -> None:
         probe.os.statvfs = original
 
 
+A02_SYSTEMD_ROWS = (
+    ("wb-core-registry-http.service", "active", "running", "success", "581889", "0", "enabled", "", "", ""),
+    ("wb-ai-api.service", "active", "running", "success", "582052", "0", "enabled", "", "", ""),
+    ("wb-core-data-mcp.service", "active", "running", "success", "582047", "0", "enabled", "", "", ""),
+    ("wb-core-sheet-vitrina-refresh.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:40:08 UTC", "Thu 2026-08-27 12:50:00 UTC", "wb-core-sheet-vitrina-refresh.service"),
+    ("wb-core-sheet-vitrina-refresh.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-sheet-vitrina-canary-restore.timer", "active", "running", "success", "", "", "enabled", "Thu 2026-08-27 12:42:50 UTC", "", "wb-core-sheet-vitrina-canary-restore.service"),
+    ("wb-core-sheet-vitrina-canary-restore.service", "activating", "start", "success", "593451", "0", "static", "", "", ""),
+    ("wb-core-sheet-vitrina-closure-retry.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:33:13 UTC", "", "wb-core-sheet-vitrina-closure-retry.service"),
+    ("wb-core-sheet-vitrina-closure-retry.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-feedbacks-auto-complaints-tick.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:35:46 UTC", "", "wb-core-feedbacks-auto-complaints-tick.service"),
+    ("wb-core-feedbacks-auto-complaints-tick.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-wb-finance-weekly.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:00:07 UTC", "Thu 2026-08-27 13:00:00 UTC", "wb-core-wb-finance-weekly.service"),
+    ("wb-core-wb-finance-weekly.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-root-storage-policy.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:41:17 UTC", "", "wb-core-root-storage-policy.service"),
+    ("wb-core-root-storage-policy.service", "inactive", "dead", "success", "0", "0", "disabled", "", "", ""),
+    ("wb-core-finance-backup-rotation.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 01:32:30 UTC", "Fri 2026-08-28 01:41:56 UTC", "wb-core-finance-backup-rotation.service"),
+    ("wb-core-finance-backup-rotation.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-warehouse-functional-sync.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:17:06 UTC", "Thu 2026-08-27 13:17:00 UTC", "wb-core-warehouse-functional-sync.service"),
+    ("wb-core-warehouse-functional-sync.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-fbs-shadow-collector.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:38:08 UTC", "Thu 2026-08-27 12:43:04 UTC", "wb-core-fbs-shadow-collector.service"),
+    ("wb-core-fbs-shadow-collector.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-fbs-warehouse-registry.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:31:20 UTC", "Thu 2026-08-27 12:46:04 UTC", "wb-core-fbs-warehouse-registry.service"),
+    ("wb-core-fbs-warehouse-registry.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-autoanswers-readonly-sync.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:38:23 UTC", "", "wb-core-autoanswers-readonly-sync.service"),
+    ("wb-core-autoanswers-readonly-sync.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+    ("wb-core-autoanswers-worker.timer", "active", "waiting", "success", "", "", "enabled", "Thu 2026-08-27 12:41:59 UTC", "", "wb-core-autoanswers-worker.service"),
+    ("wb-core-autoanswers-worker.service", "inactive", "dead", "success", "0", "0", "static", "", "", ""),
+)
+
+
 def systemd_values(
     unit: str,
     *,
@@ -510,10 +585,21 @@ def systemd_values(
     status: str = "0",
     pid: str = "0",
     unit_file_state: str | None = None,
-    triggers: str = "",
+    last_trigger: str = "",
     next_trigger: str = "",
+    next_monotonic: str = "",
+    triggers: str = "",
+    production_timer_shape: bool = False,
 ) -> dict[str, object]:
     timer = unit.endswith(".timer")
+    observed = ["Id", *warm.SYSTEMD_REQUIRED_PROPERTIES]
+    if timer:
+        observed.extend(warm.SYSTEMD_TIMER_PROPERTIES)
+    if timer and production_timer_shape:
+        observed = [
+            item for item in observed if item not in {"ExecMainStatus", "MainPID"}
+        ]
+        observed.extend(["NextElapseUSecMonotonic", "Triggers"])
     values: dict[str, object] = {
         "Id": unit,
         "LoadState": "loaded",
@@ -523,170 +609,257 @@ def systemd_values(
         "ExecMainStatus": status,
         "MainPID": pid,
         "UnitFileState": unit_file_state or ("enabled" if timer else "static"),
-        "LastTriggerUSec": "Thu 2026-08-27 12:00:07 UTC" if timer else "",
+        "LastTriggerUSec": last_trigger if timer else "",
         "NextElapseUSecRealtime": next_trigger if timer else "",
+        "NextElapseUSecMonotonic": next_monotonic if timer else "",
         "Triggers": triggers if timer else "",
         "QueryReturnCode": 0,
         "QueryError": None,
         "QueryStderrSha256": "sha256:" + "0" * 64,
-        "ObservedProperties": list(probe.SYSTEMD_PROPERTY_NAMES),
+        "ObservedProperties": sorted(set(observed)),
     }
     return values
 
 
-def idle_pair(timer: str, owner: str) -> tuple[dict[str, object], dict[str, object]]:
-    return (
-        systemd_values(
-            timer,
-            active="active",
-            sub="waiting",
-            triggers=owner,
-            next_trigger="Thu 2026-08-27 12:10:00 UTC",
-        ),
-        systemd_values(owner, active="inactive", sub="dead"),
-    )
+def a02_production_snapshot() -> dict[str, dict[str, object]]:
+    snapshot: dict[str, dict[str, object]] = {}
+    for (
+        unit,
+        active,
+        sub,
+        result,
+        pid,
+        status,
+        unit_file_state,
+        last_trigger,
+        next_trigger,
+        triggers,
+    ) in A02_SYSTEMD_ROWS:
+        snapshot[unit] = systemd_values(
+            unit,
+            active=active,
+            sub=sub,
+            result=result,
+            pid=pid,
+            status=status,
+            unit_file_state=unit_file_state,
+            last_trigger=last_trigger,
+            next_trigger=next_trigger,
+            next_monotonic=(
+                "123456789"
+                if unit.endswith(".timer") and not next_trigger
+                else ""
+            ),
+            triggers=triggers,
+            production_timer_shape=unit.endswith(".timer"),
+        )
+    return snapshot
 
 
-def firing_pair(
-    timer: str, owner: str, *, owner_active: str = "activating"
-) -> tuple[dict[str, object], dict[str, object]]:
-    owner_sub = "start" if owner_active == "activating" else "running"
-    return (
-        systemd_values(
-            timer,
-            active="active",
-            sub="running",
-            triggers=owner,
-        ),
-        systemd_values(
-            owner,
-            active=owner_active,
-            sub=owner_sub,
-            pid="4242",
-        ),
-    )
+def canonical_contract_fixture() -> dict[str, object]:
+    return {
+        "identity": {
+            "deployed_sha": probe.EXACT_DEPLOYED_SHA,
+            "module_sha256": probe.CANONICAL_SYSTEMD_MODULE_SHA256,
+            "archive_contract": probe.ARCHIVE_CONTRACT,
+            "service_names": list(warm.SERVICE_NAMES),
+            "service_names_digest": probe.payload_digest(list(warm.SERVICE_NAMES)),
+            "timer_service_pairs": [list(item) for item in warm.TIMER_SERVICE_PAIRS],
+            "query_only_symbols": list(probe.CANONICAL_QUERY_ONLY_SYMBOLS),
+        },
+        "persistent_service_names": warm.PERSISTENT_SERVICE_NAMES,
+        "service_names": warm.SERVICE_NAMES,
+        "timer_service_pairs": warm.TIMER_SERVICE_PAIRS,
+        "snapshot": warm._systemd_snapshot,
+        "classify_with_resample": warm._systemd_service_gate_with_resample,
+        "unit_row": warm._systemd_unit_row,
+        "max_attempts": warm.SYSTEMD_PAIR_RESAMPLE_MAX_ATTEMPTS,
+        "max_seconds": warm.SYSTEMD_PAIR_RESAMPLE_MAX_SECONDS,
+        "interval_seconds": warm.SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS,
+    }
 
 
-def systemd_runner(
+def snapshot_reader(
     sequences: dict[str, list[dict[str, object]]]
 ) -> object:
     calls: dict[str, int] = {}
 
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        unit = command[-1]
-        index = calls.get(unit, 0)
-        calls[unit] = index + 1
-        rows = sequences[unit]
-        values = rows[min(index, len(rows) - 1)]
-        stdout = "\n".join(
-            f"{name}={values.get(name, '')}" for name in probe.SYSTEMD_PROPERTY_NAMES
-        ) + "\n"
-        return subprocess.CompletedProcess(command, 0, stdout, "")
+    def read(names: tuple[str, ...]) -> dict[str, dict[str, object]]:
+        result: dict[str, dict[str, object]] = {}
+        for unit in names:
+            index = calls.get(unit, 0)
+            calls[unit] = index + 1
+            rows = sequences.get(unit, [{}])
+            result[unit] = deepcopy(rows[min(index, len(rows) - 1)])
+        return result
 
-    return run
+    return read
 
 
 def full_systemd_sequences() -> dict[str, list[dict[str, object]]]:
-    values: dict[str, list[dict[str, object]]] = {}
-    for unit in probe.PERSISTENT_UNITS:
-        values[unit] = [systemd_values(unit, active="active", sub="running", pid="101")]
-    for timer, owner in probe.TIMER_PAIRS:
-        timer_values, owner_values = idle_pair(timer, owner)
-        values[timer] = [timer_values]
-        values[owner] = [owner_values]
+    values = {name: [row] for name, row in a02_production_snapshot().items()}
     values[f"wb-core-storage-recovery-sanitation@{JOB}.service"] = [
         systemd_values(
             f"wb-core-storage-recovery-sanitation@{JOB}.service",
             active="inactive",
             sub="dead",
+            unit_file_state="disabled",
         )
     ]
     return values
 
 
 def test_paired_systemd_classifier() -> None:
-    timer, owner = probe.TIMER_PAIRS[0]
-    timer_values, owner_values = idle_pair(timer, owner)
-    classified = probe._classify_timer_service_pair(
-        timer, owner, timer_values, owner_values
-    )
-    assert classified["healthy"] is True
-    assert classified["classification"] == "idle_waiting_with_inactive_success_owner"
-
-    for active in ("activating", "active"):
-        timer_values, owner_values = firing_pair(timer, owner, owner_active=active)
-        classified = probe._classify_timer_service_pair(
-            timer, owner, timer_values, owner_values
-        )
-        assert classified["healthy"] is True
-        assert classified["classification"] == "coherent_trigger_in_progress"
-
-    timer_values, owner_values = firing_pair(timer, owner)
-    _ignored, inactive_owner = idle_pair(timer, owner)
-    classified = probe._classify_timer_service_pair(
-        timer, owner, timer_values, inactive_owner
-    )
-    assert classified["healthy"] is False and classified["resample_required"] is True
-
-    timer_values, owner_values = idle_pair(timer, owner)
-    owner_values["Result"] = "failed"
-    classified = probe._classify_timer_service_pair(
-        timer, owner, timer_values, owner_values
-    )
-    assert classified["healthy"] is False and classified["resample_required"] is False
-
-    for label, mutate in (
-        ("disabled timer", lambda t, _o: t.update(UnitFileState="disabled")),
-        ("disabled owner", lambda _t, o: o.update(UnitFileState="disabled")),
-        ("missing next", lambda t, _o: t.update(NextElapseUSecRealtime="")),
-        ("wrong relation", lambda t, _o: t.update(Triggers="foreign.service")),
-    ):
-        timer_values, owner_values = idle_pair(timer, owner)
-        mutate(timer_values, owner_values)
-        classified = probe._classify_timer_service_pair(
-            timer, owner, timer_values, owner_values
-        )
-        assert classified["healthy"] is False, label
-
+    contract = canonical_contract_fixture()
     sequences = full_systemd_sequences()
-    initial_timer, initial_owner = firing_pair(timer, owner)
-    final_timer, final_owner = firing_pair(timer, owner, owner_active="active")
-    sequences[timer] = [initial_timer, final_timer]
-    sequences[owner] = [idle_pair(timer, owner)[1], final_owner]
+    initial = {name: rows[0] for name, rows in sequences.items() if name in warm.SERVICE_NAMES}
+    expected = warm._systemd_service_gate(initial)
     gate = probe._service_health(
         JOB,
-        {"systemd_service_gate_after": {"healthy": True, "observed_unit_count": 27, "observed_pair_count": 12}},
-        command_runner=systemd_runner(sequences),  # type: ignore[arg-type]
-        sleep_fn=lambda _seconds: None,
-        max_resample_attempts=3,
+        {
+            "systemd_service_gate_after": {
+                "healthy": True,
+                "observed_unit_count": 27,
+                "observed_pair_count": 12,
+            }
+        },
+        canonical_contract=contract,
+        snapshot_reader=snapshot_reader(sequences),  # type: ignore[arg-type]
         resample_interval_seconds=0,
-        monotonic_fn=lambda: 0.0,
     )
-    target = next(row for row in gate["pairs"] if row["timer_name"] == timer)
-    assert gate["healthy"] is True and len(target["samples"]) == 2
+    canonical_actual = dict(gate["canonical_gate"])
+    canonical_actual.pop("pair_resample_evidence")
+    assert canonical_actual == expected
+    assert gate["healthy"] is True
+    assert gate["unit_count"] == 27 and gate["pair_count"] == 12
+    root_owner = next(
+        row
+        for row in gate["units"]
+        if row["name"] == "wb-core-root-storage-policy.service"
+    )
+    assert root_owner["UnitFileState"] == "disabled" and root_owner["healthy"] is True
+    canary = next(
+        pair
+        for pair in gate["pairs"]
+        if pair["timer_name"] == "wb-core-sheet-vitrina-canary-restore.timer"
+    )
+    assert canary["classification"] == "trigger_in_progress_with_active_owner"
+    assert canary["healthy"] is True
+    assert (
+        gate["raw_initial_snapshot"][
+            "wb-core-sheet-vitrina-closure-retry.timer"
+        ]["NextElapseUSecRealtime"]
+        == ""
+    )
+    assert (
+        gate["raw_initial_snapshot"][
+            "wb-core-sheet-vitrina-closure-retry.timer"
+        ]["NextElapseUSecMonotonic"]
+        == "123456789"
+    )
 
-    sequences = full_systemd_sequences()
-    sequences[timer] = [initial_timer]
-    sequences[owner] = [idle_pair(timer, owner)[1]]
-    try:
-        probe._service_health(
-            JOB,
-            {"systemd_service_gate_after": {"healthy": True, "observed_unit_count": 27, "observed_pair_count": 12}},
-            command_runner=systemd_runner(sequences),  # type: ignore[arg-type]
-            sleep_fn=lambda _seconds: None,
-            max_resample_attempts=3,
-            resample_interval_seconds=0,
-            monotonic_fn=lambda: 0.0,
+    timer, owner = warm.TIMER_SERVICE_PAIRS[0]
+    transition = full_systemd_sequences()
+    transition[timer] = [
+        systemd_values(
+            timer,
+            active="active",
+            sub="running",
+            production_timer_shape=True,
+        ),
+        systemd_values(
+            timer,
+            active="active",
+            sub="running",
+            production_timer_shape=True,
+        ),
+    ]
+    transition[owner] = [
+        systemd_values(owner, active="inactive", sub="dead"),
+        systemd_values(owner, active="active", sub="running", pid="4242"),
+    ]
+    resolved = probe._service_health(
+        JOB,
+        {
+            "systemd_service_gate_after": {
+                "healthy": True,
+                "observed_unit_count": 27,
+                "observed_pair_count": 12,
+            }
+        },
+        canonical_contract=contract,
+        snapshot_reader=snapshot_reader(transition),  # type: ignore[arg-type]
+        resample_interval_seconds=0,
+    )
+    assert resolved["healthy"] is True
+    assert resolved["pair_resample_evidence"]["attempt_count"] == 1
+    assert resolved["pair_resample_evidence"]["samples"]
+
+    negative_cases = (
+        ("failed", owner, {"Result": "failed"}),
+        ("unknown", owner, {"LoadState": "unknown"}),
+        ("masked", owner, {"UnitFileState": "masked"}),
+        ("nonzero", owner, {"ExecMainStatus": "7"}),
+        (
+            "impossible relation",
+            timer,
+            {"ActiveState": "active", "SubState": "running"},
+        ),
+    )
+    for label, unit, delta in negative_cases:
+        broken = full_systemd_sequences()
+        broken[unit] = [{**broken[unit][0], **delta}]
+        expect_blocked(
+            lambda broken=broken: probe._service_health(
+                JOB,
+                {
+                    "systemd_service_gate_after": {
+                        "healthy": True,
+                        "observed_unit_count": 27,
+                        "observed_pair_count": 12,
+                    }
+                },
+                canonical_contract=contract,
+                snapshot_reader=snapshot_reader(broken),  # type: ignore[arg-type]
+                max_resample_attempts=1,
+                resample_interval_seconds=0,
+            ),
+            label,
         )
-    except probe.SystemdGateError as exc:
-        failed = next(row for row in exc.gate["pairs"] if row["timer_name"] == timer)
-        assert len(failed["samples"]) == 4
-        assert exc.gate["pair_resample_evidence"]["exhausted"] is True
-    else:
-        raise AssertionError("transition resample exhaustion must fail closed")
-
-
+    missing = full_systemd_sequences()
+    missing.pop(owner)
+    expect_blocked(
+        lambda: probe._service_health(
+            JOB,
+            {
+                "systemd_service_gate_after": {
+                    "healthy": True,
+                    "observed_unit_count": 27,
+                    "observed_pair_count": 12,
+                }
+            },
+            canonical_contract=contract,
+            snapshot_reader=snapshot_reader(missing),  # type: ignore[arg-type]
+            max_resample_attempts=1,
+            resample_interval_seconds=0,
+        ),
+        "missing literal owner",
+    )
 def test_runner_receiver_and_command() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix="warm-reconciliation-deployed-module-"
+    ) as directory:
+        marker = Path(directory) / ".wb-core-runtime-sha"
+        marker.write_text(probe.EXACT_DEPLOYED_SHA + "\n", encoding="utf-8")
+        contract = probe._load_canonical_systemd_contract(
+            app_root=ROOT, deployed_sha_file=marker
+        )
+        assert contract["service_names"] == warm.SERVICE_NAMES
+        assert contract["timer_service_pairs"] == warm.TIMER_SERVICE_PAIRS
+        assert (
+            contract["identity"]["module_sha256"]
+            == probe.CANONICAL_SYSTEMD_MODULE_SHA256
+        )
     payload = valid_probe_payload()
     context = {"source": {
         "operation_id": OPERATION, "job_id": JOB, "deployed_sha": MERGE,
@@ -740,6 +913,24 @@ def test_runner_receiver_and_command() -> None:
     forbidden = ("submit", "readback_batch", "restore.tmp", "systemctl start", "systemctl restart", "sqlite3")
     assert not any(token in command[-1] for token in forbidden)
     source = (ROOT / "apps/wbc0008_warm_archive_receipt_reconciliation_probe.py").read_text()
+    assert "from apps.root_storage_warm_archive import (" in source
+    assert set(probe.CANONICAL_QUERY_ONLY_SYMBOLS) == {
+        "PERSISTENT_SERVICE_NAMES",
+        "SERVICE_NAMES",
+        "SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS",
+        "SYSTEMD_PAIR_RESAMPLE_MAX_ATTEMPTS",
+        "SYSTEMD_PAIR_RESAMPLE_MAX_SECONDS",
+        "TIMER_SERVICE_PAIRS",
+        "_systemd_service_gate_with_resample",
+        "_systemd_snapshot",
+        "_systemd_unit_row",
+    }
+    for token in (
+        "def _systemd_observation",
+        "def _classify_persistent_service",
+        "def _classify_timer_service_pair",
+    ):
+        assert token not in source
     for token in ("import sqlite3", "import tempfile", "import fcntl", ".unlink(", "systemctl\", \"start", "systemctl\", \"restart", "readback_batch("):
         assert token not in source
     calls: list[list[str]] = []
@@ -943,25 +1134,24 @@ def legacy_a01_fixture(
 
 def test_exact_legacy_a01_to_a02_gate() -> None:
     marker, client, args, source = legacy_a01_fixture()
-    prior = runner._validate_legacy_warm_reconciliation_a01(
-        client=client, comments=[marker], args=args, source=source  # type: ignore[arg-type]
-    )
-    assert prior["attempt"] == "a01"
-    assert prior["production_mutation_count"] == 0
-    assert prior["artifact_id"] == 9645283377
-
-    wrong_marker, wrong_client, wrong_args, wrong_source = legacy_a01_fixture(
-        error_message="different blocker"
-    )
     expect_blocked(
-        lambda: runner._validate_legacy_warm_reconciliation_a01(
-            client=wrong_client,
-            comments=[wrong_marker],
-            args=wrong_args,
-            source=wrong_source,
+        lambda: runner._validate_legacy_warm_reconciliation_a01(  # type: ignore[arg-type]
+            client=client,
+            comments=[marker],
+            args=args,
+            source=source,
         ),
-        "legacy a01 must have the exact timer predicate blocker",
+        "any non-exact legacy a01 identity must fail before artifact access",
     )
+    assert runner.WARM_RECONCILIATION_ATTEMPT == "v2-a01"
+    assert runner.WARM_RECONCILIATION_A01_RUN_ID == 33069817619
+    assert runner.WARM_RECONCILIATION_A01_ARTIFACT_ID == 9645283377
+    assert runner.WARM_RECONCILIATION_A01_COMMENT_ID == 5438726868
+    assert runner.WARM_RECONCILIATION_A02_RUN_ID == 33073151214
+    assert runner.WARM_RECONCILIATION_A02_ARTIFACT_ID == 9646668764
+    assert runner.WARM_RECONCILIATION_A02_COMMENT_ID == 5439297992
+    assert runner.WARM_RECONCILIATION_SOURCE_OPERATION_ID == OPERATION
+    assert runner.WARM_RECONCILIATION_SOURCE_JOB_ID == JOB
 
 
 def test_terminal_marker_idempotency() -> None:
@@ -985,30 +1175,44 @@ def test_terminal_marker_idempotency() -> None:
         "deployed_sha": None,
         "probe_source_sha256": "sha256:" + "e" * 64,
     }
-    sequence = {
-        "schema": runner.WARM_RECONCILIATION_SEQUENCE_SCHEMA,
-        "sequence_id": "root-warm-archive-reconciliation-v1-" + "1" * 32,
-        "attempt": "a02",
-        "prior_attempt": {
-            "attempt": "a01",
-            "marker_comment_id": 555,
-            "artifact_sha256": "sha256:" + "1" * 64,
-        },
+    generation = {
+        "schema": runner.WARM_RECONCILIATION_GENERATION_SCHEMA,
+        "generation": "v2",
+        "generation_id": "root-warm-archive-reconciliation-v2-" + "1" * 32,
+        "attempt": "v2-a01",
+        "code_delta_required": True,
+        "legacy_generation_exhausted": True,
+        "source_artifact_archive_digest": (
+            runner.WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST
+        ),
+        "source_receipt_sha256": source["receipt_sha256"]
+        if "receipt_sha256" in source
+        else "sha256:" + runner.WARM_RECONCILIATION_SOURCE_RECEIPT_SHA256,
+        "prior_attempts": [
+            {
+                "attempt": "a01",
+                "marker_comment_id": runner.WARM_RECONCILIATION_A01_COMMENT_ID,
+            },
+            {
+                "attempt": "a02",
+                "marker_comment_id": runner.WARM_RECONCILIATION_A02_COMMENT_ID,
+            },
+        ],
         "attempt_binding_digest": "sha256:" + "2" * 64,
-        "maximum_attempt": "a02",
-        "sequence_exhausted_after_attempt": True,
+        "maximum_attempt": "v2-a01",
+        "generation_exhausted_after_attempt": True,
     }
     receipt: dict[str, object] = {
         "schema": runner.WARM_RECONCILIATION_RECEIPT_SCHEMA,
         "state": "done",
-        "attempt": "a02",
+        "attempt": "v2-a01",
         "reason": "reconciled-existing-terminal-operation",
         "terminal_disposition": "done/reconciled_existing_operation",
         "query_only": True,
         "production_mutation_count": 0,
         "source": source,
         "reconciliation_release": release,
-        "reconciliation_sequence": sequence,
+        "reconciliation_generation": generation,
         "probe": {"result": valid_probe_payload()},
     }
     receipt["evidence_digest"] = runner.payload_digest(receipt)
@@ -1018,7 +1222,7 @@ def test_terminal_marker_idempotency() -> None:
     summary = {
         "schema": runner.WARM_RECONCILIATION_SUMMARY_SCHEMA,
         "state": "done",
-        "attempt": "a02",
+        "attempt": "v2-a01",
         "reason": receipt["reason"],
         "terminal_disposition": receipt["terminal_disposition"],
         "operation_id": OPERATION,
@@ -1026,7 +1230,7 @@ def test_terminal_marker_idempotency() -> None:
         "production_mutation_count": 0,
         "source": source,
         "reconciliation_release": release,
-        "reconciliation_sequence": sequence,
+        "reconciliation_generation": generation,
         "evidence_digest": receipt["evidence_digest"],
         "terminal_facts": {},
         "artifact": {
@@ -1040,7 +1244,7 @@ def test_terminal_marker_idempotency() -> None:
     comment = {
         "id": 999,
         "user": {"login": "github-actions[bot]"},
-        "body": runner.warm_reconciliation_marker(OPERATION, "a02")
+        "body": runner.warm_reconciliation_marker(OPERATION, "v2-a01")
         + "\n```json\n"
         + json.dumps(summary, sort_keys=True, separators=(",", ":"))
         + "\n```",
@@ -1065,37 +1269,55 @@ def test_terminal_marker_idempotency() -> None:
             assert method == "GET" and path == "/actions/artifacts/777/zip"
             return archive_bytes.getvalue()
 
-    legacy = {
-        "id": 555,
+    legacy_a01 = {
+        "id": runner.WARM_RECONCILIATION_A01_COMMENT_ID,
         "user": {"login": "github-actions[bot]"},
         "body": runner.warm_reconciliation_marker(OPERATION) + "\n```json\n{}\n```",
+    }
+    legacy_a02 = {
+        "id": runner.WARM_RECONCILIATION_A02_COMMENT_ID,
+        "user": {"login": "github-actions[bot]"},
+        "body": runner.warm_reconciliation_marker(OPERATION, "a02")
+        + "\n```json\n{}\n```",
     }
     context = {
         "source": source,
         "reconciliation_release": release,
-        "reconciliation_sequence": sequence,
+        "reconciliation_generation": generation,
         "client": Client(),
     }
-    assert runner._existing_warm_reconciliation_marker([legacy], context=context) is None
-    assert runner._existing_warm_reconciliation_marker([legacy, comment], context=context) == comment
+    assert runner._existing_warm_reconciliation_marker(
+        [legacy_a01, legacy_a02], context=context
+    ) is None
+    assert runner._existing_warm_reconciliation_marker(
+        [legacy_a01, legacy_a02, comment], context=context
+    ) == comment
     expect_blocked(
-        lambda: runner._existing_warm_reconciliation_marker([legacy, comment, comment], context=context),
+        lambda: runner._existing_warm_reconciliation_marker(
+            [legacy_a01, legacy_a02, comment, comment], context=context
+        ),
         "duplicate terminal marker",
     )
     drift = deepcopy(comment)
     drift_payload = json.loads(drift["body"].split("```json", 1)[1].split("```", 1)[0])
     drift_payload["artifact"]["sha256"] = "sha256:" + "0" * 64
-    drift["body"] = runner.warm_reconciliation_marker(OPERATION, "a02") + "\n```json\n" + json.dumps(drift_payload) + "\n```"
+    drift["body"] = runner.warm_reconciliation_marker(OPERATION, "v2-a01") + "\n```json\n" + json.dumps(drift_payload) + "\n```"
     expect_blocked(
-        lambda: runner._existing_warm_reconciliation_marker([legacy, drift], context=context),
+        lambda: runner._existing_warm_reconciliation_marker(
+            [legacy_a01, legacy_a02, drift], context=context
+        ),
         "different terminal artifact digest",
     )
     foreign = deepcopy(comment)
     foreign["id"] = 1000
-    foreign["body"] = foreign["body"].replace("attempt=a02", "attempt=a03", 1)
+    foreign["body"] = foreign["body"].replace(
+        "attempt=v2-a01", "attempt=v2-a02", 1
+    )
     expect_blocked(
-        lambda: runner._existing_warm_reconciliation_marker([legacy, foreign], context=context),
-        "a03 is outside the exact sequence",
+        lambda: runner._existing_warm_reconciliation_marker(
+            [legacy_a01, legacy_a02, foreign], context=context
+        ),
+        "v2-a02 is outside the exact generation",
     )
 
 

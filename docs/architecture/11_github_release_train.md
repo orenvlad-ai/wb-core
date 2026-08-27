@@ -431,6 +431,22 @@ attempt binding — также к новому repo-only merge/release SHA. `a01
 любой `a03` отклоняются. Blocked `a02` исчерпывает sequence и не создаёт queue,
 retry или новый reconciliation attempt.
 
+PR #1077 legacy `a02` terminalized именно так: run `33073151214`, artifact id
+`9646668764`, receipt
+`sha256:ce87472b71d1545cb8383ec417b1d83cba1c5f46568beb6249b9e66368d4030a`
+и marker `5439297992` имеют `blocked`, zero mutation и exhausted legacy
+generation. Они не переписываются и не становятся `a03`. Их artifact доказал
+реальный code defect: duplicated probe classifier требовал у timer
+`MainPID/ExecMainStatus`, отвергал допустимый `disabled` owner oneshot и не
+следовал canonical paired classifier.
+
+Только исправляющий этот defect новый merged `repo_only/done` release создаёт
+отдельную generation `v2` с единственным attempt `v2-a01`. Generation exact-
+bind original source receipt/operation/job, legacy a01 и a02 run/artifact
+archive/receipt/marker digests и exact code-delta release. `v2-a02`, `v2-a03`,
+queue, retry и PR-identity nonce отсутствуют; exact existing `v2-a01` проверяет
+artifact и возвращает `already_terminal` до SSH/comment.
+
 После GitHub-only preflight workflow выполняет не более одного SSH process с
 `PYTHONDONTWRITEBYTECODE=1`. Переданный через stdin probe имеет только direct
 read и allowlisted `systemctl show`/`systemd-analyze cat-config` primitives. В
@@ -444,16 +460,20 @@ restore/SQLite proof digests, six unlink intents/completions и reclaimed bytes.
 Он также требует отсутствие active sanitation jobs/held locks, три стабильных
 capacity sample выше root/Finance floors, свежий natural monitor `normal`, все
 27 units/12 pairs, unchanged journald, direct non-target/StoreRegistry
-identities и zero Promo/business/non-target mutation. Общий pair classifier без
-unit-specific исключений принимает только enabled loaded timer
-`active/waiting` + successful owner `inactive/dead`, либо coherent firing
-timer `active/running` + owner `activating/start|active/running` с exact
-`ExecMainStatus=0` и positive `MainPID`. Idle требует exact next trigger и
-timer `Triggers=<owner>`. Sequential mismatch этих уже известных фаз получает
-не более трёх paired resamples за пять секунд; original и каждый resample с
-raw fields/classification сохраняются. Failed/unknown/masked/not-found/disabled,
-stale/nonzero result/status, missing next trigger, wrong relation и exhausted
-transition fail closed.
+identities и zero Promo/business/non-target mutation. Generation v2 сначала
+exact-verify deployed SHA
+`7d83c5d0ddf6bf86d6359409ef0f9a7bb4ad4747` и deployed
+`apps/root_storage_warm_archive.py`, затем импортирует только canonical
+query-only `SERVICE_NAMES`, 27-unit snapshot, unit-row и bounded paired
+classifier symbols. Reconciliation не содержит собственной service
+classification policy. Timer `MainPID/ExecMainStatus`, `Triggers` и next-
+trigger не становятся обязательными полями, если canonical classifier их не
+требует; realtime и monotonic next-trigger сохраняются как raw observation.
+`static`/`disabled` owner oneshot оценивается по canonical state/result/PID
+semantics. Canonical failed/unknown/masked/missing/nonzero и impossible pair
+relation fail closed; только canonical transition получает максимум три
+resample за пять секунд. Полные initial rows, final units/pairs и bounded
+resamples остаются в artifact.
 
 Полный canonical terminal receipt публикуется immutable Actions artifact до
 любого нового PR comment. Затем на original operation PR добавляется один

@@ -62,10 +62,10 @@ RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
 RECOVERY_ARTIFACT_FILE = "production-apply-receipt.json"
 MAX_RECOVERY_ARTIFACT_BYTES = 8 * 1024 * 1024
 WARM_RECONCILIATION_RECEIPT_SCHEMA = (
-    "wb-core.root-warm-archive-reconciliation-receipt/v2"
+    "wb-core.root-warm-archive-reconciliation-receipt/v3"
 )
 WARM_RECONCILIATION_SUMMARY_SCHEMA = (
-    "wb-core.root-warm-archive-reconciliation-comment-summary/v2"
+    "wb-core.root-warm-archive-reconciliation-comment-summary/v3"
 )
 LEGACY_WARM_RECONCILIATION_RECEIPT_SCHEMA = (
     "wb-core.root-warm-archive-reconciliation-receipt/v1"
@@ -73,10 +73,86 @@ LEGACY_WARM_RECONCILIATION_RECEIPT_SCHEMA = (
 LEGACY_WARM_RECONCILIATION_SUMMARY_SCHEMA = (
     "wb-core.root-warm-archive-reconciliation-comment-summary/v1"
 )
-WARM_RECONCILIATION_SEQUENCE_SCHEMA = (
+LEGACY_WARM_RECONCILIATION_A02_RECEIPT_SCHEMA = (
+    "wb-core.root-warm-archive-reconciliation-receipt/v2"
+)
+LEGACY_WARM_RECONCILIATION_A02_SUMMARY_SCHEMA = (
+    "wb-core.root-warm-archive-reconciliation-comment-summary/v2"
+)
+LEGACY_WARM_RECONCILIATION_SEQUENCE_SCHEMA = (
     "wb-core.root-warm-archive-reconciliation-sequence/v1"
 )
-WARM_RECONCILIATION_ATTEMPT = "a02"
+WARM_RECONCILIATION_GENERATION_SCHEMA = (
+    "wb-core.root-warm-archive-reconciliation-generation/v2"
+)
+WARM_RECONCILIATION_ATTEMPT = "v2-a01"
+WARM_RECONCILIATION_SOURCE_PR = 1075
+WARM_RECONCILIATION_SOURCE_RUN_ID = 33061965717
+WARM_RECONCILIATION_SOURCE_ARTIFACT_ID = 9642978355
+WARM_RECONCILIATION_SOURCE_ARTIFACT_NAME = (
+    "production-apply-receipt-pr-1075-run-33061965717"
+)
+WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST = (
+    "sha256:c54c654e9a16d338f4afd2bc7f1ab500851850651afac08f6cd21c3d69badebd"
+)
+WARM_RECONCILIATION_SOURCE_RECEIPT_SHA256 = (
+    "fdab4802fd8a57eb6b3ad79d89fd527efdf3848bfbff5b3c0e3381fee76415c0"
+)
+WARM_RECONCILIATION_SOURCE_AUTHORIZATION_COMMENT_ID = 5437409674
+WARM_RECONCILIATION_SOURCE_BLOCKED_COMMENT_ID = 5437848287
+WARM_RECONCILIATION_SOURCE_DEPLOYED_SHA = (
+    "7d83c5d0ddf6bf86d6359409ef0f9a7bb4ad4747"
+)
+WARM_RECONCILIATION_SOURCE_OPERATION_ID = (
+    "production-goal-v1-8692b24cb2491927bdadd5dec06a15d8"
+)
+WARM_RECONCILIATION_SOURCE_JOB_ID = (
+    "d8176c48b41b6d128aa9adacb3aa50f1d464dc318cc9cc8df58d3be637649d2d"
+)
+WARM_RECONCILIATION_A01_RUN_ID = 33069817619
+WARM_RECONCILIATION_A01_ARTIFACT_ID = 9645283377
+WARM_RECONCILIATION_A01_ARTIFACT_NAME = (
+    "root-warm-archive-reconciliation-pr-1075-run-33069817619"
+)
+WARM_RECONCILIATION_A01_RECEIPT_SHA256 = (
+    "1b99b7a01127f963af31b0cafb2a764e928eb839662af665b1afa4646b9c4847"
+)
+WARM_RECONCILIATION_A01_ARCHIVE_DIGEST = (
+    "sha256:779b8e35c5b9fbb6940bc9d18fc7ecea807f1f5714e9ae104d4ba42970352dee"
+)
+WARM_RECONCILIATION_A01_COMMENT_ID = 5438726868
+WARM_RECONCILIATION_A01_MARKER_DIGEST = (
+    "sha256:008afc6e862c1443ad5331474103b4ab074f4ca18d947f70a826aedca0fa11c3"
+)
+WARM_RECONCILIATION_A01_RELEASE_PR = 1076
+WARM_RECONCILIATION_A01_RELEASE_MERGE_SHA = (
+    "98736484237d1f5af052cfa3c0a8d96c7d87ff3b"
+)
+WARM_RECONCILIATION_A02_RUN_ID = 33073151214
+WARM_RECONCILIATION_A02_ARTIFACT_ID = 9646668764
+WARM_RECONCILIATION_A02_ARTIFACT_NAME = (
+    "root-warm-archive-reconciliation-pr-1075-run-33073151214"
+)
+WARM_RECONCILIATION_A02_RECEIPT_SHA256 = (
+    "ce87472b71d1545cb8383ec417b1d83cba1c5f46568beb6249b9e66368d4030a"
+)
+WARM_RECONCILIATION_A02_ARCHIVE_DIGEST = (
+    "sha256:8d57e4ddbb19856c545f4028b92d3fa6228230cf903826d0d51c38c09283e6f9"
+)
+WARM_RECONCILIATION_A02_COMMENT_ID = 5439297992
+WARM_RECONCILIATION_A02_MARKER_DIGEST = (
+    "sha256:14acd8ee3991c4bc4ea172e43096db905c8847bf4df1f62240d6953d25d781af"
+)
+WARM_RECONCILIATION_A02_RELEASE_PR = 1077
+WARM_RECONCILIATION_A02_RELEASE_MERGE_SHA = (
+    "a9f63435223f57a02d18d3280c0b3b56c4982e82"
+)
+WARM_RECONCILIATION_CANONICAL_MODULE_SHA256 = (
+    "sha256:24c3a2243338419f755aff78583b978aa0e5197ffc9e6b215466c7d4a11f501d"
+)
+WARM_RECONCILIATION_SERVICE_NAMES_DIGEST = (
+    "sha256:29eb924bbb0c7dfa7081d2d29cfcdef9957986b344a34b25d1879e48f00fec60"
+)
 WARM_RECONCILIATION_MARKER = (
     "wb-core-root-warm-archive-reconciliation-receipt"
 )
@@ -2711,6 +2787,18 @@ def _validate_legacy_warm_reconciliation_a01(
     args: argparse.Namespace,
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if (
+        args.prior_reconciliation_run_id != WARM_RECONCILIATION_A01_RUN_ID
+        or args.prior_reconciliation_artifact_id
+        != WARM_RECONCILIATION_A01_ARTIFACT_ID
+        or args.prior_reconciliation_artifact_name
+        != WARM_RECONCILIATION_A01_ARTIFACT_NAME
+        or args.prior_reconciliation_receipt_sha256
+        != WARM_RECONCILIATION_A01_RECEIPT_SHA256
+        or args.prior_reconciliation_comment_id
+        != WARM_RECONCILIATION_A01_COMMENT_ID
+    ):
+        raise ApplyError("legacy reconciliation a01 immutable identity drifted")
     matches = [
         item
         for item in comments
@@ -2749,6 +2837,7 @@ def _validate_legacy_warm_reconciliation_a01(
         or payload.get("query_only") is not True
         or payload.get("production_mutation_count") != 0
         or payload.get("operation_id") != operation
+        or payload_digest(payload) != WARM_RECONCILIATION_A01_MARKER_DIGEST
         or payload.get("source") != source
         or not isinstance(artifact, Mapping)
         or artifact.get("name") != args.prior_reconciliation_artifact_name
@@ -2769,6 +2858,9 @@ def _validate_legacy_warm_reconciliation_a01(
             "workflow_run_id",
         }
         or legacy_release.get("release_kind") != "repo_only"
+        or legacy_release.get("pull_request") != WARM_RECONCILIATION_A01_RELEASE_PR
+        or legacy_release.get("merge_sha")
+        != WARM_RECONCILIATION_A01_RELEASE_MERGE_SHA
         or legacy_release.get("deployed_sha") is not None
         or not isinstance(terminal_facts, Mapping)
         or not terminal_facts
@@ -2814,6 +2906,7 @@ def _validate_legacy_warm_reconciliation_a01(
     if (
         not isinstance(metadata, Mapping)
         or metadata.get("id") != args.prior_reconciliation_artifact_id
+        or metadata.get("digest") != WARM_RECONCILIATION_A01_ARCHIVE_DIGEST
         or not isinstance(receipt, Mapping)
         or set(receipt)
         != {
@@ -2901,6 +2994,270 @@ def _validate_legacy_warm_reconciliation_a01(
     }
 
 
+def _validate_exhausted_warm_reconciliation_a02(
+    *,
+    client: GitHubClient,
+    comments: list[Mapping[str, Any]],
+    args: argparse.Namespace,
+    source: Mapping[str, Any],
+    prior_a01: Mapping[str, Any],
+) -> dict[str, Any]:
+    if (
+        args.prior_reconciliation_a02_run_id != WARM_RECONCILIATION_A02_RUN_ID
+        or args.prior_reconciliation_a02_artifact_id
+        != WARM_RECONCILIATION_A02_ARTIFACT_ID
+        or args.prior_reconciliation_a02_artifact_name
+        != WARM_RECONCILIATION_A02_ARTIFACT_NAME
+        or args.prior_reconciliation_a02_receipt_sha256
+        != WARM_RECONCILIATION_A02_RECEIPT_SHA256
+        or args.prior_reconciliation_a02_comment_id
+        != WARM_RECONCILIATION_A02_COMMENT_ID
+    ):
+        raise ApplyError("exhausted legacy reconciliation a02 identity drifted")
+    matches = [
+        item
+        for item in comments
+        if item.get("id") == args.prior_reconciliation_a02_comment_id
+    ]
+    if len(matches) != 1:
+        raise ApplyError("exact exhausted legacy reconciliation a02 marker is missing")
+    operation = str(source["operation_id"])
+    payload = _parse_reconciliation_comment_payload(
+        matches[0], expected_marker=warm_reconciliation_marker(operation, "a02")
+    )
+    artifact = payload.get("artifact")
+    release = payload.get("reconciliation_release")
+    sequence = payload.get("reconciliation_sequence")
+    if (
+        set(payload)
+        != {
+            "artifact",
+            "attempt",
+            "evidence_digest",
+            "operation_id",
+            "production_mutation_count",
+            "query_only",
+            "reason",
+            "reconciliation_release",
+            "reconciliation_sequence",
+            "schema",
+            "source",
+            "state",
+            "terminal_disposition",
+            "terminal_facts",
+        }
+        or payload.get("schema")
+        != LEGACY_WARM_RECONCILIATION_A02_SUMMARY_SCHEMA
+        or payload.get("attempt") != "a02"
+        or payload.get("state") != "blocked"
+        or payload.get("reason") != "query-only-reconciliation-not-proven"
+        or payload.get("terminal_disposition") != "blocked"
+        or payload.get("query_only") is not True
+        or payload.get("production_mutation_count") != 0
+        or payload.get("operation_id") != operation
+        or payload.get("source") != source
+        or payload_digest(payload) != WARM_RECONCILIATION_A02_MARKER_DIGEST
+        or not isinstance(artifact, Mapping)
+        or artifact.get("name") != WARM_RECONCILIATION_A02_ARTIFACT_NAME
+        or artifact.get("file") != WARM_RECONCILIATION_ARTIFACT_FILE
+        or artifact.get("retention_days") != 90
+        or artifact.get("sha256")
+        != "sha256:" + WARM_RECONCILIATION_A02_RECEIPT_SHA256
+        or not isinstance(release, Mapping)
+        or release.get("release_kind") != "repo_only"
+        or release.get("deployed_sha") is not None
+        or release.get("pull_request") != WARM_RECONCILIATION_A02_RELEASE_PR
+        or release.get("merge_sha") != WARM_RECONCILIATION_A02_RELEASE_MERGE_SHA
+        or not isinstance(sequence, Mapping)
+        or sequence.get("schema")
+        != LEGACY_WARM_RECONCILIATION_SEQUENCE_SCHEMA
+        or sequence.get("attempt") != "a02"
+        or sequence.get("maximum_attempt") != "a02"
+        or sequence.get("sequence_exhausted_after_attempt") is not True
+        or sequence.get("prior_attempt") != prior_a01
+    ):
+        raise ApplyError("exhausted legacy reconciliation a02 marker is invalid")
+    release_pr = client.get(f"/pulls/{WARM_RECONCILIATION_A02_RELEASE_PR}")
+    if (
+        not isinstance(release_pr, Mapping)
+        or release_pr.get("merged") is not True
+        or exact_sha(
+            release_pr.get("merge_commit_sha"), "legacy-a02-release-merge"
+        )
+        != WARM_RECONCILIATION_A02_RELEASE_MERGE_SHA
+    ):
+        raise ApplyError("legacy a02 repo-only release PR drifted")
+    release_comments = list_comments(client, WARM_RECONCILIATION_A02_RELEASE_PR)
+    release_receipt = parse_repo_only_release_receipt(
+        release_comments,
+        pr=WARM_RECONCILIATION_A02_RELEASE_PR,
+        release_operation=str(release.get("release_operation_id") or ""),
+        merge_sha=WARM_RECONCILIATION_A02_RELEASE_MERGE_SHA,
+    )
+    if (
+        release_receipt.get("workflow_run_id") != release.get("workflow_run_id")
+        or release_receipt.get("plan_hash") != release.get("plan_hash")
+    ):
+        raise ApplyError("legacy a02 release receipt drifted")
+    verified = _verify_uploaded_warm_reconciliation_artifact(
+        client,
+        run_id=WARM_RECONCILIATION_A02_RUN_ID,
+        artifact_name=WARM_RECONCILIATION_A02_ARTIFACT_NAME,
+        receipt_sha256=WARM_RECONCILIATION_A02_RECEIPT_SHA256,
+        code_sha=WARM_RECONCILIATION_A02_RELEASE_MERGE_SHA,
+    )
+    metadata = verified.get("metadata")
+    receipt = verified.get("receipt")
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("id") != WARM_RECONCILIATION_A02_ARTIFACT_ID
+        or metadata.get("digest") != WARM_RECONCILIATION_A02_ARCHIVE_DIGEST
+        or not isinstance(receipt, Mapping)
+        or set(receipt)
+        != {
+            "attempt",
+            "evidence_digest",
+            "probe",
+            "production_mutation_count",
+            "query_only",
+            "reason",
+            "reconciliation_release",
+            "reconciliation_sequence",
+            "schema",
+            "source",
+            "state",
+            "terminal_disposition",
+        }
+        or receipt.get("schema")
+        != LEGACY_WARM_RECONCILIATION_A02_RECEIPT_SCHEMA
+        or receipt.get("attempt") != "a02"
+        or receipt.get("state") != "blocked"
+        or receipt.get("reason") != "query-only-reconciliation-not-proven"
+        or receipt.get("terminal_disposition") != "blocked"
+        or receipt.get("query_only") is not True
+        or receipt.get("production_mutation_count") != 0
+        or receipt.get("source") != source
+        or receipt.get("reconciliation_release") != release
+        or receipt.get("reconciliation_sequence") != sequence
+        or receipt.get("evidence_digest") != payload.get("evidence_digest")
+        or receipt.get("evidence_digest")
+        != payload_digest(
+            {key: value for key, value in receipt.items() if key != "evidence_digest"}
+        )
+    ):
+        raise ApplyError("exhausted legacy reconciliation a02 artifact is invalid")
+    probe_evidence = receipt.get("probe")
+    probe_result = (
+        probe_evidence.get("result")
+        if isinstance(probe_evidence, Mapping)
+        else None
+    )
+    error = probe_result.get("error") if isinstance(probe_result, Mapping) else None
+    gate = (
+        probe_result.get("systemd_service_gate")
+        if isinstance(probe_result, Mapping)
+        else None
+    )
+    pairs = gate.get("pairs") if isinstance(gate, Mapping) else None
+    units = gate.get("units") if isinstance(gate, Mapping) else None
+    raw_by_name = {
+        str(row.get("name")): row.get("raw")
+        for row in units or []
+        if isinstance(row, Mapping) and isinstance(row.get("raw"), Mapping)
+    }
+    canary_timer = raw_by_name.get(
+        "wb-core-sheet-vitrina-canary-restore.timer"
+    )
+    canary_owner = raw_by_name.get(
+        "wb-core-sheet-vitrina-canary-restore.service"
+    )
+    root_owner = raw_by_name.get("wb-core-root-storage-policy.service")
+    timer_rows = [
+        raw
+        for name, raw in raw_by_name.items()
+        if name.endswith(".timer") and isinstance(raw, Mapping)
+    ]
+    if (
+        not isinstance(probe_evidence, Mapping)
+        or probe_evidence.get("return_code") != 0
+        or probe_evidence.get("transport_ambiguous") is not False
+        or not isinstance(probe_result, Mapping)
+        or probe_result.get("schema")
+        != "wb-core.root-warm-archive-reconciliation-probe/v2"
+        or probe_result.get("status") != "blocked"
+        or probe_result.get("query_only") is not True
+        or probe_result.get("production_mutation_count") != 0
+        or not isinstance(error, Mapping)
+        or error.get("type") != "SystemdGateError"
+        or error.get("message") != "systemd 27/12 paired health is not proven"
+        or not isinstance(gate, Mapping)
+        or gate.get("healthy") is not False
+        or gate.get("unit_count") != 27
+        or gate.get("pair_count") != 12
+        or gate.get("failing_pair_count") != 12
+        or not isinstance(pairs, list)
+        or len(pairs) != 12
+        or not all(
+            isinstance(pair, Mapping)
+            and pair.get("classification") == "failed_or_unknown_pair"
+            and pair.get("timer_reason_codes") == ["required_properties_missing"]
+            for pair in pairs
+        )
+        or len(raw_by_name) != 27
+        or len(timer_rows) != 12
+        or not all(
+            "MainPID" not in set(row.get("ObservedProperties") or [])
+            and "ExecMainStatus" not in set(row.get("ObservedProperties") or [])
+            for row in timer_rows
+        )
+        or not isinstance(root_owner, Mapping)
+        or root_owner.get("UnitFileState") != "disabled"
+        or not isinstance(canary_timer, Mapping)
+        or canary_timer.get("ActiveState") != "active"
+        or canary_timer.get("SubState") != "running"
+        or not isinstance(canary_owner, Mapping)
+        or canary_owner.get("ActiveState") != "activating"
+        or canary_owner.get("SubState") != "start"
+        or canary_owner.get("MainPID") != "593451"
+        or canary_owner.get("ExecMainStatus") != "0"
+        or probe_result.get("evidence_digest")
+        != payload_digest(
+            {
+                key: value
+                for key, value in probe_result.items()
+                if key != "evidence_digest"
+            }
+        )
+    ):
+        raise ApplyError("legacy a02 classifier defect evidence is not exact")
+    canonical_receipt = canonical_json_bytes(receipt) + b"\n"
+    if (
+        int(artifact.get("size_bytes") or 0) != len(canonical_receipt)
+        or digest(canonical_receipt) != WARM_RECONCILIATION_A02_RECEIPT_SHA256
+    ):
+        raise ApplyError("legacy a02 receipt size/digest drifted")
+    return {
+        "attempt": "a02",
+        "generation": "legacy-v1",
+        "state": "blocked",
+        "reason": "query-only-reconciliation-not-proven",
+        "run_id": WARM_RECONCILIATION_A02_RUN_ID,
+        "artifact_id": WARM_RECONCILIATION_A02_ARTIFACT_ID,
+        "artifact_name": WARM_RECONCILIATION_A02_ARTIFACT_NAME,
+        "artifact_archive_digest": WARM_RECONCILIATION_A02_ARCHIVE_DIGEST,
+        "artifact_receipt_sha256": "sha256:"
+        + WARM_RECONCILIATION_A02_RECEIPT_SHA256,
+        "marker_comment_id": WARM_RECONCILIATION_A02_COMMENT_ID,
+        "marker_digest": WARM_RECONCILIATION_A02_MARKER_DIGEST,
+        "evidence_digest": str(receipt["evidence_digest"]),
+        "production_mutation_count": 0,
+        "operation_id": operation,
+        "job_id": str(source["job_id"]),
+        "sequence": dict(sequence),
+        "reconciliation_release": dict(release),
+    }
+
+
 def _warm_reconciliation_context(
     *,
     args: argparse.Namespace,
@@ -2922,6 +3279,11 @@ def _warm_reconciliation_context(
         "prior_reconciliation_artifact_name": args.prior_reconciliation_artifact_name,
         "prior_reconciliation_receipt_sha256": args.prior_reconciliation_receipt_sha256,
         "prior_reconciliation_comment_id": args.prior_reconciliation_comment_id,
+        "prior_reconciliation_a02_run_id": args.prior_reconciliation_a02_run_id,
+        "prior_reconciliation_a02_artifact_id": args.prior_reconciliation_a02_artifact_id,
+        "prior_reconciliation_a02_artifact_name": args.prior_reconciliation_a02_artifact_name,
+        "prior_reconciliation_a02_receipt_sha256": args.prior_reconciliation_a02_receipt_sha256,
+        "prior_reconciliation_a02_comment_id": args.prior_reconciliation_a02_comment_id,
     }
     missing = sorted(field for field, value in required.items() if not value)
     if missing:
@@ -2936,6 +3298,9 @@ def _warm_reconciliation_context(
         or int(args.prior_reconciliation_run_id) <= 0
         or int(args.prior_reconciliation_artifact_id) <= 0
         or int(args.prior_reconciliation_comment_id) <= 0
+        or int(args.prior_reconciliation_a02_run_id) <= 0
+        or int(args.prior_reconciliation_a02_artifact_id) <= 0
+        or int(args.prior_reconciliation_a02_comment_id) <= 0
     ):
         raise ApplyError("warm archive receipt reconciliation ids are invalid")
     if re.fullmatch(r"[0-9a-f]{64}", str(args.source_receipt_sha256)) is None:
@@ -2946,9 +3311,31 @@ def _warm_reconciliation_context(
             r"[0-9a-f]{64}", str(args.prior_reconciliation_receipt_sha256)
         )
         is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(args.prior_reconciliation_a02_receipt_sha256),
+        )
+        is None
     ):
-        raise ApplyError("only the exact derived reconciliation attempt a02 is valid")
+        raise ApplyError(
+            "only the exact code-delta reconciliation generation v2-a01 is valid"
+        )
+    if (
+        args.pr != WARM_RECONCILIATION_SOURCE_PR
+        or args.source_run_id != WARM_RECONCILIATION_SOURCE_RUN_ID
+        or args.source_artifact_name != WARM_RECONCILIATION_SOURCE_ARTIFACT_NAME
+        or args.source_receipt_sha256
+        != WARM_RECONCILIATION_SOURCE_RECEIPT_SHA256
+        or args.authorization_comment_id
+        != WARM_RECONCILIATION_SOURCE_AUTHORIZATION_COMMENT_ID
+        or args.blocked_comment_id
+        != WARM_RECONCILIATION_SOURCE_BLOCKED_COMMENT_ID
+        or args.operation_id != WARM_RECONCILIATION_SOURCE_OPERATION_ID
+    ):
+        raise ApplyError("completed exact-six source lineage drifted")
     source_merge_sha = exact_sha(source_pr.get("merge_commit_sha"), "source-pr-merge")
+    if source_merge_sha != WARM_RECONCILIATION_SOURCE_DEPLOYED_SHA:
+        raise ApplyError("completed exact-six source merge SHA drifted")
     run, source_receipt = _collect_recovery_receipt(
         client,
         pr=args.pr,
@@ -2979,6 +3366,8 @@ def _warm_reconciliation_context(
         expected_operation=str(args.operation_id),
         goal=goal,
     )
+    if source_binding.get("job_id") != WARM_RECONCILIATION_SOURCE_JOB_ID:
+        raise ApplyError("completed exact-six source operation/job binding drifted")
     parse_release_receipt(
         source_comments,
         pr=args.pr,
@@ -3024,6 +3413,11 @@ def _warm_reconciliation_context(
     artifact = run.get("validated_artifact")
     if not isinstance(artifact, Mapping):
         raise ApplyError("source artifact provenance is missing")
+    if (
+        artifact.get("id") != WARM_RECONCILIATION_SOURCE_ARTIFACT_ID
+        or artifact.get("digest") != WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST
+    ):
+        raise ApplyError("source artifact immutable identity drifted")
     probe_source = (
         ROOT / "apps" / "wbc0008_warm_archive_receipt_reconciliation_probe.py"
     ).read_bytes()
@@ -3071,45 +3465,89 @@ def _warm_reconciliation_context(
             "probe_source_sha256": "sha256:" + digest(probe_source),
         },
     }
-    prior = _validate_legacy_warm_reconciliation_a01(
+    prior_a01 = _validate_legacy_warm_reconciliation_a01(
         client=client,
         comments=source_comments,
         args=args,
         source=context["source"],
     )
+    prior_a02 = _validate_exhausted_warm_reconciliation_a02(
+        client=client,
+        comments=source_comments,
+        args=args,
+        source=context["source"],
+        prior_a01=prior_a01,
+    )
     if (
-        prior["reconciliation_release"]["merge_sha"]
-        == context["reconciliation_release"]["merge_sha"]
-        or prior["reconciliation_release"]["pull_request"]
-        == context["reconciliation_release"]["pull_request"]
+        context["reconciliation_release"]["merge_sha"]
+        in {
+            prior_a01["reconciliation_release"]["merge_sha"],
+            prior_a02["reconciliation_release"]["merge_sha"],
+        }
+        or context["reconciliation_release"]["pull_request"]
+        in {
+            prior_a01["reconciliation_release"]["pull_request"],
+            prior_a02["reconciliation_release"]["pull_request"],
+        }
+        or context["reconciliation_release"]["probe_source_sha256"]
+        == prior_a02["reconciliation_release"]["probe_source_sha256"]
     ):
-        raise ApplyError("a02 requires a new repo-only reconciliation release")
-    sequence_material = {
+        raise ApplyError(
+            "v2-a01 requires a distinct repo-only classifier code-delta release"
+        )
+    prior_a01_lineage = {
+        **{
+            key: value
+            for key, value in prior_a01.items()
+            if key != "artifact_sha256"
+        },
+        "artifact_archive_digest": WARM_RECONCILIATION_A01_ARCHIVE_DIGEST,
+        "artifact_receipt_sha256": prior_a01["artifact_sha256"],
+        "generation": "legacy-v1",
+    }
+    generation_material = {
+        "generation": "v2",
         "operation_id": context["source"]["operation_id"],
         "job_id": context["source"]["job_id"],
-        "legacy_a01_artifact_sha256": prior["artifact_sha256"],
-        "legacy_a01_marker_digest": prior["marker_digest"],
+        "source_receipt_sha256": context["source"]["receipt_sha256"],
+        "source_artifact_archive_digest": (
+            WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST
+        ),
+        "prior_attempts": [prior_a01_lineage, prior_a02],
+        "repo_only_release": context["reconciliation_release"],
     }
-    sequence_id = (
-        "root-warm-archive-reconciliation-v1-"
-        + digest(canonical_json_bytes(sequence_material))[:32]
+    generation_id = (
+        "root-warm-archive-reconciliation-v2-"
+        + digest(canonical_json_bytes(generation_material))[:32]
     )
     attempt_binding = {
-        "sequence_id": sequence_id,
+        "generation_id": generation_id,
         "attempt": WARM_RECONCILIATION_ATTEMPT,
         "operation_id": context["source"]["operation_id"],
         "job_id": context["source"]["job_id"],
-        "prior_attempt": prior,
+        "source_receipt_sha256": context["source"]["receipt_sha256"],
+        "source_artifact_archive_digest": (
+            WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST
+        ),
+        "prior_attempts": [prior_a01_lineage, prior_a02],
         "reconciliation_release": context["reconciliation_release"],
     }
-    context["reconciliation_sequence"] = {
-        "schema": WARM_RECONCILIATION_SEQUENCE_SCHEMA,
-        "sequence_id": sequence_id,
+    context["reconciliation_generation"] = {
+        "schema": WARM_RECONCILIATION_GENERATION_SCHEMA,
+        "generation": "v2",
+        "generation_id": generation_id,
         "attempt": WARM_RECONCILIATION_ATTEMPT,
-        "prior_attempt": prior,
+        "code_delta_required": True,
+        "legacy_generation_exhausted": True,
+        "source_artifact_archive_digest": (
+            WARM_RECONCILIATION_SOURCE_ARCHIVE_DIGEST
+        ),
+        "source_receipt_sha256": context["source"]["receipt_sha256"],
+        "prior_attempts": [prior_a01_lineage, prior_a02],
+        "repo_only_release": context["reconciliation_release"],
         "attempt_binding_digest": payload_digest(attempt_binding),
         "maximum_attempt": WARM_RECONCILIATION_ATTEMPT,
-        "sequence_exhausted_after_attempt": True,
+        "generation_exhausted_after_attempt": True,
     }
     return context
 
@@ -3125,17 +3563,23 @@ def _existing_warm_reconciliation_marker(
         for item in comments
         if WARM_RECONCILIATION_MARKER in str(item.get("body") or "")
     ]
-    legacy_id = int(
-        context["reconciliation_sequence"]["prior_attempt"]["marker_comment_id"]
-    )
-    legacy = [item for item in all_markers if item.get("id") == legacy_id]
-    if len(legacy) != 1:
-        raise ApplyError("legacy reconciliation a01 marker is missing or duplicate")
-    remaining = [item for item in all_markers if item.get("id") != legacy_id]
+    prior_ids = {
+        int(item["marker_comment_id"])
+        for item in context["reconciliation_generation"]["prior_attempts"]
+    }
+    if prior_ids != {
+        WARM_RECONCILIATION_A01_COMMENT_ID,
+        WARM_RECONCILIATION_A02_COMMENT_ID,
+    } or any(
+        len([item for item in all_markers if item.get("id") == prior_id]) != 1
+        for prior_id in prior_ids
+    ):
+        raise ApplyError("legacy reconciliation a01/a02 markers are missing or duplicate")
+    remaining = [item for item in all_markers if item.get("id") not in prior_ids]
     if not remaining:
         return None
     if len(remaining) != 1:
-        raise ApplyError("reconciliation a02 marker is duplicate or ambiguous")
+        raise ApplyError("reconciliation v2-a01 marker is duplicate or ambiguous")
     comment = remaining[0]
     payload = _parse_reconciliation_comment_payload(
         comment,
@@ -3145,7 +3589,7 @@ def _existing_warm_reconciliation_marker(
     )
     source = payload.get("source") if isinstance(payload, Mapping) else None
     release = payload.get("reconciliation_release") if isinstance(payload, Mapping) else None
-    sequence = payload.get("reconciliation_sequence") if isinstance(payload, Mapping) else None
+    generation = payload.get("reconciliation_generation") if isinstance(payload, Mapping) else None
     artifact = payload.get("artifact") if isinstance(payload, Mapping) else None
     if (
         set(payload)
@@ -3158,7 +3602,7 @@ def _existing_warm_reconciliation_marker(
             "query_only",
             "reason",
             "reconciliation_release",
-            "reconciliation_sequence",
+            "reconciliation_generation",
             "schema",
             "source",
             "state",
@@ -3173,7 +3617,7 @@ def _existing_warm_reconciliation_marker(
         or payload.get("production_mutation_count") != 0
         or source != context.get("source")
         or release != context.get("reconciliation_release")
-        or sequence != context.get("reconciliation_sequence")
+        or generation != context.get("reconciliation_generation")
         or not isinstance(artifact, Mapping)
         or re.fullmatch(
             rf"root-warm-archive-reconciliation-pr-{int(context['source']['pull_request'])}-run-[1-9][0-9]*",
@@ -3224,7 +3668,7 @@ def _existing_warm_reconciliation_marker(
             "query_only",
             "reason",
             "reconciliation_release",
-            "reconciliation_sequence",
+            "reconciliation_generation",
             "schema",
             "source",
             "state",
@@ -3238,8 +3682,8 @@ def _existing_warm_reconciliation_marker(
         or receipt.get("source") != context.get("source")
         or receipt.get("reconciliation_release")
         != context.get("reconciliation_release")
-        or receipt.get("reconciliation_sequence")
-        != context.get("reconciliation_sequence")
+        or receipt.get("reconciliation_generation")
+        != context.get("reconciliation_generation")
         or receipt.get("evidence_digest") != payload.get("evidence_digest")
         or receipt.get("production_mutation_count") != 0
         or (
@@ -3303,7 +3747,7 @@ def _run_warm_reconciliation_preflight(
         "production_mutation_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
-        "reconciliation_sequence": context["reconciliation_sequence"],
+        "reconciliation_generation": context["reconciliation_generation"],
         "comment_id": comment_id,
     }
     _write_receipt(args.output, receipt)
@@ -3396,12 +3840,32 @@ def _valid_warm_reconciliation_probe(
     finance = payload.get("finance_reconciliation")
     monitor = payload.get("natural_root_monitor")
     services = payload.get("systemd_service_gate")
+    canonical_contract = (
+        services.get("canonical_contract")
+        if isinstance(services, Mapping)
+        else None
+    )
+    canonical_gate = (
+        services.get("canonical_gate")
+        if isinstance(services, Mapping)
+        else None
+    )
+    service_resamples = (
+        services.get("pair_resample_evidence")
+        if isinstance(services, Mapping)
+        else None
+    )
+    next_trigger_observations = (
+        services.get("timer_next_trigger_observations")
+        if isinstance(services, Mapping)
+        else None
+    )
     non_target = payload.get("non_target_reconciliation")
     journald = payload.get("journald_reconciliation")
     actions = payload.get("remote_action_counts")
     return bool(
         payload.get("schema")
-        == "wb-core.root-warm-archive-reconciliation-probe/v2"
+        == "wb-core.root-warm-archive-reconciliation-probe/v3"
         and payload.get("status") == "reconciled"
         and payload.get("query_only") is True
         and payload.get("pythondontwritebytecode") is True
@@ -3446,12 +3910,68 @@ def _valid_warm_reconciliation_probe(
         and monitor.get("normal") is True
         and isinstance(services, Mapping)
         and services.get("healthy") is True
-        and services.get("schema") == "wb-core.systemd-paired-health-gate/v1"
+        and services.get("schema") == "wb-core.systemd-canonical-health-gate/v2"
         and services.get("classification") == "healthy"
         and services.get("unit_count") == 27
         and services.get("pair_count") == 12
         and services.get("failing_pair_count") == 0
         and services.get("failing_persistent_service_count") == 0
+        and isinstance(canonical_contract, Mapping)
+        and canonical_contract.get("deployed_sha")
+        == WARM_RECONCILIATION_SOURCE_DEPLOYED_SHA
+        and canonical_contract.get("module_sha256")
+        == WARM_RECONCILIATION_CANONICAL_MODULE_SHA256
+        and canonical_contract.get("archive_contract")
+        == "root_storage_warm_archive_wbc0008_006_v7"
+        and canonical_contract.get("service_names_digest")
+        == WARM_RECONCILIATION_SERVICE_NAMES_DIGEST
+        and isinstance(canonical_contract.get("service_names"), list)
+        and len(canonical_contract["service_names"]) == 27
+        and isinstance(canonical_contract.get("timer_service_pairs"), list)
+        and len(canonical_contract["timer_service_pairs"]) == 12
+        and canonical_contract["timer_service_pairs"]
+        == [
+            [name, name.removesuffix(".timer") + ".service"]
+            for name in canonical_contract["service_names"]
+            if isinstance(name, str) and name.endswith(".timer")
+        ]
+        and set(canonical_contract.get("query_only_symbols") or [])
+        == {
+            "PERSISTENT_SERVICE_NAMES",
+            "SERVICE_NAMES",
+            "SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS",
+            "SYSTEMD_PAIR_RESAMPLE_MAX_ATTEMPTS",
+            "SYSTEMD_PAIR_RESAMPLE_MAX_SECONDS",
+            "TIMER_SERVICE_PAIRS",
+            "_systemd_service_gate_with_resample",
+            "_systemd_snapshot",
+            "_systemd_unit_row",
+        }
+        and isinstance(canonical_gate, Mapping)
+        and canonical_gate.get("healthy") is True
+        and canonical_gate.get("observed_unit_count") == 27
+        and canonical_gate.get("observed_pair_count") == 12
+        and services.get("canonical_gate_digest")
+        == payload_digest(canonical_gate)
+        and isinstance(service_resamples, Mapping)
+        and 0 <= int(service_resamples.get("attempt_count") or 0) <= 3
+        and service_resamples.get("max_attempts") == 3
+        and float(service_resamples.get("max_seconds") or 0) == 5.0
+        and isinstance(service_resamples.get("samples"), list)
+        and isinstance(next_trigger_observations, list)
+        and len(next_trigger_observations) == 12
+        and {
+            str(row.get("timer_name"))
+            for row in next_trigger_observations
+            if isinstance(row, Mapping)
+        }
+        == {
+            str(pair[0])
+            for pair in canonical_contract["timer_service_pairs"]
+            if isinstance(pair, list) and len(pair) == 2
+        }
+        and services.get("timer_next_trigger_observations_digest")
+        == payload_digest(next_trigger_observations)
         and isinstance(services.get("pairs"), list)
         and len(services["pairs"]) == 12
         and all(
@@ -3459,12 +3979,14 @@ def _valid_warm_reconciliation_probe(
             and pair.get("healthy") is True
             and pair.get("classification")
             in {
-                "idle_waiting_with_inactive_success_owner",
-                "coherent_trigger_in_progress",
+                "waiting_with_inactive_success_owner",
+                "trigger_in_progress_with_active_owner",
             }
-            and isinstance(pair.get("samples"), list)
-            and 1 <= len(pair["samples"]) <= 4
             for pair in services["pairs"]
+        )
+        and services.get("gate_digest")
+        == payload_digest(
+            {key: value for key, value in services.items() if key != "gate_digest"}
         )
         and isinstance(non_target, Mapping)
         and non_target.get("preserved") is True
@@ -3504,6 +4026,19 @@ def _run_warm_reconciliation_collect(
     probe_source = probe_path.read_bytes()
     if (
         not probe_source.startswith(b"#!/usr/bin/env python3\n")
+        or b"from apps.root_storage_warm_archive import (" not in probe_source
+        or any(
+            symbol.encode("utf-8") not in probe_source
+            for symbol in (
+                "SERVICE_NAMES",
+                "_systemd_snapshot",
+                "_systemd_service_gate_with_resample",
+                "_systemd_unit_row",
+            )
+        )
+        or b"def _classify_timer_service_pair" in probe_source
+        or b"def _classify_persistent_service" in probe_source
+        or b"def _systemd_observation" in probe_source
         or b"readback_batch(" in probe_source
         or b"storage_recovery_sanitation_job.py" in probe_source
         or b"systemctl\", \"start" in probe_source
@@ -3511,6 +4046,11 @@ def _run_warm_reconciliation_collect(
         or b"import sqlite3" in probe_source
         or b"import tempfile" in probe_source
         or b"import fcntl" in probe_source
+        or b".unlink(" in probe_source
+        or b".write_bytes(" in probe_source
+        or b".write_text(" in probe_source
+        or b"os.replace(" in probe_source
+        or b"os.rename(" in probe_source
     ):
         raise ApplyError("trusted reconciliation probe contains a forbidden primitive")
     source = context["source"]
@@ -3558,7 +4098,7 @@ def _run_warm_reconciliation_collect(
         "production_mutation_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
-        "reconciliation_sequence": context["reconciliation_sequence"],
+        "reconciliation_generation": context["reconciliation_generation"],
         "probe": probe_evidence,
     }
     receipt_without_digest["evidence_digest"] = payload_digest(
@@ -3669,7 +4209,7 @@ def _warm_reconciliation_comment_body(
         "production_mutation_count": 0,
         "source": receipt.get("source"),
         "reconciliation_release": receipt.get("reconciliation_release"),
-        "reconciliation_sequence": receipt.get("reconciliation_sequence"),
+        "reconciliation_generation": receipt.get("reconciliation_generation"),
         "evidence_digest": receipt.get("evidence_digest"),
         "terminal_facts": {
             "job_status": (result.get("job_evidence") or {}).get("status"),
@@ -3761,8 +4301,8 @@ def _run_warm_reconciliation_publish(
         or receipt.get("production_mutation_count") != 0
         or receipt.get("source") != context["source"]
         or receipt.get("reconciliation_release") != context["reconciliation_release"]
-        or receipt.get("reconciliation_sequence")
-        != context["reconciliation_sequence"]
+        or receipt.get("reconciliation_generation")
+        != context["reconciliation_generation"]
         or receipt.get("evidence_digest")
         != payload_digest(
             {key: value for key, value in receipt.items() if key != "evidence_digest"}
@@ -4505,6 +5045,15 @@ def main() -> int:
     parser.add_argument("--prior-reconciliation-artifact-name")
     parser.add_argument("--prior-reconciliation-receipt-sha256")
     parser.add_argument("--prior-reconciliation-comment-id", type=int, default=0)
+    parser.add_argument("--prior-reconciliation-a02-run-id", type=int, default=0)
+    parser.add_argument(
+        "--prior-reconciliation-a02-artifact-id", type=int, default=0
+    )
+    parser.add_argument("--prior-reconciliation-a02-artifact-name")
+    parser.add_argument("--prior-reconciliation-a02-receipt-sha256")
+    parser.add_argument(
+        "--prior-reconciliation-a02-comment-id", type=int, default=0
+    )
     parser.add_argument(
         "--reconciliation-phase",
         choices=("preflight", "collect", "publish"),
