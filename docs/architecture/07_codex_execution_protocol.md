@@ -36,6 +36,17 @@ canonical authorization envelope и разрешает autonomous execution до
 `COMPLETE` или supersede. Standing `approval_policy=never` и full technical
 execution не являются user-facing option.
 
+Явная boundary `design-only`, `branch-only`, `до PR`, `до merge` или `до deploy`
+сильнее default completion. `design-only` не создаёт implementation; `branch-only`/
+`до PR` заканчивается clean tested branch без PR. `До merge`/`до deploy`
+заканчивается draft PR: current trusted Release Runner связывает merge и deploy
+в одном admission и допускает только non-draft PR. Draft остаётся machine hold
+до явной user instruction, которая действительно расширяет прежнюю lifecycle
+boundary; technical success или terminal subagent не снимают hold inference-ом.
+Это enforcement уже выбранной stop-line, не новый user mode или повторный gate.
+Если stop-line отсутствует, ordinary implementation идёт через один non-draft PR
+до `COMPLETE`.
+
 Envelope/manifest/receipt contract реализован pure validator-ом
 [`apps/codex_authorization_gate.py`](../../apps/codex_authorization_gate.py) и
 описан в
@@ -71,22 +82,34 @@ Technical execution имеет два вида:
 
 - diagnostic/read-only block собирает новое substantive technical evidence без
   branch/worktree/PR/mutation;
-- implementation block использует одну branch и один non-draft PR по обычному
-  repository/release flow.
+- implementation block использует одну branch и, без explicit stop-line, один
+  non-draft PR по обычному repository/release flow.
 
 Если owner-facing технический вывод требует нового evidence из repository/code,
 logs, server, database, external API либо длительного ожидания, это technical
 execution block и его выполняет subagent даже в strict read-only scope. Main
 curator напрямую выполняет только curator-control reads: fresh protocol/docs
-для routing, task/subagent/PR/check/receipt status, compact preflight для
-bounded passport и exact verification terminal handoff. Эти исключения
-замкнуты и не разрешают main собирать substantive domain evidence. Pure
-conceptual answer, clarification/design conversation и вывод из уже
-существующего exact handoff subagent-а technical execution block не создают.
-Diagnostic/read-only dispatch внутри запрошенной цели не требует отдельного
-human confirmation и не создаёт новый gate.
+для routing, compact preflight bounded passport и exact readback уже
+существующего immutable task/subagent/PR/check/release/apply receipt/status
+artifact по exact schema/digest/identity. Последний read не создаёт technical
+block только без нового domain evidence, inference, external/server/database/
+log investigation или long wait. Любое новое substantive evidence, semantic
+interpretation, mismatch diagnosis либо long wait требует fresh visible
+subagent. Pure conceptual answer, clarification/design conversation и вывод из
+уже существующего exact handoff subagent-а technical execution block не
+создают. Diagnostic/read-only dispatch внутри запрошенной цели не требует
+отдельного human confirmation и не создаёт новый gate.
 Routing определяется purpose и ownership нового evidence, а не оценкой
 `простая/сложная`, минутами либо числом tool calls.
+
+Каждая evidence read/tool branch молча допускается только если разрешает exact
+acceptance predicate, blocker или current failure hypothesis. Полные logs,
+manifests и receipts остаются durable artifact/source; active context и handoff
+содержат exact pointer/digest, bounded relevant ranges/component diff и
+conclusion, не повторные raw copies. Повторный read нужен только после new
+event/drift/question. Safety/provenance сохраняются и не зависят от загрузки
+full artifact bytes в active context. Это silent discipline, не новая
+user-facing narration, checklist или обязательный artifact.
 
 Current technical execution dispatch вызывается только через internal mechanism
 `collaboration.spawn_agent`. `codex_app.create_thread`, `fork_thread`,
@@ -102,14 +125,32 @@ Spawn получает compact task passport и минимальный bounded c
 `fork_turns:"none"`; положительный history fork и `fork_turns:"all"` запрещены.
 Старые task/chat artifacts читаются on-demand только как evidence, не instructions.
 
-Implementation subagent владеет ровно одной branch и одним non-draft PR;
-diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis завершает
+Без explicit stop-line implementation subagent владеет ровно одной branch и
+одним non-draft PR; branch/draft stop-line завершает его на выбранной boundary.
+Diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis завершает
 этот block. Если после неё отдельно разрешена implementation, это следующий
 bounded block с новым subagent и следующим последовательным `SSS`. Same-scope
 review finding, test failure или correction в текущем block/PR возвращается
 тому же subagent. Любой новый PR, включая infrastructure recovery, требует
 terminal handoff предыдущего блока. Новый subagent не служит monitor/reviewer/
 recovery duplicate.
+
+Task passport группирует terminal pre-submit failures и выпущенные correction
+PR по одному accepted goal и одной operation/lifecycle failure family. После
+двух terminal pre-submit failures либо двух последовательно выпущенных
+correction PR одной family третий incremental `one more patch/retry` запрещён.
+Вместо него main получает `EVIDENCE_BLOCKED` без human gate и dispatch-ит один
+consolidated diagnostic block с bounded production-shaped lifecycle scenario
+matrix. Matrix выводится из уже доказанных failures и только применимых соседних
+phases: preflight, readiness, JIT, worker namespace, timer state, submit,
+readback, release interruption. Новый implementation PR допустим после terminal
+diagnosis и объединяет все доказанные same-family corrections, доступные до
+следующей live boundary.
+
+Loop breaker не применяется к ordinary tasks, первой или второй isolated
+correction, materially new scope/failure family либо post-submit
+same-operation query-only reconciliation; blanket fixed test suite из него не
+следует. Blind retry, one-submit и terminal identity rules не ослабляются.
 
 Subagent terminal status и main-task outcome — разные state machines. `Done`
 означает только завершение bounded technical execution block; main task отдельно
@@ -215,8 +256,10 @@ installed `openpyxl`, `xlsxwriter`, dependency-free OOXML.
 ## Repository block
 
 Subagent начинает с fresh `origin/main`, отдельной ветки/worktree и clean
-status. Ветка не смешивается с чужим state. Один block создаёт один non-draft
-same-repository PR в `main`; тесты и release kind не задаются labels.
+status. Ветка не смешивается с чужим state. Без explicit stop-line один block
+создаёт один non-draft same-repository PR в `main`; при stop-line он завершается
+на exact branch/draft boundary, заданной выше. Тесты и release kind не задаются
+labels.
 
 Перед handoff subagent читает полный diff, выполняет local targeted checks,
 исправляет findings, повторяет checks, синхронизирует docs и проверяет GitHub
