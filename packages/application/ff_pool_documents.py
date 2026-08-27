@@ -50,6 +50,11 @@ from packages.application.warehouse_recovery_policy import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_fbs_material_rematerialization import (
+    WarehouseFbsMaterialError,
+    ensure_warehouse_fbs_material_intent_schema,
+    publish_fbs_pool_aggregate_revision,
+)
 from packages.contracts.ff_pool_documents import (
     DocumentIdentity,
     ExpenseLine,
@@ -155,6 +160,7 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
     """Create only additive empty Stage 2 tables, indexes and guards."""
 
     ensure_ff_pool_foundation_schema(conn)
+    ensure_warehouse_fbs_material_intent_schema(conn)
     _ensure_targeted_recalc_queue_schema(conn)
     conn.executescript(
         f"""
@@ -2976,160 +2982,149 @@ def _apply_guided_aggregate_projection(
     request: Mapping[str, Any],
     posted_at: str,
 ) -> None:
-    """Keep the existing aggregate FF projection exact with the pool receipt."""
+    """Switch one immutable functional version with the guided pool effect."""
 
-    deltas: dict[int, tuple[int, Decimal]] = {}
-    for document in plan.get("documents") or []:
-        for movement in document.get("movements") or []:
-            nm_id = int(movement["nm_id"])
-            quantity, capital = deltas.get(nm_id, (0, Decimal("0")))
-            deltas[nm_id] = (
-                quantity + int(movement["quantity_delta"]),
-                capital
-                + Decimal(int(movement["capital_delta_cents"])) / Decimal(100),
-            )
+    nm_ids = sorted(
+        {
+            int(movement["nm_id"])
+            for document in plan.get("documents") or []
+            for movement in document.get("movements") or []
+        }
+    )
+    if not _versioned_material_publication_available(conn):
+        _apply_legacy_pool_aggregate_projection(
+            conn,
+            nm_ids=nm_ids,
+            request=request,
+            checked_at=posted_at,
+        )
+        return
+    try:
+        publish_fbs_pool_aggregate_revision(
+            conn,
+            affected_nm_ids=nm_ids,
+            source_kind=(
+                "guided_china_acceptance_recovery"
+                if (plan.get("domain_manifest") or {}).get(
+                    "guided_acceptance_recovery"
+                )
+                else "guided_china_acceptance"
+            ),
+            source_id=str(request["request_id"]),
+            business_date=str(request["business_date"]),
+            published_at=posted_at,
+        )
+    except WarehouseFbsMaterialError as exc:
+        raise FfPoolDocumentError(exc.code, str(exc), details=exc.details) from exc
+
+
+def _versioned_material_publication_available(conn: sqlite3.Connection) -> bool:
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if not {
+        "sheet_vitrina_v1_warehouse_functional_active",
+        "sheet_vitrina_v1_warehouse_functional_versions",
+        "sheet_vitrina_v1_warehouse_wb_snapshots",
+    }.issubset(tables):
+        return False
+    # A pointer without a matching version row exists only in legacy fixtures.
+    # Once a canonical version exists, incomplete version material (including a
+    # missing WB snapshot) must fail closed in the immutable publisher.
+    return conn.execute(
+        """SELECT 1
+           FROM sheet_vitrina_v1_warehouse_functional_active active
+           JOIN sheet_vitrina_v1_warehouse_functional_versions version
+             ON version.version_id=active.version_id
+           WHERE active.slot=1 LIMIT 1"""
+    ).fetchone() is not None
+
+
+def _apply_legacy_pool_aggregate_projection(
+    conn: sqlite3.Connection,
+    *,
+    nm_ids: Iterable[int],
+    request: Mapping[str, Any],
+    checked_at: str,
+) -> None:
+    """Compatibility for pre-version Stage 7C fixtures and old cutover state."""
+
     active = conn.execute(
         "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
     ).fetchone()
     if active is None:
         raise FfPoolDocumentError(
-            "aggregate_active_missing", "Guided acceptance requires the active aggregate FF version"
+            "aggregate_active_missing", "Aggregate FF version is missing"
         )
     version_id = str(active[0])
-    recovery = _json_object(
-        (plan.get("domain_manifest") or {}).get("guided_acceptance_recovery") or {}
-    )
-    restore_by_nm = {
-        int(item["nm_id"]): dict(item)
-        for item in recovery.get("restore_aggregate_balances") or []
-    }
-    for nm_id, (quantity_delta, capital_delta) in sorted(deltas.items()):
-        row = conn.execute(
-            """SELECT quantity,capital_rub,cost_covered_quantity
-               FROM sheet_vitrina_v1_warehouse_functional_balances
+    epoch = conn.execute(
+        f"SELECT epoch FROM {FEATURE_EPOCHS_TABLE} WHERE writer_enabled=1 ORDER BY epoch DESC LIMIT 1"
+    ).fetchone()
+    if epoch is None:
+        raise FfPoolDocumentError(
+            "aggregate_writer_epoch_missing", "Aggregate FF writer epoch is missing"
+        )
+    for nm_id in sorted({int(value) for value in nm_ids if int(value) > 0}):
+        rows = conn.execute(
+            f"""SELECT quantity,capital_rub FROM {BALANCES_TABLE}
+                WHERE projection_epoch=? AND nm_id=? AND pool IN('FBS','FBO')""",
+            (int(epoch[0]), nm_id),
+        ).fetchall()
+        with localcontext() as context:
+            context.prec = 160
+            quantity = sum((Decimal(str(row[0])) for row in rows), ZERO)
+            capital = sum((Decimal(str(row[1])) for row in rows), ZERO)
+            wac = (
+                canonical_decimal_text(capital / quantity)
+                if quantity > ZERO
+                else None
+            )
+        current = conn.execute(
+            """SELECT 1 FROM sheet_vitrina_v1_warehouse_functional_balances
                WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
             (version_id, nm_id),
         ).fetchone()
-        # The active aggregate is the exact sum of facility/pool rows and may
-        # carry a long fractional-kopeck tail.  Keep the arithmetic outside
-        # process-default Decimal precision just like the pool writer and the
-        # ordinary functional publisher.
-        with localcontext() as context:
-            context.prec = 160
-            if row is None:
-                if recovery or quantity_delta <= 0 or capital_delta <= ZERO:
-                    raise FfPoolDocumentError(
-                        "aggregate_sku_missing",
-                        "Guided acceptance aggregate SKU disappeared before apply",
-                        details={"nm_id": nm_id},
-                    )
-                quantity = Decimal(quantity_delta)
-                capital = capital_delta
-                conn.execute(
-                    """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
-                           version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
-                           cost_covered_quantity,quality,certified,wb_quantity,
-                           wb_in_way_to_client,wb_in_way_from_client,provenance_json
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        version_id,
-                        "ff",
-                        nm_id,
-                        canonical_decimal_text(quantity),
-                        canonical_decimal_text(capital / quantity),
-                        canonical_decimal_text(capital),
-                        canonical_decimal_text(quantity),
-                        "guided_acceptance_minor_unit",
-                        0,
-                        "0",
-                        "0",
-                        "0",
-                        _json(_guided_new_aggregate_provenance(request)),
-                    ),
-                )
-            else:
-                quantity = Decimal(str(row[0])) + Decimal(quantity_delta)
-                capital = Decimal(str(row[1])) + capital_delta
-                covered = Decimal(str(row[2])) + Decimal(quantity_delta)
-                if (
-                    quantity < ZERO
-                    or capital < ZERO
-                    or covered < ZERO
-                    or (quantity == ZERO) != (capital == ZERO)
-                ):
-                    raise FfPoolDocumentError(
-                        "guided_acceptance_aggregate_invalid",
-                        "Guided acceptance would create invalid aggregate quantity/capital coverage",
-                        details={"nm_id": nm_id},
-                    )
-                wac = (
-                    None
-                    if quantity == ZERO
-                    else canonical_decimal_text(capital / quantity)
-                )
-                conn.execute(
-                    """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-                       SET quantity=?,capital_rub=?,wac_rub=?,cost_covered_quantity=?
-                       WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-                    (
-                        canonical_decimal_text(quantity),
-                        canonical_decimal_text(capital),
-                        wac,
-                        canonical_decimal_text(covered),
-                        version_id,
-                        nm_id,
-                    ),
-                )
-    if recovery:
-        if set(restore_by_nm) != set(deltas):
-            raise FfPoolDocumentError(
-                "guided_recovery_before_state_missing",
-                "Recovery does not contain every affected aggregate before-state",
+        provenance = _json(_guided_new_aggregate_provenance(request))
+        if current is None:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    version_id,
+                    "ff",
+                    nm_id,
+                    canonical_decimal_text(quantity),
+                    wac,
+                    canonical_decimal_text(capital),
+                    canonical_decimal_text(quantity),
+                    "guided_acceptance_minor_unit",
+                    0,
+                    "0",
+                    "0",
+                    "0",
+                    provenance,
+                ),
             )
-        for nm_id, before in sorted(restore_by_nm.items()):
-            row = conn.execute(
-                """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity
-                   FROM sheet_vitrina_v1_warehouse_functional_balances
+        else:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+                   SET quantity=?,wac_rub=?,capital_rub=?,cost_covered_quantity=?
                    WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-                (version_id, nm_id),
-            ).fetchone()
-            if row is None:
-                raise FfPoolDocumentError(
-                    "guided_recovery_aggregate_drift",
-                    "Recovered aggregate projection row disappeared",
-                    details={"nm_id": nm_id},
-                )
-            if bool(before.get("row_present")):
-                conn.execute(
-                    """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-                       SET quantity=?,wac_rub=?,capital_rub=?,cost_covered_quantity=?,
-                           quality=?,certified=?,wb_quantity=?,wb_in_way_to_client=?,
-                           wb_in_way_from_client=?,provenance_json=?
-                       WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-                    (
-                        str(before["quantity"]),
-                        before.get("wac_rub"),
-                        str(before["capital_rub"]),
-                        str(before["cost_covered_quantity"]),
-                        str(before["quality"]),
-                        int(before["certified"]),
-                        str(before["wb_quantity"]),
-                        str(before["wb_in_way_to_client"]),
-                        str(before["wb_in_way_from_client"]),
-                        str(before["provenance_json"]),
-                        version_id,
-                        nm_id,
-                    ),
-                )
-            elif any(
-                Decimal(str(value or "0")) != ZERO
-                for value in (row[0], row[2], row[3])
-            ) or row[1] is not None:
-                raise FfPoolDocumentError(
-                    "guided_recovery_aggregate_drift",
-                    "A semantic-zero aggregate SKU did not recover to zero",
-                    details={"nm_id": nm_id},
-                )
+                (
+                    canonical_decimal_text(quantity),
+                    wac,
+                    canonical_decimal_text(capital),
+                    canonical_decimal_text(quantity),
+                    version_id,
+                    nm_id,
+                ),
+            )
     aggregate_rows = [
         {
             "nm_id": int(row[0]),
@@ -3146,31 +3141,20 @@ def _apply_guided_aggregate_projection(
     parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
     if parity.status != "pass":
         raise FfPoolDocumentError(
-            "guided_acceptance_parity_failed",
-            "Guided acceptance diverged from aggregate FF",
+            "legacy_aggregate_parity_failed",
+            "Legacy aggregate compatibility diverged from facility/pool detail",
             details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
         )
     record_ff_pool_parity_diagnostic(
         conn,
-        diagnostic_id="ffpar_guided_" + _fingerprint(
-            {"request_id": str(request["request_id"]), "posted_at": posted_at}
-        ).removeprefix("sha256:")[:22],
+        diagnostic_id="ffpar_legacy_"
+        + _fingerprint(
+            {"request_id": str(request["request_id"]), "version_id": version_id}
+        ).removeprefix("sha256:")[:20],
         aggregate_revision=version_id,
-        checked_at=posted_at,
+        checked_at=str(checked_at),
         result=parity,
-        details={
-            "source": (
-                "guided_china_acceptance_recovery"
-                if (plan.get("domain_manifest") or {}).get("guided_acceptance_recovery")
-                else "guided_china_acceptance"
-            ),
-            "shipment_id": str(
-                ((plan.get("domain_manifest") or {}).get("guided_acceptance_recovery") or {}).get(
-                    "shipment_id"
-                )
-                or request["source_id"]
-            ),
-        },
+        details={"source": "pre_version_material_compatibility"},
     )
 
 
@@ -5877,14 +5861,7 @@ def _apply_overhead_current_aggregate_projection(
     request: Mapping[str, Any],
     posted_at: str,
 ) -> None:
-    """Keep current aggregate FF capital atomic with overhead or its storno.
-
-    Pool document fixtures can intentionally run without the aggregate
-    projection.  In an activated warehouse runtime, however, a handoff may
-    follow immediately after the overhead commit and must never observe a
-    pool/aggregate split.  Only the exact affected capital and WAC columns are
-    changed here; heavy Finance publication remains in the durable queue.
-    """
+    """Switch one immutable functional version with overhead/storno capital."""
 
     tables = {
         str(row[0])
@@ -5898,16 +5875,11 @@ def _apply_overhead_current_aggregate_projection(
     }
     if not required.issubset(tables):
         return
-    active = conn.execute(
-        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-    ).fetchone()
-    if active is None:
-        raise FfPoolDocumentError(
-            "overhead_aggregate_active_missing",
-            "Activated pool overhead requires the current aggregate FF projection",
-        )
-    version_id = str(active[0])
-    capital_deltas: dict[int, Decimal] = {}
+    if conn.execute(
+        "SELECT 1 FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone() is None:
+        return
+    nm_ids: set[int] = set()
     for document in plan.get("documents") or []:
         for movement in document.get("movements") or []:
             if int(movement["quantity_delta"]) != 0:
@@ -5915,92 +5887,26 @@ def _apply_overhead_current_aggregate_projection(
                     "overhead_aggregate_quantity_delta",
                     "Overhead aggregate synchronization cannot change quantity",
                 )
-            nm_id = int(movement["nm_id"])
-            capital_deltas[nm_id] = capital_deltas.get(nm_id, ZERO) + (
-                Decimal(int(movement["capital_delta_cents"])) / Decimal(100)
-            )
-    for nm_id, capital_delta in sorted(capital_deltas.items()):
-        row = conn.execute(
-            """SELECT quantity,capital_rub,provenance_json
-               FROM sheet_vitrina_v1_warehouse_functional_balances
-               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-            (version_id, nm_id),
-        ).fetchone()
-        if row is None:
-            raise FfPoolDocumentError(
-                "overhead_aggregate_sku_missing",
-                "Exact overhead SKU is absent from the current aggregate FF projection",
-                details={"nm_id": nm_id, "version_id": version_id},
-            )
-        with localcontext() as context:
-            context.prec = 160
-            quantity = Decimal(str(row["quantity"]))
-            capital = Decimal(str(row["capital_rub"])) + capital_delta
-            if quantity <= ZERO or capital <= ZERO:
-                raise FfPoolDocumentError(
-                    "overhead_aggregate_invalid",
-                    "Overhead or storno would make current aggregate cost unavailable",
-                    details={"nm_id": nm_id},
-                )
-            wac = canonical_decimal_text(capital / quantity)
-        provenance = {
-            "source": "pool_overhead_current_projection_v1",
-            "request_id": str(request["request_id"]),
-            "document_id": str(plan["primary_document_id"]),
-            "source_revision": str(request["source_revision"]),
-            "posted_at": posted_at,
-            "previous_provenance_sha256": _fingerprint(
-                _loads(row["provenance_json"], {})
-            ),
-        }
-        conn.execute(
-            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-               SET capital_rub=?,wac_rub=?,provenance_json=?
-               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-            (
-                canonical_decimal_text(capital),
-                wac,
-                _json(provenance),
-                version_id,
-                nm_id,
-            ),
+            nm_ids.add(int(movement["nm_id"]))
+    if not _versioned_material_publication_available(conn):
+        _apply_legacy_pool_aggregate_projection(
+            conn,
+            nm_ids=nm_ids,
+            request=request,
+            checked_at=posted_at,
         )
-    aggregate_rows = [
-        {
-            "nm_id": int(row[0]),
-            "quantity": _signed_int(row[1], field="aggregate quantity"),
-            "capital_rub": canonical_decimal_text(row[2]),
-        }
-        for row in conn.execute(
-            """SELECT nm_id,quantity,capital_rub
-               FROM sheet_vitrina_v1_warehouse_functional_balances
-               WHERE version_id=? AND warehouse_key='ff' ORDER BY nm_id""",
-            (version_id,),
-        ).fetchall()
-    ]
-    parity = evaluate_ff_pool_aggregate_parity(conn, aggregate_rows)
-    if parity.status != "pass":
-        raise FfPoolDocumentError(
-            "overhead_aggregate_parity_failed",
-            "Overhead current projection diverged from facility/pool detail",
-            details={"mismatched_nm_ids": list(parity.mismatched_nm_ids)},
+        return
+    try:
+        publish_fbs_pool_aggregate_revision(
+            conn,
+            affected_nm_ids=sorted(nm_ids),
+            source_kind="pool_overhead_current_projection",
+            source_id=str(request["request_id"]),
+            business_date=str(request["business_date"]),
+            published_at=posted_at,
         )
-    record_ff_pool_parity_diagnostic(
-        conn,
-        diagnostic_id="ffpar_overhead_"
-        + _fingerprint(
-            {"request_id": str(request["request_id"]), "posted_at": posted_at}
-        ).removeprefix("sha256:")[:20],
-        aggregate_revision=version_id,
-        checked_at=posted_at,
-        result=parity,
-        details={
-            "source": "pool_overhead_current_projection_v1",
-            "request_id": str(request["request_id"]),
-            "document_id": str(plan["primary_document_id"]),
-            "finance_publication_deferred": True,
-        },
-    )
+    except WarehouseFbsMaterialError as exc:
+        raise FfPoolDocumentError(exc.code, str(exc), details=exc.details) from exc
 
 
 def _pool_overhead_publication_state(

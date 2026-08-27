@@ -442,7 +442,9 @@ def _lifecycle_contract() -> dict[str, Any]:
         # Default applicability can only be overridden by dated immutable
         # evidence.  Reinstatement reuses the retained exact zero row.
         applicability_service = DenseFbsService(
-            db_path=runtime.db_path, runtime_dir=runtime_dir
+            db_path=runtime.db_path,
+            runtime_dir=runtime_dir,
+            timestamp_factory=lambda: NOW,
         )
         inapplicable = applicability_service.record_applicability(
             facility_id=facility_id,

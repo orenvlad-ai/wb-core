@@ -41,6 +41,11 @@ from packages.application.wb_fbs_orders import (
     WAREHOUSE_MAPPINGS_TABLE,
     ensure_wb_fbs_orders_schema,
 )
+from packages.application.warehouse_fbs_material_rematerialization import (
+    WarehouseFbsMaterialError,
+    ensure_warehouse_fbs_material_intent_schema,
+    publish_fbs_pool_aggregate_revision,
+)
 
 
 CONTRACT_NAME = "ff_pool_fbs_lifecycle_v1"
@@ -105,6 +110,7 @@ class FfPoolFbsLifecycleError(RuntimeError):
 def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
     ensure_ff_pool_foundation_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
+    ensure_warehouse_fbs_material_intent_schema(conn)
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS {EVENTS_TABLE}(
@@ -1636,6 +1642,20 @@ def _apply_exact_physical_delta(
     capital_delta = _capital_delta(wac, quantity_delta)
     new_quantity = int(balance[0]) + int(quantity_delta)
     new_capital = _decimal_sum(Decimal(str(balance[1])), capital_delta)
+    if (
+        new_quantity < 0
+        or new_capital < ZERO
+        or (new_quantity == 0) != (new_capital == ZERO)
+    ):
+        raise FfPoolFbsLifecycleError(
+            "fbs_balance_shape_invalid",
+            "FBS lifecycle effect would create a non-canonical quantity/capital shape",
+        )
+    new_wac = (
+        None
+        if new_quantity == 0
+        else canonical_decimal_text(_decimal_ratio(new_capital, new_quantity))
+    )
     operation_id = "ffbo_" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:28]
     conn.execute(
         f"""INSERT INTO {OPERATIONS_TABLE}(
@@ -1679,7 +1699,7 @@ def _apply_exact_physical_delta(
         (
             new_quantity,
             canonical_decimal_text(new_capital),
-            canonical_decimal_text(wac),
+            new_wac,
             event_id,
             occurred_at,
             facility_id,
@@ -1687,28 +1707,140 @@ def _apply_exact_physical_delta(
             epoch,
         ),
     )
-    _apply_exact_aggregate_projection(
-        conn,
-        nm_id=nm_id,
-        quantity_delta=quantity_delta,
-        capital_delta=capital_delta,
+    event_type_row = conn.execute(
+        f"SELECT event_type FROM {EVENTS_TABLE} WHERE event_id=?", (event_id,)
+    ).fetchone()
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    material_version = (
+        conn.execute(
+            """SELECT 1
+               FROM sheet_vitrina_v1_warehouse_functional_active active
+               JOIN sheet_vitrina_v1_warehouse_functional_versions version
+                 ON version.version_id=active.version_id
+               WHERE active.slot=1 LIMIT 1"""
+        ).fetchone()
+        if "sheet_vitrina_v1_warehouse_functional_versions" in tables
+        else None
     )
+    if (
+        event_type_row is not None
+        and str(event_type_row[0]) == "opening_handoff_debit"
+    ) or material_version is None:
+        _apply_opening_aggregate_projection(
+            conn,
+            nm_id=nm_id,
+            quantity_delta=quantity_delta,
+            capital_delta=capital_delta,
+        )
+        return
+    try:
+        material = publish_fbs_pool_aggregate_revision(
+            conn,
+            affected_nm_ids=[nm_id],
+            source_kind="fbs_order_lifecycle_event",
+            source_id=event_id,
+            business_date=str(manifest["business_date"]),
+            published_at=occurred_at,
+        )
+        _enqueue_lifecycle_material_recalculation(
+            conn,
+            event_id=event_id,
+            nm_id=nm_id,
+            business_date=str(manifest["business_date"]),
+            requested_at=occurred_at,
+            target_version_id=str(material["target_version_id"]),
+        )
+    except WarehouseFbsMaterialError as exc:
+        raise FfPoolFbsLifecycleError(exc.code, str(exc), details=exc.details) from exc
 
 
-def _apply_exact_aggregate_projection(
+def _enqueue_lifecycle_material_recalculation(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    nm_id: int,
+    business_date: str,
+    requested_at: str,
+    target_version_id: str,
+) -> None:
+    """Atomically leave the exact economics continuation for a lifecycle debit."""
+
+    table = "sheet_vitrina_v1_warehouse_targeted_recalc_queue"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is None:
+        raise FfPoolFbsLifecycleError(
+            "fbs_material_recalculation_queue_missing",
+            "Canonical FBS lifecycle publication requires its durable recalculation queue",
+        )
+    stable_source_id = f"fbs_lifecycle:{event_id}"
+    source_revision = _fingerprint(
+        {
+            "contract": "fbs_lifecycle_material_recalculation_v1",
+            "event_id": event_id,
+            "target_version_id": target_version_id,
+            "business_date": business_date,
+            "nm_id": int(nm_id),
+        }
+    )
+    queue_id = "whrq_" + _fingerprint(
+        {"stable_source_id": stable_source_id, "source_revision": source_revision}
+    ).removeprefix("sha256:")[:24]
+    conn.execute(
+        f"""INSERT OR IGNORE INTO {table}(
+               queue_id,stable_source_id,source_revision,effective_date,
+               affected_nm_ids_json,status,requested_at,started_at,finished_at,error)
+           VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL)""",
+        (
+            queue_id,
+            stable_source_id,
+            source_revision,
+            str(business_date),
+            _json([int(nm_id)]),
+            str(requested_at),
+        ),
+    )
+    stored = conn.execute(
+        f"SELECT queue_id,affected_nm_ids_json FROM {table} "
+        "WHERE stable_source_id=? AND source_revision=?",
+        (stable_source_id, source_revision),
+    ).fetchone()
+    if (
+        stored is None
+        or str(stored["queue_id"]) != queue_id
+        or json.loads(str(stored["affected_nm_ids_json"] or "[]"))
+        != [int(nm_id)]
+    ):
+        raise FfPoolFbsLifecycleError(
+            "fbs_material_recalculation_queue_identity_conflict",
+            "FBS lifecycle material continuation could not bind its exact queue",
+        )
+
+
+def _apply_opening_aggregate_projection(
     conn: sqlite3.Connection,
     *,
     nm_id: int,
     quantity_delta: int,
     capital_delta: Decimal,
 ) -> None:
+    """Fold the reviewed pre-T checkpoint inside the original cutover version."""
+
     active = conn.execute(
         "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
     ).fetchone()
     if active is None:
-        raise FfPoolFbsLifecycleError("aggregate_active_missing", "Aggregate FF version is missing")
+        raise FfPoolFbsLifecycleError(
+            "aggregate_active_missing", "Aggregate FF version is missing"
+        )
     row = conn.execute(
-        """SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances
+        """SELECT quantity,capital_rub,cost_covered_quantity
+           FROM sheet_vitrina_v1_warehouse_functional_balances
            WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
         (str(active[0]), int(nm_id)),
     ).fetchone()
@@ -1718,31 +1850,25 @@ def _apply_exact_aggregate_projection(
         )
     quantity = _exact_int(row[0], "aggregate.quantity") + int(quantity_delta)
     capital = _decimal_sum(Decimal(str(row[1])), capital_delta)
-    columns = {
-        str(item[1])
-        for item in conn.execute(
-            "PRAGMA table_info(sheet_vitrina_v1_warehouse_functional_balances)"
-        ).fetchall()
-    }
-    if "wac_rub" in columns:
-        wac = (
-            None
-            if quantity == 0
-            else canonical_decimal_text(_decimal_ratio(capital, quantity))
-        )
-        conn.execute(
-            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-               SET quantity=?,capital_rub=?,wac_rub=?
-               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-            (canonical_decimal_text(Decimal(quantity)), canonical_decimal_text(capital), wac, str(active[0]), int(nm_id)),
-        )
-    else:
-        conn.execute(
-            """UPDATE sheet_vitrina_v1_warehouse_functional_balances
-               SET quantity=?,capital_rub=?
-               WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
-            (canonical_decimal_text(Decimal(quantity)), canonical_decimal_text(capital), str(active[0]), int(nm_id)),
-        )
+    covered = _decimal_sum(Decimal(str(row[2])), Decimal(quantity_delta))
+    wac = (
+        None
+        if quantity == 0
+        else canonical_decimal_text(_decimal_ratio(capital, quantity))
+    )
+    conn.execute(
+        """UPDATE sheet_vitrina_v1_warehouse_functional_balances
+           SET quantity=?,capital_rub=?,wac_rub=?,cost_covered_quantity=?
+           WHERE version_id=? AND warehouse_key='ff' AND nm_id=?""",
+        (
+            canonical_decimal_text(Decimal(quantity)),
+            canonical_decimal_text(capital),
+            wac,
+            canonical_decimal_text(covered),
+            str(active[0]),
+            int(nm_id),
+        ),
+    )
 
 
 def _record_current_parity(

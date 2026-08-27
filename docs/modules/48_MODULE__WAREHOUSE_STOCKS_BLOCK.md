@@ -21,6 +21,7 @@ related_modules:
   - "packages/application/ff_pool_documents.py"
   - "packages/application/ff_pool_fbs_applicability.py"
   - "packages/application/ff_pool_dense_fbs.py"
+  - "packages/application/warehouse_fbs_material_rematerialization.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/ff_pool_documents_xlsx.py"
   - "packages/application/ff_pool_surfaces.py"
@@ -37,6 +38,7 @@ related_modules:
   - "apps/wb_fbs_warehouse_registry.py"
   - "apps/warehouse_functional_runner.py"
   - "apps/ff_pool_overhead_backfill.py"
+  - "apps/warehouse_fbs_material_rematerialization_smoke.py"
   - "apps/warehouse_cost_queue_replay.py"
   - "apps/sqlite_backup_archive.py"
   - "apps/ff_stage_7a_production.py"
@@ -54,7 +56,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 160 stages facility/SKU activation until canonical dense FBS coverage is exact, preserves existing balances, emits zero movement/capital/WAC effect and leaves FBO/WB/six-stage aggregation unchanged."
+update_note: "Active truth remains versioned functional balances. Migration 160 stages facility/SKU activation until canonical dense FBS coverage is exact and makes every post-T FBS material effect publish a coherent functional/business successor with durable economics invalidation; FBO/WB stay outside dense initialization."
 ---
 
 # 1. Active warehouse contract
@@ -199,6 +201,43 @@ activation stores only its facility pairs plus a compact
 streamed proof of existing coverage; it does not persist the default
 applicability cross-product. Current applicability uses the canonical EKT
 business date.
+
+The 26-August Migration 160 addendum prevents a later FBS business effect from
+mixing accepted versions. A lifecycle debit, guided receipt/recovery or pool
+overhead first commits the canonical facility/pool effect and derives the exact
+aggregate FF quantity, capital, WAC, cost-covered quantity and location
+provenance from that same physical ledger. In the same transaction and under
+the shared warehouse lock it creates a successor immutable functional version,
+retains the exact same-business-date WB snapshot, reservations, effective
+supplier-cost state, unmatched audit and compact WB option/read models,
+publishes the versioned business projection, then switches active last by CAS.
+The prior version and history are never updated. A concurrent reader therefore
+sees complete `1953/1953` or complete `1952/1952`, never the incident shape
+`1952/1953`; a missing canonical snapshot/closure blocks the physical writer.
+
+That lifecycle transaction also inserts the canonical targeted-recalculation
+queue identity bound to its immutable event and successor version. Version
+binding hides the prior ready material, so restart resumes economics from the
+durable queue without repeating the physical event. Pool overhead retains its
+existing same-transaction queue and guided receipt/recovery retains its durable
+posted/replay continuation; no active physical version depends on an unrecorded
+best-effort recalculation.
+
+An internal query-only recovery planner handles only one proven active-date
+`facility × FBS × SKU` mismatch and has no CLI, HTTP route, timer or automatic
+apply. It requires one immutable lifecycle/document source watermark, exact
+single-SKU mismatch breadth and bounded functional/ready closure; FBO, WB,
+historical, broad or unknown-source cases fail closed. The deterministic
+candidate recomputes the affected SKU plus TOTAL own cost, Proxy 3
+profit/margin and Proxy 4 profit/margin/unit margin, and pins source/target
+version, roster, provenance, auxiliary and ready-snapshot digests. Durable
+append-only intent states are `repairable`, `repairing`, `repaired`,
+`retry_exhausted`, `historical_recovery_required` and `unsafe_ambiguous`; the
+complete bounded plan persists across process restart, and exact readback
+reconciles a lost response without blind retry. Typed evidence publishes only
+dependencies, invariant reasons, repairability and candidate/readback identity
+for a future WBC0012 consumer. It defines no color, severity or health UI and
+does not apply the historical incident.
 
 # 2. Physical and cost rules
 

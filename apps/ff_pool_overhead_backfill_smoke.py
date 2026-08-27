@@ -31,6 +31,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
     RegistryUploadDbBackedRuntime,
 )
 from packages.application.warehouse_functional import (  # noqa: E402
+    STAGES,
     ensure_warehouse_functional_schema,
 )
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
@@ -162,12 +163,22 @@ def main() -> None:
                     ("fac_ore", "FBS", 202, 1, 20, "200.00", "10.00", "fixture", clock()),
                 ],
             )
+            cutover_at = clock()
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers(
+                       cutover_id,cutover_at,status,plan_fingerprint,
+                       source_watermarks_json,absorbed_supply_revisions_json,
+                       backup_json,created_at,updated_at)
+                   VALUES('warehouse_functional_cutover_v1',?,'posted',
+                          'sha256:fixture-cutover','{}','{}','{}',?,?)""",
+                (cutover_at, cutover_at, cutover_at),
+            )
             conn.execute(
                 "INSERT INTO sheet_vitrina_v1_warehouse_functional_versions("
                 "version_id,cutover_id,version_kind,effective_at,business_effective_date,"
                 "published_at,status,plan_fingerprint,local_source_digest,"
                 "source_watermarks_json,created_at) VALUES("
-                "'v1','fixture','fixture',?,'2026-08-21',?,'good',"
+                "'v1','warehouse_functional_cutover_v1','fixture',?,'2026-08-21',?,'good',"
                 "'sha256:fixture','sha256:fixture','{}',?)",
                 (clock(), clock(), clock()),
             )
@@ -176,7 +187,14 @@ def main() -> None:
                 "slot,version_id,updated_at) VALUES(1,'v1',?)",
                 (clock(),),
             )
-            for nm_id, quantity, wac, capital in (
+            sync_at = clock()
+            conn.execute(
+                "INSERT INTO sheet_vitrina_v1_warehouse_wb_sync_status("
+                "slot,last_attempt_at,last_success_at,last_error,active_version_id,updated_at) "
+                "VALUES(1,?,?,NULL,'v1',?)",
+                (sync_at, sync_at, sync_at),
+            )
+            for nm_id, ff_quantity, ff_wac, ff_capital in (
                 (
                     101,
                     "10",
@@ -185,14 +203,29 @@ def main() -> None:
                 ),
                 (202, "20", "10.00", "200.00"),
             ):
-                conn.execute(
-                    "INSERT INTO sheet_vitrina_v1_warehouse_functional_balances("
-                    "version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,"
-                    "cost_covered_quantity,quality,certified,wb_quantity,"
-                    "wb_in_way_to_client,wb_in_way_from_client,provenance_json) "
-                    "VALUES('v1','ff',?,?,?,?,?,'exact',1,'0','0','0','{}')",
-                    (nm_id, quantity, wac, capital, quantity),
-                )
+                for stage in STAGES:
+                    quantity = ff_quantity if stage == "ff" else "0"
+                    wac = ff_wac if stage == "ff" else None
+                    capital = ff_capital if stage == "ff" else "0"
+                    conn.execute(
+                        "INSERT INTO sheet_vitrina_v1_warehouse_functional_balances("
+                        "version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,"
+                        "cost_covered_quantity,quality,certified,wb_quantity,"
+                        "wb_in_way_to_client,wb_in_way_from_client,provenance_json) "
+                        "VALUES('v1',?,?,?,?,?,?,'exact',1,'0','0','0','{}')",
+                        (stage, nm_id, quantity, wac, capital, quantity),
+                    )
+            snapshot_at = clock()
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                       snapshot_id,version_id,fetched_at,snapshot_date,
+                       requested_nm_ids_json,pagination_complete,page_count,
+                       page_offsets_json,raw_row_count,raw_rows_digest,
+                       raw_rows_json,items_json,created_at)
+                   VALUES('snapshot-v1','v1',?,'2026-08-21','[101,202]',1,1,
+                          '[0]',2,'sha256:fixture-snapshot','[]','[]',?)""",
+                (snapshot_at, snapshot_at),
+            )
             conn.commit()
 
         documents = []
@@ -227,16 +260,23 @@ def main() -> None:
         # neither causes a second capitalization.
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(f"DELETE FROM {TARGETED_RECALC_QUEUE_TABLE}")
+            active_version_id = str(
+                conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()[0]
+            )
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
                 "SET capital_rub='115306.500000000000000000099999',"
                 "wac_rub='11530.6500000000000000000099999' "
-                "WHERE version_id='v1' AND warehouse_key='ff' AND nm_id=101"
+                "WHERE version_id=? AND warehouse_key='ff' AND nm_id=101",
+                (active_version_id,),
             )
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
                 "SET capital_rub='60200.000',wac_rub='3010.000' "
-                "WHERE version_id='v1' AND warehouse_key='ff' AND nm_id=202"
+                "WHERE version_id=? AND warehouse_key='ff' AND nm_id=202",
+                (active_version_id,),
             )
             conn.commit()
             before_aggregate = {
@@ -244,8 +284,9 @@ def main() -> None:
                 for row in conn.execute(
                     "SELECT nm_id,capital_rub FROM "
                     "sheet_vitrina_v1_warehouse_functional_balances "
-                    "WHERE version_id='v1' AND warehouse_key='ff' "
-                    "ORDER BY nm_id"
+                    "WHERE version_id=? AND warehouse_key='ff' "
+                    "ORDER BY nm_id",
+                    (active_version_id,),
                 )
             }
 
@@ -368,8 +409,9 @@ def main() -> None:
                     for row in conn.execute(
                         "SELECT nm_id,capital_rub FROM "
                         "sheet_vitrina_v1_warehouse_functional_balances "
-                        "WHERE version_id='v1' AND warehouse_key='ff' "
-                        "ORDER BY nm_id"
+                        "WHERE version_id=? AND warehouse_key='ff' "
+                        "ORDER BY nm_id",
+                        (active_version_id,),
                     )
                 }
             assert after_aggregate == before_aggregate
