@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -23,8 +24,12 @@ from apps.registry_upload_http_entrypoint_hosted_runtime import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
-from packages.application.storage_registry import StoreRegistry  # noqa: E402
+from packages.application.storage_registry import (  # noqa: E402
+    StoreRegistry,
+    manifest_payload,
+)
 from packages.application.warehouse_fbs_material_rematerialization import (  # noqa: E402
+    HISTORICAL_MANIFEST_SCHEMA,
     WarehouseFbsMaterialRematerializer,
 )
 
@@ -32,9 +37,11 @@ from packages.application.warehouse_fbs_material_rematerialization import (  # n
 def run(args: argparse.Namespace) -> int:
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
     target = load_hosted_runtime_target(Path(args.target_file).expanduser().resolve())
-    target_runtime_dir = Path(
-        str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "")
-    ).expanduser().resolve()
+    target_runtime_dir = (
+        Path(str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""))
+        .expanduser()
+        .resolve()
+    )
     if not (
         target.target_status == "active"
         and target.target_id == ACTIVE_HOSTED_RUNTIME_TARGET_ID
@@ -61,15 +68,22 @@ def run(args: argparse.Namespace) -> int:
     generation = registry.load(require_files=True)
     if generation.implicit:
         raise ValueError("an explicit StoreRegistry generation is required")
-    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    db_path = registry.resolve("operational", manifest=generation)
+    query_only = True
+    runtime = RegistryUploadDbBackedRuntime(
+        runtime_dir=runtime_dir,
+        operational_db_path=db_path,
+        store_registry=registry,
+    )
     service = WarehouseFbsMaterialRematerializer(
         runtime=runtime,
-        timestamp_factory=lambda: datetime.now(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+        timestamp_factory=lambda: (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         ),
     )
     runtime_binding = {
         "canonical_target": {
+            "accepted": True,
             "target_id": target.target_id,
             "target_status": target.target_status,
             "target_role": target.target_role,
@@ -78,6 +92,8 @@ def run(args: argparse.Namespace) -> int:
             "deployed_sha": deployed_sha,
         },
         "storage_generation": {
+            "implicit": bool(generation.implicit),
+            "query_only": query_only,
             "manifest_sha256": generation.manifest_sha256,
             "state": generation.state,
             "canonical_source": generation.canonical_source,
@@ -85,6 +101,15 @@ def run(args: argparse.Namespace) -> int:
             "operational_generation_id": generation.operational.generation_id,
             "operational_schema_revision": generation.operational.schema_revision,
             "operational_relative_path": generation.operational.relative_path,
+            "manifest_fingerprint": "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    manifest_payload(generation),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
         },
     }
     if args.action == "plan":
@@ -93,8 +118,22 @@ def run(args: argparse.Namespace) -> int:
         manifest = json.loads(Path(args.manifest_file).read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("--manifest-file must contain one JSON object")
+        _validate_domain_manifest(manifest)
         manifest.update(runtime_binding)
-        result = service.build_historical_plan(manifest)
+        with registry.session(
+            "operational",
+            mode="ro",
+            operation="warehouse_fbs_historical_recovery_plan",
+            manifest=generation,
+        ) as dependency_conn:
+            if not bool(
+                int(dependency_conn.execute("PRAGMA query_only").fetchone()[0])
+            ):
+                raise ValueError("historical dependency session is not query-only")
+            result = service.build_historical_plan(
+                manifest,
+                dependency_conn=dependency_conn,
+            )
         written = _write_private(
             Path(args.output),
             result,
@@ -135,6 +174,48 @@ def run(args: argparse.Namespace) -> int:
         public = service.readback(operation_id=str(args.operation_id))
     print(json.dumps(public, ensure_ascii=False, sort_keys=True, indent=2))
     return 0 if public.get("status") not in {"unsafe_ambiguous", "not_found"} else 2
+
+
+def _validate_domain_manifest(manifest: dict[str, object]) -> None:
+    required = {
+        "schema",
+        "business_date",
+        "facility_id",
+        "pool",
+        "nm_ids",
+        "accepted_version_id",
+        "accepted_version_plan_digest",
+        "accepted_version_row_digest",
+        "accepted_target_row_digest",
+        "accepted_provenance_digest",
+        "accepted_effective_at",
+        "accepted_published_at",
+        "expected_current_active_version_id",
+        "expected_current_sync_version_id",
+        "expected_current_pool_digest",
+        "event_id",
+        "event_source_digest",
+        "event_status_digest",
+        "event_evidence_digest",
+        "event_row_digest",
+        "event_quantity_delta",
+        "event_capital_delta_rub",
+        "event_wac_rub",
+        "event_occurred_at",
+        "accepted_quantity",
+        "accepted_cost_covered_quantity",
+        "accepted_capital_rub",
+    }
+    if set(manifest) != required:
+        raise ValueError(
+            "historical manifest fields must be exact; "
+            f"missing={sorted(required - set(manifest))} "
+            f"extra={sorted(set(manifest) - required)}"
+        )
+    if manifest.get("schema") != HISTORICAL_MANIFEST_SCHEMA:
+        raise ValueError(
+            f"historical manifest schema must be {HISTORICAL_MANIFEST_SCHEMA}"
+        )
 
 
 def main() -> int:

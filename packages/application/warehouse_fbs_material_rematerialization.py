@@ -9,9 +9,10 @@ the same SQLite transaction.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import date
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import sqlite3
@@ -33,8 +34,6 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
 )
 from packages.application.sheet_vitrina_v1_own_product_capital import (
-    OWN_PRODUCT_CAPITAL_STAGES,
-    OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
     OWN_TOTAL_QTY_METRIC_KEY,
@@ -48,6 +47,7 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.business_data_write_barrier import barrier_status
 from packages.business_time import current_business_date_iso
 
 if TYPE_CHECKING:
@@ -70,6 +70,7 @@ MAX_PERSISTED_PLAN_BYTES = 10_000_000
 ZERO = Decimal("0")
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 STAGE_FF = "ff"
+HISTORICAL_MANIFEST_SCHEMA = "warehouse_fbs_historical_recovery_manifest_v2"
 
 REPAIRABLE = "repairable"
 REPAIRING = "repairing"
@@ -411,7 +412,11 @@ class WarehouseFbsMaterialRematerializer:
             )
             candidate_rows = list(candidate["lines"])
             roster_nm_ids = sorted(
-                {int(item["nm_id"]) for item in candidate_rows if int(item["nm_id"]) > 0}
+                {
+                    int(item["nm_id"])
+                    for item in candidate_rows
+                    if int(item["nm_id"]) > 0
+                }
             )
             warehouse_metrics = _warehouse_metric_lookup(
                 candidate_rows,
@@ -454,7 +459,9 @@ class WarehouseFbsMaterialRematerializer:
                     "costs": costs,
                     "calculation_parameters": params.public(),
                     "proxy_v4_parameters": (
-                        proxy_v4_params.public() if proxy_v4_params is not None else None
+                        proxy_v4_params.public()
+                        if proxy_v4_params is not None
+                        else None
                     ),
                 }
             )
@@ -494,7 +501,10 @@ class WarehouseFbsMaterialRematerializer:
                             "as_of_date": str(snapshot["as_of_date"]),
                         },
                     )
-                if _cell_decimal(before_cells.get(f"SKU:{target_nm_id}|orderSum")) > ZERO:
+                if (
+                    _cell_decimal(before_cells.get(f"SKU:{target_nm_id}|orderSum"))
+                    > ZERO
+                ):
                     affected_positive_order_skus.add(target_nm_id)
                 before_missing.update(
                     key
@@ -540,8 +550,7 @@ class WarehouseFbsMaterialRematerializer:
                     }
                 )
             ready_after_bytes = sum(
-                len(str(item["after_plan_json"]).encode("utf-8"))
-                for item in updates
+                len(str(item["after_plan_json"]).encode("utf-8")) for item in updates
             )
             if ready_after_bytes > MAX_READY_CLOSURE_BYTES:
                 return _blocked_plan(
@@ -573,10 +582,24 @@ class WarehouseFbsMaterialRematerializer:
                 conn, str(active["version_id"]), nm_ids=targets
             )
             ready_before_digest = _fingerprint(
-                [[item["bundle_version"], item["as_of_date"], item["before_plan_sha256"]] for item in updates]
+                [
+                    [
+                        item["bundle_version"],
+                        item["as_of_date"],
+                        item["before_plan_sha256"],
+                    ]
+                    for item in updates
+                ]
             )
             ready_after_digest = _fingerprint(
-                [[item["bundle_version"], item["as_of_date"], item["after_plan_sha256"]] for item in updates]
+                [
+                    [
+                        item["bundle_version"],
+                        item["as_of_date"],
+                        item["after_plan_sha256"],
+                    ]
+                    for item in updates
+                ]
             )
             typed_evidence = {
                 "affected_positive_order_sku_count": len(affected_positive_order_skus),
@@ -653,22 +676,40 @@ class WarehouseFbsMaterialRematerializer:
                 )
             return plan
 
-    def build_historical_plan(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    def build_historical_plan(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        dependency_conn: sqlite3.Connection,
+    ) -> dict[str, Any]:
         """Build one immutable historical repair without reading current pool as source."""
 
+        if not bool(int(dependency_conn.execute("PRAGMA query_only").fetchone()[0])):
+            raise WarehouseFbsMaterialError(
+                "historical_dependency_session_not_query_only",
+                "Historical qualification requires the explicitly bound query-only dependency session",
+            )
+        dependency_conn.row_factory = sqlite3.Row
+
         bound = deepcopy(dict(manifest))
-        required_manifest_fields = (
+        required_manifest_fields = {
+            "schema",
             "business_date",
             "facility_id",
             "pool",
             "nm_ids",
             "accepted_version_id",
-            "accepted_version_fingerprint",
+            "accepted_version_plan_digest",
+            "accepted_version_row_digest",
+            "accepted_target_row_digest",
+            "accepted_provenance_digest",
             "accepted_effective_at",
             "accepted_published_at",
             "expected_current_active_version_id",
+            "expected_current_sync_version_id",
+            "expected_current_pool_digest",
             "event_id",
-            "event_source_revision",
+            "event_source_digest",
             "event_status_digest",
             "event_evidence_digest",
             "event_row_digest",
@@ -679,7 +720,38 @@ class WarehouseFbsMaterialRematerializer:
             "accepted_quantity",
             "accepted_cost_covered_quantity",
             "accepted_capital_rub",
-        )
+            "canonical_target",
+            "storage_generation",
+        }
+        actual_manifest_fields = set(bound)
+        if actual_manifest_fields != required_manifest_fields:
+            return _blocked_plan(
+                UNSAFE_AMBIGUOUS,
+                "historical_manifest_fields_invalid",
+                business_date=str(bound.get("business_date") or ""),
+                facility_id=str(bound.get("facility_id") or ""),
+                pool=str(bound.get("pool") or "").upper(),
+                nm_ids=bound.get("nm_ids") or [],
+                source_version_id=str(bound.get("accepted_version_id") or ""),
+                details={
+                    "missing_fields": sorted(
+                        required_manifest_fields - actual_manifest_fields
+                    ),
+                    "extra_fields": sorted(
+                        actual_manifest_fields - required_manifest_fields
+                    ),
+                },
+            )
+        if bound.get("schema") != HISTORICAL_MANIFEST_SCHEMA:
+            return _blocked_plan(
+                UNSAFE_AMBIGUOUS,
+                "historical_manifest_schema_invalid",
+                business_date=str(bound.get("business_date") or ""),
+                facility_id=str(bound.get("facility_id") or ""),
+                pool=str(bound.get("pool") or "").upper(),
+                nm_ids=bound.get("nm_ids") or [],
+                source_version_id=str(bound.get("accepted_version_id") or ""),
+            )
         missing_manifest_fields = sorted(
             key
             for key in required_manifest_fields
@@ -697,13 +769,48 @@ class WarehouseFbsMaterialRematerializer:
                 source_version_id=str(bound.get("accepted_version_id") or ""),
                 details={"missing_fields": missing_manifest_fields},
             )
+        typed_digest_fields = (
+            "accepted_version_plan_digest",
+            "accepted_version_row_digest",
+            "accepted_target_row_digest",
+            "accepted_provenance_digest",
+            "expected_current_pool_digest",
+            "event_source_digest",
+            "event_status_digest",
+            "event_evidence_digest",
+            "event_row_digest",
+        )
+        invalid_digest_fields = [
+            key for key in typed_digest_fields if not _is_typed_sha256(bound.get(key))
+        ]
+        if invalid_digest_fields:
+            return _blocked_plan(
+                UNSAFE_AMBIGUOUS,
+                "historical_manifest_digest_invalid",
+                business_date=str(bound.get("business_date") or ""),
+                facility_id=str(bound.get("facility_id") or ""),
+                pool=str(bound.get("pool") or "").upper(),
+                nm_ids=bound.get("nm_ids") or [],
+                source_version_id=str(bound.get("accepted_version_id") or ""),
+                details={"invalid_digest_fields": invalid_digest_fields},
+            )
         target_date = _iso_date(bound.get("business_date"))
         facility_id = str(bound.get("facility_id") or "")
         pool = str(bound.get("pool") or "").upper()
-        targets = sorted({int(value) for value in bound.get("nm_ids") or []})
+        raw_targets = bound.get("nm_ids") or []
+        targets = sorted(int(value) for value in raw_targets)
         source_version_id = str(bound.get("accepted_version_id") or "")
         event_id = str(bound.get("event_id") or "")
-        if pool != "FBS" or len(targets) != 1 or not facility_id:
+        if (
+            pool != "FBS"
+            or len(targets) != 1
+            or len(targets) != len(set(targets))
+            or targets[0] <= 0
+            or not facility_id
+            or not bool(dict(bound.get("canonical_target") or {}).get("accepted"))
+            or bool(dict(bound.get("storage_generation") or {}).get("implicit"))
+            or not bool(dict(bound.get("storage_generation") or {}).get("query_only"))
+        ):
             return _blocked_plan(
                 UNSAFE_AMBIGUOUS,
                 "historical_manifest_scope_invalid",
@@ -713,7 +820,9 @@ class WarehouseFbsMaterialRematerializer:
                 nm_ids=targets,
                 source_version_id=source_version_id,
             )
-        with _connect_readonly(self.runtime.db_path) as conn:
+        # The caller owns this one StoreRegistry-bound dependency session.  The
+        # planner neither resolves storage again nor opens a hidden connection.
+        with nullcontext(dependency_conn) as conn:
             _require_material_schema(conn)
             active = _active_version(conn)
             if active is None or str(active["version_id"]) != str(
@@ -728,12 +837,42 @@ class WarehouseFbsMaterialRematerializer:
                     nm_ids=targets,
                     source_version_id=source_version_id,
                 )
+            sync = conn.execute(
+                "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
+                "WHERE slot=1"
+            ).fetchone()
+            current_pool_digest = _fingerprint(
+                _source_material(
+                    conn,
+                    str(active["version_id"]),
+                    nm_ids=targets,
+                )["pool_rows"]
+            )
+            if (
+                sync is None
+                or str(sync[0])
+                != str(bound.get("expected_current_sync_version_id") or "")
+                or current_pool_digest
+                != str(bound.get("expected_current_pool_digest") or "")
+            ):
+                return _blocked_plan(
+                    UNSAFE_AMBIGUOUS,
+                    "current_sync_or_pool_manifest_drift",
+                    business_date=target_date,
+                    facility_id=facility_id,
+                    pool=pool,
+                    nm_ids=targets,
+                    source_version_id=source_version_id,
+                )
             source = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions "
                 "WHERE version_id=? AND status='good'",
                 (source_version_id,),
             ).fetchone()
-            if source is None or str(source["business_effective_date"] or "") != target_date:
+            if (
+                source is None
+                or str(source["business_effective_date"] or "") != target_date
+            ):
                 return _blocked_plan(
                     UNSAFE_AMBIGUOUS,
                     "accepted_historical_version_missing_or_drifted",
@@ -761,20 +900,36 @@ class WarehouseFbsMaterialRematerializer:
                     source_version_id=source_version_id,
                     details=version_field_bindings,
                 )
-            accepted_fingerprint = str(bound["accepted_version_fingerprint"])
-            if not _digest_matches(
-                accepted_fingerprint,
-                str(source["plan_fingerprint"]),
-                _fingerprint(dict(source)),
+            target_row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
+                (source_version_id, targets[0]),
+            ).fetchone()
+            target_provenance = (
+                _loads(target_row["provenance_json"], {})
+                if target_row is not None
+                else {}
+            )
+            version_digests = {
+                "accepted_version_plan_digest": str(source["plan_fingerprint"]),
+                "accepted_version_row_digest": _fingerprint(dict(source)),
+                "accepted_target_row_digest": (
+                    _fingerprint(dict(target_row)) if target_row is not None else ""
+                ),
+                "accepted_provenance_digest": _fingerprint(target_provenance),
+            }
+            if any(
+                str(bound[key]) != actual for key, actual in version_digests.items()
             ):
                 return _blocked_plan(
                     UNSAFE_AMBIGUOUS,
-                    "accepted_historical_version_fingerprint_drift",
+                    "accepted_historical_typed_digest_drift",
                     business_date=target_date,
                     facility_id=facility_id,
                     pool=pool,
                     nm_ids=targets,
                     source_version_id=source_version_id,
+                    details=version_digests,
                 )
             event = conn.execute(
                 """SELECT event_id,cutover_id,order_id,episode_sequence,event_type,
@@ -827,15 +982,12 @@ class WarehouseFbsMaterialRematerializer:
                     details=event_value_bindings,
                 )
             event_checks = {
-                "event_source_revision": str(event["source_revision"]),
+                "event_source_digest": _fingerprint(str(event["source_revision"])),
                 "event_status_digest": str(event["status_digest"]),
                 "event_evidence_digest": str(event["evidence_digest"]),
                 "event_row_digest": _fingerprint(dict(event)),
             }
-            if any(
-                not _digest_matches(str(bound[key]), actual)
-                for key, actual in event_checks.items()
-            ):
+            if any(str(bound[key]) != actual for key, actual in event_checks.items()):
                 return _blocked_plan(
                     UNSAFE_AMBIGUOUS,
                     "immutable_historical_event_digest_drift",
@@ -900,29 +1052,61 @@ class WarehouseFbsMaterialRematerializer:
                     source_version_id=source_version_id,
                     details=exc.details,
                 )
-            source_material = _source_material(
-                conn, source_version_id, nm_ids=targets
-            )
-            current_pool_digest = _fingerprint(source_material["pool_rows"])
+            source_material = _source_material(conn, source_version_id, nm_ids=targets)
             ready_before_digest = _fingerprint(
                 [
-                    [item["bundle_version"], item["as_of_date"], item["before_plan_sha256"]]
+                    [
+                        item["bundle_version"],
+                        item["as_of_date"],
+                        item["before_plan_sha256"],
+                    ]
                     for item in updates
                 ]
             )
             ready_after_digest = _fingerprint(
                 [
-                    [item["bundle_version"], item["as_of_date"], item["after_plan_sha256"]]
+                    [
+                        item["bundle_version"],
+                        item["as_of_date"],
+                        item["after_plan_sha256"],
+                    ]
                     for item in updates
                 ]
             )
+            candidate_target = next(
+                item
+                for item in candidate["lines"]
+                if str(item["warehouse_key"]) == STAGE_FF
+                and int(item["nm_id"]) == target_nm_id
+            )
+            candidate_target_semantic_row = {
+                key: candidate_target.get(key)
+                for key in (
+                    "quantity",
+                    "wac_rub",
+                    "capital_rub",
+                    "cost_covered_quantity",
+                    "provenance_json",
+                )
+            }
+            ready_closure = [
+                {
+                    "bundle_version": str(item["bundle_version"]),
+                    "as_of_date": str(item["as_of_date"]),
+                    "after_plan_sha256": str(item["after_plan_sha256"]),
+                    "non_target_digest": str(item["non_target_digest"]),
+                }
+                for item in updates
+            ]
             typed_evidence = {
                 "repair_mode": "historical",
                 "accepted_version_id": source_version_id,
                 "immutable_event": {"event_id": event_id, **event_checks},
                 "before": {
                     "quantity": aggregate["accepted_quantity"],
-                    "cost_covered_quantity": aggregate["accepted_cost_covered_quantity"],
+                    "cost_covered_quantity": aggregate[
+                        "accepted_cost_covered_quantity"
+                    ],
                 },
                 "after": {
                     "quantity": aggregate["quantity"],
@@ -932,13 +1116,31 @@ class WarehouseFbsMaterialRematerializer:
                 "economics_dependency_closure": closure,
                 "current_preservation": {
                     "active_version_id": str(active["version_id"]),
+                    "sync_version_id": str(sync[0]),
                     "pool_rows_digest": current_pool_digest,
                 },
                 "readback_identity": {
                     "active_version_id": str(active["version_id"]),
                     "historical_version_id": str(candidate["target_version_id"]),
                     "ready_snapshot_digest": ready_after_digest,
+                    "sync_version_id": str(sync[0]),
                     "current_pool_digest": current_pool_digest,
+                    "historical_target_row_digest": _fingerprint(
+                        candidate_target_semantic_row
+                    ),
+                    "historical_target_provenance_digest": _fingerprint(
+                        _loads(candidate_target["provenance_json"], {})
+                    ),
+                    "business_projection_revision_digest": _fingerprint(
+                        {
+                            "status": "active",
+                            "source_revision": str(candidate["candidate_fingerprint"]),
+                            "business_effective_date": target_date,
+                        }
+                    ),
+                    "ready_target_total_non_target_closure_digest": _fingerprint(
+                        ready_closure
+                    ),
                 },
             }
             plan = {
@@ -1055,30 +1257,53 @@ class WarehouseFbsMaterialRematerializer:
                 "Material repair plan exceeds the exact bounded closure",
             )
         now = str(self.timestamp_factory())
-        self._ensure_intent(
-            normalized,
-            created_at=now,
-            owner_gate=(
-                {
-                    "approval_reference_digest": _fingerprint(
-                        str(approval_reference)
-                    ),
-                    "actor": str(actor),
-                }
-                if historical
-                else None
-            ),
-        )
+        before_barrier = barrier_status(self.runtime.runtime_dir)
+        if before_barrier.get("active") is not False:
+            raise WarehouseFbsMaterialError(
+                "historical_write_barrier_active",
+                "Historical repair requires one inactive read-only barrier readback",
+            )
         with warehouse_functional_write_lock(self.runtime.runtime_dir):
-            existing = self._intent(expected_operation_id)
-            if existing and str(existing["status"]) == REPAIRED:
+            under_lock_barrier = barrier_status(self.runtime.runtime_dir)
+            if under_lock_barrier.get("active") is not False or under_lock_barrier.get(
+                "status"
+            ) != before_barrier.get("status"):
+                raise WarehouseFbsMaterialError(
+                    "historical_write_barrier_drift",
+                    "Historical write barrier changed at the shared-lock boundary",
+                )
+            pre_existing = self._intent(expected_operation_id)
+            if pre_existing and str(pre_existing["status"]) == REPAIRED:
                 return self._repaired_readback(normalized, idempotent=True)
-            if existing and str(existing["status"]) in {
+            if pre_existing and str(pre_existing["status"]) in {
                 RETRY_EXHAUSTED,
                 HISTORICAL_RECOVERY_REQUIRED,
                 UNSAFE_AMBIGUOUS,
             }:
-                return _intent_public(existing)
+                return _intent_public(pre_existing)
+            # The durable intent is a business mutation.  It is created only
+            # after the first under-lock CAS qualification; planning and any
+            # pre-lock failure remain byte-for-byte inert.
+            with _connect(self.runtime.db_path) as intent_conn:
+                ensure_warehouse_fbs_material_schema(intent_conn)
+                intent_conn.execute("BEGIN IMMEDIATE")
+                self._revalidate_plan_cas(intent_conn, normalized)
+                self._ensure_intent(
+                    intent_conn,
+                    normalized,
+                    created_at=now,
+                    owner_gate=(
+                        {
+                            "approval_reference_digest": _fingerprint(
+                                str(approval_reference)
+                            ),
+                            "actor": str(actor),
+                        }
+                        if historical
+                        else None
+                    ),
+                )
+                intent_conn.commit()
             if not self._begin_attempt(normalized, started_at=now):
                 return _intent_public(self._intent(expected_operation_id))  # type: ignore[arg-type]
             try:
@@ -1097,7 +1322,10 @@ class WarehouseFbsMaterialRematerializer:
                         switch_active=not historical,
                     )
                     readback = _readback_identity(conn, normalized)
-                    if readback != dict(normalized["typed_evidence"])["readback_identity"]:
+                    if (
+                        readback
+                        != dict(normalized["typed_evidence"])["readback_identity"]
+                    ):
                         raise WarehouseFbsMaterialError(
                             "repair_readback_mismatch",
                             "Candidate material publication readback differs from the plan",
@@ -1152,11 +1380,9 @@ class WarehouseFbsMaterialRematerializer:
                 "repair_intent_plan_missing",
                 "Durable material repair plan is missing or invalid",
             )
-        if (
-            str(plan.get("operation_id") or "") != str(operation_id)
-            or str(plan.get("plan_fingerprint") or "")
-            != str(row["plan_fingerprint"])
-        ):
+        if str(plan.get("operation_id") or "") != str(operation_id) or str(
+            plan.get("plan_fingerprint") or ""
+        ) != str(row["plan_fingerprint"]):
             raise WarehouseFbsMaterialError(
                 "repair_intent_plan_identity_conflict",
                 "Durable material repair plan differs from its intent identity",
@@ -1199,7 +1425,8 @@ class WarehouseFbsMaterialRematerializer:
             ).fetchone()
             if row is None:
                 raise WarehouseFbsMaterialError(
-                    "repair_intent_missing", "Durable material repair intent disappeared"
+                    "repair_intent_missing",
+                    "Durable material repair intent disappeared",
                 )
             if str(row["status"]) == REPAIRED:
                 conn.rollback()
@@ -1227,92 +1454,87 @@ class WarehouseFbsMaterialRematerializer:
 
     def _ensure_intent(
         self,
+        conn: sqlite3.Connection,
         plan: Mapping[str, Any],
         *,
         created_at: str,
         owner_gate: Mapping[str, Any] | None = None,
     ) -> None:
-        with _connect(self.runtime.db_path) as conn:
-            ensure_warehouse_fbs_material_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                f"SELECT * FROM {INTENTS_TABLE} WHERE operation_id=?",
-                (str(plan["operation_id"]),),
-            ).fetchone()
-            if existing is None:
-                conn.execute(
-                    f"""INSERT INTO {INTENTS_TABLE}(
+        existing = conn.execute(
+            f"SELECT * FROM {INTENTS_TABLE} WHERE operation_id=?",
+            (str(plan["operation_id"]),),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                f"""INSERT INTO {INTENTS_TABLE}(
                            operation_id,business_date,facility_id,pool,nm_id,
                            source_version_id,target_version_id,plan_fingerprint,plan_json,
                            source_material_digest,roster_digest,provenance_digest,
                            ready_before_digest,ready_after_digest,status,attempt_count,
                            typed_evidence_json,last_error,created_at,updated_at
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'repairable',0,?,NULL,?,?)""",
-                    (
-                        str(plan["operation_id"]),
-                        str(plan["business_date"]),
-                        str(plan["facility_id"]),
-                        "FBS",
-                        int(plan["nm_ids"][0]),
-                        str(plan["source_version_id"]),
-                        str(plan["target_version_id"]),
-                        str(plan["plan_fingerprint"]),
-                        _json(plan),
-                        str(plan["source_material_digest"]),
-                        str(plan["roster_digest"]),
-                        str(plan["provenance_digest"]),
-                        str(plan["ready_before_digest"]),
-                        str(plan["ready_after_digest"]),
-                        _json(plan["typed_evidence"]),
-                        created_at,
-                        created_at,
+                (
+                    str(plan["operation_id"]),
+                    str(plan["business_date"]),
+                    str(plan["facility_id"]),
+                    "FBS",
+                    int(plan["nm_ids"][0]),
+                    str(plan["source_version_id"]),
+                    str(plan["target_version_id"]),
+                    str(plan["plan_fingerprint"]),
+                    _json(plan),
+                    str(plan["source_material_digest"]),
+                    str(plan["roster_digest"]),
+                    str(plan["provenance_digest"]),
+                    str(plan["ready_before_digest"]),
+                    str(plan["ready_after_digest"]),
+                    _json(plan["typed_evidence"]),
+                    created_at,
+                    created_at,
+                ),
+            )
+            _append_intent_event(
+                conn,
+                operation_id=str(plan["operation_id"]),
+                status=REPAIRABLE,
+                evidence={
+                    "phase": "durable_plan",
+                    **(
+                        {"owner_gate": dict(owner_gate)}
+                        if owner_gate is not None
+                        else {}
                     ),
-                )
-                _append_intent_event(
-                    conn,
-                    operation_id=str(plan["operation_id"]),
-                    status=REPAIRABLE,
-                    evidence={
-                        "phase": "durable_plan",
-                        **(
-                            {"owner_gate": dict(owner_gate)}
-                            if owner_gate is not None
-                            else {}
-                        ),
-                    },
-                    created_at=created_at,
-                )
-            elif (
-                str(existing["plan_fingerprint"]) != str(plan["plan_fingerprint"])
-                or _fingerprint(_loads(existing["plan_json"], {}))
-                != _fingerprint(plan)
-            ):
+                },
+                created_at=created_at,
+            )
+        elif str(existing["plan_fingerprint"]) != str(
+            plan["plan_fingerprint"]
+        ) or _fingerprint(_loads(existing["plan_json"], {})) != _fingerprint(plan):
+            raise WarehouseFbsMaterialError(
+                "repair_orchestration_identity_conflict",
+                "Existing material intent has another exact plan identity",
+            )
+        elif owner_gate is not None:
+            first_event = conn.execute(
+                f"SELECT evidence_json FROM {EVENTS_TABLE} "
+                "WHERE operation_id=? AND status=? "
+                "ORDER BY event_sequence LIMIT 1",
+                (str(plan["operation_id"]), REPAIRABLE),
+            ).fetchone()
+            persisted_gate = (
+                dict(_loads(first_event[0], {}).get("owner_gate") or {})
+                if first_event is not None
+                else {}
+            )
+            if persisted_gate != dict(owner_gate):
                 raise WarehouseFbsMaterialError(
-                    "repair_orchestration_identity_conflict",
-                    "Existing material intent has another exact plan identity",
+                    "historical_repair_owner_gate_conflict",
+                    "Historical repair resume owner evidence changed",
                 )
-            elif owner_gate is not None:
-                first_event = conn.execute(
-                    f"SELECT evidence_json FROM {EVENTS_TABLE} "
-                    "WHERE operation_id=? AND status=? "
-                    "ORDER BY event_sequence LIMIT 1",
-                    (str(plan["operation_id"]), REPAIRABLE),
-                ).fetchone()
-                persisted_gate = (
-                    dict(_loads(first_event[0], {}).get("owner_gate") or {})
-                    if first_event is not None
-                    else {}
-                )
-                if persisted_gate != dict(owner_gate):
-                    raise WarehouseFbsMaterialError(
-                        "historical_repair_owner_gate_conflict",
-                        "Historical repair resume owner evidence changed",
-                    )
-            conn.commit()
 
     def _intent(self, operation_id: str) -> sqlite3.Row | None:
-        with _connect(self.runtime.db_path) as conn:
-            ensure_warehouse_fbs_material_schema(conn)
+        with _connect_readonly(self.runtime.db_path) as conn:
+            _require_material_schema(conn)
             return conn.execute(
                 f"SELECT * FROM {INTENTS_TABLE} WHERE operation_id=?",
                 (operation_id,),
@@ -1330,6 +1552,28 @@ class WarehouseFbsMaterialRematerializer:
                 "repair_active_version_cas_drift",
                 "Active functional version changed after incident planning",
             )
+        if str(plan.get("mode") or "") == "historical":
+            manifest = dict(plan.get("historical_manifest") or {})
+            sync = conn.execute(
+                "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
+                "WHERE slot=1"
+            ).fetchone()
+            current_pool_digest = _fingerprint(
+                _source_material(conn, expected_active, nm_ids=plan["nm_ids"])[
+                    "pool_rows"
+                ]
+            )
+            if (
+                sync is None
+                or str(sync[0])
+                != str(manifest.get("expected_current_sync_version_id") or "")
+                or current_pool_digest
+                != str(manifest.get("expected_current_pool_digest") or "")
+            ):
+                raise WarehouseFbsMaterialError(
+                    "historical_current_preservation_cas_drift",
+                    "Current sync or physical pool changed after historical planning",
+                )
         material_source_version_id = (
             str(plan["source_version_id"])
             if str(plan.get("mode") or "") == "historical"
@@ -1350,6 +1594,37 @@ class WarehouseFbsMaterialRematerializer:
         candidate = dict(plan["candidate"])
         if str(plan.get("mode") or "") == "historical":
             manifest = dict(plan.get("historical_manifest") or {})
+            source = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions "
+                "WHERE version_id=? AND status='good'",
+                (str(plan["source_version_id"]),),
+            ).fetchone()
+            target_row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+                "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
+                (str(plan["source_version_id"]), int(plan["nm_ids"][0])),
+            ).fetchone()
+            if source is None or target_row is None:
+                raise WarehouseFbsMaterialError(
+                    "historical_source_cas_drift",
+                    "Accepted historical source disappeared after planning",
+                )
+            source_checks = {
+                "accepted_version_plan_digest": str(source["plan_fingerprint"]),
+                "accepted_version_row_digest": _fingerprint(dict(source)),
+                "accepted_target_row_digest": _fingerprint(dict(target_row)),
+                "accepted_provenance_digest": _fingerprint(
+                    _loads(target_row["provenance_json"], {})
+                ),
+            }
+            if any(
+                str(manifest.get(key) or "") != value
+                for key, value in source_checks.items()
+            ):
+                raise WarehouseFbsMaterialError(
+                    "historical_source_cas_drift",
+                    "Accepted historical row or provenance changed after planning",
+                )
             event = conn.execute(
                 """SELECT event_id,cutover_id,order_id,episode_sequence,event_type,
                           source_order_observation_sequence,
@@ -1367,14 +1642,13 @@ class WarehouseFbsMaterialRematerializer:
                     "Immutable historical event disappeared after planning",
                 )
             event_checks = {
-                "event_source_revision": str(event["source_revision"]),
+                "event_source_digest": _fingerprint(str(event["source_revision"])),
                 "event_status_digest": str(event["status_digest"]),
                 "event_evidence_digest": str(event["evidence_digest"]),
                 "event_row_digest": _fingerprint(dict(event)),
             }
             if any(
-                manifest.get(key)
-                and not _digest_matches(str(manifest[key]), actual)
+                manifest.get(key) and str(manifest[key]) != actual
                 for key, actual in event_checks.items()
             ):
                 raise WarehouseFbsMaterialError(
@@ -1446,34 +1720,34 @@ class WarehouseFbsMaterialRematerializer:
             )
 
     def _reconcile_after_error(self, plan: Mapping[str, Any]) -> dict[str, Any] | None:
-        with _connect(self.runtime.db_path) as conn:
-            ensure_warehouse_fbs_material_schema(conn)
+        """Query-only same-operation reconciliation after an ambiguous response."""
+
+        with _connect_readonly(self.runtime.db_path) as conn:
+            _require_material_schema(conn)
             intent = conn.execute(
                 f"SELECT * FROM {INTENTS_TABLE} WHERE operation_id=?",
                 (str(plan["operation_id"]),),
             ).fetchone()
             if intent is not None and str(intent["status"]) == REPAIRED:
-                if _readback_identity(conn, plan) == dict(plan["typed_evidence"])[
-                    "readback_identity"
-                ]:
+                if (
+                    _readback_identity(conn, plan)
+                    == dict(plan["typed_evidence"])["readback_identity"]
+                ):
                     return self._repaired_readback(plan, idempotent=True)
             candidate = conn.execute(
                 "SELECT status FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?",
                 (str(plan["target_version_id"]),),
             ).fetchone()
             if candidate is not None:
-                conn.execute("BEGIN IMMEDIATE")
-                _transition_intent(
-                    conn,
-                    operation_id=str(plan["operation_id"]),
-                    status=UNSAFE_AMBIGUOUS,
-                    evidence={"phase": "ambiguous_candidate_readback"},
-                    created_at=str(self.timestamp_factory()),
-                )
-                conn.commit()
-                return _intent_public(
-                    self._intent(str(plan["operation_id"]))  # type: ignore[arg-type]
-                )
+                return {
+                    **(_intent_public(intent) if intent is not None else {}),
+                    "contract_name": CONTRACT_NAME,
+                    "operation_id": str(plan["operation_id"]),
+                    "status": UNSAFE_AMBIGUOUS,
+                    "query_only": True,
+                    "candidate_present": True,
+                    "reason": "ambiguous_candidate_readback",
+                }
         return None
 
     def _record_recoverable_failure(
@@ -1507,7 +1781,10 @@ class WarehouseFbsMaterialRematerializer:
                 conn,
                 operation_id=str(plan["operation_id"]),
                 status=status,
-                evidence={"phase": "publication_error", "code": code or type(error).__name__},
+                evidence={
+                    "phase": "publication_error",
+                    "code": code or type(error).__name__,
+                },
                 created_at=failed_at,
                 error=str(error)[:1000],
             )
@@ -1546,7 +1823,8 @@ def _build_candidate(
     active = _active_version(conn)
     if active is None:
         raise WarehouseFbsMaterialError(
-            "fbs_material_active_missing", "One exact good active functional version is required"
+            "fbs_material_active_missing",
+            "One exact good active functional version is required",
         )
     source_version_id = str(source_version_id_override or active["version_id"])
     source = conn.execute(
@@ -1555,7 +1833,8 @@ def _build_candidate(
     ).fetchone()
     if source is None or str(source["status"]) != "good":
         raise WarehouseFbsMaterialError(
-            "fbs_material_source_missing", "One exact good source functional version is required"
+            "fbs_material_source_missing",
+            "One exact good source functional version is required",
         )
     if str(source["business_effective_date"] or "") != business_date:
         raise WarehouseFbsMaterialError(
@@ -1582,7 +1861,9 @@ def _build_candidate(
         if target_aggregates_override is not None
         else _pool_aggregates(conn, targets)
     )
-    by_key = {(str(item["warehouse_key"]), int(item["nm_id"])): item for item in raw_lines}
+    by_key = {
+        (str(item["warehouse_key"]), int(item["nm_id"])): item for item in raw_lines
+    }
     provenance_rows: list[dict[str, Any]] = []
     for nm_id in targets:
         aggregate = target_aggregates[nm_id]
@@ -1603,7 +1884,10 @@ def _build_candidate(
             wb_from_client = str(current["wb_in_way_from_client"])
             prior_provenance = _loads(current["provenance_json"], {})
         else:
-            if not allow_source_mismatch and Decimal(str(aggregate["quantity"])) <= ZERO:
+            if (
+                not allow_source_mismatch
+                and Decimal(str(aggregate["quantity"])) <= ZERO
+            ):
                 raise WarehouseFbsMaterialError(
                     "fbs_material_aggregate_sku_missing",
                     "Current FF aggregate SKU is absent before a non-positive pool effect",
@@ -1662,7 +1946,11 @@ def _build_candidate(
         }
         by_key[(STAGE_FF, nm_id)] = replacement
         provenance_rows.append(
-            {"nm_id": nm_id, "pool_digest": aggregate["digest"], "provenance": provenance}
+            {
+                "nm_id": nm_id,
+                "pool_digest": aggregate["digest"],
+                "provenance": provenance,
+            }
         )
     source_watermarks = _loads(source["source_watermarks_json"], {})
     source_watermarks["fbs_material_revision"] = {
@@ -1845,7 +2133,9 @@ def _persist_candidate_and_switch(
            WHERE version_id=? ORDER BY created_at DESC LIMIT 1""",
         (source_version_id,),
     ).fetchone()
-    if snapshot is None or str(snapshot["snapshot_date"]) != str(candidate["business_date"]):
+    if snapshot is None or str(snapshot["snapshot_date"]) != str(
+        candidate["business_date"]
+    ):
         raise WarehouseFbsMaterialError(
             "fbs_material_snapshot_missing",
             "Candidate requires the exact official snapshot of its business date",
@@ -2221,9 +2511,10 @@ def _insert_material_revision_documents(
             context.prec = 160
             quantity = sum((Decimal(str(line["quantity"])) for line in lines), ZERO)
             capital = sum((Decimal(str(line["capital_rub"])) for line in lines), ZERO)
-        document_id = "whdoc_fbs_" + _fingerprint(
-            {"version_id": version_id, "warehouse_key": stage}
-        )[7:31]
+        document_id = (
+            "whdoc_fbs_"
+            + _fingerprint({"version_id": version_id, "warehouse_key": stage})[7:31]
+        )
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_warehouse_functional_documents(
                    document_id,version_id,warehouse_key,document_type,occurred_at,
@@ -2251,9 +2542,12 @@ def _insert_material_revision_documents(
             ),
         )
         for line in sorted(lines, key=lambda item: int(item["nm_id"])):
-            line_id = "whdocline_fbs_" + _fingerprint(
-                {"document_id": document_id, "nm_id": int(line["nm_id"])}
-            )[7:31]
+            line_id = (
+                "whdocline_fbs_"
+                + _fingerprint(
+                    {"document_id": document_id, "nm_id": int(line["nm_id"])}
+                )[7:31]
+            )
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_functional_document_lines(
                        line_id,document_id,version_id,nm_id,quantity,wac_rub,
@@ -2311,57 +2605,110 @@ def _historical_event_aggregate(
             "Historical handoff debit is not an exact finite quantity/capital effect",
         )
     canonical_wac = canonical_decimal_ratio_text(capital, quantity)
-    if row["wac_rub"] is None or str(row["wac_rub"]) != canonical_wac:
+    try:
+        accepted_wac = Decimal(str(row["wac_rub"]))
+    except (InvalidOperation, TypeError, ValueError):
+        accepted_wac = ZERO
+    if not accepted_wac.is_finite() or accepted_wac <= ZERO:
         raise WarehouseFbsMaterialError(
             "historical_accepted_wac_invalid",
-            "Accepted historical WAC differs from the canonical 38-digit ratio",
+            "Accepted historical WAC must be one finite positive stored value",
         )
     prior_matches: list[dict[str, Any]] = []
     provenance = _loads(row["provenance_json"], {})
     for record in provenance.get("source_records") or []:
         if not isinstance(record, Mapping):
             continue
-        for location in record.get("locations") or []:
-            if not isinstance(location, Mapping):
-                continue
-            if (
-                str(location.get("facility_id") or "") != str(facility_id)
-                or str(location.get("pool") or "").upper() != "FBS"
-            ):
-                continue
-            prior_quantity = Decimal(str(location.get("quantity") or "0"))
-            prior_capital = Decimal(str(location.get("capital_rub") or "0"))
-            if (
-                prior_quantity + quantity_delta == quantity
-                and prior_capital + capital_delta == capital
-            ):
-                prior_matches.append(
-                    {
-                        "facility_id": str(facility_id),
-                        "pool": "FBS",
-                        "prior_quantity": canonical_decimal_text(prior_quantity),
-                        "prior_capital_rub": canonical_decimal_text(prior_capital),
-                    }
-                )
-    unique_prior = {
-        _json(item): item for item in prior_matches
-    }
+        locations = [
+            dict(location)
+            for location in record.get("locations") or []
+            if isinstance(location, Mapping)
+        ]
+        target_positions = [
+            index
+            for index, location in enumerate(locations)
+            if str(location.get("facility_id") or "") == str(facility_id)
+            and str(location.get("pool") or "").upper() == "FBS"
+        ]
+        if len(target_positions) != 1 or not locations:
+            continue
+        try:
+            prior_quantity = sum(
+                (
+                    Decimal(str(location.get("quantity") or "0"))
+                    for location in locations
+                ),
+                ZERO,
+            )
+            prior_capital = sum(
+                (
+                    Decimal(str(location.get("capital_rub") or "0"))
+                    for location in locations
+                ),
+                ZERO,
+            )
+            target_position = target_positions[0]
+            target_prior_quantity = Decimal(
+                str(locations[target_position].get("quantity") or "0")
+            )
+            target_prior_capital = Decimal(
+                str(locations[target_position].get("capital_rub") or "0")
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        target_after_quantity = target_prior_quantity + quantity_delta
+        target_after_capital = target_prior_capital + capital_delta
+        if (
+            prior_quantity + quantity_delta != quantity
+            or prior_capital + capital_delta != capital
+            or target_after_quantity < ZERO
+            or target_after_capital < ZERO
+        ):
+            continue
+        transformed_locations: list[dict[str, Any]] = []
+        for index, location in enumerate(locations):
+            item = dict(location)
+            item["pool"] = str(item.get("pool") or "").upper()
+            item_quantity = (
+                target_after_quantity
+                if index == target_position
+                else Decimal(str(item.get("quantity") or "0"))
+            )
+            item_capital = (
+                target_after_capital
+                if index == target_position
+                else Decimal(str(item.get("capital_rub") or "0"))
+            )
+            item["quantity"] = canonical_decimal_text(item_quantity)
+            item["capital_rub"] = canonical_decimal_text(item_capital)
+            item["wac_rub"] = (
+                canonical_decimal_ratio_text(item_capital, item_quantity)
+                if item_quantity > ZERO
+                else None
+            )
+            if index == target_position:
+                item["source_watermark"] = str(event["event_id"])
+            transformed_locations.append(item)
+        prior_matches.append(
+            {
+                "prior_quantity": canonical_decimal_text(prior_quantity),
+                "prior_capital_rub": canonical_decimal_text(prior_capital),
+                "target_prior_quantity": canonical_decimal_text(target_prior_quantity),
+                "target_prior_capital_rub": canonical_decimal_text(
+                    target_prior_capital
+                ),
+                "locations": transformed_locations,
+            }
+        )
+    unique_prior = {_json(item): item for item in prior_matches}
     if len(unique_prior) != 1:
         raise WarehouseFbsMaterialError(
             "historical_event_prior_operand_ambiguous",
             "Immutable accepted provenance does not prove one exact pre-debit location",
             details={"matching_location_count": len(unique_prior)},
         )
-    locations = [
-        {
-            "facility_id": str(facility_id),
-            "pool": "FBS",
-            "quantity": canonical_decimal_text(quantity),
-            "capital_rub": canonical_decimal_text(capital),
-            "wac_rub": canonical_wac,
-            "source_watermark": str(event["event_id"]),
-        }
-    ]
+    selected_prior = next(iter(unique_prior.values()))
+    locations = list(selected_prior["locations"])
     material = {
         "nm_id": int(nm_id),
         "quantity": canonical_decimal_text(quantity),
@@ -2371,7 +2718,8 @@ def _historical_event_aggregate(
         "accepted_quantity": canonical_decimal_text(quantity),
         "accepted_cost_covered_quantity": canonical_decimal_text(covered),
         "event_id": str(event["event_id"]),
-        "prior_location": next(iter(unique_prior.values())),
+        "accepted_wac_rub_text": str(row["wac_rub"]),
+        "prior_location_set": selected_prior,
     }
     return {**material, "digest": _fingerprint(material)}
 
@@ -2401,9 +2749,18 @@ def _ready_updates_for_candidate(
         source_watermarks=dict(candidate["source_watermarks"]),
         requested_nm_ids=roster_nm_ids,
     )
-    from packages.application.calculation_parameters import CalculationParametersBlock
+    from packages.application.calculation_parameters import (
+        DEFAULT_PROXY_PARAMETERS,
+        PROXY_BLOCK_KEY,
+        _parameters_from_row as _proxy3_parameters_from_row,
+    )
     from packages.application.calculation_parameters_v4 import (
-        load_proxy_v4_parameters_for_date,
+        PROXY_V4_BLOCK_KEY,
+        PROXY_V4_FIXED_BOUNDARY,
+        _parameters_from_row as _proxy4_parameters_from_row,
+    )
+    from packages.application.canonical_wb_cost_resolver import (
+        load_canonical_wb_cost_lookup,
     )
     from packages.application.inventory_cost_blend import (
         build_inventory_cost_blend_lookup,
@@ -2412,16 +2769,40 @@ def _ready_updates_for_candidate(
         _transform_snapshot,
     )
 
-    wb_compat = runtime.load_our_wb_cost_daily_state(as_of_date=target_date)
+    # Every dependency is loaded through the caller's already-bound
+    # query_only connection.  No runtime method may re-resolve storage or run
+    # an implicit schema ensure during historical qualification.
+    wb_compat = load_canonical_wb_cost_lookup(
+        conn,
+        as_of_date=date.fromisoformat(target_date),
+    )
     costs = build_inventory_cost_blend_lookup(
         as_of_date=target_date,
         wb_compat_lookup=wb_compat,
         product_capital_lookup=warehouse_metrics,
     )
-    params = CalculationParametersBlock(runtime=runtime).parameters_for_date(target_date)
-    proxy_v4_params = load_proxy_v4_parameters_for_date(
-        runtime=runtime, effective_date=target_date
+    params_row = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_calculation_parameter_versions "
+        "WHERE block_key=? AND effective_date<=? "
+        "ORDER BY effective_date DESC,revision DESC,created_at DESC LIMIT 1",
+        (PROXY_BLOCK_KEY, target_date),
+    ).fetchone()
+    params = (
+        DEFAULT_PROXY_PARAMETERS
+        if params_row is None
+        else _proxy3_parameters_from_row(params_row)
     )
+    proxy_v4_params = None
+    if target_date >= PROXY_V4_FIXED_BOUNDARY:
+        proxy_v4_row = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_proxy_v4_parameter_versions "
+            "WHERE block_key=? AND effective_date<=? "
+            "ORDER BY effective_date DESC,revision DESC,created_at DESC LIMIT 1",
+            (PROXY_V4_BLOCK_KEY, target_date),
+        ).fetchone()
+        proxy_v4_params = (
+            None if proxy_v4_row is None else _proxy4_parameters_from_row(proxy_v4_row)
+        )
     source_fingerprint = _fingerprint(
         {
             "candidate_fingerprint": candidate["candidate_fingerprint"],
@@ -2642,9 +3023,7 @@ def _pool_aggregates(
     return result
 
 
-def _functional_pool_mismatches(
-    conn: sqlite3.Connection, version_id: str
-) -> list[int]:
+def _functional_pool_mismatches(conn: sqlite3.Connection, version_id: str) -> list[int]:
     rows = conn.execute(
         """SELECT nm_id,quantity,capital_rub,wac_rub,cost_covered_quantity
            FROM sheet_vitrina_v1_warehouse_functional_balances
@@ -2691,7 +3070,8 @@ def _functional_pool_mismatches(
         actual_wac = row["wac_rub"]
         if (
             Decimal(str(row["quantity"])) != Decimal(str(aggregate["quantity"]))
-            or Decimal(str(row["capital_rub"])) != Decimal(str(aggregate["capital_rub"]))
+            or Decimal(str(row["capital_rub"]))
+            != Decimal(str(aggregate["capital_rub"]))
             or Decimal(str(row["cost_covered_quantity"]))
             != Decimal(str(aggregate["quantity"]))
             or (
@@ -2741,10 +3121,13 @@ def _canonical_target_source_evidence(
             }
         )
     lifecycle_table = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (lifecycle_table,),
-    ).fetchone() is not None:
+    if (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (lifecycle_table,),
+        ).fetchone()
+        is not None
+    ):
         event = conn.execute(
             f"""SELECT event_id,cutover_id,order_id,episode_sequence,event_type,
                        source_revision,status_digest,facility_id,pool,nm_id,
@@ -2826,10 +3209,9 @@ def _mismatch_reason_codes(
     reasons: list[str] = []
     if Decimal(str(row["cost_covered_quantity"])) != Decimal(str(row["quantity"])):
         reasons.append("ff_cost_coverage_incomplete")
-    if (
-        Decimal(str(row["quantity"])) != Decimal(str(aggregate["quantity"]))
-        or Decimal(str(row["capital_rub"])) != Decimal(str(aggregate["capital_rub"]))
-    ):
+    if Decimal(str(row["quantity"])) != Decimal(str(aggregate["quantity"])) or Decimal(
+        str(row["capital_rub"])
+    ) != Decimal(str(aggregate["capital_rub"])):
         reasons.append("ff_stage_evidence_mismatch")
     provenance = _loads(row["provenance_json"], {})
     exact_location_sets: list[list[Mapping[str, Any]]] = []
@@ -2845,10 +3227,9 @@ def _mismatch_reason_codes(
             (Decimal(str(location.get("capital_rub") or 0)) for location in locations),
             ZERO,
         )
-        if (
-            location_quantity == Decimal(str(row["quantity"]))
-            and location_capital == Decimal(str(row["capital_rub"]))
-        ):
+        if location_quantity == Decimal(
+            str(row["quantity"])
+        ) and location_capital == Decimal(str(row["capital_rub"])):
             exact_location_sets.append(locations)
     if not exact_location_sets:
         reasons.append("ff_stage_evidence_mismatch")
@@ -2897,18 +3278,25 @@ def _warehouse_metric_lookup(
             covered = (
                 Decimal(str(row["cost_covered_quantity"])) if row is not None else ZERO
             )
-            item[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = float(quantity)
+            item[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = float(
+                quantity
+            )
             item[own_stage_metric_key(public_stage, "cost_coverage_pct")] = (
                 float(covered / quantity) if quantity > ZERO else None
             )
             item[own_stage_metric_key(public_stage, "confirmed_share_pct")] = (
-                1.0 if row is not None and quantity > ZERO and bool(row["certified"])
-                else 0.0 if quantity > ZERO else None
+                1.0
+                if row is not None and quantity > ZERO and bool(row["certified"])
+                else 0.0
+                if quantity > ZERO
+                else None
             )
             confirmed = quantity if row is not None and bool(row["certified"]) else ZERO
             confirmed_total += confirmed
             item[own_stage_metric_key(public_stage, "confirmed_qty")] = float(confirmed)
-            item[own_stage_metric_key(public_stage, "cost_covered_qty")] = float(covered)
+            item[own_stage_metric_key(public_stage, "cost_covered_qty")] = float(
+                covered
+            )
             if row is not None and quantity > ZERO and not bool(row["certified"]):
                 presentation_reasons.append(str(row["quality"]))
             if row is not None and public_stage in {"WB", "FF"}:
@@ -2921,7 +3309,9 @@ def _warehouse_metric_lookup(
             float(confirmed_total / total_quantity) if total_quantity > ZERO else None
         )
         item["presentation_state"] = (
-            "confirmed" if total_quantity <= ZERO or confirmed_total >= total_quantity else "unconfirmed"
+            "confirmed"
+            if total_quantity <= ZERO or confirmed_total >= total_quantity
+            else "unconfirmed"
         )
         item["presentation_reason"] = "; ".join(sorted(set(presentation_reasons)))
         item["presentation_reasons"] = sorted(set(presentation_reasons))
@@ -2965,7 +3355,9 @@ def _ready_cells(payload: Mapping[str, Any], business_date: str) -> dict[str, An
         return {}
     index = dates.index(business_date) + 2
     sheets = [
-        item for item in payload.get("sheets") or [] if item.get("sheet_name") == "DATA_VITRINA"
+        item
+        for item in payload.get("sheets") or []
+        if item.get("sheet_name") == "DATA_VITRINA"
     ]
     if len(sheets) != 1:
         return {}
@@ -3001,14 +3393,40 @@ def _readback_identity(
         "ready_snapshot_digest": _fingerprint(ready),
     }
     if str(plan.get("mode") or "") == "historical":
+        active_version_id = str(active[0]) if active is not None else ""
+        sync = conn.execute(
+            "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
+            "WHERE slot=1"
+        ).fetchone()
         candidate = conn.execute(
-            "SELECT status FROM sheet_vitrina_v1_warehouse_functional_versions "
+            "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions "
             "WHERE version_id=?",
             (str(plan["target_version_id"]),),
         ).fetchone()
+        target_row = conn.execute(
+            "SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,"
+            "provenance_json FROM sheet_vitrina_v1_warehouse_functional_balances "
+            "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
+            (str(plan["target_version_id"]), int(plan["nm_ids"][0])),
+        ).fetchone()
         source_material = _source_material(
-            conn, str(plan["source_version_id"]), nm_ids=plan["nm_ids"]
+            conn, active_version_id, nm_ids=plan["nm_ids"]
         )
+        projection = conn.execute(
+            "SELECT status,source_revision,business_effective_date "
+            "FROM sheet_vitrina_v1_warehouse_business_projection_revisions "
+            "WHERE published_version_id=?",
+            (str(plan["target_version_id"]),),
+        ).fetchone()
+        ready_closure = [
+            {
+                "bundle_version": str(item["bundle_version"]),
+                "as_of_date": str(item["as_of_date"]),
+                "after_plan_sha256": str(item["after_plan_sha256"]),
+                "non_target_digest": str(item["non_target_digest"]),
+            }
+            for item in plan["ready_updates"]
+        ]
         result.update(
             {
                 "historical_version_id": (
@@ -3016,7 +3434,22 @@ def _readback_identity(
                     if candidate is not None and str(candidate["status"]) == "good"
                     else ""
                 ),
+                "sync_version_id": str(sync[0]) if sync is not None else "",
                 "current_pool_digest": _fingerprint(source_material["pool_rows"]),
+                "historical_target_row_digest": (
+                    _fingerprint(dict(target_row)) if target_row is not None else ""
+                ),
+                "historical_target_provenance_digest": (
+                    _fingerprint(_loads(target_row["provenance_json"], {}))
+                    if target_row is not None
+                    else ""
+                ),
+                "business_projection_revision_digest": (
+                    _fingerprint(dict(projection)) if projection is not None else ""
+                ),
+                "ready_target_total_non_target_closure_digest": _fingerprint(
+                    ready_closure
+                ),
             }
         )
     return result
@@ -3077,7 +3510,9 @@ def _verify_candidate_readback(
             (str(candidate["target_version_id"]),),
         ).fetchone()[0]
     )
-    if document_count != len({str(item["warehouse_key"]) for item in candidate["lines"]}):
+    if document_count != len(
+        {str(item["warehouse_key"]) for item in candidate["lines"]}
+    ):
         raise WarehouseFbsMaterialError(
             "fbs_material_document_readback_mismatch",
             "Candidate version-owned document projection is incomplete",
@@ -3091,10 +3526,8 @@ def _verify_candidate_readback(
     if (
         projection is None
         or str(projection["status"]) != "active"
-        or str(projection["source_revision"])
-        != str(candidate["candidate_fingerprint"])
-        or str(projection["business_effective_date"])
-        != str(candidate["business_date"])
+        or str(projection["source_revision"]) != str(candidate["candidate_fingerprint"])
+        or str(projection["business_effective_date"]) != str(candidate["business_date"])
     ):
         raise WarehouseFbsMaterialError(
             "fbs_material_business_projection_readback_mismatch",
@@ -3326,11 +3759,12 @@ def _fingerprint(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
-def _digest_matches(expected: str, *actual_values: str) -> bool:
-    selected = str(expected or "").removeprefix("sha256:")
-    return bool(selected) and any(
-        selected == str(actual or "").removeprefix("sha256:")
-        for actual in actual_values
+def _is_typed_sha256(value: Any) -> bool:
+    token = str(value or "")
+    return (
+        len(token) == 71
+        and token.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in token[7:])
     )
 
 

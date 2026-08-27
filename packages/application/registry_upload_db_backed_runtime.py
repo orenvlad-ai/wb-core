@@ -166,10 +166,17 @@ class RegistryUploadDbBackedRuntime:
         runtime_dir: Path,
         bundle_block: RegistryUploadBundleV1Block | None = None,
         cost_price_block: CostPriceUploadBlock | None = None,
+        *,
+        operational_db_path: Path | None = None,
+        store_registry: StoreRegistry | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
-        self.store_registry = StoreRegistry(self.runtime_dir)
-        self.db_path = self.store_registry.resolve("operational")
+        self.store_registry = store_registry or StoreRegistry(self.runtime_dir)
+        self.db_path = (
+            Path(operational_db_path).resolve()
+            if operational_db_path is not None
+            else self.store_registry.resolve("operational")
+        )
         with _OPERATIONAL_STORE_REGISTRIES_LOCK:
             _OPERATIONAL_STORE_REGISTRIES[self.db_path.resolve()] = self.store_registry
         self.bundle_block = bundle_block or RegistryUploadBundleV1Block()

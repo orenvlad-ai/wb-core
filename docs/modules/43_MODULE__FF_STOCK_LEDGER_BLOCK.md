@@ -25,6 +25,7 @@ related_modules:
   - "packages/application/warehouse_fbs_material_rematerialization.py"
   - "apps/ff_pool_dense_fbs.py"
   - "apps/warehouse_fbs_historical_recovery.py"
+  - "apps/wbc0013_fbs_recovery.py"
   - "packages/application/ff_pool_fbs_forward_recovery.py"
   - "packages/application/ff_pool_overhead_backfill.py"
   - "packages/application/russian_payment_orders.py"
@@ -848,9 +849,11 @@ inventory line plus request manifest remains the coverage receipt after later
 movements advance the current balance watermark. A pre-T0 business event is
 routed to explicit reconciliation/forward recovery rather than copying current
 zero into history. The generic repair adapter accepts a reviewed runtime
-manifest containing the complete target identities, complete stock-managed
-roster and exact existing-row partition; no roster size or business SKU is
-compiled into the adapter. Qualification scopes mapped order identity to the
+v2 manifest containing exact disjoint `historical_exact_zero` and
+`default_applicable_absent_history` partitions, the complete stock-managed
+roster and exact existing-row partition; no production identity is compiled
+into the adapter. The second partition requires canonical WB Content lifecycle
+evidence and absence from accepted target-facility history. Qualification scopes mapped order identity to the
 exact seller warehouse and treats facility-less legacy reservations as an
 effect only when their immutable line sum is non-zero. The plan pins active
 target, StoreRegistry generation, mapping/allocation, target-effect/history and
@@ -890,15 +893,23 @@ ready CAS. Its append-only intent states are `repairable`, `repairing`,
 `unsafe_ambiguous`; the complete bounded plan is persisted so process restart
 resumes the same identity rather than rebuilding or blindly retrying it. The
 active-date lane is unchanged. A separate owner-gated historical lane accepts
-only one manifest-bound `business_date × accepted good version × facility ×
+only one strict v2 manifest-bound `business_date × accepted good version × facility ×
 FBS × SKU × immutable handoff_debit`. It validates event source, status and
-evidence/full-row digests plus accepted-version/value/timestamp bindings,
-rebuilds the accepted target from its pre-debit location plus that event, and
+evidence/full-row digests plus separately typed version-plan, full-version-row,
+accepted-target-row and provenance bindings. One explicitly bound StoreRegistry
+generation supplies every query-only dependency; qualification performs no DDL
+or hidden re-resolution. It rebuilds the accepted target from the full
+facility/pool location set plus that event, debits only the named facility and
+preserves Moscow/other locations, and
 requires the positive-order, blank-own-cost and exact six-missing-TOTAL incident
 shape before recomputing only the target SKU and Proxy 3/4 TOTAL dependencies.
 It publishes a new immutable good historical version and
 same-date business projection without switching the current active/sync pointer
-and without reading current pool rows as candidate operands. The durable intent,
+and without reading current pool rows as candidate operands. A positive finite
+legacy long WAC is accepted only while its exact row/provenance digests remain
+unchanged; the historical source text is never rewritten and the candidate uses
+the canonical precision-38 ratio. Durable intent is created only under the
+shared lock after under-lock CAS. The intent,
 bounded retry, restart and query-only ambiguous readback contracts are shared.
 No adapter is invoked by deploy, no timer or automatic apply exists, and the
 typed evidence adds no UI or health policy.

@@ -9,15 +9,21 @@ active hosted-runtime target and explicit StoreRegistry generation. A plan,
 owner approval reference, actor and exact plan fingerprint are operation-time
 inputs, never deploy defaults.
 
-## Dense FBS zero repair
+## Dense FBS zero repair v2
 
-The dense repair manifest binds the complete stock-managed SKU roster, exact
-existing facility/FBS identities and exact missing target identities. Planner
-qualification is query-only. Mapped identity evidence is scoped to the exact
+The strict v2 manifest has exactly two disjoint target partitions:
+`historical_exact_zero` and `default_applicable_absent_history`. Their union,
+plus the exact existing facility/FBS identities, must equal the complete active,
+non-hidden stock-managed roster. Unknown, missing, extra, duplicate and
+overlapping identities fail closed; the operation id is a deterministic
+WBC0013 namespace digest. Planner qualification is query-only. Mapped identity evidence is scoped to the exact
 seller warehouse; legacy facility-less reservation history blocks only when its
 immutable net quantity is non-zero. Mapping-extension allocations, target
-effects, historical zero evidence, target absence and bounded non-target
-fingerprints are all CAS material.
+effects, historical zero evidence, canonical WB Content lifecycle/source
+identity, target absence and bounded non-target fingerprints are all CAS
+material. The absent-history partition must have no accepted target-facility
+history; it does not invent a date, global Moscow inference or reservation
+shortcut.
 
 Apply repeats qualification before and under the shared warehouse writer lock,
 persists the existing dense `repair` intent, and emits exactly one deterministic
@@ -31,18 +37,25 @@ second request.
 
 Ledger write validation, functional material comparison and recovery candidates
 use one finite Decimal ratio with context precision 38 and canonical
-non-exponent text. Equality is exact. There is no tolerance, scale heuristic or
-rewrite of a stored WAC.
+non-exponent text. New candidate values use canonical 38-digit text. A legacy
+historical positive finite WAC retains its original longer text only while the
+exact accepted row and provenance digests are unchanged; the source row is not
+normalized or rewritten. Null, negative, non-finite or digest-drifted values
+fail closed.
 
 ## Historical bounded recovery
 
 The historical manifest binds one business date, one accepted immutable good
 functional version, one facility/FBS/SKU and one immutable `handoff_debit`,
-including the accepted version fingerprint/timestamps, exact accepted
-quantity/coverage/capital, event values/time, source/status/evidence/full-row
-digests and the expected current active version. No binding is optional.
-The candidate starts from the accepted version and proves the pre-debit location
-plus event arithmetic. Current pool rows are preservation/CAS evidence only and
+including separately typed version-plan, full-version-row, accepted-target-row,
+accepted-provenance and event source/status/evidence/full-row digests, exact
+accepted quantity/coverage/capital and expected current active, sync and pool
+identities. Aliases are not accepted. Qualification uses one explicitly bound
+StoreRegistry generation and one true query-only dependency connection; it runs
+no schema ensure, DDL or hidden storage re-resolution. No binding is optional.
+The candidate starts from the accepted version and proves the full pre-debit
+facility/pool location set plus event arithmetic. It debits only the target
+location while preserving Moscow and every other location. Current pool rows are preservation/CAS evidence only and
 are never copied into the historical candidate.
 
 Only the target FF balance/coverage/provenance is replaced; all other functional
@@ -53,6 +66,20 @@ restores only that target-and-TOTAL closure and proves the non-target digest is
 unchanged. Publication creates a new immutable good
 historical version and same-date business projection, but does not change the
 current functional active pointer, WB sync pointer or current pool rows. The
-existing durable intent, shared lock, bounded retry and query-only exact
+Durable intent is created only under the shared lock and after under-lock CAS.
+The existing intent, bounded retry and query-only exact
 readback handle restart and ambiguous transport without a full database copy,
 full-day reload or blind retry.
+
+## Exact WBC0013 A to B production profile
+
+`apps/wbc0013_fbs_recovery.py` is an inert-by-default, generic shape-discovery
+adapter; deploy does not invoke it. The canonical Production Apply Runner accepts
+only the exact `WBC0013 / dense-fbs-historical-recovery / 71 = 21 + (12 + 38) /
+50 zero inserts / one historical repair` passport. It writes private 0600 JIT
+plans, requires two consecutive identical material qualifications with at most
+three regenerations, submits A once, performs query-only A reconciliation, then
+builds a fresh B plan, submits B once and performs query-only B reconciliation.
+Every ambiguous response goes directly to same-operation readback and never to
+a blind submit retry. Barrier checks are read-only before and under the shared
+lock; no ordinary service or timer is stopped or changed.
