@@ -298,7 +298,7 @@
     },
     {
       "id": "root-warm-archive-wbc0008-006",
-      "paths": ["apps/root_storage_warm_archive.py", "apps/root_storage_warm_archive_smoke.py"],
+      "paths": ["apps/root_storage_warm_archive*", "migration/159_root_storage_warm_archive_wbc0008_006.md"],
       "suites": ["warehouse_recovery", "release_safety"],
       "release": "live_runtime"
     },

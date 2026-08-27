@@ -442,6 +442,8 @@ artifact SHA-256/evidence digest и terminal disposition
 receipt digest fails closed. Probe failure может опубликовать только один
 immutable `blocked` reconciliation receipt/marker и никогда не публикует
 `done`. Production mutation count этого contour всегда равен нулю.
+Authoritative migration-159 terminal addendum находится в
+[`159_root_storage_warm_archive_wbc0008_006_receipt_reconciliation.md`](../../migration/159_root_storage_warm_archive_wbc0008_006_receipt_reconciliation.md).
 
 ## Compatibility and rollback
 
