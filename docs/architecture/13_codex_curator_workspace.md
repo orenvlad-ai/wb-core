@@ -13,6 +13,13 @@ subagent до owner-facing gate обязан получить valid receipt
 surface маршрутизирует structured evidence сюда, а не публикует второй вопрос;
 duplicate pending/answered gate и subset accepted extension suppress-ятся.
 
+Explicit `design-only`/`branch-only`/`до PR`/`до merge`/`до deploy` stop-line
+имеет приоритет над default completion. Она даёт соответственно no
+implementation, clean tested branch без PR либо draft PR machine hold для обеих
+последних границ, поскольку current Release Runner требует non-draft и связывает
+merge/deploy. Hold снимает только явная user instruction, действительно
+расширяющая boundary; technical success и terminal subagent этого не делают.
+
 Каждый technical execution block получает one fresh visible internal subagent
 `wbc NNNN SSS <latin transliteration>` без pin через
 `collaboration.spawn_agent`. Semantic name — deterministic transliteration
@@ -24,16 +31,28 @@ blocker-ом.
 
 `Read-only` ограничивает mutation/authority, но не выбирает actor. Diagnostic/
 read-only block собирает новое substantive technical evidence без branch/
-worktree/PR/mutation; implementation block владеет одной branch и одним PR.
+worktree/PR/mutation; implementation block владеет одной branch и, без explicit
+stop-line, одним non-draft PR.
 Если owner-facing technical conclusion требует нового evidence из repository/
 code, logs, server, database, external API либо длительного ожидания, это
 technical execution block. Main напрямую делает только curator-control reads:
-fresh protocol/docs для routing, task/subagent/PR/check/receipt status, compact
-preflight bounded passport и exact verification terminal handoff. Pure
-conceptual answer, clarification/design conversation и conclusion из уже
-существующего exact handoff subagent-а не dispatch-ятся. Routing не использует
-оценку сложности, времени или числа tool calls. Diagnostic/read-only dispatch
-внутри запрошенной цели не требует отдельного human confirmation или gate.
+fresh protocol/docs для routing, compact preflight bounded passport и exact
+schema/digest/identity readback уже существующего immutable task/subagent/PR/
+check/release/apply receipt/status artifact. Этот read не dispatch-ится только
+без нового domain evidence, inference, external/server/database/log
+investigation или long wait; semantic interpretation, mismatch diagnosis,
+substantive evidence и long wait требуют fresh subagent. Pure conceptual answer,
+clarification/design conversation и conclusion из уже существующего exact
+handoff subagent-а не dispatch-ятся. Routing не использует оценку сложности,
+времени или числа tool calls. Diagnostic/read-only dispatch внутри запрошенной
+цели не требует отдельного human confirmation или gate.
+
+Evidence read/tool branch молча выполняется только для exact acceptance
+predicate, blocker или current failure hypothesis. Active context и terminal
+handoff ссылаются на durable full logs/manifests/receipts через exact pointer/
+digest, bounded relevant ranges/component diff и conclusion, не дублируют raw
+artifacts; reread разрешён после new event/drift/question. Это не добавляет
+owner narration, checklist или обязательный artifact и не ослабляет provenance.
 
 Каждый block использует compact passport, exact `fork_turns:"none"` и следующий
 последовательный `SSS`. Diagnostic block заканчивается terminal diagnosis; если
@@ -54,6 +73,19 @@ progress evidence и не разрешает `list_agents`, worktree/Git/CI/stat
 или terminal handoff будит main для owner-facing transition в том же turn, без
 пользовательского `посмотри`. Subagent возвращает terminal payload ровно один
 раз без межканального дублирования и становится Done.
+
+Task passport считает terminal pre-submit failures и выпущенные correction PR
+одной family только при том же accepted goal и той же operation/lifecycle
+failure family. После второго terminal pre-submit failure либо второго
+последовательного correction release этой family третий incremental patch/retry
+заменяется на automatic `EVIDENCE_BLOCKED` consolidated diagnostic block без
+human gate. Он строит bounded production-shaped matrix по доказанным failures и
+применимым соседним phases из execution protocol; следующий implementation PR
+после terminal diagnosis консолидирует все доказанные same-family corrections
+до следующей live boundary. Ordinary tasks, first/second isolated correction,
+materially new family/scope и post-submit same-operation query-only
+reconciliation не получают matrix; one-submit/no-blind-retry/terminal identity
+guards сохраняются.
 
 Workspace не создаёт discretionary permission questions. Proposed interruption
 имеет только `AUTO_CONTINUE`, `EVIDENCE_BLOCKED` или `HUMAN_REQUIRED` с closed

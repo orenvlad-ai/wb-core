@@ -33,6 +33,14 @@ Current canonical source acquisition остаётся server-side.
   accepted goal в authorization envelope и разрешает автономный implementation
   до `COMPLETE`. После design-интервью тот же контракт активируют `запускай` /
   `принимаю` / `доведи до конца`; пользователь не выбирает режим или trust tier.
+- Явная user stop-line имеет приоритет над default completion: `design-only`
+  запрещает implementation; `branch-only`/`до PR` заканчивается clean tested
+  branch без PR; `до merge`/`до deploy` заканчивается draft PR, потому что
+  trusted Release Runner объединяет merge/deploy admission и требует non-draft.
+  Draft — machine hold и Runner его не допускает. Hold снимается только явной
+  user instruction, действительно расширяющей прежнюю lifecycle boundary, а не
+  inference из technical success или terminal subagent status; это не повторный
+  technical human gate. Без stop-line действует один non-draft PR до `COMPLETE`.
 - `Read-only` задаёт mutation/authority boundary, но не выбирает actor. Любой
   substantive technical execution образует bounded block одного из двух видов:
   diagnostic/read-only block без branch/worktree/PR/mutation либо implementation
@@ -41,14 +49,25 @@ Current canonical source acquisition остаётся server-side.
   code, logs, server, database, external API либо длительное ожидание, выполняет
   fresh visible internal subagent даже при strict read-only scope. Main curator
   напрямую делает только curator-control reads: fresh protocol/docs для routing,
-  task/subagent/PR/check/receipt status, compact preflight для bounded passport и
-  exact verification terminal handoff; они не расширяются в сбор substantive
-  domain evidence. Pure conceptual answer, clarification/design conversation и
-  вывод из уже существующего exact handoff subagent-а не требуют subagent-а.
-  Diagnostic/read-only dispatch внутри запрошенной цели не требует отдельного
-  human confirmation и не создаёт новый gate.
+  compact preflight для bounded passport и exact readback уже существующего
+  immutable task/subagent/PR/check/release/apply receipt/status artifact по его
+  schema/digest/identity. Такой read не создаёт technical block только при нуле
+  нового domain evidence, inference, external/server/database/log investigation
+  и long wait. Любая semantic interpretation, mismatch diagnosis, новое
+  substantive evidence или long wait остаются fresh subagent block. Pure
+  conceptual answer, clarification/design conversation и вывод из уже
+  существующего exact handoff subagent-а не требуют subagent-а. Diagnostic/
+  read-only dispatch внутри запрошенной цели не требует отдельного human
+  confirmation и не создаёт новый gate.
 - Routing определяется purpose и ownership нового evidence, а не оценкой
   `простая/сложная`, минутами либо числом tool calls.
+- Каждый evidence read/tool branch обязан разрешать exact acceptance predicate,
+  blocker либо current failure hypothesis; иначе он silently не выполняется.
+  Full logs/manifests/receipts остаются durable source/artifact, а active context
+  и handoff несут exact pointer/digest, bounded relevant ranges/component diff и
+  conclusion без повторного raw-copy. Повторный read допустим только после new
+  event/drift/question. Отсутствие full bytes в active context не означает
+  отсутствие durable evidence; safety и provenance не ослабляются.
 - На один bounded technical execution block создаётся ровно один fresh visible
   internal subagent. Его internal/task name соответствует
   `wbc NNNN SSS <latin transliteration>`: `SSS` последователен внутри main
@@ -69,13 +88,28 @@ Current canonical source acquisition остаётся server-side.
   читаются on-demand только как evidence.
 - По умолчанию активен максимум один technical execution subagent. Project config
   фиксирует тот же concurrency limit. Model-tier classification не используется.
-- Implementation subagent владеет ровно одной веткой и одним PR; diagnostic
-  subagent branch/worktree/PR не создаёт. Terminal diagnosis заканчивает этот
-  block; отдельно разрешённая затем implementation является следующим bounded
-  block со следующим последовательным `SSS`. Same-scope correction в текущем
-  block/PR продолжает того же subagent. Материально новый scope или новый PR,
-  включая infrastructure recovery, получает нового subagent после terminal
-  state предыдущего.
+- Без explicit stop-line implementation subagent владеет ровно одной веткой и
+  одним non-draft PR; branch/draft stop-line завершает его на указанной выше
+  boundary. Diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis
+  заканчивает этот block; отдельно разрешённая затем implementation является
+  следующим bounded block со следующим последовательным `SSS`. Same-scope
+  correction в текущем block/PR продолжает того же subagent. Материально новый
+  scope или новый PR, включая infrastructure recovery, получает нового subagent
+  после terminal state предыдущего.
+- Task passport относит terminal pre-submit failures и выпущенные correction PR
+  к family одного accepted goal и одной operation/lifecycle family. После двух
+  terminal pre-submit failures либо двух последовательно выпущенных correction
+  PR той же family третий incremental patch/retry запрещён: main фиксирует
+  `EVIDENCE_BLOCKED` без human gate и dispatch-ит один consolidated diagnostic
+  block. Он строит bounded production-shaped lifecycle scenario matrix по уже
+  доказанным failures и только применимым соседним phases: preflight, readiness,
+  JIT, worker namespace, timer state, submit, readback, release interruption.
+  После terminal diagnosis следующий implementation PR объединяет все
+  доказанные same-family corrections, доступные до следующей live boundary.
+  Правило не применяется к ordinary tasks, первой/второй isolated correction,
+  materially new scope/failure family или post-submit same-operation query-only
+  reconciliation и не задаёт blanket test suite. Terminal identity,
+  one-submit и no-blind-retry rules сохраняются.
 - Subagent возвращает один terminal handoff и становится `Done`. Это только
   terminal status technical execution block: main-task outcome отдельно остаётся
   `in_progress`, `awaiting_operation`, `blocked` или `complete` и не выводится
@@ -201,8 +235,9 @@ merge. Она не будит, не меняет и не reclassify задним
 
 ## Repository и release flow
 
-1. Один implementation block использует одну ветку и один non-draft PR в
-   `main`. Labels не выбирают tests, release kind или state.
+1. Без explicit stop-line один implementation block использует одну ветку и
+   один non-draft PR в `main`; exact stop-line boundary определена выше. Labels
+   не выбирают tests, release kind или state.
 2. `ci/test_planner.py` строит byte-stable `test-plan.json` исполняемым code
    exact PR base по exact base/head objects, base+head registry union,
    transitive dependencies и changed paths. Head planner активируется только
