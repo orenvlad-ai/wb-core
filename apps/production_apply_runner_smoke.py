@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import tempfile
 import zipfile
@@ -22,6 +23,7 @@ from apps import production_apply_runner as apply
 MERGE_SHA = "a" * 40
 RECOVERY_RUN_ID = 32872430422
 AUTHORIZATION_COMMENT_ID = 5413456865
+MOUNT_PROBE_COMMENT_ID = 5413456800
 RECOVERY_RELEASE_OPERATION = "release-v2-" + "1" * 32
 AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0006 profile inventory-history-backfill "
@@ -38,6 +40,8 @@ WARM_AUTH_BODY = (
 
 def authorization(**updates: object) -> dict[str, object]:
     value: dict[str, object] = {
+        "id": AUTHORIZATION_COMMENT_ID,
+        "created_at": "2026-08-27T12:01:00Z",
         "author_association": "OWNER",
         "issue_url": "https://api.github.com/repos/orenvlad-ai/wb-core/issues/1050",
         "body": AUTH_BODY,
@@ -58,6 +62,67 @@ def release_comment() -> dict[str, object]:
     return {
         "user": {"login": "github-actions[bot]"},
         "body": "<!-- wb-core-release-receipt operation=release-v2-test -->\n```json\n"
+        + json.dumps(payload)
+        + "\n```",
+    }
+
+
+def warm_mount_probe_comment() -> dict[str, object]:
+    job_id = apply.warm_mount_probe_job_id(
+        "orenvlad-ai/wb-core", 1050, "release-v2-test", MERGE_SHA
+    )
+    payload = {
+        "schema": apply.WARM_MOUNT_PROBE_RECEIPT_SCHEMA,
+        "state": "observed",
+        "query_only": True,
+        "database_written": False,
+        "production_probe_count": 1,
+        "job_id": job_id,
+        "repository": "orenvlad-ai/wb-core",
+        "pull_request": 1050,
+        "release_operation_id": "release-v2-test",
+        "merge_sha": MERGE_SHA,
+        "deployed_sha": MERGE_SHA,
+        "evidence_digest": "sha256:" + "e" * 64,
+        "worker": {
+            "unit_template": "wb-core-storage-recovery-sanitation@.service",
+            "unit_instance": f"wb-core-storage-recovery-sanitation@{job_id}.service",
+            "repo_template_sha256": "sha256:" + "f" * 64,
+            "installed_template_path": (
+                "/etc/systemd/system/"
+                "wb-core-storage-recovery-sanitation@.service"
+            ),
+            "installed_template_sha256": "sha256:" + "f" * 64,
+            "installed_template_matches_repo": True,
+            "mount_namespace": {"link_target": "mnt:[4026532999]"},
+        },
+        "paths": [
+            {
+                "filesystem_role": role,
+                "target": {"canonical_path": path},
+                "semantic_identity_digest": "sha256:" + token * 64,
+                "raw_candidate_count": 2 if role == "backup" else 1,
+                "raw_candidates_digest": "sha256:" + token * 64,
+            }
+            for role, path, token in (
+                ("root", "/opt/wb-core-runtime/backups", "1"),
+                ("backup", "/opt/wb-core-runtime/state/backups", "2"),
+                ("generation", "/opt/wb-core-runtime/state/generations", "3"),
+            )
+        ],
+        "artifact": {
+            "name": "root-warm-archive-mount-probe-pr-1050-run-123456",
+            "file": "root-warm-archive-mount-probe-receipt.json",
+            "sha256": "sha256:" + "4" * 64,
+            "size_bytes": 1234,
+        },
+    }
+    return {
+        "id": MOUNT_PROBE_COMMENT_ID,
+        "created_at": "2026-08-27T12:00:00Z",
+        "user": {"login": "github-actions[bot]"},
+        "body": apply.warm_mount_probe_marker(job_id)
+        + "\n```json\n"
         + json.dumps(payload)
         + "\n```",
     }
@@ -408,8 +473,212 @@ def _exercise_compact_oversized_blocked_receipt() -> None:
         assert path.read_bytes() == full_raw
 
 
+def _exercise_worker_mount_probe() -> None:
+    job_id = apply.warm_mount_probe_job_id(
+        "orenvlad-ai/wb-core", 1050, "release-v2-test", MERGE_SHA
+    )
+    target = {
+        "target_dir": "/opt/wb-core-runtime/app",
+        "ssh_destination": "wb-core-eu-root",
+    }
+    submit_command = apply._warm_mount_probe_submit_remote_command(
+        target=target, merge_sha=MERGE_SHA, job_id=job_id
+    )
+    status_command = apply._warm_mount_probe_status_remote_command(
+        target=target, merge_sha=MERGE_SHA, job_id=job_id
+    )
+    assert "--operation warm-archive-mount-probe" in submit_command[-1]
+    assert " submit " in submit_command[-1]
+    assert " status " in status_command[-1]
+    assert "authorize" not in submit_command[-1]
+
+    paths = []
+    for role, device in (("root", 2049), ("backup", 2065), ("generation", 2081)):
+        raw = {
+            "raw_line": f"fixture raw mountinfo {role}",
+            "mount_id": 100 + device,
+            "parent_mount_id": 29,
+            "device_major": 8,
+            "device_minor": device - 2048,
+            "major_minor": f"8:{device - 2048}",
+            "mount_root": "/",
+            "mount_point": f"/fixture/{role}",
+            "mount_options": ["rw"],
+            "optional_fields": [],
+            "filesystem_type": "ext4",
+            "source": f"/dev/{role}",
+            "super_options": ["rw"],
+            "filesystem_uuid": f"uuid-{role}",
+            "source_device": device,
+        }
+        raw_candidates = [raw]
+        if role == "backup":
+            overlapping = json.loads(json.dumps(raw))
+            overlapping["mount_id"] = int(raw["mount_id"]) + 1
+            overlapping["parent_mount_id"] = int(raw["mount_id"])
+            overlapping["mount_options"] = ["rw", "nosuid"]
+            raw_candidates.append(overlapping)
+        paths.append(
+            {
+                "filesystem_role": role,
+                "target": {
+                    "canonical_path": f"/fixture/{role}",
+                    "path_device": device,
+                    "path_inode": 10 + device,
+                    "canonical_family_anchor": f"/fixture/{role}",
+                    "anchor_device": device,
+                    "anchor_inode": 20 + device,
+                },
+                "semantic_identity_digest": "sha256:" + role[0] * 64,
+                "raw_candidate_count": len(raw_candidates),
+                "raw_candidates_digest": "sha256:" + role[-1] * 64,
+                "raw_mount_candidates": raw_candidates,
+                "candidate_proofs": [
+                    {
+                        "raw_candidate_digest": "sha256:" + "a" * 64,
+                        "semantic_identity_digest": "sha256:" + "b" * 64,
+                    }
+                    for _item in raw_candidates
+                ],
+            }
+        )
+    probe = {
+        "schema": "wb-core.root-warm-archive-mount-probe/v1",
+        "status": "observed",
+        "query_only": True,
+        "database_written": False,
+        "archive_mutation_count": 0,
+        "source_unlink_count": 0,
+        "service_restart_count": 0,
+        "timer_change_count": 0,
+        "job_id": job_id,
+        "deployed_sha": MERGE_SHA,
+        "path_count": 3,
+        "paths": paths,
+        "worker": {
+            "unit_template": "wb-core-storage-recovery-sanitation@.service",
+            "unit_instance": f"wb-core-storage-recovery-sanitation@{job_id}.service",
+            "repo_template_sha256": "sha256:" + "f" * 64,
+            "installed_template_path": (
+                "/etc/systemd/system/"
+                "wb-core-storage-recovery-sanitation@.service"
+            ),
+            "installed_template_sha256": "sha256:" + "f" * 64,
+            "installed_template_matches_repo": True,
+            "mount_namespace": {"link_target": "mnt:[4026532999]"},
+        },
+        "evidence_digest": "sha256:" + "e" * 64,
+    }
+    status = {
+        "status": "succeeded",
+        "terminal": True,
+        "request": {
+            "job_id": job_id,
+            "deployed_sha": MERGE_SHA,
+            "operation": "warm-archive-mount-probe",
+        },
+        "result": probe,
+    }
+
+    class ProbeClient:
+        def __init__(self) -> None:
+            self.comments: list[dict[str, object]] = [release_comment()]
+            self.post_count = 0
+
+        def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+            assert path == "/issues/1050/comments"
+            self.post_count += 1
+            comment = {
+                "id": 991,
+                "user": {"login": "github-actions[bot]"},
+                "body": body["body"],
+            }
+            self.comments.append(comment)
+            return comment
+
+    client = ProbeClient()
+    args = argparse.Namespace(
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+        release_operation_id="release-v2-test",
+    )
+    sequence = [
+        {
+            "command_sha256": "submit",
+            "return_code": 0,
+            "stdout_sha256": "submit-out",
+            "stderr_sha256": "submit-err",
+            "transport_ambiguous": False,
+            "result": {"status": "queued"},
+        },
+        {
+            "command_sha256": "status",
+            "return_code": 0,
+            "stdout_sha256": "status-out",
+            "stderr_sha256": "status-err",
+            "transport_ambiguous": False,
+            "result": status,
+        },
+    ]
+    original_command = apply.command_evidence
+    original_run = apply.subprocess.run
+    original_target = apply._canonical_target
+    original_configure = apply.configure_deploy_environment
+    original_run_id = os.environ.get("GITHUB_RUN_ID")
+    apply.command_evidence = lambda *_args, **_kwargs: sequence.pop(0)
+    apply.subprocess.run = lambda *_args, **_kwargs: object()
+    apply._canonical_target = lambda: target
+    apply.configure_deploy_environment = lambda _directory: None
+    os.environ["GITHUB_RUN_ID"] = "123456"
+    try:
+        with tempfile.TemporaryDirectory(prefix="warm-mount-probe-smoke-") as directory:
+            args.output = Path(directory) / "probe.json"
+            assert (
+                apply._run_warm_mount_probe_mode(
+                    args=args,
+                    client=client,
+                    pr={"merge_commit_sha": MERGE_SHA},
+                    comments=list(client.comments),
+                )
+                == 0
+            )
+            receipt = json.loads(args.output.read_text(encoding="utf-8"))
+            assert receipt["state"] == "observed"
+            assert receipt["production_probe_count"] == 1
+            assert receipt["probe"]["paths"] == paths
+            assert not sequence
+            assert client.post_count == 1
+            apply.command_evidence = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("terminal mount probe must not resubmit")
+            )
+            args.output = Path(directory) / "probe-repeat.json"
+            assert (
+                apply._run_warm_mount_probe_mode(
+                    args=args,
+                    client=client,
+                    pr={"merge_commit_sha": MERGE_SHA},
+                    comments=list(client.comments),
+                )
+                == 0
+            )
+            repeated = json.loads(args.output.read_text(encoding="utf-8"))
+            assert repeated["idempotent"] is True
+            assert repeated["production_probe_count"] == 0
+            assert client.post_count == 1
+    finally:
+        apply.command_evidence = original_command
+        apply.subprocess.run = original_run
+        apply._canonical_target = original_target
+        apply.configure_deploy_environment = original_configure
+        if original_run_id is None:
+            os.environ.pop("GITHUB_RUN_ID", None)
+        else:
+            os.environ["GITHUB_RUN_ID"] = original_run_id
+
+
 def main() -> None:
     _exercise_compact_oversized_blocked_receipt()
+    _exercise_worker_mount_probe()
     goal = apply.validate_authorization(
         authorization(), repository="orenvlad-ai/wb-core", pr=1050
     )
@@ -490,6 +759,14 @@ def main() -> None:
         merge_sha=MERGE_SHA,
     )
     assert parsed["state"] == "done"
+    parsed_probe = apply.parse_warm_mount_probe_receipt(
+        [warm_mount_probe_comment()],
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+        release_operation="release-v2-test",
+        merge_sha=MERGE_SHA,
+    )
+    assert parsed_probe["comment_id"] == MOUNT_PROBE_COMMENT_ID
     warm_operation = apply.operation_id(
         "orenvlad-ai/wb-core",
         1050,
@@ -556,6 +833,10 @@ def main() -> None:
         "release_operation_id": "release-v2-test",
         "authorization_comment_id": AUTHORIZATION_COMMENT_ID,
         "goal_operation_id": warm_operation,
+        "mount_probe_job_id": parsed_probe["job_id"],
+        "mount_probe_evidence_digest": parsed_probe["evidence_digest"],
+        "mount_probe_artifact": parsed_probe["artifact"],
+        "mount_probe_comment_id": parsed_probe["comment_id"],
         "merge_sha": MERGE_SHA,
         "deployed_sha": MERGE_SHA,
         "projection_manifest_path": (
@@ -586,6 +867,7 @@ def main() -> None:
     }
     parsed_readiness = apply.parse_warm_readiness_receipt(
         [
+            warm_mount_probe_comment(),
             {
                 "user": {"login": "github-actions[bot]"},
                 "body": apply.warm_readiness_marker(readiness_id)
@@ -625,7 +907,7 @@ def main() -> None:
     }
     try:
         apply.parse_warm_readiness_receipt(
-            [first_blocked_comment],
+            [warm_mount_probe_comment(), first_blocked_comment],
             repository="orenvlad-ai/wb-core",
             pr=1050,
             release_operation="release-v2-test",
@@ -649,6 +931,7 @@ def main() -> None:
     }
     parsed_second_readiness = apply.parse_warm_readiness_receipt(
         [
+            warm_mount_probe_comment(),
             first_blocked_comment,
             {
                 "user": {"login": "github-actions[bot]"},
@@ -1174,8 +1457,10 @@ def main() -> None:
     apply_job, recovery_job = workflow.split("\n  recover_receipt:\n", 1)
     assert "pull-requests: write" in apply_job
     assert "--authorization-mode warm-archive-readiness" in apply_job
+    assert "--authorization-mode warm-archive-mount-probe" in apply_job
     assert "--authorization-comment-id" in apply_job
     assert "root-warm-archive-readiness-receipt.json" in apply_job
+    assert "root-warm-archive-mount-probe-receipt.json" in apply_job
     assert "actions: read" in recovery_job
     assert "pull-requests: write" in recovery_job
     assert "--authorization-mode receipt-recovery" in recovery_job

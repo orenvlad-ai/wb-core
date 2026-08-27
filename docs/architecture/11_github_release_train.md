@@ -204,7 +204,7 @@ production-data mutation is admitted by this deploy binding.
 
 Apply workflow имеет только manual `workflow_dispatch` и production
 environment. Он поддерживает fail-closed scope-goal, exact-manifest,
-warm-archive-readiness и receipt-recovery modes.
+warm-archive-mount-probe, warm-archive-readiness и receipt-recovery modes.
 
 Legacy `exact-manifest` inputs bind PR, merge/deployed SHA, manifest SHA-256,
 durable operation id и exact authorization comment id. Authorization comment
@@ -303,19 +303,35 @@ sample or a duplicate with identity drift blocks. Capacity and lifecycle-lock
 collections likewise prove exact identity coverage, so equal raw row counts
 cannot hide a duplicated row and a missing target/lock.
 
-After WBC0008 block 021, stable filesystem CAS is semantic across the host and
-the detached systemd worker mount namespaces. It retains exact `st_dev` and
-major/minor, source, UUID, filesystem type, declared root/backup/generation
-role, path-family placement, repo policy ownership, writable requirement and
-integrity/write option semantics. Namespace-local mount/parent ids, mount root
-and mount point, propagation fields, atime observations and extra restrictive
-`nosuid|nodev|noexec` flags remain structured observation evidence only. Loss
-of a role-declared generation restriction remains blocking. `ro`,
-unknown/ambiguous option records, different device/source/UUID/type, wrong
-path-device role, destination on root/generation, symlink escape, StoreRegistry,
-owner/classification or access-role drift still fail closed. Raw host-versus-
-worker records therefore remain inspectable without manufacturing immutable CAS
-drift for the same backing filesystem.
+After WBC0008 block 022, stable filesystem CAS is semantic across the host and
+the detached systemd worker mount namespaces. Before any readiness/apply for a
+fresh release, the default-off workflow runs one
+`warm-archive-mount-probe` through the exact deployed
+`wb-core-storage-recovery-sanitation@.service` contour. The caller-known job has
+no archive, unlink, service-restart, timer-change or business-data primitive.
+Its immutable server result and Actions artifact bind the deployed SHA, repo
+unit-template SHA, unit instance, mount namespace identity, canonical target
+and family-anchor stat/realpath identities, and all sorted raw maximum-depth
+mountinfo records including exact raw lines. The subsequent v4 readiness
+receipt binds that exact probe job/evidence/artifact/comment and accepts only a
+newer exact OWNER scope comment; a pre-probe or reused binding cannot authorize
+the fresh readiness identity.
+
+The v2 semantic selector independently proves every maximum-depth candidate's
+exact `st_dev` and major/minor, source/`st_rdev`, UUID, filesystem type,
+declared root/backup/generation role, policy owner, path/family-anchor placement,
+normalized mount-root-to-target backing subpath, writable state and stable
+integrity/write options. Multiple records collapse only when there is one
+distinct semantic identity; its distinct-identity count/digest enters stable
+CAS. Raw candidate count/digest/records and per-candidate proofs remain
+observation evidence, so record order and namespace-local mount/parent ids do
+not manufacture drift. Optional propagation fields, atime observations and
+extra role-allowed restrictive `nosuid|nodev|noexec` flags are observation-only.
+Loss of a declared generation restriction remains blocking. `ro`, unknown or
+partial candidate evidence, different device/source/UUID/type/stable option,
+divergent normalized path/root/anchor/role binding, destination on
+root/generation, symlink escape, StoreRegistry, owner/classification or
+access-role drift still fail closed with exact candidate/component evidence.
 
 Any immutable or semantic-predicate mismatch before submit or mutation journal
 durably writes a private exclusive-create/fsynced component-diff artifact bound

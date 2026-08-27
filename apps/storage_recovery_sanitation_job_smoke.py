@@ -259,6 +259,68 @@ def run() -> None:
         assert busy["error"]["code"] == "another_sanitation_job_active"
         assert busy_raw.exists()
 
+        probe_job_id = "5" * 64
+        probe_submitted = submit_job(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha_file=deployed_sha_file,
+            job_id=probe_job_id,
+            deployed_sha=DEPLOYED_SHA,
+            operation="warm-archive-mount-probe",
+            root_name="",
+            family="",
+            starter=_starter,
+        )
+        assert probe_submitted["request"]["operation"] == (
+            "warm-archive-mount-probe"
+        )
+        for forbidden in (
+            "root",
+            "family",
+            "fingerprint",
+            "manifest",
+            "manifest_sha256",
+            "goal_operation_id",
+            "approval_reference",
+        ):
+            assert forbidden not in probe_submitted["request"]
+        probe_completed = run_worker(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha_file=deployed_sha_file,
+            job_id=probe_job_id,
+            executor=lambda request: {
+                "schema": "wb-core.root-warm-archive-mount-probe/v1",
+                "status": "observed",
+                "query_only": True,
+                "database_written": False,
+                "archive_mutation_count": 0,
+                "source_unlink_count": 0,
+                "job_id": request["job_id"],
+                "deployed_sha": request["deployed_sha"],
+            },
+        )
+        assert probe_completed["status"] == "succeeded"
+        assert probe_completed["result"]["query_only"] is True
+        assert probe_completed["result"]["archive_mutation_count"] == 0
+        try:
+            submit_job(
+                runtime_dir=runtime_dir,
+                root_backups=root_backups,
+                deployed_sha_file=deployed_sha_file,
+                job_id="6" * 64,
+                deployed_sha=DEPLOYED_SHA,
+                operation="warm-archive-mount-probe",
+                root_name="",
+                family="",
+                manifest="/tmp/not-allowed",
+                starter=_starter,
+            )
+        except SanitationJobError as exc:
+            assert "must not carry mutation inputs" in str(exc)
+        else:
+            raise AssertionError("mount probe accepted mutation inputs")
+
     print("storage_recovery_sanitation_job_smoke: ok")
 
 

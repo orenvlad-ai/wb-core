@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import sqlite3
@@ -58,10 +59,11 @@ from packages.application.storage_registry import (  # noqa: E402
 )
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v6"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v7"
 SEMANTIC_FILESYSTEM_IDENTITY_CONTRACT = (
-    "wb_core_semantic_filesystem_identity_v1"
+    "wb_core_semantic_filesystem_identity_v2"
 )
+MOUNT_PROBE_SCHEMA = "wb-core.root-warm-archive-mount-probe/v1"
 MATERIAL_CAS_DIFF_SCHEMA = "wb-core.root-warm-archive-material-cas-diff/v1"
 MATERIAL_CAS_FAILURE_SCHEMA = "wb-core.root-warm-archive-material-cas-failure/v1"
 MATERIAL_CAS_FAILURE_FILENAME = "root-warm-archive-material-cas-failure.json"
@@ -453,6 +455,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     readiness = subparsers.add_parser("readiness")
     readiness.add_argument("--readiness-id", required=True)
+    mount_probe_parser = subparsers.add_parser("mount-probe")
+    mount_probe_parser.add_argument("--job-id", required=True)
     dry_run_parser = subparsers.add_parser("dry-run")
     dry_run_parser.add_argument("--projection-manifest", required=True)
     dry_run_parser.add_argument("--projection-manifest-sha256", required=True)
@@ -1249,6 +1253,7 @@ def _parse_mountinfo_line(line: str) -> dict[str, Any]:
         }
     )
     return {
+        "raw_line": line,
         "mount_id": mount_id,
         "parent_mount_id": parent_mount_id,
         "device_major": device_major,
@@ -1350,21 +1355,173 @@ def _path_matches_filesystem_role(path: Path, role: str) -> bool:
     return True
 
 
-def _semantic_mount_identity(
+def _path_binding_identity(
+    path: Path,
+    *,
+    filesystem_role: str,
+    path_device: int,
+) -> dict[str, Any]:
+    policy = FILESYSTEM_ROLE_POLICIES[filesystem_role]
+    if path.is_symlink():
+        raise WarmArchiveError("filesystem path binding is a symlink")
+    try:
+        canonical_path = path.resolve(strict=True)
+        path_stat = canonical_path.stat()
+        family_root = Path(str(policy["family_root"]))
+        if family_root.is_symlink():
+            raise WarmArchiveError("filesystem family anchor is a symlink")
+        canonical_anchor = family_root.resolve(strict=True)
+        anchor_stat = canonical_anchor.stat()
+    except OSError as exc:
+        raise WarmArchiveError(
+            "filesystem path/anchor identity is missing or ambiguous"
+        ) from exc
+    if canonical_path != path.resolve() or int(path_stat.st_dev) != int(path_device):
+        raise WarmArchiveError("filesystem canonical path identity drifted")
+    expected_device = int(policy["device"])
+    if (
+        int(path_stat.st_dev) != expected_device
+        or int(anchor_stat.st_dev) != expected_device
+    ):
+        raise WarmArchiveError("filesystem path/anchor device binding drifted")
+    if not _path_matches_filesystem_role(canonical_path, filesystem_role):
+        raise WarmArchiveError("filesystem path-to-device role binding drifted")
+    return {
+        "requested_path": str(path),
+        "canonical_path": str(canonical_path),
+        "path_device": int(path_stat.st_dev),
+        "path_device_major": int(os.major(path_stat.st_dev)),
+        "path_device_minor": int(os.minor(path_stat.st_dev)),
+        "path_inode": int(path_stat.st_ino),
+        "family_root": str(family_root),
+        "canonical_family_anchor": str(canonical_anchor),
+        "anchor_device": int(anchor_stat.st_dev),
+        "anchor_device_major": int(os.major(anchor_stat.st_dev)),
+        "anchor_device_minor": int(os.minor(anchor_stat.st_dev)),
+        "anchor_inode": int(anchor_stat.st_ino),
+        "placement": "inside_declared_family",
+    }
+
+
+def _candidate_backing_subpath(path: Path, raw_mount: Mapping[str, Any]) -> str:
+    mount_point_text = str(raw_mount.get("mount_point") or "")
+    mount_root_text = str(raw_mount.get("mount_root") or "")
+    if not mount_point_text.startswith("/") or not mount_root_text.startswith("/"):
+        raise WarmArchiveError("mount path/root binding is missing or ambiguous")
+    mount_point = Path(mount_point_text)
+    try:
+        relative = path.resolve().relative_to(mount_point)
+    except ValueError as exc:
+        raise WarmArchiveError("mount candidate does not bind the canonical path") from exc
+    backing = posixpath.normpath(
+        posixpath.join(mount_root_text, relative.as_posix())
+    )
+    if not backing.startswith("/") or backing == "/.." or backing.startswith("/../"):
+        raise WarmArchiveError("mount path/root binding escaped the backing filesystem")
+    return backing
+
+
+def _mount_candidate_component_diff(
+    proofs: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not proofs:
+        return []
+    baseline = proofs[0].get("semantic_identity")
+    if not isinstance(baseline, Mapping):
+        return []
+    result: list[dict[str, Any]] = []
+
+    def flattened(value: Any, prefix: str = "") -> dict[str, Any]:
+        if isinstance(value, Mapping):
+            rows: dict[str, Any] = {}
+            for key in sorted(value):
+                token = str(key).replace("~", "~0").replace("/", "~1")
+                rows.update(flattened(value[key], f"{prefix}/{token}"))
+            return rows
+        if isinstance(value, list):
+            rows = {}
+            for index, item in enumerate(value):
+                rows.update(flattened(item, f"{prefix}/{index}"))
+            return rows
+        return {prefix or "/": value}
+
+    baseline_components = flattened(baseline)
+    for index, proof in enumerate(proofs[1:], 1):
+        candidate = proof.get("semantic_identity")
+        if not isinstance(candidate, Mapping) or candidate == baseline:
+            continue
+        candidate_components = flattened(candidate)
+        for json_path in sorted(set(baseline_components) | set(candidate_components)):
+            before = baseline_components.get(json_path)
+            after = candidate_components.get(json_path)
+            if before == after:
+                continue
+            result.append(
+                {
+                    "candidate_index": index,
+                    "json_path": json_path,
+                    "before_component_digest": _digest(before),
+                    "after_component_digest": _digest(after),
+                    "before_value": before,
+                    "after_value": after,
+                }
+            )
+    return result
+
+
+def _raw_mount_candidate_component_diff(
+    candidates: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    fields = (
+        "device_major",
+        "device_minor",
+        "major_minor",
+        "mount_root",
+        "mount_point",
+        "mount_options",
+        "filesystem_type",
+        "source",
+        "super_options",
+        "filesystem_uuid",
+        "source_device",
+    )
+    baseline = candidates[0]
+    result = []
+    for index, candidate in enumerate(candidates[1:], 1):
+        for field in fields:
+            before = baseline.get(field)
+            after = candidate.get(field)
+            if before == after:
+                continue
+            result.append(
+                {
+                    "candidate_index": index,
+                    "json_path": "/raw_mount/" + field,
+                    "before_component_digest": _digest(before),
+                    "after_component_digest": _digest(after),
+                    "before_value": before,
+                    "after_value": after,
+                }
+            )
+    return result
+
+
+def _single_semantic_mount_identity(
     path: Path,
     raw_mount: Mapping[str, Any],
     *,
     filesystem_role: str,
     policy_owner: str,
-    path_device: int,
+    path_binding: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    policy = FILESYSTEM_ROLE_POLICIES.get(filesystem_role)
-    if policy is None or not policy_owner:
-        raise WarmArchiveError("filesystem role/policy ownership is unknown")
+    policy = FILESYSTEM_ROLE_POLICIES[filesystem_role]
     required_raw = {
         "device_major",
         "device_minor",
         "major_minor",
+        "mount_root",
         "mount_point",
         "mount_options",
         "filesystem_type",
@@ -1397,11 +1554,11 @@ def _semantic_mount_identity(
     expected_major = int(policy["device_major"])
     expected_minor = int(policy["device_minor"])
     try:
-        observed_path_device = int(path_device)
+        observed_path_device = int(path_binding["path_device"])
         observed_major = int(raw_mount["device_major"])
         observed_minor = int(raw_mount["device_minor"])
         observed_source_device = int(raw_mount["source_device"])
-    except (TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise WarmArchiveError(
             "filesystem backing-device identity is missing or ambiguous"
         ) from exc
@@ -1427,11 +1584,8 @@ def _semantic_mount_identity(
         "contract_version": SEMANTIC_FILESYSTEM_IDENTITY_CONTRACT,
         "filesystem_role": filesystem_role,
         "policy_owner": policy_owner,
-        "path_binding": {
-            "path": str(path.resolve()),
-            "family_root": str(policy["family_root"]),
-            "placement": "inside_declared_family",
-        },
+        "path_binding": dict(path_binding),
+        "backing_subpath": _candidate_backing_subpath(path, raw_mount),
         "backing_device": {
             "device": expected_device,
             "device_major": expected_major,
@@ -1447,9 +1601,138 @@ def _semantic_mount_identity(
             "stable_integrity_options"
         ],
     }
+    return semantic, option_semantics
+
+
+def _semantic_mount_identity(
+    path: Path,
+    raw_mount: Mapping[str, Any] | list[Mapping[str, Any]],
+    *,
+    filesystem_role: str,
+    policy_owner: str,
+    path_device: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = FILESYSTEM_ROLE_POLICIES.get(filesystem_role)
+    policy_owner_is_role = bool(
+        policy is not None
+        and policy_owner == str(policy.get("policy_owner") or "")
+    )
+    policy_owner_is_mutable_binding = bool(
+        filesystem_role in {"root", "generation"}
+        and re.fullmatch(
+            r"root_storage_policy\.non_target_cas\.[a-z0-9_]{1,80}\."
+            r"[a-z0-9_]{1,80}",
+            policy_owner,
+        )
+    )
+    if policy is None or not (
+        policy_owner_is_role or policy_owner_is_mutable_binding
+    ):
+        raise WarmArchiveError("filesystem role/policy ownership is unknown")
+    candidates = (
+        [dict(raw_mount)]
+        if isinstance(raw_mount, Mapping)
+        else [dict(item) for item in raw_mount]
+    )
+    if not candidates:
+        raise WarmArchiveError("semantic mount identity is missing or ambiguous")
+    raw_candidates = sorted(
+        candidates,
+        key=lambda item: _canonical_json_bytes(item),
+    )
+    path_binding = _path_binding_identity(
+        path,
+        filesystem_role=filesystem_role,
+        path_device=path_device,
+    )
+    proofs: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for index, candidate in enumerate(raw_candidates):
+        try:
+            semantic, option_semantics = _single_semantic_mount_identity(
+                path,
+                candidate,
+                filesystem_role=filesystem_role,
+                policy_owner=policy_owner,
+                path_binding=path_binding,
+            )
+        except WarmArchiveError as exc:
+            failures.append(
+                {
+                    "candidate_index": index,
+                    "raw_candidate_digest": _digest(candidate),
+                    "message": str(exc),
+                    "evidence": exc.evidence,
+                }
+            )
+            continue
+        proofs.append(
+            {
+                "candidate_index": index,
+                "raw_candidate_digest": _digest(candidate),
+                "semantic_identity": semantic,
+                "semantic_identity_digest": _digest(semantic),
+                "option_semantics": option_semantics,
+            }
+        )
+    evidence = {
+        "filesystem_role": filesystem_role,
+        "policy_owner": policy_owner,
+        "path_binding": path_binding,
+        "expected_constraints": {
+            "device": int(policy["device"]),
+            "device_major": int(policy["device_major"]),
+            "device_minor": int(policy["device_minor"]),
+            "major_minor": (
+                f"{int(policy['device_major'])}:{int(policy['device_minor'])}"
+            ),
+            "source": str(policy["source"]),
+            "filesystem_uuid": str(policy["filesystem_uuid"]),
+            "filesystem_type": str(policy["filesystem_type"]),
+            "required_mount_options": sorted(
+                str(item)
+                for item in policy.get("required_mount_options") or []
+            ),
+            "required_writable": True,
+        },
+        "raw_candidate_count": len(raw_candidates),
+        "raw_candidates_digest": _digest(raw_candidates),
+        "raw_mount_candidates": copy.deepcopy(raw_candidates),
+        "candidate_proofs": proofs,
+        "candidate_failures": failures,
+        "raw_component_diff": _raw_mount_candidate_component_diff(
+            raw_candidates
+        ),
+    }
+    if failures or len(proofs) != len(raw_candidates):
+        raise WarmArchiveError(
+            "mount identity candidate proof is incomplete or divergent",
+            evidence=evidence,
+        )
+    distinct = {
+        str(item["semantic_identity_digest"]): item["semantic_identity"]
+        for item in proofs
+    }
+    if len(distinct) != 1:
+        evidence["component_diff"] = _mount_candidate_component_diff(proofs)
+        raise WarmArchiveError(
+            "mount identity candidates are semantically divergent",
+            evidence=evidence,
+        )
+    semantic = copy.deepcopy(next(iter(distinct.values())))
+    semantic_evidence = {
+        "distinct_semantic_identity_count": 1,
+        "distinct_semantic_identity_digest": _digest(
+            sorted(distinct)
+        ),
+    }
+    semantic["candidate_evidence"] = semantic_evidence
     observation = {
-        "raw_mount": copy.deepcopy(dict(raw_mount)),
-        "option_semantics": option_semantics,
+        **evidence,
+        "distinct_semantic_identity_count": 1,
+        "distinct_semantic_identity_digest": semantic_evidence[
+            "distinct_semantic_identity_digest"
+        ],
         "semantic_identity_digest": _digest(semantic),
     }
     return semantic, observation
@@ -1485,7 +1768,7 @@ def _filesystem(path: Path, *, filesystem_role: str) -> dict[str, Any]:
 
 def _select_mount_identity(
     path: Path, records: list[Mapping[str, Any]]
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     matches: list[tuple[int, dict[str, Any]]] = []
     for source_record in records:
         record = dict(source_record)
@@ -1503,23 +1786,27 @@ def _select_mount_identity(
     if not matches:
         raise WarmArchiveError(f"mount identity is unavailable: {path}")
     deepest = max(item[0] for item in matches)
-    selected = [record for depth, record in matches if depth == deepest]
-    if len(selected) != 1:
-        raise WarmArchiveError(f"mount identity is ambiguous: {path}")
-    return selected[0]
+    return sorted(
+        [record for depth, record in matches if depth == deepest],
+        key=lambda item: _canonical_json_bytes(item),
+    )
 
 
-def _mount_identity(path: Path) -> dict[str, Any]:
+def _mount_identity(path: Path) -> list[dict[str, Any]]:
     records = []
     for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
         try:
             records.append(_parse_mountinfo_line(line))
         except WarmArchiveError:
             continue
-    result = _select_mount_identity(path, records)
-    result["filesystem_uuid"] = _filesystem_uuid(str(result["source"]))
-    result["source_device"] = _source_device(str(result["source"]))
-    return result
+    selected = _select_mount_identity(path, records)
+    result = []
+    for candidate in selected:
+        enriched = dict(candidate)
+        enriched["filesystem_uuid"] = _filesystem_uuid(str(enriched["source"]))
+        enriched["source_device"] = _source_device(str(enriched["source"]))
+        result.append(enriched)
+    return sorted(result, key=lambda item: _canonical_json_bytes(item))
 
 
 def _filesystem_snapshot(runtime_dir: Path, root_backups: Path) -> dict[str, Any]:
@@ -1538,6 +1825,127 @@ def _filesystem_snapshot(runtime_dir: Path, root_backups: Path) -> dict[str, Any
     if root_backups.resolve() != Path("/opt/wb-core-runtime/backups"):
         raise WarmArchiveError("root backup directory is not canonical")
     return result
+
+
+def mount_probe(
+    *,
+    runtime_dir: Path,
+    root_backups: Path,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+    job_id: str,
+) -> dict[str, Any]:
+    """Observe exact mount candidates inside the detached worker namespace."""
+
+    if JOB_ID_RE.fullmatch(job_id) is None:
+        raise WarmArchiveError("mount probe job id is invalid")
+    _verify_deployed_sha(
+        deployed_sha=deployed_sha,
+        deployed_sha_file=deployed_sha_file,
+    )
+    if runtime_dir.resolve(strict=True) != Path("/opt/wb-core-runtime/state"):
+        raise WarmArchiveError("mount probe runtime directory is not canonical")
+    if root_backups.resolve(strict=True) != Path("/opt/wb-core-runtime/backups"):
+        raise WarmArchiveError("mount probe root backup directory is not canonical")
+    template_path = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "systemd"
+        / "wb-core-storage-recovery-sanitation@.service"
+    )
+    if template_path.is_symlink() or not template_path.is_file():
+        raise WarmArchiveError("mount probe unit template is unavailable or unsafe")
+    installed_template_path = Path(
+        "/etc/systemd/system/wb-core-storage-recovery-sanitation@.service"
+    )
+    if installed_template_path.is_symlink() or not installed_template_path.is_file():
+        raise WarmArchiveError(
+            "installed mount probe unit template is unavailable or unsafe"
+        )
+    repo_template_sha256 = _sha256_file(template_path)
+    installed_template_sha256 = _sha256_file(installed_template_path)
+    if installed_template_sha256 != repo_template_sha256:
+        raise WarmArchiveError("installed mount probe unit template SHA drifted")
+    namespace_path = Path("/proc/self/ns/mnt")
+    try:
+        namespace_link = os.readlink(namespace_path)
+        namespace_stat = namespace_path.stat()
+    except OSError as exc:
+        raise WarmArchiveError("worker mount namespace identity is unavailable") from exc
+    paths = {
+        "root": root_backups,
+        "backup": DESTINATION_ROOT,
+        "generation": GENERATION_ROOT,
+    }
+    observations: list[dict[str, Any]] = []
+    for role, path in paths.items():
+        value = path.stat()
+        candidates = _mount_identity(path)
+        policy_owner = str(FILESYSTEM_ROLE_POLICIES[role]["policy_owner"])
+        semantic, observation = _semantic_mount_identity(
+            path,
+            candidates,
+            filesystem_role=role,
+            policy_owner=policy_owner,
+            path_device=int(value.st_dev),
+        )
+        observations.append(
+            {
+                "filesystem_role": role,
+                "policy_owner": policy_owner,
+                "target": observation["path_binding"],
+                "semantic_identity": semantic,
+                "semantic_identity_digest": observation[
+                    "semantic_identity_digest"
+                ],
+                "raw_candidate_count": observation["raw_candidate_count"],
+                "raw_candidates_digest": observation["raw_candidates_digest"],
+                "raw_mount_candidates": observation["raw_mount_candidates"],
+                "candidate_proofs": observation["candidate_proofs"],
+            }
+        )
+    observations = sorted(observations, key=lambda item: item["filesystem_role"])
+    return {
+        "schema": MOUNT_PROBE_SCHEMA,
+        "contract_name": CONTRACT_NAME,
+        "status": "observed",
+        "query_only": True,
+        "database_written": False,
+        "archive_mutation_count": 0,
+        "source_unlink_count": 0,
+        "service_restart_count": 0,
+        "timer_change_count": 0,
+        "job_id": job_id,
+        "deployed_sha": deployed_sha,
+        "worker": {
+            "unit_template": "wb-core-storage-recovery-sanitation@.service",
+            "unit_instance": (
+                f"wb-core-storage-recovery-sanitation@{job_id}.service"
+            ),
+            "repo_template_path": str(template_path.relative_to(ROOT)),
+            "repo_template_sha256": repo_template_sha256,
+            "installed_template_path": str(installed_template_path),
+            "installed_template_sha256": installed_template_sha256,
+            "installed_template_matches_repo": True,
+            "mount_namespace": {
+                "proc_path": str(namespace_path),
+                "link_target": namespace_link,
+                "device": int(namespace_stat.st_dev),
+                "inode": int(namespace_stat.st_ino),
+            },
+            "cgroup_digest": _digest(
+                Path("/proc/self/cgroup").read_text(encoding="utf-8")
+            ),
+        },
+        "paths": observations,
+        "path_count": len(observations),
+        "raw_candidate_count": sum(
+            int(item["raw_candidate_count"]) for item in observations
+        ),
+        "evidence_digest": _digest(observations),
+        "completed_at": _now(),
+    }
 
 
 def _store_registry(runtime_dir: Path, targets: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -6686,6 +7094,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     root_backups = Path(args.root_backups)
     evidence_dir = Path(args.evidence_dir)
     deployed_sha_file = Path(args.deployed_sha_file)
+    if args.command == "mount-probe":
+        return mount_probe(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            deployed_sha=args.deployed_sha,
+            deployed_sha_file=deployed_sha_file,
+            job_id=args.job_id,
+        )
     if args.command == "readiness":
         return readiness(
             runtime_dir=runtime_dir,

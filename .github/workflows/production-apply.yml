@@ -13,6 +13,7 @@ on:
           - exact-manifest
           - receipt-recovery
           - warm-archive-readiness
+          - warm-archive-mount-probe
       pr:
         description: Exact merged PR number
         required: true
@@ -61,7 +62,7 @@ permissions:
 jobs:
   apply_once:
     name: One exact production apply and reconciliation
-    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness'
+    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe'
     permissions:
       contents: read
       issues: write
@@ -106,6 +107,45 @@ jobs:
         with:
           name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
           path: ${{ runner.temp }}/production-apply-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  warm_archive_mount_probe:
+    name: Exact-worker query-only mount candidate probe
+    if: inputs.authorization_mode == 'warm-archive-mount-probe'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Checkout trusted main mount probe runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run one exact-worker query-only mount candidate probe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode warm-archive-mount-probe
+          --pr "${{ inputs.pr }}"
+          --release-operation-id "${{ inputs.release_operation_id }}"
+          --output "$RUNNER_TEMP/root-warm-archive-mount-probe-receipt.json"
+
+      - name: Upload immutable mount probe receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-warm-archive-mount-probe-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/root-warm-archive-mount-probe-receipt.json
           if-no-files-found: warn
           retention-days: 90
 
