@@ -1,4 +1,4 @@
-# Migration 159 terminal addendum: WBC0008 blocks 024 and 026
+# Migration 159 terminal addendum: WBC0008 blocks 024, 026 and 027
 
 This is the authoritative repo-only terminal-receipt addendum to
 `159_root_storage_warm_archive_wbc0008_006.md`. It does not change the archive
@@ -59,6 +59,49 @@ not-found/disabled units, stale or failed Result, nonzero status, missing idle
 next trigger, wrong trigger relation and impossible/ambiguous exhaustion remain
 terminal fail-closed.
 
+## Block 027 canonical classifier and generation v2
+
+Legacy a02 is now fixed terminal evidence: run `33073151214`, artifact id
+`9646668764`, artifact
+`root-warm-archive-reconciliation-pr-1075-run-33073151214`, receipt
+`sha256:ce87472b71d1545cb8383ec417b1d83cba1c5f46568beb6249b9e66368d4030a`
+and marker `5439297992`. Its state is
+`blocked/query-only-reconciliation-not-proven`, production mutation count is
+zero and its old sequence is exhausted. It is never a03, retry, replay or
+authorization for another operation.
+
+The a02 artifact proves a classifier-code defect rather than a service failure.
+All twelve timer rows omitted `MainPID`/`ExecMainStatus`, owner oneshots were
+normally `static` and the root-storage owner was `disabled`; the old duplicated
+classifier treated these as required/disabled failures. At the same instant
+the exact canary pair was coherent natural firing: timer `active/running`, owner
+`activating/start`, `MainPID=593451`, `ExecMainStatus=0`. Vitrina WB Finance
+429 degradation is a separate excluded condition and is not systemd evidence.
+
+Only a real repository code delta creates reconciliation generation `v2`. It
+binds the original source Apply receipt and exact operation
+`production-goal-v1-8692b24cb2491927bdadd5dec06a15d8`, job
+`d8176c48b41b6d128aa9adacb3aa50f1d464dc318cc9cc8df58d3be637649d2d`,
+both terminal a01/a02 run, artifact archive, receipt and marker digests, and one
+new merged `repo_only/done` Release SHA. The only admitted attempt is
+`v2-a01`. Exact replay is `already_terminal` before SSH/comment; `v2-a02`,
+`v2-a03`, queue and identity-nonce release are invalid.
+
+The one SSH process first verifies deployed SHA exactly
+`7d83c5d0ddf6bf86d6359409ef0f9a7bb4ad4747` and the exact deployed
+`apps/root_storage_warm_archive.py` digest. It imports only that deployed
+module's query-only `SERVICE_NAMES`, 27-unit snapshot, unit-row and bounded
+paired classifier symbols and invokes them directly. Reconciliation owns no
+second classifier. Timer rows are evaluated only on properties canonical code
+requires; missing timer `MainPID/ExecMainStatus` is valid, and owner
+`UnitFileState=static|disabled` follows canonical oneshot state/result/PID
+semantics. Realtime and monotonic next-trigger values are preserved as raw
+observations without adding a reconciliation-only predicate. Canonical
+failed/unknown/masked/missing/nonzero states and impossible pair relations
+remain fail-closed; only the canonical bounded transition receives at most
+three resamples inside five seconds. Initial raw rows, final 27 units/12 pairs,
+all resamples and module/contract identity are retained.
+
 ## Receipt and terminal acceptance
 
 Full canonical evidence is uploaded as one immutable artifact first. Only then
@@ -78,6 +121,8 @@ reclaimed bytes, stable capacity above root and Finance floors, fresh normal
 natural monitor, healthy 27 units/12 pairs, no active sanitation job or held
 lock, preserved journald/non-target/StoreRegistry state, and zero Promo,
 business-data, non-target or block-024 production mutation.
+All block-024/026/027 reconciliation receipts and markers must independently
+record `production_mutation_count=0`.
 
 Required additional check:
 

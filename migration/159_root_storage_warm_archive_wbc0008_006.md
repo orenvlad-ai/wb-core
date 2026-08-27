@@ -73,6 +73,18 @@ healthy by timeout. Any service-gate block writes the complete final 27-row and
 readiness receipt and trusted callback. The same structured gate is repeated in
 final readiness qualification, mutation reconciliation and terminal readback.
 
+WBC0008 block 027 does not change this deployed archive gate. It corrects the
+separate repo-only terminal-receipt probe after legacy reconciliation a02
+duplicated and narrowed the predicate. The new probe verifies deployed SHA
+`7d83c5d0ddf6bf86d6359409ef0f9a7bb4ad4747` and exact module bytes, then
+imports and invokes this module's `SERVICE_NAMES`, `_systemd_snapshot`,
+`_systemd_unit_row` and `_systemd_service_gate_with_resample` directly. Timer
+rows therefore require only the properties this canonical classifier requires;
+timer `MainPID/ExecMainStatus` absence and `static|disabled` oneshot owners are
+not reconciliation-only failures. Realtime/monotonic next-trigger values remain
+raw evidence. Exact terminal lineage and the one-attempt generation-v2 rules
+are authoritative in the migration-159 receipt-reconciliation addendum.
+
 WBC0008 block 011 corrects the pre-mutation lock-context protocol defect found
 by the first block-011 scope-goal attempt. The Finance lock and all three other
 lifecycle locks now have independent enter/exit ownership, close their current

@@ -97,6 +97,29 @@ on:
         required: false
         default: 0
         type: number
+      prior_reconciliation_a02_run_id:
+        description: Exact exhausted legacy reconciliation a02 run
+        required: false
+        default: 0
+        type: number
+      prior_reconciliation_a02_artifact_id:
+        description: Exact exhausted legacy reconciliation a02 artifact id
+        required: false
+        default: 0
+        type: number
+      prior_reconciliation_a02_artifact_name:
+        description: Exact exhausted legacy reconciliation a02 artifact name
+        required: false
+        type: string
+      prior_reconciliation_a02_receipt_sha256:
+        description: Exact exhausted legacy a02 receipt SHA-256 without prefix
+        required: false
+        type: string
+      prior_reconciliation_a02_comment_id:
+        description: Exact exhausted legacy reconciliation a02 marker comment id
+        required: false
+        default: 0
+        type: number
 
 permissions:
   contents: read
@@ -314,6 +337,11 @@ jobs:
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
           --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
           --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
+          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
+          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
+          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
+          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
+          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
           --github-output "$GITHUB_OUTPUT"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-preflight.json"
 
@@ -342,6 +370,11 @@ jobs:
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
           --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
           --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
+          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
+          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
+          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
+          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
+          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
 
       - name: Upload full immutable reconciliation evidence first
@@ -376,4 +409,9 @@ jobs:
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
           --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
           --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
+          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
+          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
+          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
+          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
+          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
