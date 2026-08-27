@@ -223,8 +223,9 @@ def _exercise_apply_lock_path(root: Path) -> None:
     evidence_dir = root / "apply-evidence"
     evidence_dir.mkdir()
     deployed_sha = "b" * 40
-    readiness_id = "readiness-v1-" + "c" * 32
+    readiness_id = "readiness-v2-" + "c" * 32 + "-a01"
     fresh_material = {
+        "material_partition": "immutable_safety_v1",
         "expected_reclaimed_allocated_bytes": 512,
         "immutable_non_target_digest": "sha256:" + "d" * 64,
         "mutable_canonical_topology_digest": "sha256:" + "e" * 64,
@@ -244,10 +245,23 @@ def _exercise_apply_lock_path(root: Path) -> None:
     }
     observations = {
         "filesystems_before": {"root": {}, "backup": {}},
-        "journald": {},
+        "journald": {"service": {}, "effective": {}, "inventory": []},
         "services": {},
-        "systemd_service_gate": {},
-        "activity_gates": [],
+        "systemd_service_gate": {"healthy": True, "classification": "healthy"},
+        "activity_gates": [{"blockers": []} for _ in range(6)],
+        "finance": {
+            "healthy": True,
+            "required_available_floor_bytes": 1,
+        },
+        "capacity_stages": [
+            {"projected_available_at_peak_bytes": 2} for _ in range(6)
+        ],
+        "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+        "active_sanitation_jobs": [],
+        "lifecycle_locks": [
+            {"path": name, "present": True, "locked": True, "held_by_batch": True}
+            for name in warm.OTHER_LIFECYCLE_LOCKS
+        ],
         "non_target": {
             "immutable_digest": "sha256:" + "d" * 64,
             "mutable_canonical_topology_digest": "sha256:" + "e" * 64,
@@ -263,6 +277,8 @@ def _exercise_apply_lock_path(root: Path) -> None:
             "_journal_path",
             "_material_snapshot",
             "_atomic_write_json",
+            "_ensure_destination_family",
+            "_process_target",
         )
     }
     mutation_calls: list[tuple[Path, object]] = []
@@ -280,6 +296,12 @@ def _exercise_apply_lock_path(root: Path) -> None:
     warm._journal_path = lambda _evidence_dir: root / "first-mutation.json"
     warm._material_snapshot = lambda **_kwargs: (fresh_material, observations)
     warm._atomic_write_json = first_mutation
+    warm._ensure_destination_family = lambda: (_ for _ in ()).throw(
+        AssertionError("destination mutation reached before material guards")
+    )
+    warm._process_target = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("archive mutation reached before material guards")
+    )
     apply_kwargs = {
         "runtime_dir": runtime,
         "root_backups": root_backups,
@@ -306,6 +328,37 @@ def _exercise_apply_lock_path(root: Path) -> None:
             _assert_lock_available(runtime / lock_name)
 
         mutation_calls.clear()
+        drifted_material = json.loads(json.dumps(fresh_material))
+        drifted_material["targets"][0]["identity"] = {
+            "path": "/safe/fixture.sqlite3",
+            "device": 1,
+            "inode": 2,
+            "mtime_ns": 3,
+            "sha256": "sha256:" + "4" * 64,
+        }
+        warm._material_snapshot = lambda **_kwargs: (
+            drifted_material,
+            observations,
+        )
+        try:
+            warm.apply_batch(**apply_kwargs)
+        except warm.WarmArchiveError as exc:
+            assert str(exc) == "immutable material CAS drifted after qualification"
+            diff = exc.evidence["component_diff"]
+            assert diff["changed_json_paths"] == ["/targets/0/identity"]
+            assert exc.evidence["mutation_journal_created"] is False
+            assert exc.evidence["archive_mutation_started"] is False
+        else:
+            raise AssertionError("mutation-start target drift was not rejected")
+        failure_path = evidence_dir / warm.MATERIAL_CAS_FAILURE_FILENAME
+        assert failure_path.is_file()
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        assert failure["component_diff"]["changed_json_paths"] == [
+            "/targets/0/identity"
+        ]
+        assert failure["mutation_journal_created"] is False
+        assert not (root / "first-mutation.json").exists()
+        assert mutation_calls == []
 
         def fail_before_boundary(**_kwargs: object) -> None:
             raise warm.WarmArchiveError("fixture pre-boundary failure")
@@ -496,7 +549,7 @@ def _exercise_non_target_cas_split(root: Path) -> None:
             phase="inode_replacement",
         )
     except warm.WarmArchiveError as exc:
-        assert "topology/content reconciliation failed" in str(exc)
+        assert "topology reconciliation failed" in str(exc)
     else:
         raise AssertionError("mutable canonical inode replacement was admitted")
 
@@ -877,7 +930,7 @@ def _exercise_non_target_cas_split(root: Path) -> None:
 
 def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
     root = root.resolve()
-    readiness_id = "readiness-v1-" + "d" * 32
+    readiness_id = "readiness-v2-" + "d" * 32 + "-a01"
     operation_id = "production-goal-v1-" + "e" * 32
     readiness_root = root / "readiness"
     production_root = root / "production-goals"
@@ -943,20 +996,34 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
     def material_snapshot(**_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
         nonlocal calls
         calls += 1
+        service_for_call = json.loads(json.dumps(service_snapshot))
         if calls == 2:
             with autoanswers.open("ab") as handle:
                 handle.write(b"\0" * 4096)
                 handle.flush()
                 os.fsync(handle.fileno())
+            service_for_call["wb-core-registry-http.service"]["MainPID"] = str(
+                registry_pid + 5000
+            )
+            timer_name = next(
+                name for name in warm.SERVICE_NAMES if name.endswith(".timer")
+            )
+            service_for_call[timer_name]["LastTriggerUSec"] = (
+                "Wed 2026-08-26 17:18:00 UTC"
+            )
         mutable_snapshot = warm._active_mutable_canonical_snapshot(
             runtime_dir=root,
             policy=policy,
             store_registry={"stores": {}},
-            service_snapshot=service_snapshot,
+            service_snapshot=service_for_call,
             opener_reader=lambda _path: [
                 _fd_opener(
                     autoanswers,
-                    pid=registry_pid,
+                    pid=int(
+                        service_for_call["wb-core-registry-http.service"][
+                            "MainPID"
+                        ]
+                    ),
                     access_mode="read_only",
                 )
             ],
@@ -978,6 +1045,7 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         material = {
             "contract_name": warm.CONTRACT_NAME,
             "profile": warm.PROFILE,
+            "material_partition": "immutable_safety_v1",
             "source_count": 6,
             "destination_root": str(warm.DESTINATION_ROOT),
             "destination_family": str(
@@ -985,12 +1053,13 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             ),
             "targets": targets,
             "filesystems": {},
-            "finance": {
-                "next_replacement_required_bytes": 1,
-                "required_available_floor_bytes": 2,
-            },
             "store_registry": {"identity_digest": "sha256:" + "2" * 64},
-            "root_policy": {"policy_sha256": "sha256:" + "3" * 64},
+            "root_policy": {
+                "policy_sha256": "sha256:" + "3" * 64,
+                "target_rows": [],
+                "protected_path_topology": [],
+                "protected_path_topology_digest": warm._digest([]),
+            },
             "immutable_non_target_digest": immutable_digest,
             "mutable_canonical_topology": mutable_snapshot["topology_rows"],
             "mutable_canonical_topology_digest": mutable_snapshot[
@@ -1023,8 +1092,19 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
             "activity_gates": activity,
             "filesystems_before": {"root": {}, "backup": {}},
             "journald": {},
-            "services": service_snapshot,
+            "services": service_for_call,
             "systemd_service_gate": healthy_gate,
+            "finance": {
+                "status": "healthy",
+                "healthy": True,
+                "blockers": [],
+                "retained_backup_id": f"fixture-{calls}",
+                "retained_count": 1,
+                "retained_bytes": 1,
+                "next_replacement_required_bytes": 1,
+                "required_available_floor_bytes": 2,
+                "available_bytes": 10,
+            },
             "non_target": non_target,
             "capacity_stages": [
                 {
@@ -1035,6 +1115,11 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
                 for item in warm.TARGET_POLICIES
             ],
             "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+            "active_sanitation_jobs": [],
+            "lifecycle_locks": [
+                {"path": name, "present": False, "locked": False}
+                for name in warm.OTHER_LIFECYCLE_LOCKS
+            ],
         }
         return material, observations
 
@@ -1118,6 +1203,407 @@ def _exercise_readiness_to_jit_autoanswers_growth(root: Path) -> None:
         warm._atomic_write_json = original_atomic_write
 
 
+def _exercise_material_partition_and_failure_evidence(root: Path) -> None:
+    material = {
+        "contract_name": warm.CONTRACT_NAME,
+        "profile": warm.PROFILE,
+        "material_partition": "immutable_safety_v1",
+        "source_count": 6,
+        "destination_root": str(warm.DESTINATION_ROOT),
+        "destination_family": str(
+            warm.DESTINATION_ROOT / warm.DESTINATION_FAMILY_NAME
+        ),
+        "targets": [
+            {
+                "key": "fixture",
+                "source_path": "/safe/fixture.sqlite3",
+                "archive_name": "fixture.sqlite3.zst",
+                "owner": "fixture-owner",
+                "family": "fixture-family",
+                "restore_role": "evidence",
+                "identity": {
+                    "path": "/safe/fixture.sqlite3",
+                    "device": 1,
+                    "inode": 2,
+                    "apparent_size_bytes": 3,
+                    "allocated_bytes": 4096,
+                    "mtime_ns": 4,
+                    "sha256": "sha256:" + "1" * 64,
+                },
+                "sidecars": [],
+                "sqlite": {"integrity_check": "ok"},
+                "provenance": {"digest": "sha256:" + "2" * 64},
+                "hold_evidence": {
+                    "classification": "clear",
+                    "marker_paths": [],
+                    "hold_xattr_names": [],
+                },
+                "projected_archive_size_bytes": 2,
+            }
+        ],
+        "filesystems": {
+            "root": {"path": "/", "device": 1, "mount": {"source": "/dev/sda1"}},
+            "backup": {
+                "path": str(warm.DESTINATION_ROOT),
+                "device": 2,
+                "mount": {"source": "/dev/sdb1"},
+            },
+            "generation": {
+                "path": str(warm.GENERATION_ROOT),
+                "device": 3,
+                "mount": {"source": "/dev/sdc1"},
+            },
+        },
+        "store_registry": {
+            "identity_digest": "sha256:" + "3" * 64,
+            "active_paths": ["/safe/current.sqlite3"],
+            "manifest_file_sha256": "sha256:" + "4" * 64,
+        },
+        "root_policy": {
+            "policy_sha256": "sha256:" + "5" * 64,
+            "target_rows": [],
+            "protected_path_topology": [
+                {
+                    "path": "/safe/non-target.sqlite3",
+                    "device": 1,
+                    "inode": 9,
+                    "owner": "other",
+                    "classification": "essential",
+                    "registered": True,
+                }
+            ],
+            "protected_path_topology_digest": "sha256:" + "6" * 64,
+        },
+        "immutable_non_target_digest": "sha256:" + "7" * 64,
+        "mutable_canonical_topology": [
+            {
+                "key": "current",
+                "owner": "current-owner",
+                "classification": "essential",
+                "resolver": {"type": "literal", "path": "/safe/current.sqlite3"},
+                "access_roles": [],
+                "allow_no_open_handles": True,
+                "registry_identity": None,
+                "topology": {
+                    "path": "/safe/current.sqlite3",
+                    "device": 1,
+                    "inode": 10,
+                    "mode": "0o600",
+                    "uid": 1000,
+                    "gid": 1000,
+                },
+            }
+        ],
+        "mutable_canonical_topology_digest": "sha256:" + "8" * 64,
+        "expected_unlink_count": 6,
+        "expected_reclaimed_allocated_bytes": 27_591_725_056,
+        "root_minimum_after_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+        "control_artifact_reserve_bytes": warm.CONTROL_ARTIFACT_RESERVE_BYTES,
+        "compression": "zstd-level-1-single-thread",
+    }
+    healthy_gate = {
+        "classification": "healthy",
+        "healthy": True,
+        "units": [{"name": "service", "MainPID": "100", "healthy": True}],
+        "pairs": [],
+        "failing_units": [],
+        "failing_pairs": [],
+    }
+    observations = {
+        "systemd_service_gate": healthy_gate,
+        "finance": {
+            "status": "healthy",
+            "healthy": True,
+            "blockers": [],
+            "retained_backup_id": "backup-a",
+            "retained_count": 1,
+            "retained_bytes": 10,
+            "next_replacement_required_bytes": 10,
+            "required_available_floor_bytes": 20,
+            "available_bytes": 100,
+        },
+        "capacity_stages": [
+            {"key": str(index), "projected_available_at_peak_bytes": 30}
+            for index in range(6)
+        ],
+        "filesystems_before": {
+            "root": {"available_bytes": 1},
+            "backup": {"available_bytes": 100},
+        },
+        "projected_root_available_bytes": warm.ROOT_MINIMUM_AFTER_BYTES,
+        "activity_gates": [
+            {
+                "source_path": f"/safe/{index}.sqlite3",
+                "classification": "clean",
+                "blockers": [],
+                "fd_openers": [],
+                "kernel_locks": [],
+                "hold_evidence": {},
+            }
+            for index in range(6)
+        ],
+        "root_policy_protected_path_observations": [
+            {
+                "path": "/safe/non-target.sqlite3",
+                "device": 1,
+                "inode": 9,
+                "owner": "other",
+                "classification": "essential",
+                "registered": True,
+                "ordinary_mutable_fields": {"size_bytes": 10, "mtime_ns": 1},
+            }
+        ],
+        "non_target": {
+            "mutable_canonical": {
+                "observation_rows": [
+                    {
+                        **material["mutable_canonical_topology"][0],
+                        "ordinary_mutable_fields": {
+                            "apparent_size_bytes": 10,
+                            "mtime_ns": 1,
+                        },
+                        "open_handle_relationships": [],
+                    }
+                ]
+            }
+        },
+        "active_sanitation_jobs": [],
+        "lifecycle_locks": [
+            {"path": name, "present": False, "locked": False}
+            for name in warm.OTHER_LIFECYCLE_LOCKS
+        ],
+        "journald": {"service": {"MainPID": "200"}, "effective": {}, "inventory": []},
+    }
+
+    one_component = json.loads(json.dumps(material))
+    one_component["targets"][0]["identity"]["mtime_ns"] = 5
+    exact_diff = warm._material_cas_diff(material, one_component)
+    assert exact_diff["changed_json_paths"] == ["/targets/0/identity"]
+    assert exact_diff["components"][0]["classification"] == "exact_target_source"
+    assert exact_diff["components"][0]["before_component_digest"] == warm._digest(
+        material["targets"][0]["identity"]
+    )
+    assert exact_diff["components"][0]["after_component_digest"] == warm._digest(
+        one_component["targets"][0]["identity"]
+    )
+
+    immutable_cases = (
+        ("sidecars", "/targets/0/sidecars", "target_sidecar"),
+        ("destination", "/filesystems/backup", "destination_or_mount_topology"),
+        ("policy", "/root_policy", "immutable_non_target_or_policy"),
+    )
+    for case, path, classification in immutable_cases:
+        changed = json.loads(json.dumps(material))
+        if case == "sidecars":
+            changed["targets"][0]["sidecars"] = [
+                {"suffix": "-wal", "present": True}
+            ]
+        elif case == "destination":
+            changed["filesystems"]["backup"]["mount"]["source"] = "/dev/other"
+        else:
+            changed["root_policy"]["policy_sha256"] = "sha256:" + "9" * 64
+        diff = warm._material_cas_diff(material, changed)
+        assert path in diff["changed_json_paths"]
+        row = next(item for item in diff["components"] if item["json_path"] == path)
+        assert row["classification"] == classification
+        assert diff["exact_immutable_match"] is False
+
+    evolved_observations = json.loads(json.dumps(observations))
+    evolved_observations["systemd_service_gate"]["units"][0]["MainPID"] = "101"
+    evolved_observations["finance"]["retained_backup_id"] = "backup-b"
+    evolved_observations["finance"]["available_bytes"] = 110
+    evolved_observations["capacity_stages"][0][
+        "projected_available_at_peak_bytes"
+    ] = 31
+    evolved_observations["root_policy_protected_path_observations"][0][
+        "ordinary_mutable_fields"
+    ] = {"size_bytes": 11, "mtime_ns": 2}
+    evolved_observations["non_target"]["mutable_canonical"][
+        "observation_rows"
+    ][0]["ordinary_mutable_fields"] = {
+        "apparent_size_bytes": 11,
+        "mtime_ns": 2,
+    }
+    observation_diff = warm._material_cas_diff(
+        material,
+        material,
+        expected_observations=observations,
+        observed_observations=evolved_observations,
+    )
+    assert observation_diff["exact_immutable_match"] is True
+    classifications = {
+        item["classification"] for item in observation_diff["observation_changes"]
+    }
+    assert "service_health_observation" in classifications
+    assert "capacity_observation" in classifications
+    assert "non_target_live_observation" in classifications
+    assert warm._mutable_safety_predicates(
+        evolved_observations, minimum_backup_floor_bytes=20
+    )["passed"] is True
+
+    for field in (
+        "service_health_passed",
+        "capacity_passed",
+        "target_activity_passed",
+        "lifecycle_locks_passed",
+        "no_other_sanitation_job",
+    ):
+        blocked = json.loads(json.dumps(observations))
+        if field == "service_health_passed":
+            blocked["systemd_service_gate"]["healthy"] = False
+        elif field == "capacity_passed":
+            blocked["capacity_stages"][0]["projected_available_at_peak_bytes"] = 19
+        elif field == "target_activity_passed":
+            blocked["activity_gates"][0]["blockers"] = [
+                {"code": "sqlite_sidecar_present"}
+            ]
+        elif field == "lifecycle_locks_passed":
+            blocked["lifecycle_locks"][0]["locked"] = True
+        else:
+            blocked["active_sanitation_jobs"] = [
+                {"job_id": "1" * 64, "status": "running"}
+            ]
+        predicates = warm._mutable_safety_predicates(
+            blocked, minimum_backup_floor_bytes=20
+        )
+        assert predicates["passed"] is False
+        assert predicates["predicates"][field] is False
+
+    evidence_dir = root / "immutable-failure"
+    evidence_dir.mkdir(mode=0o700)
+    first = warm._persist_material_cas_failure(
+        evidence_dir=evidence_dir,
+        phase="mutation_start_immutable_material_cas",
+        readiness_id="readiness-v2-" + "1" * 32 + "-a01",
+        operation_id=OPERATION,
+        job_id="2" * 64,
+        deployed_sha="3" * 40,
+        manifest_path=evidence_dir / "manifest.json",
+        manifest_sha256="sha256:" + "4" * 64,
+        component_diff=exact_diff,
+    )
+    original_raw = Path(first["artifact_path"]).read_bytes()
+    later_matching = warm._persist_material_cas_failure(
+        evidence_dir=evidence_dir,
+        phase="later_matching_snapshot",
+        readiness_id="readiness-v2-" + "1" * 32 + "-a01",
+        operation_id=OPERATION,
+        job_id="2" * 64,
+        deployed_sha="3" * 40,
+        manifest_path=evidence_dir / "manifest.json",
+        manifest_sha256="sha256:" + "4" * 64,
+        component_diff=warm._material_cas_diff(material, material),
+    )
+    assert later_matching["original_failure_preserved"] is True
+    assert Path(first["artifact_path"]).read_bytes() == original_raw
+    preserved = json.loads(original_raw)
+    assert preserved["phase"] == "mutation_start_immutable_material_cas"
+    assert preserved["component_diff"]["changed_json_paths"] == [
+        "/targets/0/identity"
+    ]
+
+
+def _exercise_scoped_non_target_writer_progress(root: Path) -> None:
+    hold_root = root / "scoped-non-target"
+    hold_root.mkdir()
+    target = hold_root / "target.sqlite3"
+    unrelated = hold_root / "unrelated.sqlite3"
+    _seed(target)
+    _seed(unrelated)
+    destination_root = root / "warm-destination"
+    original_targets = warm.TARGET_POLICIES
+    original_destination = warm.DESTINATION_ROOT
+    warm.TARGET_POLICIES = (
+        {
+            "source_path": str(target),
+            "hold_root": str(hold_root),
+            "archive_name": "target.sqlite3.zst",
+        },
+    )
+    warm.DESTINATION_ROOT = destination_root
+    try:
+        baseline = warm._immutable_non_target_snapshot()
+        baseline_inode = unrelated.stat().st_ino
+        with unrelated.open("ab") as handle:
+            handle.write(b"writer-progress")
+            handle.flush()
+            os.fsync(handle.fileno())
+        evolved = warm._immutable_non_target_snapshot()
+        assert unrelated.stat().st_ino == baseline_inode
+        assert baseline["immutable_digest"] == evolved["immutable_digest"]
+        assert baseline["exact_family_observation_digest"] != evolved[
+            "exact_family_observation_digest"
+        ]
+
+        replacement = hold_root / "replacement.sqlite3"
+        _seed(replacement)
+        os.replace(replacement, unrelated)
+        replaced = warm._immutable_non_target_snapshot()
+        assert replaced["immutable_digest"] != baseline["immutable_digest"]
+    finally:
+        warm.TARGET_POLICIES = original_targets
+        warm.DESTINATION_ROOT = original_destination
+
+    protected = root / "registered-large-output.sqlite3"
+    _seed(protected)
+    original_load_policy = warm.load_policy
+    original_collect_status = warm.collect_root_storage_status
+    original_registered = warm.registered_producer_for_path
+    policy = {"contract": "fixture"}
+    policy_sha = "sha256:" + "a" * 64
+
+    def status_with(rows: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "policy_sha256": policy_sha,
+            "large_root_files": rows,
+            "unregistered_large_root_files": [],
+            "status": "normal",
+            "filesystems": {"root": {"available_bytes": 1}},
+        }
+
+    value = protected.stat()
+    row = {
+        "path": str(protected),
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "size_bytes": value.st_size,
+        "mtime_ns": value.st_mtime_ns,
+        "registered": True,
+        "owner": "fixture-owner",
+        "classification": "essential",
+    }
+    warm.load_policy = lambda: policy
+    warm.collect_root_storage_status = lambda **_kwargs: status_with([row])
+    warm.registered_producer_for_path = lambda *_args, **_kwargs: {
+        "owner": "fixture-owner",
+        "classification": "essential",
+    }
+    try:
+        baseline_policy = warm._root_policy_snapshot([], require_targets=False)
+        with protected.open("ab") as handle:
+            handle.write(b"below-or-above-scan-threshold-progress")
+            handle.flush()
+            os.fsync(handle.fileno())
+        warm.collect_root_storage_status = lambda **_kwargs: status_with([])
+        evolved_policy = warm._root_policy_snapshot(
+            [],
+            require_targets=False,
+            expected_protected_topology=baseline_policy[
+                "protected_path_topology"
+            ],
+        )
+        assert evolved_policy["protected_path_topology_digest"] == baseline_policy[
+            "protected_path_topology_digest"
+        ]
+        assert evolved_policy["protected_path_observations"] != baseline_policy[
+            "protected_path_observations"
+        ]
+    finally:
+        warm.load_policy = original_load_policy
+        warm.collect_root_storage_status = original_collect_status
+        warm.registered_producer_for_path = original_registered
+
+
 def run() -> None:
     assert len(warm.TARGET_POLICIES) == 6
     assert len({item["source_path"] for item in warm.TARGET_POLICIES}) == 6
@@ -1133,6 +1619,8 @@ def run() -> None:
         _exercise_lock_contexts(lock_root)
         _exercise_apply_lock_path(lock_root)
         _exercise_non_target_cas_split(lock_root)
+        _exercise_material_partition_and_failure_evidence(lock_root)
+        _exercise_scoped_non_target_writer_progress(lock_root)
         _exercise_readiness_to_jit_autoanswers_growth(lock_root)
     assert {
         owner for _timer, owner in warm.TIMER_SERVICE_PAIRS

@@ -129,6 +129,13 @@ Terminal operation identity не переиспользуется. Missing ident
 unknown schema/effect или target warning без diagnosis даёт
 `EVIDENCE_BLOCKED`, никогда `HUMAN_REQUIRED`.
 
+Sequential identity не требует пустого code PR, если capability contract уже
+задаёт bounded same-release attempt sequence. Для WBC0008 exact-six это только
+contiguous readiness-v2 `a01`..`a03`, привязанные к одному deployed SHA,
+authorization comment и derived goal operation; каждый attempt terminal и
+immutable, а exhaustion не создаёт queue/retry. Новый PR нужен только для
+реального code/runtime delta, не как identity nonce.
+
 Unrelated warning записывается, stale warning refresh-ится. Они не создают
 gate и не расширяют scope.
 

@@ -137,6 +137,7 @@ jobs:
           --authorization-mode warm-archive-readiness
           --pr "${{ inputs.pr }}"
           --release-operation-id "${{ inputs.release_operation_id }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-readiness-receipt.json"
 
       - name: Upload immutable readiness receipt

@@ -58,7 +58,10 @@ from packages.application.storage_registry import (  # noqa: E402
 )
 
 
-CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v3"
+CONTRACT_NAME = "root_storage_warm_archive_wbc0008_006_v4"
+MATERIAL_CAS_DIFF_SCHEMA = "wb-core.root-warm-archive-material-cas-diff/v1"
+MATERIAL_CAS_FAILURE_SCHEMA = "wb-core.root-warm-archive-material-cas-failure/v1"
+MATERIAL_CAS_FAILURE_FILENAME = "root-warm-archive-material-cas-failure.json"
 PROFILE = "root-warm-archive-six"
 EXPECTED_SOURCE_COUNT = 6
 DESTINATION_FAMILY_NAME = "root-warm-archive-wbc0008-006"
@@ -84,7 +87,7 @@ SYSTEMD_PAIR_RESAMPLE_INTERVAL_SECONDS = 0.25
 JOB_ID_RE = re.compile(r"[0-9a-f]{64}")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-READINESS_ID_RE = re.compile(r"readiness-v1-[0-9a-f]{32}")
+READINESS_ID_RE = re.compile(r"readiness-v2-[0-9a-f]{32}-a[0-9]{2}")
 HOLD_TERMS = ("hold", "legal", "forensic", "incident", "preserve", "retain")
 PROTECTED_PREFIXES = (
     "/opt/wb-core-runtime/state/incident_backups/",
@@ -1235,12 +1238,42 @@ def _root_policy_snapshot(
     *,
     mutable_paths: set[str] | None = None,
     require_targets: bool = True,
+    expected_protected_topology: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     policy = load_policy()
     status_payload = collect_root_storage_status(policy=policy)
     if status_payload.get("unregistered_large_root_files"):
         raise WarmArchiveError("root storage status has an unregistered producer")
     by_path = {str(item["path"]): item for item in status_payload["large_root_files"]}
+    for expected in expected_protected_topology or []:
+        expected_path = str(expected.get("path") or "")
+        if not expected_path or expected_path in by_path:
+            continue
+        path = Path(expected_path)
+        if path.is_symlink() or not path.is_file():
+            raise WarmArchiveError(
+                "protected non-target path topology drifted",
+                evidence={"path": expected_path, "key": expected_path},
+            )
+        value = path.lstat()
+        producer = registered_producer_for_path(policy, path)
+        if producer is None:
+            raise WarmArchiveError(
+                "protected non-target owner/classification drifted",
+                evidence={"path": expected_path, "key": expected_path},
+            )
+        by_path[expected_path] = {
+            "path": expected_path,
+            "device": int(value.st_dev),
+            "inode": int(value.st_ino),
+            "size_bytes": int(value.st_size),
+            "mtime_ns": int(value.st_mtime_ns),
+            "registered": producer is not None,
+            "owner": None if producer is None else producer["owner"],
+            "classification": (
+                None if producer is None else producer["classification"]
+            ),
+        }
     target_rows = []
     for item in targets:
         row = by_path.get(str(item["source_path"]))
@@ -1260,28 +1293,37 @@ def _root_policy_snapshot(
         target_rows.append(dict(row))
     target_paths = {str(item["source_path"]) for item in targets}
     mutable_paths = set(mutable_paths or set())
-    immutable_protected = []
-    for row in status_payload["large_root_files"]:
+    protected_topology = []
+    protected_observations = []
+    for row in sorted(by_path.values(), key=lambda item: str(item["path"])):
         if str(row["path"]) in target_paths:
             continue
         if str(row["path"]) in mutable_paths:
             continue
-        immutable_protected.append(
+        topology = {
+            "path": str(row["path"]),
+            "device": int(row["device"]),
+            "inode": int(row["inode"]),
+            "owner": str(row["owner"]),
+            "classification": str(row["classification"]),
+            "registered": bool(row["registered"]),
+        }
+        protected_topology.append(topology)
+        protected_observations.append(
             {
-                "path": str(row["path"]),
-                "device": int(row["device"]),
-                "inode": int(row["inode"]),
-                "size_bytes": int(row["size_bytes"]),
-                "mtime_ns": int(row["mtime_ns"]),
-                "owner": str(row["owner"]),
-                "classification": str(row["classification"]),
+                **topology,
+                "ordinary_mutable_fields": {
+                    "size_bytes": int(row["size_bytes"]),
+                    "mtime_ns": int(row["mtime_ns"]),
+                },
             }
         )
     return {
         "policy_sha256": status_payload["policy_sha256"],
         "target_rows": target_rows,
-        "immutable_protected_path_identities": immutable_protected,
-        "immutable_protected_path_identity_digest": _digest(immutable_protected),
+        "protected_path_topology": protected_topology,
+        "protected_path_topology_digest": _digest(protected_topology),
+        "protected_path_observations": protected_observations,
         "status": status_payload["status"],
         "available_bytes": int(status_payload["filesystems"]["root"]["available_bytes"]),
     }
@@ -1294,7 +1336,8 @@ def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
         source = Path(str(policy["source_path"]))
         excluded.update({str(source), str(source) + "-wal", str(source) + "-shm", str(source) + "-journal"})
         roots.add(Path(str(policy["hold_root"])))
-    rows = []
+    topology_rows = []
+    observation_rows = []
     for root in sorted(roots, key=str):
         for path in sorted(root.rglob("*"), key=str):
             if str(path) in excluded:
@@ -1309,8 +1352,11 @@ def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
                 "inode": int(value.st_ino),
                 "kind": "symlink" if stat.S_ISLNK(value.st_mode) else "file" if stat.S_ISREG(value.st_mode) else "directory" if stat.S_ISDIR(value.st_mode) else "other",
             }
+            if row["kind"] == "symlink":
+                row["symlink_target"] = os.readlink(path)[:500]
+            observation = dict(row)
             if row["kind"] == "file":
-                row.update(
+                observation.update(
                     {
                         "size_bytes": int(value.st_size),
                         "allocated_bytes": int(value.st_blocks * 512),
@@ -1319,7 +1365,8 @@ def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
                         "sha256": _sha256_file(path),
                     }
                 )
-            rows.append(row)
+            topology_rows.append(row)
+            observation_rows.append(observation)
     destination = DESTINATION_ROOT / DESTINATION_FAMILY_NAME
     destination_rows = []
     if destination.exists():
@@ -1359,13 +1406,17 @@ def _immutable_non_target_snapshot(*, operation_id: str = "") -> dict[str, Any]:
                 evidence={"unknown_destination_paths": foreign},
             )
     material = {
-        "exact_family_content_rows": rows,
-        "destination_immutable_non_target_rows": destination_rows,
+        "exact_family_topology_rows": topology_rows,
+        "destination_immutable_non_target_topology_rows": destination_rows,
     }
     return {
         **material,
-        "exact_family_content_digest": _digest(rows),
-        "destination_immutable_non_target_digest": _digest(destination_rows),
+        "exact_family_topology_digest": _digest(topology_rows),
+        "exact_family_observation_rows": observation_rows,
+        "exact_family_observation_digest": _digest(observation_rows),
+        "destination_immutable_non_target_topology_digest": _digest(
+            destination_rows
+        ),
         "immutable_digest": _digest(material),
     }
 
@@ -1665,6 +1716,7 @@ def _non_target_snapshot(
     service_snapshot: Mapping[str, Mapping[str, Any]] | None = None,
     require_targets: bool = True,
     operation_id: str = "",
+    expected_non_target: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     services = dict(service_snapshot or _systemd_snapshot())
     policy = load_policy()
@@ -1680,14 +1732,20 @@ def _non_target_snapshot(
         list(TARGET_POLICIES),
         mutable_paths=set(mutable["resolved_paths"]),
         require_targets=require_targets,
+        expected_protected_topology=list(
+            ((expected_non_target or {}).get("root_policy") or {}).get(
+                "protected_path_topology"
+            )
+            or []
+        ),
     )
     return {
         "immutable": immutable,
         "immutable_digest": _digest(
             {
                 "scoped": immutable["immutable_digest"],
-                "root_policy": root_policy[
-                    "immutable_protected_path_identity_digest"
+                "root_policy_topology": root_policy[
+                    "protected_path_topology_digest"
                 ],
             }
         ),
@@ -1733,6 +1791,106 @@ def _reconcile_non_target(
                 ),
             }
         )
+    before_protected = {
+        str(item["path"]): item
+        for item in (before.get("root_policy") or {}).get(
+            "protected_path_observations"
+        )
+        or []
+        if isinstance(item, Mapping)
+    }
+    after_protected = {
+        str(item["path"]): item
+        for item in (after.get("root_policy") or {}).get(
+            "protected_path_observations"
+        )
+        or []
+        if isinstance(item, Mapping)
+    }
+    protected_evolution = []
+    for path in sorted(set(before_protected) | set(after_protected)):
+        earlier = before_protected.get(path)
+        later = after_protected.get(path)
+        protected_evolution.append(
+            {
+                "path": path,
+                "topology_before": {
+                    key: (earlier or {}).get(key)
+                    for key in (
+                        "path",
+                        "device",
+                        "inode",
+                        "owner",
+                        "classification",
+                        "registered",
+                    )
+                },
+                "topology_after": {
+                    key: (later or {}).get(key)
+                    for key in (
+                        "path",
+                        "device",
+                        "inode",
+                        "owner",
+                        "classification",
+                        "registered",
+                    )
+                },
+                "ordinary_mutable_fields_before": (earlier or {}).get(
+                    "ordinary_mutable_fields"
+                ),
+                "ordinary_mutable_fields_after": (later or {}).get(
+                    "ordinary_mutable_fields"
+                ),
+                "ordinary_writer_progress_observed": bool(
+                    earlier
+                    and later
+                    and earlier.get("ordinary_mutable_fields")
+                    != later.get("ordinary_mutable_fields")
+                ),
+            }
+        )
+    before_scoped = {
+        str(item["path"]): item
+        for item in (before.get("immutable") or {}).get(
+            "exact_family_observation_rows"
+        )
+        or []
+        if isinstance(item, Mapping)
+    }
+    after_scoped = {
+        str(item["path"]): item
+        for item in (after.get("immutable") or {}).get(
+            "exact_family_observation_rows"
+        )
+        or []
+        if isinstance(item, Mapping)
+    }
+    scoped_writer_evolution = []
+    ordinary_fields = (
+        "size_bytes",
+        "allocated_bytes",
+        "mtime_ns",
+        "ctime_ns",
+        "sha256",
+    )
+    for path in sorted(set(before_scoped) | set(after_scoped)):
+        earlier = before_scoped.get(path)
+        later = after_scoped.get(path)
+        before_fields = {
+            key: (earlier or {}).get(key) for key in ordinary_fields
+        }
+        after_fields = {key: (later or {}).get(key) for key in ordinary_fields}
+        scoped_writer_evolution.append(
+            {
+                "path": path,
+                "ordinary_mutable_fields_before": before_fields,
+                "ordinary_mutable_fields_after": after_fields,
+                "ordinary_writer_progress_observed": bool(
+                    earlier and later and before_fields != after_fields
+                ),
+            }
+        )
     result = {
         "phase": phase,
         "immutable_digest_before": before.get("immutable_digest"),
@@ -1750,12 +1908,14 @@ def _reconcile_non_target(
         )
         == after.get("mutable_canonical_topology_digest"),
         "mutable_canonical_evolution": evolution,
+        "protected_path_observation_evolution": protected_evolution,
+        "scoped_non_target_writer_evolution": scoped_writer_evolution,
     }
     if not result["immutable_preserved"] or not result[
         "mutable_canonical_topology_preserved"
     ]:
         raise WarmArchiveError(
-            f"non-target topology/content reconciliation failed: {phase}",
+            f"non-target topology reconciliation failed: {phase}",
             evidence=result,
         )
     return result
@@ -1832,22 +1992,28 @@ def _mutation_scope_reconciliation(journal: Mapping[str, Any]) -> dict[str, Any]
 
 def _finance_snapshot(runtime_dir: Path) -> dict[str, Any]:
     health = backup_rotation_health(runtime_dir)
-    if (
-        health.get("status") != "healthy"
-        or health.get("next_replacement_capacity") is not True
-        or health.get("blockers")
-        or int(health.get("next_replacement_required_bytes") or 0) <= 0
-    ):
-        raise WarmArchiveError("Finance backup health/capacity is not ready")
+    next_replacement_required = int(
+        health.get("next_replacement_required_bytes") or 0
+    )
+    blockers = [str(item)[:300] for item in health.get("blockers") or []]
+    healthy = bool(
+        health.get("status") == "healthy"
+        and health.get("next_replacement_capacity") is True
+        and not blockers
+        and next_replacement_required > 0
+    )
     return {
-        "status": "healthy",
-        "retained_backup_id": str(health["retained_backup_id"]),
-        "retained_count": int(health["retained_count"]),
-        "retained_bytes": int(health["retained_bytes"]),
-        "next_replacement_required_bytes": int(health["next_replacement_required_bytes"]),
+        "status": str(health.get("status") or "unknown"),
+        "healthy": healthy,
+        "blockers": blockers,
+        "retained_backup_id": str(health.get("retained_backup_id") or ""),
+        "retained_count": int(health.get("retained_count") or 0),
+        "retained_bytes": int(health.get("retained_bytes") or 0),
+        "next_replacement_required_bytes": next_replacement_required,
         "emergency_reserve_bytes": EMERGENCY_RESERVE_BYTES,
-        "required_available_floor_bytes": int(health["next_replacement_required_bytes"]) + EMERGENCY_RESERVE_BYTES,
-        "available_bytes": int(health["available_bytes"]),
+        "required_available_floor_bytes": next_replacement_required
+        + EMERGENCY_RESERVE_BYTES,
+        "available_bytes": int(health.get("available_bytes") or 0),
         "last_success": health.get("last_success"),
         "last_failure": health.get("last_failure"),
     }
@@ -2377,6 +2543,7 @@ def _validate_reusable_material(material: Mapping[str, Any]) -> list[dict[str, A
     if (
         material.get("contract_name") != CONTRACT_NAME
         or material.get("profile") != PROFILE
+        or material.get("material_partition") != "immutable_safety_v1"
         or int(material.get("source_count") or 0) != EXPECTED_SOURCE_COUNT
         or material.get("destination_root") != str(DESTINATION_ROOT)
         or material.get("destination_family")
@@ -2446,8 +2613,6 @@ def _material_snapshot(
         raise WarmArchiveError("exact target count is not six")
     finance = _finance_snapshot(runtime_dir)
     active_jobs = _active_sanitation_jobs(runtime_dir, own_job_id=own_job_id)
-    if active_jobs:
-        raise WarmArchiveError("another sanitation operation is non-terminal")
     lifecycle_locks = (
         [
             {
@@ -2461,9 +2626,23 @@ def _material_snapshot(
         if lifecycle_locks_held
         else _other_lifecycle_locks(runtime_dir)
     )
-    if not lifecycle_locks_held and any(item["locked"] for item in lifecycle_locks):
-        raise WarmArchiveError("another storage lifecycle operation is active")
-    non_target = _non_target_snapshot(runtime_dir)
+    non_target = _non_target_snapshot(
+        runtime_dir,
+        expected_non_target=(
+            {
+                "root_policy": {
+                    "protected_path_topology": (
+                        (reusable_material.get("root_policy") or {}).get(
+                            "protected_path_topology"
+                        )
+                        or []
+                    )
+                }
+            }
+            if reusable_material is not None
+            else None
+        ),
+    )
     store_registry = non_target["store_registry"]
     root_policy = non_target["root_policy"]
     destination_family = DESTINATION_ROOT / DESTINATION_FAMILY_NAME
@@ -2502,25 +2681,14 @@ def _material_snapshot(
                 "sufficient": stage_minimum >= floor,
             }
         )
-    if any(not item["sufficient"] for item in stages):
-        raise WarmArchiveError("backup capacity cannot preserve Finance plus emergency reserve")
     expected_reclaimed = sum(int(item["identity"]["allocated_bytes"]) for item in targets)
     projected_root = int(filesystems["root"]["available_bytes"]) + expected_reclaimed
-    if projected_root < ROOT_MINIMUM_AFTER_BYTES:
-        raise WarmArchiveError("exact six do not project root above 25 GiB")
     services = non_target["services"]
     service_gate = _systemd_service_gate_with_resample(services)
-    if not service_gate["healthy"]:
-        raise WarmArchiveError(
-            "required production service/timer health is not ready",
-            evidence={
-                "classification": service_gate["classification"],
-                "systemd_service_gate": service_gate,
-            },
-        )
     material = {
         "contract_name": CONTRACT_NAME,
         "profile": PROFILE,
+        "material_partition": "immutable_safety_v1",
         "source_count": EXPECTED_SOURCE_COUNT,
         "destination_root": str(DESTINATION_ROOT),
         "destination_family": str(destination_family),
@@ -2533,20 +2701,15 @@ def _material_snapshot(
             }
             for name, row in filesystems.items()
         },
-        "finance": {
-            key: value
-            for key, value in finance.items()
-            if key not in {"available_bytes", "last_success", "last_failure"}
-        },
         "store_registry": store_registry,
         "root_policy": {
             "policy_sha256": root_policy["policy_sha256"],
             "target_rows": root_policy["target_rows"],
-            "immutable_protected_path_identities": root_policy[
-                "immutable_protected_path_identities"
+            "protected_path_topology": root_policy[
+                "protected_path_topology"
             ],
-            "immutable_protected_path_identity_digest": root_policy[
-                "immutable_protected_path_identity_digest"
+            "protected_path_topology_digest": root_policy[
+                "protected_path_topology_digest"
             ],
         },
         "immutable_non_target_digest": non_target["immutable_digest"],
@@ -2568,16 +2731,782 @@ def _material_snapshot(
         "activity_gates": activity_gates,
         "filesystems_before": filesystems,
         "root_policy_status": root_policy["status"],
+        "root_policy_protected_path_observations": root_policy[
+            "protected_path_observations"
+        ],
+        "finance": finance,
         "finance_available_bytes": finance["available_bytes"],
         "capacity_stages": stages,
         "projected_root_available_bytes": projected_root,
         "active_sanitation_jobs": active_jobs,
+        "lifecycle_locks": lifecycle_locks,
         "non_target": non_target,
         "journald": _journald_snapshot(),
         "services": services,
         "systemd_service_gate": service_gate,
     }
     return material, observations
+
+
+def _safe_identity(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    fields = (
+        "path",
+        "device",
+        "device_major",
+        "device_minor",
+        "inode",
+        "apparent_size_bytes",
+        "allocated_blocks_512",
+        "allocated_bytes",
+        "mode",
+        "uid",
+        "gid",
+        "mtime_ns",
+        "ctime_ns",
+        "nlink",
+        "sha256",
+        "kind",
+    )
+    return {key: value.get(key) for key in fields if key in value}
+
+
+def _json_pointer_token(value: Any) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _cas_classification(path: str) -> str:
+    if path.startswith("/targets/") and "/sidecars" in path:
+        return "target_sidecar"
+    if path.startswith("/targets/"):
+        return "exact_target_source"
+    if path.startswith("/immutable_non_target_digest") or path.startswith(
+        "/root_policy"
+    ):
+        return "immutable_non_target_or_policy"
+    if path.startswith("/mutable_canonical_topology") or path.startswith(
+        "/store_registry"
+    ):
+        return "mutable_store_topology_or_registry"
+    if path.startswith("/filesystems") or path.startswith("/destination"):
+        return "destination_or_mount_topology"
+    if path.startswith("/observations/systemd_service_gate"):
+        return "service_health_observation"
+    if path.startswith("/observations/capacity"):
+        return "capacity_observation"
+    if path.startswith("/observations/target_activity"):
+        return "target_activity_observation"
+    if path.startswith("/observations/lifecycle_locks") or path.startswith(
+        "/observations/sanitation_jobs"
+    ):
+        return "storage_lifecycle_observation"
+    if path.startswith("/observations/non_target"):
+        return "non_target_live_observation"
+    return "immutable_material"
+
+
+def _safe_target_component_evidence(
+    target: Mapping[str, Any], field: str
+) -> dict[str, Any]:
+    base = {
+        "key": target.get("key"),
+        "source_path": target.get("source_path"),
+    }
+    if field == "identity":
+        return {**base, "identity": _safe_identity(target.get("identity"))}
+    if field == "sidecars":
+        return {
+            **base,
+            "sidecars": [
+                {
+                    "suffix": item.get("suffix"),
+                    "path": item.get("path"),
+                    "present": item.get("present"),
+                    "kind": item.get("kind"),
+                    "identity": _safe_identity(item.get("identity")),
+                }
+                for item in target.get("sidecars") or []
+                if isinstance(item, Mapping)
+            ],
+        }
+    if field == "provenance":
+        provenance = target.get("provenance") or {}
+        return {
+            **base,
+            "provenance_digest": provenance.get("digest"),
+            "record_identities": [
+                {
+                    "path": item.get("path"),
+                    "identity": _safe_identity(item.get("identity")),
+                    "status": item.get("status"),
+                    "deployed_sha": item.get("deployed_sha"),
+                    "approval_reference_present": item.get(
+                        "approval_reference_present"
+                    ),
+                }
+                for item in provenance.get("records") or []
+                if isinstance(item, Mapping)
+            ],
+        }
+    if field == "hold_evidence":
+        hold = target.get("hold_evidence") or {}
+        return {
+            **base,
+            "hold": {
+                "classification": hold.get("classification"),
+                "marker_paths": list(hold.get("marker_paths") or []),
+                "hold_xattr_names": list(hold.get("hold_xattr_names") or []),
+                "protected_prefix_match": hold.get("protected_prefix_match"),
+            },
+        }
+    if field == "sqlite":
+        sqlite_evidence = target.get("sqlite") or {}
+        return {
+            **base,
+            "sqlite": {
+                "header": sqlite_evidence.get("header"),
+                "quick_check": sqlite_evidence.get("quick_check"),
+                "integrity_check": sqlite_evidence.get("integrity_check"),
+                "schema_identity_sha256": sqlite_evidence.get(
+                    "schema_identity_sha256"
+                ),
+                "schema_object_count": sqlite_evidence.get(
+                    "schema_object_count"
+                ),
+                "table_count": sqlite_evidence.get("table_count"),
+                "pragmas": sqlite_evidence.get("pragmas"),
+            },
+        }
+    return base
+
+
+def _safe_topology_evidence(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    resolver = row.get("resolver") or {}
+    topology = row.get("topology") or {}
+    return {
+        "key": row.get("key"),
+        "owner": row.get("owner"),
+        "classification": row.get("classification"),
+        "resolver": {
+            "type": resolver.get("type") if isinstance(resolver, Mapping) else None,
+            "logical_store": (
+                resolver.get("logical_store")
+                if isinstance(resolver, Mapping)
+                else None
+            ),
+            "path": resolver.get("path") if isinstance(resolver, Mapping) else None,
+        },
+        "topology": _safe_identity(topology),
+        "registry_identity_digest": (
+            _digest(row.get("registry_identity"))
+            if isinstance(row.get("registry_identity"), Mapping)
+            else None
+        ),
+        "access_roles_digest": _digest(row.get("access_roles") or []),
+        "allow_no_open_handles": row.get("allow_no_open_handles"),
+    }
+
+
+def _safe_opener_evidence(rows: Any, *, limit: int = 16) -> dict[str, Any]:
+    values = [item for item in rows or [] if isinstance(item, Mapping)]
+    return {
+        "count": len(values),
+        "rows": [
+            {
+                key: item.get(key)
+                for key in (
+                    "source_path",
+                    "pid",
+                    "fd",
+                    "access_mode",
+                    "comm",
+                    "target_device",
+                    "target_inode",
+                    "binds_source_device_inode",
+                    "matched_unit",
+                    "declared_role",
+                    "accepted",
+                    "accepted_reason",
+                    "rejected_reason",
+                )
+            }
+            for item in values[:limit]
+        ],
+        "truncated": len(values) > limit,
+        "full_digest": _digest(values),
+    }
+
+
+def _component(
+    *, path: str, value: Any, safe_evidence: Any = None, cas_role: str = "immutable"
+) -> dict[str, Any]:
+    return {
+        "json_path": path,
+        "classification": _cas_classification(path),
+        "cas_role": cas_role,
+        "digest": _digest(value),
+        "safe_evidence": safe_evidence,
+    }
+
+
+def _material_cas_components(
+    material: Mapping[str, Any], observations: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    handled = {
+        "targets",
+        "filesystems",
+        "store_registry",
+        "root_policy",
+        "mutable_canonical_topology",
+    }
+    targets = material.get("targets") or []
+    target_keys = [
+        str(item.get("key") or "")
+        for item in targets
+        if isinstance(item, Mapping)
+    ]
+    result.append(
+        _component(
+            path="/targets/@keys",
+            value=target_keys,
+            safe_evidence={"keys": target_keys},
+        )
+    )
+    for target_index, target in enumerate(targets):
+        if not isinstance(target, Mapping):
+            continue
+        metadata = {
+            field: target.get(field)
+            for field in (
+                "key",
+                "source_path",
+                "archive_name",
+                "owner",
+                "family",
+                "restore_role",
+            )
+        }
+        result.append(
+            _component(
+                path=f"/targets/{target_index}/metadata",
+                value=metadata,
+                safe_evidence=metadata,
+            )
+        )
+        for field in (
+            "identity",
+            "sidecars",
+            "sqlite",
+            "provenance",
+            "hold_evidence",
+            "projected_archive_size_bytes",
+        ):
+            result.append(
+                _component(
+                    path=f"/targets/{target_index}/{field}",
+                    value=target.get(field),
+                    safe_evidence=_safe_target_component_evidence(target, field),
+                )
+            )
+    filesystems = material.get("filesystems") or {}
+    if isinstance(filesystems, Mapping):
+        for name in sorted(filesystems):
+            row = filesystems[name]
+            result.append(
+                _component(
+                    path=f"/filesystems/{_json_pointer_token(name)}",
+                    value=row,
+                    safe_evidence=row,
+                )
+            )
+    result.append(
+        _component(
+            path="/store_registry",
+            value=material.get("store_registry"),
+            safe_evidence={
+                "identity_digest": (material.get("store_registry") or {}).get(
+                    "identity_digest"
+                ),
+                "active_paths": list(
+                    (material.get("store_registry") or {}).get("active_paths")
+                    or []
+                ),
+                "manifest_file_sha256": (
+                    material.get("store_registry") or {}
+                ).get("manifest_file_sha256"),
+            },
+        )
+    )
+    root_policy = material.get("root_policy") or {}
+    result.append(
+        _component(
+            path="/root_policy",
+            value=root_policy,
+            safe_evidence={
+                "policy_sha256": root_policy.get("policy_sha256"),
+                "target_row_count": len(root_policy.get("target_rows") or []),
+                "protected_path_topology_digest": root_policy.get(
+                    "protected_path_topology_digest"
+                ),
+                "protected_path_topology_count": len(
+                    root_policy.get("protected_path_topology") or []
+                ),
+            },
+        )
+    )
+    topology_rows = material.get("mutable_canonical_topology") or []
+    topology_keys = [
+        str(row.get("key") or "")
+        for row in topology_rows
+        if isinstance(row, Mapping)
+    ]
+    result.append(
+        _component(
+            path="/mutable_canonical_topology/@keys",
+            value=topology_keys,
+            safe_evidence={"keys": topology_keys},
+        )
+    )
+    for topology_index, row in enumerate(topology_rows):
+        if not isinstance(row, Mapping):
+            continue
+        result.append(
+            _component(
+                path=(
+                    "/mutable_canonical_topology/"
+                    + str(topology_index)
+                ),
+                value=row,
+                safe_evidence=_safe_topology_evidence(row),
+            )
+        )
+    for key in sorted(set(material) - handled):
+        result.append(
+            _component(
+                path=f"/{_json_pointer_token(key)}",
+                value=material.get(key),
+                safe_evidence=(
+                    material.get(key)
+                    if key
+                    in {
+                        "contract_name",
+                        "profile",
+                        "source_count",
+                        "destination_root",
+                        "destination_family",
+                        "immutable_non_target_digest",
+                        "mutable_canonical_topology_digest",
+                        "expected_unlink_count",
+                        "expected_reclaimed_allocated_bytes",
+                        "root_minimum_after_bytes",
+                        "control_artifact_reserve_bytes",
+                        "compression",
+                    }
+                    else None
+                ),
+            )
+        )
+    if observations is None:
+        return sorted(result, key=lambda item: item["json_path"])
+    service_gate = observations.get("systemd_service_gate") or {}
+    service_summary = {
+        "classification": service_gate.get("classification"),
+        "healthy": service_gate.get("healthy"),
+        "failing_units": service_gate.get("failing_units"),
+        "failing_pairs": service_gate.get("failing_pairs"),
+        "units": [
+            {
+                key: row.get(key)
+                for key in (
+                    "name",
+                    "LoadState",
+                    "ActiveState",
+                    "SubState",
+                    "Result",
+                    "MainPID",
+                    "ExecMainStatus",
+                    "UnitFileState",
+                    "classification",
+                    "healthy",
+                    "reason_codes",
+                )
+            }
+            for row in service_gate.get("units") or []
+            if isinstance(row, Mapping)
+        ],
+        "pairs": [
+            {
+                key: row.get(key)
+                for key in (
+                    "timer_name",
+                    "owner_name",
+                    "classification",
+                    "healthy",
+                    "reason_codes",
+                )
+            }
+            for row in service_gate.get("pairs") or []
+            if isinstance(row, Mapping)
+        ],
+    }
+    result.append(
+        _component(
+            path="/observations/systemd_service_gate",
+            value=service_summary,
+            safe_evidence=service_summary,
+            cas_role="observation_only",
+        )
+    )
+    capacity_summary = {
+        "finance": {
+            key: (observations.get("finance") or {}).get(key)
+            for key in (
+                "status",
+                "healthy",
+                "blockers",
+                "retained_backup_id",
+                "retained_count",
+                "retained_bytes",
+                "next_replacement_required_bytes",
+                "required_available_floor_bytes",
+                "available_bytes",
+            )
+        },
+        "capacity_stages": observations.get("capacity_stages"),
+        "projected_root_available_bytes": observations.get(
+            "projected_root_available_bytes"
+        ),
+        "filesystem_available_bytes": {
+            name: (row or {}).get("available_bytes")
+            for name, row in (observations.get("filesystems_before") or {}).items()
+            if isinstance(row, Mapping)
+        },
+    }
+    result.append(
+        _component(
+            path="/observations/capacity",
+            value=capacity_summary,
+            safe_evidence=capacity_summary,
+            cas_role="observation_only",
+        )
+    )
+    protected_observations = observations.get(
+        "root_policy_protected_path_observations"
+    ) or []
+    result.append(
+        _component(
+            path="/observations/non_target/protected_path_observations",
+            value=protected_observations,
+            safe_evidence={
+                "count": len(protected_observations),
+                "rows": list(protected_observations)[:64],
+                "truncated": len(protected_observations) > 64,
+                "full_digest": _digest(protected_observations),
+            },
+            cas_role="observation_only",
+        )
+    )
+    scoped_observations = (
+        ((observations.get("non_target") or {}).get("immutable") or {}).get(
+            "exact_family_observation_rows"
+        )
+        or []
+    )
+    result.append(
+        _component(
+            path="/observations/non_target/exact_family_writer_observations",
+            value=scoped_observations,
+            safe_evidence={
+                "count": len(scoped_observations),
+                "rows": list(scoped_observations)[:64],
+                "truncated": len(scoped_observations) > 64,
+                "full_digest": _digest(scoped_observations),
+            },
+            cas_role="observation_only",
+        )
+    )
+    mutable_observations = (
+        ((observations.get("non_target") or {}).get("mutable_canonical") or {}).get(
+            "observation_rows"
+        )
+        or []
+    )
+    result.append(
+        _component(
+            path="/observations/non_target/mutable_canonical_observations",
+            value=mutable_observations,
+            safe_evidence={
+                "count": len(mutable_observations),
+                "rows": [
+                    {
+                        "key": row.get("key"),
+                        "owner": row.get("owner"),
+                        "classification": row.get("classification"),
+                        "topology": _safe_identity(row.get("topology")),
+                        "ordinary_mutable_fields": row.get(
+                            "ordinary_mutable_fields"
+                        ),
+                        "open_handle_relationships": _safe_opener_evidence(
+                            row.get("open_handle_relationships")
+                        ),
+                    }
+                    for row in mutable_observations[:16]
+                    if isinstance(row, Mapping)
+                ],
+                "truncated": len(mutable_observations) > 16,
+                "full_digest": _digest(mutable_observations),
+            },
+            cas_role="observation_only",
+        )
+    )
+    active_jobs = observations.get("active_sanitation_jobs") or []
+    result.append(
+        _component(
+            path="/observations/sanitation_jobs",
+            value=active_jobs,
+            safe_evidence={
+                "count": len(active_jobs),
+                "rows": list(active_jobs)[:16],
+                "truncated": len(active_jobs) > 16,
+                "full_digest": _digest(active_jobs),
+            },
+            cas_role="observation_only",
+        )
+    )
+    lifecycle_locks = observations.get("lifecycle_locks") or []
+    result.append(
+        _component(
+            path="/observations/lifecycle_locks",
+            value=lifecycle_locks,
+            safe_evidence=list(lifecycle_locks)[:16],
+            cas_role="observation_only",
+        )
+    )
+    journald = observations.get("journald") or {}
+    result.append(
+        _component(
+            path="/observations/journald",
+            value=journald,
+            safe_evidence={
+                "service": journald.get("service"),
+                "effective": journald.get("effective"),
+                "inventory_digest": _digest(journald.get("inventory") or []),
+            },
+            cas_role="observation_only",
+        )
+    )
+    for gate_index, gate in enumerate(observations.get("activity_gates") or []):
+        if not isinstance(gate, Mapping):
+            continue
+        source_path = str(gate.get("source_path") or "")
+        target = next(
+            (
+                item
+                for item in targets
+                if isinstance(item, Mapping)
+                and str(item.get("source_path") or "") == source_path
+            ),
+            {},
+        )
+        safe_gate = {
+            "source_path": source_path,
+            "classification": gate.get("classification"),
+            "identity_before": _safe_identity(gate.get("identity_before")),
+            "identity_after": _safe_identity(gate.get("identity_after")),
+            "identity_matches_expected": gate.get("identity_matches_expected"),
+            "material_stable_during_gate": gate.get(
+                "material_stable_during_gate"
+            ),
+            "sidecars": gate.get("sidecars"),
+            "fd_openers": _safe_opener_evidence(gate.get("fd_openers")),
+            "kernel_lock_count": len(gate.get("kernel_locks") or []),
+            "kernel_locks_digest": _digest(gate.get("kernel_locks") or []),
+            "hold_evidence": gate.get("hold_evidence"),
+            "provenance_matches_expected": gate.get(
+                "provenance_matches_expected"
+            ),
+            "blockers": gate.get("blockers"),
+        }
+        result.append(
+            _component(
+                path=(
+                    "/observations/target_activity/"
+                    + str(gate_index)
+                ),
+                value=safe_gate,
+                safe_evidence=safe_gate,
+                cas_role="observation_only",
+            )
+        )
+    return sorted(result, key=lambda item: item["json_path"])
+
+
+def _material_cas_diff(
+    expected_material: Mapping[str, Any],
+    observed_material: Mapping[str, Any],
+    *,
+    expected_observations: Mapping[str, Any] | None = None,
+    observed_observations: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    before = {
+        row["json_path"]: row
+        for row in _material_cas_components(
+            expected_material, expected_observations
+        )
+    }
+    after = {
+        row["json_path"]: row
+        for row in _material_cas_components(
+            observed_material, observed_observations
+        )
+    }
+    changed = []
+    observation_changes = []
+    for path in sorted(set(before) | set(after)):
+        earlier = before.get(path)
+        later = after.get(path)
+        if (earlier or {}).get("digest") == (later or {}).get("digest"):
+            continue
+        row = {
+            "json_path": path,
+            "classification": _cas_classification(path),
+            "before_component_digest": (earlier or {}).get("digest"),
+            "after_component_digest": (later or {}).get("digest"),
+            "before_safe_evidence": (earlier or {}).get("safe_evidence"),
+            "after_safe_evidence": (later or {}).get("safe_evidence"),
+        }
+        if (earlier or later or {}).get("cas_role") == "observation_only":
+            observation_changes.append(row)
+        else:
+            changed.append(row)
+    return {
+        "schema": MATERIAL_CAS_DIFF_SCHEMA,
+        "exact_immutable_match": _digest(expected_material)
+        == _digest(observed_material),
+        "before_material_digest": _digest(expected_material),
+        "after_material_digest": _digest(observed_material),
+        "changed_component_count": len(changed),
+        "changed_json_paths": [row["json_path"] for row in changed],
+        "components": changed,
+        "observation_change_count": len(observation_changes),
+        "observation_changes": observation_changes,
+    }
+
+
+def _mutable_safety_predicates(
+    observations: Mapping[str, Any], *, minimum_backup_floor_bytes: int = 0
+) -> dict[str, Any]:
+    finance = observations.get("finance") or {}
+    current_floor = int(finance.get("required_available_floor_bytes") or 0)
+    effective_floor = max(current_floor, int(minimum_backup_floor_bytes))
+    capacity_stages = [
+        dict(item)
+        for item in observations.get("capacity_stages") or []
+        if isinstance(item, Mapping)
+    ]
+    capacity_passed = bool(
+        len(capacity_stages) == EXPECTED_SOURCE_COUNT
+        and effective_floor > 0
+        and all(
+            int(item.get("projected_available_at_peak_bytes") or -1)
+            >= effective_floor
+            for item in capacity_stages
+        )
+    )
+    activity = [
+        dict(item)
+        for item in observations.get("activity_gates") or []
+        if isinstance(item, Mapping)
+    ]
+    activity_passed = bool(
+        len(activity) == EXPECTED_SOURCE_COUNT
+        and all(not item.get("blockers") for item in activity)
+    )
+    lifecycle_locks = [
+        dict(item)
+        for item in observations.get("lifecycle_locks") or []
+        if isinstance(item, Mapping)
+    ]
+    lifecycle_locks_passed = bool(
+        len(lifecycle_locks) == len(OTHER_LIFECYCLE_LOCKS)
+        and all(
+            item.get("held_by_batch") is True or item.get("locked") is not True
+            for item in lifecycle_locks
+        )
+    )
+    service_gate = observations.get("systemd_service_gate") or {}
+    root_projected = int(observations.get("projected_root_available_bytes") or 0)
+    predicates = {
+        "finance_health_passed": finance.get("healthy") is True,
+        "capacity_passed": capacity_passed,
+        "service_health_passed": service_gate.get("healthy") is True,
+        "target_activity_passed": activity_passed,
+        "root_minimum_passed": root_projected >= ROOT_MINIMUM_AFTER_BYTES,
+        "no_other_sanitation_job": not observations.get("active_sanitation_jobs"),
+        "lifecycle_locks_passed": lifecycle_locks_passed,
+        "journald_health_passed": isinstance(observations.get("journald"), Mapping),
+    }
+    return {
+        "classification": (
+            "mutable_live_predicates_satisfied"
+            if all(predicates.values())
+            else "mutable_live_predicates_blocked"
+        ),
+        "passed": all(predicates.values()),
+        "predicates": predicates,
+        "current_finance_required_floor_bytes": current_floor,
+        "minimum_preserved_backup_floor_bytes": int(minimum_backup_floor_bytes),
+        "effective_required_backup_floor_bytes": effective_floor,
+        "minimum_projected_backup_available_bytes": (
+            min(
+                int(item.get("projected_available_at_peak_bytes") or 0)
+                for item in capacity_stages
+            )
+            if capacity_stages
+            else 0
+        ),
+        "projected_root_available_bytes": root_projected,
+        "service_gate_classification": service_gate.get("classification"),
+        "failing_units": service_gate.get("failing_units"),
+        "failing_pairs": service_gate.get("failing_pairs"),
+        "activity_blockers": [
+            {
+                "source_path": item.get("source_path"),
+                "classification": item.get("classification"),
+                "blockers": item.get("blockers"),
+            }
+            for item in activity
+            if item.get("blockers")
+        ],
+        "lifecycle_lock_blockers": [
+            {
+                "path": item.get("path"),
+                "present": item.get("present"),
+                "locked": item.get("locked"),
+                "held_by_batch": item.get("held_by_batch"),
+            }
+            for item in lifecycle_locks
+            if item.get("held_by_batch") is not True
+            and item.get("locked") is True
+        ],
+        "finance": {
+            key: finance.get(key)
+            for key in (
+                "status",
+                "healthy",
+                "blockers",
+                "retained_backup_id",
+                "retained_count",
+                "retained_bytes",
+                "next_replacement_required_bytes",
+                "available_bytes",
+            )
+        },
+    }
 
 
 def _validate_evidence_scope(evidence_dir: Path, operation_id: str) -> Path:
@@ -2610,6 +3539,323 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _write_json_exclusive(path: Path, payload: Mapping[str, Any]) -> bool:
+    """Publish immutable evidence without replacing an earlier failure."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.exclusive.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(_canonical_json_bytes(payload) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+        return True
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _safe_guard_failure_diff(
+    expected_material: Mapping[str, Any],
+    exc: WarmArchiveError,
+    *,
+    expected_observations: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    evidence = dict(exc.evidence)
+    before_components = {
+        row["json_path"]: row
+        for row in _material_cas_components(
+            expected_material, expected_observations
+        )
+    }
+    source_path = str(evidence.get("source_path") or "")
+    target_index = next(
+        (
+            index
+            for index, item in enumerate(expected_material.get("targets") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("source_path") or "") == source_path
+        ),
+        None,
+    )
+    target = (
+        (expected_material.get("targets") or [])[target_index]
+        if target_index is not None
+        else None
+    )
+    all_blockers = [
+        dict(item)
+        for item in evidence.get("blockers") or []
+        if isinstance(item, Mapping)
+    ]
+    blockers = all_blockers[:16]
+    blocker_codes = sorted(str(item.get("code") or "") for item in all_blockers)
+    if target is not None:
+        field = (
+            "sidecars"
+            if "sqlite_sidecar_present" in blocker_codes
+            else "hold_evidence"
+            if "hold_evidence_present" in blocker_codes
+            else "provenance"
+            if "provenance_drift" in blocker_codes
+            else "identity"
+        )
+        path = (
+            f"/targets/{target_index}/{field}"
+        )
+        before_component = next(
+            row
+            for row in _material_cas_components(expected_material)
+            if row["json_path"] == path
+        )
+        safe_after = {
+            "source_path": source_path,
+            "classification": evidence.get("classification"),
+            "identity_before": _safe_identity(evidence.get("identity_before")),
+            "identity_after": _safe_identity(evidence.get("identity_after")),
+            "sidecars": evidence.get("sidecars"),
+            "fd_openers": _safe_opener_evidence(evidence.get("fd_openers")),
+            "kernel_lock_count": len(evidence.get("kernel_locks") or []),
+            "kernel_locks_digest": _digest(evidence.get("kernel_locks") or []),
+            "hold_evidence": evidence.get("hold_evidence"),
+            "provenance_digest": (evidence.get("provenance") or {}).get(
+                "digest"
+            ),
+            "provenance_error": evidence.get("provenance_error"),
+            "blockers": blockers,
+            "blocker_count": len(all_blockers),
+            "blockers_truncated": len(all_blockers) > len(blockers),
+        }
+    elif isinstance(evidence.get("systemd_service_gate"), Mapping):
+        path = "/observations/systemd_service_gate"
+        before_component = before_components.get(
+            path, {"digest": None, "safe_evidence": None}
+        )
+        gate = evidence["systemd_service_gate"]
+        safe_after = {
+            "classification": gate.get("classification"),
+            "healthy": gate.get("healthy"),
+            "failing_units": gate.get("failing_units"),
+            "failing_pairs": gate.get("failing_pairs"),
+        }
+    elif evidence.get("classification") == "mutable_live_predicates_blocked":
+        predicates = evidence.get("predicates") or {}
+        path_by_predicate = {
+            "finance_health_passed": "/observations/capacity",
+            "capacity_passed": "/observations/capacity",
+            "root_minimum_passed": "/observations/capacity",
+            "service_health_passed": "/observations/systemd_service_gate",
+            "target_activity_passed": "/observations/target_activity",
+            "no_other_sanitation_job": "/observations/sanitation_jobs",
+            "lifecycle_locks_passed": "/observations/lifecycle_locks",
+            "journald_health_passed": "/observations/journald",
+        }
+        changed_paths = sorted(
+            {
+                path_by_predicate[name]
+                for name, passed in predicates.items()
+                if passed is not True and name in path_by_predicate
+            }
+        )
+        safe_by_path = {
+            "/observations/capacity": {
+                key: evidence.get(key)
+                for key in (
+                    "current_finance_required_floor_bytes",
+                    "minimum_preserved_backup_floor_bytes",
+                    "effective_required_backup_floor_bytes",
+                    "minimum_projected_backup_available_bytes",
+                    "projected_root_available_bytes",
+                    "finance",
+                )
+            },
+            "/observations/systemd_service_gate": {
+                "service_gate_classification": evidence.get(
+                    "service_gate_classification"
+                ),
+                "failing_units": evidence.get("failing_units"),
+                "failing_pairs": evidence.get("failing_pairs"),
+            },
+            "/observations/target_activity": {
+                "activity_blockers": evidence.get("activity_blockers")
+            },
+            "/observations/sanitation_jobs": {
+                "predicate": predicates.get("no_other_sanitation_job")
+            },
+            "/observations/lifecycle_locks": {
+                "lifecycle_lock_blockers": evidence.get(
+                    "lifecycle_lock_blockers"
+                )
+            },
+            "/observations/journald": {
+                "predicate": predicates.get("journald_health_passed")
+            },
+        }
+        components = [
+            {
+                "json_path": changed_path,
+                "classification": _cas_classification(changed_path),
+                "before_component_digest": (
+                    before_components.get(changed_path) or {}
+                ).get("digest"),
+                "after_component_digest": _digest(safe_by_path[changed_path]),
+                "before_safe_evidence": (
+                    before_components.get(changed_path) or {}
+                ).get("safe_evidence"),
+                "after_safe_evidence": safe_by_path[changed_path],
+            }
+            for changed_path in changed_paths
+        ]
+        return {
+            "schema": MATERIAL_CAS_DIFF_SCHEMA,
+            "exact_immutable_match": True,
+            "before_material_digest": _digest(expected_material),
+            "after_material_digest": _digest(expected_material),
+            "changed_component_count": 0,
+            "changed_json_paths": [],
+            "components": [],
+            "observation_change_count": len(components),
+            "observation_changes": components,
+            "blocked_observation_json_paths": changed_paths,
+            "collection_error": {
+                "type": type(exc).__name__,
+                "message": str(exc)[:500],
+            },
+        }
+    elif evidence.get("key") or evidence.get("path"):
+        key = evidence.get("key") or evidence.get("path")
+        topology_rows = expected_material.get("mutable_canonical_topology") or []
+        topology_index = next(
+            (
+                index
+                for index, row in enumerate(topology_rows)
+                if isinstance(row, Mapping)
+                and (row.get("key") == key or (row.get("topology") or {}).get("path") == key)
+            ),
+            None,
+        )
+        path = (
+            "/mutable_canonical_topology/" + str(topology_index)
+            if topology_index is not None
+            else "/mutable_canonical_topology/@unknown"
+        )
+        before_component = next(
+            (
+                row
+                for row in _material_cas_components(expected_material)
+                if row["json_path"] == path
+            ),
+            {"digest": None, "safe_evidence": None},
+        )
+        safe_after = {
+            "key": evidence.get("key"),
+            "path": evidence.get("path"),
+            "openers": evidence.get("openers"),
+        }
+    else:
+        path = "/material_collection"
+        before_component = {
+            "digest": _digest(expected_material),
+            "safe_evidence": None,
+        }
+        safe_after = {
+            "error_type": type(exc).__name__,
+            "message": str(exc)[:500],
+            "evidence_digest": _digest(evidence),
+        }
+    component = {
+        "json_path": path,
+        "classification": _cas_classification(path),
+        "before_component_digest": before_component.get("digest"),
+        "after_component_digest": _digest(safe_after),
+        "before_safe_evidence": before_component.get("safe_evidence"),
+        "after_safe_evidence": safe_after,
+    }
+    return {
+        "schema": MATERIAL_CAS_DIFF_SCHEMA,
+        "exact_immutable_match": False,
+        "before_material_digest": _digest(expected_material),
+        "after_material_digest": None,
+        "changed_component_count": 1,
+        "changed_json_paths": [path],
+        "components": [component],
+        "observation_change_count": 0,
+        "observation_changes": [],
+        "collection_error": {
+            "type": type(exc).__name__,
+            "message": str(exc)[:500],
+        },
+    }
+
+
+def _persist_material_cas_failure(
+    *,
+    evidence_dir: Path,
+    phase: str,
+    readiness_id: str,
+    operation_id: str,
+    job_id: str,
+    deployed_sha: str,
+    manifest_path: Path | None,
+    manifest_sha256: str,
+    component_diff: Mapping[str, Any],
+) -> dict[str, Any]:
+    path = evidence_dir / MATERIAL_CAS_FAILURE_FILENAME
+    payload = {
+        "schema": MATERIAL_CAS_FAILURE_SCHEMA,
+        "status": "blocked",
+        "phase": phase,
+        "readiness_id": readiness_id,
+        "operation_id": operation_id,
+        "job": {
+            "job_id": job_id or None,
+            "state": "bound_worker" if job_id else "not_created_pre_submit",
+        },
+        "deployed_sha": deployed_sha,
+        "manifest_path": str(manifest_path) if manifest_path else None,
+        "manifest_sha256": manifest_sha256 or None,
+        "mutation_journal_created": False,
+        "archive_mutation_started": False,
+        "component_diff": dict(component_diff),
+        "created_at": _now(),
+    }
+    created = _write_json_exclusive(path, payload)
+    if not created:
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+            raise WarmArchiveError("immutable material CAS failure evidence is unsafe")
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(existing, Mapping)
+            or existing.get("schema") != MATERIAL_CAS_FAILURE_SCHEMA
+            or existing.get("operation_id") != operation_id
+            or existing.get("readiness_id") != readiness_id
+            or existing.get("deployed_sha") != deployed_sha
+        ):
+            raise WarmArchiveError(
+                "immutable material CAS failure evidence binding drifted"
+            )
+        payload = dict(existing)
+    return {
+        "artifact_path": str(path),
+        "artifact_sha256": _sha256_file(path),
+        "artifact_created": created,
+        "original_failure_preserved": not created,
+        "component_diff": payload["component_diff"],
+        "mutation_journal_created": False,
+        "archive_mutation_started": False,
+    }
 
 
 def _fsync_directory(path: Path) -> None:
@@ -2838,6 +4084,27 @@ def readiness(
         }
         _atomic_write_json(receipt_path, result)
         return result
+    full_mutable_predicates = _mutable_safety_predicates(full_observations)
+    if full_mutable_predicates["passed"] is not True:
+        result = {
+            "contract_name": CONTRACT_NAME,
+            "status": "blocked",
+            "query_only": True,
+            "database_written": False,
+            "readiness_id": readiness_id,
+            "deployed_sha": deployed_sha,
+            "reason": "mutable_live_predicates_blocked_before_projection",
+            "initial_systemd_service_gate": initial_systemd_service_gate,
+            "systemd_service_gate": full_observations[
+                "systemd_service_gate"
+            ],
+            "pre_projection_stabilization": pre_stabilization,
+            "mutable_safety_predicates": full_mutable_predicates,
+            "callback": [full_mutable_predicates],
+            "completed_at": _now(),
+        }
+        _atomic_write_json(receipt_path, result)
+        return result
     projection = {
         "contract_name": CONTRACT_NAME,
         "status": "projection_ready",
@@ -2856,6 +4123,7 @@ def readiness(
         "mutable_canonical_observations": full_observations["non_target"][
             "mutable_canonical"
         ]["observation_rows"],
+        "mutable_safety_predicates": full_mutable_predicates,
         "observations": full_observations,
     }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2870,6 +4138,7 @@ def readiness(
     )
     final_material = None
     final_observations = None
+    final_mutable_predicates = None
     final_error = None
     if stabilization["status"] == "clean":
         try:
@@ -2879,13 +4148,33 @@ def readiness(
                 reusable_material=material,
                 witness_name="readiness_final_capacity_and_material_cas",
             )
+            final_mutable_predicates = _mutable_safety_predicates(
+                final_observations,
+                minimum_backup_floor_bytes=int(
+                    full_mutable_predicates[
+                        "effective_required_backup_floor_bytes"
+                    ]
+                ),
+            )
         except WarmArchiveError as exc:
             final_error = {"message": str(exc), "evidence": exc.evidence}
     ready = bool(
         stabilization["status"] == "clean"
         and final_error is None
         and final_material is not None
+        and final_mutable_predicates is not None
+        and final_mutable_predicates["passed"] is True
         and _digest(final_material) == _digest(material)
+    )
+    final_component_diff = (
+        _material_cas_diff(
+            material,
+            final_material,
+            expected_observations=full_observations,
+            observed_observations=final_observations,
+        )
+        if final_material is not None
+        else None
     )
     result = {
         "contract_name": CONTRACT_NAME,
@@ -2902,6 +4191,10 @@ def readiness(
         "projection_manifest_path": str(projection_path),
         "projection_manifest_sha256": projection_sha256,
         "material_qualification_digest": _digest(material),
+        "material_partition": material["material_partition"],
+        "material_cas_components": _material_cas_components(
+            material, full_observations
+        ),
         "immutable_non_target_digest": material["immutable_non_target_digest"],
         "mutable_canonical_topology_digest": material[
             "mutable_canonical_topology_digest"
@@ -2916,9 +4209,15 @@ def readiness(
         "expected_reclaimed_allocated_bytes": material[
             "expected_reclaimed_allocated_bytes"
         ],
-        "required_backup_floor_bytes": material["finance"][
-            "required_available_floor_bytes"
-        ],
+        "required_backup_floor_bytes": (
+            final_mutable_predicates[
+                "effective_required_backup_floor_bytes"
+            ]
+            if final_mutable_predicates
+            else full_mutable_predicates[
+                "effective_required_backup_floor_bytes"
+            ]
+        ),
         "root_minimum_after_bytes": ROOT_MINIMUM_AFTER_BYTES,
         "initial_systemd_service_gate": initial_systemd_service_gate,
         "systemd_service_gate": (
@@ -2929,12 +4228,8 @@ def readiness(
             )
         ),
         "capacity_guard_passed": bool(
-            ready
-            and final_observations
-            and all(
-                bool(item["sufficient"])
-                for item in final_observations["capacity_stages"]
-            )
+            final_mutable_predicates
+            and final_mutable_predicates["predicates"]["capacity_passed"] is True
         ),
         "minimum_projected_backup_available_bytes": (
             min(
@@ -2950,6 +4245,9 @@ def readiness(
             else None
         ),
         "final_material_digest": _digest(final_material) if final_material else None,
+        "immutable_material_diff": final_component_diff,
+        "component_diff": final_component_diff,
+        "mutable_safety_predicates": final_mutable_predicates,
         "final_observations": final_observations,
         "final_error": final_error,
         "callback": (
@@ -3007,6 +4305,10 @@ def _load_readiness_projection(
         != (payload.get("material") or {}).get(
             "mutable_canonical_topology_digest"
         )
+        or (payload.get("material") or {}).get("material_partition")
+        != "immutable_safety_v1"
+        or (payload.get("mutable_safety_predicates") or {}).get("passed")
+        is not True
     ):
         raise WarmArchiveError("compression projection payload is invalid")
     readiness_receipt_path = projection_path.parent / "root-warm-archive-readiness.json"
@@ -3047,18 +4349,128 @@ def dry_run(
 ) -> dict[str, Any]:
     _verify_deployed_sha(deployed_sha=deployed_sha, deployed_sha_file=deployed_sha_file)
     evidence_dir = _validate_evidence_scope(evidence_dir, operation_id)
+    prior_failure_path = evidence_dir / MATERIAL_CAS_FAILURE_FILENAME
+    if prior_failure_path.exists():
+        if (
+            prior_failure_path.is_symlink()
+            or not prior_failure_path.is_file()
+            or stat.S_IMODE(prior_failure_path.stat().st_mode) != 0o600
+        ):
+            raise WarmArchiveError("prior immutable material CAS evidence is unsafe")
+        prior_failure = json.loads(prior_failure_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(prior_failure, Mapping)
+            or prior_failure.get("schema") != MATERIAL_CAS_FAILURE_SCHEMA
+            or prior_failure.get("operation_id") != operation_id
+            or prior_failure.get("deployed_sha") != deployed_sha
+        ):
+            raise WarmArchiveError("prior immutable material CAS evidence drifted")
+        raise WarmArchiveError(
+            "operation already terminalized by immutable material CAS evidence",
+            evidence={
+                "artifact_path": str(prior_failure_path),
+                "artifact_sha256": _sha256_file(prior_failure_path),
+                "original_failure_preserved": True,
+                "component_diff": prior_failure.get("component_diff"),
+                "mutation_journal_created": False,
+                "archive_mutation_started": False,
+            },
+        )
     projection = _load_readiness_projection(
         projection_path=projection_manifest,
         projection_sha256=projection_manifest_sha256,
         deployed_sha=deployed_sha,
     )
-    material, observations = _material_snapshot(
-        runtime_dir=runtime_dir,
-        root_backups=root_backups,
-        reusable_material=projection["material"],
-        witness_name="jit_lightweight_material_qualification",
-    )
+    try:
+        material, observations = _material_snapshot(
+            runtime_dir=runtime_dir,
+            root_backups=root_backups,
+            reusable_material=projection["material"],
+            witness_name="jit_lightweight_material_qualification",
+        )
+    except WarmArchiveError as exc:
+        component_diff = _safe_guard_failure_diff(
+            projection["material"],
+            exc,
+            expected_observations=projection.get("observations"),
+        )
+        persisted = _persist_material_cas_failure(
+            evidence_dir=evidence_dir,
+            phase="jit_material_collection",
+            readiness_id=str(projection["readiness_id"]),
+            operation_id=operation_id,
+            job_id="",
+            deployed_sha=deployed_sha,
+            manifest_path=None,
+            manifest_sha256="",
+            component_diff=component_diff,
+        )
+        raise WarmArchiveError(
+            "JIT immutable material or live predicate collection blocked",
+            evidence={
+                **persisted,
+                "original_error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                },
+            },
+        ) from exc
     material_digest = _digest(material)
+    component_diff = _material_cas_diff(
+        projection["material"],
+        material,
+        expected_observations=projection.get("observations"),
+        observed_observations=observations,
+    )
+    if component_diff["exact_immutable_match"] is not True:
+        persisted = _persist_material_cas_failure(
+            evidence_dir=evidence_dir,
+            phase="jit_immutable_material_cas",
+            readiness_id=str(projection["readiness_id"]),
+            operation_id=operation_id,
+            job_id="",
+            deployed_sha=deployed_sha,
+            manifest_path=None,
+            manifest_sha256="",
+            component_diff=component_diff,
+        )
+        raise WarmArchiveError(
+            "JIT immutable material CAS drifted from readiness",
+            evidence=persisted,
+        )
+    readiness_floor = int(
+        (projection.get("mutable_safety_predicates") or {}).get(
+            "effective_required_backup_floor_bytes"
+        )
+        or 0
+    )
+    mutable_predicates = _mutable_safety_predicates(
+        observations,
+        minimum_backup_floor_bytes=readiness_floor,
+    )
+    if mutable_predicates["passed"] is not True:
+        predicate_error = WarmArchiveError(
+            "JIT mutable live predicates blocked",
+            evidence=mutable_predicates,
+        )
+        persisted = _persist_material_cas_failure(
+            evidence_dir=evidence_dir,
+            phase="jit_mutable_live_predicates",
+            readiness_id=str(projection["readiness_id"]),
+            operation_id=operation_id,
+            job_id="",
+            deployed_sha=deployed_sha,
+            manifest_path=None,
+            manifest_sha256="",
+            component_diff=_safe_guard_failure_diff(
+                projection["material"],
+                predicate_error,
+                expected_observations=projection.get("observations"),
+            ),
+        )
+        raise WarmArchiveError(
+            "JIT mutable live predicates blocked", evidence=persisted
+        )
     manifest = {
         "contract_name": CONTRACT_NAME,
         "status": "ready",
@@ -3070,6 +4482,7 @@ def dry_run(
         "material": material,
         "material_qualification_digest": material_digest,
         "observations": observations,
+        "mutable_safety_predicates": mutable_predicates,
         "readiness_projection": {
             "readiness_id": projection["readiness_id"],
             "path": str(projection_manifest),
@@ -3108,11 +4521,15 @@ def dry_run(
         "destination_family": material["destination_family"],
         "root_minimum_after_bytes": ROOT_MINIMUM_AFTER_BYTES,
         "projected_root_available_bytes": observations["projected_root_available_bytes"],
-        "finance_next_replacement_required_bytes": material["finance"]["next_replacement_required_bytes"],
+        "finance_next_replacement_required_bytes": observations["finance"]["next_replacement_required_bytes"],
         "emergency_reserve_bytes": EMERGENCY_RESERVE_BYTES,
-        "required_backup_floor_bytes": material["finance"]["required_available_floor_bytes"],
+        "required_backup_floor_bytes": mutable_predicates[
+            "effective_required_backup_floor_bytes"
+        ],
         "minimum_projected_backup_available_bytes": min(int(item["projected_available_at_peak_bytes"]) for item in stages),
-        "capacity_guard_passed": all(bool(item["sufficient"]) for item in stages),
+        "capacity_guard_passed": mutable_predicates["predicates"][
+            "capacity_passed"
+        ],
         "openers_count": blocking_openers,
         "read_only_openers_count": read_only_openers,
         "write_capable_or_unknown_openers_count": blocking_openers,
@@ -3138,6 +4555,11 @@ def dry_run(
         "projection_manifest_sha256": projection_manifest_sha256,
         "activity_evidence": observations["activity_gates"],
         "root_policy_sha256": material["root_policy"]["policy_sha256"],
+        "material_partition": material["material_partition"],
+        "material_cas_components": _material_cas_components(
+            material, observations
+        ),
+        "mutable_safety_predicates": mutable_predicates,
     }
 
 
@@ -3178,6 +4600,8 @@ def _load_manifest(
         or payload.get("contract_name") != CONTRACT_NAME
         or payload.get("status") != "ready"
         or payload.get("operation_id") != operation_id
+        or (payload.get("material") or {}).get("material_partition")
+        != "immutable_safety_v1"
         or payload.get("material_qualification_digest") != _digest(payload.get("material"))
         or int((payload.get("material") or {}).get("source_count") or 0) != EXPECTED_SOURCE_COUNT
         or not isinstance(projection, Mapping)
@@ -3186,6 +4610,8 @@ def _load_manifest(
         or not SHA256_RE.fullmatch(str(projection.get("sha256") or ""))
         or projection.get("material_qualification_digest")
         != payload.get("material_qualification_digest")
+        or (payload.get("mutable_safety_predicates") or {}).get("passed")
+        is not True
     ):
         raise WarmArchiveError("manifest contract/material binding is invalid")
     return payload
@@ -3430,11 +4856,18 @@ def _verify_archive_pair(
 
 
 def _capacity_guard(
-    *, runtime_dir: Path, archive_bytes: int, restore_bytes: int
+    *,
+    runtime_dir: Path,
+    archive_bytes: int,
+    restore_bytes: int,
+    minimum_floor_bytes: int = 0,
 ) -> dict[str, Any]:
     finance = _finance_snapshot(runtime_dir)
     capacity = _filesystem(DESTINATION_ROOT)
-    required_floor = int(finance["required_available_floor_bytes"])
+    required_floor = max(
+        int(finance["required_available_floor_bytes"]),
+        int(minimum_floor_bytes),
+    )
     required_before = (
         required_floor
         + int(archive_bytes)
@@ -3700,6 +5133,12 @@ def _process_target(
         runtime_dir=runtime_dir,
         archive_bytes=int(target["projected_archive_size_bytes"]),
         restore_bytes=int(target["identity"]["apparent_size_bytes"]),
+        minimum_floor_bytes=int(
+            (journal.get("mutable_safety_predicates_before") or {}).get(
+                "effective_required_backup_floor_bytes"
+            )
+            or 0
+        ),
     )
     source_cas_before_archive = _exact_source_cas(
         target, gate_name="mutation_pre_archive", full_hash=False
@@ -3716,7 +5155,11 @@ def _process_target(
     }
     journal["updated_at"] = _now()
     _atomic_write_json(journal_path, journal)
-    non_target_before = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target_before = _non_target_snapshot(
+        runtime_dir,
+        require_targets=False,
+        expected_non_target=journal["non_target_before"],
+    )
     non_target_before_reconciliation = _reconcile_non_target(
         journal["non_target_before"],
         non_target_before,
@@ -3801,14 +5244,26 @@ def _process_target(
         target, gate_name="mutation_exact_pre_unlink", full_hash=True
     )
     non_target_pre_unlink = _non_target_snapshot(
-        runtime_dir, require_targets=False
+        runtime_dir,
+        require_targets=False,
+        expected_non_target=journal["non_target_before"],
     )
     non_target_pre_unlink_reconciliation = _reconcile_non_target(
         journal["non_target_before"],
         non_target_pre_unlink,
         phase=f"{target['key']}:exact_pre_unlink",
     )
-    capacity_pre_unlink = _capacity_guard(runtime_dir=runtime_dir, archive_bytes=0, restore_bytes=0)
+    capacity_pre_unlink = _capacity_guard(
+        runtime_dir=runtime_dir,
+        archive_bytes=0,
+        restore_bytes=0,
+        minimum_floor_bytes=int(
+            (journal.get("mutable_safety_predicates_before") or {}).get(
+                "effective_required_backup_floor_bytes"
+            )
+            or 0
+        ),
+    )
     journal_item = {
         "key": target["key"],
         "phase": "pending_unlink",
@@ -3835,7 +5290,11 @@ def _process_target(
     if source.exists():
         raise WarmArchiveError("source remains after the single unlink")
     capacity_after = _filesystem_snapshot(runtime_dir, Path("/opt/wb-core-runtime/backups"))
-    non_target_after = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target_after = _non_target_snapshot(
+        runtime_dir,
+        require_targets=False,
+        expected_non_target=journal["non_target_before"],
+    )
     non_target_after_reconciliation = _reconcile_non_target(
         journal["non_target_before"],
         non_target_after,
@@ -4021,6 +5480,37 @@ def _apply_batch_locked(
     ):
         raise WarmArchiveError("manifest readiness projection drifted before mutation")
     journal_path = _journal_path(evidence_dir)
+    material_failure_path = evidence_dir / MATERIAL_CAS_FAILURE_FILENAME
+    if material_failure_path.exists() and not journal_path.exists():
+        if (
+            material_failure_path.is_symlink()
+            or not material_failure_path.is_file()
+            or stat.S_IMODE(material_failure_path.stat().st_mode) != 0o600
+        ):
+            raise WarmArchiveError("immutable material CAS failure evidence is unsafe")
+        prior_failure = json.loads(
+            material_failure_path.read_text(encoding="utf-8")
+        )
+        if (
+            not isinstance(prior_failure, Mapping)
+            or prior_failure.get("schema") != MATERIAL_CAS_FAILURE_SCHEMA
+            or prior_failure.get("operation_id") != operation_id
+            or prior_failure.get("readiness_id")
+            != projection_binding["readiness_id"]
+            or prior_failure.get("deployed_sha") != deployed_sha
+        ):
+            raise WarmArchiveError("immutable material CAS failure binding drifted")
+        raise WarmArchiveError(
+            "operation already terminalized before mutation journal creation",
+            evidence={
+                "artifact_path": str(material_failure_path),
+                "artifact_sha256": _sha256_file(material_failure_path),
+                "original_failure_preserved": True,
+                "component_diff": prior_failure.get("component_diff"),
+                "mutation_journal_created": False,
+                "archive_mutation_started": False,
+            },
+        )
     if journal_path.exists():
         journal = _read_journal(journal_path)
         if (
@@ -4047,6 +5537,7 @@ def _apply_batch_locked(
             runtime_dir,
             require_targets=False,
             operation_id=operation_id,
+            expected_non_target=journal["non_target_before"],
         )
         crash_resume_non_target_reconciliation = _reconcile_non_target(
             journal["non_target_before"],
@@ -4066,21 +5557,111 @@ def _apply_batch_locked(
             != journal["journald_before"]["service"].get("MainPID")
             or journald_now["effective"]["values"]
             != journal["journald_before"]["effective"]["values"]
+            or finance_now.get("healthy") is not True
             or int(filesystems_now["backup"]["available_bytes"])
-            < int(finance_now["required_available_floor_bytes"])
+            < max(
+                int(finance_now["required_available_floor_bytes"]),
+                int(
+                    (
+                        journal.get("mutable_safety_predicates_before") or {}
+                    ).get("effective_required_backup_floor_bytes")
+                    or 0
+                ),
+            )
         ):
             raise WarmArchiveError("crash-resume environment reconciliation failed")
     else:
-        fresh_material, fresh_observations = _material_snapshot(
-            runtime_dir=runtime_dir,
-            root_backups=root_backups,
-            own_job_id=own_job_id,
-            lifecycle_locks_held=True,
-            reusable_material=manifest["material"],
-            witness_name="mutation_start_lightweight_material_cas",
+        try:
+            fresh_material, fresh_observations = _material_snapshot(
+                runtime_dir=runtime_dir,
+                root_backups=root_backups,
+                own_job_id=own_job_id,
+                lifecycle_locks_held=True,
+                reusable_material=manifest["material"],
+                witness_name="mutation_start_lightweight_material_cas",
+            )
+        except WarmArchiveError as exc:
+            persisted = _persist_material_cas_failure(
+                evidence_dir=evidence_dir,
+                phase="mutation_start_material_collection",
+                readiness_id=str(projection_binding["readiness_id"]),
+                operation_id=operation_id,
+                job_id=own_job_id,
+                deployed_sha=deployed_sha,
+                manifest_path=manifest_path,
+                manifest_sha256=manifest_sha256,
+                component_diff=_safe_guard_failure_diff(
+                    manifest["material"],
+                    exc,
+                    expected_observations=manifest.get("observations"),
+                ),
+            )
+            raise WarmArchiveError(
+                "mutation-start immutable material or live predicate collection blocked",
+                evidence={
+                    **persisted,
+                    "original_error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc)[:500],
+                    },
+                },
+            ) from exc
+        component_diff = _material_cas_diff(
+            manifest["material"],
+            fresh_material,
+            expected_observations=manifest.get("observations"),
+            observed_observations=fresh_observations,
         )
-        if _digest(fresh_material) != manifest["material_qualification_digest"]:
-            raise WarmArchiveError("material CAS drifted after qualification")
+        if component_diff["exact_immutable_match"] is not True:
+            persisted = _persist_material_cas_failure(
+                evidence_dir=evidence_dir,
+                phase="mutation_start_immutable_material_cas",
+                readiness_id=str(projection_binding["readiness_id"]),
+                operation_id=operation_id,
+                job_id=own_job_id,
+                deployed_sha=deployed_sha,
+                manifest_path=manifest_path,
+                manifest_sha256=manifest_sha256,
+                component_diff=component_diff,
+            )
+            raise WarmArchiveError(
+                "immutable material CAS drifted after qualification",
+                evidence=persisted,
+            )
+        prior_floor = int(
+            (manifest.get("mutable_safety_predicates") or {}).get(
+                "effective_required_backup_floor_bytes"
+            )
+            or 0
+        )
+        mutable_predicates = _mutable_safety_predicates(
+            fresh_observations,
+            minimum_backup_floor_bytes=prior_floor,
+        )
+        if mutable_predicates["passed"] is not True:
+            predicate_error = WarmArchiveError(
+                "mutation-start mutable live predicates blocked",
+                evidence=mutable_predicates,
+            )
+            persisted = _persist_material_cas_failure(
+                evidence_dir=evidence_dir,
+                phase="mutation_start_mutable_live_predicates",
+                readiness_id=str(projection_binding["readiness_id"]),
+                operation_id=operation_id,
+                job_id=own_job_id,
+                deployed_sha=deployed_sha,
+                manifest_path=manifest_path,
+                manifest_sha256=manifest_sha256,
+                component_diff=_safe_guard_failure_diff(
+                    manifest["material"],
+                    predicate_error,
+                    expected_observations=manifest.get("observations"),
+                ),
+            )
+            raise WarmArchiveError(
+                "mutation-start mutable live predicates blocked",
+                evidence=persisted,
+            )
         journal = {
             "contract_name": CONTRACT_NAME,
             "status": "applying",
@@ -4099,6 +5680,7 @@ def _apply_batch_locked(
             "systemd_service_gate_before": fresh_observations[
                 "systemd_service_gate"
             ],
+            "mutable_safety_predicates_before": mutable_predicates,
             "activity_evidence_before": fresh_observations["activity_gates"],
             "non_target_before": fresh_observations["non_target"],
             "immutable_non_target_digest_before": fresh_material[
@@ -4133,7 +5715,11 @@ def _apply_batch_locked(
     monitor = _monitor_after_batch(journal=journal, journal_path=journal_path)
     filesystems_after = _filesystem_snapshot(runtime_dir, root_backups)
     finance_after = _finance_snapshot(runtime_dir)
-    non_target_after = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target_after = _non_target_snapshot(
+        runtime_dir,
+        require_targets=False,
+        expected_non_target=journal["non_target_before"],
+    )
     terminal_non_target_reconciliation = _reconcile_non_target(
         journal["non_target_before"],
         non_target_after,
@@ -4160,8 +5746,17 @@ def _apply_batch_locked(
         or journal_reconciliation["protected_drift"]
         or mutation_scope_reconciliation["exact"] is not True
         or int(filesystems_after["root"]["available_bytes"]) < ROOT_MINIMUM_AFTER_BYTES
+        or finance_after.get("healthy") is not True
         or int(filesystems_after["backup"]["available_bytes"])
-        < int(finance_after["required_available_floor_bytes"])
+        < max(
+            int(finance_after["required_available_floor_bytes"]),
+            int(
+                (journal.get("mutable_safety_predicates_before") or {}).get(
+                    "effective_required_backup_floor_bytes"
+                )
+                or 0
+            ),
+        )
     ):
         raise WarmArchiveError("terminal non-target/capacity/service reconciliation failed")
     unlink_count = sum(int(item.get("unlink_count") or 0) for item in journal["items"])
@@ -4278,7 +5873,13 @@ def readback_batch(
         )
     filesystems = _filesystem_snapshot(runtime_dir, root_backups)
     finance = _finance_snapshot(runtime_dir)
-    non_target = _non_target_snapshot(runtime_dir, require_targets=False)
+    non_target = _non_target_snapshot(
+        runtime_dir,
+        require_targets=False,
+        expected_non_target=(
+            journal.get("non_target_before") if isinstance(journal, Mapping) else None
+        ),
+    )
     services = _systemd_snapshot()
     systemd_service_gate = _systemd_service_gate_with_resample(services)
     journald = _journald_snapshot()
@@ -4320,6 +5921,15 @@ def readback_batch(
         and journald_reconciliation.get("deleted_count") == 0
         and not journald_reconciliation.get("protected_drift")
     )
+    effective_terminal_floor = max(
+        int(finance["required_available_floor_bytes"]),
+        int(
+            ((journal or {}).get("mutable_safety_predicates_before") or {}).get(
+                "effective_required_backup_floor_bytes"
+            )
+            or 0
+        ),
+    )
     reconciled = bool(
         job
         and job.get("status") == "succeeded"
@@ -4335,7 +5945,9 @@ def readback_batch(
         and mutation_scope_reconciliation
         and mutation_scope_reconciliation.get("exact") is True
         and int(filesystems["root"]["available_bytes"]) >= ROOT_MINIMUM_AFTER_BYTES
-        and int(filesystems["backup"]["available_bytes"]) >= int(finance["required_available_floor_bytes"])
+        and finance.get("healthy") is True
+        and int(filesystems["backup"]["available_bytes"])
+        >= effective_terminal_floor
         and systemd_service_gate["healthy"]
         and root_readback.get("ok") is True
         and root_readback.get("fresh") is True
@@ -4371,7 +5983,12 @@ def readback_batch(
         ),
         "filesystems": filesystems,
         "finance": finance,
-        "backup_capacity_guard_passed": int(filesystems["backup"]["available_bytes"]) >= int(finance["required_available_floor_bytes"]),
+        "backup_capacity_guard_passed": bool(
+            finance.get("healthy") is True
+            and int(filesystems["backup"]["available_bytes"])
+            >= effective_terminal_floor
+        ),
+        "effective_required_backup_floor_bytes": effective_terminal_floor,
         "root_minimum_passed": int(filesystems["root"]["available_bytes"]) >= ROOT_MINIMUM_AFTER_BYTES,
         "root_monitor": root_readback,
         "services": services,

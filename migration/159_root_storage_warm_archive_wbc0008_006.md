@@ -28,8 +28,8 @@ pre-submit repeatability defect found by the first block-006 operation. WBC0008
 block 012 retains that unchanged scope and corrects the producer-ownership CAS
 boundary after a legitimate same-inode 4,096-byte Autoanswers write changed the
 old global protected-file `size/mtime` digest between readiness and the first
-JIT witness. Every new readiness/manifest/apply record uses contract
-`root_storage_warm_archive_wbc0008_006_v3`; v1/v2 evidence and terminal old
+JIT witness. Block 017 supersedes that observation model with contract
+`root_storage_warm_archive_wbc0008_006_v4`; v1/v2/v3 evidence and terminal old
 operations stay immutable and are never resumed or replayed. Every
 qualification and mutation CAS gate now retains structured per-source activity
 evidence: exact path, PID, FD, access mode, process `comm`, resolved FD target
@@ -93,10 +93,12 @@ root-storage policy rather than by filename:
 
 - exact target sources and sidecars retain the existing full identity, SHA,
   activity, hold and provenance CAS at every gate;
-- immutable non-target files inside the six affected source families and any
-  destination-family non-target retain exact enumeration, type, path,
-  device/inode, mode, uid/gid, size/mtime and content digest; add/remove/content
-  or stat drift fails closed;
+- non-target files inside the six affected source families retain exact
+  enumeration, type, path, device/inode, mode and uid/gid topology. Their
+  size/allocated bytes, mtime/ctime and content digest are observation-only
+  writer-progress evidence after block 017; add/remove/replacement/type/
+  ownership topology drift still fails closed. Any destination-family foreign
+  object remains an immediate blocker;
 - active mutable canonical stores are only the explicit policy bindings for
   current Finance raw, current operational and Autoanswers stores. StoreRegistry
   resolves the first two and the literal Autoanswers binding resolves the
@@ -131,6 +133,43 @@ stable mutable topology digest; policy drift therefore blocks even when the
 file inode is unchanged. Terminal block-012 readiness
 `readiness-v1-32faefe2d84925376c40b932f4d8e829` remains immutable and is never
 retried or reused; it created no production-goal operation or mutation.
+
+WBC0008 block 017 removes the fresh-PR/readiness carousel without weakening
+source or topology safety. Material is explicitly partitioned into:
+
+- `immutable_safety_v1`: the six literal source identities and SHA-256,
+  sidecar/hold/provenance evidence, destination and all three mount/device
+  identities, StoreRegistry generation/policy identity, root-policy ownership
+  and protected-path topology, exact scoped non-target topology, and mutable
+  canonical path/device/mount/inode/type/owner/access-role topology;
+- mutable observations: current Finance retained-backup/capacity values,
+  filesystem available bytes, canonical and protected non-target size/mtime,
+  open-handle PID/FD samples, service PID/timing/state samples, source activity,
+  sanitation-job inventory and journald health evidence.
+
+At JIT and again after the Finance and lifecycle locks are held at mutation
+start, the immutable partition must match exactly. Mutable observations are
+re-evaluated through named semantic predicates: Finance health, the preserved
+conservative backup floor, every six-stage capacity peak, projected root
+minimum, all 27 units/12 pairs healthy, exact-source sidecar/opener/lock/hold
+guards clear, no other sanitation job, and journald evidence available.
+Ordinary same-inode canonical DB content/size/mtime, protected non-target
+size/mtime, Finance rotation identity, service PID/timing and unrelated writer
+progress therefore do not invalidate safety while these predicates and stable
+topologies remain valid. Source content/stat/SHA, source sidecar/hold/lock,
+destination/mount, StoreRegistry/policy/ownership, protected-path topology or
+canonical topology drift still fails closed.
+
+Any JIT or mutation-start mismatch writes
+`root-warm-archive-material-cas-failure.json` with exclusive-create plus fsync
+before raising and, at mutation start, before the mutation journal exists. The
+private artifact binds readiness, goal operation, job identity (or the explicit
+pre-submit `not_created` state), deployed SHA and manifest. It records bounded
+safe component evidence, exact JSON paths, classification and before/after
+component digests. The first failure is immutable: a later matching snapshot
+cannot replace or erase it, and the same operation immediately reads back that
+terminal failure. No destination creation, compressor, archive publication or
+unlink can follow a mismatch.
 
 An unknown resolver, owner, classification, path, destination object or
 unrelated FD owner fails closed. Mutation authority remains the six literal
@@ -185,9 +224,10 @@ is:
 /wb-core authorize-goal-v1 task WBC0008 profile root-warm-archive-six target wb_core_eu_hosted_runtime_active sources 6 archives 6 manifests 6 unlinks 6 reclaimed-allocated-bytes <exact-allocated-byte-total> root-minimum-bytes 26843545600 backup-floor-bytes <finance-next-replacement-plus-8GiB>
 ```
 
-Before a new production-goal operation exists, the trusted Apply workflow's
-`warm-archive-readiness` mode runs one canonical query-only contour against the
-exact deployed SHA. It tolerates a transient activity sample and requires three
+Before mutation submit, the trusted Apply workflow's `warm-archive-readiness`
+mode runs a bounded canonical query-only sequence against one exact deployed
+SHA and the same exact owner passport/derived goal operation. It tolerates a
+transient activity sample and requires three
 consecutive clean post-projection witnesses inside a maximum 60-second
 stabilization window. Persistent write-capable/unknown FD, lock, sidecar, hold
 or material drift returns one terminal structured callback and no operation is
@@ -213,15 +253,25 @@ one caller-known detached job. A nonzero/ambiguous submit is never repeated;
 the only next action is query-only job and archive readback. The material hash
 is evidence, not a second owner authorization field.
 
-The readiness identity is deterministically bound to repository, PR and the
-exact `live_runtime/done` Release operation. A blocked service-gate receipt is
-terminal and immutable: a later natural timer/service recovery cannot turn it
-ready, and rerunning that same identity only reads back the terminal receipt.
-Only a new legitimate PR and its fresh Release operation can derive a different
-readiness identity and execute a new full query-only readiness contour. The
-later scope-goal parser accepts only the single `state=ready` receipt for that
-exact fresh Release operation; an earlier blocked or otherwise foreign receipt
-cannot satisfy the binding.
+The v2 readiness base identity is deterministically bound to repository, PR,
+exact `live_runtime/done` Release operation, authorization-comment identity and
+derived goal operation. It admits at most three contiguous attempts `a01`..
+`a03`. Every attempt is one immutable terminal receipt; a blocked attempt is
+never rewritten or retried, a ready attempt must be the final attempt, and
+duplicate, skipped, foreign or out-of-bound attempts fail closed. A later
+natural recovery can use the next bounded attempt under the same deployed code
+and goal, so an otherwise-empty PR is neither required nor accepted merely to
+manufacture a readiness identity. Exhaustion creates no production command,
+queue or unbounded retry. The later scope-goal parser accepts exactly one final
+`state=ready` receipt for that same binding.
+
+Full readiness/apply evidence remains canonical JSON in the immutable private
+Actions artifact. PR publication is a deterministic compact summary below
+65,536 bytes containing terminal state, readiness/operation, apply count, job,
+error/component-diff summary and the artifact name, byte size and SHA-256. A
+GitHub 422 or other comment failure cannot hide or rewrite the artifact and
+never causes readiness, qualification or mutation to run again; publication
+recovery remains query-only and digest-bound.
 
 ## Terminal acceptance
 
