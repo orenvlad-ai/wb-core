@@ -4,6 +4,15 @@ Main task автоматически получает `wbc NNNN <русское 
 local `wbc-task-intake` skill. Она хранит accepted goal/decisions, короткий
 passport, scope, acceptance и final owner-facing result.
 
+Это единственная owner-facing surface goal. Пользователь не выбирает trust
+tier или approval mode: implementation intent автоматически действует до
+`COMPLETE`/supersede через canonical authorization envelope. Любой curator или
+subagent до owner-facing gate обязан получить valid receipt
+[`codex_authorization_gate.py`](../../apps/codex_authorization_gate.py) по
+[`15_codex_authorization_router.md`](15_codex_authorization_router.md). Non-owner
+surface маршрутизирует structured evidence сюда, а не публикует второй вопрос;
+duplicate pending/answered gate и subset accepted extension suppress-ятся.
+
 Каждый technical execution block получает one fresh visible internal subagent
 `wbc NNNN SSS <latin transliteration>` без pin через
 `collaboration.spawn_agent`. Semantic name — deterministic transliteration
@@ -45,6 +54,20 @@ progress evidence и не разрешает `list_agents`, worktree/Git/CI/stat
 или terminal handoff будит main для owner-facing transition в том же turn, без
 пользовательского `посмотри`. Subagent возвращает terminal payload ровно один
 раз без межканального дублирования и становится Done.
+
+Workspace не создаёт discretionary permission questions. Proposed interruption
+имеет только `AUTO_CONTINUE`, `EVIDENCE_BLOCKED` или `HUMAN_REQUIRED` с closed
+reason codes. SQLite/file/server/service location не является gate; точный
+semantic/final effect является. Missing evidence запускает diagnosis/correction,
+pre-submit same-goal correction продолжает fresh identity, а submitted/
+ambiguous operation допускает только same-operation query-only reconciliation.
+`HUMAN_REQUIRED` возможен лишь для exact новых business semantic/final target/
+destination/external-publication/financial/security-access/credential/protected
+data/неallowlisted irreversible deltas. Слова `material`, `risky`, generic
+`scope expansion` или `production DB write` gate не доказывают.
+
+Router действует только для blocks, начатых после merge его редакции, и не
+переклассифицирует существующие `wbc 0008`/`wbc 0010`.
 
 Post-task
 [`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) доступен

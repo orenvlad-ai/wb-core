@@ -36,6 +36,7 @@
       "depends_on": [],
       "requires_browser": false,
       "commands": [
+        ["python3", "apps/codex_authorization_gate_smoke.py"],
         ["python3", "apps/user_artifact_xlsx_smoke.py"],
         ["python3", "apps/hosted_runtime_auth_preflight_smoke.py"],
         ["python3", "apps/hosted_runtime_transport_reconcile_smoke.py"],
@@ -215,7 +216,7 @@
     },
     {
       "id": "orchestration-protocol",
-      "paths": [".codex/**", "AGENTS.md", ".github/pull_request_template.md", "docs/architecture/07_codex_execution_protocol.md", "docs/architecture/12_codex_global_orchestration.md", "docs/architecture/13_codex_curator_workspace.md"],
+      "paths": [".codex/**", "AGENTS.md", ".github/pull_request_template.md", "apps/codex_authorization_gate.py", "apps/codex_authorization_gate_smoke.py", "docs/architecture/07_codex_execution_protocol.md", "docs/architecture/12_codex_global_orchestration.md", "docs/architecture/13_codex_curator_workspace.md", "docs/architecture/15_codex_authorization_router.md"],
       "suites": ["release_safety"],
       "release": "repo_only"
     },

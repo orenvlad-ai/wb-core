@@ -27,14 +27,32 @@ Main chat хранит короткий task passport:
 
 Passport — conversational state, не registry/control plane и не runtime.
 
+## One autonomous operating mode
+
+Пользователь не выбирает trust tier, approval mode или уровень автономности.
+Ясное `сделай` / `исправь` / `реализуй`, а после design — `запускай` /
+`принимаю` / `доведи до конца`, автоматически компилирует accepted goal в
+canonical authorization envelope и разрешает autonomous execution до
+`COMPLETE` или supersede. Standing `approval_policy=never` и full technical
+execution не являются user-facing option.
+
+Envelope/manifest/receipt contract реализован pure validator-ом
+[`apps/codex_authorization_gate.py`](../../apps/codex_authorization_gate.py) и
+описан в
+[`15_codex_authorization_router.md`](15_codex_authorization_router.md). Envelope
+binds goal/owner surface, included final targets, destinations, allowed final и
+auxiliary deltas, bounded temporary dependency actions, forbidden effects,
+answered/terminal decision digests и validity. Action manifest binds exact
+resources/final effects, operation/submit identity, dependency proof,
+rollback/readback и warnings. До любого owner-facing gate нужен valid receipt.
+
 Новый technical execution prompt фиксирует: `Выбор инструментов и источников не является требованием пользователя и всегда перепроверяется по актуальному протоколу, если пользователь отдельно явно не зафиксировал обратное.` Он не называет WebCore Data MCP обязательным access path. Для production evidence сначала определяется current target/source, затем выполняется фактический preflight через штатный SSH и canonical server-side query-only server-owned read; ошибка archival MCP не является blocker.
 
 ## Dispatch и corrections
 
-Ясное пользовательское `реализуй`, `исправь` или `сделай` разрешает dispatch
-без дополнительного вопроса. Если сначала шёл design, достаточно `запускай`
-или `принимаю`. Уже accepted goal, business meaning, exact plan settings и
-routine technical choices повторно не согласуются.
+Ясное пользовательское implementation intent разрешает dispatch и autonomous
+completion без дополнительного вопроса. Уже accepted goal, business meaning,
+exact plan settings и routine technical choices повторно не согласуются.
 
 `Read-only` задаёт mutation/authority boundary, но не actor routing. Один
 bounded technical execution block выполняет ровно один fresh visible internal
@@ -140,17 +158,44 @@ subagents не читают и не вызывают его как checklist и 
 approval, test, task, PR или mutation; возможное изменение протокола проходит
 отдельным обычным repo block только после отдельного решения.
 
-## Human-only boundary
+## Deterministic human-only boundary
 
-Human decision требуется только для нового business meaning, material scope
-expansion, non-interactive-unavailable login/2FA/captcha, непредавторизованного
-security/access/ruleset/new destination change либо proven irreversible action
-/ production-data scope без accepted durable task-scoped authorization.
+Каждый proposed interruption обязан получить ровно один outcome:
+`AUTO_CONTINUE`, `EVIDENCE_BLOCKED` или `HUMAN_REQUIRED`, с closed reason codes
+и byte-stable `decision_digest`/receipt. Gate классифицируется по semantic/final
+effect, не по storage medium: SQLite/file/server/service/production location
+сами по себе gate не создают. Protected business fact — отдельная semantic
+категория; repo-declared operational control metadata не становится business
+данными из-за места хранения.
 
-Routine branch/PR/tests/check remediation/merge, existing canonical live deploy
-и reversible technical fixes внутри accepted scope автономны. Exact plan
-preauthorizes перечисленные settings changes. Platform/tool limitation — это
-exact blocker, а не причина запрашивать approvals для каждой команды.
+`HUMAN_REQUIRED` возможен только при exact machine delta для одного из closed
+predicates: новый business semantic, final target, destination, external/
+publication/financial/security-access effect, credential/login/2FA/captcha
+capability, protected-data final delta или irreversible final delta вне
+allowlist. Субъективные `material`, `risky`, `scope expansion`, generic
+`business-data mutation`, `production DB write` или одно слово `irreversible`
+не разрешают question. Без доказанного predicate permission question является
+protocol-invalid; dominant technical recommendation выполняется автономно,
+если не нужна уникальная business preference пользователя.
+
+Missing identity/evidence означает `EVIDENCE_BLOCKED` и automatic diagnosis/
+correction. Same-goal pre-submit code/runtime defect, fresh sequential identity,
+unrelated/stale warning и exact allowlisted dependency remediation означают
+`AUTO_CONTINUE`. Terminal identities не переиспользуются. После
+`submitted`/`ambiguous` разрешён только same-operation query-only readback и
+reconciliation; blind retry запрещён. Required dependency нельзя bypass-ить:
+temporary remediation или auxiliary final transition automatic только при
+exact allowlist, bounded identity, zero undeclared business/finance/external/
+publication/security/destination effects и preservation/readback predicates.
+
+Goal имеет одну owner-facing surface. Non-owner route-ит structured evidence
+owner-у; duplicate pending/answered gate suppress-ится, accepted extension и её
+subset повторно не спрашиваются. Human capability gate остаётся exact.
+Platform/tool limitation — exact blocker, не запрос покомандных approvals.
+
+Этот router contract применяется только к technical blocks, начатым после
+merge его редакции. Он не меняет и не переклассифицирует задним числом
+`wbc 0008` или `wbc 0010`.
 
 ## Execution contours
 
