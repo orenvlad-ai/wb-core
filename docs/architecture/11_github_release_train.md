@@ -303,6 +303,20 @@ sample or a duplicate with identity drift blocks. Capacity and lifecycle-lock
 collections likewise prove exact identity coverage, so equal raw row counts
 cannot hide a duplicated row and a missing target/lock.
 
+After WBC0008 block 021, stable filesystem CAS is semantic across the host and
+the detached systemd worker mount namespaces. It retains exact `st_dev` and
+major/minor, source, UUID, filesystem type, declared root/backup/generation
+role, path-family placement, repo policy ownership, writable requirement and
+integrity/write option semantics. Namespace-local mount/parent ids, mount root
+and mount point, propagation fields, atime observations and extra restrictive
+`nosuid|nodev|noexec` flags remain structured observation evidence only. Loss
+of a role-declared generation restriction remains blocking. `ro`,
+unknown/ambiguous option records, different device/source/UUID/type, wrong
+path-device role, destination on root/generation, symlink escape, StoreRegistry,
+owner/classification or access-role drift still fail closed. Raw host-versus-
+worker records therefore remain inspectable without manufacturing immutable CAS
+drift for the same backing filesystem.
+
 Any immutable or semantic-predicate mismatch before submit or mutation journal
 durably writes a private exclusive-create/fsynced component-diff artifact bound
 to readiness/operation/job/deployed SHA. It includes exact changed JSON paths,

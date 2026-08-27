@@ -26,7 +26,8 @@ STATUS_ARTIFACT_MAX_AGE_SECONDS = 10 * 60
 CLASS_DISCRETIONARY = "discretionary_root_writer"
 CLASS_ESSENTIAL = "essential_bounded_business_writer"
 CLASS_RETAINED = "retained_no_active_writer"
-NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v2"
+NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v3"
+MUTABLE_STORE_FILESYSTEM_ROLES = frozenset({"root", "generation"})
 MUTABLE_STORE_ACCESS_MODES = frozenset({"read_only", "read_write", "write_only"})
 MUTABLE_STORE_ACCESS_ROLES = {
     "reader": frozenset({"read_only"}),
@@ -137,6 +138,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         key = str(binding.get("key") or "").strip()
         owner = str(binding.get("owner") or "").strip()
         classification = str(binding.get("classification") or "").strip()
+        filesystem_role = str(binding.get("filesystem_role") or "").strip()
         resolver = binding.get("resolver")
         access_roles = binding.get("access_roles")
         producer = producers_by_owner.get(owner)
@@ -146,6 +148,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
             or producer is None
             or classification != CLASS_ESSENTIAL
             or producer.get("classification") != classification
+            or filesystem_role not in MUTABLE_STORE_FILESYSTEM_ROLES
             or not isinstance(resolver, dict)
             or not isinstance(access_roles, list)
             or not access_roles
@@ -179,9 +182,13 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         if resolver_type == "store_registry":
             if resolver.get("logical_store") not in {"finance_raw", "operational"}:
                 raise RootStoragePolicyError("mutable StoreRegistry resolver is invalid")
+            if filesystem_role != "generation":
+                raise RootStoragePolicyError(
+                    "mutable StoreRegistry filesystem role is invalid"
+                )
         elif resolver_type == "literal":
             literal = Path(str(resolver.get("path") or ""))
-            if not literal.is_absolute():
+            if not literal.is_absolute() or filesystem_role != "root":
                 raise RootStoragePolicyError("mutable literal resolver path is invalid")
             matched = _producer_for_path(payload, literal)
             if (
