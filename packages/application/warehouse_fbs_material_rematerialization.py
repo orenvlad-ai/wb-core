@@ -1015,12 +1015,11 @@ class WarehouseFbsMaterialRematerializer:
             ).fetchone()
             attempts = int(row[0] if row is not None else 0)
             recoverable_transport = _recoverable_transport_error(error)
+            # Only exact transport/contention classes may consume the bounded
+            # retry budget. Every identity, semantic, resource or unknown
+            # failure is terminal fail-closed.
             status = (
                 UNSAFE_AMBIGUOUS
-                # Domain errors are exact CAS, identity, schema or semantic
-                # blockers. Only an explicit transport/runtime failure is
-                # eligible for bounded resume after readback proved that no
-                # candidate identity committed.
                 if not recoverable_transport
                 else RETRY_EXHAUSTED
                 if attempts >= MAX_RETRY_ATTEMPTS
@@ -2484,8 +2483,12 @@ def _blocked_plan(
 
 
 def _recoverable_transport_error(error: Exception) -> bool:
-    if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+    if isinstance(error, (ConnectionError, TimeoutError)):
         return True
+    # PermissionError, FileNotFoundError, ENOSPC and every other generic OS
+    # resource/path/capacity failure are not transport evidence.
+    if isinstance(error, OSError):
+        return False
     if not isinstance(error, sqlite3.OperationalError):
         return False
     message = str(error).lower()
@@ -2495,7 +2498,6 @@ def _recoverable_transport_error(error: Exception) -> bool:
             "database is locked",
             "database table is locked",
             "database is busy",
-            "disk i/o error",
         )
     )
 

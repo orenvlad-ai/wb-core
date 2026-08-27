@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+import errno
 import json
 from pathlib import Path
 import sqlite3
@@ -498,6 +499,54 @@ def _test_resume_before_and_after_commit_transport_loss() -> None:
             assert conn.execute(
                 "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
             ).fetchone()[0] == "whfv_incident_source"
+
+    for label, error in (
+        ("timeout", TimeoutError("bounded transport timeout")),
+        ("sqlite-lock", sqlite3.OperationalError("database is locked")),
+    ):
+        outcome = _precommit_failure_outcome(error=error, label=label)
+        assert outcome["status"] == REPAIRABLE, (label, outcome)
+        assert outcome["attempt_count"] == 1, (label, outcome)
+
+    for label, error in (
+        ("permission", PermissionError(errno.EACCES, "permission denied")),
+        ("missing-path", FileNotFoundError(errno.ENOENT, "path not found")),
+        ("capacity", OSError(errno.ENOSPC, "no space left on device")),
+    ):
+        outcome = _precommit_failure_outcome(error=error, label=label)
+        assert outcome["status"] == UNSAFE_AMBIGUOUS, (label, outcome)
+        assert outcome["attempt_count"] == 1, (label, outcome)
+
+
+def _precommit_failure_outcome(
+    *, error: Exception, label: str
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix=f"fbs-material-{label}-") as temp_dir:
+        runtime = _seed(Path(temp_dir), mixed=True)
+        service = WarehouseFbsMaterialRematerializer(
+            runtime=runtime, timestamp_factory=_Clock()
+        )
+        plan = service.build_plan(
+            business_date=DAY,
+            facility_id=FACILITY_ID,
+            pool="FBS",
+            nm_ids=[TARGET_NM_ID],
+        )
+
+        def fail_before_commit(phase: str) -> None:
+            if phase == "before_commit":
+                raise error
+
+        outcome = service.apply_plan(
+            plan,
+            confirm_fingerprint=plan["plan_fingerprint"],
+            transport_hook=fail_before_commit,
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(
+                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+            ).fetchone()[0] == "whfv_incident_source"
+        return outcome
 
 
 def _test_drift_concurrency_and_fail_closed_boundaries() -> None:
