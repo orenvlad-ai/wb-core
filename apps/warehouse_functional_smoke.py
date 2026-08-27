@@ -33,6 +33,7 @@ from packages.application.calculation_parameters import (  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.ff_pool_dense_fbs import DenseFbsError  # noqa: E402
 from packages.application.own_product_capital import OwnProductCapitalBlock  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.supplier_financial_documents import build_financial_summary  # noqa: E402
@@ -4144,32 +4145,40 @@ def _test_guarded_publication() -> None:
             wb_balance_detail["human_evidence"]["items"],
             "expanded balance exposes structured human evidence",
         )
-        runtime.save_nomenclature_item(
-            {
-                "item_id": "nom-104-conflict",
-                "is_active": True,
-                "our_sku": "conflicting-smoke",
-                "nm_id": 104,
-                "barcode": "2052929000999",
-                "vendor_code": "conflicting-smoke",
-                "nomenclature_name": "Conflicting smoke",
-                "product_type": "anti_spy",
-                "match_key": "anti_spy|conflicting-smoke",
-                "purchase_price_yuan": 7.2,
-                "aliases": [],
-                "compatible_model_keys": [],
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        ambiguous_detail = entrypoint.handle_warehouse_detail_request("wb")
-        ambiguous_balance = next(
-            item for item in ambiguous_detail["balances"] if int(item["nm_id"]) == 104
+        try:
+            runtime.save_nomenclature_item(
+                {
+                    "item_id": "nom-104-conflict",
+                    "is_active": True,
+                    "our_sku": "conflicting-smoke",
+                    "nm_id": 104,
+                    "barcode": "2052929000999",
+                    "vendor_code": "conflicting-smoke",
+                    "nomenclature_name": "Conflicting smoke",
+                    "product_type": "anti_spy",
+                    "match_key": "anti_spy|conflicting-smoke",
+                    "purchase_price_yuan": 7.2,
+                    "aliases": [],
+                    "compatible_model_keys": [],
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                }
+            )
+        except DenseFbsError as exc:
+            _assert(
+                exc.code == "active_nomenclature_ambiguous",
+                "duplicate active nmID fails closed before publication",
+            )
+        else:
+            raise AssertionError("duplicate active nmID must not publish")
+        exact_detail = entrypoint.handle_warehouse_detail_request("wb")
+        exact_balance = next(
+            item for item in exact_detail["balances"] if int(item["nm_id"]) == 104
         )
         _assert(
-            "Неоднозначная активная номенклатура" in ambiguous_balance["identity_warning"]
-            and ambiguous_balance["quality_tone"] == "warning",
-            "identity-review warning cannot inherit a certified success tone",
+            exact_balance["identity_source"] == "active_nomenclature_exact_nm_id"
+            and not exact_balance["identity_warning"],
+            "failed duplicate leaves the prior exact active identity unchanged",
         )
         _assert(wb_detail["warehouse"]["status_label"] != wb_detail["warehouse"]["status"], "status code is localized")
         discrepancy_detail = entrypoint.handle_warehouse_detail_request("wb_acceptance_discrepancy")

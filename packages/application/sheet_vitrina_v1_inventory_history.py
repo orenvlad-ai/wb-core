@@ -990,9 +990,11 @@ def _current_components(
             facility_id = str(facility.get("facility_id") or "")
             if not facility_id:
                 continue
-            applicable = bool(facility.get("applicable"))
             if scope_kind == "TOTAL":
                 value = facility.get("available")
+                component_state = str(facility.get("state") or "missing")
+                component_reason = str(facility.get("reason") or "")
+                component_provenance = dict(facility.get("provenance") or {})
             else:
                 sku = next(
                     (
@@ -1003,6 +1005,23 @@ def _current_components(
                     None,
                 )
                 value = sku.get("available") if isinstance(sku, Mapping) else None
+                component_state = (
+                    str(sku.get("state") or "missing")
+                    if isinstance(sku, Mapping)
+                    else "missing"
+                )
+                component_reason = (
+                    str(sku.get("reason") or sku.get("reason_ru") or "")
+                    if isinstance(sku, Mapping)
+                    else "applicable_physical_row_missing"
+                )
+                component_provenance = (
+                    dict(sku.get("provenance") or {})
+                    if isinstance(sku, Mapping)
+                    else {}
+                )
+            if component_state not in COMPONENT_STATES:
+                component_state = _value_state(value)
             components.append(
                 _component(
                     scope_kind=scope_kind,
@@ -1012,14 +1031,16 @@ def _current_components(
                     component_id=facility_id,
                     component_label=str(facility.get("name") or facility_id),
                     value=value,
-                    state="inapplicable" if not applicable else _value_state(value),
+                    state=component_state,
                     source_revision=str(facility.get("source_revision") or ""),
                     source_digest=str(facility.get("source_digest") or ""),
                     source_watermark=str(facility.get("source_watermark") or ""),
                     provenance={
                         "source": "ff_pool_FBS_physical_minus_active_reserved",
                         "active": bool(facility.get("active")),
-                        "applicable": applicable,
+                        "applicable": component_state != "inapplicable",
+                        "reason": component_reason,
+                        "typed_physical_provenance": component_provenance,
                         "updated_at": str(facility.get("updated_at") or ""),
                     },
                 )

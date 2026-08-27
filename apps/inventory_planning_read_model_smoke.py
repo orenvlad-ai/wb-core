@@ -59,31 +59,58 @@ def main() -> int:
             "reason_ru": "Недоступно: WB временно не передаёт распределение",
             "historical_values_preserved": True,
         }
-        assert _metric(missing, "fbs_total") == 97
-        assert _metric(missing, "total") == 127
-        assert missing["fbs"]["physical"] == 105
-        assert missing["fbs"]["reserved"] == 8
-        assert missing["fbs"]["available"] == 97
+        # Both facilities are active, so the absent SKU 2 physical rows are
+        # applicable-missing.  The aggregate must remain unavailable instead
+        # of silently treating those missing components as zero.
+        assert _metric(missing, "fbs_total") is None, missing["fbs"]
+        assert _metric(missing, "total") is None
+        assert missing["fbs"]["physical"] is None
+        assert missing["fbs"]["reserved"] is None
+        assert missing["fbs"]["available"] is None
         assert len(missing["fbs"]["facilities"]) == 2
-        assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] == 1
+        assert missing["fbs"]["facilities"][0]["seller_stock"]["delta_to_ledger_physical"] is None
         missing_skus = {item["nm_id"]: item for item in missing["skus"]}
         assert missing_skus[1]["wb_total"] == 10
-        assert missing_skus[1]["fbs_physical"] == 105
+        assert missing_skus[1]["fbs_physical"] == 5
         assert missing_skus[1]["fbs_reserved"] == 8
-        assert missing_skus[1]["fbs_total"] == 97
-        assert missing_skus[1]["total"] == 107
+        assert missing_skus[1]["fbs_total"] == -3
+        assert missing_skus[1]["total"] == 7
         assert missing_skus[1]["wb_effective_total"] is None
         assert missing_skus[1]["fbs_facilities"][0]["seller_stock"] == {
             "quantity": 6,
             "delta_to_ledger_physical": 1,
             "role": "reconciliation_only",
         }
-        assert missing_skus[2]["fbs_total"] == 0
-        assert missing_skus[2]["total"] == 20
-        assert missing_skus[2]["quality"]["total"] == "partial"
+        assert missing_skus[2]["fbs_total"] is None
+        assert missing_skus[2]["total"] is None
+        assert missing_skus[2]["quality"]["total"] == "unavailable"
         assert "Частичные данные" in missing_skus[2]["quality"][
             "fbs_total_reason_ru"
         ]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"UPDATE {CURRENT_TABLE} SET quantity=5 WHERE cutover_id='cutover-smoke' "
+                "AND order_id=9001"
+            )
+            conn.commit()
+        zero_available = model.current()
+        zero_available_moscow = next(
+            item
+            for item in next(
+                sku for sku in zero_available["skus"] if sku["nm_id"] == 1
+            )["fbs_facilities"]
+            if item["facility_id"] == "moscow"
+        )
+        assert zero_available_moscow["physical"] == 5
+        assert zero_available_moscow["reserved"] == 5
+        assert zero_available_moscow["available"] == 0
+        assert zero_available_moscow["state"] == "exact"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"UPDATE {CURRENT_TABLE} SET quantity=8 WHERE cutover_id='cutover-smoke' "
+                "AND order_id=9001"
+            )
+            conn.commit()
         assert missing["formula"]["version"] == FORMULA_VERSION
         assert missing["formula"]["effective_from"] == "2026-08-16"
         assert missing["formula"]["six_stage_total_changed"] is False
@@ -125,12 +152,27 @@ def main() -> int:
         exact = model.current()
         assert exact["wb"]["incident_quantity"] == 35
         assert _metric(exact, "wb_effective_total") == -5
-        assert _metric(exact, "effective_total") == 92
+        assert _metric(exact, "effective_total") is None
         assert exact["wb"]["incident_evidence"]["synthetic_cap_applied"] is False
         exact_skus = {item["nm_id"]: item for item in exact["skus"]}
         assert exact_skus[1]["incident_quantity"] == 35
         assert exact_skus[1]["wb_effective_total"] == -25
-        assert exact_skus[1]["effective_total"] == 72
+        assert exact_skus[1]["effective_total"] == -28
+
+        # Facility totals cover the full active stock-managed roster, including
+        # SKU 3 which is deliberately absent from the current WB snapshot.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('moscow','FBS',2,7,0,'0',NULL,'smoke-zero',?)""",
+                (NOW,),
+            )
+            conn.commit()
+        complete_moscow = model.current()
+        assert _metric(complete_moscow, "fbs_total") == 1
+        assert _metric(complete_moscow, "total") == 31
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(
@@ -139,8 +181,8 @@ def main() -> int:
             )
             conn.commit()
         activated = model.current()
-        assert _metric(activated, "fbs_facility:orenburg") == 100
-        assert _metric(activated, "fbs_total") == 97
+        assert _metric(activated, "fbs_facility:orenburg") is None
+        assert _metric(activated, "fbs_total") is None
         assert activated["formula"]["effective_from"] == exact["formula"]["effective_from"]
 
         with sqlite3.connect(db_path) as conn:
@@ -150,12 +192,12 @@ def main() -> int:
             )
             conn.commit()
         deactivated = model.current()
-        assert _metric(deactivated, "fbs_total") == 97
-        assert _metric(deactivated, "fbs_facility:moscow") == -3
+        assert _metric(deactivated, "fbs_total") is None
+        assert _metric(deactivated, "fbs_facility:moscow") is None
         assert next(
             item for item in deactivated["fbs"]["facilities"]
             if item["facility_id"] == "moscow"
-        )["applicable"] is True
+        )["applicable"] is False
         assert deactivated["fbs"]["inactive_history_rewritten"] is False
 
         with sqlite3.connect(db_path) as conn:
@@ -170,21 +212,37 @@ def main() -> int:
             conn.commit()
         unavailable = model.current()
         assert _metric(unavailable, "fbs_facility:empty") is None
-        assert _metric(unavailable, "fbs_total") == 97
-        assert _metric(unavailable, "total") == 127
-        assert unavailable["quality"]["fbs"] == "exact_ledger"
+        assert _metric(unavailable, "fbs_total") is None
+        assert _metric(unavailable, "total") is None
+        assert unavailable["quality"]["fbs"] == "partial"
         empty = next(
             item for item in unavailable["fbs"]["facilities"]
             if item["facility_id"] == "empty"
         )
-        assert empty["applicable"] is False
-        assert empty["state"] == "inapplicable"
+        assert empty["applicable"] is True
+        assert empty["state"] == "missing"
 
     print("inventory_planning_read_model_smoke: OK")
     return 0
 
 
 def _seed(conn: sqlite3.Connection) -> None:
+    for nm_id in (1, 2, 3):
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                   item_id,is_active,is_hidden,nm_id,nomenclature_name,
+                   product_type,match_key,aliases_json,created_at,updated_at
+               ) VALUES(?,1,0,?,?,?,?,'[]',?,?)""",
+            (
+                f"planning-nm-{nm_id}",
+                nm_id,
+                f"Planning SKU {nm_id}",
+                "fixture",
+                f"planning-{nm_id}",
+                NOW,
+                NOW,
+            ),
+        )
     conn.execute(
         "INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at) VALUES(1,'whfv-current',?)",
         (NOW,),
@@ -259,6 +317,13 @@ def _seed(conn: sqlite3.Connection) -> None:
                ) VALUES(?,'FBS',1,7,?,'0',NULL,'smoke',?)""",
             (facility_id, quantity, NOW),
         )
+    conn.execute(
+        f"""INSERT INTO {BALANCES_TABLE}(
+               facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,
+               source_watermark,updated_at
+           ) VALUES('moscow','FBS',3,7,4,'0',NULL,'smoke-non-wb-sku',?)""",
+        (NOW,),
+    )
     conn.execute(
         f"""INSERT INTO {MANIFESTS_TABLE}(
                cutover_id,manifest_digest,deployed_sha,cutover_at,business_date,feature_epoch,

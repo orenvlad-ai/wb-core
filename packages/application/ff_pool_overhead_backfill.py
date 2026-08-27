@@ -42,6 +42,10 @@ from packages.application.warehouse_functional_economics_backfill import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from packages.application.warehouse_fbs_material_rematerialization import (
+    WarehouseFbsMaterialError,
+    publish_fbs_pool_aggregate_revision,
+)
 from packages.application.wb_finance_weekly import block_from_env
 
 
@@ -600,6 +604,7 @@ class FfPoolOverheadBackfill:
                         raise FfPoolOverheadBackfillError(
                             "active aggregate version drifted before short apply"
                         )
+                    material_nm_ids: list[int] = []
                     for item in projection:
                         row = conn.execute(
                             "SELECT quantity,capital_rub,provenance_json FROM "
@@ -630,30 +635,31 @@ class FfPoolOverheadBackfill:
                                     f"{item['nm_id']}"
                                 )
                             continue
-                        provenance = {
-                            "source": CONTRACT_NAME,
-                            "manifest_fingerprint": str(
-                                reviewed_plan["fingerprint"]
-                            ),
-                            "selected_document_ids": list(
-                                reviewed_plan["scope"]["document_ids"]
-                            ),
-                            "previous_provenance_sha256": _fingerprint(
-                                _loads(row["provenance_json"], {})
-                            ),
-                        }
-                        conn.execute(
-                            "UPDATE sheet_vitrina_v1_warehouse_functional_balances "
-                            "SET capital_rub=?,wac_rub=?,provenance_json=? "
-                            "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
-                            (
-                                str(item["detail_capital_rub"]),
-                                str(item["detail_wac_rub"]),
-                                _json(provenance),
-                                version_id,
-                                int(item["nm_id"]),
-                            ),
-                        )
+                        material_nm_ids.append(int(item["nm_id"]))
+                    if material_nm_ids:
+                        active_business_date = conn.execute(
+                            """SELECT business_effective_date
+                               FROM sheet_vitrina_v1_warehouse_functional_versions
+                               WHERE version_id=?""",
+                            (version_id,),
+                        ).fetchone()
+                        if active_business_date is None or not str(
+                            active_business_date[0] or ""
+                        ):
+                            raise FfPoolOverheadBackfillError(
+                                "active aggregate business date is missing"
+                            )
+                        try:
+                            publish_fbs_pool_aggregate_revision(
+                                conn,
+                                affected_nm_ids=material_nm_ids,
+                                source_kind=CONTRACT_NAME,
+                                source_id=str(reviewed_plan["fingerprint"]),
+                                business_date=str(active_business_date[0]),
+                                published_at=str(self.timestamp_factory()),
+                            )
+                        except WarehouseFbsMaterialError as exc:
+                            raise FfPoolOverheadBackfillError(str(exc)) from exc
                     for item in revisions:
                         conn.execute(
                             f"INSERT OR IGNORE INTO {TARGETED_RECALC_QUEUE_TABLE}("

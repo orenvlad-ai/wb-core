@@ -492,6 +492,19 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
             (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"])): item
             for item in movements
         }
+        # Dense FBS publishes an explicit physical row before any receipt.
+        # Keep this production-shaped arithmetic test on that canonical
+        # boundary; FBO remains outside the dense initialization scope.
+        for facility_id, pool, nm_id in sorted(movement_by_key):
+            if pool != "FBS" or nm_id in fractional_opening:
+                continue
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES(?,?,?,1,0,'0',NULL,'dense-fbs-fixture','2026-08-15T00:00:00Z')""",
+                (facility_id, pool, nm_id),
+            )
         for line_no, movement in enumerate(movements, start=1):
             _apply_balance_movement(
                 conn,
@@ -628,6 +641,15 @@ def _production_shaped_26gn527(service: FfPoolDocumentService) -> None:
                     "production-shaped-global-parity",
                     "2026-08-15T00:00:00Z",
                 ),
+            )
+        for nm_id in sorted(missing_aggregate_nm_ids):
+            conn.execute(
+                f"""INSERT INTO {BALANCES_TABLE}(
+                       facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,
+                       wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_msk','FBS',?,1,0,'0',NULL,
+                            'dense-fbs-fixture','2026-08-15T00:00:00Z')""",
+                (nm_id,),
             )
         guided_request = dict(request)
         guided_request["source_type"] = "china_acceptance_workbook"
@@ -1669,6 +1691,17 @@ def _reallocation_inventory_overhead(
     service: FfPoolDocumentService,
     catalog: list[dict[str, object]],
 ) -> None:
+    zero = _accept_post(
+        service,
+        "single-pool-dense-zero",
+        "pool_inventory",
+        {
+            "facility_id": "fac_single",
+            "scope": "FBS",
+            "targets": [{"nm_id": 101, "target_fbs": 0}],
+        },
+    )
+    assert zero["state"] == "complete"
     _accept_post(
         service,
         "single-pool-acceptance",

@@ -182,7 +182,12 @@ def main() -> int:
             available = available_quantity(
                 conn, cutover_id=_cutover_id(conn), facility_id="fac_moscow", nm_id=101
             )
-        assert available == {"physical": 9, "reserved": 11, "available": -2}
+        assert available["state"] == "exact"
+        assert {key: available[key] for key in ("physical", "reserved", "available")} == {
+            "physical": 9,
+            "reserved": 11,
+            "available": -2,
+        }
         orders = WbFbsOrdersCollector(
             db_path=runtime.db_path,
             timestamp_factory=lambda: "2026-08-14T06:10:00Z",
@@ -219,7 +224,12 @@ def main() -> int:
             available = available_quantity(
                 conn, cutover_id=_cutover_id(conn), facility_id="fac_moscow", nm_id=101
             )
-            assert available == {"physical": 9, "reserved": 13, "available": -4}
+            assert available["state"] == "exact"
+            assert {key: available[key] for key in ("physical", "reserved", "available")} == {
+                "physical": 9,
+                "reserved": 13,
+                "available": -4,
+            }
 
         # A pre-handoff cancellation releases only the reservation.
         with sqlite3.connect(runtime.db_path) as conn:
@@ -423,6 +433,20 @@ def main() -> int:
                     "1", "1", "CNY", "1", "1", 0,
                     "not_checked", "not_checked", "not_checked", "{}", "{}",
                 ),
+            )
+            conn.commit()
+        # Dense FBS requires the physical component to exist before any
+        # receipt or reservation lifecycle writer may touch it.  This
+        # historical cutover fixture predates the dense coordinator, so
+        # establish the same canonical zero precondition explicitly after
+        # the historical readback assertions have completed.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ff_pool_balances(
+                       facility_id,pool,nm_id,projection_epoch,quantity,
+                       capital_rub,wac_rub,source_watermark,updated_at
+                   ) VALUES('fac_moscow','FBS',103,1,0,'0',NULL,
+                            'dense-fbs-test-fixture','2026-08-15T04:01:00Z')"""
             )
             conn.commit()
         doc_clock = _DocClock()

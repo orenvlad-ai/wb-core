@@ -26,6 +26,10 @@ from packages.application.ff_pool_documents import ensure_ff_pool_document_schem
 from packages.application.ff_pool_foundation import ensure_ff_pool_foundation_schema
 from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema
 from packages.application.ff_pool_fbs_lifecycle import ensure_ff_pool_fbs_lifecycle_schema
+from packages.application.ff_pool_fbs_applicability import (
+    ensure_ff_pool_fbs_applicability_schema,
+    require_fbs_sku_retirable,
+)
 from packages.application.ff_wb_supply_origins import ensure_ff_wb_supply_origin_schema
 from packages.application.inventory_planning_read_model import ensure_inventory_planning_schema
 from packages.application.sheet_vitrina_v1_inventory_history import (
@@ -7363,114 +7367,84 @@ class RegistryUploadDbBackedRuntime:
                 }
             )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
-            for prepared in prepared_items:
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_nomenclature_items(
-                        item_id,
-                        is_active,
-                        is_hidden,
-                        hidden_at,
-                        hidden_reason,
-                        our_sku,
-                        nm_id,
-                        barcode,
-                        barcodes_json,
-                        barcode_source,
-                        barcode_status,
-                        barcode_synced_at,
-                        barcode_updated_at,
-                        barcode_evidence_json,
-                        vendor_code,
-                        wb_title,
-                        wb_subject_name,
-                        wb_updated_at,
-                        wb_synced_at,
-                        wb_sync_status,
-                        wb_sync_evidence_json,
-                        nomenclature_name,
-                        product_type,
-                        match_key,
-                        purchase_price_yuan,
-                        factory_box_size,
-                        aliases_json,
-                        compatible_models_text,
-                        compatible_model_keys_json,
-                        comment,
-                        created_at,
-                        updated_at
+        from packages.application.ff_pool_dense_fbs import DenseFbsService
+        from packages.application.warehouse_functional_lock import (
+            warehouse_functional_write_lock,
+        )
+
+        with warehouse_functional_write_lock(self.runtime_dir):
+            activation_items: list[dict[str, Any]] = []
+            with _connect(self.db_path) as conn:
+                _ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing = {
+                    str(row["item_id"]): row
+                    for row in conn.execute(
+                        "SELECT item_id,is_active,is_hidden,nm_id,updated_at "
+                        "FROM sheet_vitrina_v1_nomenclature_items "
+                        f"WHERE item_id IN ({','.join('?' for _ in prepared_items)})",
+                        [str(item["item_id"]) for item in prepared_items],
+                    ).fetchall()
+                } if prepared_items else {}
+                staged_rows: list[dict[str, Any]] = []
+                for prepared in prepared_items:
+                    desired_nm_id = int(prepared["nm_id"] or 0)
+                    desired_stock_managed = bool(
+                        prepared["is_active"]
+                        and not prepared["is_hidden"]
+                        and desired_nm_id > 0
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(item_id) DO UPDATE SET
-                        is_active = excluded.is_active,
-                        is_hidden = excluded.is_hidden,
-                        hidden_at = excluded.hidden_at,
-                        hidden_reason = excluded.hidden_reason,
-                        our_sku = excluded.our_sku,
-                        nm_id = excluded.nm_id,
-                        barcode = excluded.barcode,
-                        barcodes_json = excluded.barcodes_json,
-                        barcode_source = excluded.barcode_source,
-                        barcode_status = excluded.barcode_status,
-                        barcode_synced_at = excluded.barcode_synced_at,
-                        barcode_updated_at = excluded.barcode_updated_at,
-                        barcode_evidence_json = excluded.barcode_evidence_json,
-                        vendor_code = excluded.vendor_code,
-                        wb_title = excluded.wb_title,
-                        wb_subject_name = excluded.wb_subject_name,
-                        wb_updated_at = excluded.wb_updated_at,
-                        wb_synced_at = excluded.wb_synced_at,
-                        wb_sync_status = excluded.wb_sync_status,
-                        wb_sync_evidence_json = excluded.wb_sync_evidence_json,
-                        nomenclature_name = excluded.nomenclature_name,
-                        product_type = excluded.product_type,
-                        match_key = excluded.match_key,
-                        purchase_price_yuan = excluded.purchase_price_yuan,
-                        factory_box_size = excluded.factory_box_size,
-                        aliases_json = excluded.aliases_json,
-                        compatible_models_text = excluded.compatible_models_text,
-                        compatible_model_keys_json = excluded.compatible_model_keys_json,
-                        comment = excluded.comment,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        prepared["item_id"],
-                        prepared["is_active"],
-                        prepared["is_hidden"],
-                        prepared["hidden_at"],
-                        prepared["hidden_reason"],
-                        prepared["our_sku"],
-                        prepared["nm_id"],
-                        prepared["barcode"],
-                        prepared["barcodes_json"],
-                        prepared["barcode_source"],
-                        prepared["barcode_status"],
-                        prepared["barcode_synced_at"],
-                        prepared["barcode_updated_at"],
-                        prepared["barcode_evidence_json"],
-                        prepared["vendor_code"],
-                        prepared["wb_title"],
-                        prepared["wb_subject_name"],
-                        prepared["wb_updated_at"],
-                        prepared["wb_synced_at"],
-                        prepared["wb_sync_status"],
-                        prepared["wb_sync_evidence_json"],
-                        prepared["nomenclature_name"],
-                        prepared["product_type"],
-                        prepared["match_key"],
-                        prepared["purchase_price_yuan"],
-                        prepared["factory_box_size"],
-                        prepared["aliases_json"],
-                        prepared["compatible_models_text"],
-                        prepared["compatible_model_keys_json"],
-                        prepared["comment"],
-                        prepared["created_at"],
-                        prepared["updated_at"],
-                    ),
+                    prior = existing.get(str(prepared["item_id"]))
+                    prior_nm_id = int(prior["nm_id"] or 0) if prior is not None else 0
+                    prior_stock_managed = bool(
+                        prior is not None
+                        and bool(prior["is_active"])
+                        and not bool(prior["is_hidden"])
+                        and prior_nm_id > 0
+                    )
+                    if prior_stock_managed and (
+                        not desired_stock_managed or desired_nm_id != prior_nm_id
+                    ):
+                        require_fbs_sku_retirable(conn, nm_id=prior_nm_id)
+                    already_published = bool(
+                        prior_stock_managed and prior_nm_id == desired_nm_id
+                    )
+                    if desired_stock_managed and not already_published:
+                        staged = {**prepared, "is_active": 0, "nm_id": desired_nm_id}
+                        staged_rows.append(staged)
+                        activation_items.append(
+                            {
+                                "item_id": str(prepared["item_id"]),
+                                "nm_id": desired_nm_id,
+                                "updated_at": str(prepared["updated_at"]),
+                            }
+                        )
+                    else:
+                        staged_rows.append(prepared)
+                _upsert_nomenclature_rows(conn, staged_rows)
+                conn.commit()
+            if activation_items:
+                activation_material = sorted(
+                    activation_items,
+                    key=lambda item: (item["nm_id"], item["item_id"]),
                 )
-            conn.commit()
+                request_identity = "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        activation_material,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                DenseFbsService(
+                    db_path=self.db_path,
+                    runtime_dir=self.runtime_dir,
+                ).activate_staged_skus(
+                    staged_items=activation_material,
+                    orchestration_key="sku-activation:" + request_identity,
+                    request_identity=request_identity,
+                    actor="registry_nomenclature_write",
+                )
         loaded_items: list[dict[str, Any]] = []
         for prepared in prepared_items:
             loaded = self.load_nomenclature_item(str(prepared["item_id"]))
@@ -7482,20 +7456,35 @@ class RegistryUploadDbBackedRuntime:
     def delete_nomenclature_item(self, item_id: str, *, updated_at: str) -> dict[str, Any]:
         _validate_timestamp(updated_at, field_name="updated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
-            cursor = conn.execute(
-                """
-                UPDATE sheet_vitrina_v1_nomenclature_items
-                SET is_active = 0,
-                    updated_at = ?
-                WHERE item_id = ?
-                """,
-                (updated_at, item_id),
-            )
-            conn.commit()
-            if cursor.rowcount <= 0:
-                raise ValueError(f"nomenclature item not found: {item_id}")
+        from packages.application.warehouse_functional_lock import (
+            warehouse_functional_write_lock,
+        )
+
+        with warehouse_functional_write_lock(self.runtime_dir):
+            with _connect(self.db_path) as conn:
+                _ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT is_active,is_hidden,nm_id FROM "
+                    "sheet_vitrina_v1_nomenclature_items WHERE item_id=?",
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"nomenclature item not found: {item_id}")
+                if bool(row[0]) and not bool(row[1]) and int(row[2] or 0) > 0:
+                    require_fbs_sku_retirable(conn, nm_id=int(row[2]))
+                cursor = conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_nomenclature_items
+                    SET is_active = 0,
+                        updated_at = ?
+                    WHERE item_id = ?
+                    """,
+                    (updated_at, item_id),
+                )
+                conn.commit()
+                if cursor.rowcount != 1:
+                    raise ValueError(f"nomenclature item not found: {item_id}")
         loaded = self.load_nomenclature_item(item_id)
         if loaded is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
@@ -9795,6 +9784,71 @@ def _wb_supply_transit_cost_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "lock_status": _loads_json_object(row["lock_status_json"]),
         "logs": _loads_json_list(row["logs_json"]),
     }
+
+
+def _upsert_nomenclature_rows(
+    conn: sqlite3.Connection, prepared_items: Iterable[Mapping[str, Any]]
+) -> None:
+    for prepared in prepared_items:
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                item_id,is_active,is_hidden,hidden_at,hidden_reason,our_sku,nm_id,
+                barcode,barcodes_json,barcode_source,barcode_status,barcode_synced_at,
+                barcode_updated_at,barcode_evidence_json,vendor_code,wb_title,
+                wb_subject_name,wb_updated_at,wb_synced_at,wb_sync_status,
+                wb_sync_evidence_json,nomenclature_name,product_type,match_key,
+                purchase_price_yuan,factory_box_size,aliases_json,
+                compatible_models_text,compatible_model_keys_json,comment,
+                created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(item_id) DO UPDATE SET
+                is_active=excluded.is_active,
+                is_hidden=excluded.is_hidden,
+                hidden_at=excluded.hidden_at,
+                hidden_reason=excluded.hidden_reason,
+                our_sku=excluded.our_sku,
+                nm_id=excluded.nm_id,
+                barcode=excluded.barcode,
+                barcodes_json=excluded.barcodes_json,
+                barcode_source=excluded.barcode_source,
+                barcode_status=excluded.barcode_status,
+                barcode_synced_at=excluded.barcode_synced_at,
+                barcode_updated_at=excluded.barcode_updated_at,
+                barcode_evidence_json=excluded.barcode_evidence_json,
+                vendor_code=excluded.vendor_code,
+                wb_title=excluded.wb_title,
+                wb_subject_name=excluded.wb_subject_name,
+                wb_updated_at=excluded.wb_updated_at,
+                wb_synced_at=excluded.wb_synced_at,
+                wb_sync_status=excluded.wb_sync_status,
+                wb_sync_evidence_json=excluded.wb_sync_evidence_json,
+                nomenclature_name=excluded.nomenclature_name,
+                product_type=excluded.product_type,
+                match_key=excluded.match_key,
+                purchase_price_yuan=excluded.purchase_price_yuan,
+                factory_box_size=excluded.factory_box_size,
+                aliases_json=excluded.aliases_json,
+                compatible_models_text=excluded.compatible_models_text,
+                compatible_model_keys_json=excluded.compatible_model_keys_json,
+                comment=excluded.comment,
+                updated_at=excluded.updated_at
+            """,
+            tuple(
+                prepared[key]
+                for key in (
+                    "item_id","is_active","is_hidden","hidden_at","hidden_reason",
+                    "our_sku","nm_id","barcode","barcodes_json","barcode_source",
+                    "barcode_status","barcode_synced_at","barcode_updated_at",
+                    "barcode_evidence_json","vendor_code","wb_title","wb_subject_name",
+                    "wb_updated_at","wb_synced_at","wb_sync_status",
+                    "wb_sync_evidence_json","nomenclature_name","product_type",
+                    "match_key","purchase_price_yuan","factory_box_size","aliases_json",
+                    "compatible_models_text","compatible_model_keys_json","comment",
+                    "created_at","updated_at",
+                )
+            ),
+        )
 
 
 def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -12242,6 +12296,7 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
     )
     ensure_ff_pool_foundation_schema(conn)
     ensure_ff_pool_document_schema(conn)
+    ensure_ff_pool_fbs_applicability_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
     ensure_wb_fbs_warehouse_registry_schema(conn)

@@ -99,11 +99,13 @@ def main() -> None:
         ]
         assert readback["fbs_status_read_model"]["target_nm_ids_missing"] == []
         assert readback["fbs_status_read_model"]["target_nm_ids_unblocked"] is True
-        assert readback["fbs_status_read_model"]["calculation_enabled"] is True
+        assert readback["fbs_status_read_model"]["calculation_enabled"] is True, readback[
+            "fbs_status_read_model"
+        ]
         assert readback["fbs_status_read_model"]["other_active_facility_blockers"]
         assert readback["totals"]["physical"] == before_totals["physical"]
         assert readback["totals"]["reserved"] == 5
-        assert readback["fbs_status_read_model"]["available"] == 5
+        assert readback["fbs_status_read_model"]["available"] == -5
         assert readback["non_target_invariants"] == before_non_target
         _assert_database(runtime.db_path)
 

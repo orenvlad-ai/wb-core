@@ -347,12 +347,20 @@ class FbsFulfillmentOrderBlock:
                 if isinstance(item, Mapping) and int(item.get("nm_id") or 0) in requested
             ]
             by_nm_id = {int(item["nm_id"]): item for item in sku_values}
+            inapplicable_nm_ids = sorted(
+                nm_id
+                for nm_id in requested
+                if nm_id in by_nm_id
+                and str(by_nm_id[nm_id].get("state") or "") == "inapplicable"
+            )
             missing_nm_ids = sorted(
                 nm_id
                 for nm_id in requested
                 if nm_id not in by_nm_id
+                or str(by_nm_id[nm_id].get("state") or "") == "missing"
                 or by_nm_id[nm_id].get("physical") is None
                 or by_nm_id[nm_id].get("available") is None
+                if nm_id not in inapplicable_nm_ids
             )
             is_moscow = (
                 str(raw.get("city") or "").strip() == MOSCOW_CITY
@@ -364,6 +372,11 @@ class FbsFulfillmentOrderBlock:
                     "Нет полного подтверждённого facility-specific FBS physical ledger "
                     "для active SKU: "
                     + ", ".join(str(item) for item in missing_nm_ids)
+                )
+            if inapplicable_nm_ids:
+                blockers.append(
+                    "SKU явно неприменимы к выбранному FBS facility: "
+                    + ", ".join(str(item) for item in inapplicable_nm_ids)
                 )
             if not is_moscow:
                 blockers.append(
@@ -382,6 +395,7 @@ class FbsFulfillmentOrderBlock:
                     "available": raw.get("available"),
                     "sku_values": sku_values,
                     "missing_physical_nm_ids": missing_nm_ids,
+                    "inapplicable_nm_ids": inapplicable_nm_ids,
                     "calculation_enabled": not blockers,
                     "blockers": blockers,
                     "wb_stock_used": False,

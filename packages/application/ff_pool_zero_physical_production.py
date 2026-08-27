@@ -468,7 +468,8 @@ class FfPoolZeroPhysicalProductionMutation:
             missing_physical = sorted(
                 int(item["nm_id"])
                 for item in raw.get("sku_values") or []
-                if item.get("physical") is None or item.get("available") is None
+                if str(item.get("state") or "") != "inapplicable"
+                and (item.get("physical") is None or item.get("available") is None)
             )
             is_moscow = (
                 str(raw.get("facility_id") or "") == facility_id
