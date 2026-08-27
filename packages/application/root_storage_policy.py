@@ -495,23 +495,24 @@ def admit_root_write(
         normalized_owner,
         policy=resolved_policy,
     )
-    if storage_producer.get("current") is not True:
-        raise RootStoragePolicyError(
-            f"storage producer has no current write authority: {normalized_owner}"
-        )
-    maximum = int(storage_producer.get("max_single_write_bytes") or 0)
-    if maximum <= 0 or predicted_peak > maximum:
-        raise RootStoragePolicyError(
-            "large write exceeds registered producer quota: "
-            f"owner={normalized_owner}, predicted_peak_bytes={predicted_peak}, "
-            f"max_single_write_bytes={maximum}"
-        )
     destination_role = str(storage_producer.get("destination_role") or "")
     hosted_destination = _is_descendant(
         destination,
         Path("/opt/wb-core-runtime"),
     ) or _is_descendant(destination, Path("/var/backups"))
     enforce_canonical_destination = _hosted_runtime_marker_present() or hosted_destination
+    current_storage_authority = storage_producer.get("current") is True
+    if not current_storage_authority and enforce_canonical_destination:
+        raise RootStoragePolicyError(
+            f"storage producer has no current write authority: {normalized_owner}"
+        )
+    maximum = int(storage_producer.get("max_single_write_bytes") or 0)
+    if current_storage_authority and (maximum <= 0 or predicted_peak > maximum):
+        raise RootStoragePolicyError(
+            "large write exceeds registered producer quota: "
+            f"owner={normalized_owner}, predicted_peak_bytes={predicted_peak}, "
+            f"max_single_write_bytes={maximum}"
+        )
     if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
         allowed_roots = [
             storage_destination_root(
@@ -596,6 +597,7 @@ def admit_root_write(
         "reserve_mode": reserve_mode,
         "destination_role": destination_role,
         "producer_quota_bytes": maximum,
+        "isolated_retired_compatibility": not current_storage_authority,
         "large_output": predicted_peak >= LARGE_OUTPUT_BYTES,
         "storage_level": level,
         "allowed": allowed,

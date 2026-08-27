@@ -307,6 +307,24 @@ def _assert_admission(policy: dict[str, object]) -> None:
             else:
                 raise AssertionError("unknown admission identity/output/destination did not fail closed")
 
+        with mock.patch.object(
+            policy_module,
+            "_hosted_runtime_marker_present",
+            return_value=True,
+        ):
+            try:
+                admit_root_write(
+                    owner="finance_legacy_helper",
+                    destination=destination,
+                    predicted_output_bytes=1,
+                    policy=policy,
+                    root_path=root,
+                )
+            except RootStoragePolicyError as exc:
+                assert "no current write authority" in str(exc)
+            else:
+                raise AssertionError("retired producer acquired hosted write authority")
+
 
 def _assert_unregistered_detection(policy: dict[str, object]) -> None:
     with tempfile.TemporaryDirectory() as temporary:
