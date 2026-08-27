@@ -241,12 +241,29 @@ def valid_probe_payload() -> dict[str, object]:
             "required_available_floor_bytes": FLOOR,
         },
         "natural_root_monitor": {"fresh": True, "normal": True},
-        "systemd_service_gate": {"healthy": True, "unit_count": 27, "pair_count": 12},
+        "systemd_service_gate": {
+            "schema": "wb-core.systemd-paired-health-gate/v1",
+            "classification": "healthy",
+            "healthy": True,
+            "unit_count": 27,
+            "pair_count": 12,
+            "failing_pair_count": 0,
+            "failing_persistent_service_count": 0,
+            "pairs": [
+                {
+                    "healthy": True,
+                    "classification": "idle_waiting_with_inactive_success_owner",
+                    "samples": [{}],
+                }
+                for _ in range(12)
+            ],
+        },
         "non_target_reconciliation": {"preserved": True},
         "journald_reconciliation": {"preserved": True},
         "remote_action_counts": {name: 0 for name in (
             "readiness", "submit", "apply", "job_creation", "archive_worker",
-            "readback_batch", "full_restore", "temporary_file_creation",
+            "readback_batch", "full_restore", "decompression_to_file",
+            "temporary_file_creation",
             "lock_acquisition", "service_start_or_restart", "timer_change",
             "sql_or_file_write", "unlink",
         )},
@@ -484,6 +501,191 @@ def test_jobs_locks_and_capacity() -> None:
         probe.os.statvfs = original
 
 
+def systemd_values(
+    unit: str,
+    *,
+    active: str,
+    sub: str,
+    result: str = "success",
+    status: str = "0",
+    pid: str = "0",
+    unit_file_state: str | None = None,
+    triggers: str = "",
+    next_trigger: str = "",
+) -> dict[str, object]:
+    timer = unit.endswith(".timer")
+    values: dict[str, object] = {
+        "Id": unit,
+        "LoadState": "loaded",
+        "ActiveState": active,
+        "SubState": sub,
+        "Result": result,
+        "ExecMainStatus": status,
+        "MainPID": pid,
+        "UnitFileState": unit_file_state or ("enabled" if timer else "static"),
+        "LastTriggerUSec": "Thu 2026-08-27 12:00:07 UTC" if timer else "",
+        "NextElapseUSecRealtime": next_trigger if timer else "",
+        "Triggers": triggers if timer else "",
+        "QueryReturnCode": 0,
+        "QueryError": None,
+        "QueryStderrSha256": "sha256:" + "0" * 64,
+        "ObservedProperties": list(probe.SYSTEMD_PROPERTY_NAMES),
+    }
+    return values
+
+
+def idle_pair(timer: str, owner: str) -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        systemd_values(
+            timer,
+            active="active",
+            sub="waiting",
+            triggers=owner,
+            next_trigger="Thu 2026-08-27 12:10:00 UTC",
+        ),
+        systemd_values(owner, active="inactive", sub="dead"),
+    )
+
+
+def firing_pair(
+    timer: str, owner: str, *, owner_active: str = "activating"
+) -> tuple[dict[str, object], dict[str, object]]:
+    owner_sub = "start" if owner_active == "activating" else "running"
+    return (
+        systemd_values(
+            timer,
+            active="active",
+            sub="running",
+            triggers=owner,
+        ),
+        systemd_values(
+            owner,
+            active=owner_active,
+            sub=owner_sub,
+            pid="4242",
+        ),
+    )
+
+
+def systemd_runner(
+    sequences: dict[str, list[dict[str, object]]]
+) -> object:
+    calls: dict[str, int] = {}
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        unit = command[-1]
+        index = calls.get(unit, 0)
+        calls[unit] = index + 1
+        rows = sequences[unit]
+        values = rows[min(index, len(rows) - 1)]
+        stdout = "\n".join(
+            f"{name}={values.get(name, '')}" for name in probe.SYSTEMD_PROPERTY_NAMES
+        ) + "\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    return run
+
+
+def full_systemd_sequences() -> dict[str, list[dict[str, object]]]:
+    values: dict[str, list[dict[str, object]]] = {}
+    for unit in probe.PERSISTENT_UNITS:
+        values[unit] = [systemd_values(unit, active="active", sub="running", pid="101")]
+    for timer, owner in probe.TIMER_PAIRS:
+        timer_values, owner_values = idle_pair(timer, owner)
+        values[timer] = [timer_values]
+        values[owner] = [owner_values]
+    values[f"wb-core-storage-recovery-sanitation@{JOB}.service"] = [
+        systemd_values(
+            f"wb-core-storage-recovery-sanitation@{JOB}.service",
+            active="inactive",
+            sub="dead",
+        )
+    ]
+    return values
+
+
+def test_paired_systemd_classifier() -> None:
+    timer, owner = probe.TIMER_PAIRS[0]
+    timer_values, owner_values = idle_pair(timer, owner)
+    classified = probe._classify_timer_service_pair(
+        timer, owner, timer_values, owner_values
+    )
+    assert classified["healthy"] is True
+    assert classified["classification"] == "idle_waiting_with_inactive_success_owner"
+
+    for active in ("activating", "active"):
+        timer_values, owner_values = firing_pair(timer, owner, owner_active=active)
+        classified = probe._classify_timer_service_pair(
+            timer, owner, timer_values, owner_values
+        )
+        assert classified["healthy"] is True
+        assert classified["classification"] == "coherent_trigger_in_progress"
+
+    timer_values, owner_values = firing_pair(timer, owner)
+    _ignored, inactive_owner = idle_pair(timer, owner)
+    classified = probe._classify_timer_service_pair(
+        timer, owner, timer_values, inactive_owner
+    )
+    assert classified["healthy"] is False and classified["resample_required"] is True
+
+    timer_values, owner_values = idle_pair(timer, owner)
+    owner_values["Result"] = "failed"
+    classified = probe._classify_timer_service_pair(
+        timer, owner, timer_values, owner_values
+    )
+    assert classified["healthy"] is False and classified["resample_required"] is False
+
+    for label, mutate in (
+        ("disabled timer", lambda t, _o: t.update(UnitFileState="disabled")),
+        ("disabled owner", lambda _t, o: o.update(UnitFileState="disabled")),
+        ("missing next", lambda t, _o: t.update(NextElapseUSecRealtime="")),
+        ("wrong relation", lambda t, _o: t.update(Triggers="foreign.service")),
+    ):
+        timer_values, owner_values = idle_pair(timer, owner)
+        mutate(timer_values, owner_values)
+        classified = probe._classify_timer_service_pair(
+            timer, owner, timer_values, owner_values
+        )
+        assert classified["healthy"] is False, label
+
+    sequences = full_systemd_sequences()
+    initial_timer, initial_owner = firing_pair(timer, owner)
+    final_timer, final_owner = firing_pair(timer, owner, owner_active="active")
+    sequences[timer] = [initial_timer, final_timer]
+    sequences[owner] = [idle_pair(timer, owner)[1], final_owner]
+    gate = probe._service_health(
+        JOB,
+        {"systemd_service_gate_after": {"healthy": True, "observed_unit_count": 27, "observed_pair_count": 12}},
+        command_runner=systemd_runner(sequences),  # type: ignore[arg-type]
+        sleep_fn=lambda _seconds: None,
+        max_resample_attempts=3,
+        resample_interval_seconds=0,
+        monotonic_fn=lambda: 0.0,
+    )
+    target = next(row for row in gate["pairs"] if row["timer_name"] == timer)
+    assert gate["healthy"] is True and len(target["samples"]) == 2
+
+    sequences = full_systemd_sequences()
+    sequences[timer] = [initial_timer]
+    sequences[owner] = [idle_pair(timer, owner)[1]]
+    try:
+        probe._service_health(
+            JOB,
+            {"systemd_service_gate_after": {"healthy": True, "observed_unit_count": 27, "observed_pair_count": 12}},
+            command_runner=systemd_runner(sequences),  # type: ignore[arg-type]
+            sleep_fn=lambda _seconds: None,
+            max_resample_attempts=3,
+            resample_interval_seconds=0,
+            monotonic_fn=lambda: 0.0,
+        )
+    except probe.SystemdGateError as exc:
+        failed = next(row for row in exc.gate["pairs"] if row["timer_name"] == timer)
+        assert len(failed["samples"]) == 4
+        assert exc.gate["pair_resample_evidence"]["exhausted"] is True
+    else:
+        raise AssertionError("transition resample exhaustion must fail closed")
+
+
 def test_runner_receiver_and_command() -> None:
     payload = valid_probe_payload()
     context = {"source": {
@@ -517,6 +719,10 @@ def test_runner_receiver_and_command() -> None:
     ):
         changed = deepcopy(payload); changed[section][field] = value; refresh_digest(changed)  # type: ignore[index]
         assert not runner._valid_warm_reconciliation_probe(changed, context=context)
+    changed = deepcopy(payload)
+    changed["remote_action_counts"]["foreign_action"] = 0  # type: ignore[index]
+    refresh_digest(changed)
+    assert not runner._valid_warm_reconciliation_probe(changed, context=context)
     binding = {key: context["source"][key] for key in (
         "operation_id", "job_id", "deployed_sha", "manifest_path", "manifest_sha256",
     )}
@@ -585,8 +791,182 @@ def test_exact_source_receipt_gate() -> None:
         )
 
 
+def legacy_a01_fixture(
+    *, error_message: str = "systemd timer/service pair is unhealthy: wb-core-sheet-vitrina-refresh.timer"
+) -> tuple[dict[str, object], object, SimpleNamespace, dict[str, object]]:
+    legacy_merge = "6" * 40
+    legacy_pr = 1076
+    legacy_run = 33069817619
+    legacy_artifact_id = 9645283377
+    legacy_comment_id = 5438726868
+    legacy_operation = "release-v2-" + "6" * 32
+    source = {
+        "pull_request": 1075,
+        "operation_id": OPERATION,
+        "job_id": JOB,
+        "deployed_sha": MERGE,
+        "manifest_path": MANIFEST,
+        "manifest_sha256": "sha256:" + "b" * 64,
+        "expected_reclaimed_allocated_bytes": RECLAIMED,
+        "required_backup_floor_bytes": FLOOR,
+    }
+    legacy_release = {
+        "pull_request": legacy_pr,
+        "release_operation_id": legacy_operation,
+        "release_kind": "repo_only",
+        "merge_sha": legacy_merge,
+        "workflow_run_id": 33068943208,
+        "plan_hash": "sha256:" + "f" * 64,
+        "deployed_sha": None,
+        "probe_source_sha256": "sha256:" + "a" * 64,
+    }
+    probe_result: dict[str, object] = {
+        "schema": "wb-core.root-warm-archive-reconciliation-probe/v1",
+        "status": "blocked",
+        "query_only": True,
+        "production_mutation_count": 0,
+        "error": {"type": "ProbeError", "message": error_message},
+    }
+    probe_result["evidence_digest"] = runner.payload_digest(probe_result)
+    receipt: dict[str, object] = {
+        "schema": runner.LEGACY_WARM_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "reason": "query-only-reconciliation-not-proven",
+        "terminal_disposition": "blocked",
+        "query_only": True,
+        "production_mutation_count": 0,
+        "source": source,
+        "reconciliation_release": legacy_release,
+        "probe": {
+            "return_code": 0,
+            "transport_ambiguous": False,
+            "stdin_sha256": legacy_release["probe_source_sha256"],
+            "result": probe_result,
+        },
+    }
+    receipt["evidence_digest"] = runner.payload_digest(receipt)
+    raw = runner.canonical_json_bytes(receipt) + b"\n"
+    receipt_sha = hashlib.sha256(raw).hexdigest()
+    artifact_name = runner._warm_reconciliation_artifact_name(1075, legacy_run)
+    summary = {
+        "schema": runner.LEGACY_WARM_RECONCILIATION_SUMMARY_SCHEMA,
+        "state": "blocked",
+        "reason": "query-only-reconciliation-not-proven",
+        "terminal_disposition": "blocked",
+        "operation_id": OPERATION,
+        "query_only": True,
+        "production_mutation_count": 0,
+        "source": source,
+        "reconciliation_release": legacy_release,
+        "evidence_digest": receipt["evidence_digest"],
+        "terminal_facts": {"archive_count": None},
+        "artifact": {
+            "name": artifact_name,
+            "file": runner.WARM_RECONCILIATION_ARTIFACT_FILE,
+            "sha256": "sha256:" + receipt_sha,
+            "size_bytes": len(raw),
+            "retention_days": 90,
+        },
+    }
+    marker = {
+        "id": legacy_comment_id,
+        "user": {"login": "github-actions[bot]"},
+        "body": runner.warm_reconciliation_marker(OPERATION)
+        + "\n```json\n"
+        + json.dumps(summary, sort_keys=True, separators=(",", ":"))
+        + "\n```",
+    }
+    release_receipt = {
+        "schema": "wb-core.release-receipt/v2",
+        "state": "done",
+        "operation_id": legacy_operation,
+        "repository": "orenvlad-ai/wb-core",
+        "pull_request": legacy_pr,
+        "release_kind": "repo_only",
+        "merge_sha": legacy_merge,
+        "deployed_sha": None,
+        "manifest": None,
+        "reason_codes": [],
+        "workflow_run_id": legacy_release["workflow_run_id"],
+        "plan_hash": legacy_release["plan_hash"],
+    }
+    release_comment = {
+        "id": 1,
+        "user": {"login": "github-actions[bot]"},
+        "body": f"<!-- {runner.RECEIPT_MARKER} operation={legacy_operation} -->\n```json\n"
+        + json.dumps(release_receipt, sort_keys=True, separators=(",", ":"))
+        + "\n```",
+    }
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr(runner.WARM_RECONCILIATION_ARTIFACT_FILE, raw)
+
+    class Client:
+        repository = "orenvlad-ai/wb-core"
+
+        def get(self, path: str) -> object:
+            if path == f"/pulls/{legacy_pr}":
+                return {"merged": True, "merge_commit_sha": legacy_merge}
+            if path == f"/issues/{legacy_pr}/comments?per_page=100&page=1":
+                return [release_comment]
+            if path == f"/actions/runs/{legacy_run}/artifacts?per_page=100":
+                return {
+                    "artifacts": [
+                        {
+                            "id": legacy_artifact_id,
+                            "name": artifact_name,
+                            "expired": False,
+                            "workflow_run": {
+                                "id": legacy_run,
+                                "head_branch": "main",
+                                "head_sha": legacy_merge,
+                            },
+                        }
+                    ]
+                }
+            raise AssertionError(path)
+
+        def request(self, method: str, path: str, **_kwargs: object) -> bytes:
+            assert method == "GET"
+            assert path == f"/actions/artifacts/{legacy_artifact_id}/zip"
+            return archive_bytes.getvalue()
+
+    args = SimpleNamespace(
+        prior_reconciliation_comment_id=legacy_comment_id,
+        prior_reconciliation_artifact_name=artifact_name,
+        prior_reconciliation_receipt_sha256=receipt_sha,
+        prior_reconciliation_run_id=legacy_run,
+        prior_reconciliation_artifact_id=legacy_artifact_id,
+    )
+    return marker, Client(), args, source
+
+
+def test_exact_legacy_a01_to_a02_gate() -> None:
+    marker, client, args, source = legacy_a01_fixture()
+    prior = runner._validate_legacy_warm_reconciliation_a01(
+        client=client, comments=[marker], args=args, source=source  # type: ignore[arg-type]
+    )
+    assert prior["attempt"] == "a01"
+    assert prior["production_mutation_count"] == 0
+    assert prior["artifact_id"] == 9645283377
+
+    wrong_marker, wrong_client, wrong_args, wrong_source = legacy_a01_fixture(
+        error_message="different blocker"
+    )
+    expect_blocked(
+        lambda: runner._validate_legacy_warm_reconciliation_a01(
+            client=wrong_client,
+            comments=[wrong_marker],
+            args=wrong_args,
+            source=wrong_source,
+        ),
+        "legacy a01 must have the exact timer predicate blocker",
+    )
+
+
 def test_terminal_marker_idempotency() -> None:
     source = {
+        "pull_request": 1075,
         "operation_id": OPERATION,
         "job_id": JOB,
         "deployed_sha": MERGE,
@@ -605,15 +985,30 @@ def test_terminal_marker_idempotency() -> None:
         "deployed_sha": None,
         "probe_source_sha256": "sha256:" + "e" * 64,
     }
+    sequence = {
+        "schema": runner.WARM_RECONCILIATION_SEQUENCE_SCHEMA,
+        "sequence_id": "root-warm-archive-reconciliation-v1-" + "1" * 32,
+        "attempt": "a02",
+        "prior_attempt": {
+            "attempt": "a01",
+            "marker_comment_id": 555,
+            "artifact_sha256": "sha256:" + "1" * 64,
+        },
+        "attempt_binding_digest": "sha256:" + "2" * 64,
+        "maximum_attempt": "a02",
+        "sequence_exhausted_after_attempt": True,
+    }
     receipt: dict[str, object] = {
         "schema": runner.WARM_RECONCILIATION_RECEIPT_SCHEMA,
         "state": "done",
+        "attempt": "a02",
         "reason": "reconciled-existing-terminal-operation",
         "terminal_disposition": "done/reconciled_existing_operation",
         "query_only": True,
         "production_mutation_count": 0,
         "source": source,
         "reconciliation_release": release,
+        "reconciliation_sequence": sequence,
         "probe": {"result": valid_probe_payload()},
     }
     receipt["evidence_digest"] = runner.payload_digest(receipt)
@@ -623,6 +1018,7 @@ def test_terminal_marker_idempotency() -> None:
     summary = {
         "schema": runner.WARM_RECONCILIATION_SUMMARY_SCHEMA,
         "state": "done",
+        "attempt": "a02",
         "reason": receipt["reason"],
         "terminal_disposition": receipt["terminal_disposition"],
         "operation_id": OPERATION,
@@ -630,6 +1026,7 @@ def test_terminal_marker_idempotency() -> None:
         "production_mutation_count": 0,
         "source": source,
         "reconciliation_release": release,
+        "reconciliation_sequence": sequence,
         "evidence_digest": receipt["evidence_digest"],
         "terminal_facts": {},
         "artifact": {
@@ -643,7 +1040,7 @@ def test_terminal_marker_idempotency() -> None:
     comment = {
         "id": 999,
         "user": {"login": "github-actions[bot]"},
-        "body": runner.warm_reconciliation_marker(OPERATION)
+        "body": runner.warm_reconciliation_marker(OPERATION, "a02")
         + "\n```json\n"
         + json.dumps(summary, sort_keys=True, separators=(",", ":"))
         + "\n```",
@@ -668,27 +1065,47 @@ def test_terminal_marker_idempotency() -> None:
             assert method == "GET" and path == "/actions/artifacts/777/zip"
             return archive_bytes.getvalue()
 
-    context = {"source": source, "reconciliation_release": release, "client": Client()}
-    assert runner._existing_warm_reconciliation_marker([comment], context=context) == comment
+    legacy = {
+        "id": 555,
+        "user": {"login": "github-actions[bot]"},
+        "body": runner.warm_reconciliation_marker(OPERATION) + "\n```json\n{}\n```",
+    }
+    context = {
+        "source": source,
+        "reconciliation_release": release,
+        "reconciliation_sequence": sequence,
+        "client": Client(),
+    }
+    assert runner._existing_warm_reconciliation_marker([legacy], context=context) is None
+    assert runner._existing_warm_reconciliation_marker([legacy, comment], context=context) == comment
     expect_blocked(
-        lambda: runner._existing_warm_reconciliation_marker([comment, comment], context=context),
+        lambda: runner._existing_warm_reconciliation_marker([legacy, comment, comment], context=context),
         "duplicate terminal marker",
     )
     drift = deepcopy(comment)
     drift_payload = json.loads(drift["body"].split("```json", 1)[1].split("```", 1)[0])
     drift_payload["artifact"]["sha256"] = "sha256:" + "0" * 64
-    drift["body"] = runner.warm_reconciliation_marker(OPERATION) + "\n```json\n" + json.dumps(drift_payload) + "\n```"
+    drift["body"] = runner.warm_reconciliation_marker(OPERATION, "a02") + "\n```json\n" + json.dumps(drift_payload) + "\n```"
     expect_blocked(
-        lambda: runner._existing_warm_reconciliation_marker([drift], context=context),
+        lambda: runner._existing_warm_reconciliation_marker([legacy, drift], context=context),
         "different terminal artifact digest",
+    )
+    foreign = deepcopy(comment)
+    foreign["id"] = 1000
+    foreign["body"] = foreign["body"].replace("attempt=a02", "attempt=a03", 1)
+    expect_blocked(
+        lambda: runner._existing_warm_reconciliation_marker([legacy, foreign], context=context),
+        "a03 is outside the exact sequence",
     )
 
 
 def main() -> None:
     test_job_and_archive_contracts()
     test_jobs_locks_and_capacity()
+    test_paired_systemd_classifier()
     test_runner_receiver_and_command()
     test_exact_source_receipt_gate()
+    test_exact_legacy_a01_to_a02_gate()
     test_terminal_marker_idempotency()
     print("wbc0008_warm_archive_receipt_reconciliation_probe_smoke: ok")
 

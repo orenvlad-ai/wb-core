@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Mapping
 
 
-SCHEMA = "wb-core.root-warm-archive-reconciliation-probe/v1"
+SCHEMA = "wb-core.root-warm-archive-reconciliation-probe/v2"
 ARCHIVE_CONTRACT = "root_storage_warm_archive_wbc0008_006_v7"
 JOB_CONTRACT = "storage_recovery_sanitation_job_v1"
 ROOT_MINIMUM_BYTES = 25 * 1024**3
@@ -90,12 +90,24 @@ TIMER_PAIRS = (
 )
 SYSTEMD_PROPERTIES = (
     "Id,LoadState,ActiveState,SubState,Result,ExecMainStatus,MainPID,"
-    "UnitFileState,LastTriggerUSec,NextElapseUSecRealtime"
+    "UnitFileState,LastTriggerUSec,NextElapseUSecRealtime,Triggers"
 )
+SYSTEMD_PROPERTY_NAMES = tuple(SYSTEMD_PROPERTIES.split(","))
+PAIR_RESAMPLE_MAX_ATTEMPTS = 3
+PAIR_RESAMPLE_MAX_SECONDS = 5.0
+PAIR_RESAMPLE_INTERVAL_SECONDS = 0.25
 
 
 class ProbeError(RuntimeError):
     """An exact query-only reconciliation predicate failed closed."""
+
+
+class SystemdGateError(ProbeError):
+    """A 27/12 gate failed while retaining every exact pair observation."""
+
+    def __init__(self, message: str, gate: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.gate = dict(gate)
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -591,81 +603,376 @@ def _systemd_show(
     return values
 
 
+def _systemd_int(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _systemd_observation(
+    unit: str,
+    *,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> dict[str, Any]:
+    """Collect exact systemctl fields without losing a failed query or unit."""
+
+    command = [
+        "systemctl",
+        "show",
+        "--no-pager",
+        f"--property={SYSTEMD_PROPERTIES}",
+        unit,
+    ]
+    values: dict[str, Any] = {name: "" for name in SYSTEMD_PROPERTY_NAMES}
+    observed: set[str] = set()
+    try:
+        completed = command_runner(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        values.update(
+            {
+                "QueryReturnCode": None,
+                "QueryError": type(exc).__name__,
+                "QueryStderrSha256": None,
+                "ObservedProperties": [],
+            }
+        )
+        return values
+    for line in completed.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = value
+            observed.add(key)
+    values.update(
+        {
+            "QueryReturnCode": int(completed.returncode),
+            "QueryError": None,
+            "QueryStderrSha256": _sha256_bytes(
+                completed.stderr.encode("utf-8")
+            ),
+            "ObservedProperties": sorted(observed),
+        }
+    )
+    return values
+
+
+def _systemd_common_reasons(
+    unit: str,
+    values: Mapping[str, Any],
+    *,
+    timer: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    observed = set(values.get("ObservedProperties") or [])
+    required = {
+        "Id",
+        "LoadState",
+        "ActiveState",
+        "SubState",
+        "Result",
+        "ExecMainStatus",
+        "MainPID",
+        "UnitFileState",
+    }
+    if timer:
+        required.update({"LastTriggerUSec", "NextElapseUSecRealtime", "Triggers"})
+    if values.get("QueryReturnCode") != 0 or values.get("QueryError") is not None:
+        reasons.append("systemctl_query_failed")
+    if required - observed:
+        reasons.append("required_properties_missing")
+    if values.get("Id") != unit:
+        reasons.append("literal_unit_identity_mismatch")
+    if values.get("LoadState") != "loaded":
+        reasons.append("unit_not_loaded")
+    unit_file_state = str(values.get("UnitFileState") or "")
+    allowed_unit_file_states = {
+        "alias",
+        "enabled",
+        "enabled-runtime",
+        "generated",
+        "indirect",
+        "linked",
+        "linked-runtime",
+        "static",
+    }
+    if unit_file_state == "disabled" or unit_file_state.startswith("masked"):
+        reasons.append("unit_disabled_or_masked")
+    elif unit_file_state not in allowed_unit_file_states:
+        reasons.append("unit_file_state_not_allowlisted")
+    if values.get("Result") not in {"", "success"}:
+        reasons.append("failed_or_stale_result")
+    return reasons
+
+
+def _classify_persistent_service(
+    unit: str, values: Mapping[str, Any]
+) -> dict[str, Any]:
+    reasons = _systemd_common_reasons(unit, values, timer=False)
+    if _systemd_int(values.get("ExecMainStatus")) != 0:
+        reasons.append("nonzero_or_invalid_exec_main_status")
+    if (
+        values.get("ActiveState") != "active"
+        or values.get("SubState") != "running"
+        or (_systemd_int(values.get("MainPID")) or 0) <= 0
+    ):
+        reasons.append("persistent_service_not_active_running_with_pid")
+    return {
+        "name": unit,
+        "unit_kind": "persistent_service",
+        "classification": (
+            "healthy_persistent_service" if not reasons else "unhealthy_persistent_service"
+        ),
+        "healthy": not reasons,
+        "reason_codes": sorted(set(reasons)),
+        "raw": dict(values),
+    }
+
+
+def _classify_timer_service_pair(
+    timer: str,
+    owner: str,
+    timer_values: Mapping[str, Any],
+    owner_values: Mapping[str, Any],
+) -> dict[str, Any]:
+    timer_reasons = _systemd_common_reasons(timer, timer_values, timer=True)
+    owner_reasons = _systemd_common_reasons(owner, owner_values, timer=False)
+    if timer_values.get("UnitFileState") != "enabled":
+        timer_reasons.append("timer_not_enabled")
+    triggers = str(timer_values.get("Triggers") or "").split()
+    if triggers != [owner]:
+        timer_reasons.append("wrong_trigger_relation")
+    timer_exec = timer_values.get("ExecMainStatus")
+    if timer_exec not in {None, ""} and _systemd_int(timer_exec) != 0:
+        timer_reasons.append("nonzero_timer_exec_main_status")
+
+    timer_phase = "invalid"
+    if not timer_reasons and (
+        timer_values.get("ActiveState") == "active"
+        and timer_values.get("SubState") == "waiting"
+    ):
+        timer_phase = "idle"
+        if str(timer_values.get("NextElapseUSecRealtime") or "").strip().lower() in {
+            "",
+            "n/a",
+        }:
+            timer_reasons.append("missing_next_trigger_in_idle")
+            timer_phase = "invalid"
+    elif not timer_reasons and (
+        timer_values.get("ActiveState") == "active"
+        and timer_values.get("SubState") == "running"
+    ):
+        timer_phase = "firing"
+    elif not timer_reasons:
+        timer_reasons.append("timer_state_not_allowlisted")
+
+    owner_pid = _systemd_int(owner_values.get("MainPID"))
+    owner_status = _systemd_int(owner_values.get("ExecMainStatus"))
+    if owner_status != 0:
+        owner_reasons.append("nonzero_or_invalid_exec_main_status")
+    owner_phase = "invalid"
+    if not owner_reasons and (
+        owner_values.get("ActiveState") == "inactive"
+        and owner_values.get("SubState") == "dead"
+        and owner_pid == 0
+    ):
+        owner_phase = "idle"
+    elif not owner_reasons and (
+        (
+            owner_values.get("ActiveState") == "activating"
+            and owner_values.get("SubState") == "start"
+        )
+        or (
+            owner_values.get("ActiveState") == "active"
+            and owner_values.get("SubState") == "running"
+        )
+    ) and owner_pid is not None and owner_pid > 0:
+        owner_phase = "firing"
+    elif not owner_reasons:
+        owner_reasons.append("owner_state_not_allowlisted")
+
+    hard_failure = bool(timer_reasons or owner_reasons)
+    if not hard_failure and timer_phase == "idle" and owner_phase == "idle":
+        classification = "idle_waiting_with_inactive_success_owner"
+        healthy = True
+        resample_required = False
+    elif not hard_failure and timer_phase == "firing" and owner_phase == "firing":
+        classification = "coherent_trigger_in_progress"
+        healthy = True
+        resample_required = False
+    elif not hard_failure and {timer_phase, owner_phase} == {"idle", "firing"}:
+        classification = "sequential_snapshot_transition"
+        healthy = False
+        resample_required = True
+    else:
+        classification = "failed_or_unknown_pair"
+        healthy = False
+        resample_required = False
+
+    return {
+        "timer_name": timer,
+        "owner_name": owner,
+        "classification": classification,
+        "healthy": healthy,
+        "resample_required": resample_required,
+        "timer_phase": timer_phase,
+        "owner_phase": owner_phase,
+        "timer_reason_codes": sorted(set(timer_reasons)),
+        "owner_reason_codes": sorted(set(owner_reasons)),
+        "timer": dict(timer_values),
+        "owner": dict(owner_values),
+    }
+
+
 def _service_health(
     job_id: str,
     journal: Mapping[str, Any],
     *,
     command_runner: Callable[..., subprocess.CompletedProcess[str]],
+    sleep_fn: Callable[[float], None] = time.sleep,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    max_resample_attempts: int = PAIR_RESAMPLE_MAX_ATTEMPTS,
+    max_resample_seconds: float = PAIR_RESAMPLE_MAX_SECONDS,
+    resample_interval_seconds: float = PAIR_RESAMPLE_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
-    units: dict[str, dict[str, str]] = {}
+    units: dict[str, dict[str, Any]] = {}
+    persistent_rows: list[dict[str, Any]] = []
     for unit in PERSISTENT_UNITS:
-        values = _systemd_show(unit, command_runner=command_runner)
-        if (
-            values.get("ActiveState") != "active"
-            or values.get("SubState") != "running"
-            or values.get("Result") not in {"", "success"}
-        ):
-            raise ProbeError(f"persistent service is unhealthy: {unit}")
+        values = _systemd_observation(unit, command_runner=command_runner)
         units[unit] = values
+        persistent_rows.append(_classify_persistent_service(unit, values))
     pairs: list[dict[str, Any]] = []
     for timer, owner in TIMER_PAIRS:
-        timer_values = _systemd_show(timer, command_runner=command_runner)
-        owner_values = _systemd_show(owner, command_runner=command_runner)
-        timer_healthy = bool(
-            timer_values.get("ActiveState") == "active"
-            and timer_values.get("SubState") == "waiting"
-            and timer_values.get("Result") in {"", "success"}
-            and timer_values.get("UnitFileState") == "enabled"
-        )
-        owner_healthy = bool(
-            (
-                owner_values.get("ActiveState") == "inactive"
-                and owner_values.get("SubState") == "dead"
-                and owner_values.get("Result") in {"", "success"}
-                and owner_values.get("ExecMainStatus") in {"", "0"}
-            )
-            or (
-                owner_values.get("ActiveState") in {"active", "activating"}
-                and owner_values.get("Result") in {"", "success"}
-                and owner_values.get("ExecMainStatus") in {"", "0"}
-            )
-        )
-        if not timer_healthy or not owner_healthy:
-            raise ProbeError(f"systemd timer/service pair is unhealthy: {timer}")
+        timer_values = _systemd_observation(timer, command_runner=command_runner)
+        owner_values = _systemd_observation(owner, command_runner=command_runner)
         units[timer] = timer_values
         units[owner] = owner_values
-        pairs.append(
-            {
-                "timer_name": timer,
-                "owner_name": owner,
-                "healthy": True,
-                "timer_last_trigger": timer_values.get("LastTriggerUSec"),
-                "timer_next_trigger": timer_values.get("NextElapseUSecRealtime"),
-            }
+        pair = _classify_timer_service_pair(
+            timer, owner, timer_values, owner_values
         )
+        pair["samples"] = [
+            {
+                "attempt": 0,
+                "captured_at": now_fn().isoformat().replace("+00:00", "Z"),
+                **{key: value for key, value in pair.items() if key != "samples"},
+            }
+        ]
+        pairs.append(pair)
     if len(units) != 27 or len(pairs) != 12:
         raise ProbeError("systemd 27/12 coverage is incomplete")
-    job_unit_name = f"wb-core-storage-recovery-sanitation@{job_id}.service"
-    job_unit = _systemd_show(job_unit_name, command_runner=command_runner)
-    if job_unit.get("ActiveState") not in {"inactive", "failed"}:
-        raise ProbeError("completed sanitation unit is still active")
-    saved_gate = journal.get("systemd_service_gate_after")
-    if (
-        not isinstance(saved_gate, Mapping)
-        or saved_gate.get("healthy") is not True
-        or int(saved_gate.get("observed_unit_count") or 0) != 27
-        or int(saved_gate.get("observed_pair_count") or 0) != 12
+
+    started = monotonic_fn()
+    attempts = 0
+    while (
+        any(pair["resample_required"] for pair in pairs)
+        and attempts < max_resample_attempts
+        and monotonic_fn() - started < max_resample_seconds
     ):
-        raise ProbeError("saved terminal 27/12 service gate is invalid")
-    return {
-        "healthy": True,
+        if resample_interval_seconds > 0:
+            sleep_fn(resample_interval_seconds)
+        attempts += 1
+        for index, pair in enumerate(pairs):
+            if pair["resample_required"] is not True:
+                continue
+            timer = str(pair["timer_name"])
+            owner = str(pair["owner_name"])
+            timer_values = _systemd_observation(
+                timer, command_runner=command_runner
+            )
+            owner_values = _systemd_observation(
+                owner, command_runner=command_runner
+            )
+            units[timer] = timer_values
+            units[owner] = owner_values
+            classified = _classify_timer_service_pair(
+                timer, owner, timer_values, owner_values
+            )
+            samples = list(pair["samples"])
+            samples.append(
+                {
+                    "attempt": attempts,
+                    "captured_at": now_fn().isoformat().replace("+00:00", "Z"),
+                    **classified,
+                }
+            )
+            classified["samples"] = samples
+            pairs[index] = classified
+
+    job_unit_name = f"wb-core-storage-recovery-sanitation@{job_id}.service"
+    job_unit = _systemd_observation(job_unit_name, command_runner=command_runner)
+    job_unit_healthy = bool(
+        not _systemd_common_reasons(job_unit_name, job_unit, timer=False)
+        and job_unit.get("ActiveState") == "inactive"
+        and job_unit.get("SubState") == "dead"
+        and _systemd_int(job_unit.get("ExecMainStatus")) == 0
+        and _systemd_int(job_unit.get("MainPID")) == 0
+    )
+    saved_gate = journal.get("systemd_service_gate_after")
+    saved_gate_healthy = bool(
+        isinstance(saved_gate, Mapping)
+        and saved_gate.get("healthy") is True
+        and int(saved_gate.get("observed_unit_count") or 0) == 27
+        and int(saved_gate.get("observed_pair_count") or 0) == 12
+    )
+    failing_pairs = [pair for pair in pairs if pair["healthy"] is not True]
+    failing_persistent = [row for row in persistent_rows if row["healthy"] is not True]
+    healthy = not failing_pairs and not failing_persistent and job_unit_healthy and saved_gate_healthy
+    gate = {
+        "schema": "wb-core.systemd-paired-health-gate/v1",
+        "classification": "healthy" if healthy else "required_units_unhealthy",
+        "healthy": healthy,
         "unit_count": 27,
         "pair_count": 12,
         "pairs": pairs,
-        "units": units,
+        "persistent_services": persistent_rows,
+        "units": [
+            {"name": name, "raw": values}
+            for name, values in units.items()
+        ],
         "units_digest": payload_digest(units),
-        "completed_job_unit": job_unit,
+        "failing_pair_count": len(failing_pairs),
+        "failing_pairs": failing_pairs,
+        "failing_persistent_service_count": len(failing_persistent),
+        "failing_persistent_services": failing_persistent,
+        "pair_resample_evidence": {
+            "attempted": attempts > 0,
+            "attempt_count": attempts,
+            "max_attempts": max_resample_attempts,
+            "max_seconds": max_resample_seconds,
+            "interval_seconds": resample_interval_seconds,
+            "elapsed_seconds": round(monotonic_fn() - started, 6),
+            "resolved_healthy": bool(attempts > 0 and not failing_pairs),
+            "exhausted": bool(failing_pairs and attempts >= max_resample_attempts),
+        },
+        "completed_job_unit": {
+            "name": job_unit_name,
+            "healthy": job_unit_healthy,
+            "raw": job_unit,
+        },
+        "saved_terminal_gate": {
+            "healthy": saved_gate_healthy,
+            "observed_unit_count": (
+                saved_gate.get("observed_unit_count")
+                if isinstance(saved_gate, Mapping)
+                else None
+            ),
+            "observed_pair_count": (
+                saved_gate.get("observed_pair_count")
+                if isinstance(saved_gate, Mapping)
+                else None
+            ),
+        },
     }
+    gate["gate_digest"] = payload_digest(gate)
+    if not healthy:
+        raise SystemdGateError("systemd 27/12 paired health is not proven", gate)
+    return gate
 
 
 def _active_jobs_and_locks(
@@ -986,7 +1293,11 @@ def run_probe(
     )
     monitor = _monitor(journal, capacity, root_prefix=root_prefix, now_fn=now_fn)
     services = _service_health(
-        binding["job_id"], journal, command_runner=command_runner
+        binding["job_id"],
+        journal,
+        command_runner=command_runner,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
     )
     journald = _journald(
         journal, root_prefix=root_prefix, command_runner=command_runner
@@ -1059,6 +1370,8 @@ def main() -> int:
                 "message": str(exc)[:1000],
             },
         }
+        if isinstance(exc, SystemdGateError):
+            result["systemd_service_gate"] = exc.gate
         result["evidence_digest"] = payload_digest(result)
     sys.stdout.buffer.write(canonical_json_bytes(result) + b"\n")
     return 0

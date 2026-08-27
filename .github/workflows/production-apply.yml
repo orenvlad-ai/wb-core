@@ -70,6 +70,33 @@ on:
         description: Exact repo-only Release Runner operation for reconciliation code
         required: false
         type: string
+      reconciliation_attempt:
+        description: Exact bounded same-operation reconciliation attempt
+        required: false
+        type: string
+      prior_reconciliation_run_id:
+        description: Exact immutable legacy reconciliation a01 run
+        required: false
+        default: 0
+        type: number
+      prior_reconciliation_artifact_id:
+        description: Exact immutable legacy reconciliation a01 artifact id
+        required: false
+        default: 0
+        type: number
+      prior_reconciliation_artifact_name:
+        description: Exact immutable legacy reconciliation a01 artifact name
+        required: false
+        type: string
+      prior_reconciliation_receipt_sha256:
+        description: Exact legacy reconciliation a01 receipt SHA-256 without prefix
+        required: false
+        type: string
+      prior_reconciliation_comment_id:
+        description: Exact immutable legacy reconciliation a01 marker comment id
+        required: false
+        default: 0
+        type: number
 
 permissions:
   contents: read
@@ -281,6 +308,12 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
+          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
+          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
+          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
+          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
           --github-output "$GITHUB_OUTPUT"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-preflight.json"
 
@@ -303,6 +336,12 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
+          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
+          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
+          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
+          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
 
       - name: Upload full immutable reconciliation evidence first
@@ -331,4 +370,10 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
+          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
+          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
+          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
+          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"

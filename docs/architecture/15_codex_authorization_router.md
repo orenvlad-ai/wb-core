@@ -172,6 +172,15 @@ supersession завершает evidence/receipt того же operation id; о�
 preexisting supersession marker остаётся fail-closed и требует обычной fresh
 route decision.
 
+Для WBC0008 terminal-receipt contour legacy reconciliation `a01` также является
+immutable terminal evidence. После exact validation его run/artifact/receipt/
+marker, того же source operation/job, zero mutation и единственного timer-
+predicate blocker разрешён ровно один derived `a02`, bound к a01 artifact/
+marker digests и новому merged `repo_only/done` release. Exact replay `a02`
+является `already_terminal`; blocked `a02` исчерпывает sequence. Foreign,
+duplicate, different-digest и `a03` fail closed, не создавая human gate, queue
+или retry.
+
 ## Owner publication deduplication
 
 Human decision material состоит из goal, exact owner, sorted reason codes и
