@@ -1454,7 +1454,10 @@ def main() -> None:
         encoding="utf-8"
     )
     assert "pull-requests: read" not in workflow
-    apply_job, recovery_job = workflow.split("\n  recover_receipt:\n", 1)
+    apply_job, recovery_and_reconciliation = workflow.split("\n  recover_receipt:\n", 1)
+    recovery_job, reconciliation_job = recovery_and_reconciliation.split(
+        "\n  warm_archive_receipt_reconciliation:\n", 1
+    )
     assert "pull-requests: write" in apply_job
     assert "--authorization-mode warm-archive-readiness" in apply_job
     assert "--authorization-mode warm-archive-mount-probe" in apply_job
@@ -1471,6 +1474,18 @@ def main() -> None:
         "pip install",
     ):
         assert forbidden not in recovery_job
+    assert "environment: production" in reconciliation_job
+    assert "actions: read" in reconciliation_job
+    assert "ref: ${{ github.sha }}" in reconciliation_job
+    assert "--authorization-mode warm-archive-receipt-reconciliation" in reconciliation_job
+    assert "--reconciliation-phase preflight" in reconciliation_job
+    assert "--reconciliation-phase collect" in reconciliation_job
+    assert "--reconciliation-phase publish" in reconciliation_job
+    assert reconciliation_job.index("Upload full immutable reconciliation evidence first") < (
+        reconciliation_job.index("publish one compact supersession marker")
+    )
+    assert reconciliation_job.count("Execute one bounded query-only SSH probe") == 1
+    assert "pip install" not in reconciliation_job
     print("production_apply_runner_smoke: ok")
 
 

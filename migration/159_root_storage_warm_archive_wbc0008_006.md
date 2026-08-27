@@ -395,9 +395,47 @@ GitHub 422 or other comment failure cannot hide or rewrite the artifact and
 never causes readiness, qualification or mutation to run again; publication
 recovery remains query-only and digest-bound.
 
+## Terminal reconciliation of the existing submitted operation
+
+Block 024 adds a separate `repo_only` release capability; it does not change or
+deploy `root_storage_warm_archive.py`. The mode
+`warm-archive-receipt-reconciliation` is valid only for the already submitted
+exact-six operation whose immutable Production Apply receipt is exactly
+`blocked/post-submit-readback-not-reconciled`, with one submit and a succeeded
+attempt-1 detached job. It binds the exact source PR/run/artifact name and
+SHA-256, authorization and blocked comment ids, release/readiness/operation/job
+and qualified-manifest identities, deployed SHA, plus the new merged
+trusted-main repo-only Release receipt. No new owner authorization is required:
+under the authorization router this is same-operation query-only
+`AUTO_CONTINUE`, not a new production effect.
+
+Exactly one bounded SSH probe is permitted after GitHub-only preflight. It runs
+with `PYTHONDONTWRITEBYTECODE=1` and only reads immutable journal/job/manifest
+records, the six retained archive/manifest pairs and their saved proof digests,
+direct source/destination/non-target/StoreRegistry/journald state, current
+capacity, natural monitor and systemd show/config output. Readiness, a second
+submit, apply/job/archive execution, the existing `readback_batch`, decompression
+or full restore, temporary files, lock acquisition, service/timer action,
+SQL/file writes and unlink are absent. Any source/job/journal/hash/proof drift,
+source presence, missing/foreign/temp destination object, active job/lock,
+unstable or below-floor capacity, stale/non-normal monitor, 27/12/service,
+journald/non-target/StoreRegistry drift, or nonzero Promo/business/non-target
+effect blocks `done`.
+
+Full canonical evidence is uploaded as one immutable artifact first. Only then
+may the Actions bot append one distinct compact supersession marker to the
+original operation PR, binding the untouched source blocked comment/artifact,
+new release/artifact/evidence digests and
+`done/reconciled_existing_operation`. An exact existing marker is verified back
+through its artifact and returns `already_terminal` without SSH or publication;
+duplicate, foreign or different existing evidence fails closed. This block's
+production mutation count is structurally and observably zero.
+
 ## Terminal acceptance
 
-`COMPLETE` requires exactly six absent sources, six private archives and six
+`COMPLETE` requires the immutable block-024 `done` reconciliation artifact and
+compact supersession marker for the same existing operation, plus exactly six
+absent sources, six private archives and six
 private manifests on `/dev/sdb1`; independent full restore, exact size/SHA and
 SQLite quick/integrity proof for each; unlink count six; exact allocated-byte
 reconciliation; root available at least 25 GiB; backup above the Finance plus
@@ -420,6 +458,7 @@ Required checks:
 - `python3 apps/storage_recovery_sanitation_smoke.py`
 - `python3 apps/storage_recovery_sanitation_job_smoke.py`
 - `python3 apps/production_apply_runner_smoke.py`
+- `python3 apps/root_storage_warm_archive_reconciliation_probe_smoke.py`
 - `python3 apps/root_storage_policy_smoke.py`
 - `python3 apps/finance_storage_backup_rotation_smoke.py`
 - every suite selected by the exact-base PR planner

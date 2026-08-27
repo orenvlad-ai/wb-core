@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import date, datetime
 import hashlib
 import io
@@ -60,6 +61,19 @@ RECOVERY_WORKFLOW_NAME = "Production Apply Runner"
 RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
 RECOVERY_ARTIFACT_FILE = "production-apply-receipt.json"
 MAX_RECOVERY_ARTIFACT_BYTES = 8 * 1024 * 1024
+WARM_RECONCILIATION_RECEIPT_SCHEMA = (
+    "wb-core.root-warm-archive-reconciliation-receipt/v1"
+)
+WARM_RECONCILIATION_SUMMARY_SCHEMA = (
+    "wb-core.root-warm-archive-reconciliation-comment-summary/v1"
+)
+WARM_RECONCILIATION_MARKER = (
+    "wb-core-root-warm-archive-reconciliation-receipt"
+)
+WARM_RECONCILIATION_ARTIFACT_FILE = (
+    "root-warm-archive-reconciliation-receipt.json"
+)
+MAX_WARM_RECONCILIATION_ARTIFACT_BYTES = 8 * 1024 * 1024
 TARGET_FILE = (
     ROOT
     / "artifacts"
@@ -103,8 +117,16 @@ def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def payload_digest(value: Any) -> str:
+    return "sha256:" + digest(canonical_json_bytes(value))
+
+
 def marker(operation: str) -> str:
     return f"<!-- {APPLY_MARKER} operation={operation} -->"
+
+
+def warm_reconciliation_marker(operation: str) -> str:
+    return f"<!-- {WARM_RECONCILIATION_MARKER} operation={operation} -->"
 
 
 def warm_readiness_id(
@@ -240,6 +262,43 @@ def parse_release_receipt(
             matches.append(payload)
     if len(matches) != 1:
         raise ApplyError("exact live-runtime release receipt is missing or ambiguous")
+    return matches[0]
+
+
+def parse_repo_only_release_receipt(
+    comments: list[Mapping[str, Any]],
+    *,
+    pr: int,
+    release_operation: str,
+    merge_sha: str,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    marker_text = f"<!-- {RECEIPT_MARKER} operation={release_operation} -->"
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if marker_text not in body or not is_actions_bot_comment(comment):
+            continue
+        try:
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise ApplyError("repo-only release receipt is malformed") from exc
+        if (
+            payload.get("schema") == "wb-core.release-receipt/v2"
+            and payload.get("state") == "done"
+            and payload.get("operation_id") == release_operation
+            and payload.get("repository") == CANONICAL_REPOSITORY
+            and payload.get("pull_request") == pr
+            and payload.get("release_kind") == "repo_only"
+            and payload.get("merge_sha") == merge_sha
+            and payload.get("deployed_sha") is None
+            and payload.get("manifest") is None
+            and not payload.get("reason_codes")
+        ):
+            matches.append(dict(payload))
+        else:
+            raise ApplyError("repo-only release receipt binding is invalid")
+    if len(matches) != 1:
+        raise ApplyError("exact repo-only release receipt is missing or ambiguous")
     return matches[0]
 
 
@@ -1989,6 +2048,7 @@ def _collect_recovery_receipt(
     run_id: int,
     artifact_name: str,
     receipt_sha256: str,
+    expected_conclusion: str = "failure",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     expected_name = _recovery_artifact_name(pr, run_id)
     if artifact_name != expected_name:
@@ -2003,7 +2063,7 @@ def _collect_recovery_receipt(
         "path": RECOVERY_WORKFLOW_PATH,
         "event": "workflow_dispatch",
         "status": "completed",
-        "conclusion": "failure",
+        "conclusion": expected_conclusion,
         "head_branch": "main",
     }
     for field, value in expected_run.items():
@@ -2053,7 +2113,9 @@ def _collect_recovery_receipt(
     )
     if not isinstance(raw_zip, bytes):
         raise ApplyError("recovery artifact download shape is invalid")
-    return dict(run), _extract_recovery_receipt(raw_zip, receipt_sha256)
+    run_with_artifact = dict(run)
+    run_with_artifact["validated_artifact"] = dict(artifact)
+    return run_with_artifact, _extract_recovery_receipt(raw_zip, receipt_sha256)
 
 
 def _validate_recovery_receipt(
@@ -2386,6 +2448,1014 @@ def _run_receipt_recovery(
         )
     )
     return 0
+
+
+def _warm_reconciliation_artifact_name(pr: int, run_id: int) -> str:
+    return f"root-warm-archive-reconciliation-pr-{pr}-run-{run_id}"
+
+
+def _validate_warm_reconciliation_source_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    repository: str,
+    pr: int,
+    merge_sha: str,
+    authorization_comment_id: int,
+    expected_operation: str,
+    goal: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = {
+        "schema": APPLY_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "operation_id": expected_operation,
+        "repository": repository,
+        "pull_request": pr,
+        "merge_sha": merge_sha,
+        "deployed_sha": merge_sha,
+        "authorization_comment_id": authorization_comment_id,
+        "apply_count": 1,
+    }
+    for field, value in expected.items():
+        if receipt.get(field) != value:
+            raise ApplyError(f"warm reconciliation source mismatch: {field}")
+    if (
+        receipt.get("goal") != dict(goal)
+        or goal.get("profile") != WARM_ARCHIVE_GOAL_PROFILE
+        or goal.get("task") != "WBC0008"
+        or goal.get("target_id") != "wb_core_eu_hosted_runtime_active"
+        or goal.get("expected_source_count") != 6
+        or goal.get("expected_archive_count") != 6
+        or goal.get("expected_manifest_count") != 6
+        or goal.get("expected_unlink_count") != 6
+        or goal.get("expected_reclaimed_allocated_bytes") != 27_591_725_056
+        or goal.get("root_minimum_after_bytes") != 25 * 1024**3
+        or goal.get("max_mutation_submits") != 1
+    ):
+        raise ApplyError("warm reconciliation source goal binding mismatch")
+    if operation_id(repository, pr, authorization_comment_id, goal) != expected_operation:
+        raise ApplyError("warm reconciliation source operation derivation mismatch")
+    readiness = receipt.get("warm_archive_readiness")
+    evidence = receipt.get("evidence")
+    if (
+        not isinstance(readiness, Mapping)
+        or readiness.get("schema") != WARM_READINESS_RECEIPT_SCHEMA
+        or readiness.get("state") != "ready"
+        or readiness.get("query_only") is not True
+        or readiness.get("database_written") is not False
+        or readiness.get("goal_operation_id") != expected_operation
+        or readiness.get("deployed_sha") != merge_sha
+        or not isinstance(evidence, Mapping)
+        or evidence.get("state") != "blocked"
+        or evidence.get("reason") != "post-submit-readback-not-reconciled"
+        or evidence.get("apply_count") != 1
+    ):
+        raise ApplyError("warm reconciliation source terminal state/reason is invalid")
+    qualified = evidence.get("qualified_manifest")
+    apply_evidence = evidence.get("apply")
+    readback_evidence = evidence.get("readback")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (qualified, apply_evidence, readback_evidence)
+    ):
+        raise ApplyError("warm reconciliation source evidence is incomplete")
+    manifest_path = str(qualified.get("path") or "")
+    manifest_sha = _require_fingerprint(qualified.get("sha256"), "source manifest")
+    apply_result = apply_evidence.get("result")
+    readback = readback_evidence.get("result")
+    if (
+        apply_evidence.get("return_code") != 0
+        or apply_evidence.get("transport_ambiguous") is not False
+        or not isinstance(apply_result, Mapping)
+        or apply_result.get("job_id") is None
+        or apply_result.get("status") != "queued"
+        or apply_result.get("terminal") is not False
+        or apply_result.get("submit_idempotent") is not False
+        or not isinstance(apply_result.get("request"), Mapping)
+        or apply_result["request"].get("operation") != "warm-archive-apply"
+        or apply_result["request"].get("manifest") != manifest_path
+        or apply_result["request"].get("manifest_sha256") != manifest_sha
+        or apply_result["request"].get("goal_operation_id") != expected_operation
+        or apply_result["request"].get("deployed_sha") != merge_sha
+    ):
+        raise ApplyError("warm reconciliation source submit evidence is invalid")
+    job_id = str(apply_result["job_id"])
+    job = readback.get("job") if isinstance(readback, Mapping) else None
+    job_request = job.get("request") if isinstance(job, Mapping) else None
+    job_result = job.get("result") if isinstance(job, Mapping) else None
+    mutation_scope = (
+        readback.get("mutation_scope_reconciliation")
+        if isinstance(readback, Mapping)
+        else None
+    )
+    if (
+        readback_evidence.get("return_code") != 0
+        or readback_evidence.get("transport_ambiguous") is not False
+        or not isinstance(readback, Mapping)
+        or readback.get("status") != "blocked"
+        or readback.get("query_only") is not True
+        or readback.get("deployed_sha") != merge_sha
+        or readback.get("operation_id") != expected_operation
+        or readback.get("manifest_sha256") != manifest_sha
+        or readback.get("source_count") != 6
+        or readback.get("source_absent_count") != 6
+        or readback.get("archive_count") != 6
+        or readback.get("manifest_count") != 6
+        or readback.get("raw_unlink_count") != 6
+        or readback.get("reclaimed_allocated_bytes") != 27_591_725_056
+        or readback.get("root_minimum_passed") is not True
+        or readback.get("backup_capacity_guard_passed") is not False
+        or readback.get("services_healthy") is not True
+        or readback.get("non_target_preserved") is not True
+        or readback.get("promo_action_count") != 0
+        or readback.get("business_data_mutation_count") != 0
+        or readback.get("exact_manifest_apply_receipt_count") != 1
+        or not isinstance(mutation_scope, Mapping)
+        or mutation_scope.get("exact") is not True
+        or mutation_scope.get("non_target_unlink_move_write_count") != 0
+        or not isinstance(job, Mapping)
+        or job.get("job_id") != job_id
+        or job.get("status") != "succeeded"
+        or job.get("terminal") is not True
+        or job.get("attempt") != 1
+        or not isinstance(job_request, Mapping)
+        or job_request.get("operation") != "warm-archive-apply"
+        or job_request.get("goal_operation_id") != expected_operation
+        or job_request.get("manifest") != manifest_path
+        or job_request.get("manifest_sha256") != manifest_sha
+        or job_request.get("deployed_sha") != merge_sha
+        or not isinstance(job_result, Mapping)
+        or job_result.get("status") != "complete"
+        or job_result.get("operation_id") != expected_operation
+        or job_result.get("manifest_path") != manifest_path
+        or job_result.get("manifest_sha256") != manifest_sha
+        or job_result.get("mutation_submit_count") != 1
+        or job_result.get("raw_unlink_count") != 6
+        or job_result.get("reclaimed_allocated_bytes") != 27_591_725_056
+        or job_result.get("promo_action_count") != 0
+        or job_result.get("business_data_mutation_count") != 0
+        or payload_digest(job_result) != str(job.get("result_digest") or "")
+    ):
+        raise ApplyError("warm reconciliation source terminal readback is inconsistent")
+    request_digest = _require_fingerprint(job.get("request_digest"), "source job request")
+    result_digest = _require_fingerprint(job.get("result_digest"), "source job result")
+    return {
+        "readiness_id": str(readiness.get("readiness_id") or ""),
+        "job_id": job_id,
+        "job_request_digest": request_digest,
+        "job_result_digest": result_digest,
+        "manifest_path": manifest_path,
+        "manifest_sha256": manifest_sha,
+        "expected_reclaimed_allocated_bytes": 27_591_725_056,
+        "required_backup_floor_bytes": int(goal["required_backup_floor_bytes"]),
+        "release_operation_id": str(receipt.get("release_operation_id") or ""),
+    }
+
+
+def _require_fingerprint(value: Any, label: str) -> str:
+    text = str(value or "")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", text) is None:
+        raise ApplyError(f"{label} digest is invalid")
+    return text
+
+
+def _validate_source_blocked_marker(
+    comments: list[Mapping[str, Any]],
+    *,
+    comment_id: int,
+    operation: str,
+    artifact_name: str,
+    receipt_sha256: str,
+    job_id: str,
+) -> dict[str, Any]:
+    matches = [item for item in comments if item.get("id") == comment_id]
+    if len(matches) != 1 or not is_actions_bot_comment(matches[0]):
+        raise ApplyError("exact blocked marker comment is missing or foreign")
+    marked = [
+        item for item in comments if marker(operation) in str(item.get("body") or "")
+    ]
+    if len(marked) != 1 or marked[0].get("id") != comment_id:
+        raise ApplyError("source blocked marker is duplicate or ambiguous")
+    payload = _comment_payload(matches[0], operation)
+    artifact = payload.get("artifact") or {}
+    job = payload.get("job") or {}
+    if (
+        payload.get("schema") != APPLY_COMMENT_SUMMARY_SCHEMA
+        or payload.get("state") != "blocked"
+        or payload.get("reason") != "post-submit-readback-not-reconciled"
+        or payload.get("operation_id") != operation
+        or payload.get("apply_count") != 1
+        or artifact.get("name") != artifact_name
+        or artifact.get("file") != RECOVERY_ARTIFACT_FILE
+        or artifact.get("sha256") != "sha256:" + receipt_sha256
+        or job.get("job_id") != job_id
+        or job.get("status") != "succeeded"
+        or job.get("terminal") is not True
+        or job.get("attempt") != 1
+    ):
+        raise ApplyError("source blocked marker binding is invalid")
+    return dict(payload)
+
+
+def _warm_reconciliation_context(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    source_pr: Mapping[str, Any],
+    source_comments: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    required = {
+        "source_run_id": args.source_run_id,
+        "source_artifact_name": args.source_artifact_name,
+        "source_receipt_sha256": args.source_receipt_sha256,
+        "operation_id": args.operation_id,
+        "blocked_comment_id": args.blocked_comment_id,
+        "reconciliation_pr": args.reconciliation_pr,
+        "reconciliation_release_operation_id": args.reconciliation_release_operation_id,
+    }
+    missing = sorted(field for field, value in required.items() if not value)
+    if missing:
+        raise ApplyError(
+            "warm archive receipt reconciliation inputs are missing: "
+            + ", ".join(missing)
+        )
+    if (
+        int(args.source_run_id) <= 0
+        or int(args.blocked_comment_id) <= 0
+        or int(args.reconciliation_pr) <= 0
+    ):
+        raise ApplyError("warm archive receipt reconciliation ids are invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", str(args.source_receipt_sha256)) is None:
+        raise ApplyError("source receipt SHA-256 is invalid")
+    source_merge_sha = exact_sha(source_pr.get("merge_commit_sha"), "source-pr-merge")
+    run, source_receipt = _collect_recovery_receipt(
+        client,
+        pr=args.pr,
+        run_id=args.source_run_id,
+        artifact_name=args.source_artifact_name,
+        receipt_sha256=args.source_receipt_sha256,
+        expected_conclusion="success",
+    )
+    if exact_sha(run.get("head_sha"), "source-run-head") != source_merge_sha:
+        raise ApplyError("source run head is not the exact source PR merge")
+    authorization = client.get(f"/issues/comments/{args.authorization_comment_id}")
+    goal = validate_authorization(
+        authorization,
+        repository=args.repository,
+        pr=args.pr,
+    )
+    authorization_body = str(authorization.get("body") or "").strip()
+    if source_receipt.get("authorization_body_sha256") != digest(
+        authorization_body.encode("utf-8")
+    ):
+        raise ApplyError("source authorization body digest mismatch")
+    source_binding = _validate_warm_reconciliation_source_receipt(
+        source_receipt,
+        repository=args.repository,
+        pr=args.pr,
+        merge_sha=source_merge_sha,
+        authorization_comment_id=args.authorization_comment_id,
+        expected_operation=str(args.operation_id),
+        goal=goal,
+    )
+    parse_release_receipt(
+        source_comments,
+        pr=args.pr,
+        release_operation=source_binding["release_operation_id"],
+        merge_sha=source_merge_sha,
+    )
+    readiness = parse_warm_readiness_receipt(
+        source_comments,
+        repository=args.repository,
+        pr=args.pr,
+        release_operation=source_binding["release_operation_id"],
+        merge_sha=source_merge_sha,
+        authorization_comment_id=args.authorization_comment_id,
+        goal_operation_id=str(args.operation_id),
+    )
+    if readiness.get("readiness_id") != source_binding["readiness_id"]:
+        raise ApplyError("source readiness binding drifted")
+    blocked_marker = _validate_source_blocked_marker(
+        source_comments,
+        comment_id=args.blocked_comment_id,
+        operation=str(args.operation_id),
+        artifact_name=str(args.source_artifact_name),
+        receipt_sha256=str(args.source_receipt_sha256),
+        job_id=source_binding["job_id"],
+    )
+
+    reconciliation_pr = client.get(f"/pulls/{args.reconciliation_pr}")
+    if not isinstance(reconciliation_pr, Mapping) or reconciliation_pr.get("merged") is not True:
+        raise ApplyError("reconciliation release PR is not merged")
+    reconciliation_merge_sha = exact_sha(
+        reconciliation_pr.get("merge_commit_sha"), "reconciliation-pr-merge"
+    )
+    code_sha = exact_sha(os.environ.get("GITHUB_SHA"), "reconciliation-code")
+    if code_sha != reconciliation_merge_sha:
+        raise ApplyError("trusted reconciliation checkout is not the exact release merge")
+    reconciliation_comments = list_comments(client, args.reconciliation_pr)
+    reconciliation_release = parse_repo_only_release_receipt(
+        reconciliation_comments,
+        pr=args.reconciliation_pr,
+        release_operation=args.reconciliation_release_operation_id,
+        merge_sha=reconciliation_merge_sha,
+    )
+    artifact = run.get("validated_artifact")
+    if not isinstance(artifact, Mapping):
+        raise ApplyError("source artifact provenance is missing")
+    probe_source = (
+        ROOT / "apps" / "root_storage_warm_archive_reconciliation_probe.py"
+    ).read_bytes()
+    return {
+        "source": {
+            "pull_request": args.pr,
+            "run_id": args.source_run_id,
+            "run_head_sha": source_merge_sha,
+            "artifact_id": artifact.get("id"),
+            "artifact_name": args.source_artifact_name,
+            "receipt_file": RECOVERY_ARTIFACT_FILE,
+            "receipt_sha256": "sha256:" + str(args.source_receipt_sha256),
+            "receipt_state": "blocked",
+            "receipt_reason": "post-submit-readback-not-reconciled",
+            "authorization_comment_id": args.authorization_comment_id,
+            "authorization_body_sha256": source_receipt.get(
+                "authorization_body_sha256"
+            ),
+            "blocked_comment_id": args.blocked_comment_id,
+            "blocked_comment_digest": payload_digest(blocked_marker),
+            "release_operation_id": source_binding["release_operation_id"],
+            "deployed_sha": source_merge_sha,
+            "readiness_id": source_binding["readiness_id"],
+            "operation_id": args.operation_id,
+            "job_id": source_binding["job_id"],
+            "job_request_digest": source_binding["job_request_digest"],
+            "job_result_digest": source_binding["job_result_digest"],
+            "manifest_path": source_binding["manifest_path"],
+            "manifest_sha256": source_binding["manifest_sha256"],
+            "expected_reclaimed_allocated_bytes": source_binding[
+                "expected_reclaimed_allocated_bytes"
+            ],
+            "required_backup_floor_bytes": source_binding[
+                "required_backup_floor_bytes"
+            ],
+        },
+        "reconciliation_release": {
+            "pull_request": args.reconciliation_pr,
+            "release_operation_id": args.reconciliation_release_operation_id,
+            "release_kind": "repo_only",
+            "merge_sha": reconciliation_merge_sha,
+            "workflow_run_id": reconciliation_release.get("workflow_run_id"),
+            "plan_hash": reconciliation_release.get("plan_hash"),
+            "deployed_sha": None,
+            "probe_source_sha256": "sha256:" + digest(probe_source),
+        },
+    }
+
+
+def _existing_warm_reconciliation_marker(
+    comments: list[Mapping[str, Any]],
+    *,
+    context: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    operation = str(context["source"]["operation_id"])
+    all_markers = [
+        item
+        for item in comments
+        if WARM_RECONCILIATION_MARKER in str(item.get("body") or "")
+    ]
+    if not all_markers:
+        return None
+    if len(all_markers) != 1 or not is_actions_bot_comment(all_markers[0]):
+        raise ApplyError("reconciliation marker is duplicate, foreign or ambiguous")
+    comment = all_markers[0]
+    body = str(comment.get("body") or "")
+    if body.count(warm_reconciliation_marker(operation)) != 1 or body.count("```json") != 1:
+        raise ApplyError("preexisting reconciliation marker binding differs")
+    try:
+        payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise ApplyError("preexisting reconciliation marker is malformed") from exc
+    source = payload.get("source") if isinstance(payload, Mapping) else None
+    release = payload.get("reconciliation_release") if isinstance(payload, Mapping) else None
+    artifact = payload.get("artifact") if isinstance(payload, Mapping) else None
+    if (
+        payload.get("schema") != WARM_RECONCILIATION_SUMMARY_SCHEMA
+        or payload.get("state") not in {"done", "blocked"}
+        or payload.get("operation_id") != operation
+        or source != context.get("source")
+        or release != context.get("reconciliation_release")
+        or not isinstance(artifact, Mapping)
+        or re.fullmatch(
+            r"root-warm-archive-reconciliation-pr-[1-9][0-9]*-run-[1-9][0-9]*",
+            str(artifact.get("name") or ""),
+        )
+        is None
+        or artifact.get("file") != WARM_RECONCILIATION_ARTIFACT_FILE
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("sha256") or ""))
+        is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("evidence_digest") or ""))
+        is None
+    ):
+        raise ApplyError("preexisting reconciliation marker binding differs")
+    if payload.get("state") == "done" and payload.get("terminal_disposition") != (
+        "done/reconciled_existing_operation"
+    ):
+        raise ApplyError("preexisting reconciliation done marker is inconsistent")
+    run_match = re.fullmatch(
+        r"root-warm-archive-reconciliation-pr-[1-9][0-9]*-run-([1-9][0-9]*)",
+        str(artifact["name"]),
+    )
+    if run_match is None:
+        raise ApplyError("preexisting reconciliation artifact run is invalid")
+    verified = _verify_uploaded_warm_reconciliation_artifact(
+        context["client"],
+        run_id=int(run_match.group(1)),
+        artifact_name=str(artifact["name"]),
+        receipt_sha256=str(artifact["sha256"])[len("sha256:") :],
+        code_sha=str(context["reconciliation_release"]["merge_sha"]),
+    )
+    receipt = verified.get("receipt")
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt.get("schema") != WARM_RECONCILIATION_RECEIPT_SCHEMA
+        or receipt.get("state") != payload.get("state")
+        or receipt.get("terminal_disposition") != payload.get("terminal_disposition")
+        or receipt.get("source") != context.get("source")
+        or receipt.get("reconciliation_release")
+        != context.get("reconciliation_release")
+        or receipt.get("evidence_digest") != payload.get("evidence_digest")
+        or receipt.get("production_mutation_count") != 0
+        or (
+            receipt.get("state") == "done"
+            and not _valid_warm_reconciliation_probe(
+                (receipt.get("probe") or {}).get("result"), context=context
+            )
+        )
+        or receipt.get("evidence_digest")
+        != payload_digest(
+            {key: value for key, value in receipt.items() if key != "evidence_digest"}
+        )
+    ):
+        raise ApplyError("preexisting reconciliation artifact digest differs")
+    return comment
+
+
+def _write_github_output(path: str, values: Mapping[str, Any]) -> None:
+    output = Path(path)
+    with output.open("a", encoding="utf-8") as handle:
+        for key, value in values.items():
+            handle.write(f"{key}={str(value).lower() if isinstance(value, bool) else value}\n")
+
+
+def _run_warm_reconciliation_preflight(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    context = _warm_reconciliation_context(
+        args=args,
+        client=client,
+        source_pr=pr,
+        source_comments=comments,
+    )
+    context["client"] = client
+    existing = _existing_warm_reconciliation_marker(comments, context=context)
+    if existing is None:
+        state = "ready_for_probe"
+        probe_required = True
+        comment_id = 0
+    else:
+        state = "already_terminal"
+        probe_required = False
+        comment_id = int(existing.get("id") or 0)
+        if comment_id <= 0:
+            raise ApplyError("preexisting reconciliation comment id is invalid")
+    receipt = {
+        "schema": WARM_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": state,
+        "query_only": True,
+        "production_mutation_count": 0,
+        "source": context["source"],
+        "reconciliation_release": context["reconciliation_release"],
+        "comment_id": comment_id,
+    }
+    _write_receipt(args.output, receipt)
+    if args.github_output:
+        _write_github_output(
+            args.github_output,
+            {"probe_required": probe_required, "state": state, "comment_id": comment_id},
+        )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _warm_reconciliation_probe_command(
+    *, target: Mapping[str, Any], binding: Mapping[str, Any]
+) -> list[str]:
+    raw = canonical_json_bytes(binding)
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    shell = (
+        "set -eu; umask 077; cd /; "
+        "export PYTHONDONTWRITEBYTECODE=1; "
+        "exec python3 - "
+        + shlex.quote(encoded)
+    )
+    if any(
+        token in shell
+        for token in (
+            "systemctl start",
+            "systemctl restart",
+            "readback_batch",
+            "warm-archive-apply",
+            "storage_recovery_sanitation_job.py",
+            "sqlite3",
+        )
+    ):
+        raise ApplyError("reconciliation remote command contains a forbidden action")
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _query_only_probe_evidence(
+    command: list[str], probe_source: bytes
+) -> dict[str, Any]:
+    if len(command) < 2 or command[0] != "ssh":
+        raise ApplyError("reconciliation probe is not one canonical SSH command")
+    try:
+        result = subprocess.run(
+            command,
+            input=probe_source,
+            capture_output=True,
+            timeout=900.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "return_code": None,
+            "transport_ambiguous": True,
+            "command_sha256": digest(canonical_json_bytes(command)),
+            "stdin_sha256": "sha256:" + digest(probe_source),
+            "stdout_sha256": "sha256:" + digest(exc.stdout or b""),
+            "stderr_sha256": "sha256:" + digest(exc.stderr or b""),
+            "result": None,
+            "error": "query-only reconciliation probe timed out",
+        }
+    stdout = result.stdout or b""
+    stderr = result.stderr or b""
+    payload: Any = None
+    try:
+        payload = json.loads(stdout.decode("utf-8")) if stdout.strip() else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    return {
+        "return_code": result.returncode,
+        "transport_ambiguous": result.returncode == 255,
+        "command_sha256": digest(canonical_json_bytes(command)),
+        "stdin_sha256": "sha256:" + digest(probe_source),
+        "stdout_sha256": "sha256:" + digest(stdout),
+        "stderr_sha256": "sha256:" + digest(stderr),
+        "stderr_excerpt": stderr.decode("utf-8", errors="replace")[:2000],
+        "result": payload,
+    }
+
+
+def _valid_warm_reconciliation_probe(
+    payload: Any, *, context: Mapping[str, Any]
+) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    source = context["source"]
+    archive = payload.get("archive_reconciliation")
+    capacity = payload.get("capacity_reconciliation")
+    finance = payload.get("finance_reconciliation")
+    monitor = payload.get("natural_root_monitor")
+    services = payload.get("systemd_service_gate")
+    non_target = payload.get("non_target_reconciliation")
+    journald = payload.get("journald_reconciliation")
+    actions = payload.get("remote_action_counts")
+    return bool(
+        payload.get("schema")
+        == "wb-core.root-warm-archive-reconciliation-probe/v1"
+        and payload.get("status") == "reconciled"
+        and payload.get("query_only") is True
+        and payload.get("pythondontwritebytecode") is True
+        and payload.get("operation_id") == source["operation_id"]
+        and payload.get("job_id") == source["job_id"]
+        and payload.get("deployed_sha") == source["deployed_sha"]
+        and payload.get("manifest_path") == source["manifest_path"]
+        and payload.get("manifest_sha256") == source["manifest_sha256"]
+        and payload.get("production_mutation_count") == 0
+        and payload.get("mutation_submit_count_observed") == 1
+        and payload.get("promo_action_count") == 0
+        and payload.get("business_data_mutation_count") == 0
+        and payload.get("active_sanitation_job_count") == 0
+        and payload.get("held_lock_count") == 0
+        and isinstance(archive, Mapping)
+        and archive.get("source_absent_count") == 6
+        and archive.get("destination_object_count") == 12
+        and archive.get("archive_count") == 6
+        and archive.get("manifest_count") == 6
+        and archive.get("foreign_object_count") == 0
+        and archive.get("temporary_object_count") == 0
+        and archive.get("partial_object_count") == 0
+        and archive.get("pending_object_count") == 0
+        and archive.get("raw_unlink_count") == 6
+        and archive.get("reclaimed_allocated_bytes")
+        == source["expected_reclaimed_allocated_bytes"]
+        and isinstance(archive.get("archives"), list)
+        and len(archive["archives"]) == 6
+        and isinstance(capacity, Mapping)
+        and capacity.get("sample_count") == 3
+        and capacity.get("root_stable") is True
+        and capacity.get("backup_stable") is True
+        and int(capacity.get("root_min_available_bytes") or 0) >= 25 * 1024**3
+        and int(capacity.get("backup_min_available_bytes") or 0)
+        >= source["required_backup_floor_bytes"]
+        and isinstance(finance, Mapping)
+        and finance.get("healthy") is True
+        and finance.get("required_available_floor_bytes")
+        == source["required_backup_floor_bytes"]
+        and isinstance(monitor, Mapping)
+        and monitor.get("fresh") is True
+        and monitor.get("normal") is True
+        and isinstance(services, Mapping)
+        and services.get("healthy") is True
+        and services.get("unit_count") == 27
+        and services.get("pair_count") == 12
+        and isinstance(non_target, Mapping)
+        and non_target.get("preserved") is True
+        and isinstance(journald, Mapping)
+        and journald.get("preserved") is True
+        and isinstance(actions, Mapping)
+        and set(actions.values()) == {0}
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(payload.get("evidence_digest") or "")
+        )
+        is not None
+        and payload.get("evidence_digest")
+        == payload_digest(
+            {key: value for key, value in payload.items() if key != "evidence_digest"}
+        )
+    )
+
+
+def _run_warm_reconciliation_collect(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    context = _warm_reconciliation_context(
+        args=args,
+        client=client,
+        source_pr=pr,
+        source_comments=comments,
+    )
+    context["client"] = client
+    if _existing_warm_reconciliation_marker(comments, context=context) is not None:
+        raise ApplyError("reconciliation operation is already terminal; probe suppressed")
+    probe_path = ROOT / "apps" / "root_storage_warm_archive_reconciliation_probe.py"
+    probe_source = probe_path.read_bytes()
+    if (
+        not probe_source.startswith(b"#!/usr/bin/env python3\n")
+        or b"readback_batch(" in probe_source
+        or b"storage_recovery_sanitation_job.py" in probe_source
+        or b"systemctl\", \"start" in probe_source
+        or b"systemctl\", \"restart" in probe_source
+        or b"import sqlite3" in probe_source
+        or b"import tempfile" in probe_source
+        or b"import fcntl" in probe_source
+    ):
+        raise ApplyError("trusted reconciliation probe contains a forbidden primitive")
+    source = context["source"]
+    probe_binding = {
+        key: source[key]
+        for key in (
+            "operation_id",
+            "job_id",
+            "deployed_sha",
+            "manifest_path",
+            "manifest_sha256",
+            "job_request_digest",
+            "job_result_digest",
+            "expected_reclaimed_allocated_bytes",
+            "required_backup_floor_bytes",
+        )
+    }
+    target = _canonical_target()
+    with tempfile.TemporaryDirectory(prefix="wb-core-warm-reconciliation-ssh-") as directory:
+        configure_deploy_environment(Path(directory))
+        probe_evidence = _query_only_probe_evidence(
+            _warm_reconciliation_probe_command(target=target, binding=probe_binding),
+            probe_source,
+        )
+    reconciled = bool(
+        probe_evidence.get("return_code") == 0
+        and probe_evidence.get("transport_ambiguous") is False
+        and _valid_warm_reconciliation_probe(
+            probe_evidence.get("result"), context=context
+        )
+    )
+    receipt_without_digest: dict[str, Any] = {
+        "schema": WARM_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": "done" if reconciled else "blocked",
+        "reason": (
+            "reconciled-existing-terminal-operation"
+            if reconciled
+            else "query-only-reconciliation-not-proven"
+        ),
+        "terminal_disposition": (
+            "done/reconciled_existing_operation" if reconciled else "blocked"
+        ),
+        "query_only": True,
+        "production_mutation_count": 0,
+        "source": context["source"],
+        "reconciliation_release": context["reconciliation_release"],
+        "probe": probe_evidence,
+    }
+    receipt_without_digest["evidence_digest"] = payload_digest(
+        receipt_without_digest
+    )
+    _write_receipt(args.output, receipt_without_digest)
+    print(json.dumps(receipt_without_digest, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _extract_warm_reconciliation_artifact(
+    raw_zip: bytes, *, expected_sha256: str
+) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if (
+                len(files) != 1
+                or files[0].filename != WARM_RECONCILIATION_ARTIFACT_FILE
+                or files[0].file_size <= 0
+                or files[0].file_size > MAX_WARM_RECONCILIATION_ARTIFACT_BYTES
+            ):
+                raise ApplyError("reconciliation artifact shape is invalid")
+            raw = archive.read(files[0])
+    except zipfile.BadZipFile as exc:
+        raise ApplyError("reconciliation artifact ZIP is invalid") from exc
+    if digest(raw) != expected_sha256:
+        raise ApplyError("reconciliation artifact digest mismatch")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApplyError("reconciliation artifact JSON is invalid") from exc
+    if not isinstance(payload, dict) or raw != canonical_json_bytes(payload) + b"\n":
+        raise ApplyError("reconciliation artifact bytes are not canonical")
+    return payload
+
+
+def _verify_uploaded_warm_reconciliation_artifact(
+    client: GitHubClient,
+    *,
+    run_id: int,
+    artifact_name: str,
+    receipt_sha256: str,
+    code_sha: str,
+) -> dict[str, Any]:
+    matches: list[Mapping[str, Any]] = []
+    for attempt in range(6):
+        payload = client.get(f"/actions/runs/{run_id}/artifacts?per_page=100")
+        values = payload.get("artifacts") if isinstance(payload, Mapping) else None
+        if not isinstance(values, list):
+            raise ApplyError("reconciliation artifact listing is invalid")
+        matches = [
+            item
+            for item in values
+            if isinstance(item, Mapping) and item.get("name") == artifact_name
+        ]
+        if matches or attempt == 5:
+            break
+        time.sleep(2.0)
+    if len(matches) != 1:
+        raise ApplyError("uploaded reconciliation artifact is missing or ambiguous")
+    artifact = matches[0]
+    workflow_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is True
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(workflow_run, Mapping)
+        or workflow_run.get("id") != run_id
+        or workflow_run.get("head_branch") != "main"
+        or workflow_run.get("head_sha") != code_sha
+    ):
+        raise ApplyError("uploaded reconciliation artifact provenance mismatch")
+    raw_zip = client.request(
+        "GET",
+        f"/actions/artifacts/{int(artifact['id'])}/zip",
+        accept="application/vnd.github+json",
+        raw=True,
+    )
+    if not isinstance(raw_zip, bytes):
+        raise ApplyError("uploaded reconciliation artifact download failed")
+    receipt = _extract_warm_reconciliation_artifact(
+        raw_zip, expected_sha256=receipt_sha256
+    )
+    return {"metadata": dict(artifact), "receipt": receipt}
+
+
+def _warm_reconciliation_comment_body(
+    receipt: Mapping[str, Any],
+    *,
+    artifact_name: str,
+    receipt_sha256: str,
+    receipt_size_bytes: int,
+) -> str:
+    probe = receipt.get("probe") or {}
+    result = probe.get("result") or {}
+    archive = result.get("archive_reconciliation") or {}
+    capacity = result.get("capacity_reconciliation") or {}
+    finance = result.get("finance_reconciliation") or {}
+    services = result.get("systemd_service_gate") or {}
+    summary = {
+        "schema": WARM_RECONCILIATION_SUMMARY_SCHEMA,
+        "state": receipt.get("state"),
+        "reason": receipt.get("reason"),
+        "terminal_disposition": receipt.get("terminal_disposition"),
+        "operation_id": receipt.get("source", {}).get("operation_id"),
+        "query_only": True,
+        "production_mutation_count": 0,
+        "source": receipt.get("source"),
+        "reconciliation_release": receipt.get("reconciliation_release"),
+        "evidence_digest": receipt.get("evidence_digest"),
+        "terminal_facts": {
+            "job_status": (result.get("job_evidence") or {}).get("status"),
+            "job_attempt": (result.get("job_evidence") or {}).get("attempt"),
+            "journal_file_sha256": (result.get("job_evidence") or {}).get(
+                "journal_file_sha256"
+            ),
+            "source_absent_count": archive.get("source_absent_count"),
+            "destination_object_count": archive.get("destination_object_count"),
+            "archive_count": archive.get("archive_count"),
+            "manifest_count": archive.get("manifest_count"),
+            "raw_unlink_count": archive.get("raw_unlink_count"),
+            "reclaimed_allocated_bytes": archive.get(
+                "reclaimed_allocated_bytes"
+            ),
+            "root_min_available_bytes": capacity.get("root_min_available_bytes"),
+            "backup_min_available_bytes": capacity.get(
+                "backup_min_available_bytes"
+            ),
+            "finance_floor_bytes": finance.get(
+                "required_available_floor_bytes"
+            ),
+            "service_unit_count": services.get("unit_count"),
+            "service_pair_count": services.get("pair_count"),
+            "natural_monitor_normal": (result.get("natural_root_monitor") or {}).get(
+                "normal"
+            ),
+            "non_target_preserved": (result.get("non_target_reconciliation") or {}).get(
+                "preserved"
+            ),
+            "journald_preserved": (result.get("journald_reconciliation") or {}).get(
+                "preserved"
+            ),
+            "promo_action_count": result.get("promo_action_count"),
+            "business_data_mutation_count": result.get(
+                "business_data_mutation_count"
+            ),
+        },
+        "artifact": {
+            "name": artifact_name,
+            "file": WARM_RECONCILIATION_ARTIFACT_FILE,
+            "sha256": "sha256:" + receipt_sha256,
+            "size_bytes": receipt_size_bytes,
+            "retention_days": 90,
+        },
+    }
+    body = (
+        warm_reconciliation_marker(str(summary["operation_id"]))
+        + "\nCompact terminal supersession marker for the existing WBC0008 operation; full canonical evidence was uploaded first."
+        + "\n```json\n"
+        + json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```"
+    )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        raise ApplyError("compact reconciliation marker exceeds GitHub limit")
+    return body
+
+
+def _run_warm_reconciliation_publish(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    context = _warm_reconciliation_context(
+        args=args,
+        client=client,
+        source_pr=pr,
+        source_comments=comments,
+    )
+    context["client"] = client
+    if _existing_warm_reconciliation_marker(comments, context=context) is not None:
+        raise ApplyError("reconciliation marker became terminal before publication")
+    raw = args.output.read_bytes()
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApplyError("reconciliation receipt is unreadable") from exc
+    if (
+        not isinstance(receipt, dict)
+        or raw != canonical_json_bytes(receipt) + b"\n"
+        or receipt.get("schema") != WARM_RECONCILIATION_RECEIPT_SCHEMA
+        or receipt.get("state") not in {"done", "blocked"}
+        or receipt.get("query_only") is not True
+        or receipt.get("production_mutation_count") != 0
+        or receipt.get("source") != context["source"]
+        or receipt.get("reconciliation_release") != context["reconciliation_release"]
+        or receipt.get("evidence_digest")
+        != payload_digest(
+            {key: value for key, value in receipt.items() if key != "evidence_digest"}
+        )
+    ):
+        raise ApplyError("reconciliation receipt contract is invalid")
+    if receipt.get("state") == "done" and (
+        receipt.get("terminal_disposition") != "done/reconciled_existing_operation"
+        or not _valid_warm_reconciliation_probe(
+            (receipt.get("probe") or {}).get("result"), context=context
+        )
+    ):
+        raise ApplyError("done reconciliation receipt lacks exact terminal proof")
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("reconciliation publication lacks workflow run identity")
+    artifact_name = _warm_reconciliation_artifact_name(args.pr, run_id)
+    receipt_sha256 = digest(raw)
+    _verify_uploaded_warm_reconciliation_artifact(
+        client,
+        run_id=run_id,
+        artifact_name=artifact_name,
+        receipt_sha256=receipt_sha256,
+        code_sha=context["reconciliation_release"]["merge_sha"],
+    )
+    body = _warm_reconciliation_comment_body(
+        receipt,
+        artifact_name=artifact_name,
+        receipt_sha256=receipt_sha256,
+        receipt_size_bytes=len(raw),
+    )
+    published = client.post(f"/issues/{args.pr}/comments", {"body": body})
+    if (
+        not isinstance(published, Mapping)
+        or not is_actions_bot_comment(published)
+        or published.get("body") != body
+        or not isinstance(published.get("id"), int)
+    ):
+        raise ApplyError("reconciliation marker publication response mismatch")
+    readback_comments = list_comments(client, args.pr)
+    readback = _existing_warm_reconciliation_marker(
+        readback_comments, context=context
+    )
+    if readback is None or readback.get("id") != published.get("id"):
+        raise ApplyError("reconciliation marker publication readback mismatch")
+    print(
+        json.dumps(
+            {
+                "state": receipt["state"],
+                "terminal_disposition": receipt["terminal_disposition"],
+                "operation_id": context["source"]["operation_id"],
+                "run_id": run_id,
+                "artifact_name": artifact_name,
+                "artifact_sha256": "sha256:" + receipt_sha256,
+                "evidence_digest": receipt["evidence_digest"],
+                "comment_id": published["id"],
+                "production_mutation_count": 0,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_warm_reconciliation_mode(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+) -> int:
+    if args.authorization_comment_id <= 0:
+        raise ApplyError("warm archive reconciliation requires authorization comment")
+    if args.reconciliation_phase == "preflight":
+        return _run_warm_reconciliation_preflight(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    if args.reconciliation_phase == "collect":
+        return _run_warm_reconciliation_collect(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    if args.reconciliation_phase == "publish":
+        return _run_warm_reconciliation_publish(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    raise ApplyError("warm archive reconciliation phase is invalid")
 
 
 def _load_legacy_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
@@ -3010,6 +4080,7 @@ def main() -> int:
             "receipt-recovery",
             "warm-archive-readiness",
             "warm-archive-mount-probe",
+            "warm-archive-receipt-reconciliation",
         ),
         default="scope-goal",
     )
@@ -3024,6 +4095,15 @@ def main() -> int:
     parser.add_argument("--source-run-id", type=int)
     parser.add_argument("--source-artifact-name")
     parser.add_argument("--source-receipt-sha256")
+    parser.add_argument("--blocked-comment-id", type=int, default=0)
+    parser.add_argument("--reconciliation-pr", type=int, default=0)
+    parser.add_argument("--reconciliation-release-operation-id")
+    parser.add_argument(
+        "--reconciliation-phase",
+        choices=("preflight", "collect", "publish"),
+        default="preflight",
+    )
+    parser.add_argument("--github-output")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     token = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -3034,6 +4114,13 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode == "warm-archive-receipt-reconciliation":
+        return _run_warm_reconciliation_mode(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
     if args.authorization_mode == "warm-archive-mount-probe":
         return _run_warm_mount_probe_mode(
             args=args,
