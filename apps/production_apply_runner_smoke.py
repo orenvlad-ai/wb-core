@@ -469,6 +469,62 @@ def main() -> None:
         merge_sha=MERGE_SHA,
     )
     assert parsed_readiness == readiness_payload
+    fresh_release_operation = "release-v2-test-after-autoanswers-terminalization"
+    fresh_readiness_id = apply.warm_readiness_id(
+        "orenvlad-ai/wb-core", 1050, fresh_release_operation
+    )
+    assert fresh_readiness_id != readiness_id
+    blocked_old_readiness = {
+        **readiness_payload,
+        "state": "blocked",
+        "reason": "required_systemd_service_gate_blocked",
+    }
+    old_blocked_comment = {
+        "user": {"login": "github-actions[bot]"},
+        "body": apply.warm_readiness_marker(readiness_id)
+        + "\n```json\n"
+        + json.dumps(blocked_old_readiness)
+        + "\n```",
+    }
+    try:
+        apply.parse_warm_readiness_receipt(
+            [old_blocked_comment],
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
+            release_operation="release-v2-test",
+            merge_sha=MERGE_SHA,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("blocked readiness receipt must never become reusable")
+    fresh_readiness_payload = {
+        **readiness_payload,
+        "readiness_id": fresh_readiness_id,
+        "release_operation_id": fresh_release_operation,
+        "projection_manifest_path": (
+            "/opt/wb-core-runtime/state/private-evidence/"
+            f"root-warm-archive-readiness/{fresh_readiness_id}/"
+            "root-warm-archive-readiness-projection-20260827T120000Z.json"
+        ),
+    }
+    parsed_fresh_readiness = apply.parse_warm_readiness_receipt(
+        [
+            old_blocked_comment,
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": apply.warm_readiness_marker(fresh_readiness_id)
+                + "\n```json\n"
+                + json.dumps(fresh_readiness_payload)
+                + "\n```",
+            },
+        ],
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+        release_operation=fresh_release_operation,
+        merge_sha=MERGE_SHA,
+    )
+    assert parsed_fresh_readiness == fresh_readiness_payload
     systemd_gate = {
         "classification": "required_units_unhealthy",
         "failing_unit_count": 1,
