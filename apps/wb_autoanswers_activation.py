@@ -33,6 +33,7 @@ from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridg
 from packages.application.root_storage_policy import (
     admit_root_write,
     predict_sqlite_backup_bytes,
+    storage_destination_root,
 )
 from packages.application.wb_autoanswers_runtime import (
     AUTOANSWERS_DB_FILENAME,
@@ -609,19 +610,24 @@ def _create_current_compressed_schema_backup(
     """Replace the old backup only after a newer coherent snapshot is recoverable."""
 
     database = runtime_dir / "registry_upload_runtime.sqlite3"
-    staging_dir = runtime_dir / ".wb_autoanswers_capacity_recovery"
-    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
-    admit_root_write(
-        owner="autoanswers_activation_candidate",
-        destination=staging,
-        predicted_output_bytes=predict_sqlite_backup_bytes(database),
+    canonical_runtime = Path("/opt/wb-core-runtime/state")
+    hosted_runtime = runtime_dir.resolve(strict=False) == canonical_runtime
+    staging_dir = (
+        storage_destination_root("autoanswers_activation_candidate")
+        if hosted_runtime
+        else runtime_dir / ".wb_autoanswers_capacity_recovery"
     )
-    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(staging_dir, 0o700)
+    staging = staging_dir / f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__current.sqlite3"
     staging_manifest = staging.with_suffix(staging.suffix + ".manifest.json")
-    backup_dir = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
-    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(backup_dir, 0o700)
+    schema_root = f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    backup_dir = (
+        storage_destination_root(
+            "autoanswers_activation_candidate",
+            relative_root=schema_root,
+        )
+        if hosted_runtime
+        else runtime_dir / "backups" / schema_root
+    )
     archive = backup_dir / (
         f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__capacity_recovery.sqlite3.zst"
     )
@@ -634,6 +640,18 @@ def _create_current_compressed_schema_backup(
         staging.unlink(missing_ok=True)
         staging_manifest.unlink(missing_ok=True)
         return {"status": "already_verified", **existing, "legacy_raw_replaced": True}
+
+    predicted_copy_bytes = predict_sqlite_backup_bytes(database)
+    admit_root_write(
+        owner="autoanswers_activation_candidate",
+        destination=staging,
+        predicted_output_bytes=predicted_copy_bytes,
+        predicted_temporary_bytes=predicted_copy_bytes,
+    )
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(staging_dir, 0o700)
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
 
     snapshot_metadata: dict[str, Any] | None = None
     if staging.is_file() and staging_manifest.is_file():
@@ -648,10 +666,10 @@ def _create_current_compressed_schema_backup(
     if snapshot_metadata is None:
         staging.unlink(missing_ok=True)
         staging_manifest.unlink(missing_ok=True)
-        root_free = shutil.disk_usage(runtime_dir).free
-        root_required = database.stat().st_size + BACKUP_OPERATIONAL_HEADROOM_BYTES
-        if root_free < root_required:
-            raise RuntimeError("insufficient root-volume capacity for coherent replacement backup")
+        backup_free = shutil.disk_usage(staging_dir).free
+        backup_required = database.stat().st_size + BACKUP_OPERATIONAL_HEADROOM_BYTES
+        if backup_free < backup_required:
+            raise RuntimeError("insufficient backup-volume capacity for coherent replacement backup")
         source_uri = f"file:{database.resolve()}?mode=ro"
         try:
             with closing(

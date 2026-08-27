@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     admission.add_argument("--owner", required=True)
     admission.add_argument("--destination", type=Path, required=True)
     admission.add_argument("--predicted-output-bytes", type=int, required=True)
+    admission.add_argument("--predicted-temporary-bytes", type=int, default=0)
+    admission.add_argument("--predicted-readback-bytes", type=int, default=0)
+    admission.add_argument("--control-reserve-bytes", type=int, default=0)
 
     subparsers.add_parser("journald-activate")
     subparsers.add_parser("journald-readback")
@@ -86,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
                 owner=args.owner,
                 destination=args.destination,
                 predicted_output_bytes=args.predicted_output_bytes,
+                predicted_temporary_bytes=args.predicted_temporary_bytes,
+                predicted_readback_bytes=args.predicted_readback_bytes,
+                control_reserve_bytes=args.control_reserve_bytes,
                 policy=policy,
             )
             print(_canonical_json(result))

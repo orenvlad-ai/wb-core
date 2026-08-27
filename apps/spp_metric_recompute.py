@@ -23,6 +23,7 @@ from packages.contracts.spp_block import SppRequest  # noqa: E402
 from packages.application.root_storage_policy import (  # noqa: E402
     admit_root_write,
     predict_sqlite_backup_bytes,
+    storage_destination_root,
 )
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -391,7 +392,12 @@ def _coerce_float(value: Any) -> float | None:
 
 
 def _backup_db(db_path: Path) -> Path:
-    backup_dir = db_path.parent / "backups"
+    canonical_runtime = Path("/opt/wb-core-runtime/state")
+    backup_dir = (
+        storage_destination_root("spp_metric_recompute")
+        if db_path.resolve().is_relative_to(canonical_runtime)
+        else db_path.parent / "backups"
+    )
     target = backup_dir / f"spp_recompute__{_utc_now().replace(':', '').replace('-', '')}.sqlite3"
     admit_root_write(
         owner="spp_metric_recompute",

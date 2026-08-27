@@ -163,7 +163,7 @@ def dry_payload(material: str = "b") -> dict[str, object]:
         "partial_date_count": 5,
         "unavailable_date_count": 0,
         "manifest_path": (
-            "/opt/wb-core-runtime/state/private-evidence/production-goals/"
+            "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
             "op/inventory-history-backfill-plan-20260825T140615Z.json"
         ),
         "manifest_sha256": "sha256:" + "c" * 64,

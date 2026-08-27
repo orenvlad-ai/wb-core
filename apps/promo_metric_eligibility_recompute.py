@@ -23,6 +23,7 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
 from packages.application.root_storage_policy import (  # noqa: E402
     admit_root_write,
     predict_sqlite_backup_bytes,
+    storage_destination_root,
 )
 
 
@@ -513,7 +514,12 @@ def _to_jsonable(value: Any) -> Any:
 
 
 def _backup_sqlite(db_path: Path) -> str:
-    backup_dir = db_path.parent / "backups" / "promo_metric_eligibility_recompute"
+    canonical_runtime = Path("/opt/wb-core-runtime/state")
+    backup_dir = (
+        storage_destination_root("promo_metric_eligibility_recompute")
+        if db_path.resolve().is_relative_to(canonical_runtime)
+        else db_path.parent / "backups" / "promo_metric_eligibility_recompute"
+    )
     backup_path = backup_dir / f"{db_path.stem}__{_now_stamp()}.sqlite3"
     admit_root_write(
         owner="promo_metric_eligibility_recompute",
