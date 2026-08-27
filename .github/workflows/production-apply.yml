@@ -14,6 +14,7 @@ on:
           - receipt-recovery
           - warm-archive-readiness
           - warm-archive-mount-probe
+          - warm-archive-receipt-reconciliation
       pr:
         description: Exact merged PR number
         required: true
@@ -55,6 +56,20 @@ on:
         required: false
         default: 0
         type: number
+      blocked_comment_id:
+        description: Exact immutable blocked Apply marker comment id
+        required: false
+        default: 0
+        type: number
+      reconciliation_pr:
+        description: Exact merged repo-only reconciliation release PR
+        required: false
+        default: 0
+        type: number
+      reconciliation_release_operation_id:
+        description: Exact repo-only Release Runner operation for reconciliation code
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -62,7 +77,7 @@ permissions:
 jobs:
   apply_once:
     name: One exact production apply and reconciliation
-    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe'
+    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation'
     permissions:
       contents: read
       issues: write
@@ -229,3 +244,91 @@ jobs:
           path: ${{ runner.temp }}/production-apply-receipt.json
           if-no-files-found: warn
           retention-days: 90
+
+  warm_archive_receipt_reconciliation:
+    name: Query-only reconciliation of one existing warm archive operation
+    if: inputs.authorization_mode == 'warm-archive-receipt-reconciliation'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    steps:
+      - name: Checkout exact trusted-main reconciliation runner
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact source and suppress an already terminal operation
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode warm-archive-receipt-reconciliation
+          --reconciliation-phase preflight
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --github-output "$GITHUB_OUTPUT"
+          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-preflight.json"
+
+      - name: Execute one bounded query-only SSH probe
+        if: steps.preflight.outputs.probe_required == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode warm-archive-receipt-reconciliation
+          --reconciliation-phase collect
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
+
+      - name: Upload full immutable reconciliation evidence first
+        if: steps.preflight.outputs.probe_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-warm-archive-reconciliation-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/root-warm-archive-reconciliation-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Verify uploaded evidence and publish one compact supersession marker
+        if: steps.preflight.outputs.probe_required == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode warm-archive-receipt-reconciliation
+          --reconciliation-phase publish
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"

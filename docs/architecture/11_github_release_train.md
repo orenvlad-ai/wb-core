@@ -204,7 +204,8 @@ production-data mutation is admitted by this deploy binding.
 
 Apply workflow имеет только manual `workflow_dispatch` и production
 environment. Он поддерживает fail-closed scope-goal, exact-manifest,
-warm-archive-mount-probe, warm-archive-readiness и receipt-recovery modes.
+warm-archive-mount-probe, warm-archive-readiness, receipt-recovery и
+warm-archive-receipt-reconciliation modes.
 
 Legacy `exact-manifest` inputs bind PR, merge/deployed SHA, manifest SHA-256,
 durable operation id и exact authorization comment id. Authorization comment
@@ -402,6 +403,47 @@ operation/digest, non-done receipt, incomplete evidence, чужой marker ил�
 публикует original receipt payload и делает exact comment readback; один уже
 существующий Actions-bot comment с byte-semantically тем же receipt считается
 idempotent `already_terminal`, а второй comment не создаётся.
+
+### Existing WBC0008 receipt reconciliation
+
+`warm-archive-receipt-reconciliation` — отдельный repo-only contour только для
+уже submitted exact-six WBC0008 operation, у которой source Apply run завершён
+success, detached job имеет `succeeded/attempt=1`, а immutable source receipt и
+единственный Actions-bot marker имеют ровно `state=blocked`, `apply_count=1` и
+reason `post-submit-readback-not-reconciled`. Inputs обязаны exact-bind source
+PR/run/artifact name/artifact SHA-256, owner authorization comment, blocked
+marker, release/readiness/operation/job/manifest identities, deployed SHA и
+отдельный merged `repo_only/done` Release receipt новой trusted-main
+reconciliation code. Любой другой state/reason/scope или digest fails closed.
+
+После GitHub-only preflight workflow выполняет не более одного SSH process с
+`PYTHONDONTWRITEBYTECODE=1`. Переданный через stdin probe имеет только direct
+read и allowlisted `systemctl show`/`systemd-analyze cat-config` primitives. В
+нём отсутствуют readiness, submit/apply/job creation, archive worker,
+`readback_batch`, full restore/decompression-to-file, temp/lock acquisition,
+service start/restart, timer change, SQL/file write и unlink. Probe сверяет
+immutable job request/status/result и complete journal, ровно один submit,
+exact-six source absence, exact 12 destination objects без foreign/temp/
+partial/pending, текущие archive/manifest hashes и сохранённые stream/full-
+restore/SQLite proof digests, six unlink intents/completions и reclaimed bytes.
+Он также требует отсутствие active sanitation jobs/held locks, три стабильных
+capacity sample выше root/Finance floors, свежий natural monitor `normal`, все
+27 units/12 pairs, unchanged journald, direct non-target/StoreRegistry
+identities и zero Promo/business/non-target mutation.
+
+Полный canonical terminal receipt публикуется immutable Actions artifact до
+любого нового PR comment. Затем на original operation PR добавляется один
+отдельный compact supersession marker, который не изменяет старый receipt или
+blocked marker и binds source artifact/comment, reconciliation release,
+artifact SHA-256/evidence digest и terminal disposition
+`done/reconciled_existing_operation`. Повтор exact inputs сначала скачивает и
+проверяет уже bound artifact: exact same digest даёт `already_terminal` без SSH
+и без второго comment; duplicate/foreign marker или любой different artifact/
+receipt digest fails closed. Probe failure может опубликовать только один
+immutable `blocked` reconciliation receipt/marker и никогда не публикует
+`done`. Production mutation count этого contour всегда равен нулю.
+Authoritative migration-159 terminal addendum находится в
+[`159_root_storage_warm_archive_wbc0008_006_receipt_reconciliation.md`](../../migration/159_root_storage_warm_archive_wbc0008_006_receipt_reconciliation.md).
 
 ## Compatibility and rollback
 

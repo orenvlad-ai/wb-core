@@ -162,6 +162,16 @@ actions. Blind retry, новый submit и guessed success запрещены. R
 terminal old identity не переиспользуется для следующей correction; создаётся
 fresh sequential identity.
 
+Отложенное terminal receipt reconciliation той же уже submitted operation —
+`AUTO_CONTINUE`, если exact immutable source receipt имеет единственный
+allowlisted post-submit readback blocker, новый trusted code release repo-only,
+remote contour query-only и production mutation count равен нулю. Такая
+supersession завершает evidence/receipt того же operation id; она не является
+новой correction, readiness, submit, job или разрешением повторить mutation.
+Любая новая final/temporary action, другой blocker/scope/digest или ambiguous
+preexisting supersession marker остаётся fail-closed и требует обычной fresh
+route decision.
+
 ## Owner publication deduplication
 
 Human decision material состоит из goal, exact owner, sorted reason codes и
