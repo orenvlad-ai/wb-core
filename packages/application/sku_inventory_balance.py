@@ -8,8 +8,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hashlib import sha256
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
+import re
 import sqlite3
+import threading
+import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
@@ -23,6 +27,13 @@ from packages.business_time import current_business_date_iso
 
 CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v2"
 FORMULA_VERSION = "sku_inventory_balance_conservative_pace_v2"
+CALCULATION_OPERATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance_operation/v1"
+CALCULATION_OPERATION_ACCEPTANCE_CONTRACT = (
+    "sheet_vitrina_v1_sku_inventory_balance_operation_acceptance/v1"
+)
+CALCULATION_OPERATIONS_PATH = (
+    "/v1/sheet-vitrina-v1/sku-management/inventory-balance/operations"
+)
 CONFIG_KEY = "sku_inventory_balance"
 CONFIG_SCHEMA_VERSION = 1
 DRY_RUN_MODE = "dry_run"
@@ -54,6 +65,8 @@ BALANCE_COLUMNS = (
 )
 MANDATORY_COLUMNS = ("select", "product")
 DEFAULT_VISIBLE_COLUMNS = BALANCE_COLUMNS
+_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_LOGGER = logging.getLogger(__name__)
 
 
 class SkuInventoryBalanceError(SkuManagementError):
@@ -166,7 +179,11 @@ class SkuInventoryBalanceBlock:
                 "HTTP inventory-balance runtime accepts only the dry-run adapter",
                 http_status=500,
             )
+        self._calculation_worker_lock = threading.Lock()
+        self._calculation_worker_thread: threading.Thread | None = None
+        self._calculation_worker_operation_id = ""
         self.ensure_schema()
+        self._terminalize_interrupted_calculation_operations()
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -174,6 +191,7 @@ class SkuInventoryBalanceBlock:
                 """
                 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_inventory_balance_calculations (
                     calculation_id TEXT PRIMARY KEY,
+                    operation_id TEXT,
                     previous_calculation_id TEXT,
                     contract_name TEXT NOT NULL,
                     formula_version TEXT NOT NULL,
@@ -185,6 +203,35 @@ class SkuInventoryBalanceBlock:
                 );
                 CREATE INDEX IF NOT EXISTS inventory_balance_calculations_created
                 ON sheet_vitrina_v1_inventory_balance_calculations(created_at DESC, calculation_id DESC);
+                CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_inventory_balance_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    user_key TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    contract_name TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    acceptance_receipt_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    progress_percent INTEGER NOT NULL,
+                    calculation_id TEXT,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    outcome_json TEXT NOT NULL DEFAULT '{}',
+                    active_slot INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    UNIQUE(user_key, idempotency_key),
+                    UNIQUE(calculation_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS inventory_balance_operations_active_slot
+                ON sheet_vitrina_v1_inventory_balance_operations(active_slot)
+                WHERE active_slot IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS inventory_balance_operations_user_created
+                ON sheet_vitrina_v1_inventory_balance_operations(user_key, created_at DESC, operation_id DESC);
                 CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_inventory_balance_overrides (
                     calculation_id TEXT NOT NULL,
                     target_key TEXT NOT NULL,
@@ -258,6 +305,22 @@ class SkuInventoryBalanceBlock:
                 BEGIN SELECT RAISE(ABORT, 'inventory balance outcomes are append-only'); END;
                 """
             )
+            calculation_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(sheet_vitrina_v1_inventory_balance_calculations)"
+                ).fetchall()
+            }
+            if "operation_id" not in calculation_columns:
+                conn.execute(
+                    "ALTER TABLE sheet_vitrina_v1_inventory_balance_calculations "
+                    "ADD COLUMN operation_id TEXT"
+                )
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS inventory_balance_calculations_operation
+                   ON sheet_vitrina_v1_inventory_balance_calculations(operation_id)
+                   WHERE operation_id IS NOT NULL"""
+            )
             conn.commit()
 
     def get_settings(self, *, user_key: str) -> dict[str, Any]:
@@ -294,6 +357,350 @@ class SkuInventoryBalanceBlock:
             )
         return self.get_settings(user_key=user_key)
 
+    def start_calculation_operation(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        operation_id = _operation_token(payload.get("operation_id"), "operation_id")
+        idempotency_key = _operation_token(
+            payload.get("idempotency_key"),
+            "idempotency_key",
+        )
+        settings_payload = self.get_settings(user_key=user_key)
+        settings = _sanitize_calculation_settings(
+            payload.get("calculation")
+            if isinstance(payload.get("calculation"), Mapping)
+            else settings_payload.get("calculation")
+        )
+        request_payload = {"calculation": settings}
+        request_json = _json(request_payload)
+        request_digest = _digest(request_payload)
+        created_at = self.timestamp_factory()
+        acceptance_receipt = {
+            "contract_name": CALCULATION_OPERATION_ACCEPTANCE_CONTRACT,
+            "operation_contract": CALCULATION_OPERATION_CONTRACT,
+            "operation_id": operation_id,
+            "state": "accepted",
+            "status_path": f"{CALCULATION_OPERATIONS_PATH}/{operation_id}",
+            "accepted": True,
+            "idempotent": True,
+        }
+        acceptance_json = _json(acceptance_receipt)
+        acceptance_receipt = json.loads(acceptance_json)
+        created = False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """SELECT operation_id,request_digest,acceptance_receipt_json
+                   FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE user_key=? AND idempotency_key=?""",
+                (user_key, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_digest"]) != request_digest:
+                    raise SkuInventoryBalanceError(
+                        "Ключ операции уже использован с другими параметрами расчёта.",
+                        http_status=409,
+                        payload={"code": "idempotency_key_payload_mismatch"},
+                    )
+                conn.rollback()
+                return json.loads(str(existing["acceptance_receipt_json"]))
+            identity_collision = conn.execute(
+                """SELECT user_key,idempotency_key FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE operation_id=?""",
+                (operation_id,),
+            ).fetchone()
+            if identity_collision is not None:
+                raise SkuInventoryBalanceError(
+                    "Идентификатор операции уже занят другой операцией.",
+                    http_status=409,
+                    payload={"code": "operation_id_conflict"},
+                )
+            active = conn.execute(
+                """SELECT operation_id FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE active_slot=1 LIMIT 1"""
+            ).fetchone()
+            if active is not None:
+                raise SkuInventoryBalanceError(
+                    "Другой расчёт баланса запасов уже выполняется. Дождитесь его завершения.",
+                    http_status=409,
+                    payload={"code": "calculation_operation_busy"},
+                )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_inventory_balance_operations(
+                       operation_id,user_key,idempotency_key,contract_name,request_digest,
+                       request_json,acceptance_receipt_json,state,phase,progress_percent,
+                       active_slot,created_at,updated_at,created_by
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    operation_id,
+                    user_key,
+                    idempotency_key,
+                    CALCULATION_OPERATION_CONTRACT,
+                    request_digest,
+                    request_json,
+                    acceptance_json,
+                    "accepted",
+                    "accepted",
+                    0,
+                    1,
+                    created_at,
+                    created_at,
+                    actor,
+                ),
+            )
+            conn.commit()
+            created = True
+        self._log_calculation_operation(
+            operation_id,
+            phase="accepted",
+            duration_ms=0,
+            outcome="accepted",
+        )
+        if created and not self._start_calculation_worker(operation_id):
+            self._fail_calculation_operation(
+                operation_id,
+                error_code="worker_capacity_unavailable",
+                error_message="Не удалось запустить bounded worker. Создайте новую операцию.",
+                release_slot=True,
+            )
+        return acceptance_receipt
+
+    def get_calculation_operation(
+        self,
+        operation_id: str,
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        normalized_id = _operation_token(operation_id, "operation_id")
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE operation_id=? AND user_key=?""",
+                (normalized_id, user_key),
+            ).fetchone()
+        if row is None:
+            raise SkuInventoryBalanceError(
+                "Операция расчёта не найдена.",
+                http_status=404,
+                payload={"code": "calculation_operation_not_found"},
+            )
+        return self._calculation_operation_payload(row)
+
+    def latest_calculation_operation(self, *, user_key: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE user_key=? ORDER BY created_at DESC,operation_id DESC LIMIT 1""",
+                (user_key,),
+            ).fetchone()
+        return self._calculation_operation_payload(row) if row is not None else None
+
+    def _start_calculation_worker(self, operation_id: str) -> bool:
+        with self._calculation_worker_lock:
+            active = self._calculation_worker_thread
+            if active is not None and active.is_alive():
+                return self._calculation_worker_operation_id == operation_id
+            worker = threading.Thread(
+                target=self._execute_calculation_operation,
+                args=(operation_id,),
+                name="sku-inventory-balance-operation",
+                daemon=True,
+            )
+            self._calculation_worker_operation_id = operation_id
+            self._calculation_worker_thread = worker
+            worker.start()
+            return True
+
+    def _execute_calculation_operation(self, operation_id: str) -> None:
+        started_monotonic = time.monotonic()
+        try:
+            started_at = self.timestamp_factory()
+            with self._connect() as conn:
+                claimed = conn.execute(
+                    """UPDATE sheet_vitrina_v1_inventory_balance_operations
+                       SET state='running',phase='building_evidence',progress_percent=10,
+                           started_at=?,updated_at=?
+                       WHERE operation_id=? AND state='accepted' AND active_slot=1""",
+                    (started_at, started_at, operation_id),
+                ).rowcount
+                conn.commit()
+                if claimed != 1:
+                    return
+                row = conn.execute(
+                    """SELECT request_json,user_key,created_by
+                       FROM sheet_vitrina_v1_inventory_balance_operations
+                       WHERE operation_id=?""",
+                    (operation_id,),
+                ).fetchone()
+            if row is None:
+                return
+            self._log_calculation_operation(
+                operation_id,
+                phase="building_evidence",
+                duration_ms=0,
+                outcome="running",
+            )
+            request_payload = json.loads(str(row["request_json"]))
+            self.calculate(
+                request_payload,
+                user_key=str(row["user_key"]),
+                actor=str(row["created_by"]),
+                operation_id=operation_id,
+            )
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            self._log_calculation_operation(
+                operation_id,
+                phase="succeeded",
+                duration_ms=duration_ms,
+                outcome="calculation_created",
+            )
+        except Exception:
+            self._fail_calculation_operation(
+                operation_id,
+                error_code="calculation_failed",
+                error_message=(
+                    "Расчёт не завершён. Результат не создан; повторите действие новой операцией."
+                ),
+            )
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            self._log_calculation_operation(
+                operation_id,
+                phase="failed",
+                duration_ms=duration_ms,
+                outcome="failed_before_calculation",
+            )
+        finally:
+            with self._calculation_worker_lock:
+                if self._calculation_worker_operation_id == operation_id:
+                    self._calculation_worker_operation_id = ""
+                    self._calculation_worker_thread = None
+            self._release_calculation_operation_slot(operation_id)
+
+    def _fail_calculation_operation(
+        self,
+        operation_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        release_slot: bool = False,
+    ) -> None:
+        finished_at = self.timestamp_factory()
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_operations
+                   SET state='failed',phase='failed',progress_percent=100,
+                       error_code=?,error_message=?,outcome_json=?,active_slot=?,
+                       finished_at=?,updated_at=?
+                   WHERE operation_id=? AND state IN ('accepted','running')
+                         AND calculation_id IS NULL""",
+                (
+                    error_code,
+                    error_message,
+                    _json({"durable_outcome": "no_calculation_created", "retryable": True}),
+                    None if release_slot else 1,
+                    finished_at,
+                    finished_at,
+                    operation_id,
+                ),
+            )
+            conn.commit()
+
+    def _release_calculation_operation_slot(self, operation_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_operations
+                   SET active_slot=NULL
+                   WHERE operation_id=? AND state IN ('succeeded','failed')""",
+                (operation_id,),
+            )
+            conn.commit()
+
+    def _terminalize_interrupted_calculation_operations(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_operations
+                   SET active_slot=NULL WHERE state IN ('succeeded','failed')"""
+            )
+            conn.commit()
+            active_rows = conn.execute(
+                """SELECT operation_id FROM sheet_vitrina_v1_inventory_balance_operations
+                   WHERE state IN ('accepted','running') AND active_slot=1"""
+            ).fetchall()
+        if not active_rows:
+            return
+        for row in active_rows:
+            operation_id = str(row["operation_id"])
+            self._fail_calculation_operation(
+                operation_id,
+                error_code="runtime_interrupted",
+                error_message=(
+                    "Процесс расчёта был прерван до создания результата. "
+                    "Запустите новый расчёт новой операцией."
+                ),
+                release_slot=True,
+            )
+            self._log_calculation_operation(
+                operation_id,
+                phase="failed",
+                duration_ms=0,
+                outcome="runtime_interrupted",
+            )
+
+    def _calculation_operation_payload(self, row: sqlite3.Row) -> dict[str, Any]:
+        state = str(row["state"])
+        calculation_id = str(row["calculation_id"] or "")
+        started_at = str(row["started_at"] or "")
+        finished_at = str(row["finished_at"] or "")
+        result = self.get_calculation(calculation_id) if state == "succeeded" and calculation_id else None
+        return {
+            "contract_name": CALCULATION_OPERATION_CONTRACT,
+            "operation_id": str(row["operation_id"]),
+            "state": state,
+            "phase": str(row["phase"]),
+            "progress": {
+                "percent": int(row["progress_percent"] or 0),
+                "terminal": state in {"succeeded", "failed"},
+            },
+            "calculation_id": calculation_id or None,
+            "result": result,
+            "error": (
+                {
+                    "code": str(row["error_code"]),
+                    "message": str(row["error_message"]),
+                }
+                if row["error_code"]
+                else None
+            ),
+            "outcome": json.loads(str(row["outcome_json"] or "{}")),
+            "created_at": str(row["created_at"]),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_ms": _iso_duration_ms(started_at, finished_at),
+            "updated_at": str(row["updated_at"]),
+            "retryable_by_new_operation": state == "failed" and not calculation_id,
+            "blind_resubmit_allowed": False,
+        }
+
+    @staticmethod
+    def _log_calculation_operation(
+        operation_id: str,
+        *,
+        phase: str,
+        duration_ms: int,
+        outcome: str,
+    ) -> None:
+        _LOGGER.info(
+            "inventory_balance_operation id=%s phase=%s duration_ms=%d outcome=%s",
+            operation_id[:48],
+            phase,
+            max(int(duration_ms), 0),
+            outcome,
+        )
+
     def latest(self, *, user_key: str) -> dict[str, Any]:
         settings = self.get_settings(user_key=user_key)
         with self._connect() as conn:
@@ -317,6 +724,7 @@ class SkuInventoryBalanceBlock:
             ),
             "registry": self.list_registry(limit=20),
             "apply_capability": self._apply_capability(),
+            "calculation_operation": self.latest_calculation_operation(user_key=user_key),
         }
 
     def list_registry(self, *, limit: int = 20) -> dict[str, Any]:
@@ -376,7 +784,17 @@ class SkuInventoryBalanceBlock:
             "apply_jobs_linked": True,
         }
 
-    def calculate(self, payload: Mapping[str, Any], *, user_key: str, actor: str) -> dict[str, Any]:
+    def calculate(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+        actor: str,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_operation_id = (
+            _operation_token(operation_id, "operation_id") if operation_id else None
+        )
         settings_payload = self.get_settings(user_key=user_key)
         settings = _sanitize_calculation_settings(
             payload.get("calculation")
@@ -470,6 +888,7 @@ class SkuInventoryBalanceBlock:
                 "contract_name": CALCULATION_CONTRACT,
                 "formula_version": FORMULA_VERSION,
                 "calculation_id": calculation_id,
+                "operation_id": normalized_operation_id,
                 "previous_calculation_id": previous_id or None,
                 "created_at": now,
                 "created_by": actor,
@@ -522,13 +941,30 @@ class SkuInventoryBalanceBlock:
                 }
             )
             immutable["source_digest"] = digest
+            if normalized_operation_id is not None:
+                operation = conn.execute(
+                    """SELECT state,calculation_id FROM sheet_vitrina_v1_inventory_balance_operations
+                       WHERE operation_id=? AND user_key=?""",
+                    (normalized_operation_id, user_key),
+                ).fetchone()
+                if (
+                    operation is None
+                    or str(operation["state"]) != "running"
+                    or operation["calculation_id"] is not None
+                ):
+                    raise SkuInventoryBalanceError(
+                        "Операция расчёта потеряла exact running identity.",
+                        http_status=409,
+                        payload={"code": "calculation_operation_state_conflict"},
+                    )
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_inventory_balance_calculations(
-                       calculation_id,previous_calculation_id,contract_name,formula_version,
+                       calculation_id,operation_id,previous_calculation_id,contract_name,formula_version,
                        source_digest,settings_json,payload_json,created_at,created_by
-                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     calculation_id,
+                    normalized_operation_id,
                     previous_id or None,
                     CALCULATION_CONTRACT,
                     FORMULA_VERSION,
@@ -539,6 +975,34 @@ class SkuInventoryBalanceBlock:
                     actor,
                 ),
             )
+            if normalized_operation_id is not None:
+                updated = conn.execute(
+                    """UPDATE sheet_vitrina_v1_inventory_balance_operations
+                       SET state='succeeded',phase='succeeded',progress_percent=100,
+                           calculation_id=?,error_code='',error_message='',outcome_json=?,
+                           finished_at=?,updated_at=?
+                       WHERE operation_id=? AND user_key=? AND state='running'
+                             AND calculation_id IS NULL""",
+                    (
+                        calculation_id,
+                        _json(
+                            {
+                                "durable_outcome": "calculation_created",
+                                "calculation_id": calculation_id,
+                            }
+                        ),
+                        now,
+                        now,
+                        normalized_operation_id,
+                        user_key,
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise SkuInventoryBalanceError(
+                        "Операция расчёта не приняла exact calculation result.",
+                        http_status=409,
+                        payload={"code": "calculation_operation_result_conflict"},
+                    )
             conn.commit()
         return self.get_calculation(calculation_id)
 
@@ -957,6 +1421,7 @@ class SkuInventoryBalanceBlock:
         sources.append(["Поле", "Значение"])
         for key, value in (
             ("calculation_id", calculation.get("calculation_id")),
+            ("operation_id", calculation.get("operation_id")),
             ("previous_calculation_id", calculation.get("previous_calculation_id")),
             ("created_at", calculation.get("created_at")),
             ("source_digest", calculation.get("source_digest")),
@@ -1637,6 +2102,28 @@ def _wb_stock_evidence_label(row: Mapping[str, Any]) -> str:
             f"{evidence.get('raw_rows_digest') or 'digest unavailable'}"
         )
     return f"Складская incident-проекция WB × {coefficient}"
+
+
+def _operation_token(value: Any, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not _OPERATION_ID_RE.fullmatch(normalized):
+        raise SkuInventoryBalanceError(
+            f"{field} должен содержать 8..128 безопасных символов.",
+            http_status=422,
+            payload={"code": f"invalid_{field}"},
+        )
+    return normalized
+
+
+def _iso_duration_ms(started_at: str, finished_at: str) -> int:
+    if not started_at or not finished_at:
+        return 0
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return max(0, int((finished - started).total_seconds() * 1000))
 
 
 def _json(value: Any) -> str:

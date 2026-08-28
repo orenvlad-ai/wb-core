@@ -4227,9 +4227,11 @@
     .inventory-balance-progress-track { flex:1; height:12px; overflow:hidden; border-radius:999px; background:#10141a; border:1px solid var(--border-strong); }
     .inventory-balance-progress-fill { height:100%; width:0; background:linear-gradient(90deg,#4786ff,#55c6a9); transition:width .25s ease; }
     .inventory-balance-progress[data-state="completed"] .inventory-balance-progress-fill { background:#46b978; }
+    .inventory-balance-progress[data-state="succeeded"] .inventory-balance-progress-fill { background:#46b978; }
     .inventory-balance-progress[data-state="completed_with_errors"] .inventory-balance-progress-fill { background:#d85f5f; }
+    .inventory-balance-progress[data-state="failed"] .inventory-balance-progress-fill { background:#d85f5f; }
     .inventory-balance-progress-spinner { width:16px; height:16px; border-radius:50%; border:2px solid rgba(255,255,255,.2); border-top-color:#78a6ff; animation:inventory-balance-spin .8s linear infinite; }
-    .inventory-balance-progress:not([data-state="pending"]):not([data-state="running"]) .inventory-balance-progress-spinner { display:none; }
+    .inventory-balance-progress:not([data-state="accepted"]):not([data-state="pending"]):not([data-state="running"]) .inventory-balance-progress-spinner { display:none; }
     @keyframes inventory-balance-spin { to { transform:rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .inventory-balance-progress-spinner { animation:none; } .inventory-balance-progress-fill { transition:none; } }
     .sku-nearest-inbound { display: grid; gap: 2px; min-width: 0; }
@@ -6612,6 +6614,10 @@
           </div>
           <p class="sku-management-status" data-inventory-balance-status>Расчёт ещё не загружен.</p>
           <p class="research-error" data-inventory-balance-error></p>
+          <section class="sku-management-history inventory-balance-progress" data-inventory-balance-calculation-progress hidden>
+            <p data-inventory-balance-calculation-progress-summary></p>
+            <div class="inventory-balance-progress-meter" role="progressbar" aria-label="Прогресс расчёта баланса запасов" aria-valuemin="0" aria-valuemax="100" data-inventory-balance-calculation-progress-meter><span class="inventory-balance-progress-spinner" aria-hidden="true"></span><div class="inventory-balance-progress-track"><div class="inventory-balance-progress-fill" data-inventory-balance-calculation-progress-fill></div></div></div>
+          </section>
           <div class="sku-management-table-shell">
             <table class="sku-management-table inventory-balance-table" data-inventory-balance-table><thead data-inventory-balance-head></thead><tbody data-inventory-balance-body><tr><td>Откройте подраздел для загрузки.</td></tr></tbody></table>
           </div>
@@ -7265,6 +7271,10 @@
     const inventoryBalanceHeadNode = document.querySelector("[data-inventory-balance-head]");
     const inventoryBalanceBodyNode = document.querySelector("[data-inventory-balance-body]");
     const inventoryBalanceColumnControlsNode = document.querySelector("[data-inventory-balance-column-controls]");
+    const inventoryBalanceCalculationProgressNode = document.querySelector("[data-inventory-balance-calculation-progress]");
+    const inventoryBalanceCalculationProgressSummaryNode = document.querySelector("[data-inventory-balance-calculation-progress-summary]");
+    const inventoryBalanceCalculationProgressMeterNode = document.querySelector("[data-inventory-balance-calculation-progress-meter]");
+    const inventoryBalanceCalculationProgressFillNode = document.querySelector("[data-inventory-balance-calculation-progress-fill]");
     const inventoryBalanceProgressNode = document.querySelector("[data-inventory-balance-progress]");
     const inventoryBalanceProgressSummaryNode = document.querySelector("[data-inventory-balance-progress-summary]");
     const inventoryBalanceProgressBodyNode = document.querySelector("[data-inventory-balance-progress-body]");
@@ -7989,6 +7999,8 @@
         calculating: false,
         saving: false,
         loaded: false,
+        calculationOperation: null,
+        operationWatchToken: 0,
         settings: null,
         revision: 0,
         table: {visible_columns:[],column_order:[],column_widths:{},filters:{},preset:"all"},
@@ -23792,18 +23804,40 @@
       return {visible_columns:visible,column_order:order,column_widths:widths,filters:{search:String((source.filters||{}).search||"").slice(0,200),status:String((source.filters||{}).status||"")},preset:preset};
     }
 
+    const INVENTORY_BALANCE_OPERATION_STORAGE_KEY="sku_inventory_balance_operation_v1";
+    const INVENTORY_BALANCE_OPERATION_MAX_STATUS_READS=180;
+
+    function inventoryBalanceOperationActive(operation){return !!operation&&["accepted","running"].includes(String(operation.state||""));}
+
+    function inventoryBalanceOperationIdentity(){const uuid=(window.crypto&&typeof window.crypto.randomUUID==="function")?window.crypto.randomUUID():(Date.now().toString(36)+"-"+Math.random().toString(36).slice(2));return {operation_id:"ibop_"+uuid,idempotency_key:"ibkey_"+uuid};}
+
+    function persistInventoryBalanceOperationIdentity(identity){try{if(identity&&identity.operation_id)localStorage.setItem(INVENTORY_BALANCE_OPERATION_STORAGE_KEY,JSON.stringify(identity));else localStorage.removeItem(INVENTORY_BALANCE_OPERATION_STORAGE_KEY);}catch(_error){return;}}
+
+    function persistedInventoryBalanceOperationIdentity(){try{const parsed=JSON.parse(localStorage.getItem(INVENTORY_BALANCE_OPERATION_STORAGE_KEY)||"null");return parsed&&parsed.operation_id?parsed:null;}catch(_error){return null;}}
+
+    function inventoryBalanceOperationStatus(operation){const phase=String((operation&&operation.phase)||"");if(phase==="accepted")return "Операция принята сервером и ожидает bounded worker.";if(phase==="building_evidence")return "Собираем server-owned данные и формируем immutable расчёт…";if(phase==="succeeded")return "Расчёт завершён и сохранён в реестре.";if(phase==="failed")return String((operation.error&&operation.error.message)||"Расчёт не завершён; результат не создан.");return "Сверяем состояние расчёта на сервере…";}
+
+    function inventoryBalanceStatusDelay(){return new Promise(function(resolve){window.setTimeout(resolve,1000);});}
+
     async function loadInventoryBalance(options) {
-      if(state.inventoryBalance.loading||(state.inventoryBalance.loaded&&!(options&&options.force)))return;
+      if(state.inventoryBalance.loading)return;
+      if(state.inventoryBalance.loaded&&!(options&&options.force)){if(inventoryBalanceOperationActive(state.inventoryBalance.calculationOperation))watchInventoryBalanceOperation(state.inventoryBalance.calculationOperation.operation_id);return;}
       state.inventoryBalance.loading=true;state.inventoryBalance.error="";renderInventoryBalance();
+      let operationToWatch="";
       try{
         const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_path,{headers:{"Accept":"application/json"}});
         const payload=await readJsonResponse(response,"non-json inventory balance response");
         if(!response.ok)throw new Error((payload&&payload.error)||("inventory balance route returned "+response.status));
-        const settings=payload.settings||{};state.inventoryBalance.settings=settings.calculation||{};state.inventoryBalance.revision=Number(settings.revision||0);state.inventoryBalance.table=normalizeInventoryBalanceTable(settings.table||{});state.inventoryBalance.calculation=payload.calculation||null;state.inventoryBalance.applyJob=payload.apply_job||state.inventoryBalance.applyJob;state.inventoryBalance.registry=payload.registry||{items:[]};state.inventoryBalance.loaded=true;
+        const settings=payload.settings||{};state.inventoryBalance.settings=settings.calculation||{};state.inventoryBalance.revision=Number(settings.revision||0);state.inventoryBalance.table=normalizeInventoryBalanceTable(settings.table||{});state.inventoryBalance.calculation=payload.calculation||null;state.inventoryBalance.applyJob=payload.apply_job||state.inventoryBalance.applyJob;state.inventoryBalance.registry=payload.registry||{items:[]};state.inventoryBalance.calculationOperation=payload.calculation_operation||null;state.inventoryBalance.loaded=true;
+        if(state.inventoryBalance.calculationOperation&&state.inventoryBalance.calculationOperation.state==="succeeded"&&state.inventoryBalance.calculationOperation.result)state.inventoryBalance.calculation=state.inventoryBalance.calculationOperation.result;
         const available=new Set((state.inventoryBalance.calculation&&state.inventoryBalance.calculation.rows||[]).filter(function(row){return row.select_available;}).map(function(row){return Number(row.nm_id);}));
         state.inventoryBalance.selectedNmIds=new Set(Array.from(state.inventoryBalance.selectedNmIds).filter(function(id){return available.has(Number(id));}));
+        const persisted=persistedInventoryBalanceOperationIdentity();
+        if(inventoryBalanceOperationActive(state.inventoryBalance.calculationOperation))operationToWatch=String(state.inventoryBalance.calculationOperation.operation_id||"");else if(persisted&&(!state.inventoryBalance.calculationOperation||persisted.operation_id!==state.inventoryBalance.calculationOperation.operation_id))operationToWatch=String(persisted.operation_id||"");
+        state.inventoryBalance.calculating=!!operationToWatch;
         syncInventoryBalanceInputs();
-      }catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.loading=false;renderInventoryBalance();}
+      }catch(error){state.inventoryBalance.error="Не удалось загрузить состояние раздела. Повторите «Обновить».";}finally{state.inventoryBalance.loading=false;renderInventoryBalance();}
+      if(operationToWatch)watchInventoryBalanceOperation(operationToWatch);
     }
 
     function syncInventoryBalanceInputs(){
@@ -23822,8 +23856,42 @@
     }
 
     async function calculateInventoryBalance(){
-      if(state.inventoryBalance.calculating)return;state.inventoryBalance.calculating=true;state.inventoryBalance.error="";renderInventoryBalance();
-      try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_calculate_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({calculation:inventoryBalanceSettingsFromInputs()})});const payload=await readJsonResponse(response,"non-json inventory balance calculation response");if(!response.ok)throw new Error((payload&&payload.error)||("calculation route returned "+response.status));state.inventoryBalance.calculation=payload;state.inventoryBalance.selectedNmIds=new Set();await loadInventoryBalanceRegistry();}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.calculating=false;renderInventoryBalance();}
+      if(state.inventoryBalance.calculating)return;
+      const identity=inventoryBalanceOperationIdentity();
+      persistInventoryBalanceOperationIdentity(identity);
+      state.inventoryBalance.calculating=true;state.inventoryBalance.error="";state.inventoryBalance.calculationOperation={operation_id:identity.operation_id,state:"accepted",phase:"accepted",progress:{percent:0,terminal:false}};renderInventoryBalance();
+      try{
+        const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_calculate_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({operation_id:identity.operation_id,idempotency_key:identity.idempotency_key,calculation:inventoryBalanceSettingsFromInputs()})});
+        const payload=await readJsonResponse(response,"non-json inventory balance operation response");
+        if(!response.ok){state.inventoryBalance.calculating=false;state.inventoryBalance.calculationOperation=null;persistInventoryBalanceOperationIdentity(null);state.inventoryBalance.error=String((payload&&payload.error)||"Сервер не принял операцию расчёта.");renderInventoryBalance();return;}
+        if(!payload||payload.accepted!==true||!payload.operation_id){throw new Error("operation acceptance contract mismatch");}
+        identity.operation_id=String(payload.operation_id);persistInventoryBalanceOperationIdentity(identity);
+      }catch(_error){state.inventoryBalance.error="Ответ на запуск не получен. Сверяем exact operation на сервере; повторная отправка не выполняется.";renderInventoryBalance();}
+      await watchInventoryBalanceOperation(identity.operation_id);
+    }
+
+    async function watchInventoryBalanceOperation(operationId){
+      const normalized=String(operationId||"");if(!normalized)return;
+      const token=++state.inventoryBalance.operationWatchToken;state.inventoryBalance.calculating=true;renderInventoryBalance();
+      for(let attempt=0;attempt<INVENTORY_BALANCE_OPERATION_MAX_STATUS_READS;attempt+=1){
+        if(token!==state.inventoryBalance.operationWatchToken)return;
+        try{
+          const path=WEB_VITRINA_CONFIG.sku_inventory_balance_operations_path+"/"+encodeURIComponent(normalized);
+          const response=await fetch(path,{headers:{"Accept":"application/json"}});
+          const operation=await readJsonResponse(response,"non-json inventory balance operation status response");
+          if(response.status===404){state.inventoryBalance.calculating=false;state.inventoryBalance.calculationOperation=null;persistInventoryBalanceOperationIdentity(null);state.inventoryBalance.error="Сервер не подтвердил создание exact operation. Новый запуск можно выполнить безопасно.";renderInventoryBalance();return;}
+          if(!response.ok)throw new Error("operation status returned "+response.status);
+          state.inventoryBalance.calculationOperation=operation;state.inventoryBalance.error="";renderInventoryBalance();
+          if(operation.state==="succeeded"){
+            state.inventoryBalance.calculating=false;state.inventoryBalance.calculation=operation.result||state.inventoryBalance.calculation;state.inventoryBalance.selectedNmIds=new Set();persistInventoryBalanceOperationIdentity(null);await loadInventoryBalanceRegistry();renderInventoryBalance();return;
+          }
+          if(operation.state==="failed"){
+            state.inventoryBalance.calculating=false;persistInventoryBalanceOperationIdentity(null);state.inventoryBalance.error=inventoryBalanceOperationStatus(operation);renderInventoryBalance();return;
+          }
+        }catch(_error){state.inventoryBalance.error="Связь временно недоступна. Операция продолжает жить на сервере; выполняется только status readback.";renderInventoryBalance();}
+        await inventoryBalanceStatusDelay();
+      }
+      if(token===state.inventoryBalance.operationWatchToken){state.inventoryBalance.error="Расчёт всё ещё выполняется на сервере. Нажмите «Обновить» для продолжения status readback.";renderInventoryBalance();}
     }
 
     function inventoryBalanceOrderedColumns(){const byId=new Map(INVENTORY_BALANCE_COLUMNS.map(function(item){return [item.id,item];}));return (state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS).filter(function(id){return (state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS).includes(id)&&byId.has(id);}).map(function(id){return byId.get(id);});}
@@ -23837,11 +23905,16 @@
     function renderInventoryBalance(){
       if(!inventoryBalanceBodyNode)return;const columns=inventoryBalanceOrderedColumns();const calculation=state.inventoryBalance.calculation;
       if(inventoryBalanceHeadNode)inventoryBalanceHeadNode.innerHTML="<tr>"+columns.map(function(column){const width=Number((state.inventoryBalance.table.column_widths||{})[column.id]||column.width||120);return '<th data-inventory-balance-column="'+escapeHtml(column.id)+'" style="width:'+width+'px;min-width:'+width+'px">'+escapeHtml(column.label)+'</th>';}).join("")+"</tr>";
-      if(state.inventoryBalance.loading||state.inventoryBalance.calculating){inventoryBalanceBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">'+(state.inventoryBalance.calculating?"Формируем immutable расчёт…":"Загрузка…")+'</td></tr>';}else{const rows=inventoryBalanceFilteredRows();inventoryBalanceBodyNode.innerHTML=rows.length?rows.map(function(row){return '<tr data-inventory-balance-nm-id="'+escapeHtml(row.nm_id)+'">'+columns.map(function(column){return inventoryBalanceCell(column.id,row);}).join("")+"</tr>";}).join(""):'<tr><td colspan="'+columns.length+'">'+(calculation?"Нет строк по текущему фильтру.":"Нажмите «Новый расчёт».")+'</td></tr>';}
-      if(inventoryBalanceStatusNode){const count=calculation&&Array.isArray(calculation.rows)?calculation.rows.length:0;inventoryBalanceStatusNode.textContent=state.inventoryBalance.calculating?"Расчёт выполняется…":calculation?("Расчёт "+calculation.calculation_id+" · SKU: "+count+" · выбрано: "+state.inventoryBalance.selectedNmIds.size+" · live WB недоступен"):"Расчёт ещё не создан.";}
-      if(inventoryBalanceErrorNode)inventoryBalanceErrorNode.textContent=state.inventoryBalance.error||"";if(inventoryBalanceXlsxButton)inventoryBalanceXlsxButton.disabled=!calculation;if(inventoryBalanceApplyButton)inventoryBalanceApplyButton.disabled=!calculation||!state.inventoryBalance.selectedNmIds.size||state.inventoryBalance.applyRunning;
-      renderInventoryBalanceColumnControls();renderInventoryBalanceProgress();renderInventoryBalanceRegistry();
+      if(state.inventoryBalance.loading&&!calculation){inventoryBalanceBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Загрузка…</td></tr>';}else if(state.inventoryBalance.calculating&&!calculation){inventoryBalanceBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Расчёт выполняется на сервере; результат появится после durable readback.</td></tr>';}else{const rows=inventoryBalanceFilteredRows();inventoryBalanceBodyNode.innerHTML=rows.length?rows.map(function(row){return '<tr data-inventory-balance-nm-id="'+escapeHtml(row.nm_id)+'">'+columns.map(function(column){return inventoryBalanceCell(column.id,row);}).join("")+"</tr>";}).join(""):'<tr><td colspan="'+columns.length+'">'+(calculation?"Нет строк по текущему фильтру.":"Нажмите «Новый расчёт».")+'</td></tr>';}
+      if(inventoryBalanceStatusNode){const count=calculation&&Array.isArray(calculation.rows)?calculation.rows.length:0;inventoryBalanceStatusNode.textContent=state.inventoryBalance.calculating?inventoryBalanceOperationStatus(state.inventoryBalance.calculationOperation):calculation?("Расчёт "+calculation.calculation_id+" · SKU: "+count+" · выбрано: "+state.inventoryBalance.selectedNmIds.size+" · live WB недоступен"):"Расчёт ещё не создан.";}
+      if(inventoryBalanceErrorNode)inventoryBalanceErrorNode.textContent=state.inventoryBalance.error||"";
+      if(inventoryBalanceCalculateButton){inventoryBalanceCalculateButton.disabled=state.inventoryBalance.calculating||state.inventoryBalance.loading;inventoryBalanceCalculateButton.textContent=state.inventoryBalance.calculating?"Расчёт выполняется…":"Новый расчёт";}
+      if(inventoryBalanceXlsxButton)inventoryBalanceXlsxButton.disabled=!calculation||state.inventoryBalance.calculating;
+      if(inventoryBalanceApplyButton)inventoryBalanceApplyButton.disabled=!calculation||!state.inventoryBalance.selectedNmIds.size||state.inventoryBalance.applyRunning||state.inventoryBalance.calculating;
+      renderInventoryBalanceCalculationProgress();renderInventoryBalanceColumnControls();renderInventoryBalanceProgress();renderInventoryBalanceRegistry();
     }
+
+    function renderInventoryBalanceCalculationProgress(){if(!inventoryBalanceCalculationProgressNode)return;const operation=state.inventoryBalance.calculationOperation;inventoryBalanceCalculationProgressNode.hidden=!operation;if(!operation)return;const stateName=String(operation.state||"accepted");const percent=Math.min(100,Math.max(0,Number((operation.progress||{}).percent)||0));inventoryBalanceCalculationProgressNode.setAttribute("data-state",stateName);if(inventoryBalanceCalculationProgressSummaryNode)inventoryBalanceCalculationProgressSummaryNode.textContent=inventoryBalanceOperationStatus(operation)+" · "+percent+"% · "+String(operation.operation_id||"");if(inventoryBalanceCalculationProgressMeterNode){inventoryBalanceCalculationProgressMeterNode.setAttribute("aria-valuenow",String(percent));inventoryBalanceCalculationProgressMeterNode.setAttribute("aria-valuetext",inventoryBalanceOperationStatus(operation));}if(inventoryBalanceCalculationProgressFillNode)inventoryBalanceCalculationProgressFillNode.style.width=percent+"%";}
 
     function renderInventoryBalanceColumnControls(){if(!inventoryBalanceColumnControlsNode)return;const visible=new Set(state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS);const order=state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS;inventoryBalanceColumnControlsNode.innerHTML=order.map(function(id,index){const column=INVENTORY_BALANCE_COLUMNS.find(function(item){return item.id===id;});if(!column)return "";const mandatory=INVENTORY_BALANCE_MANDATORY_COLUMNS.includes(id);const width=Number((state.inventoryBalance.table.column_widths||{})[id]||column.width||120);return '<div class="sku-column-row"><label><input type="checkbox" data-inventory-balance-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked ":"")+(mandatory?"disabled ":"")+'> '+escapeHtml(column.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-inventory-balance-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-inventory-balance-column-up="'+escapeHtml(id)+'" '+(mandatory||index===0?"disabled":"")+'>↑</button><button class="button ghost" type="button" data-inventory-balance-column-down="'+escapeHtml(id)+'" '+(mandatory||index===order.length-1?"disabled":"")+'>↓</button></div>';}).join("");}
 

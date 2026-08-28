@@ -5,11 +5,16 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
+import json
 from pathlib import Path
+import socket
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
+from urllib import request as urllib_request
 import zipfile
 
 from openpyxl import load_workbook
@@ -30,11 +35,26 @@ from packages.application.sku_management import (  # noqa: E402
     _inventory_balance_aggregate_wb_evidence,
     _inventory_balance_wb_stock_from_row,
 )
+from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
+    DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_REFRESH_PATH,
+    DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+    DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH,
+    DEFAULT_SKU_INVENTORY_BALANCE_PATH,
+    DEFAULT_UPLOAD_PATH,
+    build_registry_upload_http_server,
+)
+from packages.contracts.registry_upload_http_entrypoint import (  # noqa: E402
+    RegistryUploadHttpEntrypointConfig,
+)
 
 
 class FakeRuntime:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self.runtime_dir = db_path.parent
         sqlite3.connect(db_path).close()
         self.configs: dict[tuple[str, str], dict] = {}
 
@@ -248,6 +268,39 @@ class FakeSkuManagement:
         del payload, actor
         self.commit_calls += 1
         return {"status": "success"}
+
+
+class FakeInventoryBalanceHttpEntrypoint:
+    def __init__(self, block: SkuInventoryBalanceBlock, runtime: FakeRuntime) -> None:
+        self.sku_inventory_balance_block = block
+        self.runtime = runtime
+
+    def handle_sku_inventory_balance_calculate_request(
+        self,
+        payload: dict,
+        *,
+        user_key: str,
+        actor: str,
+    ) -> dict:
+        return self.sku_inventory_balance_block.start_calculation_operation(
+            payload,
+            user_key=user_key,
+            actor=actor,
+        )
+
+    def handle_sku_inventory_balance_operation_request(
+        self,
+        operation_id: str,
+        *,
+        user_key: str,
+    ) -> dict:
+        return self.sku_inventory_balance_block.get_calculation_operation(
+            operation_id,
+            user_key=user_key,
+        )
+
+    def handle_sku_inventory_balance_request(self, *, user_key: str) -> dict:
+        return self.sku_inventory_balance_block.latest(user_key=user_key)
 
 
 class FakeBalanceSalesHistory:
@@ -957,7 +1010,214 @@ def main() -> None:
         assert sku.preview_calls == 0
         assert sku.commit_calls == 0
 
+        operation_payload = {
+            "operation_id": "ibop_unit_operation_0001",
+            "idempotency_key": "ibkey_unit_operation_0001",
+            "calculation": {"sales_period_days": 7},
+        }
+        acceptance = block.start_calculation_operation(
+            operation_payload,
+            user_key="operator",
+            actor="operator",
+        )
+        repeated_acceptance = block.start_calculation_operation(
+            operation_payload,
+            user_key="operator",
+            actor="operator",
+        )
+        acceptance_bytes = json.dumps(
+            acceptance,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        repeated_bytes = json.dumps(
+            repeated_acceptance,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        assert acceptance_bytes == repeated_bytes
+        assert acceptance["state"] == "accepted"
+        operation = _wait_operation(block, "ibop_unit_operation_0001")
+        assert operation["state"] == "succeeded"
+        assert operation["progress"] == {"percent": 100, "terminal": True}
+        assert operation["result"]["operation_id"] == "ibop_unit_operation_0001"
+        with sqlite3.connect(runtime.db_path) as conn:
+            linked = conn.execute(
+                """SELECT COUNT(*),COUNT(DISTINCT calculation_id)
+                   FROM sheet_vitrina_v1_inventory_balance_calculations
+                   WHERE operation_id=?""",
+                ("ibop_unit_operation_0001",),
+            ).fetchone()
+            assert linked == (1, 1)
+
+        original_evidence_builder = sku.build_inventory_balance_evidence
+
+        def fail_before_calculation(*, user_key: str, sales_period_days: int) -> dict:
+            del user_key, sales_period_days
+            raise RuntimeError("synthetic upstream failure")
+
+        sku.build_inventory_balance_evidence = fail_before_calculation  # type: ignore[method-assign]
+        block.start_calculation_operation(
+            {
+                "operation_id": "ibop_unit_operation_0002",
+                "idempotency_key": "ibkey_unit_operation_0002",
+                "calculation": {"sales_period_days": 7},
+            },
+            user_key="operator",
+            actor="operator",
+        )
+        failed_operation = _wait_operation(block, "ibop_unit_operation_0002")
+        sku.build_inventory_balance_evidence = original_evidence_builder  # type: ignore[method-assign]
+        assert failed_operation["state"] == "failed"
+        assert failed_operation["calculation_id"] is None
+        assert failed_operation["retryable_by_new_operation"] is True
+        assert failed_operation["blind_resubmit_allowed"] is False
+        assert failed_operation["outcome"]["durable_outcome"] == "no_calculation_created"
+
+    _http_operation_disconnect_smoke()
     print("sku_inventory_balance_smoke: ok")
+
+
+def _wait_operation(block: SkuInventoryBalanceBlock, operation_id: str) -> dict:
+    for _attempt in range(200):
+        operation = block.get_calculation_operation(operation_id, user_key="operator")
+        if operation["state"] in {"succeeded", "failed"}:
+            return operation
+        time.sleep(0.01)
+    raise AssertionError(f"operation did not finish: {operation_id}")
+
+
+def _http_operation_disconnect_smoke() -> None:
+    with tempfile.TemporaryDirectory(prefix="sku-inventory-balance-http-") as tmp:
+        runtime = FakeRuntime(Path(tmp) / "runtime.sqlite3")
+        sku = FakeSkuManagement()
+        worker_started = threading.Event()
+        worker_release = threading.Event()
+        original_builder = sku.build_inventory_balance_evidence
+
+        def blocked_builder(*, user_key: str, sales_period_days: int) -> dict:
+            worker_started.set()
+            if not worker_release.wait(timeout=5):
+                raise RuntimeError("bounded test worker release timed out")
+            return original_builder(
+                user_key=user_key,
+                sales_period_days=sales_period_days,
+            )
+
+        sku.build_inventory_balance_evidence = blocked_builder  # type: ignore[method-assign]
+        block = SkuInventoryBalanceBlock(
+            runtime=runtime,
+            sku_management_block=sku,
+        )
+        entrypoint = FakeInventoryBalanceHttpEntrypoint(block, runtime)
+        config = RegistryUploadHttpEntrypointConfig(
+            host="127.0.0.1",
+            port=0,
+            upload_path=DEFAULT_UPLOAD_PATH,
+            sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path=DEFAULT_SHEET_REFRESH_PATH,
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
+            runtime_dir=Path(tmp),
+        )
+        server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        port = int(server.server_address[1])
+        base_url = f"http://127.0.0.1:{port}"
+        operation_id = "ibop_http_disconnect_0001"
+        payload = {
+            "operation_id": operation_id,
+            "idempotency_key": "ibkey_http_disconnect_0001",
+            "calculation": {"sales_period_days": 7},
+        }
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw_request = (
+            f"POST {DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/json\r\n"
+            "Accept: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii") + body
+        client = socket.create_connection(("127.0.0.1", port), timeout=2)
+        try:
+            client.sendall(raw_request)
+        finally:
+            client.close()
+        try:
+            assert worker_started.wait(timeout=2), "disconnected POST did not start durable operation"
+            neighbor_started = time.monotonic()
+            neighbor_status, neighbor_body = _http_get_json(
+                base_url + DEFAULT_SKU_INVENTORY_BALANCE_PATH
+            )
+            neighbor_duration = time.monotonic() - neighbor_started
+            assert neighbor_status == 200
+            assert neighbor_duration < 1.0, neighbor_duration
+            assert neighbor_body["calculation_operation"]["operation_id"] == operation_id
+            assert neighbor_body["calculation_operation"]["state"] == "running"
+
+            first_status, first_bytes = _http_post_json_bytes(
+                base_url + DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+                payload,
+            )
+            second_status, second_bytes = _http_post_json_bytes(
+                base_url + DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+                payload,
+            )
+            assert first_status == second_status == 202
+            assert first_bytes == second_bytes
+
+            worker_release.set()
+            operation = None
+            for _attempt in range(200):
+                status, candidate = _http_get_json(
+                    base_url
+                    + DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH
+                    + "/"
+                    + operation_id
+                )
+                assert status == 200
+                operation = candidate
+                if operation["state"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+            assert operation is not None and operation["state"] == "succeeded", operation
+            assert operation["result"]["operation_id"] == operation_id
+            with sqlite3.connect(runtime.db_path) as conn:
+                assert conn.execute(
+                    """SELECT COUNT(*) FROM sheet_vitrina_v1_inventory_balance_operations
+                       WHERE operation_id=?""",
+                    (operation_id,),
+                ).fetchone()[0] == 1
+                assert conn.execute(
+                    """SELECT COUNT(*) FROM sheet_vitrina_v1_inventory_balance_calculations
+                       WHERE operation_id=?""",
+                    (operation_id,),
+                ).fetchone()[0] == 1
+        finally:
+            worker_release.set()
+            server.shutdown()
+            server_thread.join(timeout=5)
+            server.server_close()
+
+
+def _http_post_json_bytes(url: str, payload: dict) -> tuple[int, bytes]:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    with urllib_request.urlopen(request, timeout=2) as response:
+        return int(response.status), response.read()
+
+
+def _http_get_json(url: str) -> tuple[int, dict]:
+    request = urllib_request.Request(url, headers={"Accept": "application/json"})
+    with urllib_request.urlopen(request, timeout=2) as response:
+        return int(response.status), json.loads(response.read().decode("utf-8"))
 
 
 if __name__ == "__main__":

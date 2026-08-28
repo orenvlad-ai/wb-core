@@ -219,6 +219,7 @@ DEFAULT_SKU_MANAGEMENT_HISTORY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/history"
 DEFAULT_SKU_INVENTORY_BALANCE_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/inventory-balance"
 DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/settings"
 DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculate"
+DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/operations"
 DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculations"
 DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/apply-jobs"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
@@ -1504,7 +1505,15 @@ def _build_handler(
                         {"error": "inventory balance operation failed with a controlled server error"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                _write_json_response(
+                    self,
+                    (
+                        HTTPStatus.ACCEPTED
+                        if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH
+                        else HTTPStatus.OK
+                    ),
+                    result,
+                )
                 return
 
             sku_management_post_handlers = {
@@ -3243,6 +3252,32 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": "inventory balance registry read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH + "/"):
+                operation_id = parsed.path[
+                    len(DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH) + 1 :
+                ].strip("/")
+                try:
+                    if not operation_id or "/" in operation_id:
+                        raise SkuManagementError("invalid inventory balance operation path")
+                    payload = entrypoint.handle_sku_inventory_balance_operation_request(
+                        operation_id,
+                        user_key=_current_web_user_config_key(self),
+                    )
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "operation status read failed with a controlled server error"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -10034,6 +10069,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "sku_inventory_balance_path": DEFAULT_SKU_INVENTORY_BALANCE_PATH,
         "sku_inventory_balance_settings_path": DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
         "sku_inventory_balance_calculate_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
+        "sku_inventory_balance_operations_path": DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH,
         "sku_inventory_balance_calculations_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX,
         "sku_inventory_balance_apply_jobs_path": DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,

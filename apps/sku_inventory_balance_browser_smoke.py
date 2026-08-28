@@ -52,6 +52,8 @@ def main() -> None:
     requests: list[tuple[str, str, dict]] = []
     console_errors: list[str] = []
     latest_job: list[dict | None] = [None]
+    latest_operation: list[dict | None] = [None]
+    operation_status_reads = [0]
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -96,6 +98,7 @@ def main() -> None:
                             "calculation": calculation,
                             "apply_job": latest_job[0],
                             "registry": _registry(latest_job[0]),
+                            "calculation_operation": latest_operation[0],
                             "apply_capability": {
                                 "live_wb_available": False,
                                 "wb_patch_reachable": False,
@@ -108,7 +111,28 @@ def main() -> None:
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(_registry(latest_job[0])))
                 return
             if path == base + "/calculate":
-                route.fulfill(status=200, content_type="application/json", body=json.dumps(calculation))
+                latest_operation[0] = _operation(
+                    str(body.get("operation_id") or ""),
+                    state="running",
+                    result=None,
+                    percent=45,
+                )
+                route.abort("connectionfailed")
+                return
+            if path.startswith(base + "/operations/"):
+                operation_status_reads[0] += 1
+                if operation_status_reads[0] >= 2:
+                    latest_operation[0] = _operation(
+                        str((latest_operation[0] or {}).get("operation_id") or ""),
+                        state="succeeded",
+                        result=calculation,
+                        percent=100,
+                    )
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(latest_operation[0]),
+                )
                 return
             if path == base + "/settings":
                 settings["revision"] += 1
@@ -157,6 +181,22 @@ def main() -> None:
         assert "Новые CPC" in page.locator("[data-inventory-balance-head]").inner_text()
         assert "Старые CPM" in page.locator("[data-inventory-balance-head]").inner_text()
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
+
+        page.locator("[data-inventory-balance-calculate]").click()
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-calculation-progress]').getAttribute('data-state') === 'running'"
+        )
+        assert page.locator("[data-inventory-balance-calculate]").is_disabled()
+        page.reload()
+        page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-calculation-progress]').getAttribute('data-state') === 'succeeded'"
+        )
+        assert "Failed to fetch" not in page.locator("[data-inventory-balance-error]").inner_text()
+        assert "сохранён в реестре" in page.locator(
+            "[data-inventory-balance-calculation-progress-summary]"
+        ).inner_text()
+        assert page.locator("[data-inventory-balance-calculate]").is_enabled()
 
         page.locator("[data-inventory-balance-settings]").evaluate("node => { node.open = true; }")
         coefficient_input = page.locator(
@@ -214,7 +254,16 @@ def main() -> None:
     assert settings_requests[-1][2]["table"]["column_order"][2] == "known_stock_units"
     registry_requests = [item for item in requests if item[1].endswith("/calculations?limit=20")]
     assert registry_requests, requests
-    assert not console_errors, console_errors
+    calculate_requests = [item for item in requests if item[1].endswith("/inventory-balance/calculate")]
+    assert len(calculate_requests) == 1, calculate_requests
+    assert calculate_requests[0][2]["operation_id"].startswith("ibop_")
+    assert calculate_requests[0][2]["idempotency_key"].startswith("ibkey_")
+    assert operation_status_reads[0] >= 2
+    unexpected_console_errors = [
+        item for item in console_errors if "ERR_CONNECTION_FAILED" not in item
+    ]
+    assert not unexpected_console_errors, unexpected_console_errors
+    assert any("ERR_CONNECTION_FAILED" in item for item in console_errors), console_errors
     print("sku_inventory_balance_browser_smoke: ok")
 
 
@@ -320,6 +369,27 @@ def _job(state: str, terminal: int) -> dict:
         "items": [],
         "external_writes": False,
         "wb_patch_called": False,
+    }
+
+
+def _operation(operation_id: str, *, state: str, result: dict | None, percent: int) -> dict:
+    phase = "building_evidence" if state == "running" else state
+    return {
+        "contract_name": "sheet_vitrina_v1_sku_inventory_balance_operation/v1",
+        "operation_id": operation_id,
+        "state": state,
+        "phase": phase,
+        "progress": {"percent": percent, "terminal": state in {"succeeded", "failed"}},
+        "calculation_id": result.get("calculation_id") if result else None,
+        "result": result,
+        "error": None,
+        "outcome": {"durable_outcome": "calculation_created"} if result else {},
+        "created_at": "2026-08-26T08:00:00+00:00",
+        "started_at": "2026-08-26T08:00:01+00:00",
+        "finished_at": "2026-08-26T08:01:00+00:00" if result else "",
+        "updated_at": "2026-08-26T08:01:00+00:00",
+        "retryable_by_new_operation": False,
+        "blind_resubmit_allowed": False,
     }
 
 
