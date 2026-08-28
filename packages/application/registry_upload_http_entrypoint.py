@@ -2802,6 +2802,15 @@ class RegistryUploadHttpEntrypoint:
         *,
         auto_load: bool = False,
     ) -> dict[str, Any]:
+        active_job = self.operator_jobs.active_job(
+            operations=("auto_update", "refresh", "refresh_group"),
+        )
+        if active_job:
+            return {
+                **active_job,
+                "already_running_job_id": str(active_job.get("job_id") or ""),
+                "single_flight": True,
+            }
         return self.operator_jobs.start(
             operation="auto_update" if auto_load else "refresh",
             runner=(
@@ -2874,7 +2883,9 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         if _is_scheduled_auto_refresh_trigger(trigger_source):
-            active_job = self.operator_jobs.active_job(operations=("auto_update",))
+            active_job = self.operator_jobs.active_job(
+                operations=("auto_update", "refresh", "refresh_group"),
+            )
             if active_job:
                 return self._skip_sheet_scheduled_auto_update_for_active_job(
                     schedule_id=schedule_id,
@@ -2991,6 +3002,15 @@ class RegistryUploadHttpEntrypoint:
             raise ValueError(
                 f"source group {normalized_group_id!r} is a technical archive and cannot refresh the active vitrina"
             )
+        active_job = self.operator_jobs.active_job(
+            operations=("auto_update", "refresh", "refresh_group"),
+        )
+        if active_job:
+            return {
+                **active_job,
+                "already_running_job_id": str(active_job.get("job_id") or ""),
+                "single_flight": True,
+            }
         now = self.now_factory()
         selected_as_of_date = _resolve_group_refresh_selected_date(as_of_date, now=now)
         available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)

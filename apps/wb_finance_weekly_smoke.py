@@ -24,6 +24,7 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
     classify_deduction,
     historical_week_bounds,
 )
+from packages.adapters.wb_finance_api import FinanceRateLimited  # noqa: E402
 from packages.application.finance_raw_storage import (  # noqa: E402
     FinanceOutboxConsumer,
     FinanceRawIngestor,
@@ -611,10 +612,48 @@ def _file_sha256(path: Path) -> str:
 
 
 def _assert_client_contract() -> None:
+    with TemporaryDirectory(prefix="wb-finance-client-") as tmp:
+        _assert_client_contract_in(Path(tmp))
+
+
+def _assert_client_contract_in(runtime: Path) -> None:
+    class Clock:
+        value = 1_000.0
+
+        def time(self) -> float:
+            return self.value
+
+        def sleep(self, seconds: float) -> None:
+            self.value += float(seconds)
+
+    clock = Clock()
+    limited_calls: list[dict] = []
+
+    def limited_request(payload: dict) -> FinanceHttpResult:
+        limited_calls.append(dict(payload))
+        return FinanceHttpResult(429, [], {"X-Ratelimit-Retry": "120000"})
+
+    limited_client = WbFinanceApiClient(
+        "super-secret",
+        limit=1,
+        request=limited_request,
+        sleep=clock.sleep,
+        wall_time=clock.time,
+        monotonic=clock.time,
+        rate_gate_root=runtime,
+    )
+    try:
+        limited_client.fetch_week(date(2026, 6, 22), date(2026, 6, 28))
+    except FinanceRateLimited as exc:
+        if exc.pages != 0 or exc.cursor != 0 or exc.retry_after_seconds != 120.0:
+            raise AssertionError(f"typed 429 evidence mismatch: {exc}")
+    else:
+        raise AssertionError("Finance 429 must not be retried or treated as empty")
+    if len(limited_calls) != 1:
+        raise AssertionError("Finance 429 triggered an immediate blind retry")
+
     calls: list[dict] = []
-    sleeps: list[float] = []
     responses = [
-        FinanceHttpResult(429, [], {"X-Ratelimit-Retry": "2"}),
         FinanceHttpResult(200, [{"reportId": 1, "rrdId": 10}], {}),
         FinanceHttpResult(200, [{"reportId": 2, "rrdId": 20}], {}),
         FinanceHttpResult(204, [], {}),
@@ -627,18 +666,19 @@ def _assert_client_contract() -> None:
     client = WbFinanceApiClient(
         "super-secret",
         limit=1,
-        min_interval_seconds=0,
         request=request,
-        sleep=sleeps.append,
+        sleep=clock.sleep,
+        wall_time=clock.time,
+        monotonic=clock.time,
+        rate_gate_root=runtime,
     )
     rows = client.fetch_week(date(2026, 6, 22), date(2026, 6, 28))
     if (
-        [call["rrdId"] for call in calls] != [0, 0, 10, 20]
+        [call["rrdId"] for call in calls] != [0, 10, 20]
         or len(rows) != 2
-        or sleeps != [2.0]
     ):
         raise AssertionError(
-            f"pagination/retry contract mismatch: {calls}, {sleeps}, {rows}"
+            f"pagination/terminal-204 contract mismatch: {calls}, {rows}"
         )
     if "super-secret" in repr(client) or "<redacted>" not in repr(client):
         raise AssertionError("client repr leaked authorization token")

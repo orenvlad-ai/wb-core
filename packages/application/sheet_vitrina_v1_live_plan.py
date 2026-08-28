@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
 from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
 from packages.adapters.fin_report_daily_block import HttpBackedFinReportDailySource
+from packages.adapters.wb_finance_api import FinanceApiError, FinanceRateLimited
 from packages.adapters.onec_stocks_block import HttpBackedOnecStocksSource
 from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSource
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
@@ -1030,7 +1031,9 @@ class SheetVitrinaV1LivePlanBlock:
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
         self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
-        self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(HttpBackedFinReportDailySource())
+        self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(
+            HttpBackedFinReportDailySource(runtime_dir=runtime.runtime_dir)
+        )
         self.promo_live_source_block = promo_live_source_block or _SyntheticNoPromoLiveSourceBlock()
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
         self.closed_day_web_source_sync = closed_day_web_source_sync or self.current_web_source_sync
@@ -2190,6 +2193,7 @@ class SheetVitrinaV1LivePlanBlock:
             target_date=column_date,
             slot_kind=temporal_slot,
         )
+        next_attempt_count = _closure_next_attempt_count(closure_state, now)
         accepted_snapshot = self._load_slot_snapshot_status(
             source_key=source_key,
             temporal_slot=temporal_slot,
@@ -2338,7 +2342,7 @@ class SheetVitrinaV1LivePlanBlock:
                     target_date=column_date,
                     slot_kind=temporal_slot,
                     state=CLOSURE_STATE_SUCCESS,
-                    attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                    attempt_count=next_attempt_count,
                     next_retry_at=None,
                     last_reason=_accepted_resolution_note(temporal_slot),
                     last_attempt_at=now_iso,
@@ -2377,15 +2381,16 @@ class SheetVitrinaV1LivePlanBlock:
                     reason = status.note or sync_error or _invalid_temporal_candidate_note(source_key, temporal_slot)
                     next_retry_at, retry_state = _next_closure_retry(
                         now,
-                        (closure_state.attempt_count if closure_state is not None else 0) + 1,
+                        next_attempt_count,
                         reason,
+                        server_next_retry_at=_status_server_next_retry_at(status),
                     )
                     self.runtime.save_temporal_source_closure_state(
                         source_key=source_key,
                         target_date=column_date,
                         slot_kind=temporal_slot,
                         state=retry_state,
-                        attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                        attempt_count=next_attempt_count,
                         next_retry_at=next_retry_at,
                         last_reason=reason,
                         last_attempt_at=now_iso,
@@ -2448,13 +2453,18 @@ class SheetVitrinaV1LivePlanBlock:
             temporal_slot=temporal_slot,
         ):
             reason = status.note or sync_error or _invalid_temporal_candidate_note(source_key, temporal_slot)
-            next_retry_at, retry_state = _next_closure_retry(now, (closure_state.attempt_count if closure_state is not None else 0) + 1, reason)
+            next_retry_at, retry_state = _next_closure_retry(
+                now,
+                next_attempt_count,
+                reason,
+                server_next_retry_at=_status_server_next_retry_at(status),
+            )
             self.runtime.save_temporal_source_closure_state(
                 source_key=source_key,
                 target_date=column_date,
                 slot_kind=temporal_slot,
                 state=retry_state,
-                attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                attempt_count=next_attempt_count,
                 next_retry_at=next_retry_at,
                 last_reason=reason,
                 last_attempt_at=now_iso,
@@ -2472,7 +2482,7 @@ class SheetVitrinaV1LivePlanBlock:
                     target_date=column_date,
                     slot_kind=temporal_slot,
                     state=retry_state,
-                    attempt_count=(closure_state.attempt_count if closure_state is not None else 0) + 1,
+                    attempt_count=next_attempt_count,
                     next_retry_at=next_retry_at,
                     last_reason=reason,
                     last_attempt_at=now_iso,
@@ -4182,6 +4192,44 @@ def _capture_live_source(
 ) -> tuple[LiveSourceStatus, Any | None]:
     try:
         payload = loader()
+    except FinanceApiError as exc:
+        diagnostics = {
+            "error_code": exc.code,
+            "endpoint": "POST /api/finance/v1/sales-reports/detailed",
+            "source_date": exc.date_from,
+            "date_to": exc.date_to,
+            "period": exc.period,
+            "cursor": exc.cursor,
+            "pages": exc.pages,
+            "http_status": exc.http_status,
+            "next_retry_at": exc.next_retry_at,
+            "retry_after_seconds": exc.retry_after_seconds,
+            "header_hints": dict(exc.header_hints),
+        }
+        return (
+            LiveSourceStatus(
+                source_key=source_key,
+                temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy,
+                column_date=column_date,
+                kind=(
+                    "rate_limited"
+                    if isinstance(exc, FinanceRateLimited)
+                    else "error"
+                ),
+                freshness="",
+                snapshot_date="",
+                date=column_date,
+                date_from=exc.date_from,
+                date_to=exc.date_to,
+                requested_count=len(requested_nm_ids),
+                covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)),
+                note=str(exc),
+                diagnostics=diagnostics,
+            ),
+            None,
+        )
     except Exception as exc:  # pragma: no cover - live transport fallback
         return (
             LiveSourceStatus(
@@ -4665,6 +4713,8 @@ def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str
         return _invalid_temporal_web_source_note(source_key)
     if source_key == "promo_by_price":
         return "invalid_exact_snapshot=promo_live_source_incomplete"
+    if source_key == "fin_report_daily":
+        return "invalid_exact_snapshot=finance_requires_terminal_204_and_full_sku_coverage"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "prices_snapshot":
         return "invalid_exact_snapshot=zero_filled_prices_snapshot"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
@@ -4697,6 +4747,21 @@ def _is_valid_temporal_candidate(
             return False
     if status.kind == "incomplete" and source_key not in {ONEC_STOCKS_SOURCE_KEY, SPP_PROXY_SOURCE_KEY}:
         return False
+    if source_key == "fin_report_daily":
+        diagnostics = status.diagnostics if isinstance(status.diagnostics, Mapping) else {}
+        if not diagnostics and "synthetic" in str(status.note or "").casefold():
+            # Deterministic injected test blocks do not model transport
+            # pagination. The production adapter always supplies diagnostics.
+            return True
+        pagination = diagnostics.get("pagination") if isinstance(diagnostics, Mapping) else None
+        return bool(
+            isinstance(pagination, Mapping)
+            and pagination.get("complete") is True
+            and int(pagination.get("terminal_status") or 0) == 204
+            and int(status.requested_count) > 0
+            and int(status.covered_count) == int(status.requested_count)
+            and not status.missing_nm_ids
+        )
     if _is_invalid_temporal_web_source_payload(
         source_key=source_key,
         payload=payload,
@@ -4949,24 +5014,76 @@ def _closure_attempt_is_due(
     if closure_state.state == CLOSURE_STATE_SUCCESS:
         return False
     if closure_state.state == CLOSURE_STATE_EXHAUSTED:
-        return False
+        return _finance_exhausted_retry_window_reopened(closure_state, now)
     if not closure_state.next_retry_at:
         return True
     return _parse_runtime_timestamp(closure_state.next_retry_at) <= now.astimezone(timezone.utc)
 
 
-def _next_closure_retry(now: datetime, attempt_count: int, reason: str) -> tuple[str | None, str]:
+def _closure_next_attempt_count(
+    closure_state: TemporalSourceClosureState | None,
+    now: datetime,
+) -> int:
+    if closure_state is None:
+        return 1
+    if _finance_exhausted_retry_window_reopened(closure_state, now):
+        return 1
+    return int(closure_state.attempt_count) + 1
+
+
+def _finance_exhausted_retry_window_reopened(
+    closure_state: TemporalSourceClosureState,
+    now: datetime,
+) -> bool:
+    if (
+        closure_state.source_key != "fin_report_daily"
+        or closure_state.state != CLOSURE_STATE_EXHAUSTED
+        or not closure_state.last_attempt_at
+    ):
+        return False
+    try:
+        last_attempt_date = business_date_from_timestamp(closure_state.last_attempt_at)
+    except (TypeError, ValueError):
+        return False
+    return last_attempt_date < current_business_date_iso(now)
+
+
+def _next_closure_retry(
+    now: datetime,
+    attempt_count: int,
+    reason: str,
+    *,
+    server_next_retry_at: str | None = None,
+) -> tuple[str | None, str]:
     if attempt_count >= len(CLOSURE_RETRY_BACKOFF_MINUTES):
         return None, CLOSURE_STATE_EXHAUSTED
     retry_after_minutes = CLOSURE_RETRY_BACKOFF_MINUTES[max(attempt_count - 1, 0)]
     state = CLOSURE_STATE_RATE_LIMITED if _looks_like_rate_limit_reason(reason) else CLOSURE_STATE_RETRYING
-    next_retry_at = _format_runtime_timestamp(now.astimezone(timezone.utc) + timedelta(minutes=retry_after_minutes))
+    retry_at = now.astimezone(timezone.utc) + timedelta(minutes=retry_after_minutes)
+    if server_next_retry_at:
+        try:
+            retry_at = max(retry_at, _parse_runtime_timestamp(server_next_retry_at))
+        except (TypeError, ValueError):
+            pass
+    next_retry_at = _format_runtime_timestamp(retry_at)
     return next_retry_at, state
+
+
+def _status_server_next_retry_at(status: LiveSourceStatus) -> str | None:
+    if status.source_key != "fin_report_daily" or not isinstance(status.diagnostics, Mapping):
+        return None
+    value = str(status.diagnostics.get("next_retry_at") or "").strip()
+    return value or None
 
 
 def _looks_like_rate_limit_reason(reason: str) -> bool:
     lowered = str(reason or "").lower()
-    return "429" in lowered or "retry-after" in lowered or "rate limit" in lowered
+    return (
+        "429" in lowered
+        or "retry-after" in lowered
+        or "rate limit" in lowered
+        or "rate_limited" in lowered
+    )
 
 
 def _append_status_note(status: LiveSourceStatus, suffix: str) -> LiveSourceStatus:

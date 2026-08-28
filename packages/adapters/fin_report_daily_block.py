@@ -1,17 +1,19 @@
 """Адаптерная граница блока fin report daily."""
 
 import json
-import time
+import os
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Protocol, Tuple
-from urllib import error, parse, request as urllib_request
+from typing import Any, Mapping, Protocol
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
+from packages.adapters.wb_finance_api import (
+    FinanceFetchResult,
+    WbFinanceApiClient,
+)
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
 
 
-DEADLINE_MS = 240000
-MAX_PAGES = 200
+FINANCE_BASE_URL = "https://finance-api.wildberries.ru"
 
 
 class FinReportDailySource(Protocol):
@@ -38,146 +40,140 @@ class ArtifactBackedFinReportDailySource:
 class HttpBackedFinReportDailySource:
     def __init__(
         self,
-        base_url: str = "https://statistics-api.wildberries.ru",
+        base_url: str = FINANCE_BASE_URL,
         token_env_var: str = DEFAULT_WB_API_TOKEN_ENV,
-        base_url_env_var: str = "WB_STATISTICS_API_BASE_URL",
-        timeout_seconds: float = 30.0,
-        page_sleep_seconds: float = 0.2,
+        base_url_env_var: str = "WB_FINANCE_API_BASE_URL",
+        timeout_seconds: float = 180.0,
+        runtime_dir: Path | None = None,
+        client: WbFinanceApiClient | None = None,
     ) -> None:
         self._default_base_url = base_url.rstrip("/")
         self._token_env_var = token_env_var
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = timeout_seconds
-        self._page_sleep_seconds = page_sleep_seconds
+        self._runtime_dir = runtime_dir
+        self._client = client
 
     def fetch(self, request: FinReportDailyRequest) -> Mapping[str, Any]:
-        runtime = load_runtime_config(
-            token_env_var=self._token_env_var,
-            default_base_url=self._default_base_url,
-            base_url_env_var=self._base_url_env_var,
-            default_timeout_seconds=self._default_timeout_seconds,
+        client = self._client
+        if client is None:
+            runtime = load_runtime_config(
+                token_env_var=self._token_env_var,
+                default_base_url=self._default_base_url,
+                base_url_env_var=self._base_url_env_var,
+                default_timeout_seconds=self._default_timeout_seconds,
+            )
+            client = WbFinanceApiClient(
+                runtime.token,
+                url=_finance_detailed_url(runtime.base_url),
+                rate_gate_root=(
+                    self._runtime_dir
+                    or Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", ".runtime/registry_upload"))
+                ),
+            )
+        fetched = client.fetch_report(
+            date_from=request.snapshot_date,
+            date_to=request.snapshot_date,
+            period="daily",
         )
-        rows, pages, rrdid_end = self._fetch_all_pages(
-            base_url=runtime.base_url,
-            token=runtime.token,
+        rows, exact_row_count, target_row_count = self._map_finance_rows(
+            fetched=fetched,
             snapshot_date=request.snapshot_date,
-            timeout_seconds=runtime.timeout_seconds,
             nm_ids=request.nm_ids,
+        )
+        covered_nm_ids = sorted(
+            int(row["nmId"])
+            for row in rows
+            if isinstance(row.get("nmId"), int) and int(row["nmId"]) > 0
         )
         return {
             "snapshot_date": request.snapshot_date,
             "requested_nm_ids": request.nm_ids,
             "source": {
-                "endpoint": "GET /api/v5/supplier/reportDetailByPeriod?period=daily",
-                "mode": "official_api_bootstrap_sample",
-                "pagination": {"pages": pages, "rrdid_start": 0, "rrdid_end": rrdid_end},
+                "endpoint": "POST /api/finance/v1/sales-reports/detailed",
+                "mode": "official_finance_daily",
+                "period": "daily",
+                "pagination": {
+                    "pages": fetched.pages,
+                    "rrdid_start": 0,
+                    "rrdid_end": fetched.rrd_id_end,
+                    "terminal_status": fetched.terminal_status,
+                    "complete": fetched.terminal_status == 204,
+                },
+                "source_digest": fetched.source_digest,
+                "source_row_count": len(fetched.rows),
+                "exact_date_row_count": exact_row_count,
+                "target_row_count": target_row_count,
+                "requested_count": len(set(request.nm_ids)),
+                "covered_count": len(set(covered_nm_ids)),
             },
             "data": {"rows": rows},
         }
 
-    def _fetch_all_pages(
+    def _map_finance_rows(
         self,
         *,
-        base_url: str,
-        token: str,
+        fetched: FinanceFetchResult,
         snapshot_date: str,
-        timeout_seconds: float,
         nm_ids: list[int],
-    ) -> Tuple[List[Mapping[str, Any]], int, int]:
-        started_at = time.monotonic()
-        pages = 0
-        rrdid = 0
+    ) -> tuple[list[dict[str, Any]], int, int]:
         wanted = set(nm_ids)
-        fetched_at = f"{snapshot_date} 21:30:00"
         items: dict[int, dict[str, float]] = {}
         total_storage_fee = 0.0
+        exact_row_count = 0
+        target_row_count = 0
 
-        while True:
-            if (time.monotonic() - started_at) * 1000 > DEADLINE_MS:
-                raise RuntimeError("ERR_FIN_PAGINATION_DEADLINE")
-            if pages >= MAX_PAGES:
-                raise RuntimeError("ERR_FIN_PAGINATION_MAXPAGES")
-
-            page_rows = self._fetch_page(
-                base_url=base_url,
-                token=token,
-                snapshot_date=snapshot_date,
-                rrdid=rrdid,
-                timeout_seconds=timeout_seconds,
+        for row in fetched.rows:
+            row_snapshot = _extract_snapshot_date(row)
+            if row_snapshot != snapshot_date:
+                continue
+            exact_row_count += 1
+            storage_fee = _required_money(row, "paidStorage")
+            total_storage_fee += storage_fee
+            nm_id = _positive_int(row.get("nmId"))
+            if nm_id is None or nm_id not in wanted:
+                continue
+            target_row_count += 1
+            rec = items.setdefault(
+                nm_id,
+                {
+                    "snapshot_date": snapshot_date,
+                    "nmId": nm_id,
+                    "fin_delivery_rub": 0.0,
+                    "fin_storage_fee": 0.0,
+                    "fin_deduction": 0.0,
+                    "fin_commission": 0.0,
+                    "fin_penalty": 0.0,
+                    "fin_additional_payment": 0.0,
+                    "fin_buyout_rub": 0.0,
+                    "fin_commission_wb_portal": 0.0,
+                    "fin_acquiring_fee": 0.0,
+                    "fin_loyalty_rub": 0.0,
+                },
             )
-            if page_rows is None:
-                break
-            if not page_rows:
-                raise RuntimeError("reportDetailByPeriod: empty page with status=200")
+            retail = _required_money(row, "retailPriceWithDisc")
+            commission = retail * _required_money(row, "commissionPercent") / 100.0
+            doc_type = str(row.get("docTypeName") or "").casefold()
+            operation = str(row.get("sellerOperName") or "").casefold()
+            is_sale = doc_type == "продажа" or operation == "продажа"
+            is_return = "возврат" in doc_type or "возврат" in operation
 
-            pages += 1
-            current_rrdid = rrdid
-            last_rrdid = current_rrdid
-            for row in page_rows:
-                if not isinstance(row, Mapping):
-                    continue
-                row_snapshot = _extract_snapshot_date(row)
-                if row_snapshot != snapshot_date:
-                    continue
-
-                storage_fee = _to_float(row.get("storage_fee"))
-                total_storage_fee += storage_fee
-
-                nm_id = row.get("nm_id")
-                if not isinstance(nm_id, int) or nm_id <= 0 or nm_id not in wanted:
-                    last_rrdid = _read_rrdid(row, last_rrdid)
-                    continue
-
-                rec = items.setdefault(
-                    nm_id,
-                    {
-                        "snapshot_date": snapshot_date,
-                        "nmId": nm_id,
-                        "fin_delivery_rub": 0.0,
-                        "fin_storage_fee": 0.0,
-                        "fin_deduction": 0.0,
-                        "fin_commission": 0.0,
-                        "fin_penalty": 0.0,
-                        "fin_additional_payment": 0.0,
-                        "fin_buyout_rub": 0.0,
-                        "fin_commission_wb_portal": 0.0,
-                        "fin_acquiring_fee": 0.0,
-                        "fin_loyalty_rub": 0.0,
-                        "fetched_at": fetched_at,
-                    },
-                )
-
-                retail_price_withdisc_rub = _to_float(row.get("retail_price_withdisc_rub"))
-                commission_by_retail_withdisc = (
-                    retail_price_withdisc_rub * _to_float(row.get("commission_percent")) / 100.0
-                )
-                doc_type_name = str(row.get("doc_type_name") or "")
-                supplier_oper_name = str(row.get("supplier_oper_name") or "")
-                is_sale = doc_type_name == "Продажа" or supplier_oper_name == "Продажа"
-                is_return = "Возврат" in doc_type_name or "Возврат" in supplier_oper_name
-
-                rec["fin_delivery_rub"] += _to_float(row.get("delivery_rub"))
-                rec["fin_storage_fee"] += storage_fee
-                rec["fin_deduction"] += _to_float(row.get("deduction"))
-                rec["fin_commission"] += _to_float(row.get("ppvz_sales_commission"))
-                rec["fin_penalty"] += _to_float(row.get("penalty"))
-                rec["fin_additional_payment"] += _to_float(row.get("additional_payment"))
-                rec["fin_acquiring_fee"] += _to_float(row.get("acquiring_fee"))
-                rec["fin_loyalty_rub"] += _to_float(row.get("cashback_amount"))
-
-                if is_sale:
-                    rec["fin_buyout_rub"] += retail_price_withdisc_rub
-                    rec["fin_commission_wb_portal"] += commission_by_retail_withdisc
-                elif is_return:
-                    rec["fin_buyout_rub"] -= retail_price_withdisc_rub
-                    rec["fin_commission_wb_portal"] -= commission_by_retail_withdisc
-
-                last_rrdid = _read_rrdid(row, last_rrdid)
-
-            if last_rrdid <= current_rrdid:
-                raise RuntimeError("ERR_PAGINATION_STUCK")
-            rrdid = last_rrdid
-            time.sleep(self._page_sleep_seconds)
+            rec["fin_delivery_rub"] += _required_money(row, "deliveryService")
+            rec["fin_storage_fee"] += storage_fee
+            rec["fin_deduction"] += _required_money(row, "deduction")
+            rec["fin_commission"] += _required_money(row, "ppvzSalesCommission")
+            rec["fin_penalty"] += _required_money(row, "penalty")
+            rec["fin_additional_payment"] += _required_money(row, "additionalPayment")
+            # The daily Vitrina contract is additive: delivered acquiringFee is
+            # summed as-is, including rows whose document is a return.
+            rec["fin_acquiring_fee"] += _required_money(row, "acquiringFee")
+            rec["fin_loyalty_rub"] += _required_money(row, "cashbackAmount")
+            if is_sale:
+                rec["fin_buyout_rub"] += retail
+                rec["fin_commission_wb_portal"] += commission
+            elif is_return:
+                rec["fin_buyout_rub"] -= retail
+                rec["fin_commission_wb_portal"] -= commission
 
         rows = [items[nm_id] for nm_id in sorted(items)]
         rows.append(
@@ -194,52 +190,19 @@ class HttpBackedFinReportDailySource:
                 "fin_commission_wb_portal": 0.0,
                 "fin_acquiring_fee": 0.0,
                 "fin_loyalty_rub": 0.0,
-                "fetched_at": fetched_at,
             }
         )
-        return rows, pages, rrdid
-
-    def _fetch_page(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        snapshot_date: str,
-        rrdid: int,
-        timeout_seconds: float,
-    ) -> Optional[List[Mapping[str, Any]]]:
-        url = (
-            f"{base_url}/api/v5/supplier/reportDetailByPeriod?"
-            f"{parse.urlencode({'dateFrom': snapshot_date, 'dateTo': snapshot_date, 'rrdid': str(rrdid), 'period': 'daily'})}"
-        )
-        req = urllib_request.Request(url=url, headers={"Authorization": token}, method="GET")
-        try:
-            with urllib_request.urlopen(req, timeout=timeout_seconds) as response:
-                if response.status == 204:
-                    return None
-                payload = json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            if exc.code == 204:
-                return None
-            body = exc.read().decode("utf-8")
-            raise RuntimeError(
-                f"official fin report daily request failed with status {exc.code}: {body}"
-            ) from exc
-        except error.URLError as exc:
-            raise RuntimeError(
-                f"official fin report daily request transport failed: {exc}"
-            ) from exc
-
-        if not isinstance(payload, list):
-            raise RuntimeError("reportDetailByPeriod: expected array payload")
-        return [row for row in payload if isinstance(row, Mapping)]
+        return rows, exact_row_count, target_row_count
 
 
 def _extract_snapshot_date(row: Mapping[str, Any]) -> str:
-    from_rr_dt = _extract_ymd(row.get("rr_dt"))
+    from_rr_dt = _extract_ymd(row.get("rrDate"))
     if from_rr_dt:
         return from_rr_dt
-    return _extract_ymd(row.get("sale_dt"))
+    from_sale = _extract_ymd(row.get("saleDt"))
+    if from_sale:
+        return from_sale
+    return _extract_ymd(row.get("dateFrom"))
 
 
 def _extract_ymd(value: Any) -> str:
@@ -255,12 +218,28 @@ def _extract_ymd(value: Any) -> str:
     return ""
 
 
-def _to_float(value: Any) -> float:
-    if isinstance(value, (int, float)):
+def _required_money(row: Mapping[str, Any], field: str) -> float:
+    if field not in row or row.get(field) in (None, ""):
+        raise RuntimeError(f"Finance daily required field is missing: {field}")
+    value = row.get(field)
+    if isinstance(value, bool):
+        raise RuntimeError(f"Finance daily money field is invalid: {field}")
+    try:
         return float(value)
-    return 0.0
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Finance daily money field is invalid: {field}") from exc
 
 
-def _read_rrdid(row: Mapping[str, Any], fallback: int) -> int:
-    value = row.get("rrd_id")
-    return value if isinstance(value, int) else fallback
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _finance_detailed_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/api/finance/v1/sales-reports/detailed"):
+        return normalized
+    return normalized + "/api/finance/v1/sales-reports/detailed"

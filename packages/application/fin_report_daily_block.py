@@ -37,6 +37,9 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
     if not isinstance(rows, list):
         raise ValueError("legacy payload must contain data.rows list")
 
+    source = payload.get("source")
+    source_diagnostics = dict(source) if isinstance(source, Mapping) else {}
+
     grouped: dict[int, dict[str, float]] = defaultdict(lambda: {field: 0.0 for field in FIN_FIELDS})
     storage_total = 0.0
 
@@ -82,6 +85,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
                 nm_id=0,
                 fin_storage_fee_total=storage_total,
             ),
+            diagnostics=source_diagnostics,
         )
     )
 

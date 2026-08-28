@@ -1,0 +1,53 @@
+{
+  "schema": "wb-core.production-apply-manifest/v2",
+  "operation_id": "wbc0020-finance-daily-20260826-20260827",
+  "target_id": "wb_core_eu_hosted_runtime_active",
+  "deployed_sha_contract": "exact-merge-sha",
+  "dry_run_default": true,
+  "explicit_apply": true,
+  "bounded_scope": true,
+  "pre_change_digest": true,
+  "backup_evidence": true,
+  "expected_affected_records": true,
+  "non_target_invariants": true,
+  "idempotency_or_recovery": true,
+  "post_apply_readback": true,
+  "reconciliation": true,
+  "query_only_manifest_readback": true,
+  "pre_change_digest_value": "sha256:c566a6c7a5a3a4b0174a54db013b7df3802574542ef70bb1f1f3529a57a1b58d",
+  "backup_evidence_value": "Per-date private 0600 reviewed plan plus compact 171-cell and exact Finance temporal/closure before images, exact plan/non-target/temporal CAS and runtime operation audit.",
+  "expected_affected_record_count": 342,
+  "non_target_invariant_ids": [
+    "all-non-finance-metrics",
+    "all-dates-except-2026-08-26-and-2026-08-27",
+    "proxy-profit-gap-2026-08-26-sku-428853741",
+    "stocks-cost-wac-warehouse-ads-orders",
+    "finance-2026-08-24-and-2026-08-25"
+  ],
+  "recovery_contract": {
+    "mode": "bounded-recovery",
+    "id": "wbc0020-two-exact-operation-query-only-reconciliation-v1"
+  },
+  "commands": {
+    "dry_run": [
+      "python3",
+      "apps/wbc0020_finance_daily_recovery.py",
+      "dry-run"
+    ],
+    "apply": [
+      "python3",
+      "apps/wbc0020_finance_daily_recovery.py",
+      "apply"
+    ],
+    "readback": [
+      "python3",
+      "apps/wbc0020_finance_daily_recovery.py",
+      "readback"
+    ],
+    "reconcile": [
+      "python3",
+      "apps/wbc0020_finance_daily_recovery.py",
+      "reconcile"
+    ]
+  }
+}

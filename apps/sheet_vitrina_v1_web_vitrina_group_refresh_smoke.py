@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import threading
 import time
 from tempfile import TemporaryDirectory
 from datetime import datetime, timezone
@@ -87,6 +88,35 @@ def main() -> None:
             refreshed_at_factory=lambda: NEW_REFRESHED_AT,
             now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
         )
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_refresh(_log: object) -> dict[str, object]:
+            started.set()
+            release.wait(timeout=5.0)
+            return {"status": "success"}
+
+        active = entrypoint.operator_jobs.start(
+            operation="refresh",
+            runner=blocking_refresh,
+        )
+        if not started.wait(timeout=2.0):
+            raise AssertionError("single-flight fixture did not start")
+        repeated_full = entrypoint.start_sheet_refresh_job(as_of_date="2026-04-20")
+        repeated_group = entrypoint.start_sheet_source_group_refresh_job(
+            source_group_id="wb_api",
+            as_of_date="2026-04-21",
+        )
+        if (
+            repeated_full.get("job_id") != active.get("job_id")
+            or repeated_group.get("job_id") != active.get("job_id")
+            or not repeated_full.get("single_flight")
+            or not repeated_group.get("single_flight")
+        ):
+            raise AssertionError("repeated full/group click created a second heavy refresh")
+        release.set()
+        _wait_job(entrypoint, str(active["job_id"]))
 
         captured: dict[str, object] = {}
 
