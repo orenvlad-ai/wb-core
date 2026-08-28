@@ -84,12 +84,30 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         page_errors: list[str] = []
+        console_errors: list[str] = []
+        fbs_http_errors: list[str] = []
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 context = browser.new_context(viewport={"width": 1280, "height": 900})
                 page = context.new_page()
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
+                page.on(
+                    "console",
+                    lambda message: console_errors.append(message.text)
+                    if message.type == "error"
+                    and not message.text.startswith("Failed to load resource:")
+                    else None,
+                )
+                page.on(
+                    "response",
+                    lambda response: fbs_http_errors.append(
+                        f"{response.status} {response.url}"
+                    )
+                    if "fbs-fulfillment-order" in response.url
+                    and response.status >= 400
+                    else None,
+                )
                 page.goto(
                     f"http://127.0.0.1:{port}{DEFAULT_SHEET_OPERATOR_UI_PATH}"
                     "?embedded_tab=factory-order",
@@ -106,6 +124,19 @@ def main() -> int:
                     "open", ""
                 )
                 expect(page.locator("#fbsHistoryModeLastN")).to_be_checked()
+                expect(page.locator("#fbsInboundScope")).to_have_value(
+                    "selected_facility"
+                )
+                expect(page.locator("#fbsInboundScopeHelp")).to_contain_text(
+                    "нельзя одновременно считать распределённым"
+                )
+                expect(page.locator("#fbsReadinessDetails")).not_to_have_attribute(
+                    "open", ""
+                )
+                assert page.locator("#fbsFulfillmentResultBody").count() == 0
+                assert fbs_panel.evaluate(
+                    "element => element.scrollWidth <= element.clientWidth + 1"
+                )
                 expect(page.locator("#fbsSalesAvgPeriodDays")).to_have_value("14")
                 expect(page.locator("#fbsSalesDateFrom")).to_be_disabled()
                 expect(page.locator("#fbsSalesDateTo")).to_be_disabled()
@@ -147,12 +178,46 @@ def main() -> int:
                 expect(page.locator("#fbsTotalQty")).not_to_have_text("-")
                 expect(page.locator("#fbsHorizonDays")).to_have_text("89")
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_enabled()
-                expect(page.locator("#fbsFulfillmentResultBody tr")).not_to_have_count(0)
+                expect(page.locator("#fbsPreviewNote")).to_contain_text("Рассчитано")
+                expect(page.locator("#fbsResultInboundScope")).to_have_text(
+                    "Только для выбранного ФФ"
+                )
+                expect(page.locator("#fbsResultInbound")).to_contain_text("15 шт.")
+
+                with page.expect_download(timeout=15000) as download_info:
+                    page.locator("#fbsFulfillmentDownloadButton").click()
+                download = download_info.value
+                assert download.suggested_filename.endswith(".xlsx")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
+                    "FBS-рекомендация скачана"
+                )
+
+                page.locator("#fbsInboundScope").select_option("all_active")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
+                    "Параметры изменены"
+                )
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                page.locator("#fbsFulfillmentCalculateButton").click()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
+                    "Расчёт завершён", timeout=15000
+                )
+                expect(page.locator("#fbsResultInboundScope")).to_have_text(
+                    "Все активные заказы фабрике"
+                )
+                expect(page.locator("#fbsResultInbound")).to_contain_text("535 шт.")
 
                 page.locator("#fbsHistoryModeLastN").check()
                 expect(page.locator("#fbsSalesAvgPeriodDays")).to_be_enabled()
                 expect(page.locator("#fbsSalesDateFrom")).to_be_disabled()
                 expect(page.locator("#fbsSalesDateTo")).to_be_disabled()
+
+                page.set_viewport_size({"width": 390, "height": 844})
+                assert fbs_panel.evaluate(
+                    "element => element.scrollWidth <= element.clientWidth + 1"
+                )
+                expect(page.locator("#fbsInboundScope")).to_be_visible()
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_visible()
 
                 context.close()
                 browser.close()
@@ -163,6 +228,10 @@ def main() -> int:
 
         if page_errors:
             raise AssertionError(f"browser page errors: {page_errors}")
+        if console_errors:
+            raise AssertionError(f"browser console errors: {console_errors}")
+        if fbs_http_errors:
+            raise AssertionError(f"browser FBS HTTP errors: {fbs_http_errors}")
     print("sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke: ok")
     return 0
 

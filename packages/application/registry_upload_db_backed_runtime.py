@@ -10677,6 +10677,7 @@ def _build_supply_calculation_registry_metadata(
             "sales_date_from",
             "sales_date_to",
             "target_facility_id",
+            "inbound_scope",
             "production_days",
             "factory_to_target_ff_days",
             "ff_safety_days",

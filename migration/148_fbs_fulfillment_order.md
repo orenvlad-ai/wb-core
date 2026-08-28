@@ -49,6 +49,16 @@ excluded from every facility-specific inbound pool until an operator assigns an
 active facility; no default, fallback or row rewrite is performed, and an
 explicit Оренбург target never enters Moscow coverage.
 
+The calculate request has an explicit `inbound_scope`. The backward-compatible
+default `selected_facility` preserves the facility-specific rule above. The
+operator may deliberately choose `all_active`; this keeps the same
+`production`/`in_transit`, authoritative nmId and positive-quantity guards but
+removes only the `target_facility_id` filter, so unassigned and other-facility
+active supplier orders are counted once. The result, immutable registry
+evidence/fingerprint and XLSX freeze the chosen scope. The UI labels this as
+common production/in-transit volume which must not simultaneously be treated as
+regionally distributed stock.
+
 ## Sales window
 
 The demand source remains exact-date server-owned
@@ -96,9 +106,10 @@ document or production order is backfilled or mutated by this migration.
 - `POST /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/calculate`;
 - `GET /v1/sheet-vitrina-v1/supply/fbs-fulfillment-order/recommendation.xlsx`.
 
-Status shows selected FF readiness, physical/reserved/available, active inbound,
-history coverage and blockers. Result shows selected mode and exact boundaries,
-calendar/used trading-day counts and per-SKU coverage/recommendation. Supplier
+Status shows selected FF readiness, physical/reserved/available, default-scope
+active inbound, history coverage and blockers. Result shows selected inbound
+scope and sales mode, exact boundaries, calendar/used trading-day counts and
+per-SKU coverage/recommendation. Supplier
 operator surfaces show the target selector, while the supplier-safe card shows
 the assigned facility as read-only state or `Назначается оператором`; both
 registries retain the target column.
@@ -107,15 +118,17 @@ registries retain the target column.
 
 - `apps/fbs_fulfillment_order_supply_smoke.py` covers Moscow happy path,
   signed `physical-reserved`, incomplete Orenburg isolation, no WB operands,
-  unassigned-target exclusion without fallback, explicit Orenburg exclusion, active/accepted
-  inbound statuses, validation, rounding, both history modes, inclusive bounds,
-  no outside-window leakage and immutable evidence/export;
+  default unassigned/other-target exclusion without fallback, the explicit
+  all-active scope without double counting, authoritative match/quantity and
+  active/accepted status guards, validation, rounding, both history modes,
+  inclusive bounds, no outside-window leakage and immutable evidence/export;
 - `apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py` covers protected
   endpoints, UI tokens/default section, validation/download and stale legacy
   readiness;
 - `apps/sheet_vitrina_v1_fbs_fulfillment_order_browser_smoke.py` covers the
-  default-open/collapsed surfaces, facility readiness switching, both history
-  controls and an exact custom-period calculation in a real browser;
+  default-safe scope, stale-result invalidation, compact preview/readiness
+  disclosure, real XLSX download, responsive layout, facility switching, both
+  history controls and an exact custom-period calculation in a real browser;
 - existing factory-order, supplier shipment, calculation registry, inventory
   planning and operator UI smokes remain regression gates.
 

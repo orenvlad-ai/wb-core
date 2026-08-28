@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import io
 import json
 import math
 from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -85,6 +87,7 @@ def main() -> int:
         assert wb_state["raw_total"] > 100_000
         facilities = {item["facility_id"]: item for item in status.facilities}
         assert status.wb_stock_used is False
+        assert status.defaults["inbound_scope"] == "selected_facility"
         assert facilities[MOSCOW_ID]["calculation_enabled"] is True
         assert facilities[MOSCOW_ID]["physical"] == 100 + 200 * (len(active_nm_ids) - 1)
         assert facilities[MOSCOW_ID]["reserved"] == 30
@@ -113,6 +116,7 @@ def main() -> int:
             }
         )
         assert last_n.horizon_days == 20
+        assert last_n.settings.inbound_scope == "selected_facility"
         assert last_n.sales_window["actual_date_from"] == "2026-04-04"
         assert last_n.sales_window["actual_date_to"] == "2026-04-17"
         assert last_n.sales_window["calendar_day_count"] == 14
@@ -133,6 +137,40 @@ def main() -> int:
         assert "wb" not in last_n.inbound_coverage
         assert last_n.inbound_coverage["unassigned_target_excluded_count"] == 1
         assert last_n.inbound_coverage["legacy_null_target_fallback_moscow_count"] == 0
+        assert last_n.inbound_coverage["scope"] == "selected_facility"
+        assert last_n.inbound_coverage["total_quantity"] == 15
+
+        all_active = block.calculate(
+            {
+                "target_facility_id": MOSCOW_ID,
+                "inbound_scope": "all_active",
+                "production_days": 10,
+                "factory_to_target_ff_days": 5,
+                "ff_safety_days": 3,
+                "order_cycle_days": 2,
+                "order_batch_qty": 50,
+                "sales_history_mode": "last_n_days",
+                "sales_avg_period_days": 14,
+            }
+        )
+        all_rows = {row.nm_id: row for row in all_active.rows}
+        assert all_active.settings.inbound_scope == "all_active"
+        assert all_active.inbound_coverage["scope"] == "all_active"
+        assert all_active.inbound_coverage["total_quantity"] == 535
+        assert all_active.inbound_coverage["included_shipment_count"] == 3
+        assert all_active.inbound_coverage["unassigned_target_included_count"] == 1
+        assert all_active.inbound_coverage[
+            "explicit_other_facility_included_count"
+        ] == 1
+        assert all_active.inbound_coverage["unassigned_target_excluded_count"] == 0
+        assert all_active.inbound_coverage[
+            "explicit_other_facility_excluded_count"
+        ] == 0
+        assert all_rows[active_nm_ids[0]].remaining_active_inbound_qty == 535
+        assert all_rows[active_nm_ids[0]].recommended_order_qty == math.ceil(
+            max(all_rows[active_nm_ids[0]].national_daily_demand * 20 - 605, 0)
+            / 50
+        ) * 50
 
         custom = block.calculate(
             {
@@ -167,6 +205,7 @@ def main() -> int:
             ({"ff_safety_days": -1}, "не может быть отрицательным"),
             ({"order_batch_qty": 0}, "больше нуля"),
             ({"sales_avg_period_days": 0}, "больше нуля"),
+            ({"inbound_scope": "unknown"}, "Охват заказов фабрике"),
         ):
             _expect_error(
                 block,
@@ -216,7 +255,7 @@ def main() -> int:
         registry = runtime.list_supply_calculation_registry(
             calculation_type="fbs_fulfillment_order"
         )
-        assert registry["pagination"]["total"] == 2
+        assert registry["pagination"]["total"] == 3
         record = runtime.load_supply_calculation_registry_record(custom.calculation_id)
         assert record is not None
         assert record["calculation_type"] == "fbs_fulfillment_order"
@@ -225,6 +264,22 @@ def main() -> int:
         )
         assert record["evidence"]["wb_stock_used"] is False
         assert record["evidence"]["target_facility"]["facility_id"] == MOSCOW_ID
+        assert record["payload"]["settings"]["inbound_scope"] == "selected_facility"
+        assert record["key_settings"]["inbound_scope"] == "selected_facility"
+        assert record["evidence"]["settings"]["inbound_scope"] == "selected_facility"
+        assert record["evidence"]["coverage"]["inbound"]["scope"] == (
+            "selected_facility"
+        )
+        all_record = runtime.load_supply_calculation_registry_record(
+            all_active.calculation_id
+        )
+        assert all_record is not None
+        assert all_record["payload"]["settings"]["inbound_scope"] == "all_active"
+        assert all_record["key_settings"]["inbound_scope"] == "all_active"
+        assert all_record["evidence"]["coverage"]["inbound"]["scope"] == "all_active"
+        assert all_record["evidence"]["result_fingerprint"] != record["evidence"][
+            "result_fingerprint"
+        ]
         demand = record["evidence"]["demand_basis"]
         assert demand["sales_window"]["mode"] == "custom_period"
         assert demand["sales_window"]["actual_date_from"] == "2026-04-10"
@@ -240,8 +295,33 @@ def main() -> int:
         assert "Исключённые даты" in export_rows[0]
         assert "Итоговый demand basis, шт/день" in export_rows[0]
         assert "Целевой фулфилмент" in export_rows[0]
+        assert "Охват заказов фабрике" in export_rows[0]
         assert any("custom_period" in [str(cell) for cell in row] for row in export_rows)
         assert any("false" in [str(cell).lower() for cell in row] for row in export_rows)
+        all_export_bytes, _, _ = runtime.load_supply_calculation_registry_export(
+            all_active.calculation_id
+        )
+        with zipfile.ZipFile(io.BytesIO(all_export_bytes), "r") as archive:
+            assert archive.testzip() is None
+            assert 'name="Заказ на ФФ"' in archive.read(
+                "xl/workbook.xml"
+            ).decode("utf-8")
+        all_export_rows = read_first_sheet_rows(all_export_bytes)
+        assert sum(
+            1
+            for row in all_export_rows[1:]
+            if row and isinstance(row[0], int)
+        ) == len(active_nm_ids)
+        assert any(
+            "Все активные заказы фабрике" in [str(cell) for cell in row]
+            for row in all_export_rows
+        )
+        assert any(
+            row
+            and row[0] == "Учтено активных входящих, шт"
+            and float(row[2]) == 535
+            for row in all_export_rows
+        )
 
     print("fbs_fulfillment_order_supply_smoke: ok")
     return 0
@@ -463,11 +543,12 @@ def _seed_shipments(
     runtime: RegistryUploadDbBackedRuntime,
     active_nm_ids: list[int],
 ) -> None:
-    for shipment_id, target_id, quantity, status in (
-        ("legacy-null-target", None, 20, ORDER_STATUS_PRODUCTION),
-        ("explicit-moscow", MOSCOW_ID, 15, ORDER_STATUS_IN_TRANSIT),
-        ("explicit-orenburg", ORENBURG_ID, 500, ORDER_STATUS_IN_TRANSIT),
-        ("accepted-moscow", MOSCOW_ID, 400, ORDER_STATUS_ACCEPTED_FF),
+    for shipment_id, target_id, quantity, status, line_match_status in (
+        ("legacy-null-target", None, 20, ORDER_STATUS_PRODUCTION, "matched"),
+        ("explicit-moscow", MOSCOW_ID, 15, ORDER_STATUS_IN_TRANSIT, "matched"),
+        ("explicit-orenburg", ORENBURG_ID, 500, ORDER_STATUS_IN_TRANSIT, "matched"),
+        ("accepted-moscow", MOSCOW_ID, 400, ORDER_STATUS_ACCEPTED_FF, "matched"),
+        ("unmatched-active", MOSCOW_ID, 1000, ORDER_STATUS_PRODUCTION, "unmatched"),
     ):
         runtime.save_supplier_shipment(
             header={
@@ -513,11 +594,29 @@ def _seed_shipments(
                     "amount": quantity,
                     "currency": "RMB",
                     "comment": "",
+                    "match_status": line_match_status,
+                    "manual_override": False,
+                    "raw": {},
+                }
+            ] + ([
+                {
+                    "line_id": shipment_id + "-zero-line",
+                    "line_type": "product",
+                    "sort_order": 2,
+                    "source_no": "2",
+                    "model_raw": "ZERO",
+                    "internal_nm_id": active_nm_ids[0],
+                    "internal_name": "ZERO",
+                    "qty": 0,
+                    "unit_price": 1,
+                    "amount": 0,
+                    "currency": "RMB",
+                    "comment": "",
                     "match_status": "matched",
                     "manual_override": False,
                     "raw": {},
                 }
-            ],
+            ] if shipment_id == "explicit-moscow" else []),
         )
 
 

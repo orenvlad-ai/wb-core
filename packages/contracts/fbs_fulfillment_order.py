@@ -15,11 +15,18 @@ SALES_HISTORY_MODES = {
 }
 DEFAULT_SALES_HISTORY_DAYS = 14
 MOSCOW_CITY = "Москва"
+INBOUND_SCOPE_SELECTED_FACILITY = "selected_facility"
+INBOUND_SCOPE_ALL_ACTIVE = "all_active"
+INBOUND_SCOPES = {
+    INBOUND_SCOPE_SELECTED_FACILITY,
+    INBOUND_SCOPE_ALL_ACTIVE,
+}
 
 
 @dataclass(frozen=True)
 class FbsFulfillmentOrderSettings:
     target_facility_id: str
+    inbound_scope: str
     production_days: int
     factory_to_target_ff_days: int
     ff_safety_days: int
