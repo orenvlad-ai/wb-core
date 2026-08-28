@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -142,8 +143,13 @@ def main() -> None:
                 return
             if path.endswith("/override"):
                 target = calculation["rows"][0]["campaign_recommendations"][1]
-                target["manual_target_bid_rub"] = body.get("manual_target_bid_rub")
-                target["final_target_bid_rub"] = body.get("manual_target_bid_rub")
+                manual_target = body.get("manual_target_bid_rub")
+                target["manual_target_bid_rub"] = manual_target
+                target["final_target_bid_rub"] = (
+                    manual_target
+                    if manual_target is not None
+                    else target["calculated_target_bid_rub"]
+                )
                 calculation["rows"][0]["old_cpm_campaigns"][0] = target
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(calculation))
                 return
@@ -170,17 +176,109 @@ def main() -> None:
         assert page.locator('[data-sku-management-subpanel="general"]').is_hidden()
         assert page.locator('[data-sku-management-subpanel="inventory-balance"]').is_visible()
         balance_body_text = page.locator("[data-inventory-balance-body]").inner_text()
+        normalized_balance_text = balance_body_text.replace("\xa0", " ")
         assert "Дефицит" in balance_body_text, (
             balance_body_text,
             page.locator("[data-inventory-balance-status]").inner_text(),
             page.locator("[data-inventory-balance-error]").inner_text(),
             console_errors,
         )
-        assert "агрегат WB × 0.5" in balance_body_text
-        assert "без складской раскладки" in balance_body_text
+        assert "WB только агрегатом × 0.5" in normalized_balance_text
+        assert "Снизить 1 000 → 800 ₽/1000 показов (−20%)" in normalized_balance_text
+        assert "Оставить 5 ₽/клик" in normalized_balance_text
+        assert "Повысить 10 → 15 ₽/клик (+50%)" in normalized_balance_text
+        assert "Ещё 1 кампания — в подробностях" in normalized_balance_text
+        assert "Ставка не рассчитана" in normalized_balance_text
+        assert "Мало статистики рекламы · Темп менять не нужно" in normalized_balance_text
+        assert "insufficient_stats" not in normalized_balance_text
+        assert "hold_conservative" not in normalized_balance_text
+        assert "advert_id" not in normalized_balance_text
+        assert page.locator(".inventory-balance-quality.exact").count() == 2
+        assert page.locator(".inventory-balance-quality.partial").count() == 1
+        assert page.locator(".inventory-balance-quality.insufficient").count() == 1
+        assert page.locator(".inventory-balance-main-row").count() == 4
+        row_heights = page.locator(".inventory-balance-main-row").evaluate_all(
+            "rows => rows.map(row => row.getBoundingClientRect().height)"
+        )
+        assert all(height <= 62 for height in row_heights), row_heights
+        visible_line_counts = page.locator(
+            ".inventory-balance-main-row .inventory-balance-two-line"
+        ).evaluate_all("nodes => nodes.map(node => node.children.length)")
+        assert visible_line_counts and all(count <= 2 for count in visible_line_counts)
+        assert page.locator("th.inventory-balance-select-column").evaluate(
+            "node => getComputedStyle(node).position"
+        ) == "sticky"
+        table_shell = page.locator("[data-inventory-balance-table]").locator("xpath=..")
+        table_shell.evaluate("node => { node.scrollLeft = node.scrollWidth; }")
+        page.wait_for_timeout(50)
+        sticky_select_box = page.locator(
+            ".inventory-balance-main-row td.inventory-balance-select-column"
+        ).first.bounding_box()
+        sticky_product_box = page.locator(
+            ".inventory-balance-main-row td.inventory-balance-product-column"
+        ).first.bounding_box()
+        shell_box = table_shell.bounding_box()
+        assert sticky_select_box and sticky_product_box and shell_box
+        assert abs(sticky_select_box["x"] - shell_box["x"]) <= 2
+        assert abs(
+            sticky_product_box["x"]
+            - (sticky_select_box["x"] + sticky_select_box["width"])
+        ) <= 2
+        table_shell.evaluate("node => { node.scrollLeft = 0; }")
         assert "Новые CPC" in page.locator("[data-inventory-balance-head]").inner_text()
         assert "Старые CPM" in page.locator("[data-inventory-balance-head]").inner_text()
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
+        screenshot_path = os.environ.get("SKU_INVENTORY_BALANCE_SCREENSHOT", "").strip()
+        if screenshot_path:
+            page.screenshot(path=screenshot_path, full_page=True)
+        screenshot_right_path = os.environ.get(
+            "SKU_INVENTORY_BALANCE_SCREENSHOT_RIGHT", ""
+        ).strip()
+        if screenshot_right_path:
+            page.locator("[data-inventory-balance-table]").evaluate(
+                "table => { table.parentElement.scrollLeft = table.parentElement.scrollWidth; }"
+            )
+            page.wait_for_timeout(50)
+            page.screenshot(path=screenshot_right_path, full_page=True)
+            page.locator("[data-inventory-balance-table]").evaluate(
+                "table => { table.parentElement.scrollLeft = 0; }"
+            )
+
+        deficit_row = page.locator('[data-inventory-balance-nm-id="101"]')
+        assert "Использован официальный агрегат" not in deficit_row.inner_text()
+        deficit_row.locator("[data-inventory-balance-details-toggle]").click()
+        deficit_details = page.locator('[data-inventory-balance-details-row="101"]')
+        assert deficit_details.is_visible()
+        deficit_detail_text = deficit_details.inner_text()
+        assert "Использован официальный агрегат WB" in deficit_detail_text
+        assert "advert_id 8001" in deficit_detail_text
+        assert "placement search" in deficit_detail_text
+        assert "CPO 80 ₽/заказ" in deficit_detail_text
+        deficit_details.locator("details").evaluate_all(
+            "nodes => nodes.forEach(node => { node.open = true; })"
+        )
+        expanded_deficit_detail_text = deficit_details.inner_text()
+        assert "shipment-deficit-1" in expanded_deficit_detail_text
+        assert "sha256:wb-deficit" in expanded_deficit_detail_text
+        assert "recommendation_quality" in expanded_deficit_detail_text
+        assert "calculated_target_bid_rub" in expanded_deficit_detail_text
+
+        insufficient_toggle = page.locator(
+            '[data-inventory-balance-details-toggle="303"]'
+        )
+        insufficient_toggle.focus()
+        insufficient_toggle.press("Enter")
+        insufficient_details = page.locator('[data-inventory-balance-details-row="303"]')
+        assert insufficient_details.is_visible()
+        insufficient_details.locator("details").evaluate_all(
+            "nodes => nodes.forEach(node => { node.open = true; })"
+        )
+        assert "insufficient_stats" in insufficient_details.inner_text()
+        unavailable_override = insufficient_details.locator(
+            '[data-inventory-balance-override="303:9303:search"]'
+        )
+        assert unavailable_override.input_value() == ""
+        assert unavailable_override.get_attribute("placeholder") == "Введите вручную"
 
         page.locator("[data-inventory-balance-calculate]").click()
         page.wait_for_function(
@@ -211,19 +309,50 @@ def main() -> None:
         page.wait_for_timeout(50)
         page.locator("[data-inventory-balance-select-all]").click()
         assert page.locator("[data-inventory-balance-apply]").is_enabled()
+        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
 
+        page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-details-toggle]'
+        ).click()
         override = page.locator('[data-inventory-balance-override="101:8001:search"]')
+        assert override.input_value() == "800"
         override.fill("725.25")
         override.blur()
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-status]').textContent.includes('ibc_browser')"
         )
+        assert "Изменено вручную" in page.locator(
+            '[data-inventory-balance-details-row="101"]'
+        ).inner_text()
+        override.fill("800")
+        override.blur()
+        page.wait_for_timeout(50)
+        assert "Изменено вручную" not in page.locator(
+            '[data-inventory-balance-details-row="101"]'
+        ).inner_text()
+        assert override.input_value() == "800"
+        override.fill("725.25")
+        override.blur()
+        page.wait_for_timeout(50)
+        page.locator("[data-inventory-balance-preset]").select_option("all")
         page.locator("[data-inventory-balance-apply]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
         confirmation = page.locator("[data-inventory-balance-confirm-body]").inner_text()
-        assert "SKU: 1" in confirmation
-        assert "campaign targets: 1" in confirmation
-        assert "WB PATCH недоступны" in confirmation
+        normalized_confirmation = confirmation.replace("\xa0", " ")
+        assert "Выбрано SKU\n2" in confirmation
+        assert "Точных целей\n2" in confirmation
+        assert "Повышений\n1" in confirmation
+        assert "Понижений\n1" in confirmation
+        assert "1 000 → 725,25 ₽/1000 показов" in normalized_confirmation
+        assert "10 → 15 ₽/клик" in normalized_confirmation
+        assert "Исключено целей без изменения или точного расчёта: 3" in confirmation
+        assert "Недоступных строк текущего фильтра, не включено: 2" in confirmation
+        assert "Только dry-run, ставки WB не изменятся" in confirmation
+        screenshot_modal_path = os.environ.get(
+            "SKU_INVENTORY_BALANCE_SCREENSHOT_MODAL", ""
+        ).strip()
+        if screenshot_modal_path:
+            page.screenshot(path=screenshot_modal_path, full_page=True)
         page.locator("[data-inventory-balance-confirm-start]").click()
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-progress-summary]') && document.querySelector('[data-inventory-balance-progress-summary]').textContent.includes('100%')"
@@ -244,6 +373,7 @@ def main() -> None:
     assert not [item for item in requests if item[0] == "PATCH"]
     override_requests = [item for item in requests if item[1].endswith("/override")]
     assert override_requests and override_requests[-1][2]["manual_target_bid_rub"] == 725.25
+    assert any(item[2]["manual_target_bid_rub"] is None for item in override_requests)
     start_requests = [item for item in requests if item[1].endswith("/apply-jobs")]
     assert start_requests and start_requests[-1][2]["mode"] == "dry_run"
     assert start_requests[-1][2]["confirmed"] is True
@@ -268,30 +398,30 @@ def main() -> None:
 
 
 def _calculation() -> dict:
-    cpc = {
+    deficit_cpc = {
         "target_key": "101:9001:recommendations",
         "nm_id": 101,
         "advert_id": 9001,
-        "campaign_name": "new cpc recommendations",
+        "campaign_name": "Поддерживающая CPC",
         "campaign_group": "new_cpc",
         "payment_type": "cpc",
         "placement": "recommendations",
         "cpo_rub": 30,
         "current_bid_rub": 5,
-        "calculated_target_bid_rub": 4,
+        "calculated_target_bid_rub": 5,
         "manual_target_bid_rub": None,
-        "final_target_bid_rub": 4,
+        "final_target_bid_rub": 5,
         "identity_valid": True,
         "manual_override_allowed": True,
         "can_apply": False,
         "allocation_action": "hold_other_group",
         "recommendation_quality": "complete",
     }
-    cpm = {
+    deficit_cpm = {
         "target_key": "101:8001:search",
         "nm_id": 101,
         "advert_id": 8001,
-        "campaign_name": "old cpm search",
+        "campaign_name": "Снижение дефицитной CPM",
         "campaign_group": "old_cpm",
         "payment_type": "cpm",
         "placement": "search",
@@ -306,6 +436,90 @@ def _calculation() -> dict:
         "allocation_action": "decrease_less_efficient_group",
         "recommendation_quality": "complete",
     }
+    excess_cpc = {
+        "target_key": "202:9202:search",
+        "nm_id": 202,
+        "advert_id": 9202,
+        "campaign_name": "Продвижение складского избытка с длинным названием",
+        "campaign_group": "new_cpc",
+        "payment_type": "cpc",
+        "placement": "search",
+        "cpo_rub": 25,
+        "current_bid_rub": 10,
+        "calculated_target_bid_rub": 15,
+        "manual_target_bid_rub": None,
+        "final_target_bid_rub": 15,
+        "identity_valid": True,
+        "manual_override_allowed": True,
+        "can_apply": True,
+        "allocation_action": "increase_more_efficient_group",
+        "recommendation_quality": "complete",
+    }
+    excess_cpm = {
+        "target_key": "202:8202:recommendations",
+        "nm_id": 202,
+        "advert_id": 8202,
+        "campaign_name": "Поддерживающая CPM",
+        "campaign_group": "old_cpm",
+        "payment_type": "cpm",
+        "placement": "recommendations",
+        "cpo_rub": 70,
+        "current_bid_rub": 1200,
+        "calculated_target_bid_rub": 1200,
+        "manual_target_bid_rub": None,
+        "final_target_bid_rub": 1200,
+        "identity_valid": True,
+        "manual_override_allowed": True,
+        "can_apply": False,
+        "allocation_action": "hold_other_group",
+        "recommendation_quality": "complete",
+    }
+    excess_cpc_hold = {
+        **excess_cpc,
+        "target_key": "202:9203:recommendations",
+        "advert_id": 9203,
+        "campaign_name": "Поддерживающая CPC переизбытка",
+        "placement": "recommendations",
+        "current_bid_rub": 8,
+        "calculated_target_bid_rub": 8,
+        "final_target_bid_rub": 8,
+        "can_apply": False,
+        "allocation_action": "hold_other_group",
+    }
+    insufficient_cpc = {
+        "target_key": "303:9303:search",
+        "nm_id": 303,
+        "advert_id": 9303,
+        "campaign_name": "Кампания без сопоставимой статистики",
+        "campaign_group": "new_cpc",
+        "payment_type": "cpc",
+        "placement": "search",
+        "cpo_rub": None,
+        "orders": None,
+        "spend_rub": 100,
+        "current_bid_rub": 12,
+        "calculated_target_bid_rub": 12,
+        "manual_target_bid_rub": None,
+        "final_target_bid_rub": 12,
+        "identity_valid": True,
+        "manual_override_allowed": True,
+        "can_apply": False,
+        "allocation_action": "hold_conservative",
+        "recommendation_quality": "insufficient_stats",
+        "calculation_reason": "консервативно без изменения: недостаточно сопоставимой CPO evidence",
+    }
+    insufficient_cpm = {
+        **insufficient_cpc,
+        "target_key": "303:8303:recommendations",
+        "advert_id": 8303,
+        "campaign_name": "Вторая кампания без статистики",
+        "campaign_group": "old_cpm",
+        "payment_type": "cpm",
+        "placement": "recommendations",
+        "current_bid_rub": 1500,
+        "calculated_target_bid_rub": 1500,
+        "final_target_bid_rub": 1500,
+    }
     return {
         "contract_name": "sheet_vitrina_v1_sku_inventory_balance/v2",
         "calculation_id": "ibc_browser",
@@ -316,13 +530,21 @@ def _calculation() -> dict:
         "registry_immutable": True,
         "overrides_are_separate": True,
         "automatic_ml_or_training": False,
+        "lineage": {
+            "sales_evidence_window": {"sales_period_days": 7, "date_from": "2026-08-20"},
+            "supplier_eta_evidence": {
+                "method": "empirical_last_completed_shipments",
+                "shipment_ids": ["done-1", "done-2", "done-3"],
+                "digest": "sha256:eta-browser",
+            },
+        },
         "rows": [
             {
                 "nm_id": 101,
                 "name": "Deficit SKU",
                 "our_sku": "DEF",
                 "status": "Дефицит",
-                "quality": "complete",
+                "quality": "partial",
                 "quality_warnings": [
                     "Использован официальный агрегат WB по SKU без раскладки по складам и регионам"
                 ],
@@ -331,41 +553,129 @@ def _calculation() -> dict:
                 "wb_confidence_coefficient": 0.5,
                 "confidence_adjusted_wb_units": 50,
                 "wb_stock_evidence": {
+                    "source_contract": "official_current_stock_snapshot/v1",
                     "mode": "aggregate_per_sku_total",
                     "quality": "exact_aggregate_total",
                     "warehouse_granularity_complete": False,
                     "incident_projection_applied": False,
-                    "raw_rows_digest": "sha256:" + "b" * 64,
+                    "raw_rows_digest": "sha256:wb-deficit",
                 },
                 "current_daily_sales": 10,
                 "target_daily_sales": 8,
                 "pace_change_pct": -20,
                 "days_cover": 5,
                 "bottleneck_date": "2026-09-10",
-                "next_inbound": {"date": "2026-09-10", "quantity": 100},
+                "next_inbound": {
+                    "date": "2026-09-10",
+                    "quantity": 100,
+                    "source_ids": ["shipment-deficit-1"],
+                },
                 "subsequent_inbound": None,
-                "campaign_recommendations": [cpc, cpm],
-                "new_cpc_campaigns": [cpc],
-                "old_cpm_campaigns": [cpm],
+                "milestones": [
+                    {
+                        "date": "2026-09-10",
+                        "quantity": 100,
+                        "sources": ["supplier_shipment"],
+                        "source_ids": ["shipment-deficit-1"],
+                    }
+                ],
+                "campaign_recommendations": [deficit_cpc, deficit_cpm],
+                "new_cpc_campaigns": [deficit_cpc],
+                "old_cpm_campaigns": [deficit_cpm],
                 "select_available": True,
-            }
+            },
+            {
+                "nm_id": 202,
+                "name": "Overstock SKU",
+                "our_sku": "OVER",
+                "status": "Переизбыток",
+                "quality": "complete",
+                "quality_warnings": [],
+                "known_stock_units": 600,
+                "wb_confidence_coefficient": 0.5,
+                "wb_stock_evidence": {"mode": "warehouse_granular_incident_projection"},
+                "current_daily_sales": 8,
+                "target_daily_sales": 12,
+                "pace_change_pct": 50,
+                "days_cover": 75,
+                "bottleneck_date": "2026-09-18",
+                "next_inbound": {"date": "2026-09-18", "quantity": 200},
+                "subsequent_inbound": None,
+                "milestones": [{"date": "2026-09-18", "quantity": 200, "source_ids": ["shipment-overstock-1"]}],
+                "campaign_recommendations": [excess_cpc, excess_cpc_hold, excess_cpm],
+                "new_cpc_campaigns": [excess_cpc, excess_cpc_hold],
+                "old_cpm_campaigns": [excess_cpm],
+                "select_available": True,
+            },
+            {
+                "nm_id": 303,
+                "name": "Balanced SKU",
+                "our_sku": "BAL",
+                "status": "Баланс",
+                "quality": "complete",
+                "quality_warnings": [],
+                "known_stock_units": 300,
+                "wb_confidence_coefficient": 0.5,
+                "wb_stock_evidence": {"mode": "warehouse_granular_incident_projection"},
+                "current_daily_sales": 10,
+                "target_daily_sales": 10,
+                "pace_change_pct": 0,
+                "days_cover": 30,
+                "bottleneck_date": None,
+                "next_inbound": {"date": "2026-09-25", "quantity": 100},
+                "subsequent_inbound": None,
+                "milestones": [{"date": "2026-09-25", "quantity": 100, "source_ids": ["shipment-balanced-1"]}],
+                "campaign_recommendations": [insufficient_cpc, insufficient_cpm],
+                "new_cpc_campaigns": [insufficient_cpc],
+                "old_cpm_campaigns": [insufficient_cpm],
+                "select_available": False,
+            },
+            {
+                "nm_id": 404,
+                "name": "Unknown supply SKU",
+                "our_sku": "UNKNOWN",
+                "status": "Недостаточно данных",
+                "quality": "unknown",
+                "quality_warnings": [
+                    "Нет eligible exact production/in_transit поставок; target не рассчитывается"
+                ],
+                "known_stock_units": 40,
+                "wb_confidence_coefficient": 0.5,
+                "wb_stock_evidence": {"mode": "warehouse_granular_incident_projection"},
+                "current_daily_sales": 4,
+                "target_daily_sales": None,
+                "pace_change_pct": None,
+                "days_cover": 10,
+                "bottleneck_date": None,
+                "next_inbound": None,
+                "subsequent_inbound": None,
+                "milestones": [],
+                "campaign_recommendations": [],
+                "new_cpc_campaigns": [],
+                "old_cpm_campaigns": [],
+                "select_available": False,
+            },
         ],
     }
 
 
 def _job(state: str, terminal: int) -> dict:
+    total = 2
     return {
         "job_id": "ibj_browser",
         "calculation_id": "ibc_browser",
         "mode": "dry_run",
         "state": state,
         "progress": {
-            "total": 1,
+            "total": total,
             "terminal": terminal,
-            "percent": terminal * 100,
-            "states": {"pending": 1 - terminal, "succeeded": terminal},
+            "percent": int(terminal / total * 100),
+            "states": {"pending": total - terminal, "succeeded": terminal},
         },
-        "sku_states": [{"nm_id": 101, "state": "succeeded" if terminal else "pending", "target_count": 1}],
+        "sku_states": [
+            {"nm_id": nm_id, "state": "succeeded" if terminal else "pending", "target_count": 1}
+            for nm_id in (101, 202)
+        ],
         "items": [],
         "external_writes": False,
         "wb_patch_called": False,
@@ -414,7 +724,7 @@ def _registry(job: dict | None) -> dict:
                 "created_at": "2026-08-26T08:00:00+00:00",
                 "created_by": "operator",
                 "previous_calculation_id": "ibc_previous",
-                "row_count": 1,
+                "row_count": 4,
                 "apply_protocols": [
                     {"protocol": "inventory_balance_apply_job/v1", "mode": "dry_run"},
                     {"protocol": "inventory_balance_live_wb_boundary/v1", "mode": "live_wb", "available": False},
