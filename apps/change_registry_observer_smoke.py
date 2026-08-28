@@ -31,10 +31,15 @@ from packages.application.change_registry import (  # noqa: E402
 from packages.application.change_registry_observer import (  # noqa: E402
     ChangeRegistryObserver,
     ChangeRegistryObserverBusy,
+    ChangeRegistryObserverError,
     ChangeRegistryReadSurface,
+    activation_job_id,
 )
 from packages.application.change_registry_source_acquisition import (  # noqa: E402
     ChangeRegistrySourceAcquirer,
+)
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    RegistryUploadHttpEntrypoint,
 )
 from apps.change_registry_source_acquisition_smoke import (  # noqa: E402
     FakeAdsSource,
@@ -42,6 +47,7 @@ from apps.change_registry_source_acquisition_smoke import (  # noqa: E402
     _count_payload,
     _detail,
 )
+from apps.change_registry_observer import observer_job_exit_code  # noqa: E402
 
 
 SELLER = "seller-primary"
@@ -90,26 +96,36 @@ def _assert_canonical_hosted_activation_wiring() -> None:
 
     units_dir = ROOT / target["systemd_units_source_dir"]
     observer_unit = units_dir / "wb-core-change-registry-observer.service"
+    activation_unit = units_dir / "wb-core-change-registry-activation@.service"
     http_unit = units_dir / "wb-core-registry-http.service"
     assert _unit_environment(observer_unit) == expected
+    assert _unit_environment(activation_unit) == expected
     assert _unit_environment(http_unit) == expected
 
     environment_file = target["environment_file"]
     observer_text = observer_unit.read_text(encoding="utf-8")
+    activation_text = activation_unit.read_text(encoding="utf-8")
     http_text = http_unit.read_text(encoding="utf-8")
     assert f"--env-file {environment_file}" in observer_text
+    assert f"--env-file {environment_file}" in activation_text
+    assert "--trigger activation --deployed-sha %i" in activation_text
     assert f"EnvironmentFile={environment_file}" in http_text
 
     managed_units = {item["name"]: item for item in target["managed_systemd_units"]}
     assert managed_units[observer_unit.name] == {
         "name": observer_unit.name,
         "enable": False,
-        "restart": True,
+        "restart": False,
     }
     assert managed_units["wb-core-change-registry-observer.timer"] == {
         "name": "wb-core-change-registry-observer.timer",
         "enable": True,
         "restart": True,
+    }
+    assert managed_units[activation_unit.name] == {
+        "name": activation_unit.name,
+        "enable": False,
+        "restart": False,
     }
 
 
@@ -240,6 +256,7 @@ def _snapshot(
             "facts_written": 0,
             "identity_incidents_written": 0,
         },
+        "wb_mutation_calls": {"post": 0, "patch": 0},
     }
     payload["manifest_digest"] = canonical_digest(payload)
     return payload
@@ -248,11 +265,13 @@ def _snapshot(
 class SnapshotAcquirer:
     def __init__(self, snapshot: Mapping[str, Any]) -> None:
         self.snapshot = deepcopy(snapshot)
+        self.acquire_calls = 0
         self.upload_task_calls = 0
         self.patch_bids_calls = 0
         self.balance_wb_patch_called = False
 
     def acquire(self) -> dict[str, Any]:
+        self.acquire_calls += 1
         return deepcopy(self.snapshot)
 
 
@@ -297,6 +316,33 @@ def _atomic_result_counts(db_path: Path) -> dict[str, int]:
 def main() -> None:
     _assert_canonical_hosted_activation_wiring()
     with TemporaryDirectory(prefix="change-registry-observer-") as tmp:
+        missing_runtime = Path(tmp) / "missing-runtime"
+        missing_runtime.mkdir()
+        before_missing = list(missing_runtime.iterdir())
+        missing = ChangeRegistryReadSurface(
+            missing_runtime, seller_id=SELLER, account_scope=ACCOUNT
+        ).overview()
+        assert missing["status"]["health_state"] == "schema_missing"
+        assert missing["storage"] == {"mode": "ro", "query_only": True}
+        assert list(missing_runtime.iterdir()) == before_missing
+        incomplete_runtime = Path(tmp) / "incomplete-runtime"
+        incomplete_runtime.mkdir()
+        incomplete_db = incomplete_runtime / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(incomplete_db) as conn:
+            conn.execute("CREATE TABLE unrelated(id INTEGER PRIMARY KEY)")
+            conn.commit()
+        incomplete_before = incomplete_db.stat()
+        incomplete = ChangeRegistryReadSurface(
+            incomplete_runtime, seller_id=SELLER, account_scope=ACCOUNT
+        ).overview()
+        incomplete_after = incomplete_db.stat()
+        assert incomplete["status"]["health_state"] == "schema_missing"
+        assert incomplete["status"]["missing_tables"]
+        assert (incomplete_before.st_size, incomplete_before.st_mtime_ns) == (
+            incomplete_after.st_size,
+            incomplete_after.st_mtime_ns,
+        )
+
         runtime_dir = Path(tmp) / "runtime"
         runtime_dir.mkdir(parents=True)
         db_path = runtime_dir / "registry_upload_runtime.sqlite3"
@@ -309,8 +355,15 @@ def main() -> None:
         native_before = native_jsonl.read_bytes()
 
         observer, adapter = _observer(runtime_dir, _snapshot(0), "2026-08-29T00:00:00Z")
-        baseline = observer.run(trigger_kind="activation", requested_by="release-runner", job_id="activation-baseline")
+        baseline_sha = "a" * 40
+        baseline = observer.run(
+            trigger_kind="activation",
+            requested_by="release-runner",
+            deployed_sha=baseline_sha,
+        )
         assert baseline["events"][-1]["state"] == "complete"
+        assert baseline["job"]["job_id"] == activation_job_id(baseline_sha)
+        assert observer_job_exit_code(baseline) == 0
         assert _counts(db_path) == {"checkpoints": 1, "facts": 0, "incidents": 0}
 
         observer, _ = _observer(runtime_dir, _snapshot(10), "2026-08-29T00:10:00Z")
@@ -340,6 +393,16 @@ def main() -> None:
         )
         assert len(surface.overview()["annotations"]) == 2
         assert observer.run(trigger_kind="manual", requested_by="operator", job_id="changed")["events"][-1]["fact_count"] == 1
+        try:
+            observer.run(
+                trigger_kind="manual",
+                requested_by="different-actor",
+                job_id="changed",
+            )
+        except ChangeRegistryObserverError:
+            pass
+        else:
+            raise AssertionError("conflicting job-id actor binding did not fail closed")
         assert _counts(db_path)["facts"] == 1
         replay_counts = _counts(db_path)
         replay_observer, _ = _observer(
@@ -391,6 +454,7 @@ def main() -> None:
         observer, _ = _observer(runtime_dir, _snapshot(40, price=7777, complete=False), "2026-08-29T00:40:00Z")
         partial = observer.run(trigger_kind="manual", requested_by="operator", job_id="partial")
         assert partial["events"][-1]["state"] == "partial" and partial["events"][-1]["fact_count"] == 0
+        assert observer_job_exit_code(partial) == 1
 
         observer, _ = _observer(runtime_dir, _snapshot(41, include_good=False), "2026-08-29T00:41:00Z")
         disappeared = observer.run(trigger_kind="manual", requested_by="operator", job_id="disappeared")
@@ -428,6 +492,73 @@ def main() -> None:
             raise AssertionError("concurrent observer did not fail closed on the lease")
         holder._fail_job("lease-holder", "manual", "", RuntimeError("smoke release"))
 
+        crash_digest = canonical_digest(
+            {
+                "seller_id": SELLER,
+                "account_scope": ACCOUNT,
+                "trigger_kind": "manual",
+                "scheduled_slot": "",
+                "requested_by": "operator",
+                "client_job_id": "accepted-crash",
+                "deployed_sha": "",
+            }
+        )
+        crashed, _ = _observer(
+            runtime_dir, _snapshot(44), "2026-08-29T00:44:10Z"
+        )
+        crashed.lease_seconds = 1
+        crashed._admit(
+            job_id="accepted-crash",
+            trigger_kind="manual",
+            scheduled_slot_value="",
+            requested_by="operator",
+            requested_at="2026-08-29T00:44:10Z",
+            request_digest=crash_digest,
+        )
+        assert observer_job_exit_code(crashed.read_job("accepted-crash")) == 1
+        recovered, recovered_adapter = _observer(
+            runtime_dir, _snapshot(44), "2026-08-29T00:44:12Z"
+        )
+        recovered_job = recovered.run(
+            trigger_kind="manual", requested_by="operator", job_id="accepted-crash"
+        )
+        assert recovered_job["events"][-1]["state"] == "complete"
+        assert [event["state"] for event in recovered_job["events"]].count("running") == 2
+        assert recovered_adapter.upload_task_calls == 0
+
+        class FailingAcquirer:
+            calls = 0
+
+            def acquire(self):
+                self.calls += 1
+                raise RuntimeError("expected source failure")
+
+        failing = FailingAcquirer()
+        failed_observer = ChangeRegistryObserver(
+            runtime_dir,
+            seller_id=SELLER,
+            account_scope=ACCOUNT,
+            acquirer_factory=lambda: failing,
+            now_fn=lambda: "2026-08-29T00:44:40Z",
+        )
+        try:
+            failed_observer.run(
+                trigger_kind="manual", requested_by="operator", job_id="failed-replay"
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("source failure was not surfaced")
+        replay_failed, replay_adapter = _observer(
+            runtime_dir, _snapshot(44), "2026-08-29T00:44:41Z"
+        )
+        failed_job = replay_failed.run(
+            trigger_kind="manual", requested_by="operator", job_id="failed-replay"
+        )
+        assert failed_job["events"][-1]["state"] == "failed"
+        assert observer_job_exit_code(failed_job) == 1
+        assert replay_adapter.acquire_calls == 0
+
         before_failure = _counts(db_path)
         atomic_before_failure = _atomic_result_counts(db_path)
         observer, _ = _observer(runtime_dir, _snapshot(45, price=3333), "2026-08-29T00:45:00Z")
@@ -455,8 +586,42 @@ def main() -> None:
         overview = ChangeRegistryReadSurface(runtime_dir, seller_id=SELLER, account_scope=ACCOUNT).overview()
         assert overview["status"]["health_state"] == "normal"
         assert overview["interval_semantics"].startswith("Время изменения")
+        assert overview["storage"] == {"mode": "ro", "query_only": True}
 
-        async_observer, _ = _observer(runtime_dir, _snapshot(9 * 60), "2026-08-29T09:00:00Z")
+        scheduled_observer, _ = _observer(
+            runtime_dir, _snapshot(12 * 60), "2026-08-29T12:00:00Z"
+        )
+        scheduled_job = scheduled_observer.run(
+            trigger_kind="scheduled",
+            requested_by="systemd",
+            scheduled_slot_value="2026-08-29T12:00:00Z",
+        )
+        activation_sha = "b" * 40
+        activation_observer, _ = _observer(
+            runtime_dir, _snapshot(12 * 60), "2026-08-29T12:00:31+00:00"
+        )
+        activation_job = activation_observer.run(
+            trigger_kind="activation",
+            requested_by="trusted-release-runner",
+            deployed_sha=activation_sha,
+        )
+        assert scheduled_job["job"]["job_id"] != activation_job["job"]["job_id"]
+        assert activation_job["job"]["job_id"] == activation_job_id(activation_sha)
+        activation_event_count = len(activation_job["events"])
+        same_sha = activation_observer.run(
+            trigger_kind="activation",
+            requested_by="trusted-release-runner",
+            deployed_sha=activation_sha,
+        )
+        assert len(same_sha["events"]) == activation_event_count
+        new_sha = activation_observer.run(
+            trigger_kind="activation",
+            requested_by="trusted-release-runner",
+            deployed_sha="c" * 40,
+        )
+        assert new_sha["job"]["job_id"] != same_sha["job"]["job_id"]
+
+        async_observer, _ = _observer(runtime_dir, _snapshot(13 * 60), "2026-08-29T13:00:00Z")
         async_observer.submit_manual(requested_by="operator", job_id="async-manual")
         for _attempt in range(50):
             async_job = async_observer.read_job("async-manual")
@@ -464,6 +629,36 @@ def main() -> None:
                 break
             time.sleep(0.01)
         assert async_job["events"][-1]["state"] == "complete"
+
+        scheduled_failure = FailingAcquirer()
+        failed_scheduled_observer = ChangeRegistryObserver(
+            runtime_dir,
+            seller_id=SELLER,
+            account_scope=ACCOUNT,
+            acquirer_factory=lambda: scheduled_failure,
+            now_fn=lambda: "2026-08-29T14:00:00Z",
+        )
+        try:
+            failed_scheduled_observer.run(
+                trigger_kind="scheduled",
+                requested_by="systemd",
+                scheduled_slot_value="2026-08-29T14:00:00Z",
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("failed scheduled scan was not surfaced")
+        scheduled_replay, scheduled_replay_adapter = _observer(
+            runtime_dir, _snapshot(14 * 60), "2026-08-29T14:00:01Z"
+        )
+        replayed_scheduled_job = scheduled_replay.run(
+            trigger_kind="scheduled",
+            requested_by="systemd",
+            scheduled_slot_value="2026-08-29T14:00:00Z",
+        )
+        assert replayed_scheduled_job["events"][-1]["state"] == "failed"
+        assert observer_job_exit_code(replayed_scheduled_job) == 1
+        assert scheduled_replay_adapter.acquire_calls == 0
 
         with sqlite3.connect(db_path) as conn:
             assert conn.execute("SELECT payload FROM sheet_vitrina_v1_sku_action_events").fetchone()[0] == "unchanged"
@@ -504,7 +699,6 @@ def main() -> None:
             account_scope=ACCOUNT,
             prices_source=prices_source,
             ads_source=ads_source,
-            now_fn=lambda: "2026-08-29T10:00:00Z",
             sleep_fn=lambda _seconds: None,
         )
         ChangeRegistryObserver(
@@ -512,14 +706,44 @@ def main() -> None:
             seller_id=SELLER,
             account_scope=ACCOUNT,
             acquirer_factory=lambda: source_acquirer,
-            now_fn=lambda: "2026-08-29T10:00:00Z",
         ).run(
             trigger_kind="activation",
             requested_by="smoke",
-            job_id="real-readonly-acquirer",
+            deployed_sha="d" * 40,
         )
         assert prices_source.write_calls == 0
         assert ads_source.write_calls == 0
+
+        stat_before = db_path.stat()
+        readonly_surface = ChangeRegistryReadSurface(
+            runtime_dir, seller_id=SELLER, account_scope=ACCOUNT
+        )
+        readonly = readonly_surface.overview()
+        stat_after = db_path.stat()
+        assert readonly["storage"] == {"mode": "ro", "query_only": True}
+        assert (stat_before.st_size, stat_before.st_mtime_ns) == (
+            stat_after.st_size,
+            stat_after.st_mtime_ns,
+        )
+        http_entrypoint = RegistryUploadHttpEntrypoint.__new__(
+            RegistryUploadHttpEntrypoint
+        )
+        http_entrypoint.change_registry_read_surface = readonly_surface
+        http_entrypoint.change_registry_enabled = True
+        api_payload = http_entrypoint.handle_change_registry_request({"limit": 20})
+        assert api_payload["status"]["last_checkpoint"] == readonly["status"][
+            "last_checkpoint"
+        ]
+        assert api_payload["activation"] == {"enabled": True}
+        template = (
+            ROOT
+            / "packages"
+            / "adapters"
+            / "templates"
+            / "sheet_vitrina_v1_web_vitrina.html"
+        ).read_text(encoding="utf-8")
+        assert "Реестр изменений" in template
+        assert "data-change-registry-status" in template
 
     print("change_registry_observer_smoke: OK")
 

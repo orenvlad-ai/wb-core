@@ -153,6 +153,7 @@ class ChangeRegistrySourceAcquirer:
                 "facts_written": 0,
                 "identity_incidents_written": 0,
             },
+            "wb_mutation_calls": {"post": 0, "patch": 0},
         }
         return _with_digest(payload)
 
@@ -546,16 +547,7 @@ class ChangeRegistrySourceAcquirer:
 
     def _now(self) -> str:
         value = self.now_fn()
-        if isinstance(value, datetime):
-            moment = value
-            if moment.tzinfo is None or moment.utcoffset() is None:
-                moment = moment.replace(tzinfo=timezone.utc)
-            return moment.isoformat()
-        text = str(value or "").strip()
-        if not text:
-            raise SourceAcquisitionError("now_fn returned an empty timestamp")
-        _parse_timestamp(text)
-        return text
+        return canonical_utc_timestamp(value, allow_naive=True)
 
 
 def _normalize_price_good(
@@ -1357,16 +1349,53 @@ def _payment_model_value(value: Any) -> tuple[str, str]:
 
 def _timestamp_value(value: Any) -> tuple[str, str]:
     kind, text = _text_value(value)
-    _parse_timestamp(text)
-    return kind, text
+    return kind, canonical_utc_timestamp(text)
 
 
-def _parse_timestamp(value: str) -> datetime:
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    moment = datetime.fromisoformat(normalized)
+def canonical_utc_timestamp(
+    value: datetime | str | Any,
+    *,
+    allow_naive: bool = False,
+) -> str:
+    """Render one instant in the only digest/persistence timestamp form: UTC ``Z``."""
+
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            raise SourceAcquisitionError("timestamp is empty")
+        try:
+            moment = datetime.fromisoformat(
+                text[:-1] + "+00:00" if text.endswith("Z") else text
+            )
+        except ValueError as exc:
+            raise SourceAcquisitionError("timestamp must be valid ISO-8601") from exc
     if moment.tzinfo is None or moment.utcoffset() is None:
-        raise SourceAcquisitionError("timestamp must have timezone")
-    return moment
+        if not allow_naive:
+            raise SourceAcquisitionError("timestamp must have timezone")
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonicalize_acquisition_timestamps(value: Any) -> Any:
+    """Canonicalize every explicit aware ISO timestamp before any digest boundary."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): canonicalize_acquisition_timestamps(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [canonicalize_acquisition_timestamps(child) for child in value]
+    if isinstance(value, datetime):
+        return canonical_utc_timestamp(value)
+    if isinstance(value, str) and "T" in value:
+        try:
+            return canonical_utc_timestamp(value)
+        except SourceAcquisitionError:
+            return value
+    return value
 
 
 def _strict_integer(value: Any) -> int | None:
@@ -1398,14 +1427,19 @@ def _chunks(values: Sequence[int], size: int) -> list[list[int]]:
 
 
 def _with_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(payload)
+    canonical = canonicalize_acquisition_timestamps(payload)
+    if not isinstance(canonical, Mapping):
+        raise SourceAcquisitionError("manifest payload must be an object")
+    result = dict(canonical)
     result["manifest_digest"] = canonical_digest(result)
     return result
 
 
 def _digest_any(value: Any) -> str:
     try:
-        return canonical_digest(_normalized_digest_value(value))
+        return canonical_digest(
+            _normalized_digest_value(canonicalize_acquisition_timestamps(value))
+        )
     except Exception:
         safe = {"type": type(value).__name__}
         return canonical_digest(safe)
@@ -1536,6 +1570,8 @@ __all__ = [
     "ADS_DETAIL_BATCH_LIMIT",
     "ADS_DETAIL_MIN_INTERVAL_SECONDS",
     "ChangeRegistrySourceAcquirer",
+    "canonical_utc_timestamp",
+    "canonicalize_acquisition_timestamps",
     "CONTRACT_NAME",
     "CONTRACT_VERSION",
     "PRICE_PAGE_LIMIT",

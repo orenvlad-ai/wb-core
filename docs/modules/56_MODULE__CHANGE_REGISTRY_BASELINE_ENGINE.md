@@ -25,9 +25,12 @@ update_note: "Canonical baseline/checkpoint/diff/projection engine invoked by th
 observer. It has no timer, scheduler, refresh hook, HTTP/UI route, writer
 instrumentation or startup invocation of its own. It accepts only the canonical sanitized
 `wb_change_registry_source_acquisition/v1` result for the configured exact
-`seller_id + account_scope`, verifies its own and both source manifest digests,
+`seller_id + account_scope`. Before digest validation it rejects any
+timestamp-bearing input that is not already canonical UTC `...Z`; it never
+silently re-digests offset-shaped bytes. It then verifies its own and both source manifest digests,
 mapping version and zero-persistence seam, then opens the StoreRegistry-selected
-`operational` generation.
+`operational` generation. Missing or nonzero WB `POST`/`PATCH` counters also
+fail closed before persistence.
 
 One explicit `ingest` is one `BEGIN IMMEDIATE`: checkpoint, normalized
 observations, identity incidents, facts and checkpoint links commit together.
@@ -124,6 +127,7 @@ first baseline with zero facts, partial-after, exact second diff including zero
 and later campaign creation, zero/many fail-closed incidents, exact repeat,
 transaction rollback/recovery, strict complete chronology, deterministic stable
 cursor projection, inert unbound writer proof and exact race reconciliation in
-both proof orderings. The module-57 observer smoke additionally proves explicit
+both proof orderings, including rejection of consistently re-digested but
+noncanonical offset timestamps. The module-57 observer smoke additionally proves explicit
 disappearance observations and evidence-gap windows through the same engine;
 module-58 smoke proves writer/checkpoint reconciliation.

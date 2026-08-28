@@ -9,7 +9,7 @@ invokes ``ingest`` explicitly after its read-only source acquisition.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 import base64
 import hashlib
 import json
@@ -39,6 +39,9 @@ from packages.application.change_registry import (
 from packages.application.change_registry_source_acquisition import (
     CONTRACT_NAME as ACQUISITION_CONTRACT_NAME,
     CONTRACT_VERSION as ACQUISITION_CONTRACT_VERSION,
+    SourceAcquisitionError,
+    canonical_utc_timestamp,
+    canonicalize_acquisition_timestamps,
 )
 from packages.application.storage_registry import StoreRegistry
 
@@ -931,6 +934,11 @@ def _normalize_acquisition(
     if not isinstance(acquisition, Mapping):
         raise ChangeRegistryError("acquisition must be a canonical object")
     _assert_sanitized(acquisition)
+    canonical = canonicalize_acquisition_timestamps(acquisition)
+    if canonical != acquisition:
+        raise ChangeRegistryConflict(
+            "acquisition timestamps must be canonical UTC Z before digest validation"
+        )
     manifest_digest = _digest(acquisition.get("manifest_digest"), "manifest_digest")
     unsigned = dict(acquisition)
     unsigned.pop("manifest_digest", None)
@@ -1006,6 +1014,13 @@ def _normalize_acquisition(
     ):
         raise ChangeRegistryConflict(
             "baseline input must come from the zero-persistence acquisition seam"
+        )
+    wb_mutation_calls = acquisition.get("wb_mutation_calls")
+    if not isinstance(wb_mutation_calls, Mapping) or any(
+        wb_mutation_calls.get(method) != 0 for method in ("post", "patch")
+    ):
+        raise ChangeRegistryConflict(
+            "baseline input must report zero WB mutation calls"
         )
 
     observation_map: dict[tuple[str, int, int, str, str], _Observation] = {}
@@ -1662,18 +1677,10 @@ def _verify_embedded_manifest(source: Mapping[str, Any], name: str) -> None:
 
 
 def _utc_timestamp(value: Any, name: str) -> str:
-    text = str(value or "").strip()
-    if not text or "T" not in text:
-        raise ChangeRegistryError(f"{name} must be an ISO-8601 timestamp")
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
-        moment = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ChangeRegistryError(f"{name} is invalid") from exc
-    if moment.tzinfo is None or moment.utcoffset() is None:
-        raise ChangeRegistryError(f"{name} requires an explicit timezone")
-    utc = moment.astimezone(timezone.utc)
-    rendered = utc.isoformat().replace("+00:00", "Z")
+        rendered = canonical_utc_timestamp(value)
+    except SourceAcquisitionError as exc:
+        raise ChangeRegistryError(f"{name} requires an explicit timezone") from exc
     return rendered
 
 

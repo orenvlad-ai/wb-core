@@ -20,16 +20,28 @@ health and lease release. A failure rolls that result back as a unit. No WB
 POST/PATCH adapter, Balance writer, recommendation or
 `manual_pending` row is reachable from this module.
 
-The service is `wb-core-change-registry-observer.service`; its timer runs every
-two hours, around minute 17, 24/7, independently from Vitrina refresh. The
-service is also started by the live-runtime deploy. Both the observer unit and
-`wb-core-registry-http.service` receive the exact activation flag and account
-scope declared in the canonical hosted target `runtime_env`; the owner-managed
-environment file remains the credential/source-secret boundary and is not a
-second activation source. A targeted smoke rejects any target/unit value or
-env-file binding drift. The deterministic two-hour scheduled slot makes a
-deploy and timer collision one scan. The first successful production run is
-therefore an explicit activation baseline.
+`wb-core-change-registry-observer.service` is timer-owned only; its timer runs
+every two hours, around minute 17, 24/7, independently from Vitrina refresh and
+keeps a deterministic scheduled-slot identity. Deploy never restarts that
+service. Instead the trusted deploy invokes
+`wb-core-change-registry-activation@<deployed-sha>.service`. Its job identity and
+request digest bind the exact deployed Git SHA and have no scheduled slot. A
+new SHA is a new activation even inside the same two-hour slot; exact replay of
+an already complete SHA is a no-op. Deploy succeeds only when the exact
+activation job is terminal `complete` with a checkpoint. Both observer units
+and `wb-core-registry-http.service` receive the activation flag/account scope
+from canonical target `runtime_env`; the owner-managed environment file remains
+the credential/source-secret boundary. A timer/activation collision is
+serialized by the seller lease, never collapsed into one identity.
+
+Acquisition timestamps are canonical UTC `...Z` before all acquisition
+digests. The observer also defensively canonicalizes the acquisition interval
+and uses canonical `completed_at` for source-manifest `created_at` and bounded
+summary JSON. Offset-equivalent instants therefore cannot alter source
+manifest or checkpoint identity.
+Each persisted bounded source summary also carries the acquisition's explicit
+zero-persistence and zero WB `POST`/`PATCH` counters for query-only production
+readback.
 
 ## Observation and fact semantics
 
@@ -57,10 +69,18 @@ therefore an explicit activation baseline.
 ## Health and concurrency
 
 The DB lease has one owner per seller/account scope and CAS revision; concurrent
-manual and scheduled starts produce one winner. Scheduled-slot uniqueness makes
-replay deterministic. Two consecutive scheduled `partial`/`failed` outcomes set
-health to `degraded`. Manual jobs do not change that counter. The next scheduled
-complete outcome resets it to `normal`.
+manual, scheduled and activation starts produce one winner. An existing job id
+must exactly match seller/account, trigger, scheduled slot, actor/client binding
+and stable request digest. A conflict fails closed. Exact terminal replay keeps
+its prior outcome; `failed` or `partial` is never reported as success. A live
+`accepted/running` replay remains nonterminal, while an expired owner can be
+resumed by bounded revision-CAS or terminalized before another worker claims
+the lease. CLI exit zero is reserved for terminal `complete`; accepted,
+running, busy, partial and failed are nonzero. Manual idempotency binds the
+seller/account/actor and client key without wall-clock bytes. Two consecutive
+scheduled `partial`/`failed` outcomes set health to `degraded`; manual and
+activation jobs do not change that counter. The next scheduled complete resets
+it to `normal`.
 
 ## Authenticated read surface
 
@@ -76,15 +96,23 @@ authorization section owns:
 
 The payload contains no WB raw response, token, secret or mutable business
 action. The already-published narrow `/sku-management/` nginx prefix owns all
-three routes.
+three routes. Overview/status opens only the StoreRegistry operational
+generation in `mode=ro`, verifies `PRAGMA query_only=ON` and never calls schema
+initialization. A missing generation/schema returns a controlled empty
+`schema_missing` readback without creating or changing a database file. Schema
+ensure remains a writer/runtime activation responsibility.
 
 ## Operational registration and proof
 
-The service/timer are repo-owned systemd units and managed by the canonical
-Europe hosted target. The observer service is a declared reader-writer of the
-operational StoreRegistry generation. Business-data maintenance classifies its
-timer as a continuous observer and does not stop it with unrelated business
-writers. Production readback must prove the release receipt SHA, service result,
-active timer, API/UI persisted status and a first complete checkpoint with zero
-facts; foundation writer tables (`operations`, `items`, `attempt_events`,
-`manual_pending`) remain empty.
+The timer service, activation template and timer are repo-owned systemd units
+managed by the canonical Europe hosted target. Both worker services are
+declared reader-writers of the operational StoreRegistry generation.
+Business-data maintenance classifies only the timer as a continuous observer
+and does not stop it with unrelated business writers. Production readback must
+prove release receipt SHA, exact-SHA activation `complete`, separately active/
+waiting timer, free lease, authenticated API/UI status, unauthenticated `401`,
+and the first complete checkpoint with zero facts and source-derived manifest/
+observation/incident cardinality. Module-58 foundation counts and fact links
+are reported exactly as persisted; observer activation creates no operations,
+items, attempts or `manual_pending` rows but does not assume writer-owned tables
+are empty.

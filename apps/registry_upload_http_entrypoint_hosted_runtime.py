@@ -1072,6 +1072,7 @@ def deploy_current_checkout(
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     root_storage_commands = _build_root_storage_policy_commands(target)
     systemd_commands = _build_managed_systemd_commands(target)
+    change_registry_activation_command = _build_change_registry_activation_command(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
     status_command = (
@@ -1119,6 +1120,7 @@ def deploy_current_checkout(
             "nginx_public_routes_update": nginx_public_routes_command,
             "status": status_command,
             "auth_env_preflight": auth_env_preflight_command,
+            "change_registry_activation": change_registry_activation_command,
         },
     }
     if dry_run:
@@ -1233,6 +1235,12 @@ def deploy_current_checkout(
             reconcile_transport_failure("readback", exc)
     # Read back the same contract after all managed-unit operations.
     run_stage("readback", auth_env_preflight_command)
+    if change_registry_activation_command:
+        run_stage(
+            "change-registry-activation",
+            change_registry_activation_command,
+            allow_transport_reconciliation=False,
+        )
     # All ordinary deploy mutations precede the bounded journald operation.
     # After this one submit, only query-only readback and durable receipt
     # publication remain; no dependency, nginx or other service mutation runs.
@@ -1304,6 +1312,36 @@ def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
         "done"
     )
     return _remote_shell_command(target, script)
+
+
+def _build_change_registry_activation_command(
+    target: HostedRuntimeTarget,
+) -> list[str] | None:
+    enabled = str(
+        target.runtime_env.get("CHANGE_REGISTRY_OBSERVER_ENABLED") or ""
+    ).strip().casefold()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if not runtime_dir or not target.environment_file:
+        raise ValueError("Change Registry activation runtime paths are incomplete")
+    deployed_sha = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("Change Registry activation requires an exact deployed SHA")
+    unit = f"wb-core-change-registry-activation@{deployed_sha}.service"
+    command = (
+        "set -eu; "
+        f"systemctl start {shlex.quote(unit)}; "
+        f"cd {shlex.quote(target.target_dir)}; "
+        "python3 apps/change_registry_observer.py "
+        f"--runtime-dir {shlex.quote(runtime_dir)} "
+        f"--env-file {shlex.quote(target.environment_file)} "
+        "activation-status "
+        f"--deployed-sha {shlex.quote(deployed_sha)}"
+    )
+    return _remote_shell_command(target, command)
 
 
 def _build_autoanswers_os_dependencies_command(target: HostedRuntimeTarget) -> list[str]:
