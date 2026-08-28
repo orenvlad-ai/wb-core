@@ -19,7 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.ff_pool_dense_fbs import _write_private  # noqa: E402
+from apps.ff_pool_dense_fbs import (  # noqa: E402
+    PRIVATE_PLAN_MAX_BYTES,
+    _write_private,
+)
 from apps.registry_upload_http_entrypoint_hosted_runtime import (  # noqa: E402
     ACTIVE_HOSTED_RUNTIME_TARGET_ID,
     load_hosted_runtime_target,
@@ -1306,10 +1309,46 @@ def _write_plan(
 ) -> dict[str, Any]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = Path(context["evidence_dir"]) / f"wbc0013-{phase}-plan-{timestamp}.json"
-    written = _write_private(path, plan, owner="production_apply_evidence")
+    written = _write_private(
+        path,
+        plan,
+        owner="production_apply_evidence",
+        max_output_bytes=PRIVATE_PLAN_MAX_BYTES,
+        require_private_parent=True,
+        no_overwrite=True,
+    )
     if not written.get("written"):
-        raise RuntimeError("private WBC0013 plan output was not admitted")
-    return {"path": path, "sha256": _sha_file(path)}
+        error_type = str(written.get("error_type") or "PrivatePlanPersistenceError")
+        error = str(written.get("error") or "private plan persistence failed")
+        raise Wbc0013CliError(
+            str(written.get("reason") or "private_plan_persistence_failed"),
+            f"{error_type}: {error}",
+            details=_selection_details(
+                predicate=f"wbc0013.{phase}.private_plan_persisted",
+                expected_cardinality=1,
+                candidates=[],
+                details={
+                    "phase": str(phase),
+                    "target_path": str(path),
+                    "persistence": written,
+                },
+            ),
+        )
+    return {
+        "path": path,
+        "sha256": _sha_file(path),
+        "persistence": {
+            "owner": "production_apply_evidence",
+            "destination": str(path),
+            "evidence_dir": str(context["evidence_dir"]),
+            "evidence_dir_mode": "0700",
+            **{
+                key: value
+                for key, value in written.items()
+                if key not in {"written", "mode", "path"}
+            },
+        },
+    }
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1339,6 +1378,7 @@ def run(args: argparse.Namespace) -> int:
             "database_written": False,
             "manifest_path": str(output["path"]),
             "manifest_sha256": output["sha256"],
+            "plan_persistence": output["persistence"],
             "material_qualification_digest": plan["material_qualification_digest"],
             "file_mode": "0600",
             "barrier_inactive": True,
@@ -1422,6 +1462,7 @@ def run(args: argparse.Namespace) -> int:
             "database_written": False,
             "manifest_path": str(output["path"]),
             "manifest_sha256": output["sha256"],
+            "plan_persistence": output["persistence"],
             "material_qualification_digest": _fingerprint(
                 {
                     "source_material_digest": plan["source_material_digest"],

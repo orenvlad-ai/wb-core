@@ -1683,6 +1683,44 @@ def _validate_wbc0013_candidate(
         is None
     ):
         raise ApplyError(f"WBC0013 {phase} private manifest path is invalid")
+    persistence = payload.get("plan_persistence")
+    admission = (
+        persistence.get("root_storage_admission")
+        if isinstance(persistence, Mapping)
+        else None
+    )
+    manifest_size = (
+        persistence.get("size_bytes") if isinstance(persistence, Mapping) else None
+    )
+    maximum_size = (
+        persistence.get("max_size_bytes") if isinstance(persistence, Mapping) else None
+    )
+    if not (
+        isinstance(persistence, Mapping)
+        and persistence.get("owner") == "production_apply_evidence"
+        and persistence.get("destination") == manifest_path
+        and persistence.get("evidence_dir") == posixpath.dirname(manifest_path)
+        and persistence.get("evidence_dir_mode") == "0700"
+        and persistence.get("file_mode") == "0600"
+        and persistence.get("parent_mode") == "0700"
+        and isinstance(manifest_size, int)
+        and not isinstance(manifest_size, bool)
+        and isinstance(maximum_size, int)
+        and not isinstance(maximum_size, bool)
+        and 0 < manifest_size <= maximum_size <= 12_000_000
+        and persistence.get("bounded_size") is True
+        and persistence.get("atomic_publish") is True
+        and persistence.get("no_overwrite") is True
+        and persistence.get("durable_file_fsync") is True
+        and persistence.get("durable_directory_fsync") is True
+        and isinstance(admission, Mapping)
+        and admission.get("owner") == "production_apply_evidence"
+        and admission.get("destination") == manifest_path
+        and admission.get("destination_role") == "backup"
+        and admission.get("predicted_output_bytes") == manifest_size
+        and admission.get("allowed") is True
+    ):
+        raise ApplyError(f"WBC0013 {phase} private plan persistence receipt is invalid")
 
 
 def _wbc0013_typed_failure(
@@ -1820,6 +1858,7 @@ def run_wbc0013_goal(
                     "attempt": attempt,
                     "manifest_path": payload["manifest_path"],
                     "manifest_sha256": payload["manifest_sha256"],
+                    "plan_persistence": dict(payload["plan_persistence"]),
                     "material_qualification_digest": current,
                     **(
                         {

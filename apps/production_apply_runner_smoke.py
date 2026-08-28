@@ -66,13 +66,15 @@ def _exercise_wbc0013_two_phase_runner() -> None:
     }
 
     def candidate(phase: str) -> dict[str, object]:
+        manifest_path = f"{base}/wbc0013-{phase}-plan-20260828T120000Z.json"
+        manifest_size = 108_853 if phase == "a" else 256_000
         payload: dict[str, object] = {
             "status": "ready",
             "phase": phase,
             "deployed_sha": MERGE_SHA,
             "query_only": True,
             "database_written": False,
-            "manifest_path": f"{base}/wbc0013-{phase}-plan-20260828T120000Z.json",
+            "manifest_path": manifest_path,
             "manifest_sha256": "sha256:" + phase * 64,
             "material_qualification_digest": "sha256:"
             + ("1" if phase == "a" else "2") * 64,
@@ -80,6 +82,28 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             "barrier_inactive": True,
             "target_generation_bound": True,
             "timer_change_count": 0,
+            "plan_persistence": {
+                "owner": "production_apply_evidence",
+                "destination": manifest_path,
+                "evidence_dir": base,
+                "evidence_dir_mode": "0700",
+                "file_mode": "0600",
+                "parent_mode": "0700",
+                "size_bytes": manifest_size,
+                "max_size_bytes": 12_000_000,
+                "bounded_size": True,
+                "atomic_publish": True,
+                "no_overwrite": True,
+                "durable_file_fsync": True,
+                "durable_directory_fsync": True,
+                "root_storage_admission": {
+                    "owner": "production_apply_evidence",
+                    "destination": manifest_path,
+                    "destination_role": "backup",
+                    "predicted_output_bytes": manifest_size,
+                    "allowed": True,
+                },
+            },
         }
         if phase == "a":
             payload.update(
@@ -258,9 +282,12 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             "status": "error",
             "phase": "a",
             "stage": "qualification",
-            "code": "dense_qualification_blocked",
-            "message": "fixture qualification blocked",
-            "predicate": "dense_a.apply_allowed_after_exact_qualification",
+            "code": "root_storage_admission_unavailable",
+            "message": (
+                "RootStoragePolicyError: unregistered large root writer owner: "
+                "production_apply_evidence"
+            ),
+            "predicate": "wbc0013.a.private_plan_persisted",
             "expected_cardinality": 1,
             "observed_cardinality": 0,
             "candidate_digest": "sha256:" + "4" * 64,
@@ -286,9 +313,12 @@ def _exercise_wbc0013_two_phase_runner() -> None:
     assert blocked["failure"] == {
         "phase": "a",
         "stage": "qualification",
-        "code": "dense_qualification_blocked",
-        "message": "fixture qualification blocked",
-        "predicate": "dense_a.apply_allowed_after_exact_qualification",
+        "code": "root_storage_admission_unavailable",
+        "message": (
+            "RootStoragePolicyError: unregistered large root writer owner: "
+            "production_apply_evidence"
+        ),
+        "predicate": "wbc0013.a.private_plan_persisted",
         "expected_cardinality": 1,
         "observed_cardinality": 0,
         "candidate_digest": "sha256:" + "4" * 64,

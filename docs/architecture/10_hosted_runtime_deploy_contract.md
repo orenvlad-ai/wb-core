@@ -477,6 +477,15 @@ backup and generation roles without crossing devices and alerts on any large
 file outside every registered destination root. The machine-complete lifecycle matrix
 and production inventory are authoritative in
 `migration/160_root_storage_prevention_wbc0008_029.md`.
+Task-scoped Production Apply JIT plans use the registered
+`production_apply_evidence` owner and only its canonical backup destination
+`backups/private-evidence/production-goals/<operation>`. The operation
+directory already exists with mode `0700`; each bounded plan is fsynced as a
+mode-`0600` same-directory temporary file and atomically published without
+overwriting an existing final name. Both file and directory durability plus
+the full root-storage admission result are part of the qualification receipt.
+An admission failure preserves the exact `RootStoragePolicyError` type and
+message in the terminal immutable Apply receipt; it never becomes a submit.
 The target-bound policy and historical block-003 journald drop-in
 source are
 `artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json` and

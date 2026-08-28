@@ -93,7 +93,13 @@ adapter; deploy does not invoke it. The canonical Production Apply Runner accept
 only the exact `WBC0013 / dense-fbs-historical-recovery / 71 = 21 + 50 /
 50 zero inserts / accepted date + nmId + version + event / one historical repair`
 passport. It writes private 0600 JIT
-plans, requires two consecutive identical material qualifications with at most
+plans only through the registered `production_apply_evidence` backup
+destination inside the exact mode-0700 operation directory. Each plan is
+bounded, file-and-directory-fsynced and atomically published without overwrite;
+its path, size, modes and full storage-admission result are retained in the
+qualification receipt until terminal reconciliation. A storage failure keeps
+the exact `RootStoragePolicyError` type and reason in the immutable terminal
+receipt and performs no submit. The runner requires two consecutive identical material qualifications with at most
 three regenerations, submits A once, performs query-only A reconciliation, then
 builds a fresh B plan, submits B once and performs query-only B reconciliation.
 Every ambiguous response goes directly to same-operation readback and never to

@@ -29,6 +29,7 @@ from apps.ff_pool_dense_fbs import (  # noqa: E402
     _write_private,
     run as run_orenburg_cli,
 )
+from apps import wbc0013_fbs_recovery as wbc0013_recovery  # noqa: E402
 from apps.wbc0013_fbs_recovery import (  # noqa: E402
     _discover_dense_manifest,
     _discover_forward_dense_manifest,
@@ -1665,25 +1666,157 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert cli_plan["storage_generation"]["query_only"] is True
         assert _file_sha256(runtime.db_path) == after
 
-        output_path = runtime_dir / "admitted-plan.json"
+        evidence_dir = (
+            runtime_dir
+            / "backups"
+            / "private-evidence"
+            / "production-goals"
+            / ("production-goal-v1-" + "7" * 32)
+        )
+        evidence_dir.mkdir(parents=True, mode=0o700)
+        evidence_dir.chmod(0o700)
+        output_path = evidence_dir / "wbc0013-a-plan-20260828T120000Z.json"
         write_result = _write_private(
             output_path,
             plan,
             admission_factory=lambda **_kwargs: {"allowed": True, "fixture": True},
+            require_private_parent=True,
+            no_overwrite=True,
         )
         assert write_result["written"] is True
         assert output_path.stat().st_mode & 0o777 == 0o600
+        assert write_result["parent_mode"] == "0700"
+        assert write_result["bounded_size"] is True
+        assert write_result["atomic_publish"] is True
+        assert write_result["no_overwrite"] is True
+        assert write_result["durable_file_fsync"] is True
+        assert write_result["durable_directory_fsync"] is True
+        assert not list(evidence_dir.glob(f".{output_path.name}.*.tmp"))
+        original_output_sha = _file_sha256(output_path)
+        no_overwrite = _write_private(
+            output_path,
+            {"contract_name": "historical-b-fixture", "changed": True},
+            admission_factory=lambda **_kwargs: {"allowed": True, "fixture": True},
+            require_private_parent=True,
+            no_overwrite=True,
+        )
+        assert no_overwrite["written"] is False
+        assert no_overwrite["reason"] == "private_plan_destination_exists"
+        assert _file_sha256(output_path) == original_output_sha
+
+        oversized = _write_private(
+            evidence_dir / "wbc0013-b-plan-20260828T120001Z.json",
+            plan,
+            admission_factory=lambda **_kwargs: {"allowed": True, "fixture": True},
+            max_output_bytes=100,
+            require_private_parent=True,
+            no_overwrite=True,
+        )
+        assert oversized["written"] is False
+        assert oversized["reason"] == "private_plan_size_limit_exceeded"
+        assert not (evidence_dir / "wbc0013-b-plan-20260828T120001Z.json").exists()
 
         def deny_output(**_kwargs: Any) -> None:
             raise RootStoragePolicyError("fixture policy has no registered owner")
 
         fallback = _write_private(
-            runtime_dir / "not-written.json",
+            evidence_dir / "wbc0013-b-plan-20260828T120002Z.json",
             plan,
             admission_factory=deny_output,
         )
         assert fallback["mode"] == "stdout_only"
-        assert not (runtime_dir / "not-written.json").exists()
+        assert fallback["error_type"] == "RootStoragePolicyError"
+        assert fallback["error"] == "fixture policy has no registered owner"
+        assert not (evidence_dir / "wbc0013-b-plan-20260828T120002Z.json").exists()
+
+        original_wbc_private_writer = wbc0013_recovery._write_private
+
+        def admitted_wbc_private_writer(
+            path: Path, payload: dict[str, object], **kwargs: Any
+        ) -> dict[str, object]:
+            return _write_private(
+                path,
+                payload,
+                admission_factory=lambda **_admission: {
+                    "allowed": True,
+                    "owner": "production_apply_evidence",
+                    "destination": str(path),
+                    "destination_role": "backup",
+                    "predicted_output_bytes": len(
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                        ).encode("utf-8")
+                    )
+                    + 1,
+                },
+                **kwargs,
+            )
+
+        wbc0013_recovery._write_private = admitted_wbc_private_writer
+        try:
+            a_persistence = wbc0013_recovery._write_plan(
+                {"evidence_dir": evidence_dir}, "a", plan
+            )
+            b_persistence = wbc0013_recovery._write_plan(
+                {"evidence_dir": evidence_dir},
+                "b",
+                {
+                    "contract_name": "warehouse_fbs_material_rematerialization_v1",
+                    "status": "repairable",
+                    "plan_fingerprint": "sha256:" + "b" * 64,
+                },
+            )
+        finally:
+            wbc0013_recovery._write_private = original_wbc_private_writer
+        for phase, persistence in (("a", a_persistence), ("b", b_persistence)):
+            assert persistence["path"].name.startswith(f"wbc0013-{phase}-plan-")
+            assert persistence["persistence"]["owner"] == "production_apply_evidence"
+            assert persistence["persistence"]["evidence_dir"] == str(evidence_dir)
+            assert persistence["persistence"]["evidence_dir_mode"] == "0700"
+            assert persistence["persistence"]["file_mode"] == "0600"
+            assert persistence["persistence"]["atomic_publish"] is True
+            assert persistence["persistence"]["no_overwrite"] is True
+            assert persistence["persistence"]["bounded_size"] is True
+
+        defect_dir = evidence_dir.parent / ("production-goal-v1-" + "8" * 32)
+        defect_dir.mkdir(mode=0o700)
+        defect_dir.chmod(0o700)
+
+        def denied_wbc_private_writer(
+            path: Path, payload: dict[str, object], **kwargs: Any
+        ) -> dict[str, object]:
+            return _write_private(
+                path,
+                payload,
+                admission_factory=lambda **_admission: (_ for _ in ()).throw(
+                    RootStoragePolicyError(
+                        "unregistered large root writer owner: "
+                        "production_apply_evidence"
+                    )
+                ),
+                **kwargs,
+            )
+
+        wbc0013_recovery._write_private = denied_wbc_private_writer
+        try:
+            wbc0013_recovery._write_plan(
+                {"evidence_dir": defect_dir}, "a", plan
+            )
+        except wbc0013_recovery.Wbc0013CliError as exc:
+            assert exc.code == "root_storage_admission_unavailable"
+            assert str(exc) == (
+                "RootStoragePolicyError: unregistered large root writer owner: "
+                "production_apply_evidence"
+            )
+            assert exc.details["predicate"] == "wbc0013.a.private_plan_persisted"
+        else:
+            raise AssertionError("deployed WBC0013 storage failure lost its typed reason")
+        finally:
+            wbc0013_recovery._write_private = original_wbc_private_writer
+        assert not list(defect_dir.iterdir())
 
         with sqlite3.connect(runtime.db_path) as conn:
             original_evidence = conn.execute(
