@@ -45,6 +45,14 @@ compatibility не является blocker, current canonical source acquisitio
   `до deploy` stop-lines сильнее default completion. Разговорное усиление вроде
   `одним проходом` или `сразу` не создаёт выдуманный числовой/lifecycle limit;
   literal quantitative limit пользователя обязателен по router contract.
+- Перед каждым implementation dispatch owning main молча разрешает в
+  существующих полях compact passport exact outcome/acceptance,
+  included/excluded boundary и только известные связанные final effects,
+  способные изменить acceptance/business outcome. Однозначность даёт
+  `AUTO_CONTINUE`; missing substantive evidence — один automatic diagnostic,
+  exact unresolved business fork — один вопрос по doc15. Required technical
+  dependency внутри accepted final meaning включается автоматически;
+  новый artifact/gate и ordinary-task overhead запрещены.
 - `Read-only` задаёт mutation boundary, не actor. Новое substantive technical
   evidence или long wait выполняет один fresh visible internal subagent;
   curator-control read ограничен exact immutable receipt/status readback без

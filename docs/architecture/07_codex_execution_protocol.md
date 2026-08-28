@@ -64,6 +64,42 @@ rollback/readback и warnings. До любого owner-facing gate нужен va
 Ясное пользовательское implementation intent разрешает dispatch и autonomous
 completion без дополнительного вопроса. Уже accepted goal, business meaning,
 exact plan settings и routine technical choices повторно не согласуются.
+Команда `запускай` начинает этот autonomous process, а не разрешает
+пропустить pre-dispatch resolution.
+
+Перед каждым implementation spawn owning main молча формулирует из уже
+доступного accepted context:
+
+- accepted outcome и exact acceptance predicate;
+- included/excluded boundary;
+- только уже известные или обоснованно указанные связанные final effects,
+  способные изменить acceptance или business outcome.
+
+Это не новая анкета, checklist, artifact, schema, validator, workflow или
+test suite: outcome/effects отражаются в уже существующих goal/scope/acceptance
+полях compact task passport. Curator не ищет speculative dependencies и не
+расширяет проверку в broad audit. Ordinary narrow task без такой неясности
+проходит её без нового subagent, owner pause или отдельного status message.
+
+Результат использует closed outcomes doc15:
+
+- `AUTO_CONTINUE`, если всё однозначно и есть dominant technical path: main
+  сразу dispatch-ит implementation block;
+- `EVIDENCE_BLOCKED`, если связи/эффекты нельзя однозначно определить без
+  нового substantive technical evidence: без human gate автоматически
+  dispatch-ится один bounded diagnostic/read-only block. Его собственный
+  dispatch этой проверки не требует; после terminal diagnosis owning main
+  повторяет resolution и либо запускает следующий implementation block, либо
+  применяет router без второго автоматического preflight diagnostic;
+- `HUMAN_REQUIRED`, только если exact evidence оставляет два или более
+  различных допустимых business outcomes и dominant technical choice нет. Main
+  задаёт ровно один конкретный business question, кратко объясняет
+  различие и даёт рекомендацию. Technical permission question запрещён.
+
+Required technical dependency автоматически включается в scope/plan
+текущего implementation block, если final target, business meaning, destination и
+effects не меняются. Owner confirmation не нужен; exact new final/effect delta
+применяет doc15 и не маскируется как dependency.
 
 `Read-only` задаёт mutation/authority boundary, но не actor routing. Один
 bounded technical execution block выполняет ровно один fresh visible internal
@@ -128,8 +164,10 @@ Spawn получает compact task passport и минимальный bounded c
 Без explicit stop-line implementation subagent владеет ровно одной branch и
 одним non-draft PR; branch/draft stop-line завершает его на выбранной boundary.
 Diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis завершает
-этот block. Если после неё отдельно разрешена implementation, это следующий
-bounded block с новым subagent и следующим последовательным `SSS`. Same-scope
+этот block. Если accepted goal сохранился и terminal diagnosis сняла
+`EVIDENCE_BLOCKED`, owning main после повторной pre-dispatch resolution автономно
+запускает следующий bounded block с новым subagent и следующим
+последовательным `SSS`. Same-scope
 review finding, test failure или correction в текущем block/PR возвращается
 тому же subagent. Любой новый PR, включая infrastructure recovery, требует
 terminal handoff предыдущего блока. Новый subagent не служит monitor/reviewer/

@@ -13,6 +13,8 @@ regression contract — `apps/codex_authorization_gate_smoke.py`.
 предлагает trust tier, approval mode или standing technical profile.
 `approval_policy=never` и full technical execution остаются routine platform
 profile, а не пользовательским выбором.
+Activation начинает autonomous process, но не отменяет mandatory
+pre-dispatch resolution перед implementation block.
 
 Обычные owner phrases вроде `одним проходом`, `сразу` или `доведи до конца`
 задают goal и отсутствие лишних пауз, но сами по себе не создают `max 1 PR`,
@@ -128,6 +130,23 @@ protocol-invalid. Когда curator имеет одну dominant technical reco
 question запрещён.
 
 ## Automatic и evidence-blocked rules
+
+### Pre-dispatch
+
+Owning main применяет те же closed outcomes до implementation spawn, используя
+существующий compact task passport и exact available evidence, а не новый
+artifact или gate. Однозначный accepted outcome/acceptance/boundary и dominant
+technical path дают `AUTO_CONTINUE`. Недостающее substantive technical
+evidence даёт `EVIDENCE_BLOCKED` и один automatic bounded diagnostic/read-only
+block без human gate; diagnostic dispatch сам эту проверку не требует.
+
+`HUMAN_REQUIRED` возникает только когда exact evidence оставляет два или
+более различных допустимых business outcomes без dominant technical choice,
+а exact difference доказан existing unmatched final/effect delta и ground из
+closed list. `Ambiguity` не является новым outcome/reason code. Owner получает
+один concrete business question, различие и рекомендацию; technical permission
+question запрещён. Required technical dependency остаётся `AUTO_CONTINUE`,
+если final target, business meaning, destination и effects accepted goal не меняются.
 
 ### Pre-submit
 
