@@ -1,8 +1,9 @@
-"""Inert append-only foundation for the seller change registry.
+"""Append-only storage foundation for the seller change registry.
 
 The module owns only the operational SQLite contract and internal repository
-primitives.  It does not observe WB, instrument an existing writer, expose an
-HTTP route, project outcomes, or import legacy Prices/Ads/SKU audit evidence.
+primitives.  Writer-facing atomic lifecycle methods remain storage-only: this
+module does not call WB, expose an HTTP route, project outcomes, or import
+legacy Prices/Ads/SKU audit evidence.
 """
 
 from __future__ import annotations
@@ -1022,6 +1023,220 @@ class ChangeRegistryRepository:
             ensure_change_registry_schema(conn)
             conn.commit()
 
+    def prepare_writer_operation(
+        self,
+        *,
+        operation_id: str,
+        seller_id: str,
+        account_scope: str,
+        source_surface: str,
+        actor_principal: str,
+        actor_kind: str,
+        requested_at: str,
+        created_at: str,
+        provenance_digest: str,
+        items: Sequence[Mapping[str, Any]],
+        native_idempotency_key: str = "",
+        correlation_id: str = "",
+        calculation_id: str = "",
+        apply_operation_id: str = "",
+        provenance_annotation_id: str = "",
+        provenance_comment: str = "",
+    ) -> dict[str, Any]:
+        """Atomically create one writer header, exact items and created attempts."""
+
+        operation_row = {
+            "operation_id": _identifier(operation_id, "operation_id"),
+            "seller_id": _identifier(seller_id, "seller_id"),
+            "account_scope": _identifier(account_scope, "account_scope"),
+            "source_surface": _identifier(source_surface, "source_surface"),
+            "actor_principal": _identifier(
+                actor_principal, "actor_principal", maximum=160
+            ),
+            "actor_kind": _required_token(
+                actor_kind,
+                "actor_kind",
+                {"human", "service", "system", "import"},
+            ),
+            "requested_at": _timestamp(requested_at, "requested_at"),
+            "created_at": _timestamp(created_at, "created_at"),
+            "native_idempotency_key": _optional_text(
+                native_idempotency_key, "native_idempotency_key", 240
+            ),
+            "correlation_id": _optional_text(
+                correlation_id, "correlation_id", 240
+            ),
+            "calculation_id": _optional_text(
+                calculation_id, "calculation_id", 240
+            ),
+            "apply_operation_id": _optional_text(
+                apply_operation_id, "apply_operation_id", 240
+            ),
+            "provenance_digest": _digest(
+                provenance_digest, "provenance_digest"
+            ),
+            "mapping_version": MAPPING_VERSION,
+        }
+        if _timestamp_moment(operation_row["requested_at"]) > _timestamp_moment(
+            operation_row["created_at"]
+        ):
+            raise ChangeRegistryError(
+                "operation created_at precedes requested_at"
+            )
+        if not items:
+            raise ChangeRegistryError(
+                "writer operation requires at least one atomic item"
+            )
+
+        item_rows: list[dict[str, Any]] = []
+        attempt_rows: list[dict[str, Any]] = []
+        seen_targets: set[tuple[str, int, int, str, str]] = set()
+        for raw_item in items:
+            target = raw_item.get("target")
+            if not isinstance(target, TargetIdentity):
+                raise ChangeRegistryError(
+                    "writer item target must be a TargetIdentity"
+                )
+            exact_target = target_identity(
+                target.target_kind,
+                nm_id=target.nm_id,
+                advert_id=target.advert_id,
+                placement=target.placement,
+            )
+            field = _validate_parameter_field(
+                exact_target.target_kind,
+                str(raw_item.get("parameter_field") or ""),
+            )
+            target_key = (
+                exact_target.target_kind,
+                exact_target.nm_id,
+                exact_target.advert_id,
+                exact_target.placement,
+                field,
+            )
+            if target_key in seen_targets:
+                raise ChangeRegistryError(
+                    "writer operation contains a duplicate atomic target"
+                )
+            seen_targets.add(target_key)
+            before = _canonicalize_field_value(
+                field, raw_item.get("before_value", MISSING)
+            )
+            requested = _canonicalize_field_value(
+                field, raw_item.get("requested_value", MISSING)
+            )
+            _validate_field_value(field, before, requested=False)
+            _validate_field_value(field, requested, requested=True)
+            change_item_id = _identifier(
+                raw_item.get("change_item_id"), "change_item_id"
+            )
+            attempt_id = _identifier(
+                raw_item.get("attempt_id"), "attempt_id"
+            )
+            item_rows.append(
+                {
+                    "change_item_id": change_item_id,
+                    "operation_id": operation_row["operation_id"],
+                    "seller_id": operation_row["seller_id"],
+                    "account_scope": operation_row["account_scope"],
+                    "target_kind": exact_target.target_kind,
+                    "nm_id": exact_target.nm_id,
+                    "advert_id": exact_target.advert_id,
+                    "placement": exact_target.placement,
+                    "parameter_field": field,
+                    **before.columns("before_value"),
+                    **requested.columns("requested_value"),
+                    "recommendation_item_id": _optional_text(
+                        raw_item.get("recommendation_item_id"),
+                        "recommendation_item_id",
+                        160,
+                    ),
+                    "mapping_version": MAPPING_VERSION,
+                    "created_at": operation_row["created_at"],
+                }
+            )
+            attempt_rows.append(
+                {
+                    "attempt_event_id": _identifier(
+                        raw_item.get("attempt_event_id"),
+                        "attempt_event_id",
+                    ),
+                    "attempt_id": attempt_id,
+                    "change_item_id": change_item_id,
+                    "sequence_no": 1,
+                    "state": "created",
+                    "resolution_state": "",
+                    "occurred_at": operation_row["created_at"],
+                    "receipt_reference": "",
+                    "receipt_digest": "",
+                    "error_code": "",
+                    "error_message": "",
+                    "readback_proof_kind": "",
+                    "readback_digest": "",
+                    "native_event_key": "created",
+                }
+            )
+
+        annotation_row: dict[str, Any] | None = None
+        if provenance_comment:
+            annotation_row = {
+                "annotation_revision_id": _identifier(
+                    provenance_annotation_id,
+                    "provenance_annotation_id",
+                ),
+                "subject_kind": "operation",
+                "subject_id": operation_row["operation_id"],
+                "revision_no": 1,
+                "parent_revision_id": None,
+                "actor_principal": operation_row["actor_principal"],
+                "reason": "writer_provenance",
+                "comment": _optional_text(
+                    provenance_comment, "provenance_comment", 4000
+                ),
+                "created_at": operation_row["created_at"],
+            }
+
+        with self._transaction("prepare_writer_operation") as conn:
+            existed_before = conn.execute(
+                f"SELECT 1 FROM {OPERATIONS_TABLE} WHERE operation_id=?",
+                (operation_row["operation_id"],),
+            ).fetchone() is not None
+            operation = self._insert_idempotent_conn(
+                conn, OPERATIONS_TABLE, "operation_id", operation_row
+            )
+            stored_items = [
+                self._insert_idempotent_conn(
+                    conn, ITEMS_TABLE, "change_item_id", row
+                )
+                for row in item_rows
+            ]
+            stored_attempts = [
+                self._insert_idempotent_conn(
+                    conn,
+                    ATTEMPT_EVENTS_TABLE,
+                    "attempt_event_id",
+                    row,
+                )
+                for row in attempt_rows
+            ]
+            annotation = (
+                self._insert_idempotent_conn(
+                    conn,
+                    ANNOTATION_REVISIONS_TABLE,
+                    "annotation_revision_id",
+                    annotation_row,
+                )
+                if annotation_row is not None
+                else None
+            )
+            return {
+                "operation": operation,
+                "items": stored_items,
+                "attempt_events": stored_attempts,
+                "annotation": annotation,
+                "created_new": not existed_before,
+            }
+
     def create_operation(
         self,
         *,
@@ -1873,6 +2088,401 @@ class ChangeRegistryRepository:
                 "annotations": [dict(row) for row in annotations],
             }
 
+    def find_operation_by_receipt_reference(
+        self, receipt_reference: str
+    ) -> dict[str, Any] | None:
+        exact_reference = _sanitized_text(
+            receipt_reference, "receipt_reference", 320
+        )
+        if not exact_reference:
+            raise ChangeRegistryError("receipt_reference is required")
+        with self._read_session("find_operation_by_receipt_reference") as conn:
+            rows = conn.execute(
+                f"""SELECT DISTINCT item.operation_id
+                    FROM {ATTEMPT_EVENTS_TABLE} event
+                    JOIN {ITEMS_TABLE} item
+                      ON item.change_item_id=event.change_item_id
+                    WHERE event.receipt_reference=?
+                    ORDER BY item.operation_id""",
+                (exact_reference,),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ChangeRegistryConflict(
+                "receipt reference resolves to multiple operations"
+            )
+        return self.read_operation(str(rows[0]["operation_id"]))
+
+    def append_writer_operation_state(
+        self,
+        *,
+        operation_id: str,
+        state: str,
+        occurred_at: str,
+        receipt_reference: str = "",
+        receipt_digest: str = "",
+        error_code: str = "",
+        error_message: str = "",
+        readback_proof_kind: str = "",
+        readback_digest: str = "",
+        resolution_state: str = "",
+    ) -> dict[str, Any]:
+        """Append the same lifecycle transition to all atomic writer attempts."""
+
+        exact_operation_id = _identifier(operation_id, "operation_id")
+        exact_state = _required_token(state, "state", ATTEMPT_STATES)
+        exact_occurred_at = _timestamp(occurred_at, "occurred_at")
+        exact_resolution = str(resolution_state or "").strip().lower()
+        if (exact_state == "resolved") != bool(exact_resolution):
+            raise ChangeRegistryError(
+                "resolved attempt events require one terminal resolution_state"
+            )
+        if exact_resolution and exact_resolution not in {
+            "confirmed",
+            "failed",
+            "rejected",
+            "cancelled",
+        }:
+            raise ChangeRegistryError("invalid attempt resolution_state")
+        common = {
+            "receipt_reference": _sanitized_text(
+                receipt_reference, "receipt_reference", 320
+            ),
+            "receipt_digest": _optional_digest(
+                receipt_digest, "receipt_digest"
+            ),
+            "error_code": _optional_text(error_code, "error_code", 120),
+            "error_message": _sanitized_text(
+                error_message, "error_message", 800
+            ),
+            "readback_proof_kind": _optional_text(
+                readback_proof_kind, "readback_proof_kind", 120
+            ),
+            "readback_digest": _optional_digest(
+                readback_digest, "readback_digest"
+            ),
+        }
+        with self._transaction("append_writer_operation_state") as conn:
+            self._required_row(
+                conn, OPERATIONS_TABLE, "operation_id", exact_operation_id
+            )
+            items = conn.execute(
+                f"""SELECT * FROM {ITEMS_TABLE} WHERE operation_id=?
+                    ORDER BY change_item_id""",
+                (exact_operation_id,),
+            ).fetchall()
+            if not items:
+                raise ChangeRegistryConflict(
+                    "writer operation has no atomic items"
+                )
+            stored: list[dict[str, Any]] = []
+            for item in items:
+                previous = conn.execute(
+                    f"""SELECT * FROM {ATTEMPT_EVENTS_TABLE}
+                        WHERE change_item_id=?
+                        ORDER BY sequence_no DESC LIMIT 1""",
+                    (item["change_item_id"],),
+                ).fetchone()
+                if previous is None:
+                    raise ChangeRegistryConflict(
+                        "writer item has no created attempt"
+                    )
+                previous_state = str(previous["state"])
+                previous_resolution = str(previous["resolution_state"])
+                if previous_state == exact_state and previous_resolution == exact_resolution:
+                    stored.append(dict(previous))
+                    continue
+                if previous_state in {
+                    "confirmed",
+                    "failed",
+                    "rejected",
+                    "cancelled",
+                    "resolved",
+                }:
+                    if (
+                        exact_state == "resolved"
+                        and previous_state == "resolved"
+                        and previous_resolution == exact_resolution
+                    ):
+                        stored.append(dict(previous))
+                        continue
+                    raise ChangeRegistryConflict(
+                        "writer attempt is already terminal"
+                    )
+                _validate_attempt_transition(previous_state, exact_state)
+                if _timestamp_moment(exact_occurred_at) < _timestamp_moment(
+                    str(previous["occurred_at"])
+                ):
+                    raise ChangeRegistryError(
+                        "attempt event timestamp precedes previous sequence"
+                    )
+                sequence_no = int(previous["sequence_no"]) + 1
+                event_basis = {
+                    "attempt_id": str(previous["attempt_id"]),
+                    "sequence_no": sequence_no,
+                    "state": exact_state,
+                    "resolution_state": exact_resolution,
+                    "occurred_at": exact_occurred_at,
+                    **common,
+                }
+                row = {
+                    "attempt_event_id": _stable_registry_id(
+                        "crae", event_basis
+                    ),
+                    "attempt_id": str(previous["attempt_id"]),
+                    "change_item_id": str(item["change_item_id"]),
+                    "sequence_no": sequence_no,
+                    "state": exact_state,
+                    "resolution_state": exact_resolution,
+                    "occurred_at": exact_occurred_at,
+                    **common,
+                    "native_event_key": _optional_text(
+                        f"{exact_state}:{exact_resolution}:{common['receipt_reference']}"
+                        [:240],
+                        "native_event_key",
+                        240,
+                    ),
+                }
+                stored.append(
+                    self._insert_idempotent_conn(
+                        conn,
+                        ATTEMPT_EVENTS_TABLE,
+                        "attempt_event_id",
+                        row,
+                    )
+                )
+            return {"operation_id": exact_operation_id, "events": stored}
+
+    def confirm_writer_operation(
+        self,
+        *,
+        operation_id: str,
+        confirmed_values: Mapping[str, Any],
+        confirmed_at: str,
+        readback_digest: str,
+        receipt_reference: str = "",
+        native_audit_references: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Atomically confirm exact items, create/reuse facts and late-link proof."""
+
+        exact_operation_id = _identifier(operation_id, "operation_id")
+        exact_confirmed_at = _timestamp(confirmed_at, "confirmed_at")
+        exact_readback_digest = _digest(
+            readback_digest, "readback_digest"
+        )
+        exact_receipt_reference = _sanitized_text(
+            receipt_reference, "receipt_reference", 320
+        )
+        exact_native_references = tuple(
+            _sanitized_text(item, "native_audit_reference", 320)
+            for item in native_audit_references
+            if str(item or "").strip()
+        )
+        with self._transaction("confirm_writer_operation") as conn:
+            self._required_row(
+                conn, OPERATIONS_TABLE, "operation_id", exact_operation_id
+            )
+            items = conn.execute(
+                f"""SELECT * FROM {ITEMS_TABLE} WHERE operation_id=?
+                    ORDER BY change_item_id""",
+                (exact_operation_id,),
+            ).fetchall()
+            if not items:
+                raise ChangeRegistryConflict(
+                    "writer operation has no atomic items"
+                )
+            facts: list[dict[str, Any]] = []
+            events: list[dict[str, Any]] = []
+            for item in items:
+                item_id = str(item["change_item_id"])
+                if item_id not in confirmed_values:
+                    raise ChangeRegistryError(
+                        "confirmed readback is missing an atomic item"
+                    )
+                field = str(item["parameter_field"])
+                after = _canonicalize_field_value(
+                    field, confirmed_values[item_id]
+                )
+                _validate_field_value(field, after, requested=True)
+                before = CanonicalValue(
+                    str(item["before_value_kind"]),
+                    item["before_value_integer"],
+                    item["before_value_text"],
+                )
+                target = TargetIdentity(
+                    str(item["target_kind"]),
+                    int(item["nm_id"]),
+                    int(item["advert_id"]),
+                    str(item["placement"]),
+                )
+                fact: dict[str, Any] | None = None
+                if before != after:
+                    fact = _find_reconcilable_transition_fact(
+                        conn,
+                        seller_id=str(item["seller_id"]),
+                        account_scope=str(item["account_scope"]),
+                        target=target,
+                        parameter_field=field,
+                        before=before,
+                        after=after,
+                        observed_from=str(item["created_at"]),
+                        observed_to=exact_confirmed_at,
+                        incoming_proof_kind="wb_readback",
+                    )
+                    if fact is None:
+                        fact_basis = {
+                            "operation_id": exact_operation_id,
+                            "change_item_id": item_id,
+                            "target": {
+                                "target_kind": target.target_kind,
+                                "nm_id": target.nm_id,
+                                "advert_id": target.advert_id,
+                                "placement": target.placement,
+                            },
+                            "parameter_field": field,
+                            "before": _canonical_value_payload(before),
+                            "after": _canonical_value_payload(after),
+                            "observed_from": str(item["created_at"]),
+                            "observed_to": exact_confirmed_at,
+                            "readback_digest": exact_readback_digest,
+                        }
+                        fact_row = {
+                            "fact_id": _stable_registry_id("crf", fact_basis),
+                            "seller_id": str(item["seller_id"]),
+                            "account_scope": str(item["account_scope"]),
+                            "target_kind": target.target_kind,
+                            "nm_id": target.nm_id,
+                            "advert_id": target.advert_id,
+                            "placement": target.placement,
+                            "parameter_field": field,
+                            **before.columns("before_value"),
+                            **after.columns("after_value"),
+                            "observed_from": str(item["created_at"]),
+                            "observed_to": exact_confirmed_at,
+                            "proven_at": exact_confirmed_at,
+                            "proof_kind": "wb_readback",
+                            "evidence_digest": canonical_digest(fact_basis),
+                            "mapping_version": MAPPING_VERSION,
+                        }
+                        fact = self._insert_idempotent_conn(
+                            conn, FACTS_TABLE, "fact_id", fact_row
+                        )
+                    fact_id = str(fact["fact_id"])
+                    _append_fact_link_conn(
+                        self,
+                        conn,
+                        fact_id=fact_id,
+                        link_kind="change_item",
+                        linked_id=item_id,
+                        linked_at=exact_confirmed_at,
+                        evidence_basis={
+                            "fact_id": fact_id,
+                            "change_item_id": item_id,
+                            "readback_digest": exact_readback_digest,
+                        },
+                    )
+                    for native_reference in exact_native_references:
+                        _append_fact_link_conn(
+                            self,
+                            conn,
+                            fact_id=fact_id,
+                            link_kind="native_audit",
+                            linked_id=native_reference,
+                            linked_at=exact_confirmed_at,
+                            evidence_basis={
+                                "fact_id": fact_id,
+                                "native_audit_reference": native_reference,
+                                "readback_digest": exact_readback_digest,
+                            },
+                        )
+                    recommendation_id = str(
+                        item["recommendation_item_id"] or ""
+                    )
+                    if recommendation_id:
+                        _append_fact_link_conn(
+                            self,
+                            conn,
+                            fact_id=fact_id,
+                            link_kind="recommendation_item",
+                            linked_id=recommendation_id,
+                            linked_at=exact_confirmed_at,
+                            evidence_basis={
+                                "fact_id": fact_id,
+                                "recommendation_item_id": recommendation_id,
+                                "readback_digest": exact_readback_digest,
+                            },
+                        )
+                    facts.append(dict(fact))
+
+                previous = conn.execute(
+                    f"""SELECT * FROM {ATTEMPT_EVENTS_TABLE}
+                        WHERE change_item_id=?
+                        ORDER BY sequence_no DESC LIMIT 1""",
+                    (item_id,),
+                ).fetchone()
+                if previous is None:
+                    raise ChangeRegistryConflict(
+                        "writer item has no attempt lifecycle"
+                    )
+                previous_state = str(previous["state"])
+                previous_resolution = str(previous["resolution_state"])
+                if previous_state == "confirmed" or (
+                    previous_state == "resolved"
+                    and previous_resolution == "confirmed"
+                ):
+                    events.append(dict(previous))
+                    continue
+                if previous_state == "submitted":
+                    next_state = "confirmed"
+                    resolution = ""
+                elif previous_state == "ambiguous":
+                    next_state = "resolved"
+                    resolution = "confirmed"
+                else:
+                    raise ChangeRegistryConflict(
+                        "writer confirmation requires submitted or ambiguous state"
+                    )
+                sequence_no = int(previous["sequence_no"]) + 1
+                event_basis = {
+                    "attempt_id": str(previous["attempt_id"]),
+                    "sequence_no": sequence_no,
+                    "state": next_state,
+                    "resolution_state": resolution,
+                    "readback_digest": exact_readback_digest,
+                }
+                event_row = {
+                    "attempt_event_id": _stable_registry_id(
+                        "crae", event_basis
+                    ),
+                    "attempt_id": str(previous["attempt_id"]),
+                    "change_item_id": item_id,
+                    "sequence_no": sequence_no,
+                    "state": next_state,
+                    "resolution_state": resolution,
+                    "occurred_at": exact_confirmed_at,
+                    "receipt_reference": exact_receipt_reference,
+                    "receipt_digest": "",
+                    "error_code": "",
+                    "error_message": "",
+                    "readback_proof_kind": "wb_readback",
+                    "readback_digest": exact_readback_digest,
+                    "native_event_key": f"{next_state}:wb_readback",
+                }
+                events.append(
+                    self._insert_idempotent_conn(
+                        conn,
+                        ATTEMPT_EVENTS_TABLE,
+                        "attempt_event_id",
+                        event_row,
+                    )
+                )
+            return {
+                "operation_id": exact_operation_id,
+                "facts": facts,
+                "events": events,
+            }
+
     def read_fact(self, fact_id: str) -> dict[str, Any]:
         exact_id = _identifier(fact_id, "fact_id")
         with self._read_session("read_fact") as conn:
@@ -2058,6 +2668,135 @@ def _plain_insert(
     )
 
 
+def _stable_registry_id(prefix: str, basis: Mapping[str, Any]) -> str:
+    return f"{prefix}_{hashlib.sha256(canonical_json(basis).encode('utf-8')).hexdigest()}"
+
+
+def _canonical_value_payload(value: CanonicalValue) -> dict[str, Any]:
+    return {
+        "kind": value.kind,
+        "integer": value.integer_value,
+        "text": value.text_value,
+    }
+
+
+def find_reconcilable_transition_fact(
+    conn: sqlite3.Connection,
+    *,
+    seller_id: str,
+    account_scope: str,
+    target: TargetIdentity,
+    parameter_field: str,
+    before: CanonicalValue,
+    after: CanonicalValue,
+    observed_from: str,
+    observed_to: str,
+    incoming_proof_kind: str,
+) -> dict[str, Any] | None:
+    """Find one exact cross-proof transition whose interval contains the other."""
+
+    exact_kind = _required_token(
+        incoming_proof_kind,
+        "incoming_proof_kind",
+        {"wb_readback", "checkpoint_diff"},
+    )
+    candidate_kinds = (
+        ("checkpoint_diff",)
+        if exact_kind == "wb_readback"
+        else ("wb_readback", "native_audit", "reconciliation")
+    )
+    placeholders = ",".join("?" for _ in candidate_kinds)
+    rows = conn.execute(
+        f"""SELECT * FROM {FACTS_TABLE}
+            WHERE seller_id=? AND account_scope=? AND target_kind=? AND nm_id=?
+              AND advert_id=? AND placement=? AND parameter_field=?
+              AND before_value_kind=? AND before_value_integer IS ?
+              AND before_value_text IS ? AND after_value_kind=?
+              AND after_value_integer IS ? AND after_value_text IS ?
+              AND proof_kind IN ({placeholders})
+            ORDER BY observed_from,observed_to,fact_id""",
+        (
+            seller_id,
+            account_scope,
+            target.target_kind,
+            target.nm_id,
+            target.advert_id,
+            target.placement,
+            parameter_field,
+            before.kind,
+            before.integer_value,
+            before.text_value,
+            after.kind,
+            after.integer_value,
+            after.text_value,
+            *candidate_kinds,
+        ),
+    ).fetchall()
+    incoming_start = _timestamp_moment(observed_from)
+    incoming_end = _timestamp_moment(observed_to)
+    candidates: list[sqlite3.Row] = []
+    for row in rows:
+        candidate_start = _timestamp_moment(str(row["observed_from"]))
+        candidate_end = _timestamp_moment(str(row["observed_to"]))
+        contained = (
+            candidate_start <= incoming_start <= candidate_end
+            if exact_kind == "wb_readback"
+            else incoming_start <= candidate_start <= incoming_end
+        )
+        if contained:
+            candidates.append(row)
+    if len(candidates) > 1:
+        raise ChangeRegistryConflict(
+            "exact transition/provenance reconciliation is ambiguous"
+        )
+    return dict(candidates[0]) if candidates else None
+
+
+_find_reconcilable_transition_fact = find_reconcilable_transition_fact
+
+
+def append_fact_link_in_transaction(
+    repository: "ChangeRegistryRepository",
+    conn: sqlite3.Connection,
+    *,
+    fact_id: str,
+    link_kind: str,
+    linked_id: str,
+    linked_at: str,
+    evidence_basis: Mapping[str, Any],
+) -> dict[str, Any]:
+    kind = _required_token(
+        link_kind,
+        "link_kind",
+        {"change_item", "checkpoint", "native_audit", "recommendation_item"},
+    )
+    exact_linked_id = _identifier(linked_id, "linked_id", maximum=320)
+    if kind in {"native_audit", "recommendation_item"}:
+        exact_linked_id = _sanitized_text(exact_linked_id, "linked_id", 320)
+    row = {
+        "fact_link_id": _stable_registry_id(
+            "crfl",
+            {"fact_id": fact_id, "link_kind": kind, "linked_id": exact_linked_id},
+        ),
+        "fact_id": _identifier(fact_id, "fact_id"),
+        "link_kind": kind,
+        "change_item_id": exact_linked_id if kind == "change_item" else None,
+        "checkpoint_id": exact_linked_id if kind == "checkpoint" else None,
+        "native_audit_reference": exact_linked_id if kind == "native_audit" else "",
+        "recommendation_item_id": (
+            exact_linked_id if kind == "recommendation_item" else ""
+        ),
+        "linked_at": _timestamp(linked_at, "linked_at"),
+        "evidence_digest": canonical_digest(evidence_basis),
+    }
+    return repository._insert_idempotent_conn(
+        conn, FACT_LINKS_TABLE, "fact_link_id", row
+    )
+
+
+_append_fact_link_conn = append_fact_link_in_transaction
+
+
 def _require_initialized_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -2094,7 +2833,7 @@ def _require_annotation_subject(
 
 def _validate_attempt_transition(previous: str, current: str) -> None:
     allowed = {
-        "created": {"submitted", "failed", "rejected", "cancelled"},
+        "created": {"submitted", "failed", "rejected", "cancelled", "ambiguous"},
         "submitted": {
             "confirmed",
             "failed",
@@ -2369,6 +3108,8 @@ __all__ = [
     "canonical_digest",
     "canonical_json",
     "canonicalize_value",
+    "append_fact_link_in_transaction",
     "ensure_change_registry_schema",
+    "find_reconcilable_transition_fact",
     "target_identity",
 ]

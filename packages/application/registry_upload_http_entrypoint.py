@@ -43,6 +43,10 @@ from packages.application.wb_finance_weekly import block_from_env
 from packages.application.partner_report import PartnerReportBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.change_registry_writer import (
+    SUPPORTED_ACCOUNT_SCOPE as CHANGE_REGISTRY_WRITER_ACCOUNT_SCOPE,
+    InternalWriterRegistry,
+)
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
@@ -1052,6 +1056,37 @@ class RegistryUploadHttpEntrypoint:
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
         self.refreshed_at_factory = refreshed_at_factory or _default_activated_at_factory
         self.now_factory = now_factory or _default_now_factory
+        registry_seller_id = str(
+            os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID") or ""
+        ).strip()
+        registry_scope = os.environ.get(
+            "CHANGE_REGISTRY_ACCOUNT_SCOPE", CHANGE_REGISTRY_ACCOUNT_SCOPE
+        ).strip()
+        if (
+            registry_scope != CHANGE_REGISTRY_ACCOUNT_SCOPE
+            or registry_scope != CHANGE_REGISTRY_WRITER_ACCOUNT_SCOPE
+        ):
+            raise ValueError(
+                "CHANGE_REGISTRY_ACCOUNT_SCOPE differs from the repo-owned fixed scope"
+            )
+        if (
+            not registry_seller_id
+            and self.runtime.runtime_dir.resolve()
+            == Path("/opt/wb-core-runtime/state").resolve()
+        ):
+            raise RuntimeError(
+                "SELLER_PORTAL_CANONICAL_SUPPLIER_ID is required for internal writer registry binding"
+            )
+        writer_registry = (
+            InternalWriterRegistry(
+                runtime_dir=self.runtime.runtime_dir,
+                seller_id=registry_seller_id,
+                account_scope=registry_scope,
+                timestamp_factory=self.activated_at_factory,
+            )
+            if registry_seller_id
+            else None
+        )
         self.promo_artifact_gc_runner = promo_artifact_gc_runner or run_promo_campaign_archive_light_gc
         self._sheet_cycle_lock = threading.RLock()
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
@@ -1118,12 +1153,16 @@ class RegistryUploadHttpEntrypoint:
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
+            writer_registry=writer_registry,
+            registry_source_surface="ads_bid_change",
         )
         self.prices_block = prices_block or WbPricesManagementBlock(
             runtime=self.runtime,
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
+            writer_registry=writer_registry,
+            registry_source_surface="prices_upload",
         )
         self.buyer_session_block = (
             buyer_session_block
@@ -1136,6 +1175,7 @@ class RegistryUploadHttpEntrypoint:
             buyer_source=self.buyer_session_block,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
+            writer_registry=writer_registry,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
@@ -1283,6 +1323,8 @@ class RegistryUploadHttpEntrypoint:
                 write_enabled=True,
                 preview_ttl_seconds=self.prices_block.safety.preview_ttl_seconds,
             ),
+            writer_registry=writer_registry,
+            registry_source_surface="sku_management_price",
         )
         sku_ads_block = SheetVitrinaV1AdsBlock(
             runtime=self.runtime,
@@ -1292,6 +1334,8 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
             cache_ttl_seconds=self.ads_block.cache_ttl_seconds,
             safety_config=replace(self.ads_block.safety, write_enabled=True),
+            writer_registry=writer_registry,
+            registry_source_surface="sku_management_bid",
         )
         self.sku_management_block = sku_management_block or SkuManagementBlock(
             runtime=self.runtime,
@@ -1312,22 +1356,12 @@ class RegistryUploadHttpEntrypoint:
                 timestamp_factory=self.activated_at_factory,
             )
         )
-        registry_seller_id = os.environ.get(
-            "SELLER_PORTAL_CANONICAL_SUPPLIER_ID", ""
-        ).strip()
-        registry_scope = os.environ.get(
-            "CHANGE_REGISTRY_ACCOUNT_SCOPE", CHANGE_REGISTRY_ACCOUNT_SCOPE
-        ).strip()
         self.change_registry_enabled = os.environ.get(
             "CHANGE_REGISTRY_OBSERVER_ENABLED", ""
         ).strip().casefold() in {"1", "true", "yes", "on"}
         self.change_registry_read_surface = change_registry_read_surface
         self.change_registry_observer_factory = change_registry_observer_factory
         if self.change_registry_read_surface is None and registry_seller_id:
-            if registry_scope != CHANGE_REGISTRY_ACCOUNT_SCOPE:
-                raise ValueError(
-                    "CHANGE_REGISTRY_ACCOUNT_SCOPE differs from the repo-owned fixed scope"
-                )
             self.change_registry_read_surface = ChangeRegistryReadSurface(
                 self.runtime.runtime_dir,
                 seller_id=registry_seller_id,

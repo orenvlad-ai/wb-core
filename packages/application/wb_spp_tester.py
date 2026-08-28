@@ -29,6 +29,11 @@ from packages.application.wb_prices_management import (
     normalize_goods_payload,
     normalize_quarantine_good,
 )
+from packages.application.change_registry_writer import (
+    InternalWriterRegistry,
+    InternalWriterRegistryError,
+    price_tuple_from_wb,
+)
 from packages.application.wb_buyer_session import WbBuyerSessionBlock
 from packages.contracts.wb_buyer_session import WbAuthenticatedBuyerPriceSource
 from packages.contracts.wb_price_quarantine import (
@@ -120,6 +125,7 @@ class WbSppTesterBlock:
         sleep: Callable[[float], None] | None = None,
         safety_config: WbSppTesterSafetyConfig | None = None,
         cadence_config: WbSppTesterCadenceConfig | None = None,
+        writer_registry: InternalWriterRegistry | None = None,
     ) -> None:
         self.runtime = runtime
         self.runtime_dir = runtime_dir
@@ -130,6 +136,7 @@ class WbSppTesterBlock:
         self.sleep = sleep or time.sleep
         self.safety = safety_config or _load_safety_config()
         self.cadence = cadence_config or _load_cadence_config()
+        self.writer_registry = writer_registry
         self._state_dir = self.runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests"
         self._jobs_dir = self._state_dir / "jobs"
         self._current_job_path = self._state_dir / "current_job.json"
@@ -574,7 +581,13 @@ class WbSppTesterBlock:
             measurement["note"] = "fresh seller/quarantine guard blocked the measurement; no seller price write was attempted"
             self._append_audit(str(job["job_id"]), "measurement_prewrite_guard_blocked", measurement)
             return measurement
-        upload = self._upload_price_with_backoff(job, [{"nmID": nm_id, "price": upload_price}])
+        upload = self._upload_price_with_backoff(
+            job,
+            [{"nmID": nm_id, "price": upload_price}],
+            stage=f"measurement:{point_id}",
+            before=write_guard["current"],
+            requested=write_guard["next"],
+        )
         if upload.get("status") == "rate_limited_stop":
             measurement["status"] = "rate_limited_stop"
             measurement["note"] = upload.get("note") or "WB Prices API repeated 429"
@@ -583,24 +596,74 @@ class WbSppTesterBlock:
         upload_id = _optional_int(upload.get("uploadID"))
         measurement["uploadID"] = upload_id
         if upload_id is None:
+            self._mark_registry_upload_ambiguous(
+                upload,
+                error_code="wb_upload_missing_id",
+                error_message="WB upload response had no uploadID",
+            )
             measurement["status"] = "upload_missing_id"
             measurement["note"] = "WB upload task did not return uploadID"
             return measurement
-        upload_status = self._wait_upload_final(job, upload_id)
+        try:
+            upload_status = self._wait_upload_final(job, upload_id)
+        except Exception as exc:
+            self._mark_registry_upload_ambiguous(
+                upload,
+                error_code="wb_upload_status_unavailable",
+                error_message=str(exc),
+            )
+            raise
         measurement["evidence"]["upload_status"] = upload_status
         if upload_status.get("status") != "success":
+            status = str(upload_status.get("status") or "unknown")
+            if status in {"partial_error", "all_error", "canceled"}:
+                self._mark_registry_upload_failed(
+                    upload,
+                    error_code=f"wb_upload_{status}",
+                    error_message="WB upload reached a non-success final status",
+                )
+            else:
+                self._mark_registry_upload_ambiguous(
+                    upload,
+                    error_code=f"wb_upload_{status}",
+                    error_message="WB upload final status could not be verified",
+                )
             measurement["status"] = "upload_not_success"
             measurement["note"] = str(upload_status.get("status") or "unknown upload status")
             return measurement
 
-        readback = self._wait_discounted_readback(job, expected_discounted=expected_discounted)
+        try:
+            readback = self._wait_discounted_readback(
+                job,
+                expected_discounted=expected_discounted,
+                expected_price=upload_price,
+                expected_discount=discount,
+            )
+        except Exception as exc:
+            self._mark_registry_upload_ambiguous(
+                upload,
+                error_code="wb_readback_unavailable",
+                error_message=str(exc),
+            )
+            raise
         measurement["evidence"]["readback"] = readback
         actual_discounted = _number_or_none(readback.get("discountedPrice"))
         measurement["actual_wb_discounted_price"] = actual_discounted
-        if actual_discounted is None or not _money_close(_parse_money(actual_discounted, "discountedPrice"), expected_discounted, Decimal("1.00")):
+        if (
+            actual_discounted is None
+            or _optional_int(readback.get("price")) != upload_price
+            or _optional_int(readback.get("discount")) != discount
+            or not _money_exact(actual_discounted, expected_discounted)
+        ):
+            self._mark_registry_upload_ambiguous(
+                upload,
+                error_code="wb_readback_mismatch",
+                error_message="exact seller price tuple did not match requested values",
+            )
             measurement["status"] = "readback_mismatch"
             measurement["note"] = "WB readback did not match expected discounted price"
             return measurement
+        self._confirm_registry_upload(job, upload, readback)
 
         quarantine = self._check_quarantine(job)
         measurement["evidence"]["quarantine"] = quarantine
@@ -628,27 +691,210 @@ class WbSppTesterBlock:
         self._append_audit(str(job["job_id"]), "measurement_finished", measurement)
         return measurement
 
-    def _upload_price_with_backoff(self, job: Mapping[str, Any], goods: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        attempts = 0
-        while attempts < 3:
-            attempts += 1
+    def _upload_price_with_backoff(
+        self,
+        job: Mapping[str, Any],
+        goods: Sequence[Mapping[str, Any]],
+        *,
+        stage: str,
+        before: Mapping[str, Any],
+        requested: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Submit exactly once; 429 and transport ambiguity are never retried."""
+
+        prepared = None
+        if self.writer_registry is not None:
             try:
-                payload = self.prices_source.upload_task(goods)
-                self._append_audit(str(job["job_id"]), "wb_upload_task", {"request": {"data": list(goods)}, "response": payload})
-                data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+                prepared = self.writer_registry.prepare_price(
+                    source_surface="spp_tester",
+                    actor=str(job.get("actor") or ""),
+                    native_operation_id=f"{job['job_id']}:{stage}",
+                    nm_id=int(job["nmID"]),
+                    before=price_tuple_from_wb(
+                        price=before.get("price"),
+                        discount=before.get("discount"),
+                        seller_price=before.get("discountedPrice"),
+                    ),
+                    requested=price_tuple_from_wb(
+                        price=requested.get("price"),
+                        discount=requested.get("discount"),
+                        seller_price=requested.get("discountedPrice"),
+                    ),
+                    explicit_fields=tuple(
+                        field
+                        for key, field in (
+                            ("price", "original_price_minor"),
+                            ("discount", "discount_bps"),
+                        )
+                        if any(key in item for item in goods)
+                    ),
+                    requested_at=str(job.get("created_at") or self.timestamp_factory()),
+                    correlation_id=str(job["job_id"]),
+                    apply_operation_id=str(job["job_id"]),
+                    native_audit_reference=(
+                        "sheet_vitrina_v1_prices/spp_tests/audit.jsonl"
+                        f"#job={job['job_id']}&stage={stage}"
+                    ),
+                    stage=stage,
+                )
+            except InternalWriterRegistryError as exc:
+                raise WbSppTesterError(
+                    "change registry preparation failed; WB price upload was not called",
+                    http_status=503,
+                    payload={"reason": "registry_fail_closed", "detail": str(exc)},
+                ) from exc
+        receipt_reference = f"wb-spp:{job['job_id']}:{stage}"
+        try:
+            payload = self.prices_source.upload_task(goods)
+        except WbPricesApiError as exc:
+            self._append_audit(str(job["job_id"]), "wb_upload_task_error", exc.to_dict())
+            if prepared is not None:
+                if exc.http_status is None:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="wb_submit_transport_unknown",
+                        error_message=str(exc),
+                        receipt_reference=receipt_reference,
+                    )
+                else:
+                    self.writer_registry.fail_before_submit(
+                        prepared,
+                        rejected=True,
+                        error_code=f"wb_http_{exc.http_status}",
+                        error_message=str(exc),
+                    )
+            if exc.http_status == 429:
                 return {
-                    "status": "created",
-                    "uploadID": _optional_int(data.get("id") or data.get("uploadID") or data.get("upload_id")),
-                    "alreadyExists": bool(data.get("alreadyExists")),
-                    "wb_response": payload,
+                    "status": "rate_limited_stop",
+                    "note": "WB Prices API 429; no blind retry was made",
+                    "registry_receipt_reference": receipt_reference,
                 }
-            except WbPricesApiError as exc:
-                self._append_audit(str(job["job_id"]), "wb_upload_task_error", exc.to_dict())
-                if exc.http_status != 429:
-                    raise
-                if not self._handle_429_backoff(job, exc, phase="upload_task", attempt=attempts):
-                    return {"status": "rate_limited_stop", "note": "WB Prices API repeated 429 during upload"}
-        return {"status": "rate_limited_stop", "note": "WB Prices API repeated 429 during upload"}
+            raise
+        except Exception as exc:
+            if prepared is not None:
+                self.writer_registry.ambiguous(
+                    prepared,
+                    error_code="wb_submit_transport_unknown",
+                    error_message=str(exc),
+                    receipt_reference=receipt_reference,
+                )
+            raise
+        self._append_audit(str(job["job_id"]), "wb_upload_task", {"request": {"data": list(goods)}, "response": payload})
+        data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+        upload_id = _optional_int(data.get("id") or data.get("uploadID") or data.get("upload_id"))
+        if prepared is not None:
+            try:
+                self.writer_registry.submitted(
+                    prepared,
+                    receipt_reference=receipt_reference,
+                    receipt_basis={
+                        "upload_id": upload_id,
+                        "already_exists": bool(data.get("alreadyExists")),
+                        "stage": stage,
+                    },
+                )
+            except InternalWriterRegistryError as exc:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="registry_post_submit_failure",
+                        error_message=str(exc),
+                        receipt_reference=receipt_reference,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+                raise WbSppTesterError(
+                    "WB price response was received but registry lifecycle is ambiguous",
+                    http_status=503,
+                    payload={"reason": "registry_post_submit_ambiguous"},
+                ) from exc
+        return {
+            "status": "created",
+            "uploadID": upload_id,
+            "alreadyExists": bool(data.get("alreadyExists")),
+            "wb_response": payload,
+            "registry_receipt_reference": receipt_reference if prepared is not None else "",
+        }
+
+    def _confirm_registry_upload(
+        self,
+        job: Mapping[str, Any],
+        upload: Mapping[str, Any],
+        readback: Mapping[str, Any],
+    ) -> None:
+        if self.writer_registry is None:
+            return
+        receipt = str(upload.get("registry_receipt_reference") or "")
+        if not receipt:
+            return
+        prepared = self.writer_registry.find_by_receipt(receipt)
+        if prepared is None:
+            raise WbSppTesterError(
+                "submitted registry operation is missing during exact readback",
+                http_status=503,
+            )
+        exact_tuple = price_tuple_from_wb(
+            price=readback.get("price"),
+            discount=readback.get("discount"),
+            seller_price=readback.get("discountedPrice"),
+        )
+        self.writer_registry.confirm_price(
+            prepared,
+            confirmed=exact_tuple,
+            readback_basis={
+                "job_id": str(job["job_id"]),
+                "nm_id": int(job["nmID"]),
+                "upload_id": _optional_int(upload.get("uploadID")),
+                "confirmed": exact_tuple,
+            },
+            receipt_reference=receipt,
+            native_audit_references=(
+                "sheet_vitrina_v1_prices/spp_tests/audit.jsonl"
+                f"#native_operation={prepared.native_operation_id}",
+            ),
+        )
+
+    def _mark_registry_upload_ambiguous(
+        self,
+        upload: Mapping[str, Any],
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        if self.writer_registry is None:
+            return
+        receipt = str(upload.get("registry_receipt_reference") or "")
+        if not receipt:
+            return
+        prepared = self.writer_registry.find_by_receipt(receipt)
+        if prepared is not None:
+            self.writer_registry.ambiguous(
+                prepared,
+                error_code=error_code,
+                error_message=error_message,
+                receipt_reference=receipt,
+            )
+
+    def _mark_registry_upload_failed(
+        self,
+        upload: Mapping[str, Any],
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        if self.writer_registry is None:
+            return
+        receipt = str(upload.get("registry_receipt_reference") or "")
+        if not receipt:
+            return
+        prepared = self.writer_registry.find_by_receipt(receipt)
+        if prepared is not None:
+            self.writer_registry.failed_after_submit(
+                prepared,
+                error_code=error_code,
+                error_message=error_message,
+                receipt_reference=receipt,
+            )
 
     def _wait_upload_final(self, job: Mapping[str, Any], upload_id: int) -> dict[str, Any]:
         last: dict[str, Any] = {}
@@ -665,14 +911,26 @@ class WbSppTesterBlock:
         last["status"] = last.get("status") or "timeout"
         return last
 
-    def _wait_discounted_readback(self, job: Mapping[str, Any], *, expected_discounted: Decimal) -> dict[str, Any]:
+    def _wait_discounted_readback(
+        self,
+        job: Mapping[str, Any],
+        *,
+        expected_discounted: Decimal,
+        expected_price: int,
+        expected_discount: int,
+    ) -> dict[str, Any]:
         nm_id = int(job["nmID"])
         last: dict[str, Any] = {}
         for _attempt in range(self.cadence.readback_max_polls):
             good = self._fetch_current_good(nm_id, job_id=str(job["job_id"]), audit_event="wb_prices_readback")
             last = good
             actual = _number_or_none(good.get("discountedPrice"))
-            if actual is not None and _money_close(_parse_money(actual, "discountedPrice"), expected_discounted, Decimal("1.00")):
+            if (
+                actual is not None
+                and _optional_int(good.get("price")) == expected_price
+                and _optional_int(good.get("discount")) == expected_discount
+                and _money_exact(actual, expected_discounted)
+            ):
                 return good
             self._sleep_with_heartbeat(job, self.cadence.readback_poll_seconds, phase="readback_poll")
         return last
@@ -760,45 +1018,6 @@ class WbSppTesterBlock:
             "stable": False,
             "authenticated_buyer_price": None,
         }
-
-    def _handle_429_backoff(
-        self,
-        job: Mapping[str, Any],
-        exc: WbPricesApiError,
-        *,
-        phase: str,
-        attempt: int,
-    ) -> bool:
-        cooldown = int(exc.retry_after_seconds or self.cadence.rate_limit_min_cooldown_seconds)
-        cooldown = max(cooldown, self.cadence.rate_limit_min_cooldown_seconds)
-        if attempt > 1:
-            cooldown *= 2
-        if attempt >= 3:
-            self._append_audit(
-                str(job["job_id"]),
-                "wb_prices_429_stop",
-                {
-                    "phase": phase,
-                    "attempt": attempt,
-                    "reason": "repeated_rate_limit_restore_required",
-                    "error": exc.to_dict(),
-                },
-            )
-            return False
-        self._append_audit(
-            str(job["job_id"]),
-            "wb_prices_429_backoff",
-            {"phase": phase, "attempt": attempt, "cooldown_seconds": cooldown, "error": exc.to_dict()},
-        )
-        current = self._load_job(str(job["job_id"])) or dict(job)
-        self._set_job_status(current, "cooldown", f"429_backoff_{phase}")
-        self._sleep_with_heartbeat(job, cooldown, phase=f"429_backoff_{phase}")
-        try:
-            self._fetch_current_good(int(job["nmID"]), job_id=str(job["job_id"]), audit_event="wb_prices_429_probe")
-            return True
-        except WbPricesApiError as probe_exc:
-            self._append_audit(str(job["job_id"]), "wb_prices_429_probe_error", probe_exc.to_dict())
-            return probe_exc.http_status != 429
 
     def _check_quarantine(self, job: Mapping[str, Any]) -> dict[str, Any]:
         nm_id = int(job["nmID"])
@@ -952,7 +1171,7 @@ class WbSppTesterBlock:
             "restore_current_discountedPrice",
         )
         steps = self._build_restore_steps(job, current_discounted=current_discounted)
-        for step in steps:
+        for step_index, step in enumerate(steps, start=1):
             price = int(step["price"])
             discount = int(step["discount"])
             try:
@@ -985,18 +1204,58 @@ class WbSppTesterBlock:
                 job["result_status"] = "manual_restore_required"
                 self._save_job(job)
                 return False
-            upload = self._upload_price_with_backoff(job, [{"nmID": nm_id, "price": price, "discount": discount}])
+            upload = self._upload_price_with_backoff(
+                job,
+                [{"nmID": nm_id, "price": price, "discount": discount}],
+                stage=f"restore:{step.get('kind') or 'step'}:{step_index}",
+                before={
+                    "price": fresh_current.get("price"),
+                    "discount": fresh_current.get("discount"),
+                    "discountedPrice": fresh_current.get("discountedPrice"),
+                },
+                requested={
+                    "price": price,
+                    "discount": discount,
+                    "discountedPrice": step["expected_discounted_price"],
+                },
+            )
             step["upload"] = upload
             if upload.get("status") == "rate_limited_stop" or upload.get("uploadID") is None:
+                self._mark_registry_upload_ambiguous(
+                    upload,
+                    error_code="wb_upload_unverifiable",
+                    error_message="restore upload was not accepted with an uploadID",
+                )
                 step["status"] = "upload_failed"
                 restore_state.setdefault("steps", []).append(step)
                 job["manual_restore_required"] = True
                 job["result_status"] = "manual_restore_required"
                 self._save_job(job)
                 return False
-            upload_status = self._wait_upload_final(job, int(upload["uploadID"]))
+            try:
+                upload_status = self._wait_upload_final(job, int(upload["uploadID"]))
+            except Exception as exc:
+                self._mark_registry_upload_ambiguous(
+                    upload,
+                    error_code="wb_upload_status_unavailable",
+                    error_message=str(exc),
+                )
+                raise
             step["upload_status"] = upload_status
             if upload_status.get("status") != "success":
+                upload_outcome = str(upload_status.get("status") or "unknown")
+                if upload_outcome in {"partial_error", "all_error", "canceled"}:
+                    self._mark_registry_upload_failed(
+                        upload,
+                        error_code=f"wb_upload_{upload_outcome}",
+                        error_message="restore upload reached a non-success final status",
+                    )
+                else:
+                    self._mark_registry_upload_ambiguous(
+                        upload,
+                        error_code=f"wb_upload_{upload_outcome}",
+                        error_message="restore upload final status could not be verified",
+                    )
                 step["status"] = "upload_not_success"
                 restore_state.setdefault("steps", []).append(step)
                 job["manual_restore_required"] = True
@@ -1004,14 +1263,46 @@ class WbSppTesterBlock:
                 self._save_job(job)
                 return False
             expected = _discounted_price(_parse_money(price, "price"), _parse_money(discount, "discount"))
-            readback = self._wait_discounted_readback(job, expected_discounted=expected)
+            try:
+                readback = self._wait_discounted_readback(
+                    job,
+                    expected_discounted=expected,
+                    expected_price=price,
+                    expected_discount=discount,
+                )
+            except Exception as exc:
+                self._mark_registry_upload_ambiguous(
+                    upload,
+                    error_code="wb_readback_unavailable",
+                    error_message=str(exc),
+                )
+                raise
             step["readback"] = readback
+            exact_tuple = bool(
+                _optional_int(readback.get("price")) == price
+                and _optional_int(readback.get("discount")) == discount
+                and _money_exact(readback.get("discountedPrice"), expected)
+            )
+            if exact_tuple:
+                self._confirm_registry_upload(job, upload, readback)
+            else:
+                self._mark_registry_upload_ambiguous(
+                    upload,
+                    error_code="wb_readback_mismatch",
+                    error_message="restore exact seller price tuple did not match",
+                )
             quarantine = self._check_quarantine(job)
             step["quarantine"] = quarantine
-            step["status"] = "ok" if not quarantine.get("is_quarantined") else "quarantine_detected"
+            step["status"] = (
+                "ok"
+                if exact_tuple and not quarantine.get("is_quarantined")
+                else "readback_mismatch"
+                if not exact_tuple
+                else "quarantine_detected"
+            )
             restore_state.setdefault("steps", []).append(step)
             self._save_job(job)
-            if quarantine.get("is_quarantined"):
+            if not exact_tuple or quarantine.get("is_quarantined"):
                 job["manual_restore_required"] = True
                 job["result_status"] = "manual_restore_required"
                 self._save_job(job)

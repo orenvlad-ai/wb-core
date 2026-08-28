@@ -2054,6 +2054,14 @@ class SkuManagementBlock:
                         "polling": polling,
                     },
                 )
+            registry_receipt = str(
+                delegated.get("registry_receipt_reference") or ""
+            )
+            if registry_receipt:
+                self.ads_block.reconcile_registry_bid(
+                    receipt_reference=registry_receipt,
+                    exact_readback=readback,
+                )
             confirmed_at = self.timestamp_factory()
             diagnostics = self._diagnostics(
                 started=started,

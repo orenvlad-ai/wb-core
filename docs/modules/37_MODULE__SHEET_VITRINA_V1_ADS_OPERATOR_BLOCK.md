@@ -32,10 +32,15 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/09_official_api_secret_boundary.md"
 source_of_truth_level: "module_canonical"
-update_note: "SKU-first ads operator with guarded bid preview/commit, commit-time minimum revalidation, cache-bypassing delayed read support for `Управление SKU`, persistent audit and no bulk/auto-bidding."
+update_note: "Guarded bid commit prepares the immutable registry before the sole WB patch and confirms only exact bid readback; native audit remains evidence."
 ---
 
 # 1. Идентификатор и статус
+
+Every accepted commit is instrumented through module 58 immediately before the
+single WB patch. Registry failure gives zero patches. The returned patch is
+`submitted`; one bounded exact advert/nmID/placement readback may confirm it,
+otherwise it remains `ambiguous` for the existing SKU query-only polling path.
 
 - `module_id`: `sheet_vitrina_v1_ads_operator_block`
 - `family`: `sheet_vitrina_v1/operator/wb_promotion`

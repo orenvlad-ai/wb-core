@@ -34,6 +34,7 @@ related_runners:
   - "apps/wb_spp_tester_browser_smoke.py"
   - "apps/wb_buyer_session_recovery.py"
   - "apps/wb_buyer_session_smoke.py"
+  - "apps/change_registry_internal_writers_smoke.py"
 related_docs:
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "docs/modules/35_MODULE__SPP_PROXY_BLOCK.md"
@@ -42,6 +43,15 @@ related_docs:
 source_of_truth_level: "module_canonical"
 update_note: "Manual exact-price flow now exposes the selected SKU's current seller discounted price, retries one generic transient buyer probe once, and applies a shared conservative 1.5x/33.3% inclusive quarantine guard to the exact integer-price conversion before Start and immediately before every measurement write."
 ---
+
+## Immutable writer events
+
+Every measurement and every restore bridge/final transition has its own stable
+`job_id + stage` registry operation. Preparation occurs after the fresh guard
+and before exactly one WB upload call. HTTP 429 stops that stage without a
+retry. Exact original price, discount and seller-price readback confirms it;
+unverifiable readback stays ambiguous while mandatory restore continues under
+its own operations. Native SPP JSONL/job state is linked evidence, not replaced.
 
 # 1. Идентификатор и статус
 

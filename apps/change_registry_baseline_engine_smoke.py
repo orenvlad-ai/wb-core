@@ -208,6 +208,10 @@ def main() -> None:
         assert _table_count(db_path, FACTS_TABLE) == facts_before_failed
         assert _latest_complete_checkpoint(db_path) == resumed_receipt["checkpoint_id"]
 
+        projection_before_unbound = engine.project_intervals(
+            target=target_identity("price", nm_id=1),
+            parameter_field="seller_price_minor",
+        )
         repository.append_fact(
             fact_id="non-checkpoint-proof",
             seller_id=SELLER,
@@ -222,15 +226,12 @@ def main() -> None:
             proof_kind="native_audit",
             evidence_digest=canonical_digest({"proof": "unsupported-projection"}),
         )
-        try:
-            engine.project_intervals(
-                target=target_identity("price", nm_id=1),
-                parameter_field="seller_price_minor",
-            )
-        except ChangeRegistryConflict:
-            pass
-        else:
-            raise AssertionError("projection accepted an unbound non-checkpoint proof")
+        # Writer facts are inert for interval projection until an exact
+        # checkpoint reconciliation late-links them.
+        assert engine.project_intervals(
+            target=target_identity("price", nm_id=1),
+            parameter_field="seller_price_minor",
+        ) == projection_before_unbound
 
     print("change_registry_baseline_engine_smoke: OK")
 

@@ -31,6 +31,7 @@ related_tables:
   - "sheet_vitrina_v1_sku_action_events"
   - "sheet_vitrina_v1_wb_incident_policy_revisions"
   - "sheet_vitrina_v1_wb_incident_projection_cache"
+  - "change_registry_operations/items/attempt_events/facts/fact_links"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/sku-management"
   - "GET /v1/sheet-vitrina-v1/sku-management/sku/{nm_id}"
@@ -43,6 +44,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-settings"
   - "GET /v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options"
 related_runners:
+  - "apps/change_registry_internal_writers_smoke.py"
   - "apps/sku_management_smoke.py"
   - "apps/sku_management_browser_smoke.py"
   - "apps/wb_warehouse_exclusion_browser_smoke.py"

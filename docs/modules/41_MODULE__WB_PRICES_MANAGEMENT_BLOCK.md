@@ -43,6 +43,7 @@ related_runners:
   - "apps/wb_prices_management_browser_smoke.py"
   - "apps/wb_spp_tester_smoke.py"
   - "apps/wb_spp_tester_browser_smoke.py"
+  - "apps/change_registry_internal_writers_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
 related_docs:
@@ -53,6 +54,15 @@ related_docs:
 source_of_truth_level: "module_canonical"
 update_note: "Manual SPP and ordinary prices preview share the conservative 1.5x/33.3% inclusive seller-discounted-price quarantine contract. Selected SKU current discounted price is visible before input; risky sequences are blocked before upload and rechecked immediately before each measurement write."
 ---
+
+## Change-registry lifecycle
+
+Standalone upload and the SKU-owned instance use the same module-58 seam with
+different `source_surface`. Preview and stale/invalid confirmation create no
+rows. Immediately before the only upload-task request, one transaction stores
+the full old/requested price tuple for every nmID. Final upload success is not
+confirmation by itself: exact current WB tuples must match before facts are
+created; failure/mismatch remains explicit failed/ambiguous state.
 
 # 1. Идентификатор и статус
 

@@ -2,7 +2,7 @@
 
 The engine consumes only the sanitized deterministic result produced by
 ``ChangeRegistrySourceAcquirer``.  It owns no scheduler, HTTP/UI route, WB
-client, writer instrumentation or automatic invocation. The active observer
+client, writer submit capability or automatic invocation. The active observer
 invokes ``ingest`` explicitly after its read-only source acquisition.
 """
 
@@ -33,6 +33,7 @@ from packages.application.change_registry import (
     canonical_digest,
     canonical_json,
     canonicalize_value,
+    find_reconcilable_transition_fact,
     target_identity,
 )
 from packages.application.change_registry_source_acquisition import (
@@ -449,27 +450,42 @@ class ChangeRegistryBaselineEngine:
                 "observed_from": proof_completed_at,
                 "observed_to": str(current_checkpoint["completed_at"]),
             }
-            evidence_digest = canonical_digest(fact_basis)
-            fact_id = _stable_id("crf", fact_basis)
-            fact_row = {
-                "fact_id": fact_id,
-                "seller_id": self.seller_id,
-                "account_scope": self.account_scope,
-                "target_kind": target.target_kind,
-                "nm_id": target.nm_id,
-                "advert_id": target.advert_id,
-                "placement": target.placement,
-                "parameter_field": parameter_field,
-                **_value_columns("before_value", before_value),
-                **_value_columns("after_value", current_value),
-                "observed_from": proof_completed_at,
-                "observed_to": str(current_checkpoint["completed_at"]),
-                "proven_at": str(current_checkpoint["completed_at"]),
-                "proof_kind": "checkpoint_diff",
-                "evidence_digest": evidence_digest,
-                "mapping_version": MAPPING_VERSION,
-            }
-            _insert_idempotent(conn, FACTS_TABLE, "fact_id", fact_row)
+            reconciled = find_reconcilable_transition_fact(
+                conn,
+                seller_id=self.seller_id,
+                account_scope=self.account_scope,
+                target=target,
+                parameter_field=parameter_field,
+                before=before_value,
+                after=current_value,
+                observed_from=proof_completed_at,
+                observed_to=str(current_checkpoint["completed_at"]),
+                incoming_proof_kind="checkpoint_diff",
+            )
+            if reconciled is None:
+                evidence_digest = canonical_digest(fact_basis)
+                fact_id = _stable_id("crf", fact_basis)
+                fact_row = {
+                    "fact_id": fact_id,
+                    "seller_id": self.seller_id,
+                    "account_scope": self.account_scope,
+                    "target_kind": target.target_kind,
+                    "nm_id": target.nm_id,
+                    "advert_id": target.advert_id,
+                    "placement": target.placement,
+                    "parameter_field": parameter_field,
+                    **_value_columns("before_value", before_value),
+                    **_value_columns("after_value", current_value),
+                    "observed_from": proof_completed_at,
+                    "observed_to": str(current_checkpoint["completed_at"]),
+                    "proven_at": str(current_checkpoint["completed_at"]),
+                    "proof_kind": "checkpoint_diff",
+                    "evidence_digest": evidence_digest,
+                    "mapping_version": MAPPING_VERSION,
+                }
+                _insert_idempotent(conn, FACTS_TABLE, "fact_id", fact_row)
+            else:
+                fact_id = str(reconciled["fact_id"])
 
             exact_current = conn.execute(
                 f"""SELECT 1 FROM {OBSERVATION_VALUES_TABLE}
@@ -666,9 +682,14 @@ class ChangeRegistryBaselineEngine:
                 )
 
         fact_rows = conn.execute(
-            f"""SELECT * FROM {FACTS_TABLE}
+            f"""SELECT fact.* FROM {FACTS_TABLE} fact
                 WHERE seller_id=? AND account_scope=? AND target_kind=? AND nm_id=?
                   AND advert_id=? AND placement=? AND parameter_field=?
+                  AND EXISTS(
+                    SELECT 1 FROM {FACT_LINKS_TABLE} linked_checkpoint
+                    WHERE linked_checkpoint.fact_id=fact.fact_id
+                      AND linked_checkpoint.link_kind='checkpoint'
+                  )
                 ORDER BY observed_to,fact_id""",
             (
                 self.seller_id,
@@ -680,9 +701,13 @@ class ChangeRegistryBaselineEngine:
                 field,
             ),
         ).fetchall()
-        if any(str(row["proof_kind"]) != "checkpoint_diff" for row in fact_rows):
+        if any(
+            str(row["proof_kind"])
+            not in {"checkpoint_diff", "wb_readback", "native_audit", "reconciliation"}
+            for row in fact_rows
+        ):
             raise ChangeRegistryConflict(
-                "interval projection rejects non-checkpoint or ambiguous proof"
+                "interval projection rejects ambiguous proof"
             )
         facts_by_checkpoint: dict[str, sqlite3.Row] = {}
         checkpoints_by_id = {str(row["checkpoint_id"]): row for row in checkpoints}
@@ -703,25 +728,53 @@ class ChangeRegistryBaselineEngine:
                 raise ChangeRegistryConflict(
                     "projected fact checkpoint identity is ambiguous"
                 )
-            proof_candidates = [
-                row
-                for row in checkpoints
-                if str(row["completed_at"]) == str(fact["observed_from"])
-                and str(row["completed_at"]) < str(checkpoint["completed_at"])
-            ]
-            previous = proof_candidates[0] if len(proof_candidates) == 1 else None
-            if (
-                previous is None
-                or str(fact["observed_to"]) != str(checkpoint["completed_at"])
-                or str(fact["proven_at"]) != str(checkpoint["completed_at"])
-            ):
+            before_value = _row_value(fact, "before_value")
+            after_value = _row_value(fact, "after_value")
+            proof_kind = str(fact["proof_kind"])
+            if proof_kind == "checkpoint_diff":
+                proof_candidates = [
+                    row
+                    for row in checkpoints
+                    if str(row["completed_at"]) == str(fact["observed_from"])
+                    and str(row["completed_at"]) < str(checkpoint["completed_at"])
+                ]
+                previous = (
+                    proof_candidates[0] if len(proof_candidates) == 1 else None
+                )
+                interval_matches = (
+                    previous is not None
+                    and str(fact["observed_to"]) == str(checkpoint["completed_at"])
+                    and str(fact["proven_at"]) == str(checkpoint["completed_at"])
+                )
+            else:
+                proof_candidates = []
+                for candidate in checkpoints:
+                    if not (
+                        _moment(str(candidate["completed_at"]))
+                        <= _moment(str(fact["observed_from"]))
+                        < _moment(str(checkpoint["completed_at"]))
+                    ):
+                        continue
+                    candidate_observation = _load_observation(
+                        conn, str(candidate["checkpoint_id"]), target, field
+                    )
+                    if _comparable_row_value(candidate_observation) == before_value:
+                        proof_candidates.append(candidate)
+                previous = proof_candidates[-1] if proof_candidates else None
+                interval_matches = (
+                    previous is not None
+                    and _moment(str(previous["completed_at"]))
+                    <= _moment(str(fact["observed_from"]))
+                    <= _moment(str(checkpoint["completed_at"]))
+                    and _moment(str(fact["observed_from"]))
+                    <= _moment(str(fact["observed_to"]))
+                )
+            if not interval_matches:
                 raise ChangeRegistryConflict(
                     "projected fact interval does not match checkpoint chronology"
                 )
             current_observation = _load_observation(conn, checkpoint_id, target, field)
             current_value = _comparable_row_value(current_observation)
-            after_value = _row_value(fact, "after_value")
-            before_value = _row_value(fact, "before_value")
             if current_value is None or current_value != after_value:
                 raise ChangeRegistryConflict(
                     "projected fact does not match the linked exact observation"
