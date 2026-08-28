@@ -152,11 +152,18 @@ def main() -> None:
             page.locator("[data-inventory-balance-error]").inner_text(),
             console_errors,
         )
+        assert "агрегат WB × 0.5" in balance_body_text
+        assert "без складской раскладки" in balance_body_text
         assert "Новые CPC" in page.locator("[data-inventory-balance-head]").inner_text()
         assert "Старые CPM" in page.locator("[data-inventory-balance-head]").inner_text()
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
 
         page.locator("[data-inventory-balance-settings]").evaluate("node => { node.open = true; }")
+        coefficient_input = page.locator(
+            '[data-inventory-balance-setting="wb_confidence_coefficient"]'
+        )
+        assert coefficient_input.get_attribute("min") == "0"
+        assert coefficient_input.get_attribute("max") == "1"
         page.locator("[data-inventory-balance-preset]").select_option("actionable")
         page.locator('[data-inventory-balance-column-visible="quality"]').uncheck()
         page.locator('[data-inventory-balance-column-up="known_stock_units"]').click()
@@ -202,6 +209,7 @@ def main() -> None:
     assert start_requests[-1][2]["confirmed"] is True
     settings_requests = [item for item in requests if item[1].endswith("/inventory-balance/settings")]
     assert settings_requests and settings_requests[-1][2]["table"]["preset"] == "actionable"
+    assert settings_requests[-1][2]["calculation"]["wb_confidence_coefficient"] == 0.5
     assert "quality" not in settings_requests[-1][2]["table"]["visible_columns"]
     assert settings_requests[-1][2]["table"]["column_order"][2] == "known_stock_units"
     registry_requests = [item for item in requests if item[1].endswith("/calculations?limit=20")]
@@ -250,12 +258,12 @@ def _calculation() -> dict:
         "recommendation_quality": "complete",
     }
     return {
-        "contract_name": "sheet_vitrina_v1_sku_inventory_balance/v1",
+        "contract_name": "sheet_vitrina_v1_sku_inventory_balance/v2",
         "calculation_id": "ibc_browser",
         "previous_calculation_id": "ibc_previous",
         "created_at": "2026-08-26T08:00:00+00:00",
         "source_digest": "sha256:browser",
-        "formula_version": "sku_inventory_balance_conservative_pace_v1",
+        "formula_version": "sku_inventory_balance_conservative_pace_v2",
         "registry_immutable": True,
         "overrides_are_separate": True,
         "automatic_ml_or_training": False,
@@ -266,8 +274,20 @@ def _calculation() -> dict:
                 "our_sku": "DEF",
                 "status": "Дефицит",
                 "quality": "complete",
-                "quality_warnings": [],
+                "quality_warnings": [
+                    "Использован официальный агрегат WB по SKU без раскладки по складам и регионам"
+                ],
                 "known_stock_units": 50,
+                "stock_wb_units": 100,
+                "wb_confidence_coefficient": 0.5,
+                "confidence_adjusted_wb_units": 50,
+                "wb_stock_evidence": {
+                    "mode": "aggregate_per_sku_total",
+                    "quality": "exact_aggregate_total",
+                    "warehouse_granularity_complete": False,
+                    "incident_projection_applied": False,
+                    "raw_rows_digest": "sha256:" + "b" * 64,
+                },
                 "current_daily_sales": 10,
                 "target_daily_sales": 8,
                 "pace_change_pct": -20,

@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from types import SimpleNamespace
 import zipfile
 
 from openpyxl import load_workbook
@@ -24,7 +25,11 @@ from packages.application.sku_inventory_balance import (  # noqa: E402
     SkuInventoryBalanceError,
     calculate_inventory_balance_row,
 )
-from packages.application.sku_management import SkuManagementBlock  # noqa: E402
+from packages.application.sku_management import (  # noqa: E402
+    SkuManagementBlock,
+    _inventory_balance_aggregate_wb_evidence,
+    _inventory_balance_wb_stock_from_row,
+)
 
 
 class FakeRuntime:
@@ -212,7 +217,7 @@ class FakeSkuManagement:
                     "daily_demand": row["daily_demand"],
                     "quality": "complete",
                 }
-        source["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v1"
+        source["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v2"
         source["meta"]["inventory_balance_evidence"] = {
             "sales_period_days": int(sales_period_days),
             "sales_lookup_days": int(sales_period_days) * 4,
@@ -279,7 +284,216 @@ class FakeBalanceEvidenceRuntime:
         return self.details[shipment_id]
 
 
+def _aggregate_wb_balance_fallback_checks() -> None:
+    digest = "sha256:" + "a" * 64
+    aggregate_result = SimpleNamespace(
+        kind="success",
+        snapshot_date="2026-08-26",
+        fetched_at="2026-08-26T08:00:00Z",
+        pagination_complete=True,
+        raw_rows_digest=digest,
+        warehouse_granularity_complete=False,
+        count=1,
+        items=[SimpleNamespace(nm_id=101, stock_total=80.0)],
+        warehouse_rows=[],
+    )
+    aggregate = _inventory_balance_aggregate_wb_evidence(
+        aggregate_result,
+        requested_nm_ids=[101],
+        expected_snapshot_date="2026-08-26",
+    )
+    collector = object.__new__(SkuManagementBlock)
+    collector.now_factory = lambda: datetime(2026, 8, 26, 8, tzinfo=timezone.utc)
+    collector.stocks_block = SimpleNamespace(
+        execute=lambda request: SimpleNamespace(result=aggregate_result)
+    )
+    collector.runtime = SimpleNamespace(
+        load_ff_stock_activation_operation=lambda: {"status": "active"},
+        list_ff_stock_balances=lambda: [{"nm_id": 101, "quantity": 10}],
+    )
+    collector.sales_history = None
+    collector._append_supplier_inbounds = lambda result, settings: None
+    collector._append_factory_order_inbounds = lambda result, settings: None
+    collector._append_wb_supply_inbounds = lambda result, settings: None
+    collector._append_regional_demand = lambda result, settings, as_of_date: None
+    collected = collector._collect_forecast_evidence(
+        active=[{"nm_id": 101}],
+        settings=SimpleNamespace(sales_avg_period_days=7),
+    )
+    general_row = collected[101]
+    assert general_row["stock_wb"] is None
+    assert general_row["districts"] == {}
+    assert general_row["inventory_balance_wb_stock_evidence"] == aggregate[101]
+    selected_stock, selected_evidence, warning = _inventory_balance_wb_stock_from_row(
+        general_row,
+        expected_snapshot_date="2026-08-26",
+    )
+    assert selected_stock == 80
+    assert selected_evidence["mode"] == "aggregate_per_sku_total"
+    assert selected_evidence["incident_projection_applied"] is False
+    assert selected_evidence["used_by_inventory_balance"] is True
+    assert "без раскладки" in warning
+
+    exact_zero_result = SimpleNamespace(
+        **{
+            **vars(aggregate_result),
+            "items": [SimpleNamespace(nm_id=101, stock_total=0.0)],
+        }
+    )
+    exact_zero = _inventory_balance_aggregate_wb_evidence(
+        exact_zero_result,
+        requested_nm_ids=[101],
+        expected_snapshot_date="2026-08-26",
+    )
+    assert exact_zero[101]["stock_wb_units"] == 0.0
+
+    aggregate_row = calculate_inventory_balance_row(
+        {
+            "nm_id": 101,
+            "name": "Aggregate-only WB SKU",
+            "stock_wb": selected_stock,
+            "stock_ff": 10,
+            "daily_demand": 8,
+            "quality": "complete",
+            "quality_warnings": [warning],
+            "wb_stock_evidence": selected_evidence,
+            "inventory_balance_as_of_date": "2026-08-26",
+            "inventory_balance_inbounds": [
+                {
+                    "date": "2026-09-04",
+                    "quantity": 30,
+                    "source": "supplier_shipment",
+                    "source_id": "aggregate-next",
+                    "consumes_current_ff": False,
+                },
+                {
+                    "date": "2026-09-14",
+                    "quantity": 40,
+                    "source": "supplier_shipment",
+                    "source_id": "aggregate-subsequent",
+                    "consumes_current_ff": False,
+                },
+            ],
+        },
+        settings={
+            "wb_confidence_coefficient": 0.25,
+            "safety_stock_days": 10,
+            "bid_scale_max": 2.0,
+        },
+    )
+    assert aggregate_row["known_stock_units"] == 30
+    assert aggregate_row["confidence_adjusted_wb_units"] == 20
+    assert aggregate_row["milestones"][0]["available_before_arrival"] == 30
+    assert aggregate_row["next_inbound"]["source_ids"] == ["aggregate-next"]
+    assert aggregate_row["subsequent_inbound"]["source_ids"] == [
+        "aggregate-subsequent"
+    ]
+    assert aggregate_row["target_daily_sales"] is not None
+    assert aggregate_row["pace_change_pct"] is not None
+    assert aggregate_row["days_cover"] == 3.75
+    assert aggregate_row["wb_stock_evidence"]["wb_confidence_coefficient"] == 0.25
+
+    zero_coefficient = calculate_inventory_balance_row(
+        {
+            "nm_id": 101,
+            "name": "Zero WB coefficient",
+            "stock_wb": selected_stock,
+            "stock_ff": 10,
+            "daily_demand": 8,
+            "quality": "complete",
+            "quality_warnings": [warning],
+            "wb_stock_evidence": selected_evidence,
+            "inventory_balance_as_of_date": "2026-08-26",
+            "inventory_balance_inbounds": [
+                {
+                    "date": "2026-09-04",
+                    "quantity": 30,
+                    "source": "supplier_shipment",
+                    "source_id": "aggregate-next-zero",
+                    "consumes_current_ff": False,
+                }
+            ],
+        },
+        settings={
+            "wb_confidence_coefficient": 0.0,
+            "safety_stock_days": 10,
+            "bid_scale_max": 2.0,
+        },
+    )
+    assert zero_coefficient["known_stock_units"] == 10
+    assert zero_coefficient["confidence_adjusted_wb_units"] == 0
+
+    invalid_results = [
+        SimpleNamespace(**{**vars(aggregate_result), "pagination_complete": False}),
+        SimpleNamespace(**{**vars(aggregate_result), "snapshot_date": "2026-08-25"}),
+        SimpleNamespace(**{**vars(aggregate_result), "raw_rows_digest": "sha256:invalid"}),
+        SimpleNamespace(**{**vars(aggregate_result), "count": True}),
+        SimpleNamespace(**{**vars(aggregate_result), "count": 0, "items": []}),
+        SimpleNamespace(
+            **{
+                **vars(aggregate_result),
+                "items": [SimpleNamespace(nm_id=101, stock_total=float("nan"))],
+            }
+        ),
+        SimpleNamespace(
+            **{
+                **vars(aggregate_result),
+                "items": [SimpleNamespace(nm_id=101, stock_total=float("inf"))],
+            }
+        ),
+        SimpleNamespace(
+            **{
+                **vars(aggregate_result),
+                "items": [SimpleNamespace(nm_id=101, stock_total=-1.0)],
+            }
+        ),
+        SimpleNamespace(
+            **{
+                **vars(aggregate_result),
+                "count": 2,
+                "items": [
+                    SimpleNamespace(nm_id=101, stock_total=80.0),
+                    SimpleNamespace(nm_id=101, stock_total=0.0),
+                ],
+            }
+        ),
+    ]
+    for invalid in invalid_results:
+        try:
+            _inventory_balance_aggregate_wb_evidence(
+                invalid,
+                requested_nm_ids=(
+                    [101, 202]
+                    if getattr(invalid, "count", None) == 2
+                    else [101]
+                ),
+                expected_snapshot_date="2026-08-26",
+            )
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("partial/missing/malformed aggregate WB evidence was accepted")
+
+    malformed_row = {
+        "stock_wb": None,
+        "inventory_balance_wb_stock_evidence": {
+            **aggregate[101],
+            "raw_rows_digest": "",
+        },
+    }
+    missing_stock, malformed_evidence, malformed_warning = (
+        _inventory_balance_wb_stock_from_row(
+            malformed_row,
+            expected_snapshot_date="2026-08-26",
+        )
+    )
+    assert missing_stock is None
+    assert malformed_evidence["quality"] == "invalid_aggregate_evidence"
+    assert "остаётся неизвестным" in malformed_warning
+
+
 def main() -> None:
+    _aggregate_wb_balance_fallback_checks()
     evidence_block = object.__new__(SkuManagementBlock)
     evidence_block.sales_history = FakeBalanceSalesHistory()
     evidence_block.runtime = FakeBalanceEvidenceRuntime()
@@ -357,6 +571,7 @@ def main() -> None:
         empty = block.latest(user_key="operator")
         assert empty["calculation"] is None
         assert empty["apply_capability"]["wb_patch_reachable"] is False
+        assert empty["settings"]["calculation"]["wb_confidence_coefficient"] == 0.5
 
         settings = block.save_settings(
             {
@@ -513,6 +728,7 @@ def main() -> None:
         calculation = block.calculate({}, user_key="operator", actor="operator")
         assert calculation["registry_immutable"] is True
         assert calculation["automatic_ml_or_training"] is False
+        assert calculation["formula_version"] == "sku_inventory_balance_conservative_pace_v2"
         assert calculation["previous_calculation_id"] is None
         assert calculation["source_digest"].startswith("sha256:")
         assert {row["nm_id"] for row in calculation["rows"]}.isdisjoint(
@@ -534,6 +750,10 @@ def main() -> None:
         deficit = calculation["rows"][0]
         assert deficit["raw_opening_stock_units"] == 100
         assert deficit["known_stock_units"] == 50
+        assert deficit["wb_confidence_coefficient"] == 0.5
+        assert calculation["lineage"]["wb_stock_evidence"][0][
+            "wb_confidence_coefficient"
+        ] == 0.5
         assert len(deficit["new_cpc_campaigns"]) == 1
         assert len(deficit["old_cpm_campaigns"]) == 1
         cpc = deficit["new_cpc_campaigns"][0]
@@ -627,6 +847,7 @@ def main() -> None:
         decision_headers = [cell.value for cell in next(book["Решения"].iter_rows(min_row=1, max_row=1))]
         assert "Следующая поставка" in decision_headers
         assert "Последующая поставка" in decision_headers
+        assert "WB источник" in decision_headers
         next_column = decision_headers.index("Следующая поставка") + 1
         subsequent_column = decision_headers.index("Последующая поставка") + 1
         assert book["Решения"].cell(row=2, column=next_column).value == "2026-09-04: 100.0"
@@ -642,6 +863,12 @@ def main() -> None:
         first_inbound = [cell.value for cell in next(book["Поставки"].iter_rows(min_row=2, max_row=2))]
         assert first_inbound[1:9] == [101, "2026-09-04", 100, 50, 150, "supplier_shipment", "shipment-1", "next"]
         assert first_inbound[9:14] == ["empirical_last_completed_shipments", 3, 21, 21, "complete"]
+        source_fields = {
+            row[0].value: row[1].value
+            for row in book["Источники"].iter_rows(min_row=2, max_col=2)
+        }
+        assert "wb_stock_evidence" in source_fields
+        assert '"wb_confidence_coefficient":0.5' in source_fields["wb_stock_evidence"]
         assert book["История расчётов"].max_row == 3
 
         job = block.start_apply(

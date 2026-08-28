@@ -21,8 +21,8 @@ from packages.application.sku_management import SkuManagementError
 from packages.business_time import current_business_date_iso
 
 
-CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v1"
-FORMULA_VERSION = "sku_inventory_balance_conservative_pace_v1"
+CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v2"
+FORMULA_VERSION = "sku_inventory_balance_conservative_pace_v2"
 CONFIG_KEY = "sku_inventory_balance"
 CONFIG_SCHEMA_VERSION = 1
 DRY_RUN_MODE = "dry_run"
@@ -502,6 +502,13 @@ class SkuInventoryBalanceBlock:
                         "matched_rows": excluded_rows,
                         "identity_rule": "exact_nm_id_only",
                     },
+                    "wb_stock_evidence": [
+                        {
+                            "nm_id": int(item.get("nm_id") or 0),
+                            **dict(item.get("wb_stock_evidence") or {}),
+                        }
+                        for item in rows
+                    ],
                 },
                 "excluded_rows": excluded_rows,
                 "apply_protocols": self._apply_protocols(),
@@ -849,7 +856,8 @@ class SkuInventoryBalanceBlock:
         decision_headers = [
             "Товар", "nmID", "Статус", "Известный запас", "Продажи/день",
             "Целевой темп", "Изменение темпа", "Дней запаса", "Узкая дата",
-            "Следующая поставка", "Последующая поставка", "Новая CPC", "Старая CPM", "Качество",
+            "Следующая поставка", "Последующая поставка", "Новая CPC", "Старая CPM",
+            "WB источник", "Качество",
         ]
         decisions.append(decision_headers)
         for row in calculation.get("rows") or []:
@@ -862,7 +870,8 @@ class SkuInventoryBalanceBlock:
                     _inbound_label(row.get("next_inbound")),
                     _inbound_label(row.get("subsequent_inbound")),
                     _campaigns_label(row.get("new_cpc_campaigns")),
-                    _campaigns_label(row.get("old_cpm_campaigns")), row.get("quality"),
+                    _campaigns_label(row.get("old_cpm_campaigns")),
+                    _wb_stock_evidence_label(row), row.get("quality"),
                 ]
             )
         calculation_sheet = wb.create_sheet("Расчёт")
@@ -871,7 +880,8 @@ class SkuInventoryBalanceBlock:
                 "Товар", "nmID", "Начальный доступный остаток", "Текущий темп",
                 "Жёсткий темп", "Темп с резервом", "Целевой темп", "Статус",
                 "Узкая дата", "Следующая дата", "Следующая, шт",
-                "Последующая дата", "Последующая, шт", "Формула",
+                "Последующая дата", "Последующая, шт", "Остаток WB",
+                "Коэффициент WB", "Учтено WB", "WB evidence mode", "Формула",
             ]
         )
         for row in calculation.get("rows") or []:
@@ -884,7 +894,11 @@ class SkuInventoryBalanceBlock:
                     row.get("reserve_daily_sales"), row.get("target_daily_sales"),
                     row.get("status"), row.get("bottleneck_date"),
                     next_inbound.get("date"), next_inbound.get("quantity"),
-                    subsequent.get("date"), subsequent.get("quantity"), FORMULA_VERSION,
+                    subsequent.get("date"), subsequent.get("quantity"),
+                    row.get("stock_wb_units"), row.get("wb_confidence_coefficient"),
+                    row.get("confidence_adjusted_wb_units"),
+                    (row.get("wb_stock_evidence") or {}).get("mode"),
+                    calculation.get("formula_version"),
                 ]
             )
         campaigns = wb.create_sheet("Кампании")
@@ -951,6 +965,7 @@ class SkuInventoryBalanceBlock:
             ("source_generated_at", calculation.get("source_generated_at")),
             ("sales_evidence_window", _json((calculation.get("lineage") or {}).get("sales_evidence_window") or {})),
             ("supplier_eta_evidence", _json((calculation.get("lineage") or {}).get("supplier_eta_evidence") or {})),
+            ("wb_stock_evidence", _json((calculation.get("lineage") or {}).get("wb_stock_evidence") or [])),
             ("exclusion_policy", _json((calculation.get("lineage") or {}).get("exclusion_policy") or {})),
             ("excluded_rows", _json(calculation.get("excluded_rows") or [])),
             ("settings", _json(calculation.get("settings") or {})),
@@ -1126,6 +1141,12 @@ def calculate_inventory_balance_row(
     demand = _optional_float(raw.get("daily_demand"))
     stock_wb = _optional_float(raw.get("stock_wb"))
     stock_ff = _optional_float(raw.get("stock_ff"))
+    wb_confidence_coefficient = float(settings["wb_confidence_coefficient"])
+    wb_stock_evidence = _calculation_wb_stock_evidence(
+        raw,
+        stock_wb=stock_wb,
+        wb_confidence_coefficient=wb_confidence_coefficient,
+    )
     inbound_evidence = raw.get("inventory_balance_inbounds")
     as_of_date = _iso_date(str(raw.get("inventory_balance_as_of_date") or ""))
     identity = {
@@ -1162,6 +1183,8 @@ def calculate_inventory_balance_row(
             ],
             "stock_wb_units": stock_wb,
             "stock_ff_units": stock_ff,
+            "wb_confidence_coefficient": wb_confidence_coefficient,
+            "wb_stock_evidence": wb_stock_evidence,
             "known_stock_units": None,
             "current_daily_sales": demand,
             "hard_daily_sales": None,
@@ -1176,7 +1199,8 @@ def calculate_inventory_balance_row(
             "milestones": [],
         }
     raw_opening = float(stock_wb)
-    saleable_wb = raw_opening * float(settings["wb_confidence_coefficient"])
+    saleable_wb = raw_opening * wb_confidence_coefficient
+    wb_stock_evidence["confidence_adjusted_wb_units"] = round(saleable_wb, 2)
     known_stock = saleable_wb + float(stock_ff)
     cumulative = known_stock
     milestones: list[dict[str, Any]] = []
@@ -1230,6 +1254,8 @@ def calculate_inventory_balance_row(
             + ["Нет eligible exact production/in_transit поставок; target не рассчитывается"],
             "stock_wb_units": round(raw_opening, 2),
             "stock_ff_units": round(float(stock_ff), 2),
+            "wb_confidence_coefficient": wb_confidence_coefficient,
+            "wb_stock_evidence": wb_stock_evidence,
             "known_stock_units": round(known_stock, 2),
             "saleable_opening_units": round(known_stock, 2),
             "confidence_adjusted_wb_units": round(saleable_wb, 2),
@@ -1313,7 +1339,8 @@ def calculate_inventory_balance_row(
         "stock_wb_units": round(raw_opening, 2),
         "stock_ff_units": round(float(stock_ff), 2),
         "raw_opening_stock_units": round(raw_opening, 2),
-        "wb_confidence_coefficient": float(settings["wb_confidence_coefficient"]),
+        "wb_confidence_coefficient": wb_confidence_coefficient,
+        "wb_stock_evidence": wb_stock_evidence,
         "current_daily_sales": round(demand, 4),
         "hard_daily_sales": round(hard, 4),
         "reserve_daily_sales": round(reserve, 4),
@@ -1485,6 +1512,38 @@ def _allocate_campaign_targets(
     return result
 
 
+def _calculation_wb_stock_evidence(
+    raw: Mapping[str, Any],
+    *,
+    stock_wb: float | None,
+    wb_confidence_coefficient: float,
+) -> dict[str, Any]:
+    source = raw.get("wb_stock_evidence")
+    evidence = dict(source) if isinstance(source, Mapping) else {}
+    if not evidence:
+        evidence = {
+            "source": "sku_inventory_balance_input",
+            "source_contract": "sku_management/current_incident_projection",
+            "mode": (
+                "warehouse_granular_incident_projection"
+                if stock_wb is not None
+                else "missing"
+            ),
+            "quality": "exact_warehouse_projection" if stock_wb is not None else "unknown",
+            "warehouse_granularity_complete": stock_wb is not None,
+            "incident_projection_applied": stock_wb is not None,
+            "warning": "",
+        }
+    evidence["stock_wb_units"] = stock_wb
+    evidence["wb_confidence_coefficient"] = wb_confidence_coefficient
+    evidence["confidence_adjusted_wb_units"] = (
+        round(float(stock_wb) * wb_confidence_coefficient, 2)
+        if stock_wb is not None
+        else None
+    )
+    return evidence
+
+
 def _sanitize_calculation_settings(raw: Any) -> dict[str, Any]:
     source = dict(raw) if isinstance(raw, Mapping) else {}
     return {
@@ -1565,6 +1624,19 @@ def _inbound_label(item: Any) -> str:
     if not isinstance(item, Mapping):
         return ""
     return f"{item.get('date') or ''}: {item.get('quantity') or 0}"
+
+
+def _wb_stock_evidence_label(row: Mapping[str, Any]) -> str:
+    evidence = row.get("wb_stock_evidence")
+    if not isinstance(evidence, Mapping):
+        return ""
+    coefficient = row.get("wb_confidence_coefficient")
+    if str(evidence.get("mode") or "") == "aggregate_per_sku_total":
+        return (
+            f"Официальный агрегат WB × {coefficient}; без раскладки по складам; "
+            f"{evidence.get('raw_rows_digest') or 'digest unavailable'}"
+        )
+    return f"Складская incident-проекция WB × {coefficient}"
 
 
 def _json(value: Any) -> str:

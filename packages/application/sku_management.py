@@ -1039,6 +1039,9 @@ class SkuManagementBlock:
                     **sku,
                     **forecast,
                     "stock_wb": item_evidence.get("stock_wb"),
+                    "inventory_balance_wb_stock_evidence": dict(
+                        item_evidence.get("inventory_balance_wb_stock_evidence") or {}
+                    ),
                     "stock_ff": item_evidence.get("stock_ff"),
                     "nearest_supplier_inbound": select_nearest_supplier_inbound(
                         item_evidence.get("supplier_inbounds", []),
@@ -1190,6 +1193,14 @@ class SkuManagementBlock:
         for row in rows:
             nm_id = int(row.get("nm_id") or 0)
             demand = demand_by_nm.get(nm_id) or {}
+            balance_stock_wb, wb_stock_evidence, wb_stock_warning = (
+                _inventory_balance_wb_stock_from_row(
+                    row,
+                    expected_snapshot_date=as_of_date,
+                )
+            )
+            row["stock_wb"] = balance_stock_wb
+            row["wb_stock_evidence"] = wb_stock_evidence
             row["daily_demand"] = demand.get("daily_demand")
             row["demand_evidence"] = demand
             row["inventory_balance_as_of_date"] = as_of_date
@@ -1199,13 +1210,17 @@ class SkuManagementBlock:
             warning = str(demand.get("warning") or "")
             if warning:
                 row["quality_warnings"] = list(row.get("quality_warnings") or []) + [warning]
+            if wb_stock_warning:
+                row["quality_warnings"] = list(row.get("quality_warnings") or []) + [
+                    wb_stock_warning
+                ]
             if supplier.get("warnings"):
                 row["quality_warnings"] = list(row.get("quality_warnings") or []) + list(
                     supplier.get("warnings") or []
                 )
         result = dict(source)
         result["rows"] = rows
-        result["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v1"
+        result["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v2"
         result["meta"] = {
             **dict(source.get("meta") or {}),
             "inventory_balance_evidence": {
@@ -2240,6 +2255,7 @@ class SkuManagementBlock:
             nm_id: {
                 "as_of_date": today,
                 "stock_wb": None,
+                "inventory_balance_wb_stock_evidence": None,
                 "stock_ff": None,
                 "daily_demand": None,
                 "real_inbounds": [],
@@ -2264,57 +2280,87 @@ class SkuManagementBlock:
                 ).result
                 if getattr(stock_result, "kind", "") != "success":
                     raise ValueError("official WB stock snapshot is incomplete")
-                if not bool(
+                warehouse_granularity_complete = bool(
                     getattr(stock_result, "warehouse_granularity_complete", True)
-                ):
-                    raise ValueError(
-                        "official WB stock snapshot contains only aggregate warehouse evidence"
-                    )
-                exclusion = build_incident_stock_projection(
-                    self.runtime,
-                    items=list(getattr(stock_result, "items", []) or []),
-                    warehouse_rows=list(
-                        getattr(stock_result, "warehouse_rows", []) or []
-                    ),
-                    snapshot_date=str(
-                        getattr(stock_result, "snapshot_date", "") or today
-                    ),
-                    fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
-                    pagination_complete=bool(
-                        getattr(stock_result, "pagination_complete", False)
-                        and getattr(
-                            stock_result,
-                            "warehouse_granularity_complete",
-                            True,
-                        )
-                    ),
-                    raw_rows_digest=str(
-                        getattr(stock_result, "raw_rows_digest", "") or ""
-                    ),
                 )
-                for item in getattr(stock_result, "items", []):
-                    target = result.get(int(item.nm_id))
-                    if target is None:
-                        continue
-                    exclusion_row = exclusion["by_nm_id"].get(str(int(item.nm_id)), {})
-                    target["stock_wb"] = _optional_float(
-                        exclusion_row.get("effective_stock_total_mp")
+                if not warehouse_granularity_complete:
+                    aggregate_evidence = _inventory_balance_aggregate_wb_evidence(
+                        stock_result,
+                        requested_nm_ids=nm_ids,
+                        expected_snapshot_date=today,
                     )
-                    target["warehouse_exclusion_options"] = list(
-                        exclusion.get("options") or []
-                    )
-                    if target["stock_wb"] is None:
-                        target["warnings"].append("current WB stock evidence is unavailable")
-                    for key, attribute in (
-                        ("central", "stock_ru_central"), ("northwest", "stock_ru_northwest"),
-                        ("volga", "stock_ru_volga"), ("ural", "stock_ru_ural"),
-                        ("south_caucasus", "stock_ru_south_caucasus"), ("far_siberia", "stock_ru_far_siberia"),
-                    ):
-                        value = _optional_float(
-                            exclusion_row.get(f"effective_{attribute}")
+                    for nm_id, evidence in aggregate_evidence.items():
+                        target = result[nm_id]
+                        target["inventory_balance_wb_stock_evidence"] = evidence
+                        target["warnings"].append(
+                            "official WB stock snapshot is aggregate-only; "
+                            "warehouse/region and incident projection remain unavailable"
                         )
-                        if value is not None:
-                            target["districts"].setdefault(key, {})["stock"] = value
+                else:
+                    exclusion = build_incident_stock_projection(
+                        self.runtime,
+                        items=list(getattr(stock_result, "items", []) or []),
+                        warehouse_rows=list(
+                            getattr(stock_result, "warehouse_rows", []) or []
+                        ),
+                        snapshot_date=str(
+                            getattr(stock_result, "snapshot_date", "") or today
+                        ),
+                        fetched_at=str(getattr(stock_result, "fetched_at", "") or ""),
+                        pagination_complete=bool(
+                            getattr(stock_result, "pagination_complete", False)
+                            and warehouse_granularity_complete
+                        ),
+                        raw_rows_digest=str(
+                            getattr(stock_result, "raw_rows_digest", "") or ""
+                        ),
+                    )
+                    for item in getattr(stock_result, "items", []):
+                        target = result.get(int(item.nm_id))
+                        if target is None:
+                            continue
+                        exclusion_row = exclusion["by_nm_id"].get(str(int(item.nm_id)), {})
+                        target["stock_wb"] = _optional_float(
+                            exclusion_row.get("effective_stock_total_mp")
+                        )
+                        target["warehouse_exclusion_options"] = list(
+                            exclusion.get("options") or []
+                        )
+                        if target["stock_wb"] is None:
+                            target["warnings"].append("current WB stock evidence is unavailable")
+                        else:
+                            target["inventory_balance_wb_stock_evidence"] = {
+                                "source": "official_wb_stocks_snapshot",
+                                "source_contract": "stocks_block/current_wb_warehouses",
+                                "mode": "warehouse_granular_incident_projection",
+                                "stock_wb_units": target["stock_wb"],
+                                "snapshot_date": str(
+                                    getattr(stock_result, "snapshot_date", "") or today
+                                ),
+                                "fetched_at": str(
+                                    getattr(stock_result, "fetched_at", "") or ""
+                                ),
+                                "raw_rows_digest": str(
+                                    getattr(stock_result, "raw_rows_digest", "") or ""
+                                ),
+                                "pagination_complete": bool(
+                                    getattr(stock_result, "pagination_complete", False)
+                                ),
+                                "warehouse_granularity_complete": True,
+                                "incident_projection_applied": True,
+                                "quality": "exact_warehouse_projection",
+                                "warning": "",
+                            }
+                        for key, attribute in (
+                            ("central", "stock_ru_central"), ("northwest", "stock_ru_northwest"),
+                            ("volga", "stock_ru_volga"), ("ural", "stock_ru_ural"),
+                            ("south_caucasus", "stock_ru_south_caucasus"), ("far_siberia", "stock_ru_far_siberia"),
+                        ):
+                            value = _optional_float(
+                                exclusion_row.get(f"effective_{attribute}")
+                            )
+                            if value is not None:
+                                target["districts"].setdefault(key, {})["stock"] = value
             except Exception as exc:
                 for row in result.values():
                     row["warnings"].append(f"stocks evidence error: {exc}")
@@ -3447,6 +3493,145 @@ def _integer(value: Any, field: str, minimum: int, maximum: int) -> int:
 
 def _positive_int(value: Any, field: str) -> int:
     return _integer(value, field, 1, 10**15)
+
+
+def _inventory_balance_aggregate_wb_evidence(
+    stock_result: Any,
+    *,
+    requested_nm_ids: Sequence[int],
+    expected_snapshot_date: str,
+) -> dict[int, dict[str, Any]]:
+    """Validate a complete aggregate-only snapshot without creating warehouse facts."""
+
+    requested = {int(item) for item in requested_nm_ids}
+    snapshot_date = str(getattr(stock_result, "snapshot_date", "") or "")
+    raw_rows_digest = str(getattr(stock_result, "raw_rows_digest", "") or "")
+    items = list(getattr(stock_result, "items", []) or [])
+    if getattr(stock_result, "kind", "") != "success":
+        raise ValueError("official aggregate WB stock snapshot is not successful")
+    if bool(getattr(stock_result, "warehouse_granularity_complete", True)):
+        raise ValueError("aggregate WB stock fallback requires aggregate-only evidence")
+    if not bool(getattr(stock_result, "pagination_complete", False)):
+        raise ValueError("official aggregate WB stock snapshot pagination is incomplete")
+    if snapshot_date != str(expected_snapshot_date):
+        raise ValueError(
+            "official aggregate WB stock snapshot date does not match calculation date"
+        )
+    if not _is_sha256_digest(raw_rows_digest):
+        raise ValueError("official aggregate WB stock snapshot digest is missing or malformed")
+    raw_count = getattr(stock_result, "count", None)
+    if (
+        not isinstance(raw_count, int)
+        or isinstance(raw_count, bool)
+        or raw_count != len(requested)
+        or len(items) != len(requested)
+    ):
+        raise ValueError("official aggregate WB stock snapshot SKU coverage is incomplete")
+
+    result: dict[int, dict[str, Any]] = {}
+    for item in items:
+        raw_nm_id = item.get("nm_id") if isinstance(item, Mapping) else getattr(item, "nm_id", None)
+        raw_stock = (
+            item.get("stock_total")
+            if isinstance(item, Mapping)
+            else getattr(item, "stock_total", None)
+        )
+        if (
+            not isinstance(raw_nm_id, int)
+            or isinstance(raw_nm_id, bool)
+            or raw_nm_id not in requested
+            or raw_nm_id in result
+        ):
+            raise ValueError("official aggregate WB stock snapshot SKU identity is incomplete")
+        if (
+            not isinstance(raw_stock, (int, float))
+            or isinstance(raw_stock, bool)
+            or not math.isfinite(float(raw_stock))
+            or float(raw_stock) < 0
+        ):
+            raise ValueError(
+                f"official aggregate WB stock quantity is missing or malformed for nmId {raw_nm_id}"
+            )
+        result[raw_nm_id] = {
+            "source": "official_wb_stocks_snapshot",
+            "source_contract": "stocks_block/current_wb_warehouses",
+            "mode": "aggregate_per_sku_total",
+            "stock_wb_units": float(raw_stock),
+            "snapshot_date": snapshot_date,
+            "fetched_at": str(getattr(stock_result, "fetched_at", "") or ""),
+            "raw_rows_digest": raw_rows_digest,
+            "pagination_complete": True,
+            "warehouse_granularity_complete": False,
+            "incident_projection_applied": False,
+            "quality": "exact_aggregate_total",
+            "warning": (
+                "Использован официальный агрегат WB по SKU без раскладки по складам "
+                "и регионам"
+            ),
+        }
+    if set(result) != requested:
+        raise ValueError("official aggregate WB stock snapshot SKU coverage is incomplete")
+    return result
+
+
+def _inventory_balance_wb_stock_from_row(
+    row: Mapping[str, Any],
+    *,
+    expected_snapshot_date: str,
+) -> tuple[float | None, dict[str, Any], str]:
+    """Select the balance-only WB opening while keeping other consumers strict."""
+
+    incumbent = _optional_float(row.get("stock_wb"))
+    raw_evidence = row.get("inventory_balance_wb_stock_evidence")
+    evidence = dict(raw_evidence) if isinstance(raw_evidence, Mapping) else {}
+    if incumbent is not None and math.isfinite(incumbent) and incumbent >= 0:
+        if not evidence:
+            evidence = {
+                "source": "sku_management",
+                "source_contract": "sku_management/current_incident_projection",
+                "mode": "warehouse_granular_incident_projection",
+                "stock_wb_units": incumbent,
+                "snapshot_date": str(expected_snapshot_date),
+                "warehouse_granularity_complete": True,
+                "incident_projection_applied": True,
+                "quality": "exact_warehouse_projection",
+                "warning": "",
+            }
+        evidence["used_by_inventory_balance"] = True
+        return incumbent, evidence, ""
+
+    if str(evidence.get("mode") or "") != "aggregate_per_sku_total":
+        return None, evidence, ""
+    quantity = evidence.get("stock_wb_units")
+    valid = (
+        isinstance(quantity, (int, float))
+        and not isinstance(quantity, bool)
+        and math.isfinite(float(quantity))
+        and float(quantity) >= 0
+        and str(evidence.get("snapshot_date") or "") == str(expected_snapshot_date)
+        and bool(evidence.get("pagination_complete"))
+        and evidence.get("warehouse_granularity_complete") is False
+        and evidence.get("incident_projection_applied") is False
+        and _is_sha256_digest(str(evidence.get("raw_rows_digest") or ""))
+    )
+    if not valid:
+        evidence["used_by_inventory_balance"] = False
+        evidence["quality"] = "invalid_aggregate_evidence"
+        return (
+            None,
+            evidence,
+            "Агрегат WB не принят: missing/partial/malformed evidence остаётся неизвестным",
+        )
+    evidence["used_by_inventory_balance"] = True
+    warning = str(evidence.get("warning") or "")
+    return float(quantity), evidence, warning
+
+
+def _is_sha256_digest(value: str) -> bool:
+    normalized = str(value or "")
+    if not normalized.startswith("sha256:") or len(normalized) != 71:
+        return False
+    return all(character in "0123456789abcdef" for character in normalized[7:].lower())
 
 
 def _optional_int(value: Any) -> int | None:
