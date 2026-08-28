@@ -39,7 +39,7 @@ related_runners:
   - "apps/sku_inventory_balance_smoke.py"
   - "apps/sku_inventory_balance_browser_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Новый расчёт использует durable operation v1: быстрый 202, idempotency-key dedupe, server-backed progress/result и bounded background worker; formula v2, immutable calculations and live WB boundaries remain unchanged."
+update_note: "Основная строка стала компактной decision surface с русскими действиями по ставкам и раскрываемым technical provenance; durable operation v1, formula v2, immutable calculations и live WB boundaries не изменены."
 ---
 
 # 1. Product surface and ownership
@@ -52,6 +52,10 @@ update_note: "Новый расчёт использует durable operation v1:
 Оба подраздела используют authorization section `sku_management` и текущую WebCore session. Отдельной identity/role model нет. Row universe, товарная identity, operational stock timeline и campaign identity приходят только из действующих SKU Management и Ads Operator contracts. Browser не создаёт stock, sales или campaign truth.
 
 `sheet_vitrina_v1_user_configs` с key `sku_inventory_balance` хранит calculation settings и table preferences: видимость, порядок, ширины колонок, search/status filters и preset. Обязательные колонки `Выбор` и `Название / nmID` всегда остаются первыми. `localStorage` не является источником настройки.
+
+Collapsed state содержит ровно одну основную строку на SKU высотой не более двух видимых текстовых строк в каждой ячейке. Горизонтальный table shell, server-owned порядок/видимость/ширины колонок и sticky `Выбор` + `Название / nmID` сохраняются. Кнопка `Подробнее` с native keyboard/focus semantics добавляет сразу после основной строки subordinate detail row; постоянно высокие campaign/quality cells запрещены.
+
+В `Качество` collapsed state отображается только русский badge `точное|частичное|недостаточно` и не более одной короткой причины. Полные warnings, включая fail-closed reason, WB/source lineage, shipment identities, digests и provenance доступны в per-SKU disclosure. Raw service tokens не выводятся в collapsed row.
 
 # 2. Immutable calculation registry
 
@@ -94,11 +98,15 @@ Campaign rows сохраняют exact `nm_id + advert_id + placement`. `payment
 
 Calculated target bid использует bounded factor `0.25..2.0`, подтверждённый WB minimum как нижнюю границу и relative group CPO evidence. При росте темпа изменение направляется в eligible group с меньшим CPO; при снижении сначала режется group с большим CPO. Остальные группы удерживаются. Если сравнимая CPO statistics неполна, multi-group target fail closed в консервативный hold с `recommendation_quality=insufficient_stats`. Single eligible group может масштабироваться с явным `single_group_no_relative_comparison`. Поля `current_bid_rub`, `calculated_target_bid_rub` и `final_target_bid_rub` существуют одновременно.
 
+Collapsed CPC/CPM cells переводят payload в три разные operator semantics без изменения формулы: реальное изменение (`Снизить|Повысить current → final` с процентом), genuine calculated hold (`Оставить current`) и недоступная auto target (`Ставка не рассчитана`). Единицы всегда явные: CPC — `₽/клик`, CPM — `₽/1000 показов`. Для `insufficient_stats`, `insufficient_inventory_evidence`, unknown либо отсутствующего calculated target запрещено показывать цепочку, будто current является рассчитанной целью; рядом выводится короткая причина и, если `pace_change_pct` известен, направление/величина требуемого изменения темпа. Campaign name может быть сокращён; `advert_id`, placement, CPO, recommendation quality, allocation/calculation reason, calculated/manual/final provenance и relative evidence находятся только в disclosure.
+
 Inline manual override записывается только в `sheet_vitrina_v1_inventory_balance_overrides`. Immutable calculated target сохраняется; final target выбирает manual value при его наличии. Очистка manual value возвращает final target к calculated value. При unknown inventory pacing manual override недоступен и не может превратить строку без supply evidence в actionable. Apply selection принимает только exact valid target с current/final value и реальным изменением.
+
+Editable control находится в detail row и подписан единицами. При доступной auto target он показывает effective final target; значение, отличное от calculated target, получает явную отметку `Изменено вручную`, а возврат к calculated value очищает manual override. При недоступной auto target поле не prefill-ится фиктивным current/calculated hold: допустимый существующим server contract ручной override вводится как отдельная `Ручная цель`, а при unknown inventory pacing control остаётся disabled.
 
 # 5. Selection, confirmation and durable apply
 
-Оператор выбирает строки либо `Выбрать все доступные`. Одна SKU-строка разворачивается в список exact campaign targets. До job browser показывает confirmation summary: число SKU/targets, повышения/понижения и явную границу `dry-run`.
+Оператор выбирает строки либо `Выбрать все доступные`; selected count остаётся рядом с действием. Действие называется `Предпросмотр выбранных`. Одна SKU-строка разворачивается в список exact campaign targets. До job browser показывает selected SKU и atomic campaign targets с current→final и единицами, число повышений/понижений, исключённые targets и недоступные строки. Modal содержит буквальную границу `Только dry-run, ставки WB не изменятся` и не обещает live apply.
 
 `sheet_vitrina_v1_inventory_balance_apply_jobs` и `..._apply_items` — durable server-backed state machine. Item states: `pending → running → succeeded|failed`; stale `running` после process interruption terminalize-ится как `ambiguous` и не повторяется blind retry. Job progress, animated progress bar/spinner, final success/error state и aggregate per-SKU terminal state читаются с сервера, поэтому reload не теряет состояние.
 
@@ -124,7 +132,7 @@ Download строится из выбранного immutable calculation плю
 
 `apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook provenance readback, durable progress and disabled live adapter without preview/commit calls. Тот же smoke разрывает клиентский socket до response, удерживает тяжёлый worker, доказывает быстрый соседний GET, byte-stable same-key `202`, later operation GET recovery и exact one operation/one calculation.
 
-`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings, columns, grouped CPC/CPM recommendations, inline override, select-all, confirmation, disabled/working calculate button, animated operation progress, transport-loss readback without raw `Failed to fetch`, reload recovery, server-backed terminal result and отсутствие browser `PATCH`.
+`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings/columns, compact two-line primary rows, sticky identity, keyboard disclosure, Russian quality badges, deficit/overstock/balance and change/hold/insufficient campaign presentation, full warnings/lineage/digests/provenance in details, labelled effective/manual target controls, select-all/count, atomic dry-run confirmation with exclusions, disabled/working calculate button, animated operation progress, transport-loss readback without raw `Failed to fetch`, reload recovery, server-backed terminal result and отсутствие browser `PATCH`.
 
 Explicit exclusion policy `sku_inventory_balance_exclusions_v1` удаляет из calculation rows/UI/XLSX только exact nmID `497413772`, `497415593`, `497416931` с reason `iPhone Air glass is outside inventory-balance scope`; name substring matching запрещён. Policy version, полный configured list и matched rows сохраняются в lineage и `Источники`.
 
