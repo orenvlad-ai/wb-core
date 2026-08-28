@@ -241,26 +241,25 @@ reconciles a lost response without blind retry. Typed evidence publishes only
 dependencies, invariant reasons, repairability and candidate/readback identity
 for a future WBC0012 consumer. It defines no color, severity or health UI and
 does not apply the historical incident automatically. Migration 162 adds a
-separate strict-v2 manifest-bound historical lane for one accepted immutable
-version and one handoff event. It binds separate version-plan, full-version-row,
+separate manifest-bound historical lane for one accepted immutable version and
+one handoff event. WBC0013 binds date `2026-08-26`, nmId `428853741`, version
+`whfv_cb0657c384d5adebae01e585` and event
+`ffbf_87cea959c9d600da99caa1ab68ef` directly; it does not enumerate a broad
+mismatch set. It binds separate version-plan, full-version-row,
 target-row, provenance and event source/status/evidence/row digests through one
 query-only StoreRegistry generation. A positive finite legacy long WAC remains
 acceptable only under unchanged exact row/provenance evidence and is never
 rewritten; event multiplication, pre-debit location arithmetic and the
-candidate ratio use Decimal precision 38. Fresh mismatch discovery assumes no
-fixed mismatch-set size. Before any event expansion it locally rejects rows
-without the exact positive-order, blank-own-cost and six-missing-TOTAL ready
-shape and requires exactly one remaining version/SKU. It then requires exactly
-one event in the interval after that accepted version publication and before the
-next good publication, restricted to FBS facilities named by accepted
-provenance. Zero or multiple ready/event candidates fail closed with typed
-cardinality digests; unrelated stale cells never form a global version-by-event
-cross-product. The full
-facility/pool location transform debits the target facility while preserving
-Moscow and all other locations, reconstructs the historical FF target and
+candidate ratio use Decimal precision 38. The accepted target must retain its
+exact three-location evidence, and the ready closure must expose the target own
+cost plus exactly six TOTAL dependencies. The full facility/pool location
+transform debits Orenburg while preserving Moscow and the third location,
+reconstructs the historical FF target and
 target+TOTAL economics closure, and publishes a new
 historical good version while preserving the current active/sync pointer and
-every current facility/pool row. Explicit apply requires plan fingerprint,
+every current facility/pool row, including all terminal A zeros. Candidate
+timestamps come from the accepted source event, making independently generated
+material witnesses identical. Explicit apply requires plan fingerprint,
 approval and actor; intent is persisted only under the shared lock after CAS.
 Deploy, timers and ordinary refresh never call it. The default-off WBC0013
 Production Apply profile runs dense A once, query-only reconciliation, then a

@@ -807,6 +807,9 @@ materialized as one default row per pair.
 
 Facility activation and SKU activation/reactivation follow
 `staged -> materializing -> [resumable] -> materialized -> active`. The
+canonical onboarding entrypoints are the nomenclature atomic-save path calling
+`activate_staged_skus` and the facility create/update surface calling
+`activate_facility`; neither path may publish its subject active first. The
 immutable intent pins the roster, writer epoch, applicability, materialized
 balance before-images, compact existing-coverage proof, subject CAS and plan
 fingerprint. Materialization reuses canonical `pool_inventory`
@@ -848,31 +851,27 @@ The first explicit zero is valid only from its proven dense `T0`. Its immutable
 inventory line plus request manifest remains the coverage receipt after later
 movements advance the current balance watermark. A pre-T0 business event is
 routed to explicit reconciliation/forward recovery rather than copying current
-zero into history. The generic repair adapter accepts a reviewed runtime
-v2 manifest containing exact disjoint `historical_exact_zero` and
-`no_material_value_history` partitions, the complete stock-managed
-roster and exact existing-row partition; no production identity is compiled
-into the adapter. The second partition requires canonical WB Content lifecycle
-evidence plus exactly 228 accepted `missing / NULL` components across the latest
-six unique capture ids by finalization sequence; duplicate finalization rows do
-not consume a slot and no fixed date count is assumed. All older/newer distinct
-captures are audited for material evidence. Those rows mean
-`no_material_value_history`, not zero; all historical dates remain immutable,
-and any exact/zero/value/WAC/movement/opening/receipt evidence fails closed.
-`TOTAL.nm_id=NULL` is never converted to an SKU identity, and superseded
-lineages may contain only nonmaterial missing/NULL or the identical accepted
-original-12 zero digest. Discovery accepts multiple identical qualifying dates
-and binds the latest qualifying sequence/capture. Qualification scopes mapped order identity to the
-exact seller warehouse and treats facility-less legacy reservations as an
-effect only when their immutable line sum is non-zero. The plan pins active
-target, StoreRegistry generation, mapping/allocation, target-effect/history and
-bounded non-target fingerprints. Explicit apply additionally requires the exact
+zero into history. The generic repair adapter accepts a reviewed current-state
+v3 manifest containing the owner-approved missing identities, complete
+stock-managed roster and exact existing-row partition; no production identity
+is compiled into the generic adapter. Historical captures, missing/NULL
+presentation rows, fixed capture/date counts and cross-lineage semantic equality
+are immutable audit evidence only and are absent from admission and CAS. The
+current-state planner instead proves exact target identity and absence, exact
+seller-warehouse mapping, roster/allocation, current target/non-target rows and
+no Orenburg-scoped current material lifecycle, reservation, reconciliation,
+unresolved identity or unprocessed handoff. Closed history and Moscow operations
+do not block; an actual current Orenburg conflict does. The plan pins active
+target, StoreRegistry generation and all current material CAS. Explicit apply
+additionally requires the exact
 plan fingerprint, actor and approval reference, repeats qualification before
 and under the shared writer lock, persists one `repair` intent and submits one
 deterministic `pool_inventory` request containing only `0 / 0 / NULL` inserts.
 Repeat and ambiguous transport use canonical request readback; there is no blind
-second submit. Deployment performs no production repair and the adapter is inert
-until a separately approved manifest is applied.
+second submit. Query-only readback proves roster coverage, one document and its
+absolute-target lines, zero movements, forward `T0`, history-write count zero
+and non-target preservation. Deployment performs no production repair and the
+adapter is inert until a separately approved manifest is applied.
 
 The 26-August material-version addendum closes a separate post-T publication
 gap. Lifecycle debits, guided receipt/recovery and pool overhead no longer edit
@@ -902,19 +901,24 @@ ready CAS. Its append-only intent states are `repairable`, `repairing`,
 `unsafe_ambiguous`; the complete bounded plan is persisted so process restart
 resumes the same identity rather than rebuilding or blindly retrying it. The
 active-date lane is unchanged. A separate owner-gated historical lane accepts
-only one strict v2 manifest-bound `business_date × accepted good version × facility ×
-FBS × SKU × immutable handoff_debit`. It validates event source, status and
+only one manifest-bound `business_date × accepted good version × facility × FBS
+× SKU × immutable handoff_debit`. WBC0013 selects the accepted
+`2026-08-26 × 428853741 × whfv_cb0657c384d5adebae01e585 ×
+ffbf_87cea959c9d600da99caa1ab68ef` identity directly and never enumerates a
+broad mismatch set. It validates event source, status and
 evidence/full-row digests plus separately typed version-plan, full-version-row,
 accepted-target-row and provenance bindings. One explicitly bound StoreRegistry
 generation supplies every query-only dependency; qualification performs no DDL
-or hidden re-resolution. It rebuilds the accepted target from the full
-facility/pool location set plus that event, debits only the named facility and
-preserves Moscow/other locations, and
+or hidden re-resolution. It rebuilds the accepted target from the exact three
+facility/pool locations plus that event, debits only Orenburg and preserves both
+other locations, and
 requires the positive-order, blank-own-cost and exact six-missing-TOTAL incident
 shape before recomputing only the target SKU and Proxy 3/4 TOTAL dependencies.
 It publishes a new immutable good historical version and
 same-date business projection without switching the current active/sync pointer
-and without reading current pool rows as candidate operands. A positive finite
+and without reading current pool rows or the terminal A zeros as candidate
+operands. Candidate timestamps derive from the accepted event, so two JIT
+witnesses are materially identical despite different wall-clock time. A positive finite
 legacy long WAC is accepted only while its exact row/provenance digests remain
 unchanged; the historical source text is never rewritten and the candidate uses
 the canonical precision-38 ratio. Durable intent is created only under the

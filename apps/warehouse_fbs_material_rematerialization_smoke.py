@@ -775,9 +775,21 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
             current_pool_rows = [
                 dict(row)
                 for row in conn.execute(
-                    f"SELECT * FROM {BALANCES_TABLE} WHERE projection_epoch=1 "
-                    "AND nm_id=? ORDER BY facility_id,pool,nm_id",
-                    (TARGET_NM_ID,),
+                    f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,"
+                    f"capital_rub,wac_rub,source_watermark,updated_at FROM {BALANCES_TABLE} "
+                    "ORDER BY facility_id,pool,nm_id"
+                ).fetchall()
+            ]
+            current_preservation_nm_ids = sorted(
+                {int(row["nm_id"]) for row in current_pool_rows}
+            )
+            a_forward_zero_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,"
+                    f"capital_rub,wac_rub,source_watermark,updated_at FROM {BALANCES_TABLE} "
+                    "WHERE facility_id=? AND pool='FBS' AND nm_id=303 ORDER BY nm_id",
+                    (FACILITY_ID,),
                 ).fetchall()
             ]
             pool_before = list(
@@ -820,6 +832,9 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
             "expected_current_active_version_id": current_version,
             "expected_current_sync_version_id": current_version,
             "expected_current_pool_digest": _fingerprint(current_pool_rows),
+            "current_preservation_nm_ids": current_preservation_nm_ids,
+            "a_forward_zero_nm_ids": [303],
+            "expected_a_forward_zero_digest": _fingerprint(a_forward_zero_rows),
             "event_id": "handoff-debit-1",
             "event_source_digest": _fingerprint(str(event["source_revision"])),
             "event_status_digest": str(event["status_digest"]),
@@ -890,6 +905,19 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
         assert blocked["reason"] == "historical_manifest_fields_invalid"
         plan = _build_historical_plan(service, runtime, historical_manifest)
         assert plan["status"] == REPAIRABLE, plan
+        later_clock_service = WarehouseFbsMaterialRematerializer(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-08-29T23:59:59Z",
+        )
+        witness_two = _build_historical_plan(
+            later_clock_service, runtime, historical_manifest
+        )
+        assert witness_two["status"] == REPAIRABLE
+        assert witness_two["plan_fingerprint"] == plan["plan_fingerprint"]
+        assert witness_two["candidate"] == plan["candidate"]
+        assert plan["candidate"]["published_at"] == historical_manifest[
+            "event_occurred_at"
+        ]
         assert plan["mode"] == "historical"
         assert plan["nm_ids"] == [TARGET_NM_ID]
         assert WAC_CURRENT_ONLY_NM_ID not in plan["nm_ids"]

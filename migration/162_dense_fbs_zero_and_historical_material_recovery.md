@@ -9,35 +9,26 @@ active hosted-runtime target and explicit StoreRegistry generation. A plan,
 owner approval reference, actor and exact plan fingerprint are operation-time
 inputs, never deploy defaults.
 
-## Dense FBS zero repair v2
+## Dense FBS forward-zero repair v3
 
-The strict v2 manifest has exactly two disjoint target partitions:
-`historical_exact_zero` and `no_material_value_history`. Their union,
-plus the exact existing facility/FBS identities, must equal the complete active,
-non-hidden stock-managed roster. Unknown, missing, extra, duplicate and
-overlapping identities fail closed; the operation id is a deterministic
-WBC0013 namespace digest. Planner qualification is query-only. Mapped identity evidence is scoped to the exact
-seller warehouse; legacy facility-less reservation history blocks only when its
-immutable net quantity is non-zero. Mapping-extension allocations, target
-effects, historical zero evidence, canonical WB Content lifecycle/source
-identity, target absence and bounded non-target fingerprints are all CAS
-material. The second partition binds all 228 accepted components for its 38
-identities across the latest six unique accepted `capture_id` values ordered by
-`finalization_sequence`; duplicate finalization rows for one capture do not
-consume a slot. Every selected capture must contribute exactly 38 rows and
-every row must remain
-`missing / NULL`: that state means only `no_material_value_history`, never a
-historical zero. `exact`, `exact_zero`, quantity, capital, WAC, movement,
-opening, receipt or any other material provenance blocks the operation. The
-selector audits every older and newer distinct accepted capture for material
-evidence; it assumes no fixed calendar-date count. Historical-zero discovery
-accepts any number of qualifying business dates only when their original-12
-partition and semantic digest are identical, then binds the latest qualifying
-sequence/capture. Other original-12 lineages may contain only nonmaterial
-`missing / NULL` evidence or that identical accepted exact-zero partition;
-nonzero, material provenance or partition drift blocks. `TOTAL` rows with
-`nm_id=NULL` remain typed separately. No current zero is copied backward and no
-accepted historical row is rewritten.
+The strict v3 manifest binds only the current canonical identity: one exact
+facility, seller warehouse and office, the complete active stock-managed roster,
+the exact existing facility/FBS identities and one owner-approved missing target
+list. For WBC0013 that identity is Orenburg and `71 = 21 + 50`, where the 50 are
+the accepted original-12 plus WB-Content-38 identities. Historical capture/date
+counts, presentation lineage, an exact historical anchor and semantic equality
+between old presentation revisions are not admission or CAS inputs. They remain
+immutable audit evidence and are never inferred to mean zero.
+
+Planner qualification is query-only and fails closed when a target already has
+a current canonical balance or current Orenburg material state: an active
+reservation/fulfilled lifecycle, open reconciliation, unresolved exact-warehouse
+identity or a complete/sorted handoff not consumed by the Orenburg lifecycle.
+Closed documents/history, missing or NULL presentation rows and Moscow activity
+are non-material for this forward cutover. Exact mapping/allocation, roster,
+target absence, current material evidence and current target/non-target row
+fingerprints remain CAS material. Unknown, missing, extra, duplicate or
+overlapping current identities fail closed.
 
 Apply repeats qualification before and under the shared warehouse writer lock,
 persists the existing dense `repair` intent, and emits exactly one deterministic
@@ -46,6 +37,9 @@ still-missing target with `quantity=0`, `capital_rub=0` and `wac_rub=NULL`.
 Existing/non-target rows are not updated. Exact canonical request readback
 reconciles restart or lost transport; the adapter never blindly submits a
 second request.
+The query-only terminal receipt proves all 71 roster rows, exactly 50 new
+explicit zeros, one document with 50 absolute-target lines, zero movement lines,
+the forward `T0`, unchanged non-target rows and zero history writes.
 
 ## Shared WAC contract
 
@@ -67,20 +61,17 @@ accepted quantity/coverage/capital and expected current active, sync and pool
 identities. Aliases are not accepted. Qualification uses one explicitly bound
 StoreRegistry generation and one true query-only dependency connection; it runs
 no schema ensure, DDL or hidden storage re-resolution. No binding is optional.
-Fresh qualification first classifies the exact mismatch set without assuming
-its size. It proves the ready-side prerequisites before event expansion:
-positive order, blank target own cost and exactly six missing TOTAL dependencies.
-Unrelated stale cells are bounded local rejections. Exactly one ready-shaped
-version/SKU must remain; only then does discovery query immutable FBS events
-belonging to facilities named by that accepted provenance and occurring strictly
-after that version's publication and before the next good publication. Exactly
-one causal event is required. This prevents a mismatch-by-event cross-product
-or capacity explosion while 0 or greater-than-1 readiness/event cardinality
-fails closed with a typed predicate and bounded candidate digests. The
-candidate starts from the accepted version and proves the full pre-debit
-facility/pool location set plus event arithmetic. It debits only the target
-location while preserving Moscow and every other location. Current pool rows are preservation/CAS evidence only and
-are never copied into the historical candidate.
+WBC0013 qualification does not enumerate or classify a broad mismatch set. It
+selects only business date `2026-08-26`, nmId `428853741`, accepted version
+`whfv_cb0657c384d5adebae01e585` and causal event
+`ffbf_87cea959c9d600da99caa1ab68ef`. It proves the one ready-side target, blank
+own cost and exact six missing TOTAL dependencies, then reconstructs the exact
+three-location pre-debit set and debits only Orenburg. Moscow and the third
+location remain byte-semantically present. Current pool rows, including all 50
+terminal A zeros, are preservation/CAS evidence only and are never candidate
+operands. The candidate publication time is derived from the accepted event, so
+qualification witnesses built at different wall-clock times are materially
+identical.
 
 Only the target FF balance/coverage/provenance is replaced; all other functional
 rows and auxiliary version material are copied from the accepted version. Ready
@@ -99,8 +90,9 @@ full-day reload or blind retry.
 
 `apps/wbc0013_fbs_recovery.py` is an inert-by-default, generic shape-discovery
 adapter; deploy does not invoke it. The canonical Production Apply Runner accepts
-only the exact `WBC0013 / dense-fbs-historical-recovery / 71 = 21 + (12 + 38) /
-50 zero inserts / one historical repair` passport. It writes private 0600 JIT
+only the exact `WBC0013 / dense-fbs-historical-recovery / 71 = 21 + 50 /
+50 zero inserts / accepted date + nmId + version + event / one historical repair`
+passport. It writes private 0600 JIT
 plans, requires two consecutive identical material qualifications with at most
 three regenerations, submits A once, performs query-only A reconciliation, then
 builds a fresh B plan, submits B once and performs query-only B reconciliation.

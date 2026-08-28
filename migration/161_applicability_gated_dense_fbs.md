@@ -99,6 +99,14 @@ after later movements advance the current balance watermark.  A business event
 dated before T0 is rejected into explicit reconciliation/forward recovery; the
 current zero is never copied backward.
 
+The bounded forward-repair contour uses this same rule for an owner-approved
+currently missing roster partition. Eligibility is current-state only: exact
+active facility/SKU identity, absent canonical balance and no facility-scoped
+reservation/material lifecycle, open reconciliation, unresolved identity or
+unprocessed handoff. Historical captures and presentation lineage are
+immutable audit evidence, never a prerequisite for creating the future `T0` and
+never rewritten by that operation.
+
 ## 2026-08-26 material-version incident addendum
 
 One accepted functional publication became mixed after a canonical FBS

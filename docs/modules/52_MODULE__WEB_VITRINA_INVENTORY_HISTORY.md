@@ -82,6 +82,10 @@ effective dates. Таблицы защищены no-update/no-delete triggers: r
 восстанавливается из продаж/заказов и не получает current balance задним
 числом. Архивный SKU остаётся в component history, если он присутствует в
 доказанном source revision; его отдельная UI-видимость не входит в этот модуль.
+Поэтому исторические capture/date counts, `missing / NULL`, exact-zero lineage и
+semantic equality между presentation revisions являются audit-only для
+current-state forward-zero cutover: они не разрешают и не запрещают будущий
+`T0`, а сама операция не пишет ни в одну history table.
 
 # 3. Time and quality semantics
 

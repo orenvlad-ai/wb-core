@@ -206,9 +206,12 @@ WBC0013_AUTH_RE = re.compile(
     r"profile (?P<profile>dense-fbs-historical-recovery) "
     r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
     r"roster (?P<roster>[1-9][0-9]*) existing (?P<existing>[1-9][0-9]*) "
-    r"historical-zero (?P<historical>[1-9][0-9]*) "
-    r"absent-history (?P<absent>[1-9][0-9]*) "
+    r"owner-approved-missing (?P<missing>[1-9][0-9]*) "
     r"zero-inserts (?P<zero_inserts>[1-9][0-9]*) "
+    r"historical-date (?P<historical_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"historical-nm (?P<historical_nm>[1-9][0-9]*) "
+    r"historical-version (?P<historical_version>whfv_[a-z0-9_]{8,120}) "
+    r"historical-event (?P<historical_event>ffbf_[a-z0-9]{8,120}) "
     r"historical-repairs (?P<historical_repairs>[1-9][0-9]*)$"
 )
 LEGACY_AUTH_RE = re.compile(
@@ -846,9 +849,14 @@ def validate_authorization(
             "target_id": raw["target"],
             "expected_roster_count": int(raw["roster"]),
             "expected_existing_count": int(raw["existing"]),
-            "expected_historical_zero_count": int(raw["historical"]),
-            "expected_no_material_value_history_count": int(raw["absent"]),
+            "expected_owner_approved_missing_count": int(raw["missing"]),
+            "expected_original_identity_count": 12,
+            "expected_wb_content_identity_count": 38,
             "expected_zero_insert_count": int(raw["zero_inserts"]),
+            "historical_business_date": raw["historical_date"],
+            "historical_nm_id": int(raw["historical_nm"]),
+            "historical_version_id": raw["historical_version"],
+            "historical_event_id": raw["historical_event"],
             "expected_historical_repair_count": int(raw["historical_repairs"]),
             "max_a_submits": 1,
             "max_b_submits": 1,
@@ -859,16 +867,20 @@ def validate_authorization(
         if (
             goal["expected_roster_count"] != 71
             or goal["expected_existing_count"] != 21
-            or goal["expected_historical_zero_count"] != 12
-            or goal["expected_no_material_value_history_count"] != 38
+            or goal["expected_owner_approved_missing_count"] != 50
             or goal["expected_zero_insert_count"] != 50
+            or goal["historical_business_date"] != "2026-08-26"
+            or goal["historical_nm_id"] != 428853741
+            or goal["historical_version_id"]
+            != "whfv_cb0657c384d5adebae01e585"
+            or goal["historical_event_id"]
+            != "ffbf_87cea959c9d600da99caa1ab68ef"
             or goal["expected_historical_repair_count"] != 1
             or goal["expected_existing_count"]
-            + goal["expected_historical_zero_count"]
-            + goal["expected_no_material_value_history_count"]
+            + goal["expected_owner_approved_missing_count"]
             != goal["expected_roster_count"]
         ):
-            raise ApplyError("WBC0013 authorization scope is not exact SSS011")
+            raise ApplyError("WBC0013 authorization scope is not exact SSS017")
         return goal
     if raw["profile"] != GOAL_PROFILE:
         raise ApplyError("task authorization profile is unsupported")
@@ -1607,9 +1619,12 @@ def _validate_wbc0013_candidate(
             **common,
             "roster_count": goal["expected_roster_count"],
             "existing_count": goal["expected_existing_count"],
-            "historical_zero_count": goal["expected_historical_zero_count"],
-            "no_material_value_history_count": goal[
-                "expected_no_material_value_history_count"
+            "owner_approved_missing_count": goal[
+                "expected_owner_approved_missing_count"
+            ],
+            "original_identity_count": goal["expected_original_identity_count"],
+            "wb_content_identity_count": goal[
+                "expected_wb_content_identity_count"
             ],
             "zero_insert_count": goal["expected_zero_insert_count"],
         }
@@ -1617,6 +1632,10 @@ def _validate_wbc0013_candidate(
         else {
             **common,
             "historical_repair_count": goal["expected_historical_repair_count"],
+            "business_date": goal["historical_business_date"],
+            "nm_id": goal["historical_nm_id"],
+            "accepted_version_id": goal["historical_version_id"],
+            "event_id": goal["historical_event_id"],
             "current_active_preserved": True,
             "current_sync_preserved": True,
             "current_pool_preserved": True,
@@ -1627,10 +1646,10 @@ def _validate_wbc0013_candidate(
             raise ApplyError(f"WBC0013 {phase} qualification escaped goal: {field}")
     if phase == "b":
         if (
-            not isinstance(payload.get("fresh_mismatch_count"), int)
-            or int(payload["fresh_mismatch_count"]) <= 0
+            payload.get("exact_target_count") != 1
             or payload.get("ready_shape_candidate_count") != 1
             or payload.get("causal_event_count") != 1
+            or payload.get("broad_mismatch_query_performed") is not False
             or not str(payload.get("selection_predicate") or "").startswith(
                 "historical_b."
             )
@@ -1804,7 +1823,7 @@ def run_wbc0013_goal(
                     "material_qualification_digest": current,
                     **(
                         {
-                            "fresh_mismatch_count": payload["fresh_mismatch_count"],
+                            "exact_target_count": payload["exact_target_count"],
                             "ready_shape_candidate_count": payload[
                                 "ready_shape_candidate_count"
                             ],
@@ -1821,6 +1840,9 @@ def run_wbc0013_goal(
                             ],
                             "mismatch_classification_digest": payload[
                                 "mismatch_classification_digest"
+                            ],
+                            "broad_mismatch_query_performed": payload[
+                                "broad_mismatch_query_performed"
                             ],
                         }
                         if phase == "b"
@@ -1880,8 +1902,17 @@ def run_wbc0013_goal(
         and isinstance(a_result, Mapping)
         and a_result.get("status") == "reconciled"
         and a_result.get("query_only") is True
+        and a_result.get("roster_count") == goal["expected_roster_count"]
+        and a_result.get("covered_roster_count") == goal["expected_roster_count"]
         and a_result.get("zero_row_count") == goal["expected_zero_insert_count"]
+        and a_result.get("new_explicit_zero_count")
+        == goal["expected_zero_insert_count"]
         and a_result.get("document_count") == 1
+        and a_result.get("absolute_target_line_count")
+        == goal["expected_zero_insert_count"]
+        and a_result.get("movement_line_count") == 0
+        and bool(a_result.get("forward_t0"))
+        and a_result.get("history_write_count") == 0
         and a_result.get("non_target_preserved") is True
     ):
         failure_evidence = (
@@ -1963,8 +1994,22 @@ def run_wbc0013_goal(
         and b_result.get("current_active_preserved") is True
         and b_result.get("current_sync_preserved") is True
         and b_result.get("current_pool_preserved") is True
+        and b_result.get("a_forward_zeros_preserved") is True
         and b_result.get("ready_target_total_closed") is True
         and b_result.get("non_target_preserved") is True
+        and b_result.get("historical_quantity") == "1952"
+        and b_result.get("historical_cost_covered_quantity") == "1952"
+        and b_result.get("historical_location_count") == 3
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(b_result.get("historical_location_digest") or ""),
+        )
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(b_result.get("historical_provenance_digest") or ""),
+        )
+        and b_result.get("target_own_cost_available") is True
+        and b_result.get("six_total_dependencies_available") is True
     )
     result = {
         "state": "done" if reconciled else "blocked",

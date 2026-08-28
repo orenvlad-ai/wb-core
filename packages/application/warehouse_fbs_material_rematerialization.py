@@ -70,7 +70,7 @@ MAX_PERSISTED_PLAN_BYTES = 10_000_000
 ZERO = Decimal("0")
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 STAGE_FF = "ff"
-HISTORICAL_MANIFEST_SCHEMA = "warehouse_fbs_historical_recovery_manifest_v2"
+HISTORICAL_MANIFEST_SCHEMA = "warehouse_fbs_historical_recovery_manifest_v3"
 
 REPAIRABLE = "repairable"
 REPAIRING = "repairing"
@@ -708,6 +708,9 @@ class WarehouseFbsMaterialRematerializer:
             "expected_current_active_version_id",
             "expected_current_sync_version_id",
             "expected_current_pool_digest",
+            "current_preservation_nm_ids",
+            "a_forward_zero_nm_ids",
+            "expected_a_forward_zero_digest",
             "event_id",
             "event_source_digest",
             "event_status_digest",
@@ -775,6 +778,7 @@ class WarehouseFbsMaterialRematerializer:
             "accepted_target_row_digest",
             "accepted_provenance_digest",
             "expected_current_pool_digest",
+            "expected_a_forward_zero_digest",
             "event_source_digest",
             "event_status_digest",
             "event_evidence_digest",
@@ -841,19 +845,33 @@ class WarehouseFbsMaterialRematerializer:
                 "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status "
                 "WHERE slot=1"
             ).fetchone()
-            current_pool_digest = _fingerprint(
-                _source_material(
-                    conn,
-                    str(active["version_id"]),
-                    nm_ids=targets,
-                )["pool_rows"]
+            current_pool_rows = _current_pool_preservation_rows(
+                conn,
+                nm_ids=bound["current_preservation_nm_ids"],
             )
+            current_pool_digest = _fingerprint(current_pool_rows)
+            a_forward_zero_rows = _a_forward_zero_rows(
+                conn,
+                facility_id=facility_id,
+                nm_ids=bound["a_forward_zero_nm_ids"],
+            )
+            a_forward_zero_digest = _fingerprint(a_forward_zero_rows)
             if (
                 sync is None
                 or str(sync[0])
                 != str(bound.get("expected_current_sync_version_id") or "")
                 or current_pool_digest
                 != str(bound.get("expected_current_pool_digest") or "")
+                or a_forward_zero_digest
+                != str(bound.get("expected_a_forward_zero_digest") or "")
+                or len(a_forward_zero_rows)
+                != len(list(bound.get("a_forward_zero_nm_ids") or []))
+                or any(
+                    int(row["quantity"]) != 0
+                    or Decimal(str(row["capital_rub"])) != ZERO
+                    or row["wac_rub"] is not None
+                    for row in a_forward_zero_rows
+                )
             ):
                 return _blocked_plan(
                     UNSAFE_AMBIGUOUS,
@@ -1028,7 +1046,7 @@ class WarehouseFbsMaterialRematerializer:
                     source_kind="fbs_historical_material_recovery",
                     source_id=f"{source_version_id}:{event_id}",
                     business_date=target_date,
-                    published_at=str(self.timestamp_factory()),
+                    published_at=str(event["occurred_at"]),
                     allow_source_mismatch=True,
                     source_version_id_override=source_version_id,
                     target_aggregates_override={target_nm_id: aggregate},
@@ -1098,6 +1116,19 @@ class WarehouseFbsMaterialRematerializer:
                 }
                 for item in updates
             ]
+            historical_material_receipt = _historical_material_receipt(
+                target_row=candidate_target,
+                ready_rows=[
+                    {
+                        "bundle_version": item["bundle_version"],
+                        "as_of_date": item["as_of_date"],
+                        "plan_json": item["after_plan_json"],
+                    }
+                    for item in updates
+                ],
+                business_date=target_date,
+                nm_id=target_nm_id,
+            )
             typed_evidence = {
                 "repair_mode": "historical",
                 "accepted_version_id": source_version_id,
@@ -1125,6 +1156,7 @@ class WarehouseFbsMaterialRematerializer:
                     "ready_snapshot_digest": ready_after_digest,
                     "sync_version_id": str(sync[0]),
                     "current_pool_digest": current_pool_digest,
+                    "a_forward_zero_digest": a_forward_zero_digest,
                     "historical_target_row_digest": _fingerprint(
                         candidate_target_semantic_row
                     ),
@@ -1141,6 +1173,7 @@ class WarehouseFbsMaterialRematerializer:
                     "ready_target_total_non_target_closure_digest": _fingerprint(
                         ready_closure
                     ),
+                    "historical_material_receipt": historical_material_receipt,
                 },
             }
             plan = {
@@ -1559,9 +1592,14 @@ class WarehouseFbsMaterialRematerializer:
                 "WHERE slot=1"
             ).fetchone()
             current_pool_digest = _fingerprint(
-                _source_material(conn, expected_active, nm_ids=plan["nm_ids"])[
-                    "pool_rows"
-                ]
+                _current_pool_preservation_rows(
+                    conn, nm_ids=manifest["current_preservation_nm_ids"]
+                )
+            )
+            a_forward_zero_rows = _a_forward_zero_rows(
+                conn,
+                facility_id=str(plan["facility_id"]),
+                nm_ids=manifest["a_forward_zero_nm_ids"],
             )
             if (
                 sync is None
@@ -1569,6 +1607,16 @@ class WarehouseFbsMaterialRematerializer:
                 != str(manifest.get("expected_current_sync_version_id") or "")
                 or current_pool_digest
                 != str(manifest.get("expected_current_pool_digest") or "")
+                or _fingerprint(a_forward_zero_rows)
+                != str(manifest.get("expected_a_forward_zero_digest") or "")
+                or len(a_forward_zero_rows)
+                != len(list(manifest.get("a_forward_zero_nm_ids") or []))
+                or any(
+                    int(row["quantity"]) != 0
+                    or Decimal(str(row["capital_rub"])) != ZERO
+                    or row["wac_rub"] is not None
+                    for row in a_forward_zero_rows
+                )
             ):
                 raise WarehouseFbsMaterialError(
                     "historical_current_preservation_cas_drift",
@@ -3445,6 +3493,106 @@ def _ready_cells(payload: Mapping[str, Any], business_date: str) -> dict[str, An
     return result
 
 
+def _current_pool_preservation_rows(
+    conn: sqlite3.Connection, *, nm_ids: Iterable[int]
+) -> list[dict[str, Any]]:
+    selected = sorted({int(value) for value in nm_ids if int(value) > 0})
+    if not selected:
+        return []
+    placeholders = ",".join("?" for _ in selected)
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+            "wac_rub,source_watermark,updated_at FROM "
+            f"{BALANCES_TABLE} WHERE nm_id IN ({placeholders}) "
+            "ORDER BY facility_id,pool,nm_id",
+            tuple(selected),
+        ).fetchall()
+    ]
+
+
+def _a_forward_zero_rows(
+    conn: sqlite3.Connection, *, facility_id: str, nm_ids: Iterable[int]
+) -> list[dict[str, Any]]:
+    selected = sorted({int(value) for value in nm_ids if int(value) > 0})
+    if not selected:
+        return []
+    placeholders = ",".join("?" for _ in selected)
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+            "wac_rub,source_watermark,updated_at FROM "
+            f"{BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
+            f"AND nm_id IN ({placeholders}) ORDER BY nm_id",
+            (str(facility_id), *selected),
+        ).fetchall()
+    ]
+
+
+def _historical_material_receipt(
+    *,
+    target_row: Mapping[str, Any],
+    ready_rows: Iterable[Mapping[str, Any]],
+    business_date: str,
+    nm_id: int,
+) -> dict[str, Any]:
+    provenance = _loads(target_row.get("provenance_json"), {})
+    revision_records = [
+        dict(record)
+        for record in provenance.get("source_records") or []
+        if isinstance(record, Mapping)
+        and str(record.get("source_kind") or "")
+        == "fbs_historical_material_recovery"
+    ]
+    locations = (
+        [dict(item) for item in revision_records[-1].get("locations") or []]
+        if revision_records
+        else []
+    )
+    ready_receipts: list[dict[str, Any]] = []
+    for item in ready_rows:
+        cells = _ready_cells(_loads(item.get("plan_json"), {}), business_date)
+        available_total_keys = sorted(
+            key
+            for key in CRITICAL_TOTAL_METRIC_KEYS
+            if cells.get(f"TOTAL|{key}") not in {None, ""}
+        )
+        ready_receipts.append(
+            {
+                "bundle_version": str(item.get("bundle_version") or ""),
+                "as_of_date": str(item.get("as_of_date") or ""),
+                "target_own_cost_available": cells.get(
+                    f"SKU:{int(nm_id)}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"
+                )
+                not in {None, ""},
+                "available_total_metric_keys": available_total_keys,
+                "available_total_metric_count": len(available_total_keys),
+            }
+        )
+    receipt = {
+        "quantity": str(target_row.get("quantity") or ""),
+        "cost_covered_quantity": str(
+            target_row.get("cost_covered_quantity") or ""
+        ),
+        "location_count": len(locations),
+        "location_digest": _fingerprint(locations),
+        "provenance_digest": _fingerprint(provenance),
+        "ready_receipts": ready_receipts,
+        "ready_receipt_digest": _fingerprint(ready_receipts),
+        "all_target_own_cost_available": bool(ready_receipts)
+        and all(item["target_own_cost_available"] for item in ready_receipts),
+        "all_six_total_dependencies_available": bool(ready_receipts)
+        and all(
+            item["available_total_metric_count"] == len(CRITICAL_TOTAL_METRIC_KEYS)
+            for item in ready_receipts
+        ),
+    }
+    receipt["fingerprint"] = _fingerprint(receipt)
+    return receipt
+
+
 def _readback_identity(
     conn: sqlite3.Connection, plan: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -3486,8 +3634,13 @@ def _readback_identity(
             "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
             (str(plan["target_version_id"]), int(plan["nm_ids"][0])),
         ).fetchone()
-        source_material = _source_material(
-            conn, active_version_id, nm_ids=plan["nm_ids"]
+        current_pool_rows = _current_pool_preservation_rows(
+            conn, nm_ids=plan["historical_manifest"]["current_preservation_nm_ids"]
+        )
+        a_forward_zero_rows = _a_forward_zero_rows(
+            conn,
+            facility_id=str(plan["facility_id"]),
+            nm_ids=plan["historical_manifest"]["a_forward_zero_nm_ids"],
         )
         projection = conn.execute(
             "SELECT status,source_revision,business_effective_date "
@@ -3504,6 +3657,20 @@ def _readback_identity(
             }
             for item in plan["ready_updates"]
         ]
+        actual_ready_rows: list[dict[str, Any]] = []
+        for update in plan["ready_updates"]:
+            row = conn.execute(
+                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                "WHERE bundle_version=? AND as_of_date=?",
+                (str(update["bundle_version"]), str(update["as_of_date"])),
+            ).fetchone()
+            actual_ready_rows.append(
+                {
+                    "bundle_version": str(update["bundle_version"]),
+                    "as_of_date": str(update["as_of_date"]),
+                    "plan_json": str(row[0]) if row is not None else "{}",
+                }
+            )
         result.update(
             {
                 "historical_version_id": (
@@ -3512,7 +3679,8 @@ def _readback_identity(
                     else ""
                 ),
                 "sync_version_id": str(sync[0]) if sync is not None else "",
-                "current_pool_digest": _fingerprint(source_material["pool_rows"]),
+                "current_pool_digest": _fingerprint(current_pool_rows),
+                "a_forward_zero_digest": _fingerprint(a_forward_zero_rows),
                 "historical_target_row_digest": (
                     _fingerprint(dict(target_row)) if target_row is not None else ""
                 ),
@@ -3526,6 +3694,16 @@ def _readback_identity(
                 ),
                 "ready_target_total_non_target_closure_digest": _fingerprint(
                     ready_closure
+                ),
+                "historical_material_receipt": (
+                    _historical_material_receipt(
+                        target_row=dict(target_row),
+                        ready_rows=actual_ready_rows,
+                        business_date=str(plan["business_date"]),
+                        nm_id=int(plan["nm_ids"][0]),
+                    )
+                    if target_row is not None
+                    else {}
                 ),
             }
         )
