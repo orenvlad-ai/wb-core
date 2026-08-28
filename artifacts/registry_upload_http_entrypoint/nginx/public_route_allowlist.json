@@ -301,7 +301,7 @@
       "methods": ["GET"]
     },
     {
-      "name": "sheet_vitrina_sku_management_actions",
+      "name": "sheet_vitrina_sku_management_and_change_registry_actions",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/sku-management/",
       "methods": ["GET", "POST"]

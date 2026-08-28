@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core two-hour Change Registry observer scheduler
+
+[Timer]
+OnCalendar=*-*-* 00/2:17:00 Asia/Yekaterinburg
+AccuracySec=30s
+RandomizedDelaySec=30s
+Persistent=true
+Unit=wb-core-change-registry-observer.service
+
+[Install]
+WantedBy=timers.target

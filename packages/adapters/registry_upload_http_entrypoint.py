@@ -216,6 +216,9 @@ DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price
 DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/preview"
 DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/commit"
 DEFAULT_SKU_MANAGEMENT_HISTORY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/history"
+DEFAULT_CHANGE_REGISTRY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/change-registry"
+DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH = f"{DEFAULT_CHANGE_REGISTRY_PATH}/manual-scan"
+DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH = f"{DEFAULT_CHANGE_REGISTRY_PATH}/annotations"
 DEFAULT_SKU_INVENTORY_BALANCE_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/inventory-balance"
 DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/settings"
 DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculate"
@@ -1522,6 +1525,8 @@ def _build_handler(
                 DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_price_commit_request(body, actor=actor),
                 DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_preview_request(body, actor=actor),
                 DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_commit_request(body, actor=actor),
+                DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH: lambda body, actor: entrypoint.handle_change_registry_manual_scan_request(body, actor=actor),
+                DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH: lambda body, actor: entrypoint.handle_change_registry_annotation_request(body, actor=actor),
             }
             if parsed.path in sku_management_post_handlers:
                 try:
@@ -1548,7 +1553,15 @@ def _build_handler(
                         {"error": "sku management operation failed with a controlled server error"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                _write_json_response(
+                    self,
+                    (
+                        HTTPStatus.ACCEPTED
+                        if parsed.path == DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH
+                        else HTTPStatus.OK
+                    ),
+                    result,
+                )
                 return
 
             if parsed.path == DEFAULT_SHEET_ADS_BID_PREVIEW_PATH:
@@ -3366,19 +3379,24 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
-            if parsed.path in {DEFAULT_SKU_MANAGEMENT_PATH, DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH, DEFAULT_SKU_MANAGEMENT_HISTORY_PATH}:
+            if parsed.path in {DEFAULT_SKU_MANAGEMENT_PATH, DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH, DEFAULT_SKU_MANAGEMENT_HISTORY_PATH, DEFAULT_CHANGE_REGISTRY_PATH}:
                 try:
                     actor = _current_web_user_config_key(self)
                     if parsed.path == DEFAULT_SKU_MANAGEMENT_PATH:
                         payload = entrypoint.handle_sku_management_table_request(user_key=actor)
                     elif parsed.path == DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH:
                         payload = entrypoint.handle_sku_management_settings_request(user_key=actor)
-                    else:
+                    elif parsed.path == DEFAULT_SKU_MANAGEMENT_HISTORY_PATH:
                         payload = entrypoint.handle_sku_management_history_request(_flatten_query_params(parsed.query))
+                    else:
+                        payload = entrypoint.handle_change_registry_request(_flatten_query_params(parsed.query))
                 except SkuManagementError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
                     _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
                 except Exception:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -10066,6 +10084,9 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "sku_management_bid_preview_path": DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH,
         "sku_management_bid_commit_path": DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH,
         "sku_management_history_path": DEFAULT_SKU_MANAGEMENT_HISTORY_PATH,
+        "change_registry_path": DEFAULT_CHANGE_REGISTRY_PATH,
+        "change_registry_manual_scan_path": DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH,
+        "change_registry_annotations_path": DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH,
         "sku_inventory_balance_path": DEFAULT_SKU_INVENTORY_BALANCE_PATH,
         "sku_inventory_balance_settings_path": DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
         "sku_inventory_balance_calculate_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,

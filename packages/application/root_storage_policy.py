@@ -46,6 +46,7 @@ MUTABLE_STORE_SERVICE_UNITS = frozenset(
         "wb-core-finance-backup-rotation.service",
         "wb-core-warehouse-functional-sync.service",
         "wb-core-fbs-shadow-collector.service",
+        "wb-core-change-registry-observer.service",
         "wb-core-fbs-warehouse-registry.service",
         "wb-core-autoanswers-readonly-sync.service",
         "wb-core-autoanswers-worker.service",

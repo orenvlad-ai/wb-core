@@ -2,7 +2,7 @@
 title: "Модуль: строгий read-only source acquisition для реестра изменений"
 doc_id: "WB-CORE-MODULE-55-CHANGE-REGISTRY-SOURCE-ACQUISITION"
 doc_type: "module"
-status: "foundation_dark"
+status: "active_internal_source"
 purpose: "Зафиксировать детерминированное совместное чтение seller-controlled Prices и Promotion Ads для будущего baseline engine без persistence или activation."
 scope: "Один seller/account; exhaustive Prices GET pagination; Promotion count manifest и detail batches; typed scalar/identity evidence; canonical sanitized manifests and digests."
 source_basis:
@@ -22,7 +22,7 @@ related_modules:
 related_runners:
   - "apps/change_registry_source_acquisition_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Strict acquisition only; no registry/checkpoint/fact/incident persistence, scheduler/UI/API activation, writer instrumentation or WB mutation."
+update_note: "Strict acquisition remains persistence-free; module 56 validates/persists it and active module 57 schedules observation without WB mutation."
 ---
 
 # 1. Scope and activation boundary
@@ -32,8 +32,10 @@ explicit `seller_id + account_scope`. The result is `complete` only when both
 the Prices half and the Ads half are independently complete. A complete empty
 seller source remains distinct from a request failure or a partial source.
 
-The module is dark and internal. It has no scheduler, refresh integration,
-HTTP/UI route, database repository, storage initializer or writer hook. It
+The module is internal and persistence-free. It has no scheduler, refresh
+integration, HTTP/UI route, database repository, storage initializer or writer
+hook of its own; the active scheduled consumer is module 57 through the
+canonical module-56 baseline engine. It
 does not call Prices upload/status/quarantine methods, Ads minimum/
 recommendation/statistics/PATCH methods or any other WB write. It never inserts
 registry operations/items/facts/checkpoints/observation values or identity

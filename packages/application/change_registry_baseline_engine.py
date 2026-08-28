@@ -1,9 +1,9 @@
-"""Dark transactional baseline/diff engine for the seller change registry.
+"""Transactional baseline/diff engine for the seller change registry.
 
 The engine consumes only the sanitized deterministic result produced by
 ``ChangeRegistrySourceAcquirer``.  It owns no scheduler, HTTP/UI route, WB
-client, writer instrumentation or automatic invocation.  A caller must invoke
-``ingest`` explicitly.
+client, writer instrumentation or automatic invocation. The active observer
+invokes ``ingest`` explicitly after its read-only source acquisition.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from packages.application.change_registry import (
     CHECKPOINTS_TABLE,
@@ -122,7 +122,13 @@ class ChangeRegistryBaselineEngine:
         self.source_surface = _identity(source_surface, "source_surface")
         self.store_registry = StoreRegistry(self.runtime_dir)
 
-    def ingest(self, acquisition: Mapping[str, Any]) -> dict[str, Any]:
+    def ingest(
+        self,
+        acquisition: Mapping[str, Any],
+        *,
+        transaction_hook: Callable[[sqlite3.Connection, Mapping[str, Any]], None]
+        | None = None,
+    ) -> dict[str, Any]:
         """Persist one explicit invocation as one all-or-nothing transaction."""
 
         normalized = _normalize_acquisition(
@@ -162,6 +168,8 @@ class ChangeRegistryBaselineEngine:
                         checkpoint_id=checkpoint_id,
                         incident_surface=incident_surface,
                     )
+                    if transaction_hook is not None:
+                        transaction_hook(conn, receipt)
                     conn.commit()
                     return receipt
 
@@ -254,6 +262,18 @@ class ChangeRegistryBaselineEngine:
                     )
 
                 if normalized.status == "complete" and previous is not None:
+                    self._append_disappearance_observations(
+                        conn,
+                        previous_checkpoint_id=str(previous["checkpoint_id"]),
+                        current_checkpoint_id=checkpoint_id,
+                        observed_at=normalized.completed_at,
+                        current_by_key=current_by_key,
+                        excluded_advert_ids={
+                            incident.advert_id for incident in normalized.incidents
+                        },
+                    )
+
+                if normalized.status == "complete" and previous is not None:
                     self._append_diffs(
                         conn,
                         previous=previous,
@@ -266,11 +286,72 @@ class ChangeRegistryBaselineEngine:
                     checkpoint_id=checkpoint_id,
                     incident_surface=incident_surface,
                 )
+                if transaction_hook is not None:
+                    transaction_hook(conn, receipt)
                 conn.commit()
                 return receipt
             except Exception:
                 conn.rollback()
                 raise
+
+    def _append_disappearance_observations(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        previous_checkpoint_id: str,
+        current_checkpoint_id: str,
+        observed_at: str,
+        current_by_key: dict[
+            tuple[str, int, int, str, str], dict[str, Any]
+        ],
+        excluded_advert_ids: set[int],
+    ) -> None:
+        previous_rows = conn.execute(
+            f"""SELECT * FROM {OBSERVATION_VALUES_TABLE}
+                WHERE checkpoint_id=?
+                ORDER BY target_kind,nm_id,advert_id,placement,parameter_field""",
+            (previous_checkpoint_id,),
+        ).fetchall()
+        for previous_row in previous_rows:
+            key = _row_key(previous_row)
+            if key in current_by_key or (
+                key[2] > 0 and key[2] in excluded_advert_ids
+            ):
+                continue
+            target = target_identity(
+                key[0],
+                nm_id=key[1],
+                advert_id=key[2],
+                placement=key[3],
+            )
+            observation = _Observation(
+                target=target,
+                parameter_field=key[4],
+                status="missing",
+                value=CanonicalValue("missing"),
+                health_code="target_disappeared",
+                evidence_digest=canonical_digest(
+                    {
+                        "previous_checkpoint_id": previous_checkpoint_id,
+                        "current_checkpoint_id": current_checkpoint_id,
+                        "target": _target_payload(target),
+                        "parameter_field": key[4],
+                        "status": "missing",
+                        "health_code": "target_disappeared",
+                    }
+                ),
+            )
+            row = _observation_row(
+                current_checkpoint_id,
+                observed_at,
+                observation,
+            )
+            current_by_key[key] = _insert_idempotent(
+                conn,
+                OBSERVATION_VALUES_TABLE,
+                "observation_value_id",
+                row,
+            )
 
     def _append_diffs(
         self,
@@ -300,6 +381,42 @@ class ChangeRegistryBaselineEngine:
                 _comparable_row_value(previous_row) if previous_row is not None else None
             )
             target_kind, nm_id, advert_id, placement, parameter_field = key
+            proof_checkpoint_id = previous_id
+            proof_completed_at = str(previous["completed_at"])
+            if previous_value is None:
+                prior_exact = conn.execute(
+                    f"""SELECT observation.*, checkpoint.checkpoint_id AS proof_checkpoint_id,
+                               checkpoint.completed_at AS proof_completed_at
+                        FROM {OBSERVATION_VALUES_TABLE} observation
+                        JOIN {CHECKPOINTS_TABLE} checkpoint
+                          ON checkpoint.checkpoint_id=observation.checkpoint_id
+                        WHERE checkpoint.seller_id=? AND checkpoint.account_scope=?
+                          AND checkpoint.source_surface=?
+                          AND checkpoint.completeness_status='complete'
+                          AND checkpoint.completed_at<?
+                          AND observation.target_kind=? AND observation.nm_id=?
+                          AND observation.advert_id=? AND observation.placement=?
+                          AND observation.parameter_field=?
+                          AND observation.observation_status IN ('exact','exact_zero')
+                          AND observation.value_kind IN ('integer','text','boolean')
+                        ORDER BY checkpoint.completed_at DESC,checkpoint.checkpoint_id DESC
+                        LIMIT 1""",
+                    (
+                        self.seller_id,
+                        self.account_scope,
+                        self.source_surface,
+                        current_checkpoint["completed_at"],
+                        target_kind,
+                        nm_id,
+                        advert_id,
+                        placement,
+                        parameter_field,
+                    ),
+                ).fetchone()
+                if prior_exact is not None:
+                    previous_value = _comparable_row_value(prior_exact)
+                    proof_checkpoint_id = str(prior_exact["proof_checkpoint_id"])
+                    proof_completed_at = str(prior_exact["proof_completed_at"])
             if previous_value is not None:
                 if previous_value == current_value:
                     continue
@@ -323,13 +440,13 @@ class ChangeRegistryBaselineEngine:
                 "proof_kind": "checkpoint_diff",
                 "seller_id": self.seller_id,
                 "account_scope": self.account_scope,
-                "previous_checkpoint_id": previous_id,
+                "previous_checkpoint_id": proof_checkpoint_id,
                 "current_checkpoint_id": current_checkpoint["checkpoint_id"],
                 "target": _target_payload(target),
                 "parameter_field": parameter_field,
                 "before": _value_payload(before_value),
                 "after": _value_payload(current_value),
-                "observed_from": str(previous["completed_at"]),
+                "observed_from": proof_completed_at,
                 "observed_to": str(current_checkpoint["completed_at"]),
             }
             evidence_digest = canonical_digest(fact_basis)
@@ -345,7 +462,7 @@ class ChangeRegistryBaselineEngine:
                 "parameter_field": parameter_field,
                 **_value_columns("before_value", before_value),
                 **_value_columns("after_value", current_value),
-                "observed_from": str(previous["completed_at"]),
+                "observed_from": proof_completed_at,
                 "observed_to": str(current_checkpoint["completed_at"]),
                 "proven_at": str(current_checkpoint["completed_at"]),
                 "proof_kind": "checkpoint_diff",
@@ -586,11 +703,15 @@ class ChangeRegistryBaselineEngine:
                 raise ChangeRegistryConflict(
                     "projected fact checkpoint identity is ambiguous"
                 )
-            previous_id = checkpoint["previous_complete_checkpoint_id"]
-            previous = checkpoints_by_id.get(str(previous_id)) if previous_id else None
+            proof_candidates = [
+                row
+                for row in checkpoints
+                if str(row["completed_at"]) == str(fact["observed_from"])
+                and str(row["completed_at"]) < str(checkpoint["completed_at"])
+            ]
+            previous = proof_candidates[0] if len(proof_candidates) == 1 else None
             if (
                 previous is None
-                or str(fact["observed_from"]) != str(previous["completed_at"])
                 or str(fact["observed_to"]) != str(checkpoint["completed_at"])
                 or str(fact["proven_at"]) != str(checkpoint["completed_at"])
             ):
@@ -610,9 +731,12 @@ class ChangeRegistryBaselineEngine:
             )
             previous_value = _comparable_row_value(previous_observation)
             if before_value == CanonicalValue("text", text_value=CREATION_ABSENT_STATE):
+                immediate_previous_id = checkpoint["previous_complete_checkpoint_id"]
                 if not (
                     target.target_kind == "campaign"
                     and field == "campaign_state"
+                    and immediate_previous_id is not None
+                    and str(previous["checkpoint_id"]) == str(immediate_previous_id)
                     and target.advert_id
                     not in _checkpoint_advert_ids(conn, str(previous["checkpoint_id"]))
                 ):
@@ -669,27 +793,24 @@ class ChangeRegistryBaselineEngine:
             if active_value is None:
                 if fact is not None:
                     before = _row_value(fact, "before_value")
-                    if before != CanonicalValue(
+                    if before == CanonicalValue(
                         "text", text_value=CREATION_ABSENT_STATE
                     ):
-                        raise ChangeRegistryConflict(
-                            "projection cannot bridge an ambiguous evidence gap"
+                        previous_id = str(checkpoint["previous_complete_checkpoint_id"])
+                        previous = checkpoints_by_id[previous_id]
+                        absent = CanonicalValue("text", text_value=CREATION_ABSENT_STATE)
+                        intervals.append(
+                            _interval_payload(
+                                target=target,
+                                field=field,
+                                value=absent,
+                                start_at=str(previous["completed_at"]),
+                                end_at=completed_at,
+                                start_checkpoint_id=previous_id,
+                                end_checkpoint_id=checkpoint_id,
+                                fact_id=str(fact["fact_id"]),
+                            )
                         )
-                    previous_id = str(checkpoint["previous_complete_checkpoint_id"])
-                    previous = checkpoints_by_id[previous_id]
-                    absent = CanonicalValue("text", text_value=CREATION_ABSENT_STATE)
-                    intervals.append(
-                        _interval_payload(
-                            target=target,
-                            field=field,
-                            value=absent,
-                            start_at=str(previous["completed_at"]),
-                            end_at=completed_at,
-                            start_checkpoint_id=previous_id,
-                            end_checkpoint_id=checkpoint_id,
-                            fact_id=str(fact["fact_id"]),
-                        )
-                    )
                     active_fact_id = str(fact["fact_id"])
                 elif (
                     index

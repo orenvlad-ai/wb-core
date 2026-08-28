@@ -6,6 +6,7 @@ import hashlib
 import importlib
 from io import BytesIO
 import json
+import os
 import re
 import sqlite3
 import time
@@ -102,6 +103,11 @@ from packages.application.supplier_expense_allocation import (
     project_supplier_order_expense_allocation,
 )
 from packages.application.cny_ledger import CnyLedgerBlock
+from packages.application.change_registry_observer import (
+    ChangeRegistryObserver,
+    ChangeRegistryReadSurface,
+    DEFAULT_ACCOUNT_SCOPE as CHANGE_REGISTRY_ACCOUNT_SCOPE,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -1038,6 +1044,8 @@ class RegistryUploadHttpEntrypoint:
         buyer_session_recovery_controller: WbBuyerSessionRecoveryController | None = None,
         sku_management_block: SkuManagementBlock | None = None,
         sku_inventory_balance_block: SkuInventoryBalanceBlock | None = None,
+        change_registry_read_surface: ChangeRegistryReadSurface | None = None,
+        change_registry_observer_factory: Callable[[], ChangeRegistryObserver] | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -1304,6 +1312,33 @@ class RegistryUploadHttpEntrypoint:
                 timestamp_factory=self.activated_at_factory,
             )
         )
+        registry_seller_id = os.environ.get(
+            "SELLER_PORTAL_CANONICAL_SUPPLIER_ID", ""
+        ).strip()
+        registry_scope = os.environ.get(
+            "CHANGE_REGISTRY_ACCOUNT_SCOPE", CHANGE_REGISTRY_ACCOUNT_SCOPE
+        ).strip()
+        self.change_registry_enabled = os.environ.get(
+            "CHANGE_REGISTRY_OBSERVER_ENABLED", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        self.change_registry_read_surface = change_registry_read_surface
+        self.change_registry_observer_factory = change_registry_observer_factory
+        if self.change_registry_read_surface is None and registry_seller_id:
+            if registry_scope != CHANGE_REGISTRY_ACCOUNT_SCOPE:
+                raise ValueError(
+                    "CHANGE_REGISTRY_ACCOUNT_SCOPE differs from the repo-owned fixed scope"
+                )
+            self.change_registry_read_surface = ChangeRegistryReadSurface(
+                self.runtime.runtime_dir,
+                seller_id=registry_seller_id,
+                account_scope=registry_scope,
+            )
+        if self.change_registry_observer_factory is None and registry_seller_id:
+            self.change_registry_observer_factory = lambda: ChangeRegistryObserver(
+                self.runtime.runtime_dir,
+                seller_id=registry_seller_id,
+                account_scope=registry_scope,
+            )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
@@ -2353,6 +2388,42 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sku_management_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.sku_management_block.history(params or {})
+
+    def handle_change_registry_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        if self.change_registry_read_surface is None:
+            raise ValueError("Change Registry seller scope is not configured")
+        values = params or {}
+        limit = int(values.get("limit") or 100)
+        payload = self.change_registry_read_surface.overview(limit=limit)
+        payload["activation"] = {"enabled": bool(self.change_registry_enabled)}
+        return payload
+
+    def handle_change_registry_manual_scan_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        if not self.change_registry_enabled:
+            raise ValueError("Change Registry observer is disabled")
+        if self.change_registry_observer_factory is None:
+            raise ValueError("Change Registry seller scope is not configured")
+        client_key = str(payload.get("idempotency_key") or "").strip()
+        if client_key and (len(client_key) > 80 or not re.fullmatch(r"[A-Za-z0-9_.:-]+", client_key)):
+            raise ValueError("invalid manual scan idempotency_key")
+        job_id = (
+            "crjob_manual_" + hashlib.sha256(client_key.encode("utf-8")).hexdigest()[:24]
+            if client_key
+            else ""
+        )
+        return self.change_registry_observer_factory().submit_manual(
+            requested_by=actor,
+            job_id=job_id,
+        )
+
+    def handle_change_registry_annotation_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        if self.change_registry_read_surface is None:
+            raise ValueError("Change Registry seller scope is not configured")
+        return self.change_registry_read_surface.annotate(payload, actor=actor)
 
     def handle_sku_inventory_balance_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_inventory_balance_block.latest(user_key=user_key)
