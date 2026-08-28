@@ -1539,6 +1539,64 @@ def main() -> None:
         manifest_sha="b" * 64,
         operation="op-1",
     )
+    legacy_release_operation = "release-v2-" + "7" * 32
+    legacy_release_payload = {
+        "schema": "wb-core.release-receipt/v2",
+        "state": "awaiting_apply",
+        "operation_id": legacy_release_operation,
+        "repository": "orenvlad-ai/wb-core",
+        "pull_request": 1041,
+        "release_kind": "production_mutation",
+        "merge_sha": MERGE_SHA,
+        "deployed_sha": MERGE_SHA,
+        "reason_codes": [],
+        "manifest": {
+            "sha256": "b" * 64,
+            "operation_id": "op-1",
+            "path": "release/production-mutations/fixture.json",
+        },
+    }
+    parsed_legacy_release = apply.parse_legacy_release_receipt(
+        [
+            {
+                "user": {"login": "github-actions[bot]"},
+                "body": (
+                    f"<!-- wb-core-release-receipt operation={legacy_release_operation} -->"
+                    "\n```json\n"
+                    + json.dumps(legacy_release_payload)
+                    + "\n```"
+                ),
+            }
+        ],
+        pr=1041,
+        merge_sha=MERGE_SHA,
+        manifest_sha="b" * 64,
+        operation="op-1",
+    )
+    assert parsed_legacy_release["operation_id"] == legacy_release_operation
+    assert parsed_legacy_release["manifest"]["operation_id"] == "op-1"
+    try:
+        apply.parse_legacy_release_receipt(
+            [
+                {
+                    "user": {"login": "github-actions[bot]"},
+                    "body": (
+                        f"<!-- wb-core-release-receipt operation={legacy_release_operation} -->"
+                        "\n```json\n"
+                        + json.dumps({**legacy_release_payload, "pull_request": 1042})
+                        + "\n```"
+                    ),
+                }
+            ],
+            pr=1041,
+            merge_sha=MERGE_SHA,
+            manifest_sha="b" * 64,
+            operation="op-1",
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("foreign legacy release PR binding must fail closed")
     legacy_result = apply._run_legacy_commands(
         {
             "commands": {
