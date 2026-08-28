@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import sqlite3
 import sys
@@ -46,6 +47,33 @@ def main() -> None:
             account_scope=ACCOUNT,
         )
         db_path = runtime_dir / "registry_upload_runtime.sqlite3"
+
+        noncanonical = _acquisition(
+            started_at="2026-08-29T08:00:00Z",
+            completed_at="2026-08-29T08:01:00Z",
+            status="complete",
+            prices=[],
+            campaigns=[],
+        )
+        noncanonical = deepcopy(noncanonical)
+        noncanonical["interval"] = {
+            "started_at": "2026-08-29T08:00:00+00:00",
+            "completed_at": "2026-08-29T13:01:00+05:00",
+        }
+        for source in noncanonical["sources"].values():
+            source["interval"] = dict(noncanonical["interval"])
+            source.pop("manifest_digest")
+            source["manifest_digest"] = canonical_digest(source)
+        noncanonical.pop("manifest_digest")
+        noncanonical["manifest_digest"] = canonical_digest(noncanonical)
+        try:
+            engine.ingest(noncanonical)
+        except ChangeRegistryConflict:
+            pass
+        else:
+            raise AssertionError(
+                "baseline accepted noncanonical timestamp-bearing digested input"
+            )
 
         partial_before = _acquisition(
             started_at="2026-08-29T09:00:00Z",
@@ -463,6 +491,7 @@ def _acquisition(
             "facts_written": 0,
             "identity_incidents_written": 0,
         },
+        "wb_mutation_calls": {"post": 0, "patch": 0},
     }
     payload["manifest_digest"] = canonical_digest(payload)
     return payload

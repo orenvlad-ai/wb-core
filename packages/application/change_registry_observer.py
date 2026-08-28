@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Callable, Mapping
@@ -35,14 +36,19 @@ from packages.application.change_registry_baseline_engine import (
 )
 from packages.application.change_registry_source_acquisition import (
     ChangeRegistrySourceAcquirer,
+    canonical_utc_timestamp,
+    canonicalize_acquisition_timestamps,
 )
-from packages.application.storage_registry import StoreRegistry
+from packages.application.storage_registry import StorageRegistryError, StoreRegistry
 
 
 CONTRACT_NAME = "wb_change_registry_observer"
 CONTRACT_VERSION = 1
 DEFAULT_ACCOUNT_SCOPE = "seller-portal-primary"
 LEASE_SECONDS = 1800
+TERMINAL_JOB_STATES = frozenset({"complete", "partial", "failed", "busy"})
+RUNNABLE_JOB_STATES = frozenset({"accepted", "running"})
+_DEPLOYED_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class ChangeRegistryObserverError(ValueError):
@@ -54,7 +60,14 @@ class ChangeRegistryObserverBusy(ChangeRegistryObserverError):
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return canonical_utc_timestamp(datetime.now(timezone.utc))
+
+
+def activation_job_id(deployed_sha: str) -> str:
+    exact_sha = str(deployed_sha or "").strip().lower()
+    if not _DEPLOYED_SHA.fullmatch(exact_sha):
+        raise ChangeRegistryObserverError("deployed_sha must be an exact Git SHA")
+    return f"crjob_activation_{exact_sha}"
 
 
 def scheduled_slot(moment: str | datetime | None = None) -> str:
@@ -66,16 +79,11 @@ def scheduled_slot(moment: str | datetime | None = None) -> str:
 
 
 def _moment(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        text = str(value or "").strip()
-        parsed = datetime.fromisoformat(
-            text[:-1] + "+00:00" if text.endswith("Z") else text
-        )
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    try:
+        rendered = canonical_utc_timestamp(value)
+    except Exception as exc:
         raise ChangeRegistryObserverError("timestamp must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return datetime.fromisoformat(rendered[:-1] + "+00:00")
 
 
 def _id(prefix: str, value: Any) -> str:
@@ -154,28 +162,53 @@ class ChangeRegistryObserver:
         requested_by: str,
         scheduled_slot_value: str = "",
         job_id: str = "",
+        deployed_sha: str = "",
         inject_db_failure: bool = False,
     ) -> dict[str, Any]:
         trigger = str(trigger_kind or "").strip().lower()
         if trigger not in {"scheduled", "manual", "activation"}:
             raise ChangeRegistryObserverError("trigger_kind is invalid")
-        now = self.now_fn()
+        now = canonical_utc_timestamp(self.now_fn())
         slot = scheduled_slot_value or (
             scheduled_slot(now) if trigger == "scheduled" else ""
         )
+        slot = canonical_utc_timestamp(slot) if slot else ""
         if trigger != "scheduled" and slot:
             raise ChangeRegistryObserverError(
                 "only scheduled jobs own a scheduled slot"
             )
+        exact_sha = str(deployed_sha or "").strip().lower()
+        if trigger == "activation":
+            exact_job_id = activation_job_id(exact_sha)
+            if job_id and job_id != exact_job_id:
+                raise ChangeRegistryObserverError(
+                    "activation job_id must be bound to deployed_sha"
+                )
+        elif exact_sha:
+            raise ChangeRegistryObserverError(
+                "deployed_sha is only valid for activation jobs"
+            )
+        else:
+            exact_job_id = str(job_id or "").strip()
+        if not exact_job_id:
+            identity_basis = {
+                "seller_id": self.seller_id,
+                "account_scope": self.account_scope,
+                "trigger_kind": trigger,
+                "scheduled_slot": slot,
+                "requested_by": str(requested_by or "").strip(),
+                "requested_at": slot if trigger == "scheduled" else now,
+            }
+            exact_job_id = _id("crjob_", identity_basis)
         basis = {
             "seller_id": self.seller_id,
             "account_scope": self.account_scope,
             "trigger_kind": trigger,
             "scheduled_slot": slot,
-            "requested_at": slot if trigger == "scheduled" else now,
-            "request_nonce": job_id,
+            "requested_by": str(requested_by or "").strip(),
+            "client_job_id": exact_job_id,
+            "deployed_sha": exact_sha,
         }
-        exact_job_id = job_id or _id("crjob_", basis)
         admitted = self._admit(
             job_id=exact_job_id,
             trigger_kind=trigger,
@@ -198,15 +231,15 @@ class ChangeRegistryObserver:
     def submit_manual(self, *, requested_by: str, job_id: str = "") -> dict[str, Any]:
         """Admit a manual job, then perform its read-only scan in background."""
 
-        now = self.now_fn()
+        now = canonical_utc_timestamp(self.now_fn())
         exact_job_id = job_id or _id(
             "crjob_",
             {
                 "seller_id": self.seller_id,
                 "account_scope": self.account_scope,
                 "trigger_kind": "manual",
-                "requested_at": now,
                 "requested_by": requested_by,
+                "request_nonce": now,
             },
         )
         admitted = self._admit(
@@ -217,9 +250,11 @@ class ChangeRegistryObserver:
             requested_at=now,
             request_digest=canonical_digest(
                 {
-                    "job_id": exact_job_id,
+                    "seller_id": self.seller_id,
+                    "account_scope": self.account_scope,
                     "trigger_kind": "manual",
-                    "requested_at": now,
+                    "requested_by": str(requested_by or "").strip(),
+                    "client_job_id": exact_job_id,
                 }
             ),
         )
@@ -242,7 +277,10 @@ class ChangeRegistryObserver:
 
     def _admit(self, **row: Any) -> dict[str, bool]:
         self.initialize_schema()
-        now = str(row["requested_at"])
+        now = canonical_utc_timestamp(row["requested_at"])
+        requested_by = str(row["requested_by"] or "").strip()[:160]
+        if not requested_by:
+            raise ChangeRegistryObserverError("requested_by is required")
         expires = (
             _moment(now) + timedelta(seconds=self.lease_seconds)
         ).isoformat().replace("+00:00", "Z")
@@ -256,21 +294,42 @@ class ChangeRegistryObserver:
                     (row["job_id"],),
                 ).fetchone()
                 if existing is not None:
-                    conn.commit()
-                    return {"replay": True}
+                    expected = {
+                        "seller_id": self.seller_id,
+                        "account_scope": self.account_scope,
+                        "trigger_kind": row["trigger_kind"],
+                        "scheduled_slot": row["scheduled_slot_value"],
+                        "requested_by": requested_by,
+                        "request_digest": row["request_digest"],
+                    }
+                    if any(existing[key] != value for key, value in expected.items()):
+                        raise ChangeRegistryObserverError(
+                            "observer job id owns a conflicting request binding"
+                        )
+                    state = self._last_job_state(conn, str(row["job_id"]))
+                    if state in TERMINAL_JOB_STATES:
+                        conn.commit()
+                        return {"replay": True}
+                    if state not in RUNNABLE_JOB_STATES:
+                        raise ChangeRegistryObserverError(
+                            "observer job has no resumable lifecycle state"
+                        )
                 lease = conn.execute(
                     f"SELECT * FROM {OBSERVER_LEASES_TABLE} "
                     "WHERE seller_id=? AND account_scope=?",
                     (self.seller_id, self.account_scope),
                 ).fetchone()
-                if (
-                    lease is not None
-                    and str(lease["owner_job_id"])
-                    and _moment(str(lease["expires_at"])) > _moment(now)
-                ):
-                    raise ChangeRegistryObserverBusy(
-                        "another registry scan owns the seller lease"
-                    )
+                if lease is not None and str(lease["owner_job_id"]):
+                    owner = str(lease["owner_job_id"])
+                    if _moment(str(lease["expires_at"])) > _moment(now):
+                        if existing is not None and owner == str(row["job_id"]):
+                            conn.commit()
+                            return {"replay": True}
+                        raise ChangeRegistryObserverBusy(
+                            "another registry scan owns the seller lease"
+                        )
+                    if owner != str(row["job_id"]):
+                        self._terminalize_stale_owner(conn, lease, now)
                 if lease is None:
                     _insert(
                         conn,
@@ -286,38 +345,102 @@ class ChangeRegistryObserver:
                         },
                     )
                 else:
-                    conn.execute(
+                    expected_revision = int(lease["revision"])
+                    claimed = conn.execute(
                         f"UPDATE {OBSERVER_LEASES_TABLE} SET "
                         "owner_job_id=?,acquired_at=?,expires_at=?,"
                         "revision=revision+1,updated_at=? "
-                        "WHERE seller_id=? AND account_scope=?",
+                        "WHERE seller_id=? AND account_scope=? AND revision=?",
                         (
                             row["job_id"], now, expires, now,
-                            self.seller_id, self.account_scope,
+                            self.seller_id, self.account_scope, expected_revision,
                         ),
                     )
-                _insert(
-                    conn,
-                    OBSERVER_JOBS_TABLE,
-                    {
-                        "job_id": row["job_id"],
-                        "seller_id": self.seller_id,
-                        "account_scope": self.account_scope,
-                        "trigger_kind": row["trigger_kind"],
-                        "scheduled_slot": row["scheduled_slot_value"],
-                        "requested_by": str(row["requested_by"])[:160],
-                        "requested_at": now,
-                        "request_digest": row["request_digest"],
-                    },
-                )
+                    if claimed.rowcount != 1:
+                        raise ChangeRegistryObserverBusy(
+                            "observer lease changed during CAS recovery"
+                        )
+                if existing is None:
+                    _insert(
+                        conn,
+                        OBSERVER_JOBS_TABLE,
+                        {
+                            "job_id": row["job_id"],
+                            "seller_id": self.seller_id,
+                            "account_scope": self.account_scope,
+                            "trigger_kind": row["trigger_kind"],
+                            "scheduled_slot": row["scheduled_slot_value"],
+                            "requested_by": requested_by,
+                            "requested_at": now,
+                            "request_digest": row["request_digest"],
+                        },
+                    )
+                    self._append_job_event(
+                        conn, str(row["job_id"]), 1, "accepted", now, None, 0
+                    )
                 self._append_job_event(
-                    conn, str(row["job_id"]), 1, "accepted", now, None, 0
+                    conn,
+                    str(row["job_id"]),
+                    self._next_event_sequence(conn, str(row["job_id"])),
+                    "running",
+                    now,
+                    None,
+                    0,
                 )
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
         return {"replay": False}
+
+    def _last_job_state(self, conn: sqlite3.Connection, job_id: str) -> str:
+        row = conn.execute(
+            f"SELECT state FROM {OBSERVER_JOB_EVENTS_TABLE} WHERE job_id=? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        return str(row["state"]) if row is not None else ""
+
+    def _next_event_sequence(self, conn: sqlite3.Connection, job_id: str) -> int:
+        row = conn.execute(
+            f"SELECT MAX(sequence_no) AS sequence_no FROM {OBSERVER_JOB_EVENTS_TABLE} "
+            "WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        return int(row["sequence_no"] or 0) + 1
+
+    def _terminalize_stale_owner(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        now: str,
+    ) -> None:
+        owner = str(lease["owner_job_id"])
+        owner_job = conn.execute(
+            f"SELECT * FROM {OBSERVER_JOBS_TABLE} WHERE job_id=?",
+            (owner,),
+        ).fetchone()
+        if owner_job is not None and self._last_job_state(conn, owner) in RUNNABLE_JOB_STATES:
+            self._append_job_event(
+                conn,
+                owner,
+                self._next_event_sequence(conn, owner),
+                "failed",
+                now,
+                None,
+                0,
+                error_code="stale_worker_lease",
+                error_message="Предыдущий worker не завершился до истечения lease.",
+            )
+            if str(owner_job["trigger_kind"]) == "scheduled":
+                self._append_health(
+                    conn,
+                    owner,
+                    str(owner_job["scheduled_slot"]),
+                    "failed",
+                    now,
+                    None,
+                )
 
     def _persist(
         self,
@@ -328,9 +451,12 @@ class ChangeRegistryObserver:
         inject_db_failure: bool,
     ) -> dict[str, Any]:
         interval = snapshot.get("interval") or {}
-        completed_at = str(interval.get("completed_at") or "")
-        _moment(str(interval.get("started_at") or ""))
-        _moment(completed_at)
+        canonical_snapshot = canonicalize_acquisition_timestamps(snapshot)
+        if not isinstance(canonical_snapshot, Mapping):
+            raise ChangeRegistryObserverError("acquisition snapshot must be an object")
+        interval = canonical_snapshot.get("interval") or {}
+        completed_at = canonical_utc_timestamp(interval.get("completed_at") or "")
+        canonical_utc_timestamp(interval.get("started_at") or "")
         persisted_at = max(_moment(completed_at), _moment(self.now_fn())).isoformat().replace(
             "+00:00", "Z"
         )
@@ -352,10 +478,16 @@ class ChangeRegistryObserver:
             outcome = str(receipt["completeness_status"])
             fact_count = int(receipt["row_counts"]["facts"])
             self._persist_source_manifests(
-                conn, checkpoint_id, completed_at, snapshot
+                conn, checkpoint_id, completed_at, canonical_snapshot
             )
             self._append_job_event(
-                conn, job_id, 2, outcome, persisted_at, checkpoint_id, fact_count
+                conn,
+                job_id,
+                self._next_event_sequence(conn, job_id),
+                outcome,
+                persisted_at,
+                checkpoint_id,
+                fact_count,
             )
             if trigger == "scheduled":
                 self._append_health(
@@ -365,7 +497,9 @@ class ChangeRegistryObserver:
             if inject_db_failure:
                 raise sqlite3.OperationalError("injected observer DB failure")
 
-        self.engine.ingest(snapshot, transaction_hook=persist_observer_metadata)
+        self.engine.ingest(
+            canonical_snapshot, transaction_hook=persist_observer_metadata
+        )
         return self.read_job(job_id)
 
     def _persist_source_manifests(
@@ -398,7 +532,7 @@ class ChangeRegistryObserver:
             status = str(source.get("completeness_status") or "failed")
             if status not in {"complete", "partial", "failed"}:
                 status = "failed"
-            summary = {
+            summary = canonicalize_acquisition_timestamps({
                 "source": source_name,
                 "completeness_status": status,
                 "counts": {
@@ -407,7 +541,9 @@ class ChangeRegistryObserver:
                     if isinstance(value, int)
                 },
                 "interval": dict(source.get("interval") or {}),
-            }
+                "persistence": dict(snapshot.get("persistence") or {}),
+                "wb_mutation_calls": dict(snapshot.get("wb_mutation_calls") or {}),
+            })
             row = {
                 "source_manifest_id": _id("crsm_", [checkpoint_id, source_name]),
                 "checkpoint_id": checkpoint_id,
@@ -533,18 +669,17 @@ class ChangeRegistryObserver:
     def _fail_job(
         self, job_id: str, trigger: str, slot: str, exc: Exception
     ) -> None:
-        now = self.now_fn()
+        now = canonical_utc_timestamp(self.now_fn())
         with self.store_registry.session(
             "operational", mode="rw", operation="change_registry_observer_fail"
         ) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                last = conn.execute(
-                    f"SELECT MAX(sequence_no) AS sequence_no FROM "
-                    f"{OBSERVER_JOB_EVENTS_TABLE} WHERE job_id=?",
-                    (job_id,),
-                ).fetchone()
-                sequence = int(last["sequence_no"] or 0) + 1
+                state = self._last_job_state(conn, job_id)
+                if state in TERMINAL_JOB_STATES:
+                    conn.commit()
+                    return
+                sequence = self._next_event_sequence(conn, job_id)
                 self._append_job_event(
                     conn,
                     job_id,
@@ -611,13 +746,48 @@ class ChangeRegistryReadSurface:
         self.seller_id = str(seller_id)
         self.account_scope = str(account_scope)
         self.store_registry = StoreRegistry(self.runtime_dir)
-        ChangeRegistryRepository(self.runtime_dir).initialize_schema()
 
     def overview(self, *, limit: int = 100) -> dict[str, Any]:
         exact_limit = max(1, min(int(limit), 200))
+        try:
+            operational_path = self.store_registry.resolve("operational")
+        except StorageRegistryError as exc:
+            return self._unavailable_overview("storage_unavailable", str(exc))
+        if not operational_path.is_file():
+            return self._unavailable_overview(
+                "schema_missing", "operational generation file is missing"
+            )
         with self.store_registry.session(
             "operational", mode="ro", operation="change_registry_overview"
         ) as conn:
+            query_only = int(conn.execute("PRAGMA query_only").fetchone()[0])
+            if query_only != 1:
+                raise ChangeRegistryObserverError(
+                    "registry read surface requires PRAGMA query_only=ON"
+                )
+            required_tables = {
+                CHECKPOINTS_TABLE,
+                CHECKPOINT_SOURCE_MANIFESTS_TABLE,
+                FACTS_TABLE,
+                IDENTITY_INCIDENTS_TABLE,
+                OBSERVER_HEALTH_EVENTS_TABLE,
+                OBSERVER_JOB_EVENTS_TABLE,
+                OBSERVER_JOBS_TABLE,
+                ANNOTATION_REVISIONS_TABLE,
+            }
+            actual_tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            missing_tables = sorted(required_tables - actual_tables)
+            if missing_tables:
+                return self._unavailable_overview(
+                    "schema_missing",
+                    "required registry tables are missing",
+                    missing_tables=missing_tables,
+                )
             checkpoint = conn.execute(
                 f"SELECT * FROM {CHECKPOINTS_TABLE} WHERE seller_id=? "
                 "AND account_scope=? AND source_surface=? "
@@ -719,6 +889,7 @@ class ChangeRegistryReadSurface:
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
+            "storage": {"mode": "ro", "query_only": True},
             "seller_scope": {
                 "seller_id": self.seller_id,
                 "account_scope": self.account_scope,
@@ -740,6 +911,39 @@ class ChangeRegistryReadSurface:
             "incidents": [dict(row) for row in incidents],
             "jobs": [dict(row) for row in jobs],
             "annotations": annotations,
+            "interval_semantics": (
+                "Время изменения известно только внутри окна между двумя наблюдениями."
+            ),
+        }
+
+    def _unavailable_overview(
+        self,
+        health_state: str,
+        detail: str,
+        *,
+        missing_tables: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "storage": {"mode": "ro", "query_only": True},
+            "seller_scope": {
+                "seller_id": self.seller_id,
+                "account_scope": self.account_scope,
+            },
+            "status": {
+                "health_state": health_state,
+                "health_detail": detail[:300],
+                "missing_tables": list(missing_tables or []),
+                "consecutive_scheduled_noncomplete": 0,
+                "last_checkpoint": None,
+                "source_manifests": [],
+            },
+            "facts": [],
+            "interval_state": [],
+            "incidents": [],
+            "jobs": [],
+            "annotations": [],
             "interval_semantics": (
                 "Время изменения известно только внутри окна между двумя наблюдениями."
             ),
@@ -809,6 +1013,8 @@ __all__ = [
     "ChangeRegistryObserverError",
     "ChangeRegistryReadSurface",
     "DEFAULT_ACCOUNT_SCOPE",
+    "TERMINAL_JOB_STATES",
+    "activation_job_id",
     "scheduled_slot",
     "utc_now",
 ]

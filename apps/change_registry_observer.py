@@ -18,6 +18,7 @@ from packages.application.change_registry_observer import (  # noqa: E402
     ChangeRegistryObserver,
     ChangeRegistryReadSurface,
     DEFAULT_ACCOUNT_SCOPE,
+    activation_job_id,
 )
 
 
@@ -63,8 +64,21 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--trigger", choices=("scheduled", "manual", "activation"), required=True)
     scan.add_argument("--scheduled-slot", default="")
     scan.add_argument("--requested-by", default="systemd")
+    scan.add_argument("--deployed-sha", default="")
     commands.add_parser("status")
+    job_status = commands.add_parser("job-status")
+    job_status.add_argument("--job-id", required=True)
+    activation_status = commands.add_parser("activation-status")
+    activation_status.add_argument("--deployed-sha", required=True)
     return parser
+
+
+def observer_job_exit_code(payload: dict[str, object]) -> int:
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        return 1
+    last = events[-1]
+    return 0 if isinstance(last, dict) and last.get("state") == "complete" else 1
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
@@ -80,16 +94,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ).overview(limit=20)
         payload["activation"] = {"enabled": _enabled()}
         return payload
-    if not _enabled():
-        raise RuntimeError("Change Registry observer is disabled by repo-owned activation flag")
-    return ChangeRegistryObserver(
+    observer = ChangeRegistryObserver(
         runtime_dir,
         seller_id=seller_id,
         account_scope=account_scope,
-    ).run(
+    )
+    if args.command == "job-status":
+        return observer.read_job(str(args.job_id))
+    if args.command == "activation-status":
+        return observer.read_job(activation_job_id(str(args.deployed_sha)))
+    if not _enabled():
+        raise RuntimeError("Change Registry observer is disabled by repo-owned activation flag")
+    return observer.run(
         trigger_kind=args.trigger,
         requested_by=args.requested_by,
         scheduled_slot_value=args.scheduled_slot,
+        deployed_sha=args.deployed_sha,
     )
 
 
@@ -110,6 +130,8 @@ def main() -> int:
         )
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if args.command in {"scan", "job-status", "activation-status"}:
+        return observer_job_exit_code(result)
     return 0
 
 

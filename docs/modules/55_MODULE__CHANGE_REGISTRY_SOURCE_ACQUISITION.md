@@ -92,6 +92,14 @@ Current detail preserves:
   including literal zero;
 - source/detail/record/target evidence digests without raw payloads.
 
+Every aware acquisition timestamp crosses one boundary before any response,
+record, source or joint digest: it is rendered as the equivalent UTC instant
+with a terminal `Z`. This applies to joint/source intervals, count
+`changeTime`, detail `timestamps.created` and timestamp-bearing sanitized
+evidence. Therefore `Z`, `+00:00` and any other explicit offset for the same
+instant produce identical canonical bytes and identities. The default
+`datetime.now(timezone.utc)` path also emits `Z`, never `+00:00`.
+
 A campaign target is actionable only when one `advert_id` resolves to exactly
 one unique `nmID`. Cardinality zero or many emits a deterministic immutable-
 shaped `campaign_nm_mapping_cardinality` incident candidate with sorted unique
@@ -115,6 +123,8 @@ errors fail the affected half closed without retrying as rate limits.
 
 Manifests contain only method, sanitized path, counts, offsets/IDs, interval,
 completeness, bounded error class/status/retry evidence and SHA-256 digests.
+The joint safety seam reports both zero registry persistence and zero WB
+`POST`/`PATCH` calls; module 56 validates both before ingest.
 They contain no token, Authorization header, raw request/response body, cookie
 or credential-shaped value. Canonical JSON is sorted, compact UTF-8; all
 manifest/record/incident digests exclude randomness.
@@ -126,7 +136,9 @@ Prices pagination, uniform/nonuniform size tuples, exact zero/null/missing,
 Ads count/detail complete and partial results, batches of 50, legacy
 inapplicable evidence, exact-one/zero/many mapping, deterministic incidents,
 explicit payment units, `Retry-After`, bounded exhaustion, joint completeness,
-zero writer calls, zero persistence counts and byte/digest idempotence.
+zero writer calls, zero persistence counts, UTC-offset digest equivalence and a
+production-shaped `92 Prices / 189 Ads manifest / 179 details / 10 legacy /
+537 bids` fixture.
 
 Excluded: baseline diff engine, historical import/backfill, registry rows,
 checkpoints, facts, observer/scheduler/lease/job, public API/UI, writer

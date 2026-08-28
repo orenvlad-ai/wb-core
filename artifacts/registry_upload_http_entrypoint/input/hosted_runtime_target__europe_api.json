@@ -130,12 +130,17 @@
     {
       "name": "wb-core-change-registry-observer.service",
       "enable": false,
-      "restart": true
+      "restart": false
     },
     {
       "name": "wb-core-change-registry-observer.timer",
       "enable": true,
       "restart": true
+    },
+    {
+      "name": "wb-core-change-registry-activation@.service",
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-fbs-warehouse-registry.service",

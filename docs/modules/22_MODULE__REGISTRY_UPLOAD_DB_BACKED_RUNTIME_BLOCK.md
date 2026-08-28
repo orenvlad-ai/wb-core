@@ -288,6 +288,9 @@ The same StoreRegistry-selected operational SQLite generation contains the
 additive `change_registry_*` foundation defined by
 `docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md` plus the observer-owned
 job/source-summary/health/lease tables from module 57. Runtime schema ensure
-installs only tables/indexes/triggers. Activation belongs to the separate
-read-only Prices+Ads observer service; no existing Prices/Ads/SKU writer is
-instrumented and no historical evidence is imported.
+installs only tables/indexes/triggers. Read overview/status never ensures the
+schema: it uses StoreRegistry `mode=ro` with `PRAGMA query_only=ON` and reports
+missing schema without a hidden write. Scheduled observation and exact-SHA
+deploy activation belong to separate read-only Prices+Ads worker units; no
+existing Prices/Ads/SKU writer is instrumented and no historical evidence is
+imported.

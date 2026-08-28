@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
@@ -188,14 +189,20 @@ class _Missing:
 _MISSING = _Missing()
 
 
-def _acquire(prices, ads, sleeps: list[float] | None = None):
+def _acquire(
+    prices,
+    ads,
+    sleeps: list[float] | None = None,
+    *,
+    now: Any = FIXED_TIME,
+):
     observed_sleeps = sleeps if sleeps is not None else []
     return ChangeRegistrySourceAcquirer(
         seller_id="seller-primary",
         account_scope="account-primary",
         prices_source=prices,
         ads_source=ads,
-        now_fn=lambda: FIXED_TIME,
+        now_fn=lambda: now,
         sleep_fn=lambda seconds: observed_sleeps.append(float(seconds)),
     ).acquire()
 
@@ -323,6 +330,8 @@ def _assert_prices_and_identity_contract() -> None:
         "identity_incidents_written": 0,
     }:
         raise AssertionError("acquisition claimed a persistence side effect")
+    if result["wb_mutation_calls"] != {"post": 0, "patch": 0}:
+        raise AssertionError("acquisition claimed a WB mutation call")
     if prices.write_calls or ads.write_calls:
         raise AssertionError("a WB writer was called")
 
@@ -430,10 +439,84 @@ def _assert_retry_after_and_bounded_failure() -> None:
         raise AssertionError("official Promotion rate-limit hint was not honored")
 
 
+def _assert_utc_z_digest_identity_and_production_shape() -> None:
+    good = {
+        "nmID": 101,
+        "vendorCode": "canonical-time",
+        "discount": 0,
+        "currencyIsoCode4217": "RUB",
+        "editableSizePrice": False,
+        "sizes": [
+            {
+                "sizeID": 1,
+                "techSizeName": "ONE",
+                "price": 100,
+                "discountedPrice": 100,
+            }
+        ],
+    }
+    variants = (
+        (datetime(2026, 8, 29, 6, tzinfo=timezone.utc), "2026-08-29T03:00:00Z", "2026-08-29T06:00:00Z"),
+        ("2026-08-29T06:00:00+00:00", "2026-08-29T03:00:00+00:00", "2026-08-29T06:00:00+00:00"),
+        ("2026-08-29T11:00:00+05:00", "2026-08-29T08:00:00+05:00", "2026-08-29T11:00:00+05:00"),
+    )
+    acquisitions = []
+    for now, change_time, created in variants:
+        count = _count_payload([201])
+        count["adverts"][0]["advert_list"][0]["changeTime"] = change_time
+        acquisitions.append(
+            _acquire(
+                FakePricesSource({0: [good], 1000: []}),
+                FakeAdsSource(count, {201: _detail(201, [101], created=created)}),
+                now=now,
+            )
+        )
+    if acquisitions[0] != acquisitions[1] or acquisitions[1] != acquisitions[2]:
+        raise AssertionError("equivalent aware instants changed canonical bytes/digests")
+    canonical = acquisitions[0]
+    if canonical["interval"]["completed_at"] != "2026-08-29T06:00:00Z":
+        raise AssertionError("default aware UTC acquisition did not render canonical Z")
+    campaign = canonical["sources"]["ads"]["campaigns"][0]
+    if campaign["created_at"]["value"]["text_value"] != "2026-08-29T06:00:00Z":
+        raise AssertionError("detail timestamp escaped the UTC-Z boundary")
+
+    price_goods = [
+        {
+            **deepcopy(good),
+            "nmID": 100_000 + index,
+            "vendorCode": f"fixture-{index}",
+        }
+        for index in range(92)
+    ]
+    current_ids = list(range(200_000, 200_179))
+    legacy_ids = list(range(300_000, 300_010))
+    details = {
+        advert_id: _detail(advert_id, [400_000 + index])
+        for index, advert_id in enumerate(current_ids)
+    }
+    shaped = _acquire(
+        FakePricesSource({0: price_goods, 1000: []}),
+        FakeAdsSource(_count_payload(current_ids, legacy_ids=legacy_ids), details),
+    )
+    counts = shaped["sources"]["ads"]["counts"]
+    if shaped["sources"]["prices"]["counts"]["goods"] != 92:
+        raise AssertionError("production-shaped Prices fixture did not keep 92 goods")
+    if shaped["sources"]["prices"]["counts"]["pages"] != 2:
+        raise AssertionError("production-shaped Prices fixture did not prove two pages")
+    if (
+        counts["manifest_campaigns"],
+        counts["detail_campaigns"],
+        counts["legacy_count_only_campaigns"],
+        counts["bids"],
+    ) != (189, 179, 10, 537):
+        raise AssertionError(f"production-shaped Ads cardinality drifted: {counts!r}")
+
+
 def main() -> None:
     _assert_prices_and_identity_contract()
     _assert_ads_batching_and_partial_mismatch()
     _assert_retry_after_and_bounded_failure()
+    _assert_utc_z_digest_identity_and_production_shape()
     print("change_registry_source_acquisition_smoke: ok")
 
 

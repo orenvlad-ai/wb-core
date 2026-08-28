@@ -92,12 +92,14 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   WAC. Failure is visible non-blocking evidence; deploy creates no facility or
   binding.
 - `wb-core-change-registry-observer.timer` runs every two hours, 24/7, over one
-  fixed canonical seller/account scope. The deploy restarts its oneshot after
-  installing the repo-owned activation flag, so the first complete scan is an
-  explicit baseline with zero facts; scheduled-slot idempotency collapses a
-  same-slot timer collision. It performs only Prices/Ads WB GET and bounded
-  operational StoreRegistry writes. No WB POST/PATCH or seller-state mutation
-  is permitted.
+  fixed canonical seller/account scope and owns only deterministic scheduled
+  slots. Deploy does not restart that oneshot. After systemd/runtime readback,
+  trusted deploy starts `wb-core-change-registry-activation@<deployed-sha>` and
+  verifies the exact SHA-bound job is terminal `complete`; a new SHA always has
+  a new activation identity, while exact replay of the same complete SHA is a
+  no-op. Timer and activation remain distinct identities and serialize through
+  one seller lease. Both perform only Prices/Ads WB GET and bounded operational
+  StoreRegistry writes. No WB POST/PATCH or seller-state mutation is permitted.
 - Migration 142 adds canonical hosted
   `ff-pool-cutover-production-dry-run/apply/readback`. Every action pins the
   active target, environment file and exact `.wb-core-runtime-sha`. Dry-run is
@@ -465,6 +467,7 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-shadow-collector.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-observer.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-observer.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-activation@.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-warehouse-registry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-warehouse-registry.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-business-data-maintenance-restore@.service`

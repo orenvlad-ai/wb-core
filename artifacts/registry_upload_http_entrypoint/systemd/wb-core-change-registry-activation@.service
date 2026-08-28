@@ -1,0 +1,14 @@
+[Unit]
+Description=WB Core Change Registry deploy activation for exact SHA %i
+After=network-online.target wb-core-registry-http.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+Environment=CHANGE_REGISTRY_OBSERVER_ENABLED=true
+Environment=CHANGE_REGISTRY_ACCOUNT_SCOPE=seller-portal-primary
+ExecStart=/usr/bin/python3 apps/change_registry_observer.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env scan --trigger activation --deployed-sha %i --requested-by trusted-release-runner
+TimeoutStartSec=30m
+User=root
+Group=root
