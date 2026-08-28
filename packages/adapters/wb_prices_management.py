@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Mapping, Protocol, Sequence
 from urllib import error, parse, request as urllib_request
 
@@ -17,9 +19,11 @@ SAFE_RESPONSE_HEADER_NAMES = {
     "x-ratelimit-limit",
     "x-ratelimit-remaining",
     "x-ratelimit-reset",
+    "x-ratelimit-retry",
     "x-rate-limit-limit",
     "x-rate-limit-remaining",
     "x-rate-limit-reset",
+    "x-rate-limit-retry",
 }
 
 
@@ -32,7 +36,7 @@ class WbPricesApiError(RuntimeError):
     http_status: int | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     body_summary: str = ""
-    retry_after_seconds: int | None = None
+    retry_after_seconds: float | None = None
     transport_error: str = ""
 
     def __post_init__(self) -> None:
@@ -237,13 +241,33 @@ def _body_summary(body: str) -> str:
     return normalized[:800]
 
 
-def _retry_after_seconds(headers: Mapping[str, str]) -> int | None:
-    for key, value in headers.items():
-        if str(key).strip().lower() != "retry-after":
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    normalized = {
+        str(key).strip().lower(): str(value).strip()
+        for key, value in headers.items()
+    }
+    for name in (
+        "retry-after",
+        "x-ratelimit-retry",
+        "x-rate-limit-retry",
+        "x-ratelimit-reset",
+        "x-rate-limit-reset",
+    ):
+        raw_value = normalized.get(name, "")
+        if not raw_value:
             continue
         try:
-            parsed = int(str(value).strip())
+            parsed = float(raw_value)
         except (TypeError, ValueError):
-            return None
-        return max(0, parsed)
+            if name != "retry-after":
+                continue
+            try:
+                retry_at = parsedate_to_datetime(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        if parsed >= 0:
+            return parsed
     return None
