@@ -233,6 +233,15 @@ WRITERS = [
         "lifecycle": "private evidence retained through reconciliation or reviewed restore",
     },
     {
+        "owner": "production_apply_evidence",
+        "source": "apps/sheet_vitrina_v1_historical_cost_carry_forward.py",
+        "cadence": "owner_authorized_one_shot",
+        "artifact": "coherent pre-mutation SQLite copy plus private operation evidence",
+        "full_monolith": True,
+        "guard": "task-scoped exact target, two JIT witnesses, immediate CAS and one submit",
+        "lifecycle": "verified reconciliation evidence under the exact operation identity",
+    },
+    {
         "owner": "promo_metric_eligibility_recompute",
         "source": "apps/promo_metric_eligibility_recompute.py",
         "cadence": "human_gated_one_shot",

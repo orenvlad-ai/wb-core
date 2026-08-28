@@ -43,6 +43,158 @@ WBC0013_AUTH_BODY = (
     "historical-nm 428853741 historical-version whfv_cb0657c384d5adebae01e585 "
     "historical-event ffbf_87cea959c9d600da99caa1ab68ef historical-repairs 1"
 )
+HISTORICAL_COST_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0013 "
+    "profile historical-analytical-cost-carry-forward "
+    "target wb_core_eu_hosted_runtime_active business-date 2026-08-26 "
+    "nm 428853741 accepted-versions 1 ready-snapshots 1"
+)
+
+
+def _exercise_historical_cost_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=HISTORICAL_COST_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["profile"] == apply.HISTORICAL_COST_GOAL_PROFILE
+    assert goal["max_mutation_submits"] == 1
+    operation = "production-goal-v1-" + "8" * 32
+    evidence_dir = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        + operation
+    )
+    manifest_path = (
+        evidence_dir
+        + "/historical-cost-carry-forward-plan-20260828T120000Z.json"
+    )
+    persistence = {
+        "owner": "production_apply_evidence",
+        "destination": manifest_path,
+        "evidence_dir": evidence_dir,
+        "evidence_dir_mode": "0700",
+        "file_mode": "0600",
+        "parent_mode": "0700",
+        "bounded_size": True,
+        "atomic_publish": True,
+        "no_overwrite": True,
+        "durable_file_fsync": True,
+        "durable_directory_fsync": True,
+        "root_storage_admission": {
+            "owner": "production_apply_evidence",
+            "allowed": True,
+        },
+    }
+    candidate = {
+        "status": "ready",
+        "query_only": True,
+        "database_written": False,
+        "business_date": "2026-08-26",
+        "nm_id": 428853741,
+        "accepted_vitrina_version_count": 1,
+        "updated_ready_snapshot_count": 1,
+        "target_generation_bound": True,
+        "barrier_inactive": True,
+        "timer_change_count": 0,
+        "target_binding": {
+            "validated": True,
+            "target_id": "wb_core_eu_hosted_runtime_active",
+            "deployed_sha": MERGE_SHA,
+        },
+        "manifest_path": manifest_path,
+        "manifest_sha256": "sha256:" + "1" * 64,
+        "material_qualification_digest": "sha256:" + "2" * 64,
+        "source_digest": "sha256:" + "3" * 64,
+        "non_target_digest": "sha256:" + "4" * 64,
+        "other_ready_snapshots_digest": "sha256:" + "5" * 64,
+        "source_business_date": "2026-08-25",
+        "source_unit_cost_rub": "10.25",
+        "after_metrics": {"after_required_values": list(range(1, 13))},
+        "plan_persistence": persistence,
+    }
+    common = {
+        "return_code": 0,
+        "transport_ambiguous": False,
+        "command_sha256": "a" * 64,
+        "stdout_sha256": "b" * 64,
+        "stderr_sha256": "c" * 64,
+    }
+    readback = {
+        "status": "reconciled",
+        "query_only": True,
+        "database_written": False,
+        "submit_count": 1,
+        "business_date": "2026-08-26",
+        "nm_id": 428853741,
+        "accepted_vitrina_version_count": 1,
+        "updated_ready_snapshot_count": 1,
+        "runtime_controls_changed": False,
+        "timer_change_count": 0,
+        "metrics": {"after_required_values": list(range(1, 13))},
+    }
+    sequence = iter(
+        [
+            {**common, "result": candidate},
+            {**common, "result": candidate},
+            {**common, "result": {"status": "submitted", "submit_count": 1}},
+            {**common, "result": readback},
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    apply.command_evidence = lambda *_args, **_kwargs: next(sequence)
+    apply.time.sleep = lambda *_args, **_kwargs: None
+    try:
+        result = apply.run_historical_cost_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture",
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert result["state"] == "done"
+    assert result["apply_count"] == result["submit_count"] == 1
+    assert [item["qualification_state"] for item in result["qualification_attempts"]] == [
+        "matching_witness",
+        "qualified",
+    ]
+
+    blocked_sequence = iter(
+        [
+            {
+                **common,
+                "return_code": 2,
+                "result": {
+                    "status": "blocked",
+                    "code": "cost_changing_event_or_ambiguity",
+                    "message": "intervening receipt blocks carry-forward",
+                    "submit_count": 0,
+                },
+            }
+        ]
+    )
+    apply.command_evidence = lambda *_args, **_kwargs: next(blocked_sequence)
+    try:
+        blocked = apply.run_historical_cost_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture",
+        )
+    finally:
+        apply.command_evidence = original_command
+    assert blocked["state"] == "blocked" and blocked["apply_count"] == 0
+    assert blocked["failure"]["code"] == "cost_changing_event_or_ambiguity"
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -968,6 +1120,7 @@ def main() -> None:
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
     _exercise_wbc0013_two_phase_runner()
+    _exercise_historical_cost_runner()
     goal = apply.validate_authorization(
         authorization(), repository="orenvlad-ai/wb-core", pr=1050
     )

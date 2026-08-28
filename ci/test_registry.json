@@ -98,6 +98,7 @@
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_coverage_smoke.py"],
         ["python3", "apps/our_wb_costs_smoke.py"],
         ["python3", "apps/inventory_cost_blend_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_historical_cost_carry_forward_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_reports_ui_smoke.py"],
         ["python3", "apps/sku_inventory_balance_smoke.py"]
