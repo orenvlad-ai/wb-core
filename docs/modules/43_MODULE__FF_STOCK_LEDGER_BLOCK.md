@@ -850,10 +850,15 @@ movements advance the current balance watermark. A pre-T0 business event is
 routed to explicit reconciliation/forward recovery rather than copying current
 zero into history. The generic repair adapter accepts a reviewed runtime
 v2 manifest containing exact disjoint `historical_exact_zero` and
-`default_applicable_absent_history` partitions, the complete stock-managed
+`no_material_value_history` partitions, the complete stock-managed
 roster and exact existing-row partition; no production identity is compiled
 into the adapter. The second partition requires canonical WB Content lifecycle
-evidence and absence from accepted target-facility history. Qualification scopes mapped order identity to the
+evidence plus exactly 228 accepted `missing / NULL` components across six
+deterministically selected finalizations. Those rows mean
+`no_material_value_history`, not zero; all historical dates remain immutable,
+and any exact/zero/value/WAC/movement/opening/receipt evidence fails closed.
+`TOTAL.nm_id=NULL` is never converted to an SKU identity, and superseded
+same-date captures must retain the identical original-12 digest. Qualification scopes mapped order identity to the
 exact seller warehouse and treats facility-less legacy reservations as an
 effect only when their immutable line sum is non-zero. The plan pins active
 target, StoreRegistry generation, mapping/allocation, target-effect/history and

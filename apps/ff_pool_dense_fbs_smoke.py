@@ -29,6 +29,7 @@ from apps.ff_pool_dense_fbs import (  # noqa: E402
     _write_private,
     run as run_orenburg_cli,
 )
+from apps.wbc0013_fbs_recovery import _discover_dense_manifest  # noqa: E402
 from packages.application.ff_pool_dense_fbs import (  # noqa: E402
     DenseFbsError,
     DenseFbsResumableError,
@@ -56,6 +57,7 @@ from packages.application.ff_pool_foundation import (  # noqa: E402
     FACILITIES_TABLE,
     FACILITY_PROFILES_TABLE,
     FEATURE_EPOCHS_TABLE,
+    OPERATIONS_TABLE,
 )
 from packages.application.ff_pool_surfaces import FfPoolSurface  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
@@ -1210,7 +1212,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         plan = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1222,7 +1224,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         repeated = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1294,17 +1296,30 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert (
             plan["historical_zero_evidence"]["mapping_extension_provenance_count"] == 12
         )
-        assert (
-            plan["default_absent_history_evidence"][
-                "accepted_target_facility_history_count"
-            ]
-            == 0
+        assert len(plan["historical_zero_evidence"]["superseded_finalizations"]) == 1
+        assert all(
+            item["identical_to_latest"]
+            for item in plan["historical_zero_evidence"]["superseded_finalizations"]
         )
-        assert len(plan["default_absent_history_evidence"]["lifecycle_rows"]) == 38
+        assert (
+            plan["no_material_value_history_evidence"][
+                "accepted_missing_component_count"
+            ]
+            == 228
+        )
+        assert len(plan["no_material_value_history_evidence"]["lifecycle_rows"]) == 38
         assert (
             plan["historical_zero_evidence"]["forbidden_next_day_retrocopy_count"] == 0
         )
         with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            discovered = _discover_dense_manifest(conn)
+            assert discovered["partitions"] == {
+                "historical_exact_zero": sorted(ORENBURG_ORIGINAL_TARGET_NM_IDS),
+                "no_material_value_history": sorted(
+                    ORENBURG_WB_CONTENT_TARGET_NM_IDS
+                ),
+            }
             assert (
                 conn.execute(
                     f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBS' "
@@ -1378,7 +1393,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                     "facility_id": ORENBURG_FACILITY_ID,
                     "partitions": {
                         "historical_exact_zero": list(ORENBURG_ORIGINAL_TARGET_NM_IDS),
-                        "default_applicable_absent_history": list(
+                        "no_material_value_history": list(
                             ORENBURG_WB_CONTENT_TARGET_NM_IDS
                         ),
                     },
@@ -1409,7 +1424,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         )
         invalid_manifests.append(duplicate)
         overlap = deepcopy(valid_domain_manifest)
-        overlap["partitions"]["default_applicable_absent_history"].append(
+        overlap["partitions"]["no_material_value_history"].append(
             overlap["partitions"]["historical_exact_zero"][0]
         )
         invalid_manifests.append(overlap)
@@ -1488,7 +1503,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         source_drift = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1517,7 +1532,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         lifecycle_status_drift = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1536,10 +1551,147 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             )
             conn.commit()
 
+        material_nm_id = ORENBURG_WB_CONTENT_TARGET_NM_IDS[0]
+        for case, state, quantity, provenance in (
+            ("exact-zero", "exact_zero", 0, {"source": "accepted_inventory_history"}),
+            ("exact", "exact", 1, {"source": "accepted_inventory_history"}),
+            (
+                "wac",
+                "missing",
+                None,
+                {"source": "accepted_inventory_history", "wac_rub": "1"},
+            ),
+        ):
+            case_db = Path(raw) / f"material-history-{case}.sqlite3"
+            with sqlite3.connect(runtime.db_path) as source_conn, sqlite3.connect(
+                case_db
+            ) as conn:
+                source_conn.backup(conn)
+                capture_id = f"history-orenburg-20260820-{case}"
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_inventory_history_captures(
+                           capture_id,business_date,capture_kind,formula_version,
+                           bundle_version,ready_snapshot_id,ready_plan_version,
+                           generation_identity,facility_roster_revision,
+                           facility_roster_json,source_manifest_json,source_digest,
+                           captured_at)
+                       SELECT ?,business_date,capture_kind,formula_version,
+                              bundle_version,ready_snapshot_id,ready_plan_version,
+                              generation_identity,facility_roster_revision,
+                              facility_roster_json,source_manifest_json,?,captured_at
+                         FROM sheet_vitrina_v1_inventory_history_captures
+                        WHERE capture_id='history-orenburg-20260820'""",
+                    (capture_id, "sha256:" + hashlib.sha256(case.encode()).hexdigest()),
+                )
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_inventory_history_components(
+                           capture_id,scope_kind,scope_key,nm_id,component_kind,
+                           component_id,component_label,state,quantity,source_revision,
+                           source_digest,source_watermark,provenance_json,captured_at)
+                       SELECT ?,scope_kind,scope_key,nm_id,component_kind,component_id,
+                              component_label,
+                              CASE WHEN scope_kind='SKU' AND nm_id=? THEN ? ELSE state END,
+                              CASE WHEN scope_kind='SKU' AND nm_id=? THEN ? ELSE quantity END,
+                              source_revision,source_digest,source_watermark,
+                              CASE WHEN scope_kind='SKU' AND nm_id=? THEN ?
+                                   ELSE provenance_json END,captured_at
+                         FROM sheet_vitrina_v1_inventory_history_components
+                        WHERE capture_id='history-orenburg-20260820'""",
+                    (
+                        capture_id,
+                        material_nm_id,
+                        state,
+                        material_nm_id,
+                        quantity,
+                        material_nm_id,
+                        json.dumps(provenance, sort_keys=True),
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_inventory_history_finalizations(
+                           finalization_id,business_date,capture_id,
+                           finalization_identity,finalization_digest,
+                           supersedes_finalization_digest,finalized_at,provenance_json)
+                       VALUES(?, '2026-08-20', ?, ?, ?,
+                              (SELECT finalization_digest
+                                 FROM sheet_vitrina_v1_inventory_history_finalizations
+                                WHERE business_date='2026-08-20'
+                                ORDER BY finalization_sequence DESC LIMIT 1),
+                              '2026-08-20T18:06:00Z','{}')""",
+                    (
+                        f"final-orenburg-20260820-{case}",
+                        capture_id,
+                        f"accepted-refresh:2026-08-20:{case}",
+                        "sha256:"
+                        + hashlib.sha256((case + "-final").encode()).hexdigest(),
+                    ),
+                )
+                conn.commit()
+            case_service = DenseFbsService(
+                db_path=case_db,
+                runtime_dir=runtime_dir,
+                timestamp_factory=lambda: NOW,
+            )
+            material_history = case_service.build_zero_repair_plan(
+                facility_id=ORENBURG_FACILITY_ID,
+                historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+                no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+                seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+                official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+                expected_roster_nm_ids=roster_nm_ids,
+                expected_existing_nm_ids=non_target_nm_ids,
+                historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+                canonical_target=canonical_target,
+                storage_generation=storage_generation,
+            )
+            assert material_history["apply_allowed"] is False
+            assert material_history["no_material_value_history_evidence"][
+                "invalid_latest_material_rows"
+            ]
+        movement_db = Path(raw) / "material-movement.sqlite3"
+        with sqlite3.connect(runtime.db_path) as source_conn, sqlite3.connect(
+            movement_db
+        ) as conn:
+            source_conn.backup(conn)
+            conn.execute(
+                f"""INSERT INTO {OPERATIONS_TABLE}(
+                       operation_id,operation_type,source_system,source_type,source_id,
+                       source_revision,idempotency_epoch,business_date,posted_at,metadata_json)
+                   VALUES('material-evidence-operation','opening','fixture','fixture',
+                          'material-evidence','v1',1,'2026-08-20',?,'{{}}')""",
+                (NOW,),
+            )
+            conn.execute(
+                f"""INSERT INTO {LINES_TABLE}(
+                       operation_id,line_no,facility_id,pool,nm_id,quantity_delta,
+                       capital_delta_rub,wac_snapshot_rub,metadata_json)
+                   VALUES('material-evidence-operation',1,?,'FBS',?,1,'1','1','{{}}')""",
+                (ORENBURG_FACILITY_ID, material_nm_id),
+            )
+            conn.commit()
+        movement_evidence = DenseFbsService(
+            db_path=movement_db,
+            runtime_dir=runtime_dir,
+            timestamp_factory=lambda: NOW,
+        ).build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            historical_business_date=ORENBURG_HISTORICAL_ZERO_DATE,
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert movement_evidence["apply_allowed"] is False
+        assert movement_evidence["target_effects"]["movement_lines_count"] == 1
+
         wrong_date = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1624,7 +1776,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         post_effect_plan = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-            default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+            no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
             seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
             official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
             expected_roster_nm_ids=roster_nm_ids,
@@ -1701,7 +1853,7 @@ def _assert_orenburg_allocation_drift_blocks() -> None:
             ).build_zero_repair_plan(
                 facility_id=ORENBURG_FACILITY_ID,
                 historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,
-                default_applicable_absent_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
+                no_material_value_history_nm_ids=ORENBURG_WB_CONTENT_TARGET_NM_IDS,
                 seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
                 official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
                 expected_roster_nm_ids=sorted(
@@ -1809,10 +1961,17 @@ def _seed_orenburg_mapping_and_history(
             for nm_id in allocation_nm_ids
         ),
     )
-    for business_date, capture_id, finalization_id in (
-        ("2026-08-24", "history-orenburg-20260824", "final-orenburg-20260824"),
-        ("2026-08-25", "history-orenburg-20260825", "final-orenburg-20260825"),
-    ):
+    accepted_captures = [
+        (f"2026-08-{day:02d}", f"history-orenburg-202608{day:02d}")
+        for day in range(20, 26)
+    ]
+    accepted_captures.insert(
+        4, ("2026-08-24", "history-orenburg-20260824-superseded")
+    )
+    previous_by_date: dict[str, str] = {}
+    for business_date, capture_id in accepted_captures:
+        suffix = capture_id.removeprefix("history-orenburg-")
+        finalization_id = "final-orenburg-" + suffix
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_inventory_history_captures(
                    capture_id,business_date,capture_kind,formula_version,bundle_version,
@@ -1826,53 +1985,96 @@ def _seed_orenburg_mapping_and_history(
                 business_date,
                 json.dumps([ORENBURG_FACILITY_ID]),
                 json.dumps({"accepted": True, "business_date": business_date}),
-                "sha256:" + hashlib.sha256(business_date.encode()).hexdigest(),
+                "sha256:" + hashlib.sha256(capture_id.encode()).hexdigest(),
                 f"{business_date}T18:00:00Z",
             ),
         )
+        supersedes = previous_by_date.get(business_date, "")
+        finalization_digest = "sha256:" + hashlib.sha256(
+            (capture_id + "final").encode()
+        ).hexdigest()
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_inventory_history_finalizations(
                    finalization_id,business_date,capture_id,finalization_identity,
                    finalization_digest,supersedes_finalization_digest,finalized_at,
                    provenance_json
-               ) VALUES(?,?,?,?,?,'',?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?)""",
             (
                 finalization_id,
                 business_date,
                 capture_id,
                 "accepted-refresh:" + business_date,
-                "sha256:"
-                + hashlib.sha256((business_date + "final").encode()).hexdigest(),
+                finalization_digest,
+                supersedes,
                 f"{business_date}T18:05:00Z",
                 json.dumps({"status": "accepted", "source": "ready_plan"}),
             ),
         )
-    conn.executemany(
-        """INSERT INTO sheet_vitrina_v1_inventory_history_components(
-               capture_id,scope_kind,scope_key,nm_id,component_kind,component_id,
-               component_label,state,quantity,source_revision,source_digest,
-               source_watermark,provenance_json,captured_at
-           ) VALUES('history-orenburg-20260824','SKU',?,?,'FBS_FACILITY',?,
-                    'Оренбург','exact_zero',0,'mapping-extension-v1',?,?,?,
-                    '2026-08-24T18:00:00Z')""",
-        (
+        previous_by_date[business_date] = finalization_digest
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_inventory_history_components(
+                   capture_id,scope_kind,scope_key,nm_id,component_kind,component_id,
+                   component_label,state,quantity,source_revision,source_digest,
+                   source_watermark,provenance_json,captured_at
+               ) VALUES(?,'TOTAL','TOTAL',NULL,'FBS_FACILITY',?,'Оренбург',
+                        'missing',NULL,'','','','{}',?)""",
+            (capture_id, ORENBURG_FACILITY_ID, f"{business_date}T18:00:00Z"),
+        )
+        conn.executemany(
+            """INSERT INTO sheet_vitrina_v1_inventory_history_components(
+                   capture_id,scope_kind,scope_key,nm_id,component_kind,component_id,
+                   component_label,state,quantity,source_revision,source_digest,
+                   source_watermark,provenance_json,captured_at
+               ) VALUES(?,'SKU',?,?,'FBS_FACILITY',?,'Оренбург','missing',NULL,
+                        '','','',?,?)""",
             (
-                f"SKU:{nm_id}",
-                nm_id,
-                ORENBURG_FACILITY_ID,
-                "sha256:" + hashlib.sha256(f"history:{nm_id}".encode()).hexdigest(),
-                "mapping-extension-2026-08-24",
-                json.dumps(
-                    {
-                        "source": "fbs_mapping_extension_allocation",
-                        "extension_id": extension_id,
-                        "historical_only": True,
-                    }
+                (
+                    capture_id,
+                    f"SKU:{nm_id}",
+                    nm_id,
+                    ORENBURG_FACILITY_ID,
+                    json.dumps(
+                        {
+                            "source": "accepted_inventory_history",
+                            "semantic": "no_material_value_history",
+                        },
+                        sort_keys=True,
+                    ),
+                    f"{business_date}T18:00:00Z",
+                )
+                for nm_id in ORENBURG_WB_CONTENT_TARGET_NM_IDS
+            ),
+        )
+        if business_date == ORENBURG_HISTORICAL_ZERO_DATE:
+            conn.executemany(
+                """INSERT INTO sheet_vitrina_v1_inventory_history_components(
+                       capture_id,scope_kind,scope_key,nm_id,component_kind,component_id,
+                       component_label,state,quantity,source_revision,source_digest,
+                       source_watermark,provenance_json,captured_at
+                   ) VALUES(?,'SKU',?,?,'FBS_FACILITY',?,'Оренбург','exact_zero',0,
+                            'mapping-extension-v1',?,?,?,?)""",
+                (
+                    (
+                        capture_id,
+                        f"SKU:{nm_id}",
+                        nm_id,
+                        ORENBURG_FACILITY_ID,
+                        "sha256:"
+                        + hashlib.sha256(f"history:{nm_id}".encode()).hexdigest(),
+                        "mapping-extension-2026-08-24",
+                        json.dumps(
+                            {
+                                "source": "fbs_mapping_extension_allocation",
+                                "extension_id": extension_id,
+                                "historical_only": True,
+                            },
+                            sort_keys=True,
+                        ),
+                        f"{business_date}T18:00:00Z",
+                    )
+                    for nm_id in ORENBURG_ORIGINAL_TARGET_NM_IDS
                 ),
             )
-            for nm_id in ORENBURG_ORIGINAL_TARGET_NM_IDS
-        ),
-    )
 
 
 def _mapping_allocation_digest(*, extension_id: str, nm_id: int, position: int) -> str:

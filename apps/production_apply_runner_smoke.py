@@ -85,7 +85,7 @@ def _exercise_wbc0013_two_phase_runner() -> None:
                     "roster_count": 71,
                     "existing_count": 21,
                     "historical_zero_count": 12,
-                    "absent_history_count": 38,
+                    "no_material_value_history_count": 38,
                     "zero_insert_count": 50,
                 }
             )
@@ -93,6 +93,8 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             payload.update(
                 {
                     "historical_repair_count": 1,
+                    "fresh_mismatch_count": 7,
+                    "mismatch_classification_digest": "sha256:" + "8" * 64,
                     "current_active_preserved": True,
                     "current_sync_preserved": True,
                     "current_pool_preserved": True,
@@ -129,6 +131,7 @@ def _exercise_wbc0013_two_phase_runner() -> None:
         phase="plan-a",
     )
     assert "apply-a" not in plan_command[-1]
+    assert "export PYTHONPATH=/opt/wb-core-runtime/app" in plan_command[-1]
     try:
         apply._wbc0013_remote_command(
             target={
@@ -205,6 +208,42 @@ def _exercise_wbc0013_two_phase_runner() -> None:
     assert [
         item["qualification_state"] for item in result["qualification_attempts"]["b"]
     ] == ["matching_witness", "qualified"]
+
+    typed_error = {
+        **common,
+        "return_code": 2,
+        "result": {
+            "status": "error",
+            "phase": "a",
+            "stage": "qualification",
+            "code": "dense_qualification_blocked",
+            "message": "fixture qualification blocked",
+            "details_digest": "sha256:" + "9" * 64,
+        },
+    }
+    sequence = iter([typed_error])
+    apply.command_evidence = lambda *_args, **_kwargs: next(sequence)
+    try:
+        blocked = apply.run_wbc0013_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture",
+        )
+    finally:
+        apply.command_evidence = original_command
+    assert blocked["state"] == "blocked" and blocked["apply_count"] == 0
+    assert blocked["failure"] == {
+        "phase": "a",
+        "stage": "qualification",
+        "code": "dense_qualification_blocked",
+        "message": "fixture qualification blocked",
+        "details_digest": "sha256:" + "9" * 64,
+    }
 
 
 def authorization(**updates: object) -> dict[str, object]:

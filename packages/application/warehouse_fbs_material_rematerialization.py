@@ -2586,19 +2586,22 @@ def _historical_event_aggregate(
             "historical_target_balance_missing",
             "Accepted historical version lacks the exact FF target row",
         )
-    quantity = Decimal(str(row["quantity"]))
-    capital = Decimal(str(row["capital_rub"]))
-    covered = Decimal(str(row["cost_covered_quantity"]))
-    quantity_delta = Decimal(str(event["physical_quantity_delta"]))
-    capital_delta = Decimal(str(event["capital_delta_rub"]))
-    frozen_wac = Decimal(str(event["frozen_wac_rub"]))
+    with localcontext() as arithmetic:
+        arithmetic.prec = 38
+        quantity = +Decimal(str(row["quantity"]))
+        capital = +Decimal(str(row["capital_rub"]))
+        covered = +Decimal(str(row["cost_covered_quantity"]))
+        quantity_delta = +Decimal(str(event["physical_quantity_delta"]))
+        capital_delta = +Decimal(str(event["capital_delta_rub"]))
+        frozen_wac = +Decimal(str(event["frozen_wac_rub"]))
+        event_capital = +(quantity_delta * frozen_wac)
     if (
         quantity <= ZERO
         or quantity != quantity.to_integral_value()
         or capital <= ZERO
         or quantity_delta >= ZERO
         or capital_delta >= ZERO
-        or capital_delta != quantity_delta * frozen_wac
+        or capital_delta != event_capital
     ):
         raise WarehouseFbsMaterialError(
             "historical_event_arithmetic_invalid",
@@ -2633,34 +2636,41 @@ def _historical_event_aggregate(
         if len(target_positions) != 1 or not locations:
             continue
         try:
-            prior_quantity = sum(
-                (
-                    Decimal(str(location.get("quantity") or "0"))
-                    for location in locations
-                ),
-                ZERO,
-            )
-            prior_capital = sum(
-                (
-                    Decimal(str(location.get("capital_rub") or "0"))
-                    for location in locations
-                ),
-                ZERO,
-            )
-            target_position = target_positions[0]
-            target_prior_quantity = Decimal(
-                str(locations[target_position].get("quantity") or "0")
-            )
-            target_prior_capital = Decimal(
-                str(locations[target_position].get("capital_rub") or "0")
-            )
+            with localcontext() as arithmetic:
+                arithmetic.prec = 38
+                prior_quantity = sum(
+                    (
+                        Decimal(str(location.get("quantity") or "0"))
+                        for location in locations
+                    ),
+                    ZERO,
+                )
+                prior_capital = sum(
+                    (
+                        Decimal(str(location.get("capital_rub") or "0"))
+                        for location in locations
+                    ),
+                    ZERO,
+                )
+                target_position = target_positions[0]
+                target_prior_quantity = Decimal(
+                    str(locations[target_position].get("quantity") or "0")
+                )
+                target_prior_capital = Decimal(
+                    str(locations[target_position].get("capital_rub") or "0")
+                )
+                target_after_quantity = target_prior_quantity + quantity_delta
+                target_after_capital = target_prior_capital + capital_delta
         except (InvalidOperation, TypeError, ValueError):
             continue
-        target_after_quantity = target_prior_quantity + quantity_delta
-        target_after_capital = target_prior_capital + capital_delta
+        with localcontext() as arithmetic:
+            arithmetic.prec = 38
+            exact_prior_match = bool(
+                prior_quantity + quantity_delta == quantity
+                and prior_capital + capital_delta == capital
+            )
         if (
-            prior_quantity + quantity_delta != quantity
-            or prior_capital + capital_delta != capital
+            not exact_prior_match
             or target_after_quantity < ZERO
             or target_after_capital < ZERO
         ):

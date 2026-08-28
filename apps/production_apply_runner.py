@@ -847,7 +847,7 @@ def validate_authorization(
             "expected_roster_count": int(raw["roster"]),
             "expected_existing_count": int(raw["existing"]),
             "expected_historical_zero_count": int(raw["historical"]),
-            "expected_absent_history_count": int(raw["absent"]),
+            "expected_no_material_value_history_count": int(raw["absent"]),
             "expected_zero_insert_count": int(raw["zero_inserts"]),
             "expected_historical_repair_count": int(raw["historical_repairs"]),
             "max_a_submits": 1,
@@ -860,15 +860,15 @@ def validate_authorization(
             goal["expected_roster_count"] != 71
             or goal["expected_existing_count"] != 21
             or goal["expected_historical_zero_count"] != 12
-            or goal["expected_absent_history_count"] != 38
+            or goal["expected_no_material_value_history_count"] != 38
             or goal["expected_zero_insert_count"] != 50
             or goal["expected_historical_repair_count"] != 1
             or goal["expected_existing_count"]
             + goal["expected_historical_zero_count"]
-            + goal["expected_absent_history_count"]
+            + goal["expected_no_material_value_history_count"]
             != goal["expected_roster_count"]
         ):
-            raise ApplyError("WBC0013 authorization scope is not exact SSS009")
+            raise ApplyError("WBC0013 authorization scope is not exact SSS011")
         return goal
     if raw["profile"] != GOAL_PROFILE:
         raise ApplyError("task authorization profile is unsupported")
@@ -1576,6 +1576,8 @@ def _wbc0013_remote_command(
         + setup
         + "; cd "
         + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
         + "; "
         + " ".join(shlex.quote(part) for part in parts)
     )
@@ -1606,7 +1608,9 @@ def _validate_wbc0013_candidate(
             "roster_count": goal["expected_roster_count"],
             "existing_count": goal["expected_existing_count"],
             "historical_zero_count": goal["expected_historical_zero_count"],
-            "absent_history_count": goal["expected_absent_history_count"],
+            "no_material_value_history_count": goal[
+                "expected_no_material_value_history_count"
+            ],
             "zero_insert_count": goal["expected_zero_insert_count"],
         }
         if phase == "a"
@@ -1621,6 +1625,16 @@ def _validate_wbc0013_candidate(
     for field, value in expected.items():
         if payload.get(field) != value:
             raise ApplyError(f"WBC0013 {phase} qualification escaped goal: {field}")
+    if phase == "b" and (
+        not isinstance(payload.get("fresh_mismatch_count"), int)
+        or int(payload["fresh_mismatch_count"]) <= 0
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(payload.get("mismatch_classification_digest") or ""),
+        )
+        is None
+    ):
+        raise ApplyError("WBC0013 B fresh mismatch classification is invalid")
     for field in ("manifest_sha256", "material_qualification_digest"):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
             raise ApplyError(
@@ -1636,6 +1650,51 @@ def _validate_wbc0013_candidate(
         is None
     ):
         raise ApplyError(f"WBC0013 {phase} private manifest path is invalid")
+
+
+def _wbc0013_typed_failure(
+    evidence: Mapping[str, Any], *, phase: str, stage: str
+) -> dict[str, Any]:
+    payload = evidence.get("result")
+    if isinstance(payload, Mapping) and payload.get("status") == "error":
+        candidate = {
+            "phase": str(payload.get("phase") or ""),
+            "stage": str(payload.get("stage") or ""),
+            "code": str(payload.get("code") or ""),
+            "message": str(payload.get("message") or ""),
+            "details_digest": str(payload.get("details_digest") or ""),
+        }
+        if (
+            candidate["phase"] == phase
+            and candidate["stage"] == stage
+            and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,120}", candidate["code"])
+            and 0 < len(candidate["message"]) <= 500
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", candidate["details_digest"]
+            )
+        ):
+            return candidate
+    transport = bool(evidence.get("transport_ambiguous"))
+    return {
+        "phase": phase,
+        "stage": stage,
+        "code": (
+            "transport_ambiguous" if transport else "typed_failure_payload_invalid"
+        ),
+        "message": (
+            "command transport outcome is ambiguous"
+            if transport
+            else "command failed without one valid typed failure payload"
+        ),
+        "details_digest": payload_digest(
+            {
+                "return_code": evidence.get("return_code"),
+                "transport_ambiguous": transport,
+                "stdout_sha256": evidence.get("stdout_sha256"),
+                "stderr_sha256": evidence.get("stderr_sha256"),
+            }
+        ),
+    }
 
 
 def run_wbc0013_goal(
@@ -1667,9 +1726,36 @@ def run_wbc0013_goal(
             )
             payload = evidence.get("result")
             if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
-                qualification[phase].append({**evidence, "attempt": attempt})
+                qualification[phase].append(
+                    {
+                        **evidence,
+                        "attempt": attempt,
+                        "typed_failure": _wbc0013_typed_failure(
+                            evidence, phase=phase, stage="qualification"
+                        ),
+                    }
+                )
                 return None
-            _validate_wbc0013_candidate(payload, goal, phase=phase, merge_sha=merge_sha)
+            try:
+                _validate_wbc0013_candidate(
+                    payload, goal, phase=phase, merge_sha=merge_sha
+                )
+            except ApplyError as exc:
+                typed_failure = {
+                    "phase": phase,
+                    "stage": "qualification",
+                    "code": "qualification_candidate_invalid",
+                    "message": str(exc)[:500],
+                    "details_digest": payload_digest(payload),
+                }
+                qualification[phase].append(
+                    {
+                        **evidence,
+                        "attempt": attempt,
+                        "typed_failure": typed_failure,
+                    }
+                )
+                return None
             current = str(payload["material_qualification_digest"])
             qualification[phase].append(
                 {
@@ -1680,6 +1766,16 @@ def run_wbc0013_goal(
                     "manifest_path": payload["manifest_path"],
                     "manifest_sha256": payload["manifest_sha256"],
                     "material_qualification_digest": current,
+                    **(
+                        {
+                            "fresh_mismatch_count": payload["fresh_mismatch_count"],
+                            "mismatch_classification_digest": payload[
+                                "mismatch_classification_digest"
+                            ],
+                        }
+                        if phase == "b"
+                        else {}
+                    ),
                 }
             )
             if current == previous:
@@ -1699,11 +1795,13 @@ def run_wbc0013_goal(
 
     a_candidate = qualify("a")
     if a_candidate is None:
+        failure = qualification["a"][-1].get("typed_failure")
         return {
             "state": "blocked",
             "reason": "wbc0013-a-material-cas-not-qualified",
             "apply_count": 0,
             "qualification_attempts": qualification,
+            "failure": failure,
         }
     a_apply = command_evidence(
         _wbc0013_remote_command(
@@ -1736,6 +1834,28 @@ def run_wbc0013_goal(
         and a_result.get("document_count") == 1
         and a_result.get("non_target_preserved") is True
     ):
+        failure_evidence = (
+            a_apply
+            if a_apply.get("return_code") != 0
+            else a_readback
+            if a_readback.get("return_code") != 0
+            else None
+        )
+        failure = (
+            _wbc0013_typed_failure(
+                failure_evidence,
+                phase="a",
+                stage=("submit" if failure_evidence is a_apply else "readback"),
+            )
+            if failure_evidence is not None
+            else {
+                "phase": "a",
+                "stage": "readback",
+                "code": "readback_not_reconciled",
+                "message": "query-only A readback did not prove exact reconciliation",
+                "details_digest": payload_digest(a_result),
+            }
+        )
         return {
             "state": "blocked",
             "reason": "wbc0013-a-query-only-readback-not-reconciled",
@@ -1743,9 +1863,11 @@ def run_wbc0013_goal(
             "qualification_attempts": qualification,
             "a_apply": a_apply,
             "a_readback": a_readback,
+            "failure": failure,
         }
     b_candidate = qualify("b")
     if b_candidate is None:
+        failure = qualification["b"][-1].get("typed_failure")
         return {
             "state": "blocked",
             "reason": "wbc0013-b-material-cas-not-qualified",
@@ -1753,6 +1875,7 @@ def run_wbc0013_goal(
             "qualification_attempts": qualification,
             "a_apply": a_apply,
             "a_readback": a_readback,
+            "failure": failure,
         }
     b_apply = command_evidence(
         _wbc0013_remote_command(
@@ -1789,7 +1912,7 @@ def run_wbc0013_goal(
         and b_result.get("ready_target_total_closed") is True
         and b_result.get("non_target_preserved") is True
     )
-    return {
+    result = {
         "state": "done" if reconciled else "blocked",
         "reason": (
             "reconciled"
@@ -1805,6 +1928,30 @@ def run_wbc0013_goal(
         "b_apply": b_apply,
         "b_readback": b_readback,
     }
+    if not reconciled:
+        failure_evidence = (
+            b_apply
+            if b_apply.get("return_code") != 0
+            else b_readback
+            if b_readback.get("return_code") != 0
+            else None
+        )
+        result["failure"] = (
+            _wbc0013_typed_failure(
+                failure_evidence,
+                phase="b",
+                stage=("submit" if failure_evidence is b_apply else "readback"),
+            )
+            if failure_evidence is not None
+            else {
+                "phase": "b",
+                "stage": "readback",
+                "code": "readback_not_reconciled",
+                "message": "query-only B readback did not prove exact reconciliation",
+                "details_digest": payload_digest(b_result),
+            }
+        )
+    return result
 
 
 def run_dynamic_goal(

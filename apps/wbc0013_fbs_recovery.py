@@ -46,9 +46,15 @@ from packages.application.warehouse_fbs_material_rematerialization import (  # n
 EXPECTED_ROSTER = 71
 EXPECTED_EXISTING = 21
 EXPECTED_HISTORICAL = 12
-EXPECTED_ABSENT = 38
+EXPECTED_NO_MATERIAL_HISTORY = 38
 EXPECTED_INSERTS = 50
-EXPECTED_HISTORICAL_REPAIRS = 1
+
+
+class Wbc0013CliError(RuntimeError):
+    def __init__(self, code: str, message: str, *, details: Any = None) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.details = details
 
 
 def _sha_file(path: Path) -> str:
@@ -198,36 +204,53 @@ def _discover_dense_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
             or sorted((*existing, *targets)) != roster
         ):
             continue
+        latest_by_date: dict[str, sqlite3.Row] = {}
+        for row in conn.execute(
+            "SELECT finalization_sequence,finalization_id,business_date,capture_id "
+            "FROM sheet_vitrina_v1_inventory_history_finalizations "
+            "ORDER BY business_date,finalization_sequence DESC,finalization_id DESC"
+        ).fetchall():
+            latest_by_date.setdefault(str(row[2]), row)
         historical_by_date: list[tuple[str, list[int]]] = []
-        rows = conn.execute(
-            "SELECT finalization.business_date,component.nm_id,component.state,"
-            "component.quantity,component.provenance_json "
-            "FROM sheet_vitrina_v1_inventory_history_finalizations finalization "
-            "JOIN sheet_vitrina_v1_inventory_history_components component "
-            "ON component.capture_id=finalization.capture_id "
-            "WHERE component.component_kind='FBS_FACILITY' "
-            "AND component.component_id=? ORDER BY finalization.business_date,component.nm_id",
-            (facility_id,),
-        ).fetchall()
-        for business_date in sorted({str(row[0]) for row in rows}):
+        for business_date, finalization in sorted(latest_by_date.items()):
+            components = conn.execute(
+                "SELECT nm_id,state,quantity,provenance_json "
+                "FROM sheet_vitrina_v1_inventory_history_components "
+                "WHERE capture_id=? AND scope_kind='SKU' AND nm_id IS NOT NULL "
+                "AND component_kind='FBS_FACILITY' AND component_id=? "
+                "ORDER BY nm_id",
+                (str(finalization[3]), facility_id),
+            ).fetchall()
+            by_nm: dict[int, sqlite3.Row] = {}
+            duplicate = False
+            for component in components:
+                nm_id = int(component[0])
+                if nm_id in by_nm:
+                    duplicate = True
+                    break
+                by_nm[nm_id] = component
+            if duplicate:
+                continue
             exact = []
-            for row in rows:
-                if str(row[0]) != business_date or int(row[1]) not in targets:
+            for nm_id in targets:
+                component = by_nm.get(nm_id)
+                if component is None:
                     continue
-                provenance = json.loads(str(row[4] or "{}"))
+                provenance = json.loads(str(component[3] or "{}"))
                 if (
-                    str(row[2]) == "exact_zero"
-                    and int(row[3]) == 0
-                    and provenance.get("source") == "fbs_mapping_extension_allocation"
+                    str(component[1]) == "exact_zero"
+                    and int(component[2]) == 0
+                    and provenance.get("source")
+                    == "fbs_mapping_extension_allocation"
                 ):
-                    exact.append(int(row[1]))
+                    exact.append(nm_id)
             if len(exact) == EXPECTED_HISTORICAL:
                 historical_by_date.append((business_date, sorted(exact)))
         if len(historical_by_date) != 1:
             continue
         historical_date, historical = historical_by_date[0]
         absent = sorted(set(targets) - set(historical))
-        if len(absent) != EXPECTED_ABSENT:
+        if len(absent) != EXPECTED_NO_MATERIAL_HISTORY:
             continue
         candidates.append(
             {
@@ -238,7 +261,7 @@ def _discover_dense_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
                 "historical_business_date": historical_date,
                 "partitions": {
                     "historical_exact_zero": historical,
-                    "default_applicable_absent_history": absent,
+                    "no_material_value_history": absent,
                 },
                 "expected_roster_nm_ids": roster,
                 "expected_existing_nm_ids": existing,
@@ -262,8 +285,8 @@ def _dense_plan(context: Mapping[str, Any]) -> dict[str, Any]:
     ).build_zero_repair_plan(
         facility_id=str(manifest["facility_id"]),
         historical_exact_zero_nm_ids=partitions["historical_exact_zero"],
-        default_applicable_absent_history_nm_ids=partitions[
-            "default_applicable_absent_history"
+        no_material_value_history_nm_ids=partitions[
+            "no_material_value_history"
         ],
         seller_warehouse_id=int(manifest["seller_warehouse_id"]),
         official_office_id=int(manifest["official_office_id"]),
@@ -292,7 +315,7 @@ def _discover_historical_manifests(
     *,
     canonical_target: Mapping[str, Any],
     storage_generation: Mapping[str, Any],
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     active = conn.execute(
         "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
     ).fetchone()
@@ -300,11 +323,12 @@ def _discover_historical_manifests(
         "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1"
     ).fetchone()
     if active is None or sync is None or str(active[0]) != str(sync[0]):
-        return []
+        return {"mismatches": [], "manifests": []}
     epoch = conn.execute(
         "SELECT epoch FROM sheet_vitrina_v1_ff_pool_feature_epochs ORDER BY epoch DESC LIMIT 1"
     ).fetchone()
     candidates: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
     rows = conn.execute(
         "SELECT version.*,balance.nm_id,balance.quantity,balance.wac_rub,"
         "balance.capital_rub,balance.cost_covered_quantity,balance.provenance_json "
@@ -318,12 +342,59 @@ def _discover_historical_manifests(
     for joined in rows:
         version_id = str(joined["version_id"])
         nm_id = int(joined["nm_id"])
+        target_provenance = json.loads(str(joined["provenance_json"] or "{}"))
+        causal_facilities = sorted(
+            {
+                str(location.get("facility_id") or "")
+                for record in target_provenance.get("source_records") or []
+                if isinstance(record, Mapping)
+                for location in record.get("locations") or []
+                if isinstance(location, Mapping)
+                and str(location.get("pool") or "").upper() == "FBS"
+                and str(location.get("facility_id") or "")
+            }
+        )
+        published_at = str(joined["published_at"])
+        next_version = conn.execute(
+            "SELECT published_at FROM sheet_vitrina_v1_warehouse_functional_versions "
+            "WHERE status='good' AND published_at>? "
+            "ORDER BY published_at,version_id LIMIT 1",
+            (published_at,),
+        ).fetchone()
+        interval_end = str(next_version[0]) if next_version is not None else ""
+        mismatch = {
+            "version_id": version_id,
+            "nm_id": nm_id,
+            "quantity": str(joined["quantity"]),
+            "cost_covered_quantity": str(joined["cost_covered_quantity"]),
+            "published_at_exclusive": published_at,
+            "next_published_at_exclusive": interval_end,
+            "causal_facilities": causal_facilities,
+        }
+        mismatches.append(mismatch)
+        if not causal_facilities:
+            mismatch["classification"] = "rejected_no_exact_fbs_location"
+            continue
+        placeholders = ",".join("?" for _ in causal_facilities)
+        interval_clause = "AND occurred_at<?" if interval_end else ""
+        event_parameters: list[Any] = [nm_id, *causal_facilities, published_at]
+        if interval_end:
+            event_parameters.append(interval_end)
         events = conn.execute(
             "SELECT event_id FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
-            "WHERE nm_id=? AND event_type='handoff_debit' "
-            "AND physical_quantity_delta<0 AND capital_delta_rub<0 ORDER BY occurred_at",
-            (nm_id,),
+            f"WHERE nm_id=? AND facility_id IN ({placeholders}) AND pool='FBS' "
+            "AND event_type='handoff_debit' AND physical_quantity_delta<0 "
+            "AND capital_delta_rub<0 AND occurred_at>? "
+            f"{interval_clause} ORDER BY occurred_at,event_id",
+            tuple(event_parameters),
         ).fetchall()
+        mismatch["causal_event_count"] = len(events)
+        mismatch["causal_event_ids_digest"] = _fingerprint(
+            [str(item[0]) for item in events]
+        )
+        mismatch["classification"] = (
+            "candidate" if events else "rejected_no_event_in_causal_interval"
+        )
         source = conn.execute(
             "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?",
             (version_id,),
@@ -356,9 +427,7 @@ def _discover_historical_manifests(
                     "accepted_version_plan_digest": str(source["plan_fingerprint"]),
                     "accepted_version_row_digest": _fingerprint(dict(source)),
                     "accepted_target_row_digest": _fingerprint(dict(target)),
-                    "accepted_provenance_digest": _fingerprint(
-                        json.loads(str(target["provenance_json"] or "{}"))
-                    ),
+                    "accepted_provenance_digest": _fingerprint(target_provenance),
                     "accepted_effective_at": str(source["effective_at"]),
                     "accepted_published_at": str(source["published_at"]),
                     "expected_current_active_version_id": str(active[0]),
@@ -382,10 +451,12 @@ def _discover_historical_manifests(
                     "storage_generation": dict(storage_generation),
                 }
             )
-    return candidates
+    return {"mismatches": mismatches, "manifests": candidates}
 
 
-def _historical_plan(context: Mapping[str, Any]) -> dict[str, Any]:
+def _historical_plan(
+    context: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     service = WarehouseFbsMaterialRematerializer(
         runtime=context["runtime"],
         timestamp_factory=lambda: (
@@ -403,22 +474,38 @@ def _historical_plan(context: Mapping[str, Any]) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         if not bool(int(conn.execute("PRAGMA query_only").fetchone()[0])):
             raise ValueError("WBC0013 historical dependency session is not query-only")
-        manifests = _discover_historical_manifests(
+        discovery = _discover_historical_manifests(
             conn,
             canonical_target=context["canonical_target"],
             storage_generation=context["storage_generation"],
         )
-        repairable = [
-            plan
-            for plan in (
-                service.build_historical_plan(manifest, dependency_conn=conn)
-                for manifest in manifests
-            )
-            if plan.get("status") == REPAIRABLE
+        classified = [
+            service.build_historical_plan(manifest, dependency_conn=conn)
+            for manifest in discovery["manifests"]
         ]
-    if len(repairable) != EXPECTED_HISTORICAL_REPAIRS:
-        raise ValueError("WBC0013 historical target discovery is missing or ambiguous")
-    return repairable[0]
+        repairable = [plan for plan in classified if plan.get("status") == REPAIRABLE]
+    qualification = {
+        "fresh_mismatch_count": len(discovery["mismatches"]),
+        "fresh_mismatch_digest": _fingerprint(discovery["mismatches"]),
+        "candidate_manifest_count": len(discovery["manifests"]),
+        "candidate_classifications": [
+            {
+                "status": str(plan.get("status") or ""),
+                "reason": str(plan.get("reason") or ""),
+                "source_version_id": str(plan.get("source_version_id") or ""),
+                "nm_ids": list(plan.get("nm_ids") or []),
+            }
+            for plan in classified
+        ],
+    }
+    qualification["fingerprint"] = _fingerprint(qualification)
+    if len(repairable) != 1:
+        raise Wbc0013CliError(
+            "historical_target_missing_or_ambiguous",
+            "WBC0013 historical target discovery is missing or ambiguous",
+            details=qualification,
+        )
+    return repairable[0], qualification
 
 
 def _latest_plan(evidence_dir: Path, phase: str) -> tuple[Path, dict[str, Any]]:
@@ -448,7 +535,11 @@ def run(args: argparse.Namespace) -> int:
     if phase == "plan-a":
         plan = _dense_plan(context)
         if not plan.get("apply_allowed"):
-            raise ValueError("WBC0013 dense A qualification is blocked")
+            raise Wbc0013CliError(
+                "dense_qualification_blocked",
+                "WBC0013 dense A qualification is blocked",
+                details={"blockers": list(plan.get("blockers") or [])},
+            )
         output = _write_plan(context, "a", plan)
         payload = {
             "status": "ready",
@@ -468,8 +559,8 @@ def run(args: argparse.Namespace) -> int:
                 plan["non_targets"]["target_facility_existing_fbs_nm_ids"]
             ),
             "historical_zero_count": len(plan["partitions"]["historical_exact_zero"]),
-            "absent_history_count": len(
-                plan["partitions"]["default_applicable_absent_history"]
+            "no_material_value_history_count": len(
+                plan["partitions"]["no_material_value_history"]
             ),
             "zero_insert_count": plan["expected_effects"]["balance_insert_count"],
         }
@@ -518,7 +609,7 @@ def run(args: argparse.Namespace) -> int:
             "readback": readback,
         }
     elif phase == "plan-b":
-        plan = _historical_plan(context)
+        plan, qualification = _historical_plan(context)
         output = _write_plan(context, "b", plan)
         preservation = plan["typed_evidence"]["current_preservation"]
         payload = {
@@ -537,6 +628,7 @@ def run(args: argparse.Namespace) -> int:
                     "ready_before_digest": plan["ready_before_digest"],
                     "ready_after_digest": plan["ready_after_digest"],
                     "historical_manifest": plan["historical_manifest"],
+                    "mismatch_classification_digest": qualification["fingerprint"],
                 }
             ),
             "file_mode": "0600",
@@ -544,6 +636,8 @@ def run(args: argparse.Namespace) -> int:
             "target_generation_bound": True,
             "timer_change_count": 0,
             "historical_repair_count": 1,
+            "fresh_mismatch_count": qualification["fresh_mismatch_count"],
+            "mismatch_classification_digest": qualification["fingerprint"],
             "current_active_preserved": bool(preservation["active_version_id"]),
             "current_sync_preserved": bool(preservation["sync_version_id"]),
             "current_pool_preserved": bool(preservation["pool_rows_digest"]),
@@ -619,10 +713,43 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--manifest-sha256", default="")
     parser.add_argument("--approval-reference", default="")
+    args = parser.parse_args()
     try:
-        return run(parser.parse_args())
+        return run(args)
     except (OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
-        print(json.dumps({"status": "error", "error": str(exc)}), file=sys.stderr)
+        raw_phase = str(args.phase)
+        phase = "a" if raw_phase.endswith("-a") else "b"
+        stage = (
+            "qualification"
+            if raw_phase.startswith("plan-")
+            else "submit"
+            if raw_phase.startswith("apply-")
+            else "readback"
+        )
+        code = str(
+            getattr(exc, "code", "")
+            or f"wbc0013_{phase}_{stage}_{type(exc).__name__.lower()}"
+        )[:120]
+        message = str(exc).replace("\n", " ")[:500]
+        details = getattr(exc, "details", None)
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "phase": phase,
+                    "stage": stage,
+                    "code": code,
+                    "message": message,
+                    "details_digest": _fingerprint(
+                        details
+                        if details is not None
+                        else {"exception_type": type(exc).__name__, "message": message}
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
         return 2
 
 

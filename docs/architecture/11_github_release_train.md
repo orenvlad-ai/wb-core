@@ -252,13 +252,19 @@ WBC0013 имеет отдельный exact двухфазный profile:
 /wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery target wb_core_eu_hosted_runtime_active roster 71 existing 21 historical-zero 12 absent-history 38 zero-inserts 50 historical-repairs 1
 ```
 
-Он принимает только равенство `71 = 21 + (12 + 38)`, создаёт private-0600 JIT
+Он принимает только равенство `71 = 21 + (12 + 38)`, где 38 означает
+`no_material_value_history` и связывает 228 принятых `missing`, а не
+исторические нули. Profile создаёт private-0600 JIT
 планы и требует два consecutive одинаковых material witness для A и B, максимум
 с тремя регенерациями до submit. Runner делает ровно один A submit, только
 query-only A reconciliation, затем fresh B plan, ровно один B submit и
 query-only B reconciliation. Потерянный ответ ведёт к same-operation readback,
 а не к повторному submit. Profile default-off, deploy его не вызывает; обычные
 service/timer не останавливаются и не меняются.
+Remote command закрепляет deployed path, явный `PYTHONPATH`, target/generation
+и mode-0700 evidence directory. Любой terminal failure сохраняется в receipt
+как bounded typed `phase/stage/code/message/details_digest`; stderr digest не
+заменяет доменную причину.
 
 WBC0008 profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
 caller-known detached sanitation job. После submit разрешён только query-only
