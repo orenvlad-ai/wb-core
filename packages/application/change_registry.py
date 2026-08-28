@@ -36,6 +36,11 @@ IDENTITY_INCIDENTS_TABLE = "change_registry_identity_incidents"
 ANNOTATION_REVISIONS_TABLE = "change_registry_annotation_revisions"
 MANUAL_PENDING_EVENTS_TABLE = "change_registry_manual_pending_events"
 MANUAL_PENDING_CURRENT_TABLE = "change_registry_manual_pending_current"
+CHECKPOINT_SOURCE_MANIFESTS_TABLE = "change_registry_checkpoint_source_manifests"
+OBSERVER_JOBS_TABLE = "change_registry_observer_jobs"
+OBSERVER_JOB_EVENTS_TABLE = "change_registry_observer_job_events"
+OBSERVER_HEALTH_EVENTS_TABLE = "change_registry_observer_health_events"
+OBSERVER_LEASES_TABLE = "change_registry_observer_leases"
 
 IMMUTABLE_TABLES = (
     OPERATIONS_TABLE,
@@ -48,6 +53,10 @@ IMMUTABLE_TABLES = (
     IDENTITY_INCIDENTS_TABLE,
     ANNOTATION_REVISIONS_TABLE,
     MANUAL_PENDING_EVENTS_TABLE,
+    CHECKPOINT_SOURCE_MANIFESTS_TABLE,
+    OBSERVER_JOBS_TABLE,
+    OBSERVER_JOB_EVENTS_TABLE,
+    OBSERVER_HEALTH_EVENTS_TABLE,
 )
 
 TARGET_KINDS = frozenset({"price", "bid", "campaign"})
@@ -611,6 +620,122 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             subject_kind,subject_id,revision_no,annotation_revision_id
         );
 
+        CREATE TABLE IF NOT EXISTS {CHECKPOINT_SOURCE_MANIFESTS_TABLE}(
+            source_manifest_id TEXT PRIMARY KEY,
+            checkpoint_id TEXT NOT NULL REFERENCES {CHECKPOINTS_TABLE}(checkpoint_id),
+            source_name TEXT NOT NULL CHECK(source_name IN ('prices','ads')),
+            completeness_status TEXT NOT NULL
+                CHECK(completeness_status IN ('complete','partial','failed')),
+            expected_count INTEGER NOT NULL CHECK(
+                typeof(expected_count)='integer' AND expected_count>=0
+            ),
+            observed_count INTEGER NOT NULL CHECK(
+                typeof(observed_count)='integer' AND observed_count>=0
+                AND observed_count<=expected_count
+            ),
+            summary_json TEXT NOT NULL CHECK(
+                json_valid(summary_json) AND json_type(summary_json)='object'
+                AND length(summary_json)<=4000
+            ),
+            evidence_digest TEXT NOT NULL CHECK({_digest_check('evidence_digest')}),
+            created_at TEXT NOT NULL
+                CHECK(substr(created_at,-1,1)='Z' AND julianday(created_at) IS NOT NULL),
+            CHECK({_identity_text_check('source_manifest_id', 120)}),
+            UNIQUE(checkpoint_id,source_name)
+        );
+        CREATE INDEX IF NOT EXISTS change_registry_source_manifests_by_checkpoint
+        ON {CHECKPOINT_SOURCE_MANIFESTS_TABLE}(checkpoint_id,source_name);
+
+        CREATE TABLE IF NOT EXISTS {OBSERVER_JOBS_TABLE}(
+            job_id TEXT PRIMARY KEY,
+            seller_id TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            trigger_kind TEXT NOT NULL CHECK(trigger_kind IN ('scheduled','manual','activation')),
+            scheduled_slot TEXT NOT NULL DEFAULT '',
+            requested_by TEXT NOT NULL,
+            requested_at TEXT NOT NULL
+                CHECK(substr(requested_at,-1,1)='Z' AND julianday(requested_at) IS NOT NULL),
+            request_digest TEXT NOT NULL CHECK({_digest_check('request_digest')}),
+            CHECK({_identity_text_check('job_id', 120)}),
+            CHECK({_identity_text_check('seller_id', 120)}),
+            CHECK({_identity_text_check('account_scope', 120)}),
+            CHECK({_identity_text_check('requested_by', 160)}),
+            CHECK((trigger_kind='scheduled' AND scheduled_slot<>'')
+                OR (trigger_kind<>'scheduled' AND scheduled_slot=''))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS change_registry_observer_scheduled_slot
+        ON {OBSERVER_JOBS_TABLE}(seller_id,account_scope,scheduled_slot)
+        WHERE trigger_kind='scheduled';
+        CREATE INDEX IF NOT EXISTS change_registry_observer_jobs_by_scope_time
+        ON {OBSERVER_JOBS_TABLE}(seller_id,account_scope,requested_at,job_id);
+
+        CREATE TABLE IF NOT EXISTS {OBSERVER_JOB_EVENTS_TABLE}(
+            job_event_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES {OBSERVER_JOBS_TABLE}(job_id),
+            sequence_no INTEGER NOT NULL CHECK(
+                typeof(sequence_no)='integer' AND sequence_no>0
+            ),
+            state TEXT NOT NULL CHECK(state IN (
+                'accepted','running','complete','partial','failed','busy'
+            )),
+            occurred_at TEXT NOT NULL
+                CHECK(substr(occurred_at,-1,1)='Z' AND julianday(occurred_at) IS NOT NULL),
+            checkpoint_id TEXT REFERENCES {CHECKPOINTS_TABLE}(checkpoint_id),
+            fact_count INTEGER NOT NULL DEFAULT 0 CHECK(
+                typeof(fact_count)='integer' AND fact_count>=0
+            ),
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '' CHECK(length(error_message)<=800),
+            evidence_digest TEXT NOT NULL CHECK({_digest_check('evidence_digest')}),
+            CHECK({_identity_text_check('job_event_id', 120)}),
+            UNIQUE(job_id,sequence_no)
+        );
+        CREATE INDEX IF NOT EXISTS change_registry_observer_job_events_by_job
+        ON {OBSERVER_JOB_EVENTS_TABLE}(job_id,sequence_no,job_event_id);
+
+        CREATE TABLE IF NOT EXISTS {OBSERVER_HEALTH_EVENTS_TABLE}(
+            health_event_id TEXT PRIMARY KEY,
+            seller_id TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            scheduled_slot TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN ('complete','partial','failed')),
+            consecutive_noncomplete INTEGER NOT NULL CHECK(
+                typeof(consecutive_noncomplete)='integer' AND consecutive_noncomplete>=0
+            ),
+            health_state TEXT NOT NULL CHECK(health_state IN ('normal','degraded')),
+            job_id TEXT NOT NULL REFERENCES {OBSERVER_JOBS_TABLE}(job_id),
+            checkpoint_id TEXT REFERENCES {CHECKPOINTS_TABLE}(checkpoint_id),
+            occurred_at TEXT NOT NULL
+                CHECK(substr(occurred_at,-1,1)='Z' AND julianday(occurred_at) IS NOT NULL),
+            evidence_digest TEXT NOT NULL CHECK({_digest_check('evidence_digest')}),
+            CHECK({_identity_text_check('health_event_id', 120)}),
+            UNIQUE(seller_id,account_scope,scheduled_slot)
+        );
+        CREATE INDEX IF NOT EXISTS change_registry_observer_health_by_scope_time
+        ON {OBSERVER_HEALTH_EVENTS_TABLE}(
+            seller_id,account_scope,occurred_at,health_event_id
+        );
+
+        CREATE TABLE IF NOT EXISTS {OBSERVER_LEASES_TABLE}(
+            seller_id TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            owner_job_id TEXT NOT NULL DEFAULT '',
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0),
+            updated_at TEXT NOT NULL
+                CHECK(substr(updated_at,-1,1)='Z' AND julianday(updated_at) IS NOT NULL),
+            CHECK({_identity_text_check('seller_id', 120)}),
+            CHECK({_identity_text_check('account_scope', 120)}),
+            CHECK((owner_job_id='' AND acquired_at='' AND expires_at='') OR (
+                owner_job_id<>''
+                AND substr(acquired_at,-1,1)='Z' AND julianday(acquired_at) IS NOT NULL
+                AND substr(expires_at,-1,1)='Z' AND julianday(expires_at) IS NOT NULL
+                AND julianday(acquired_at)<julianday(expires_at)
+            )),
+            PRIMARY KEY(seller_id,account_scope)
+        );
+
         CREATE TABLE IF NOT EXISTS {MANUAL_PENDING_EVENTS_TABLE}(
             pending_event_id TEXT PRIMARY KEY,
             pending_id TEXT NOT NULL,
@@ -845,6 +970,20 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
         BEFORE DELETE ON {MANUAL_PENDING_CURRENT_TABLE}
         BEGIN
             SELECT RAISE(ABORT,'manual pending coordination rows are retained');
+        END;
+        CREATE TRIGGER IF NOT EXISTS change_registry_observer_lease_cas
+        BEFORE UPDATE ON {OBSERVER_LEASES_TABLE}
+        WHEN NEW.seller_id<>OLD.seller_id
+          OR NEW.account_scope<>OLD.account_scope
+          OR NEW.revision<>OLD.revision+1
+          OR julianday(NEW.updated_at)<julianday(OLD.updated_at)
+        BEGIN
+            SELECT RAISE(ABORT,'change registry observer lease CAS mismatch');
+        END;
+        CREATE TRIGGER IF NOT EXISTS change_registry_observer_lease_no_delete
+        BEFORE DELETE ON {OBSERVER_LEASES_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT,'change registry observer lease rows are retained');
         END;
         """
     )
@@ -2205,6 +2344,7 @@ __all__ = [
     "ANNOTATION_REVISIONS_TABLE",
     "ATTEMPT_EVENTS_TABLE",
     "CHECKPOINTS_TABLE",
+    "CHECKPOINT_SOURCE_MANIFESTS_TABLE",
     "CanonicalValue",
     "ChangeRegistryConflict",
     "ChangeRegistryError",
@@ -2220,6 +2360,10 @@ __all__ = [
     "MAPPING_VERSION",
     "MISSING",
     "OBSERVATION_VALUES_TABLE",
+    "OBSERVER_HEALTH_EVENTS_TABLE",
+    "OBSERVER_JOB_EVENTS_TABLE",
+    "OBSERVER_JOBS_TABLE",
+    "OBSERVER_LEASES_TABLE",
     "OPERATIONS_TABLE",
     "TargetIdentity",
     "canonical_digest",

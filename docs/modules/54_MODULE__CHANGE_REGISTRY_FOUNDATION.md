@@ -2,7 +2,7 @@
 title: "Модуль: единый реестр изменений — foundation"
 doc_id: "WB-CORE-MODULE-54-CHANGE-REGISTRY-FOUNDATION"
 doc_type: "module"
-status: "foundation_dark"
+status: "active_foundation"
 purpose: "Зафиксировать server-owned append-only contract фактов seller actions и отдельного observation/health evidence без включения capture, API, UI или аналитики."
 scope: "Additive operational SQLite schema, deterministic scalar canonicalization, immutable repository primitives, stable reads/cursors and a transaction-safe non-canonical manual-pending coordination seam."
 source_basis:
@@ -20,7 +20,7 @@ related_modules:
 related_runners:
   - "apps/change_registry_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Initial dark contract/schema/storage foundation; no business capture or activation."
+update_note: "Foundation remains immutable; module 56 supplies the canonical baseline engine and module 57 activates only its external read-only observer consumer."
 ---
 
 # 1. Решение о storage и граница активации
@@ -36,8 +36,10 @@ SQLite является текущим operational implementation, а не ре�
 PostgreSQL target. Смена storage architecture, cross-store move или PostgreSQL
 migration остаются отдельным решением.
 
-Foundation не подключена к Prices, Ads, SKU Management, Balance, refresh,
-scheduler или observer flows. Existing Prices/Ads JSONL и
+Foundation сама не инструментирует Prices, Ads, SKU Management, Balance или
+их writer flows. Canonical baseline/diff engine описан в module 56; активный
+read-only observer consumer и UI/API описаны отдельно в
+`docs/modules/57_MODULE__CHANGE_REGISTRY_OBSERVER.md`. Existing Prices/Ads JSONL и
 `sheet_vitrina_v1_sku_action_events` остаются native evidence и не удаляются,
 не переписываются и не импортируются этим блоком.
 

@@ -1,4 +1,4 @@
-"""Deterministic smoke for the dark change-registry baseline engine."""
+"""Deterministic smoke for the change-registry baseline engine."""
 
 from __future__ import annotations
 
@@ -162,6 +162,36 @@ def main() -> None:
 
         _assert_projection(engine)
 
+        evidence_gap = _acquisition(
+            started_at="2026-08-29T12:10:00Z",
+            completed_at="2026-08-29T12:11:00Z",
+            status="complete",
+            prices=[_price(1, original=1_000, discount=0, seller=_exact_null())],
+            campaigns=[
+                _campaign(10, 1, state="paused", model="cpc", bid=0),
+                _identity_campaign(20, []),
+                _identity_campaign(30, [1, 2]),
+                _campaign(40, 2, state="active", model="cpm", bid=700),
+            ],
+        )
+        gap_receipt = engine.ingest(evidence_gap)
+        assert gap_receipt["fact_ids"] == []
+        resumed = _acquisition(
+            started_at="2026-08-29T12:20:00Z",
+            completed_at="2026-08-29T12:21:00Z",
+            status="complete",
+            prices=[_price(1, original=1_000, discount=0, seller=1_200)],
+            campaigns=[
+                _campaign(10, 1, state="paused", model="cpc", bid=0),
+                _identity_campaign(20, []),
+                _identity_campaign(30, [1, 2]),
+                _campaign(40, 2, state="active", model="cpm", bid=700),
+            ],
+        )
+        resumed_receipt = engine.ingest(resumed)
+        assert len(resumed_receipt["fact_ids"]) == 1
+        _assert_evidence_gap_projection(engine, db_path, resumed_receipt["fact_ids"][0])
+
         failed = _acquisition(
             started_at="2026-08-29T12:30:00Z",
             completed_at="2026-08-29T12:31:00Z",
@@ -171,12 +201,12 @@ def main() -> None:
         )
         facts_before_failed = _table_count(db_path, FACTS_TABLE)
         failed_receipt = engine.ingest(failed)
-        assert failed_receipt["previous_complete_checkpoint_id"] == third_receipt[
+        assert failed_receipt["previous_complete_checkpoint_id"] == resumed_receipt[
             "checkpoint_id"
         ]
         assert failed_receipt["fact_ids"] == []
         assert _table_count(db_path, FACTS_TABLE) == facts_before_failed
-        assert _latest_complete_checkpoint(db_path) == third_receipt["checkpoint_id"]
+        assert _latest_complete_checkpoint(db_path) == resumed_receipt["checkpoint_id"]
 
         repository.append_fact(
             fact_id="non-checkpoint-proof",
@@ -184,9 +214,9 @@ def main() -> None:
             account_scope=ACCOUNT,
             target=target_identity("price", nm_id=1),
             parameter_field="seller_price_minor",
-            before_value=1_100,
-            after_value=1_200,
-            observed_from="2026-08-29T12:01:00Z",
+            before_value=1_200,
+            after_value=1_300,
+            observed_from="2026-08-29T12:21:00Z",
             observed_to="2026-08-29T13:00:00Z",
             proven_at="2026-08-29T13:00:00Z",
             proof_kind="native_audit",
@@ -348,6 +378,33 @@ def _assert_projection(engine: ChangeRegistryBaselineEngine) -> None:
         pass
     else:
         raise AssertionError("projection cursor was accepted for another target")
+
+
+def _assert_evidence_gap_projection(
+    engine: ChangeRegistryBaselineEngine,
+    db_path: Path,
+    fact_id: str,
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT observed_from,observed_to,before_value_integer,after_value_integer "
+            f"FROM {FACTS_TABLE} WHERE fact_id=?",
+            (fact_id,),
+        ).fetchone()
+    assert row == (
+        "2026-08-29T12:01:00Z",
+        "2026-08-29T12:21:00Z",
+        1_100,
+        1_200,
+    )
+    projection = engine.project_intervals(
+        target=target_identity("price", nm_id=1),
+        parameter_field="seller_price_minor",
+        limit=200,
+    )
+    assert projection["items"][-2]["end_at"] == "2026-08-29T12:11:00Z"
+    assert projection["items"][-1]["start_at"] == "2026-08-29T12:21:00Z"
+    assert projection["items"][-1]["value"]["integer_value"] == 1_200
 
 
 def _acquisition(

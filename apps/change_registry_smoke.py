@@ -26,6 +26,11 @@ from packages.application.change_registry import (  # noqa: E402
     MANUAL_PENDING_EVENTS_TABLE,
     MISSING,
     OBSERVATION_VALUES_TABLE,
+    OBSERVER_LEASES_TABLE,
+    CHECKPOINT_SOURCE_MANIFESTS_TABLE,
+    OBSERVER_HEALTH_EVENTS_TABLE,
+    OBSERVER_JOB_EVENTS_TABLE,
+    OBSERVER_JOBS_TABLE,
     OPERATIONS_TABLE,
     ChangeRegistryConflict,
     ChangeRegistryError,
@@ -64,7 +69,10 @@ def main() -> None:
 
 
 def _assert_schema_contract(db_path: Path) -> None:
-    expected = set(IMMUTABLE_TABLES) | {MANUAL_PENDING_CURRENT_TABLE}
+    expected = set(IMMUTABLE_TABLES) | {
+        MANUAL_PENDING_CURRENT_TABLE,
+        OBSERVER_LEASES_TABLE,
+    }
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
@@ -560,6 +568,14 @@ def _assert_repository_contract(
 
         for table in IMMUTABLE_TABLES:
             row = conn.execute(f"SELECT rowid FROM {table} LIMIT 1").fetchone()
+            if table in {
+                CHECKPOINT_SOURCE_MANIFESTS_TABLE,
+                OBSERVER_JOBS_TABLE,
+                OBSERVER_JOB_EVENTS_TABLE,
+                OBSERVER_HEALTH_EVENTS_TABLE,
+            }:
+                assert row is None
+                continue
             assert row is not None, f"missing fixture row for {table}"
             rowid = int(row[0])
             _sqlite_rejected(

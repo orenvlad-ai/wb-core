@@ -78,6 +78,7 @@ ALL_BUSINESS_TIMER_UNITS = CORE_TIMER_UNITS + FORCE_OFF_TIMER_UNITS
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
 CONTINUOUS_OBSERVER_TIMER_UNITS = (
     "wb-core-fbs-shadow-collector.timer",
+    "wb-core-change-registry-observer.timer",
 )
 CLASSIFIED_WB_CORE_TIMER_UNITS = (
     ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS

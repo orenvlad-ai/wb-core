@@ -128,6 +128,16 @@
       "restart": true
     },
     {
+      "name": "wb-core-change-registry-observer.service",
+      "enable": false,
+      "restart": true
+    },
+    {
+      "name": "wb-core-change-registry-observer.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-fbs-warehouse-registry.service",
       "enable": false,
       "restart": false
@@ -200,6 +210,8 @@
     "WB_AUTOANSWERS_FORCE_OFF": "false",
     "PROMO_XLSX_COLLECTOR_STORAGE_STATE_PATH": "/opt/wb-web-bot/storage_state.json",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_ID": "c0ed0bf8-c443-41f2-b9db-1c14f0099815",
+    "CHANGE_REGISTRY_OBSERVER_ENABLED": "true",
+    "CHANGE_REGISTRY_ACCOUNT_SCOPE": "seller-portal-primary",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL": "ИП Сагитов В. Р.",
     "SELLER_PORTAL_RELOGIN_SSH_DESTINATION": "wb-core-eu-root"
   },

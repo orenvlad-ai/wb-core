@@ -256,6 +256,11 @@
             "allowed_access_modes": ["read_only", "read_write"]
           },
           {
+            "service": "wb-core-change-registry-observer.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"]
+          },
+          {
             "service": "wb-core-fbs-warehouse-registry.service",
             "declared_role": "reader_writer",
             "allowed_access_modes": ["read_only", "read_write"]

@@ -282,11 +282,12 @@ The runtime records only sanitized endpoint/operation/phase, priority, owner pro
 
 If the interactive budget is exhausted before a business commit, the HTTP adapter returns `503`, `Retry-After` and contract `wb_core_sqlite_contention_v1` with a Russian retry/resume message. It never exposes the raw SQLite exception. Transactions roll back before that response, and callers use their existing idempotency/revision contracts on retry. Bank-fee confirm is the explicit post-commit exception: its parent/expense/assignment/CNY-document unit is already complete, so contention in the subsequent derived replay returns Russian `202 pending`, `operation_applied=true` and safe retry; the repeat resumes replay without duplicating business rows.
 
-## Change registry dark foundation
+## Change registry operational store
 
 The same StoreRegistry-selected operational SQLite generation contains the
-empty additive `change_registry_*` foundation defined by
-`docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md`. Runtime schema ensure
-installs only tables/indexes/triggers. No existing Prices/Ads/SKU writer is
-instrumented, no historical evidence is imported, and no reader/API/UI is
-activated by this schema addition.
+additive `change_registry_*` foundation defined by
+`docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md` plus the observer-owned
+job/source-summary/health/lease tables from module 57. Runtime schema ensure
+installs only tables/indexes/triggers. Activation belongs to the separate
+read-only Prices+Ads observer service; no existing Prices/Ads/SKU writer is
+instrumented and no historical evidence is imported.

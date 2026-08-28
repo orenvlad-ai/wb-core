@@ -44,6 +44,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SKU_MANAGEMENT_PATH,
+    DEFAULT_CHANGE_REGISTRY_PATH,
     DEFAULT_SUPPLY_CALCULATIONS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
@@ -75,6 +76,8 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 def main() -> None:
     if _required_section_for_path(DEFAULT_SKU_MANAGEMENT_PATH) != WEB_AUTH_SECTION_SKU_MANAGEMENT:
         raise AssertionError("SKU management API must use its own section authorization boundary")
+    if _required_section_for_path(DEFAULT_CHANGE_REGISTRY_PATH) != WEB_AUTH_SECTION_SKU_MANAGEMENT:
+        raise AssertionError("Change Registry API must inherit authenticated SKU management access")
     if _required_section_for_path(DEFAULT_PARTNER_REPORT_OPTIONS_PATH) != WEB_AUTH_SECTION_REPORTS:
         raise AssertionError("Partner Report API must use the reports authorization boundary")
     if _required_section_for_path(DEFAULT_SUPPLY_CALCULATIONS_PATH) != WEB_AUTH_SECTION_SUPPLY:
@@ -193,6 +196,16 @@ def main() -> None:
                 sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
                 if sku_code != 401 or sku_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")
+                change_registry_code, change_registry_payload = _get_json(
+                    f"{base_url}{DEFAULT_CHANGE_REGISTRY_PATH}"
+                )
+                if (
+                    change_registry_code != 401
+                    or change_registry_payload.get("error") != "authentication_required"
+                ):
+                    raise AssertionError(
+                        "unauthenticated Change Registry route must return 401 JSON"
+                    )
                 partner_code, partner_payload = _get_json(
                     f"{base_url}{DEFAULT_PARTNER_REPORT_OPTIONS_PATH}"
                 )
