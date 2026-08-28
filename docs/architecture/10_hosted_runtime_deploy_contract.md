@@ -1280,16 +1280,17 @@ stop or change the 06:30/07:30 or any other ordinary service/timer. Deploy and
 post-deploy verification do not run A or B and do not mutate production
 business data.
 
-SSS011 keeps that inert boundary while tightening qualification. Dense A binds
-the exact `12 historical_exact_zero + 38 no_material_value_history` partition
-and all 228 accepted missing components from the latest six unique capture ids,
-deduplicating repeated finalization rows and auditing every older/newer distinct
-capture; accepted history is never rewritten or retrofilled from current zero.
-Dense discovery accepts multiple identical original-12 dates and binds the
-latest qualifying sequence/capture while material or partition drift fails
-closed. Historical B reduces the broad mismatch set to exactly one ready-shaped
-candidate before it expands the exact causal interval, then admits exactly one
-FBS event. The deployed CLI returns bounded typed failures, and the durable
-runner receipt preserves predicate, expected/observed cardinality and candidate/
-details digests in addition to phase, stage, code and message. Post-deploy checks
-remain import/SHA/inert and query-only; neither A nor B is executed by release.
+SSS017 keeps that inert deploy boundary and changes operation-time admission.
+Dense A is a current-state forward cutover for exact Orenburg
+`71 = existing 21 + owner-approved missing 50`; historical capture topology,
+dates, presentation lineage and missing/NULL semantics are audit-only. Exact
+target identity/absence, current target/non-target CAS and current
+Orenburg-scoped material conflicts remain fail-closed. One submit may create one
+document with 50 `0 / 0 / NULL` absolute targets and zero movements; query-only
+readback proves forward `T0`, history untouched and non-target preservation.
+Historical B selects only accepted `2026-08-26 / 428853741 /
+whfv_cb0657c384d5adebae01e585 / ffbf_87cea959c9d600da99caa1ab68ef`, not a broad
+mismatch set. Its deterministic event timestamp yields material-identical JIT
+witnesses; readback proves 1952/1952, exact three-location/provenance, own cost,
+six TOTAL dependencies, current state and all A zeros preserved. The deployed
+CLI retains bounded typed failures. Release itself executes neither A nor B.

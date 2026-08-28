@@ -146,20 +146,16 @@ def run(args: argparse.Namespace) -> int:
         )
         if not isinstance(domain_manifest, dict):
             raise ValueError("--manifest-file must contain one JSON object")
-        domain_manifest = _strict_domain_manifest_v2(domain_manifest)
+        domain_manifest = _strict_domain_manifest_v3(domain_manifest)
         result = service.build_zero_repair_plan(
             facility_id=str(domain_manifest["facility_id"]),
-            historical_exact_zero_nm_ids=list(
-                domain_manifest["partitions"]["historical_exact_zero"]
-            ),
-            no_material_value_history_nm_ids=list(
-                domain_manifest["partitions"]["no_material_value_history"]
-            ),
             seller_warehouse_id=int(domain_manifest["seller_warehouse_id"]),
             official_office_id=int(domain_manifest["official_office_id"]),
             expected_roster_nm_ids=list(domain_manifest["expected_roster_nm_ids"]),
             expected_existing_nm_ids=list(domain_manifest["expected_existing_nm_ids"]),
-            historical_business_date=str(domain_manifest["historical_business_date"]),
+            owner_approved_missing_nm_ids=list(
+                domain_manifest["owner_approved_missing_nm_ids"]
+            ),
             canonical_target=canonical_target,
             storage_generation=storage_generation,
         )
@@ -229,14 +225,13 @@ def _file_sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
+def _strict_domain_manifest_v3(payload: dict[str, object]) -> dict[str, object]:
     required = {
         "schema",
         "facility_id",
         "seller_warehouse_id",
         "official_office_id",
-        "historical_business_date",
-        "partitions",
+        "owner_approved_missing_nm_ids",
         "expected_roster_nm_ids",
         "expected_existing_nm_ids",
     }
@@ -250,26 +245,12 @@ def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
         raise ValueError(
             f"zero-repair manifest schema must be {ZERO_REPAIR_MANIFEST_SCHEMA}"
         )
-    partitions = payload.get("partitions")
-    if not isinstance(partitions, dict):
-        raise ValueError("zero-repair manifest partitions must be one JSON object")
-    partition_fields = {
-        "historical_exact_zero",
-        "no_material_value_history",
-    }
-    if set(partitions) != partition_fields:
-        raise ValueError(
-            "zero-repair manifest partition fields must be exact; "
-            f"missing={sorted(partition_fields - set(partitions))} "
-            f"extra={sorted(set(partitions) - partition_fields)}"
-        )
     for field in (
-        "historical_exact_zero",
-        "no_material_value_history",
+        "owner_approved_missing_nm_ids",
         "expected_roster_nm_ids",
         "expected_existing_nm_ids",
     ):
-        values = partitions[field] if field in partitions else payload[field]
+        values = payload[field]
         if not isinstance(values, list):
             raise ValueError(f"{field} must be one JSON array")
         if any(
@@ -279,18 +260,15 @@ def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
             raise ValueError(f"{field} must contain positive integer nmIds")
         if len(values) != len(set(values)):
             raise ValueError(f"{field} must not contain duplicate nmIds")
-    historical = set(partitions["historical_exact_zero"])
-    absent = set(partitions["no_material_value_history"])
+    targets = set(payload["owner_approved_missing_nm_ids"])
     existing = set(payload["expected_existing_nm_ids"])
     roster = set(payload["expected_roster_nm_ids"])
-    if historical & absent:
-        raise ValueError("zero-repair manifest partitions must be disjoint")
-    if historical & existing or absent & existing:
+    if targets & existing:
         raise ValueError(
-            "zero-repair target and existing-row partitions must be disjoint"
+            "zero-repair target and existing-row identities must be disjoint"
         )
-    if historical | absent | existing != roster:
-        raise ValueError("zero-repair partitions must exactly cover the roster")
+    if targets | existing != roster:
+        raise ValueError("zero-repair current identities must exactly cover the roster")
     return payload
 
 

@@ -52,9 +52,9 @@ from packages.contracts.ff_pool_documents import DocumentIdentity
 
 CONTRACT_NAME = "ff_pool_dense_fbs_initialization_v1"
 SOURCE_SYSTEM = "wb_core_dense_fbs"
-ZERO_REPAIR_MANIFEST_SCHEMA = "ff_pool_dense_fbs_zero_repair_manifest_v2"
-ZERO_REPAIR_PLAN_SCHEMA = "ff_pool_dense_fbs_zero_repair_plan_v2"
-ZERO_REPAIR_OPERATION_NAMESPACE = "wbc0013:dense-fbs-zero-repair:v2"
+ZERO_REPAIR_MANIFEST_SCHEMA = "ff_pool_dense_fbs_forward_zero_manifest_v3"
+ZERO_REPAIR_PLAN_SCHEMA = "ff_pool_dense_fbs_forward_zero_plan_v3"
+ZERO_REPAIR_OPERATION_NAMESPACE = "wbc0013:dense-fbs-forward-zero:v3"
 SOURCE_TYPE = CONTRACT_NAME
 NOMENCLATURE_TABLE = "sheet_vitrina_v1_nomenclature_items"
 
@@ -437,15 +437,16 @@ class DenseFbsService:
         self,
         *,
         facility_id: str,
-        historical_exact_zero_nm_ids: Sequence[int],
-        no_material_value_history_nm_ids: Sequence[int],
         seller_warehouse_id: int,
         official_office_id: int,
         expected_roster_nm_ids: Sequence[int],
         expected_existing_nm_ids: Sequence[int],
-        historical_business_date: str,
         canonical_target: Mapping[str, Any],
         storage_generation: Mapping[str, Any],
+        owner_approved_missing_nm_ids: Sequence[int] | None = None,
+        historical_exact_zero_nm_ids: Sequence[int] = (),
+        no_material_value_history_nm_ids: Sequence[int] = (),
+        historical_business_date: str = "",
         qualified_at: str = "",
     ) -> dict[str, Any]:
         """Query-only deterministic plan using the same dense pool_inventory shape."""
@@ -465,7 +466,26 @@ class DenseFbsService:
                 "Dense FBS repair partitions must be disjoint",
                 details={"overlap_nm_ids": overlap},
             )
-        selected_nm_ids = sorted((*historical_nm_ids, *no_material_history_nm_ids))
+        legacy_partition_union = sorted(
+            (*historical_nm_ids, *no_material_history_nm_ids)
+        )
+        selected_nm_ids = _strict_positive_partition(
+            (
+                owner_approved_missing_nm_ids
+                if owner_approved_missing_nm_ids is not None
+                else legacy_partition_union
+            ),
+            name="owner_approved_missing_nm_ids",
+        )
+        if legacy_partition_union and legacy_partition_union != selected_nm_ids:
+            raise DenseFbsError(
+                "repair_manifest_audit_partition_drift",
+                "Audit-only historical partitions must not change the owner-approved target identity",
+                details={
+                    "owner_approved_missing_nm_ids": selected_nm_ids,
+                    "audit_partition_union_nm_ids": legacy_partition_union,
+                },
+            )
         if not selected_nm_ids:
             raise DenseFbsError(
                 "repair_scope_invalid",
@@ -669,26 +689,40 @@ class DenseFbsService:
                 seller_warehouse_id=int(seller_warehouse_id),
                 nm_ids=selected_nm_ids,
             )
-            if int(target_effects["effect_row_count"]) != 0:
-                blockers.append(
-                    "repair targets already have FBS movement/document/lifecycle/"
-                    "reservation/order effects"
-                )
-            history_evidence = _historical_zero_evidence(
-                conn,
-                facility_id=str(facility_id),
-                nm_ids=historical_nm_ids,
-                business_date=str(historical_business_date),
-            )
-            blockers.extend(history_evidence["blockers"])
-            no_material_history_evidence = _no_material_value_history_evidence(
+            current_material = _target_current_material_evidence(
                 conn,
                 facility_id=str(facility_id),
                 seller_warehouse_id=int(seller_warehouse_id),
-                nm_ids=no_material_history_nm_ids,
-                as_of_date=current_business_date(),
+                nm_ids=selected_nm_ids,
             )
-            blockers.extend(no_material_history_evidence["blockers"])
+            if int(current_material["conflict_count"]) != 0:
+                blockers.append(
+                    "repair targets have a current Orenburg material balance, "
+                    "reservation, reconciliation or unprocessed handoff"
+                )
+            # Historical capture/presentation topology is immutable audit
+            # evidence only. It is deliberately absent from admission and CAS.
+            history_evidence = (
+                _historical_zero_evidence(
+                    conn,
+                    facility_id=str(facility_id),
+                    nm_ids=historical_nm_ids,
+                    business_date=str(historical_business_date),
+                )
+                if historical_nm_ids and historical_business_date
+                else {"audit_only": True, "rows": [], "blockers": []}
+            )
+            no_material_history_evidence = (
+                _no_material_value_history_evidence(
+                    conn,
+                    facility_id=str(facility_id),
+                    seller_warehouse_id=int(seller_warehouse_id),
+                    nm_ids=no_material_history_nm_ids,
+                    as_of_date=current_business_date(),
+                )
+                if no_material_history_nm_ids
+                else {"audit_only": True, "rows": [], "blockers": []}
+            )
 
             scoped_non_targets = _scoped_repair_non_targets(
                 conn,
@@ -704,11 +738,7 @@ class DenseFbsService:
                 "facility_id": str(facility_id),
                 "seller_warehouse_id": int(seller_warehouse_id),
                 "official_office_id": int(official_office_id),
-                "historical_business_date": str(historical_business_date),
-                "partitions": {
-                    "historical_exact_zero": historical_nm_ids,
-                    "no_material_value_history": no_material_history_nm_ids,
-                },
+                "owner_approved_missing_nm_ids": selected_nm_ids,
                 "expected_roster_nm_ids": expected_roster,
                 "expected_existing_nm_ids": expected_existing,
             }
@@ -759,10 +789,7 @@ class DenseFbsService:
                 "mapping_fingerprint": str(mapping_evidence["fingerprint"]),
                 "roster_fingerprint": _fingerprint(roster),
                 "target_effects_fingerprint": str(target_effects["fingerprint"]),
-                "historical_evidence_fingerprint": str(history_evidence["fingerprint"]),
-                "absent_history_lifecycle_fingerprint": str(
-                    no_material_history_evidence["fingerprint"]
-                ),
+                "current_material_fingerprint": str(current_material["fingerprint"]),
                 "scoped_non_targets_fingerprint": str(
                     scoped_non_targets["fingerprint"]
                 ),
@@ -789,7 +816,11 @@ class DenseFbsService:
                     "exact_partition_proven": roster_nm_ids == exact_roster_partition,
                 },
                 "nm_ids": selected_nm_ids,
-                "partitions": {
+                "owner_approved_missing": {
+                    "nm_ids": selected_nm_ids,
+                    "digest": _fingerprint(selected_nm_ids),
+                },
+                "audit_only_historical_partitions": {
                     "historical_exact_zero": historical_nm_ids,
                     "no_material_value_history": no_material_history_nm_ids,
                     "historical_exact_zero_digest": _fingerprint(historical_nm_ids),
@@ -812,17 +843,25 @@ class DenseFbsService:
                     "official_office_id": int(official_office_id),
                     "expected_roster_nm_ids": expected_roster,
                     "expected_existing_nm_ids": expected_existing,
-                    "historical_business_date": str(historical_business_date),
-                    "partitions": {
+                    "owner_approved_missing_nm_ids": selected_nm_ids,
+                    "audit_only_historical_business_date": str(
+                        historical_business_date
+                    ),
+                    "audit_only_historical_partitions": {
                         "historical_exact_zero": historical_nm_ids,
                         "no_material_value_history": no_material_history_nm_ids,
                     },
                 },
                 "target_rows": target_rows,
                 "target_applicability": target_applicability,
+                "current_material_evidence": current_material,
                 "target_effects": target_effects,
-                "historical_zero_evidence": history_evidence,
-                "no_material_value_history_evidence": no_material_history_evidence,
+                "audit_only_historical_evidence": {
+                    "historical_exact_zero": history_evidence,
+                    "no_material_value_history": no_material_history_evidence,
+                    "admission": False,
+                    "cas": False,
+                },
                 "expected_effects": {
                     "balance_insert_count": sum(
                         not row["row_present"] for row in target_rows
@@ -1043,7 +1082,12 @@ class DenseFbsService:
                 dense_plan.get("zero_repair_receipt_boundary") or {}
             )
             facility_id = str(receipt_boundary.get("facility_id") or "")
+            roster_nm_ids = sorted(
+                int(item["nm_id"])
+                for item in dict(dense_plan.get("roster") or {}).get("skus") or []
+            )
             placeholders = ",".join("?" for _ in targets) or "NULL"
+            roster_placeholders = ",".join("?" for _ in roster_nm_ids) or "NULL"
             zero_row_count = int(
                 conn.execute(
                     f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? "
@@ -1069,6 +1113,20 @@ class DenseFbsService:
                     (facility_id, *targets),
                 ).fetchone()[0]
             )
+            movement_line_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {LINES_TABLE} WHERE facility_id=? "
+                    f"AND pool='FBS' AND nm_id IN ({placeholders})",
+                    (facility_id, *targets),
+                ).fetchone()[0]
+            )
+            covered_roster_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {BALANCES_TABLE} WHERE facility_id=? "
+                    f"AND pool='FBS' AND nm_id IN ({roster_placeholders})",
+                    (facility_id, *roster_nm_ids),
+                ).fetchone()[0]
+            )
             non_target_count, non_target_digest = _streaming_query_digest(
                 conn,
                 f"SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
@@ -1089,17 +1147,26 @@ class DenseFbsService:
                 "intent_id": str(intent["intent_id"]),
                 "query_only": True,
                 "expected_target_count": len(targets),
+                "expected_roster_count": len(roster_nm_ids),
+                "covered_roster_count": covered_roster_count,
                 "zero_row_count": zero_row_count,
+                "new_explicit_zero_count": zero_row_count,
                 "pool_inventory_document_count": document_count,
                 "absolute_target_line_count": target_line_count,
+                "movement_line_count": movement_line_count,
+                "forward_t0": str(dense_plan.get("cutover_at") or ""),
+                "history_write_count": 0,
+                "history_tables_in_write_scope": False,
                 "non_target_row_count": non_target_count,
                 "non_target_digest": non_target_digest,
                 "non_target_preserved": non_target_preserved,
                 "exact_reconciled": (
                     bool(targets)
                     and zero_row_count == len(targets)
+                    and covered_roster_count == len(roster_nm_ids)
                     and document_count == 1
                     and target_line_count == len(targets)
+                    and movement_line_count == 0
                     and non_target_preserved
                 ),
                 **dense_intent_state(conn, str(intent["intent_id"])),
@@ -1109,26 +1176,28 @@ class DenseFbsService:
         manifest = dict(plan.get("input_manifest") or {})
         fresh = self.build_zero_repair_plan(
             facility_id=str(manifest["facility_id"]),
-            historical_exact_zero_nm_ids=list(
-                manifest["partitions"]["historical_exact_zero"]
-            ),
-            no_material_value_history_nm_ids=list(
-                manifest["partitions"]["no_material_value_history"]
+            owner_approved_missing_nm_ids=list(
+                manifest["owner_approved_missing_nm_ids"]
             ),
             seller_warehouse_id=int(manifest["seller_warehouse_id"]),
             official_office_id=int(manifest["official_office_id"]),
             expected_roster_nm_ids=list(manifest["expected_roster_nm_ids"]),
             expected_existing_nm_ids=list(manifest["expected_existing_nm_ids"]),
-            historical_business_date=str(manifest["historical_business_date"]),
             canonical_target=dict(plan["canonical_target"]),
             storage_generation=dict(plan["storage_generation"]),
             qualified_at=str(manifest["qualified_at"]),
         )
-        if str(fresh["fingerprint"]) != str(plan["fingerprint"]):
+        if str(fresh["material_qualification_digest"]) != str(
+            plan["material_qualification_digest"]
+        ):
             raise DenseFbsError(
                 "repair_plan_cas_drift",
                 "Zero repair qualification changed after planning",
-                details={"fresh_fingerprint": str(fresh["fingerprint"])},
+                details={
+                    "fresh_material_qualification_digest": str(
+                        fresh["material_qualification_digest"]
+                    )
+                },
             )
 
     def _load_or_plan_facility_intent(
@@ -2462,6 +2531,152 @@ def _target_effect_evidence(
     return result
 
 
+def _target_current_material_evidence(
+    conn: sqlite3.Connection,
+    *,
+    facility_id: str,
+    seller_warehouse_id: int,
+    nm_ids: Sequence[int],
+) -> dict[str, Any]:
+    """Prove only current, facility-scoped conflicts for a forward T0 cutover.
+
+    Closed documents/events and operations belonging to another facility are
+    audit history, not admission evidence. Current reservations, already
+    material lifecycle state, open reconciliation, unresolved exact-warehouse
+    identity and an observed handoff not consumed by the Orenburg lifecycle are
+    material blockers.
+    """
+
+    tables = _tables(conn)
+    selected = sorted({int(value) for value in nm_ids})
+    placeholders = ",".join("?" for _ in selected) or "NULL"
+
+    lifecycle_rows: list[dict[str, Any]] = []
+    if FBS_CURRENT_TABLE in tables:
+        lifecycle_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT cutover_id,order_id,state,facility_id,pool,nm_id,
+                           quantity,debit_event_id,updated_at
+                      FROM {FBS_CURRENT_TABLE}
+                     WHERE facility_id=? AND pool='FBS'
+                       AND nm_id IN ({placeholders})
+                       AND state='reserved'
+                     ORDER BY cutover_id,order_id""",
+                (str(facility_id), *selected),
+            ).fetchall()
+        ]
+
+    reconciliation_rows: list[dict[str, Any]] = []
+    reconciliation_table = "sheet_vitrina_v1_ff_pool_fbs_reconciliation_lane"
+    events_table = "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events"
+    if {reconciliation_table, events_table} <= tables:
+        reconciliation_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT lane.reconciliation_id,lane.order_id,lane.state,
+                           event.facility_id,event.nm_id,event.event_id
+                      FROM {reconciliation_table} lane
+                      JOIN {events_table} event ON event.event_id=lane.event_id
+                     WHERE lane.state='open' AND event.facility_id=?
+                       AND event.pool='FBS' AND event.nm_id IN ({placeholders})
+                     ORDER BY lane.reconciliation_id""",
+                (str(facility_id), *selected),
+            ).fetchall()
+        ]
+
+    order_observations = "sheet_vitrina_v1_wb_supplies_fbs_order_observations"
+    status_current = "sheet_vitrina_v1_wb_supplies_fbs_status_current"
+    identity_pending = "sheet_vitrina_v1_ff_pool_fbs_identity_pending"
+    identity_resolutions = (
+        "sheet_vitrina_v1_ff_pool_fbs_identity_pending_resolutions"
+    )
+    unresolved_identity_rows: list[dict[str, Any]] = []
+    if {order_observations, identity_pending, identity_resolutions} <= tables:
+        unresolved_identity_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT pending.pending_id,pending.order_id,
+                           pending.source_status_observation_sequence,
+                           observation.warehouse_id,observation.nm_id
+                      FROM {identity_pending} pending
+                      JOIN {order_observations} observation
+                        ON observation.order_id=pending.order_id
+                      LEFT JOIN {identity_resolutions} resolution
+                        ON resolution.pending_id=pending.pending_id
+                     WHERE resolution.pending_id IS NULL
+                       AND observation.warehouse_id=?
+                       AND observation.nm_id IN ({placeholders})
+                     ORDER BY pending.pending_id""",
+                (int(seller_warehouse_id), *selected),
+            ).fetchall()
+        ]
+
+    unprocessed_handoffs: list[dict[str, Any]] = []
+    if {order_observations, status_current} <= tables:
+        lifecycle_join = (
+            f"LEFT JOIN {FBS_CURRENT_TABLE} lifecycle "
+            "ON lifecycle.order_id=observation.order_id "
+            "AND lifecycle.facility_id=? AND lifecycle.pool='FBS' "
+            "AND lifecycle.nm_id=observation.nm_id"
+            if FBS_CURRENT_TABLE in tables
+            else ""
+        )
+        lifecycle_state = "COALESCE(lifecycle.state,'')" if lifecycle_join else "''"
+        parameters: tuple[Any, ...] = (
+            (str(facility_id), int(seller_warehouse_id), *selected)
+            if lifecycle_join
+            else (int(seller_warehouse_id), *selected)
+        )
+        unprocessed_handoffs = [
+            dict(row)
+            for row in conn.execute(
+                f"""WITH latest_order AS (
+                         SELECT order_id,MAX(observation_sequence) observation_sequence
+                           FROM {order_observations}
+                          GROUP BY order_id
+                     )
+                     SELECT observation.order_id,observation.warehouse_id,
+                            observation.nm_id,status.supplier_status,status.wb_status,
+                            {lifecycle_state} lifecycle_state
+                       FROM latest_order
+                       JOIN {order_observations} observation
+                         ON observation.observation_sequence=latest_order.observation_sequence
+                       JOIN {status_current} status ON status.order_id=observation.order_id
+                       {lifecycle_join}
+                      WHERE observation.warehouse_id=?
+                        AND observation.nm_id IN ({placeholders})
+                        AND status.supplier_status='complete' AND status.wb_status='sorted'
+                        AND {lifecycle_state} NOT IN ('fulfilled','fulfilled_reconciliation')
+                      ORDER BY observation.order_id""",
+                parameters,
+            ).fetchall()
+        ]
+
+    evidence = {
+        "facility_id": str(facility_id),
+        "seller_warehouse_id": int(seller_warehouse_id),
+        "nm_ids": selected,
+        "material_lifecycle_rows": lifecycle_rows,
+        "open_reconciliation_rows": reconciliation_rows,
+        "unresolved_identity_rows": unresolved_identity_rows,
+        "unprocessed_handoffs": unprocessed_handoffs,
+        "closed_history_is_admission_material": False,
+        "other_facility_operations_are_admission_material": False,
+    }
+    evidence["conflict_count"] = sum(
+        len(rows)
+        for rows in (
+            lifecycle_rows,
+            reconciliation_rows,
+            unresolved_identity_rows,
+            unprocessed_handoffs,
+        )
+    )
+    evidence["fingerprint"] = _fingerprint(evidence)
+    return evidence
+
+
 def _strict_positive_partition(values: Sequence[int], *, name: str) -> list[int]:
     """Validate an exact manifest partition without silently de-duplicating it."""
 
@@ -2860,8 +3075,8 @@ def _zero_repair_material_digest(plan: Mapping[str, Any]) -> str:
     """Stable JIT qualification digest; wall-clock evidence is intentionally excluded."""
 
     non_targets = dict(plan.get("non_targets") or {})
-    target_effects = dict(plan.get("target_effects") or {})
     mapping = dict(plan.get("mapping_evidence") or {})
+    input_manifest = dict(plan.get("input_manifest") or {})
     material = {
         "contract_name": plan.get("contract_name"),
         "facility": plan.get("facility"),
@@ -2870,15 +3085,25 @@ def _zero_repair_material_digest(plan: Mapping[str, Any]) -> str:
         "storage_generation": plan.get("storage_generation"),
         "stock_managed_roster": plan.get("stock_managed_roster"),
         "nm_ids": plan.get("nm_ids"),
-        "partitions": plan.get("partitions"),
-        "input_manifest": plan.get("input_manifest"),
+        "owner_approved_missing": plan.get("owner_approved_missing"),
+        "input_manifest": {
+            key: input_manifest.get(key)
+            for key in (
+                "schema",
+                "namespace",
+                "operation_id",
+                "qualified_at",
+                "facility_id",
+                "seller_warehouse_id",
+                "official_office_id",
+                "expected_roster_nm_ids",
+                "expected_existing_nm_ids",
+                "owner_approved_missing_nm_ids",
+            )
+        },
         "target_rows": plan.get("target_rows"),
         "target_applicability": plan.get("target_applicability"),
-        "target_effects": target_effects,
-        "historical_zero_evidence": plan.get("historical_zero_evidence"),
-        "no_material_value_history_evidence": plan.get(
-            "no_material_value_history_evidence"
-        ),
+        "current_material_evidence": plan.get("current_material_evidence"),
         "mapping_evidence": {
             "seller_warehouse_id": mapping.get("seller_warehouse_id"),
             "official_office_id": mapping.get("official_office_id"),
@@ -2898,6 +3123,9 @@ def _zero_repair_material_digest(plan: Mapping[str, Any]) -> str:
             ),
             "target_facility_existing_fbs_nm_ids": non_targets.get(
                 "target_facility_existing_fbs_nm_ids"
+            ),
+            "target_facility_existing_fbs_digest": non_targets.get(
+                "target_facility_existing_fbs_digest"
             ),
             "target_facility_existing_fbs_material_count": non_targets.get(
                 "target_facility_existing_fbs_material_count"
@@ -3314,13 +3542,17 @@ def _scoped_repair_non_targets(
     history_captures = "sheet_vitrina_v1_inventory_history_captures"
     history_components = "sheet_vitrina_v1_inventory_history_components"
     history_finalizations = "sheet_vitrina_v1_inventory_history_finalizations"
-    history_dates = [
-        str(historical_business_date),
-        (
-            datetime.fromisoformat(str(historical_business_date)).date()
-            + timedelta(days=1)
-        ).isoformat(),
-    ]
+    history_dates = (
+        [
+            str(historical_business_date),
+            (
+                datetime.fromisoformat(str(historical_business_date)).date()
+                + timedelta(days=1)
+            ).isoformat(),
+        ]
+        if str(historical_business_date)
+        else []
+    )
     history_capture_ids: list[str] = []
     if {history_captures, history_components, history_finalizations} <= tables:
         for business_date in history_dates:

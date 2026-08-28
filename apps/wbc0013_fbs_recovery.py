@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
@@ -50,6 +51,90 @@ EXPECTED_EXISTING = 21
 EXPECTED_HISTORICAL = 12
 EXPECTED_NO_MATERIAL_HISTORY = 38
 EXPECTED_INSERTS = 50
+ORENBURG_FACILITY_ID = "fff_2579bb2741ed4ab23b11bb4c4183"
+ORENBURG_SELLER_WAREHOUSE_ID = 854205
+ORENBURG_OFFICIAL_OFFICE_ID = 12223
+OWNER_APPROVED_EXISTING_NM_IDS = (
+    210183142,
+    210183919,
+    210184534,
+    245720334,
+    259460529,
+    259465495,
+    259473237,
+    391659990,
+    428850065,
+    428853741,
+    428854140,
+    428854299,
+    428855306,
+    428855560,
+    428855758,
+    428855978,
+    497414010,
+    497414624,
+    497416271,
+    497417163,
+    497417474,
+)
+OWNER_APPROVED_MISSING_NM_IDS = (
+    259466031,
+    391660889,
+    391661710,
+    391662410,
+    391662965,
+    391663632,
+    428849827,
+    428854502,
+    497413772,
+    497415593,
+    497416559,
+    497416931,
+    1221231049,
+    1221235702,
+    1221244040,
+    1221249681,
+    1235346302,
+    1235353505,
+    1235356960,
+    1235358879,
+    1235360281,
+    1235361692,
+    1235365622,
+    1235366828,
+    1235368116,
+    1235369738,
+    1235373410,
+    1235374572,
+    1235375860,
+    1235377899,
+    1235379341,
+    1235381785,
+    1235384726,
+    1235387930,
+    1235392011,
+    1235393709,
+    1235398515,
+    1235399866,
+    1235404761,
+    1235405720,
+    1235406475,
+    1235406984,
+    1235407826,
+    1235409896,
+    1235411727,
+    1235412880,
+    1235413454,
+    1235414081,
+    1235419785,
+    1235421650,
+)
+OWNER_APPROVED_ORIGINAL_NM_IDS = OWNER_APPROVED_MISSING_NM_IDS[:12]
+OWNER_APPROVED_WB_CONTENT_NM_IDS = OWNER_APPROVED_MISSING_NM_IDS[12:]
+HISTORICAL_BUSINESS_DATE = "2026-08-26"
+HISTORICAL_NM_ID = 428853741
+HISTORICAL_VERSION_ID = "whfv_cb0657c384d5adebae01e585"
+HISTORICAL_EVENT_ID = "ffbf_87cea959c9d600da99caa1ab68ef"
 
 
 class Wbc0013CliError(RuntimeError):
@@ -237,7 +322,134 @@ def _common(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _discover_forward_dense_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Bind the exact current 71 = 21 + 50 Orenburg forward-zero scope."""
+
+    roster = [
+        int(row[0])
+        for row in conn.execute(
+            "SELECT nm_id FROM sheet_vitrina_v1_nomenclature_items "
+            "WHERE is_active=1 AND is_hidden=0 AND nm_id IS NOT NULL AND nm_id>0 "
+            "ORDER BY nm_id"
+        ).fetchall()
+    ]
+    expected_roster = sorted(
+        (*OWNER_APPROVED_EXISTING_NM_IDS, *OWNER_APPROVED_MISSING_NM_IDS)
+    )
+    if roster != expected_roster or len(roster) != EXPECTED_ROSTER:
+        raise _selection_error(
+            "dense_roster_identity_invalid",
+            "WBC0013 active stock-managed roster is not the exact accepted 71 identities",
+            predicate="dense_a.current_roster_exact_accepted_71",
+            expected_cardinality=EXPECTED_ROSTER,
+            candidates=[{"nm_id": value} for value in roster],
+            details={"expected_roster_digest": _fingerprint(expected_roster)},
+        )
+    facility = conn.execute(
+        "SELECT facility_id,active FROM sheet_vitrina_v1_ff_facilities "
+        "WHERE facility_id=?",
+        (ORENBURG_FACILITY_ID,),
+    ).fetchone()
+    if facility is None or not bool(facility[1]):
+        raise _selection_error(
+            "dense_facility_identity_invalid",
+            "WBC0013 exact Orenburg facility is missing or inactive",
+            predicate="dense_a.current_exact_active_orenburg_facility",
+            expected_cardinality=1,
+            candidates=[],
+        )
+    existing = [
+        int(row[0])
+        for row in conn.execute(
+            "SELECT nm_id FROM sheet_vitrina_v1_ff_pool_balances "
+            "WHERE facility_id=? AND pool='FBS' ORDER BY nm_id",
+            (ORENBURG_FACILITY_ID,),
+        ).fetchall()
+    ]
+    if existing != sorted(OWNER_APPROVED_EXISTING_NM_IDS):
+        raise _selection_error(
+            "dense_existing_identity_invalid",
+            "WBC0013 current Orenburg FBS identities are not the exact accepted 21",
+            predicate="dense_a.current_existing_exact_21",
+            expected_cardinality=EXPECTED_EXISTING,
+            candidates=[{"nm_id": value} for value in existing],
+            details={
+                "expected_existing_digest": _fingerprint(
+                    sorted(OWNER_APPROVED_EXISTING_NM_IDS)
+                )
+            },
+        )
+    target_rows = conn.execute(
+        "SELECT nm_id FROM sheet_vitrina_v1_ff_pool_balances "
+        f"WHERE facility_id=? AND pool='FBS' AND nm_id IN "
+        f"({','.join('?' for _ in OWNER_APPROVED_MISSING_NM_IDS)}) ORDER BY nm_id",
+        (ORENBURG_FACILITY_ID, *OWNER_APPROVED_MISSING_NM_IDS),
+    ).fetchall()
+    if target_rows:
+        raise _selection_error(
+            "dense_target_current_balance_present",
+            "WBC0013 forward-zero targets already have a current canonical balance",
+            predicate="dense_a.current_target_balance_absent_50",
+            expected_cardinality=0,
+            candidates=[{"nm_id": int(row[0])} for row in target_rows],
+        )
+
+    wb_content_rows = conn.execute(
+        "SELECT nm_id,wb_sync_status,wb_sync_evidence_json FROM "
+        "sheet_vitrina_v1_nomenclature_items WHERE is_active=1 AND is_hidden=0 "
+        f"AND nm_id IN ({','.join('?' for _ in OWNER_APPROVED_WB_CONTENT_NM_IDS)}) "
+        "ORDER BY nm_id",
+        tuple(OWNER_APPROVED_WB_CONTENT_NM_IDS),
+    ).fetchall()
+    invalid_wb_content: list[dict[str, Any]] = []
+    for row in wb_content_rows:
+        evidence = _loads_mapping(row[2])
+        if (
+            evidence.get("source") != "wb_content_cards"
+            or evidence.get("endpoint") != "/content/v2/get/cards/list"
+            or int(evidence.get("nm_id") or 0) != int(row[0])
+            or str(evidence.get("result") or "") not in {"created", "matched"}
+            or not str(row[1] or "")
+        ):
+            invalid_wb_content.append(
+                {"nm_id": int(row[0]), "wb_sync_status": str(row[1] or "")}
+            )
+    if (
+        len(wb_content_rows) != EXPECTED_NO_MATERIAL_HISTORY
+        or invalid_wb_content
+    ):
+        raise _selection_error(
+            "dense_target_current_identity_invalid",
+            "WBC0013 WB Content target identity is incomplete or drifted",
+            predicate="dense_a.current_wb_content_identity_exact_38",
+            expected_cardinality=EXPECTED_NO_MATERIAL_HISTORY,
+            candidates=[
+                {"nm_id": int(row[0]), "wb_sync_status": str(row[1] or "")}
+                for row in wb_content_rows
+            ],
+            details={"invalid_rows": invalid_wb_content[:20]},
+        )
+    return {
+        "schema": ZERO_REPAIR_MANIFEST_SCHEMA,
+        "facility_id": ORENBURG_FACILITY_ID,
+        "seller_warehouse_id": ORENBURG_SELLER_WAREHOUSE_ID,
+        "official_office_id": ORENBURG_OFFICIAL_OFFICE_ID,
+        "owner_approved_missing_nm_ids": sorted(OWNER_APPROVED_MISSING_NM_IDS),
+        "expected_roster_nm_ids": expected_roster,
+        "expected_existing_nm_ids": sorted(OWNER_APPROVED_EXISTING_NM_IDS),
+        "current_identity_partition": {
+            "original_count": len(OWNER_APPROVED_ORIGINAL_NM_IDS),
+            "wb_content_count": len(OWNER_APPROVED_WB_CONTENT_NM_IDS),
+            "original_digest": _fingerprint(sorted(OWNER_APPROVED_ORIGINAL_NM_IDS)),
+            "wb_content_digest": _fingerprint(
+                sorted(OWNER_APPROVED_WB_CONTENT_NM_IDS)
+            ),
+        },
+    }
+
+
 def _discover_dense_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Legacy historical selector retained only as inspectable audit evidence."""
     roster = [
         int(row[0])
         for row in conn.execute(
@@ -485,7 +697,29 @@ def _discover_dense_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
     return candidates[0]
 
 
+def _dense_forward_plan(context: Mapping[str, Any]) -> dict[str, Any]:
+    uri = f"file:{Path(context['db_path']).resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        manifest = _discover_forward_dense_manifest(conn)
+    return DenseFbsService(
+        db_path=Path(context["db_path"]),
+        runtime_dir=Path(context["runtime_dir"]),
+    ).build_zero_repair_plan(
+        facility_id=str(manifest["facility_id"]),
+        seller_warehouse_id=int(manifest["seller_warehouse_id"]),
+        official_office_id=int(manifest["official_office_id"]),
+        expected_roster_nm_ids=manifest["expected_roster_nm_ids"],
+        expected_existing_nm_ids=manifest["expected_existing_nm_ids"],
+        owner_approved_missing_nm_ids=manifest["owner_approved_missing_nm_ids"],
+        canonical_target=context["canonical_target"],
+        storage_generation=context["storage_generation"],
+    )
+
+
 def _dense_plan(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Legacy audit planner; the WBC0013 production profile does not call it."""
     uri = f"file:{Path(context['db_path']).resolve()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         conn.row_factory = sqlite3.Row
@@ -557,6 +791,171 @@ def _event_row(conn: sqlite3.Connection, event_id: str) -> sqlite3.Row | None:
         "FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events WHERE event_id=?",
         (event_id,),
     ).fetchone()
+
+
+def _discover_exact_historical_manifest(
+    conn: sqlite3.Connection,
+    *,
+    canonical_target: Mapping[str, Any],
+    storage_generation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Select only the accepted WBC0013 B identity; no mismatch-set audit."""
+
+    active = conn.execute(
+        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone()
+    sync = conn.execute(
+        "SELECT active_version_id FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1"
+    ).fetchone()
+    source = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions "
+        "WHERE version_id=? AND status='good' AND business_effective_date=?",
+        (HISTORICAL_VERSION_ID, HISTORICAL_BUSINESS_DATE),
+    ).fetchone()
+    target = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+        "WHERE version_id=? AND warehouse_key='ff' AND nm_id=?",
+        (HISTORICAL_VERSION_ID, HISTORICAL_NM_ID),
+    ).fetchone()
+    event = _event_row(conn, HISTORICAL_EVENT_ID)
+    candidates = [
+        {
+            "business_date": HISTORICAL_BUSINESS_DATE,
+            "nm_id": HISTORICAL_NM_ID,
+            "version_id": HISTORICAL_VERSION_ID,
+            "event_id": HISTORICAL_EVENT_ID,
+        }
+    ]
+    if (
+        active is None
+        or sync is None
+        or str(active[0]) != str(sync[0])
+        or source is None
+        or target is None
+        or event is None
+        or str(event["facility_id"]) != ORENBURG_FACILITY_ID
+        or int(event["nm_id"]) != HISTORICAL_NM_ID
+        or str(event["event_type"]) != "handoff_debit"
+    ):
+        raise _selection_error(
+            "historical_exact_target_missing_or_drifted",
+            "WBC0013 accepted historical target/version/event is missing or drifted",
+            predicate="historical_b.exact_accepted_target_version_event",
+            expected_cardinality=1,
+            candidates=(candidates if source is not None and target is not None else []),
+        )
+    ready = historical_ready_shape_evidence(
+        conn,
+        business_date=HISTORICAL_BUSINESS_DATE,
+        nm_id=HISTORICAL_NM_ID,
+    )
+    if not bool(ready["eligible"]):
+        raise _selection_error(
+            "historical_exact_ready_shape_drifted",
+            "WBC0013 exact accepted historical target no longer has the six-dependency shape",
+            predicate="historical_b.exact_accepted_ready_shape",
+            expected_cardinality=1,
+            candidates=[
+                {
+                    "business_date": HISTORICAL_BUSINESS_DATE,
+                    "nm_id": HISTORICAL_NM_ID,
+                    "ready_shape_digest": str(ready["fingerprint"]),
+                    "blockers": list(ready["blockers"]),
+                }
+            ],
+        )
+    preservation_nm_ids = sorted(
+        (*OWNER_APPROVED_EXISTING_NM_IDS, *OWNER_APPROVED_MISSING_NM_IDS)
+    )
+    placeholders = ",".join("?" for _ in preservation_nm_ids)
+    pool_rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+            "wac_rub,source_watermark,updated_at FROM "
+            "sheet_vitrina_v1_ff_pool_balances "
+            f"WHERE nm_id IN ({placeholders}) ORDER BY facility_id,pool,nm_id",
+            tuple(preservation_nm_ids),
+        ).fetchall()
+    ]
+    target_placeholders = ",".join("?" for _ in OWNER_APPROVED_MISSING_NM_IDS)
+    a_zero_rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,"
+            "wac_rub,source_watermark,updated_at FROM "
+            "sheet_vitrina_v1_ff_pool_balances WHERE facility_id=? AND pool='FBS' "
+            f"AND nm_id IN ({target_placeholders}) ORDER BY nm_id",
+            (ORENBURG_FACILITY_ID, *OWNER_APPROVED_MISSING_NM_IDS),
+        ).fetchall()
+    ]
+    invalid_a_zero: list[int] = []
+    for row in a_zero_rows:
+        try:
+            capital = Decimal(str(row["capital_rub"]))
+        except (InvalidOperation, TypeError, ValueError):
+            capital = Decimal("NaN")
+        if (
+            int(row["quantity"]) != 0
+            or not capital.is_finite()
+            or capital != 0
+            or row["wac_rub"] is not None
+        ):
+            invalid_a_zero.append(int(row["nm_id"]))
+    if len(a_zero_rows) != EXPECTED_INSERTS or invalid_a_zero:
+        raise _selection_error(
+            "historical_current_a_zero_drifted",
+            "WBC0013 B requires all 50 terminal A forward zeros to remain exact",
+            predicate="historical_b.current_a_forward_zeros_exact_50",
+            expected_cardinality=EXPECTED_INSERTS,
+            candidates=[{"nm_id": int(row["nm_id"])} for row in a_zero_rows],
+            details={"invalid_nm_ids": invalid_a_zero},
+        )
+    target_provenance = _loads_mapping(target["provenance_json"])
+    manifest = {
+        "schema": HISTORICAL_MANIFEST_SCHEMA,
+        "business_date": HISTORICAL_BUSINESS_DATE,
+        "facility_id": ORENBURG_FACILITY_ID,
+        "pool": "FBS",
+        "nm_ids": [HISTORICAL_NM_ID],
+        "accepted_version_id": HISTORICAL_VERSION_ID,
+        "accepted_version_plan_digest": str(source["plan_fingerprint"]),
+        "accepted_version_row_digest": _fingerprint(dict(source)),
+        "accepted_target_row_digest": _fingerprint(dict(target)),
+        "accepted_provenance_digest": _fingerprint(target_provenance),
+        "accepted_effective_at": str(source["effective_at"]),
+        "accepted_published_at": str(source["published_at"]),
+        "expected_current_active_version_id": str(active[0]),
+        "expected_current_sync_version_id": str(sync[0]),
+        "expected_current_pool_digest": _fingerprint(pool_rows),
+        "current_preservation_nm_ids": preservation_nm_ids,
+        "a_forward_zero_nm_ids": sorted(OWNER_APPROVED_MISSING_NM_IDS),
+        "expected_a_forward_zero_digest": _fingerprint(a_zero_rows),
+        "event_id": str(event["event_id"]),
+        "event_source_digest": _fingerprint(str(event["source_revision"])),
+        "event_status_digest": str(event["status_digest"]),
+        "event_evidence_digest": str(event["evidence_digest"]),
+        "event_row_digest": _fingerprint(dict(event)),
+        "event_quantity_delta": str(event["physical_quantity_delta"]),
+        "event_capital_delta_rub": str(event["capital_delta_rub"]),
+        "event_wac_rub": str(event["frozen_wac_rub"]),
+        "event_occurred_at": str(event["occurred_at"]),
+        "accepted_quantity": str(target["quantity"]),
+        "accepted_cost_covered_quantity": str(target["cost_covered_quantity"]),
+        "accepted_capital_rub": str(target["capital_rub"]),
+        "canonical_target": dict(canonical_target),
+        "storage_generation": dict(storage_generation),
+    }
+    selection = _selection_details(
+        predicate="historical_b.exact_accepted_target_version_event",
+        expected_cardinality=1,
+        candidates=candidates,
+        details={
+            "ready_shape_digest": str(ready["fingerprint"]),
+            "broad_mismatch_query_performed": False,
+        },
+    )
+    return {"mismatches": candidates, "manifests": [manifest], "selection": selection}
 
 
 def _discover_historical_manifests(
@@ -812,7 +1211,7 @@ def _historical_plan(
         conn.row_factory = sqlite3.Row
         if not bool(int(conn.execute("PRAGMA query_only").fetchone()[0])):
             raise ValueError("WBC0013 historical dependency session is not query-only")
-        discovery = _discover_historical_manifests(
+        discovery = _discover_exact_historical_manifest(
             conn,
             canonical_target=context["canonical_target"],
             storage_generation=context["storage_generation"],
@@ -829,13 +1228,37 @@ def _historical_plan(
             for manifest in discovery["manifests"]
         ]
         repairable = [plan for plan in classified if plan.get("status") == REPAIRABLE]
+        exact_material = [
+            plan
+            for plan in repairable
+            if (
+                dict(plan.get("typed_evidence") or {})
+                .get("historical_material_receipt", {})
+                .get("quantity")
+                == "1952"
+                and dict(plan.get("typed_evidence") or {})
+                .get("historical_material_receipt", {})
+                .get("cost_covered_quantity")
+                == "1952"
+                and dict(plan.get("typed_evidence") or {})
+                .get("historical_material_receipt", {})
+                .get("location_count")
+                == 3
+                and dict(plan.get("typed_evidence") or {})
+                .get("historical_material_receipt", {})
+                .get("all_target_own_cost_available")
+                is True
+                and dict(plan.get("typed_evidence") or {})
+                .get("historical_material_receipt", {})
+                .get("all_six_total_dependencies_available")
+                is True
+            )
+        ]
     qualification = {
-        "fresh_mismatch_count": len(discovery["mismatches"]),
-        "fresh_mismatch_digest": _fingerprint(discovery["mismatches"]),
+        "exact_target_count": len(discovery["mismatches"]),
+        "exact_target_digest": _fingerprint(discovery["mismatches"]),
         "ready_shape_candidate_count": 1,
-        "ready_shape_candidate_digest": str(
-            selection.get("ready_shape_candidate", {}).get("ready_shape_digest") or ""
-        ),
+        "ready_shape_candidate_digest": str(selection.get("ready_shape_digest") or ""),
         "causal_event_count": int(selection["observed_cardinality"]),
         "causal_event_candidate_digest": str(selection["candidate_digest"]),
         "selection_predicate": str(selection["predicate"]),
@@ -852,10 +1275,10 @@ def _historical_plan(
         ],
     }
     qualification["fingerprint"] = _fingerprint(qualification)
-    if len(repairable) != 1:
+    if len(exact_material) != 1:
         raise Wbc0013CliError(
             "historical_target_missing_or_ambiguous",
-            "WBC0013 historical target discovery is missing or ambiguous",
+            "WBC0013 historical target lacks the exact three-location and six-dependency receipt",
             details=_selection_details(
                 predicate="historical_b.repairable_manifest",
                 expected_cardinality=1,
@@ -867,7 +1290,7 @@ def _historical_plan(
                 details={"discovery_qualification": qualification},
             ),
         )
-    return repairable[0], qualification
+    return exact_material[0], qualification
 
 
 def _latest_plan(evidence_dir: Path, phase: str) -> tuple[Path, dict[str, Any]]:
@@ -895,7 +1318,7 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("business-data write barrier is active or invalid")
     phase = str(args.phase)
     if phase == "plan-a":
-        plan = _dense_plan(context)
+        plan = _dense_forward_plan(context)
         if not plan.get("apply_allowed"):
             raise Wbc0013CliError(
                 "dense_qualification_blocked",
@@ -925,10 +1348,11 @@ def run(args: argparse.Namespace) -> int:
             "existing_count": len(
                 plan["non_targets"]["target_facility_existing_fbs_nm_ids"]
             ),
-            "historical_zero_count": len(plan["partitions"]["historical_exact_zero"]),
-            "no_material_value_history_count": len(
-                plan["partitions"]["no_material_value_history"]
+            "owner_approved_missing_count": len(
+                plan["owner_approved_missing"]["nm_ids"]
             ),
+            "original_identity_count": len(OWNER_APPROVED_ORIGINAL_NM_IDS),
+            "wb_content_identity_count": len(OWNER_APPROVED_WB_CONTENT_NM_IDS),
             "zero_insert_count": plan["expected_effects"]["balance_insert_count"],
         }
     elif phase == "apply-a":
@@ -970,8 +1394,19 @@ def run(args: argparse.Namespace) -> int:
         payload = {
             "status": "reconciled" if complete else "not_reconciled",
             "query_only": True,
+            "roster_count": int(readback.get("expected_roster_count") or 0),
+            "covered_roster_count": int(readback.get("covered_roster_count") or 0),
             "zero_row_count": int(readback.get("zero_row_count") or 0),
+            "new_explicit_zero_count": int(
+                readback.get("new_explicit_zero_count") or 0
+            ),
             "document_count": int(readback.get("pool_inventory_document_count") or 0),
+            "absolute_target_line_count": int(
+                readback.get("absolute_target_line_count") or 0
+            ),
+            "movement_line_count": int(readback.get("movement_line_count") or 0),
+            "forward_t0": str(readback.get("forward_t0") or ""),
+            "history_write_count": int(readback.get("history_write_count") or 0),
             "non_target_preserved": bool(readback.get("non_target_preserved")),
             "readback": readback,
         }
@@ -1003,7 +1438,11 @@ def run(args: argparse.Namespace) -> int:
             "target_generation_bound": True,
             "timer_change_count": 0,
             "historical_repair_count": 1,
-            "fresh_mismatch_count": qualification["fresh_mismatch_count"],
+            "business_date": HISTORICAL_BUSINESS_DATE,
+            "nm_id": HISTORICAL_NM_ID,
+            "accepted_version_id": HISTORICAL_VERSION_ID,
+            "event_id": HISTORICAL_EVENT_ID,
+            "exact_target_count": qualification["exact_target_count"],
             "ready_shape_candidate_count": qualification[
                 "ready_shape_candidate_count"
             ],
@@ -1017,6 +1456,7 @@ def run(args: argparse.Namespace) -> int:
             "selection_predicate": qualification["selection_predicate"],
             "selection_details_digest": qualification["selection_details_digest"],
             "mismatch_classification_digest": qualification["fingerprint"],
+            "broad_mismatch_query_performed": False,
             "current_active_preserved": bool(preservation["active_version_id"]),
             "current_sync_preserved": bool(preservation["sync_version_id"]),
             "current_pool_preserved": bool(preservation["pool_rows_digest"]),
@@ -1056,6 +1496,7 @@ def run(args: argparse.Namespace) -> int:
         expected = plan["typed_evidence"]["readback_identity"]
         actual = readback.get("readback_identity") or {}
         complete = readback.get("status") == "repaired" and actual == expected
+        material_receipt = dict(actual.get("historical_material_receipt") or {})
         payload = {
             "status": "reconciled" if complete else "not_reconciled",
             "query_only": True,
@@ -1066,12 +1507,29 @@ def run(args: argparse.Namespace) -> int:
             == expected.get("sync_version_id"),
             "current_pool_preserved": actual.get("current_pool_digest")
             == expected.get("current_pool_digest"),
+            "a_forward_zeros_preserved": actual.get("a_forward_zero_digest")
+            == expected.get("a_forward_zero_digest"),
             "ready_target_total_closed": actual.get("ready_snapshot_digest")
             == expected.get("ready_snapshot_digest"),
             "non_target_preserved": actual.get(
                 "ready_target_total_non_target_closure_digest"
             )
             == expected.get("ready_target_total_non_target_closure_digest"),
+            "historical_quantity": material_receipt.get("quantity"),
+            "historical_cost_covered_quantity": material_receipt.get(
+                "cost_covered_quantity"
+            ),
+            "historical_location_count": material_receipt.get("location_count"),
+            "historical_location_digest": material_receipt.get("location_digest"),
+            "historical_provenance_digest": material_receipt.get(
+                "provenance_digest"
+            ),
+            "target_own_cost_available": material_receipt.get(
+                "all_target_own_cost_available"
+            ),
+            "six_total_dependencies_available": material_receipt.get(
+                "all_six_total_dependencies_available"
+            ),
             "readback": readback,
         }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))

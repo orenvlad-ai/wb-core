@@ -25,11 +25,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.ff_pool_dense_fbs import (  # noqa: E402
-    _strict_domain_manifest_v2,
+    _strict_domain_manifest_v3,
     _write_private,
     run as run_orenburg_cli,
 )
-from apps.wbc0013_fbs_recovery import _discover_dense_manifest  # noqa: E402
+from apps.wbc0013_fbs_recovery import (  # noqa: E402
+    _discover_dense_manifest,
+    _discover_forward_dense_manifest,
+)
 from packages.application.ff_pool_dense_fbs import (  # noqa: E402
     DenseFbsError,
     DenseFbsResumableError,
@@ -1293,48 +1296,51 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         assert plan["target_effects"]["effect_row_count"] == 0
         assert plan["target_effects"]["legacy_reservations_count"] == 0
         assert plan["target_effects"]["identity_mapped_order_evidence_count"] == 0
-        assert plan["historical_zero_evidence"]["exact_zero_count"] == 12
+        historical_audit = plan["audit_only_historical_evidence"]
+        assert historical_audit["admission"] is False
+        assert historical_audit["cas"] is False
+        historical_zero = historical_audit["historical_exact_zero"]
+        no_material_history = historical_audit["no_material_value_history"]
+        assert historical_zero["exact_zero_count"] == 12
         assert (
-            plan["historical_zero_evidence"]["mapping_extension_provenance_count"] == 12
+            historical_zero["mapping_extension_provenance_count"] == 12
         )
-        assert len(plan["historical_zero_evidence"]["superseded_finalizations"]) == 5
+        assert len(historical_zero["superseded_finalizations"]) == 5
         assert all(
             item["identical_to_latest"]
-            for item in plan["historical_zero_evidence"]["superseded_finalizations"]
+            for item in historical_zero["superseded_finalizations"]
         )
         assert any(
             item["classification"] == "nonmaterial_missing_or_absent"
-            for item in plan["historical_zero_evidence"]["accepted_lineage"]
+            for item in historical_zero["accepted_lineage"]
         )
-        assert plan["historical_zero_evidence"]["invalid_lineage"] == []
+        assert historical_zero["invalid_lineage"] == []
         assert (
-            plan["no_material_value_history_evidence"][
-                "accepted_missing_component_count"
-            ]
+            no_material_history["accepted_missing_component_count"]
             == 228
         )
         assert (
-            plan["no_material_value_history_evidence"][
-                "selected_unique_capture_count"
-            ]
+            no_material_history["selected_unique_capture_count"]
             == 6
         )
         assert len(
-            plan["no_material_value_history_evidence"][
-                "older_distinct_finalizations"
-            ]
+            no_material_history["older_distinct_finalizations"]
         ) == 1
         assert len(
-            plan["no_material_value_history_evidence"][
-                "duplicate_finalization_rows"
-            ]
+            no_material_history["duplicate_finalization_rows"]
         ) == 1
-        assert len(plan["no_material_value_history_evidence"]["lifecycle_rows"]) == 38
+        assert len(no_material_history["lifecycle_rows"]) == 38
         assert (
-            plan["historical_zero_evidence"]["forbidden_next_day_retrocopy_count"] == 0
+            historical_zero["forbidden_next_day_retrocopy_count"] == 0
         )
         with sqlite3.connect(runtime.db_path) as conn:
             conn.row_factory = sqlite3.Row
+            forward_discovered = _discover_forward_dense_manifest(conn)
+            assert forward_discovered["owner_approved_missing_nm_ids"] == sorted(
+                ORENBURG_TARGET_NM_IDS
+            )
+            assert forward_discovered["expected_existing_nm_ids"] == non_target_nm_ids
+            assert forward_discovered["expected_roster_nm_ids"] == roster_nm_ids
             discovered = _discover_dense_manifest(conn)
             assert discovered["partitions"] == {
                 "historical_exact_zero": sorted(ORENBURG_ORIGINAL_TARGET_NM_IDS),
@@ -1547,8 +1553,11 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                 canonical_target=canonical_target,
                 storage_generation=storage_generation,
             )
-            assert conflict_plan["apply_allowed"] is False
-            assert conflict_plan["historical_zero_evidence"]["invalid_lineage"]
+            assert conflict_plan["apply_allowed"] is True
+            assert conflict_plan["blockers"] == []
+            assert conflict_plan["audit_only_historical_evidence"][
+                "historical_exact_zero"
+            ]["invalid_lineage"]
 
         # The CLI accepts only an explicit active target and explicit
         # StoreRegistry generation, both opened query-only.
@@ -1590,17 +1599,11 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                 {
                     "schema": ZERO_REPAIR_MANIFEST_SCHEMA,
                     "facility_id": ORENBURG_FACILITY_ID,
-                    "partitions": {
-                        "historical_exact_zero": list(ORENBURG_ORIGINAL_TARGET_NM_IDS),
-                        "no_material_value_history": list(
-                            ORENBURG_WB_CONTENT_TARGET_NM_IDS
-                        ),
-                    },
                     "seller_warehouse_id": ORENBURG_SELLER_WAREHOUSE_ID,
                     "official_office_id": ORENBURG_OFFICIAL_OFFICE_ID,
+                    "owner_approved_missing_nm_ids": list(ORENBURG_TARGET_NM_IDS),
                     "expected_roster_nm_ids": roster_nm_ids,
                     "expected_existing_nm_ids": non_target_nm_ids,
-                    "historical_business_date": ORENBURG_HISTORICAL_ZERO_DATE,
                 },
                 sort_keys=True,
             ),
@@ -1609,7 +1612,7 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         valid_domain_manifest = json.loads(
             domain_manifest_file.read_text(encoding="utf-8")
         )
-        _strict_domain_manifest_v2(valid_domain_manifest)
+        _strict_domain_manifest_v3(valid_domain_manifest)
         invalid_manifests = []
         extra = deepcopy(valid_domain_manifest)
         extra["unknown"] = True
@@ -1618,13 +1621,13 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         missing.pop("expected_existing_nm_ids")
         invalid_manifests.append(missing)
         duplicate = deepcopy(valid_domain_manifest)
-        duplicate["partitions"]["historical_exact_zero"].append(
-            duplicate["partitions"]["historical_exact_zero"][0]
+        duplicate["owner_approved_missing_nm_ids"].append(
+            duplicate["owner_approved_missing_nm_ids"][0]
         )
         invalid_manifests.append(duplicate)
         overlap = deepcopy(valid_domain_manifest)
-        overlap["partitions"]["no_material_value_history"].append(
-            overlap["partitions"]["historical_exact_zero"][0]
+        overlap["expected_existing_nm_ids"].append(
+            overlap["owner_approved_missing_nm_ids"][0]
         )
         invalid_manifests.append(overlap)
         incomplete_union = deepcopy(valid_domain_manifest)
@@ -1634,12 +1637,12 @@ def _orenburg_repair_contract() -> dict[str, Any]:
         invalid_manifests.append(incomplete_union)
         for invalid_manifest in invalid_manifests:
             try:
-                _strict_domain_manifest_v2(invalid_manifest)
+                _strict_domain_manifest_v3(invalid_manifest)
             except ValueError:
                 pass
             else:
                 raise AssertionError(
-                    "invalid strict-v2 dense manifest must fail closed"
+                    "invalid strict-v3 dense manifest must fail closed"
                 )
         cli_stdout = io.StringIO()
         cli_stderr = io.StringIO()
@@ -1711,8 +1714,16 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             canonical_target=canonical_target,
             storage_generation=storage_generation,
         )
-        assert source_drift["apply_allowed"] is False
-        assert any("WB Content" in item for item in source_drift["blockers"])
+        assert source_drift["apply_allowed"] is True
+        assert source_drift["blockers"] == []
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                _discover_forward_dense_manifest(conn)
+            except RuntimeError as exc:
+                assert getattr(exc, "code", "") == "dense_target_current_identity_invalid"
+            else:
+                raise AssertionError("current owner-approved target identity drift must block")
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 "UPDATE sheet_vitrina_v1_nomenclature_items "
@@ -1740,8 +1751,8 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             canonical_target=canonical_target,
             storage_generation=storage_generation,
         )
-        assert lifecycle_status_drift["apply_allowed"] is False
-        assert any("WB Content" in item for item in lifecycle_status_drift["blockers"])
+        assert lifecycle_status_drift["apply_allowed"] is True
+        assert lifecycle_status_drift["blockers"] == []
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute(
                 "UPDATE sheet_vitrina_v1_nomenclature_items "
@@ -1843,8 +1854,11 @@ def _orenburg_repair_contract() -> dict[str, Any]:
                 canonical_target=canonical_target,
                 storage_generation=storage_generation,
             )
-            assert material_history["apply_allowed"] is False
-            assert material_history["no_material_value_history_evidence"][
+            assert material_history["apply_allowed"] is True
+            assert material_history["blockers"] == []
+            assert material_history["audit_only_historical_evidence"][
+                "no_material_value_history"
+            ][
                 "invalid_latest_material_rows"
             ]
         movement_db = Path(raw) / "material-movement.sqlite3"
@@ -1884,8 +1898,45 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             canonical_target=canonical_target,
             storage_generation=storage_generation,
         )
-        assert movement_evidence["apply_allowed"] is False
+        assert movement_evidence["apply_allowed"] is True
+        assert movement_evidence["current_material_evidence"]["conflict_count"] == 0
         assert movement_evidence["target_effects"]["movement_lines_count"] == 1
+
+        current_conflict_db = Path(raw) / "current-reservation.sqlite3"
+        with sqlite3.connect(runtime.db_path) as source_conn, sqlite3.connect(
+            current_conflict_db
+        ) as conn:
+            source_conn.backup(conn)
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_current(
+                       cutover_id,order_id,state,episode_sequence,source_revision,
+                       status_digest,supplier_status,wb_status,facility_id,pool,nm_id,
+                       quantity,frozen_wac_rub,debit_event_id,updated_at
+                   ) VALUES('wbc0013-current-conflict',9913001,'reserved',1,
+                            'current-revision','current-status','new','waiting',
+                            ?,'FBS',?,1,'1','',?)""",
+                (ORENBURG_FACILITY_ID, material_nm_id, NOW),
+            )
+            conn.commit()
+        current_conflict = DenseFbsService(
+            db_path=current_conflict_db,
+            runtime_dir=runtime_dir,
+            timestamp_factory=lambda: NOW,
+        ).build_zero_repair_plan(
+            facility_id=ORENBURG_FACILITY_ID,
+            owner_approved_missing_nm_ids=ORENBURG_TARGET_NM_IDS,
+            seller_warehouse_id=ORENBURG_SELLER_WAREHOUSE_ID,
+            official_office_id=ORENBURG_OFFICIAL_OFFICE_ID,
+            expected_roster_nm_ids=roster_nm_ids,
+            expected_existing_nm_ids=non_target_nm_ids,
+            canonical_target=canonical_target,
+            storage_generation=storage_generation,
+        )
+        assert current_conflict["apply_allowed"] is False
+        assert current_conflict["current_material_evidence"]["conflict_count"] == 1
+        assert current_conflict["current_material_evidence"][
+            "material_lifecycle_rows"
+        ][0]["state"] == "reserved"
 
         wrong_date = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
@@ -1899,8 +1950,10 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             canonical_target=canonical_target,
             storage_generation=storage_generation,
         )
-        assert wrong_date["apply_allowed"] is False
-        assert wrong_date["historical_zero_evidence"]["rows"] == []
+        assert wrong_date["apply_allowed"] is True
+        assert wrong_date["audit_only_historical_evidence"][
+            "historical_exact_zero"
+        ]["rows"] == []
 
         drift_nm_id = non_target_nm_ids[0]
         with sqlite3.connect(runtime.db_path) as conn:
@@ -1940,6 +1993,12 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             f"AND nm_id IN ({','.join('?' for _ in non_target_nm_ids)}) ORDER BY nm_id",
             (ORENBURG_FACILITY_ID, *non_target_nm_ids),
         )
+        history_before_apply = _fingerprint_rows(
+            runtime.db_path,
+            "SELECT * FROM sheet_vitrina_v1_inventory_history_components "
+            "ORDER BY capture_id,scope_kind,scope_key,nm_id,component_kind,component_id",
+            (),
+        )
         applied = service.apply_zero_repair_plan(
             plan,
             confirm_fingerprint=str(plan["fingerprint"]),
@@ -1972,6 +2031,27 @@ def _orenburg_repair_contract() -> dict[str, Any]:
             f"AND nm_id IN ({','.join('?' for _ in non_target_nm_ids)}) ORDER BY nm_id",
             (ORENBURG_FACILITY_ID, *non_target_nm_ids),
         )
+        assert history_before_apply == _fingerprint_rows(
+            runtime.db_path,
+            "SELECT * FROM sheet_vitrina_v1_inventory_history_components "
+            "ORDER BY capture_id,scope_kind,scope_key,nm_id,component_kind,component_id",
+            (),
+        )
+        readback = service.readback_zero_repair(
+            operation_id=str(plan["input_manifest"]["operation_id"])
+        )
+        assert readback["query_only"] is True
+        assert readback["expected_roster_count"] == 71
+        assert readback["covered_roster_count"] == 71
+        assert readback["new_explicit_zero_count"] == 50
+        assert readback["pool_inventory_document_count"] == 1
+        assert readback["absolute_target_line_count"] == 50
+        assert readback["movement_line_count"] == 0
+        assert readback["forward_t0"] == NOW
+        assert readback["history_write_count"] == 0
+        assert readback["history_tables_in_write_scope"] is False
+        assert readback["non_target_preserved"] is True
+        assert readback["exact_reconciled"] is True
         post_effect_plan = service.build_zero_repair_plan(
             facility_id=ORENBURG_FACILITY_ID,
             historical_exact_zero_nm_ids=ORENBURG_ORIGINAL_TARGET_NM_IDS,

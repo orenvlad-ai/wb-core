@@ -249,17 +249,19 @@ profile без manifest hash в owner passport:
 WBC0013 имеет отдельный exact двухфазный profile:
 
 ```text
-/wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery target wb_core_eu_hosted_runtime_active roster 71 existing 21 historical-zero 12 absent-history 38 zero-inserts 50 historical-repairs 1
+/wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery target wb_core_eu_hosted_runtime_active roster 71 existing 21 owner-approved-missing 50 zero-inserts 50 historical-date 2026-08-26 historical-nm 428853741 historical-version whfv_cb0657c384d5adebae01e585 historical-event ffbf_87cea959c9d600da99caa1ab68ef historical-repairs 1
 ```
 
-Он принимает только равенство `71 = 21 + (12 + 38)`, где 38 означает
-`no_material_value_history` и связывает 228 принятых `missing`, а не
-исторические нули: это последние шесть уникальных capture по sequence, без
-фиксированного числа дат и без повторного счёта duplicate-finalization. Profile создаёт private-0600 JIT
+Он принимает только текущую каноническую форму `71 = 21 + 50`; 50 —
+owner-approved identity list (исходные 12 плюс WB Content 38). Исторические
+capture/date/lineage и `missing / NULL` остаются audit-only и не входят в
+admission или CAS A. Profile создаёт private-0600 JIT
 планы и требует два consecutive одинаковых material witness для A и B, максимум
 с тремя регенерациями до submit. Runner делает ровно один A submit, только
 query-only A reconciliation, затем fresh B plan, ровно один B submit и
-query-only B reconciliation. Потерянный ответ ведёт к same-operation readback,
+query-only B reconciliation. B выбирает только exact date/nm/version/event из
+passport и не строит broad mismatch set; timestamp кандидата детерминирован
+accepted event. Потерянный ответ ведёт к same-operation readback,
 а не к повторному submit. Profile default-off, deploy его не вызывает; обычные
 service/timer не останавливаются и не меняются.
 Remote command закрепляет deployed path, явный `PYTHONPATH`, target/generation

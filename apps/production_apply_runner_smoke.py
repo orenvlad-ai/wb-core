@@ -39,7 +39,9 @@ WARM_AUTH_BODY = (
 WBC0013_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 profile dense-fbs-historical-recovery "
     "target wb_core_eu_hosted_runtime_active roster 71 existing 21 "
-    "historical-zero 12 absent-history 38 zero-inserts 50 historical-repairs 1"
+    "owner-approved-missing 50 zero-inserts 50 historical-date 2026-08-26 "
+    "historical-nm 428853741 historical-version whfv_cb0657c384d5adebae01e585 "
+    "historical-event ffbf_87cea959c9d600da99caa1ab68ef historical-repairs 1"
 )
 
 
@@ -84,8 +86,9 @@ def _exercise_wbc0013_two_phase_runner() -> None:
                 {
                     "roster_count": 71,
                     "existing_count": 21,
-                    "historical_zero_count": 12,
-                    "no_material_value_history_count": 38,
+                    "owner_approved_missing_count": 50,
+                    "original_identity_count": 12,
+                    "wb_content_identity_count": 38,
                     "zero_insert_count": 50,
                 }
             )
@@ -93,7 +96,12 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             payload.update(
                 {
                     "historical_repair_count": 1,
-                    "fresh_mismatch_count": 160,
+                    "business_date": "2026-08-26",
+                    "nm_id": 428853741,
+                    "accepted_version_id": "whfv_cb0657c384d5adebae01e585",
+                    "event_id": "ffbf_87cea959c9d600da99caa1ab68ef",
+                    "exact_target_count": 1,
+                    "broad_mismatch_query_performed": False,
                     "ready_shape_candidate_count": 1,
                     "ready_shape_candidate_digest": "sha256:" + "6" * 64,
                     "causal_event_count": 1,
@@ -173,8 +181,15 @@ def _exercise_wbc0013_two_phase_runner() -> None:
                 "result": {
                     "status": "reconciled",
                     "query_only": True,
+                    "roster_count": 71,
+                    "covered_roster_count": 71,
                     "zero_row_count": 50,
+                    "new_explicit_zero_count": 50,
                     "document_count": 1,
+                    "absolute_target_line_count": 50,
+                    "movement_line_count": 0,
+                    "forward_t0": "2026-08-28T12:00:00+00:00",
+                    "history_write_count": 0,
                     "non_target_preserved": True,
                 },
             },
@@ -190,8 +205,16 @@ def _exercise_wbc0013_two_phase_runner() -> None:
                     "current_active_preserved": True,
                     "current_sync_preserved": True,
                     "current_pool_preserved": True,
+                    "a_forward_zeros_preserved": True,
                     "ready_target_total_closed": True,
                     "non_target_preserved": True,
+                    "historical_quantity": "1952",
+                    "historical_cost_covered_quantity": "1952",
+                    "historical_location_count": 3,
+                    "historical_location_digest": "sha256:" + "4" * 64,
+                    "historical_provenance_digest": "sha256:" + "5" * 64,
+                    "target_own_cost_available": True,
+                    "six_total_dependencies_available": True,
                 },
             },
         ]
