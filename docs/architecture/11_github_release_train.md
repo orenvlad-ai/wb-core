@@ -254,7 +254,8 @@ WBC0013 имеет отдельный exact двухфазный profile:
 
 Он принимает только равенство `71 = 21 + (12 + 38)`, где 38 означает
 `no_material_value_history` и связывает 228 принятых `missing`, а не
-исторические нули. Profile создаёт private-0600 JIT
+исторические нули: это последние шесть уникальных capture по sequence, без
+фиксированного числа дат и без повторного счёта duplicate-finalization. Profile создаёт private-0600 JIT
 планы и требует два consecutive одинаковых material witness для A и B, максимум
 с тремя регенерациями до submit. Runner делает ровно один A submit, только
 query-only A reconciliation, затем fresh B plan, ровно один B submit и
@@ -263,7 +264,8 @@ query-only B reconciliation. Потерянный ответ ведёт к same-
 service/timer не останавливаются и не меняются.
 Remote command закрепляет deployed path, явный `PYTHONPATH`, target/generation
 и mode-0700 evidence directory. Любой terminal failure сохраняется в receipt
-как bounded typed `phase/stage/code/message/details_digest`; stderr digest не
+как bounded typed `phase/stage/code/message/predicate/expected_cardinality/
+observed_cardinality/candidate_digest/details_digest`; stderr digest не
 заменяет доменную причину.
 
 WBC0008 profile создаёт два одинаковых JIT material-CAS witness, затем ровно один

@@ -550,18 +550,218 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
                     )
                 ),
             )
+            broad_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) "
+                    "FROM sheet_vitrina_v1_warehouse_functional_versions version "
+                    "JOIN sheet_vitrina_v1_warehouse_functional_balances balance "
+                    "ON balance.version_id=version.version_id "
+                    "AND balance.warehouse_key='ff' "
+                    "WHERE version.status='good' AND balance.quantity>0 "
+                    "AND balance.cost_covered_quantity<>balance.quantity"
+                ).fetchone()[0]
+            )
+            assert broad_count < 160
+            for number in range(160 - broad_count):
+                stale_version = f"whfv_stale_local_reject_{number:03d}"
+                stale_second = number % 60
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                           version_id,cutover_id,version_kind,effective_at,
+                           business_effective_date,published_at,status,plan_fingerprint,
+                           local_source_digest,source_watermarks_json,created_at)
+                       VALUES(?,?,'hourly_wb_sync',?,'2025-01-01',?,'good',?,?,?,?)""",
+                    (
+                        stale_version,
+                        str(source["cutover_id"]),
+                        f"2025-01-01T00:{number // 60:02d}:{stale_second:02d}Z",
+                        f"2025-01-01T00:{number // 60:02d}:{stale_second:02d}Z",
+                        _fingerprint(f"stale-plan-{number}"),
+                        _fingerprint(f"stale-local-{number}"),
+                        "{}",
+                        f"2025-01-01T00:{number // 60:02d}:{stale_second:02d}Z",
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                           version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                           cost_covered_quantity,quality,certified,wb_quantity,
+                           wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+                       SELECT ?,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                              cost_covered_quantity,quality,certified,wb_quantity,
+                              wb_in_way_to_client,wb_in_way_from_client,provenance_json
+                         FROM sheet_vitrina_v1_warehouse_functional_balances
+                        WHERE version_id='whfv_incident_source' AND warehouse_key='ff'
+                          AND nm_id=?""",
+                    (stale_version, TARGET_NM_ID),
+                )
             discovery = _discover_historical_manifests(
                 conn,
                 canonical_target={"accepted": True},
                 storage_generation={"implicit": False, "query_only": True},
             )
-            assert len(discovery["mismatches"]) >= 2
+            assert len(discovery["mismatches"]) == 160
             assert len(discovery["manifests"]) == 1
             assert discovery["manifests"][0]["event_id"] == "handoff-debit-1"
             assert any(
-                item["classification"] == "rejected_no_event_in_causal_interval"
+                item["classification"] == "rejected_ready_shape_prerequisites"
                 for item in discovery["mismatches"]
             )
+            assert discovery["selection"]["predicate"] == (
+                "historical_b.exact_causal_handoff_debit_event"
+            )
+            assert discovery["selection"]["expected_cardinality"] == 1
+            assert discovery["selection"]["observed_cardinality"] == 1
+            assert len(
+                [
+                    item
+                    for item in discovery["mismatches"]
+                    if item["classification"]
+                    == "rejected_ready_shape_prerequisites"
+                ]
+            ) == 159
+
+            conn.execute("SAVEPOINT ready_zero")
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",
+                (DAY,),
+            )
+            ready_zero = _discover_historical_manifests(
+                conn,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert ready_zero["manifests"] == []
+            assert ready_zero["selection"]["predicate"] == (
+                "historical_b.exact_ready_shape_candidate"
+            )
+            assert ready_zero["selection"]["observed_cardinality"] == 0
+            conn.execute("ROLLBACK TO ready_zero")
+            conn.execute("RELEASE ready_zero")
+
+            conn.execute("SAVEPOINT ready_many")
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                       version_id,cutover_id,version_kind,effective_at,
+                       business_effective_date,published_at,status,plan_fingerprint,
+                       local_source_digest,source_watermarks_json,created_at)
+                   SELECT 'whfv_ready_shape_ambiguous',cutover_id,version_kind,
+                          effective_at,business_effective_date,
+                          '2026-08-26T11:59:00Z',status,
+                          'sha256:ready-shape-ambiguous',local_source_digest,
+                          source_watermarks_json,created_at
+                     FROM sheet_vitrina_v1_warehouse_functional_versions
+                    WHERE version_id='whfv_incident_source'"""
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+                   SELECT 'whfv_ready_shape_ambiguous',warehouse_key,nm_id,quantity,
+                          wac_rub,capital_rub,cost_covered_quantity,quality,certified,
+                          wb_quantity,wb_in_way_to_client,wb_in_way_from_client,
+                          provenance_json
+                     FROM sheet_vitrina_v1_warehouse_functional_balances
+                    WHERE version_id='whfv_incident_source'"""
+            )
+            ready_many = _discover_historical_manifests(
+                conn,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert ready_many["manifests"] == []
+            assert ready_many["selection"]["predicate"] == (
+                "historical_b.exact_ready_shape_candidate"
+            )
+            assert ready_many["selection"]["observed_cardinality"] == 2
+            conn.execute("ROLLBACK TO ready_many")
+            conn.execute("RELEASE ready_many")
+
+            conn.execute("SAVEPOINT causal_zero")
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                       version_id,cutover_id,version_kind,effective_at,
+                       business_effective_date,published_at,status,plan_fingerprint,
+                       local_source_digest,source_watermarks_json,created_at)
+                   SELECT 'whfv_causal_zero',cutover_id,version_kind,
+                          '2026-08-28T23:00:00Z','2026-08-28',
+                          '2026-08-28T23:00:00Z',status,'sha256:causal-zero',
+                          local_source_digest,source_watermarks_json,created_at
+                     FROM sheet_vitrina_v1_warehouse_functional_versions
+                    WHERE version_id='whfv_incident_source'"""
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                       version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                       cost_covered_quantity,quality,certified,wb_quantity,
+                       wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+                   SELECT 'whfv_causal_zero',warehouse_key,nm_id,quantity,wac_rub,
+                          capital_rub,cost_covered_quantity,quality,certified,
+                          wb_quantity,wb_in_way_to_client,wb_in_way_from_client,
+                          provenance_json
+                     FROM sheet_vitrina_v1_warehouse_functional_balances
+                    WHERE version_id='whfv_incident_source'"""
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                       bundle_version,activated_at,as_of_date,snapshot_id,
+                       plan_version,refreshed_at,plan_json)
+                   SELECT 'causal-zero-bundle',activated_at,'2026-08-28',
+                          'causal-zero-snapshot',plan_version,refreshed_at,
+                          replace(plan_json,?,'2026-08-28')
+                     FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE as_of_date=? LIMIT 1""",
+                (DAY, DAY),
+            )
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",
+                (DAY,),
+            )
+            causal_zero = _discover_historical_manifests(
+                conn,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert causal_zero["manifests"] == []
+            assert causal_zero["selection"]["predicate"] == (
+                "historical_b.exact_causal_handoff_debit_event"
+            )
+            assert causal_zero["selection"]["observed_cardinality"] == 0
+            conn.execute("ROLLBACK TO causal_zero")
+            conn.execute("RELEASE causal_zero")
+
+            conn.execute("SAVEPOINT causal_many")
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events(
+                       event_id,cutover_id,order_id,episode_sequence,event_type,
+                       source_order_observation_sequence,
+                       source_status_observation_sequence,source_revision,
+                       status_digest,supplier_status,wb_status,source_observed_at,
+                       facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                       capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at)
+                   SELECT 'handoff-debit-ambiguous',cutover_id,9909,episode_sequence,
+                          event_type,source_order_observation_sequence,
+                          source_status_observation_sequence,'ambiguous-revision',
+                          ?,supplier_status,wb_status,source_observed_at,facility_id,
+                          pool,nm_id,quantity,physical_quantity_delta,capital_delta_rub,
+                          frozen_wac_rub,?,'2026-08-26T12:01:00Z'
+                     FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events
+                    WHERE event_id='handoff-debit-1'""",
+                (
+                    _fingerprint("ambiguous-status"),
+                    _fingerprint("ambiguous-evidence"),
+                ),
+            )
+            causal_many = _discover_historical_manifests(
+                conn,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert causal_many["manifests"] == []
+            assert causal_many["selection"]["observed_cardinality"] == 2
+            conn.execute("ROLLBACK TO causal_many")
+            conn.execute("RELEASE causal_many")
             event = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
                 "WHERE event_id='handoff-debit-1'"

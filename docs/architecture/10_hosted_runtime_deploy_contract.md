@@ -1282,10 +1282,14 @@ business data.
 
 SSS011 keeps that inert boundary while tightening qualification. Dense A binds
 the exact `12 historical_exact_zero + 38 no_material_value_history` partition
-and all 228 accepted missing components; accepted history is never rewritten or
-retrofilled from current zero. Historical B classifies the fresh mismatch set
-and admits only one causally bound FBS event inside the accepted-version
-publication interval. The deployed CLI returns bounded typed failures, and the
-durable runner receipt preserves their phase, stage, code, message and details
-digest. Post-deploy checks remain import/SHA/inert and query-only; neither A nor
-B is executed by release.
+and all 228 accepted missing components from the latest six unique capture ids,
+deduplicating repeated finalization rows and auditing every older/newer distinct
+capture; accepted history is never rewritten or retrofilled from current zero.
+Dense discovery accepts multiple identical original-12 dates and binds the
+latest qualifying sequence/capture while material or partition drift fails
+closed. Historical B reduces the broad mismatch set to exactly one ready-shaped
+candidate before it expands the exact causal interval, then admits exactly one
+FBS event. The deployed CLI returns bounded typed failures, and the durable
+runner receipt preserves predicate, expected/observed cardinality and candidate/
+details digests in addition to phase, stage, code and message. Post-deploy checks
+remain import/SHA/inert and query-only; neither A nor B is executed by release.

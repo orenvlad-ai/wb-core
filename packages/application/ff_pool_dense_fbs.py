@@ -2679,7 +2679,8 @@ def _no_material_value_history_evidence(
     accepted_rows: list[dict[str, Any]] = []
     all_accepted_rows: list[dict[str, Any]] = []
     finalization_bindings: list[dict[str, Any]] = []
-    superseded_bindings: list[dict[str, Any]] = []
+    older_distinct_bindings: list[dict[str, Any]] = []
+    duplicate_finalization_bindings: list[dict[str, Any]] = []
     captures = "sheet_vitrina_v1_inventory_history_captures"
     components = "sheet_vitrina_v1_inventory_history_components"
     finalizations = "sheet_vitrina_v1_inventory_history_finalizations"
@@ -2696,52 +2697,54 @@ def _no_material_value_history_evidence(
                  WHERE EXISTS (
                        SELECT 1 FROM {components} component
                         WHERE component.capture_id=finalization.capture_id
-                          AND component.scope_kind='SKU'
-                          AND component.nm_id IS NOT NULL
                           AND component.component_kind='FBS_FACILITY'
                           AND component.component_id=?
-                          AND component.nm_id IN ({placeholders})
                  )
                    AND capture.business_date=finalization.business_date
-                 ORDER BY finalization.business_date,
-                          finalization.finalization_sequence DESC,
+                 ORDER BY finalization.finalization_sequence DESC,
                           finalization.finalization_id DESC""",
-            (str(facility_id), *selected),
+            (str(facility_id),),
         ).fetchall()
-        by_date: dict[str, list[sqlite3.Row]] = {}
+        distinct_captures: list[sqlite3.Row] = []
+        seen_capture_ids: set[str] = set()
         for row in finalization_rows:
-            by_date.setdefault(str(row[2]), []).append(row)
-        for business_date in sorted(by_date):
-            dated = by_date[business_date]
-            latest = dated[0]
-            finalization_bindings.append(_history_finalization_binding(latest))
-            latest_rows = _accepted_facility_components(
+            capture_id = str(row[3])
+            if capture_id in seen_capture_ids:
+                duplicate_finalization_bindings.append(
+                    _history_finalization_binding(row)
+                )
+                continue
+            seen_capture_ids.add(capture_id)
+            distinct_captures.append(row)
+        selected_captures = distinct_captures[:6]
+        older_captures = distinct_captures[6:]
+        finalization_bindings = [
+            _history_finalization_binding(row) for row in selected_captures
+        ]
+        older_distinct_bindings = [
+            _history_finalization_binding(row) for row in older_captures
+        ]
+        selected_capture_ids = {str(row[3]) for row in selected_captures}
+        for finalization in distinct_captures:
+            business_date = str(finalization[2])
+            rows_for_capture = _accepted_facility_components(
                 conn,
-                capture_id=str(latest[3]),
+                capture_id=str(finalization[3]),
                 facility_id=str(facility_id),
                 nm_ids=selected,
             )
-            accepted_rows.extend(
-                {"business_date": business_date, **item} for item in latest_rows
-            )
-            for superseded in dated[1:]:
-                superseded_bindings.append(_history_finalization_binding(superseded))
-            for finalization in dated:
-                rows_for_capture = _accepted_facility_components(
-                    conn,
-                    capture_id=str(finalization[3]),
-                    facility_id=str(facility_id),
-                    nm_ids=selected,
-                )
-                all_accepted_rows.extend(
-                    {
-                        "business_date": business_date,
-                        "finalization_sequence": int(finalization[0]),
-                        "finalization_id": str(finalization[1]),
-                        **item,
-                    }
-                    for item in rows_for_capture
-                )
+            bound_rows = [
+                {
+                    "business_date": business_date,
+                    "finalization_sequence": int(finalization[0]),
+                    "finalization_id": str(finalization[1]),
+                    **item,
+                }
+                for item in rows_for_capture
+            ]
+            all_accepted_rows.extend(bound_rows)
+            if str(finalization[3]) in selected_capture_ids:
+                accepted_rows.extend(bound_rows)
     latest_counts: dict[int, int] = {nm_id: 0 for nm_id in selected}
     invalid_rows: list[dict[str, Any]] = []
     for item in accepted_rows:
@@ -2773,16 +2776,17 @@ def _no_material_value_history_evidence(
         or item["quantity"] is not None
         or _contains_material_history_evidence(item.get("provenance"))
     ]
-    latest_date_count = len(finalization_bindings)
-    expected_component_count = len(selected) * latest_date_count
-    if latest_date_count != 6 or len(accepted_rows) != len(selected) * 6:
+    selected_capture_count = len(finalization_bindings)
+    expected_component_count = len(selected) * 6
+    if selected_capture_count != 6 or len(accepted_rows) != expected_component_count:
         blockers.append(
-            "no-material-value partition must bind exactly six accepted dates "
-            f"and {len(selected) * 6} latest missing components"
+            "no-material-value partition must bind the latest six unique accepted "
+            f"capture ids and {expected_component_count} missing components"
         )
-    if any(count != latest_date_count for count in latest_counts.values()):
+    if any(count != 6 for count in latest_counts.values()):
         blockers.append(
-            "no-material-value accepted history is not exactly deduplicated by date and nmId"
+            "no-material-value accepted history is not exactly deduplicated by "
+            "unique capture id and nmId"
         )
     if invalid_rows or invalid_superseded_rows:
         blockers.append(
@@ -2796,10 +2800,17 @@ def _no_material_value_history_evidence(
         "lifecycle_rows": lifecycle_rows,
         "lifecycle_digest": _fingerprint(lifecycle_rows),
         "semantic": "no_material_value_history",
-        "latest_finalizations": finalization_bindings,
-        "latest_finalizations_digest": _fingerprint(finalization_bindings),
-        "superseded_finalizations": superseded_bindings,
-        "superseded_finalizations_digest": _fingerprint(superseded_bindings),
+        "selected_unique_finalizations": finalization_bindings,
+        "selected_unique_finalizations_digest": _fingerprint(finalization_bindings),
+        "selected_unique_capture_count": selected_capture_count,
+        "older_distinct_finalizations": older_distinct_bindings,
+        "older_distinct_finalizations_digest": _fingerprint(
+            older_distinct_bindings
+        ),
+        "duplicate_finalization_rows": duplicate_finalization_bindings,
+        "duplicate_finalization_rows_digest": _fingerprint(
+            duplicate_finalization_bindings
+        ),
         "accepted_missing_component_count": len(accepted_rows),
         "expected_accepted_missing_component_count": expected_component_count,
         "accepted_missing_component_digest": _fingerprint(accepted_rows),
@@ -2809,7 +2820,7 @@ def _no_material_value_history_evidence(
             str(key): value for key, value in sorted(latest_counts.items())
         },
         "invalid_latest_material_rows": invalid_rows[:20],
-        "invalid_superseded_material_rows": invalid_superseded_rows[:20],
+        "invalid_any_distinct_capture_material_rows": invalid_superseded_rows[:20],
         "default_applicability_required": True,
         "blockers": blockers,
     }
@@ -2931,18 +2942,89 @@ def _historical_zero_evidence(
                    finalization.finalized_at,capture.source_digest
               FROM {finalizations} finalization
               JOIN {captures} capture ON capture.capture_id=finalization.capture_id
-             WHERE finalization.business_date=?
-               AND capture.business_date=finalization.business_date
+             WHERE capture.business_date=finalization.business_date
+               AND EXISTS (
+                   SELECT 1 FROM {components} component
+                    WHERE component.capture_id=finalization.capture_id
+                      AND component.scope_kind='SKU'
+                      AND component.nm_id IS NOT NULL
+                      AND component.component_kind='FBS_FACILITY'
+                      AND component.component_id=?
+                      AND component.nm_id IN ({','.join('?' for _ in selected)})
+               )
              ORDER BY finalization.finalization_sequence DESC,
                       finalization.finalization_id DESC""",
-        (str(business_date),),
+        (str(facility_id), *selected),
     ).fetchall()
     if not finalization_rows:
-        blockers.append(f"latest accepted history is missing for {business_date}")
+        blockers.append("accepted original12 lineage is missing")
         result = {"business_date": str(business_date), "rows": [], "blockers": blockers}
         result["fingerprint"] = _fingerprint(result)
         return result
-    finalization = finalization_rows[0]
+
+    distinct_finalizations: list[sqlite3.Row] = []
+    duplicate_finalizations: list[dict[str, Any]] = []
+    seen_capture_ids: set[str] = set()
+    for row in finalization_rows:
+        capture_id = str(row[3])
+        if capture_id in seen_capture_ids:
+            duplicate_finalizations.append(_history_finalization_binding(row))
+            continue
+        seen_capture_ids.add(capture_id)
+        distinct_finalizations.append(row)
+
+    def semantic_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "nm_id": int(item["nm_id"]),
+                "state": str(item["state"]),
+                "quantity": item["quantity"],
+                "source_revision": str(item["source_revision"]),
+                "source_digest": str(item["source_digest"]),
+                "source_watermark": str(item["source_watermark"]),
+                "provenance": item["provenance"],
+            }
+            for item in rows
+        ]
+
+    anchors: list[tuple[sqlite3.Row, list[dict[str, Any]], str]] = []
+    rows_by_capture: dict[str, list[dict[str, Any]]] = {}
+    for candidate in distinct_finalizations:
+        candidate_rows = _accepted_facility_components(
+            conn,
+            capture_id=str(candidate[3]),
+            facility_id=str(facility_id),
+            nm_ids=selected,
+        )
+        rows_by_capture[str(candidate[3])] = candidate_rows
+        invalid_candidate = [
+            item["nm_id"]
+            for item in candidate_rows
+            if item["state"] != "exact_zero"
+            or int(item["quantity"] if item["quantity"] is not None else -1) != 0
+            or str(item["provenance"].get("source") or "")
+            != "fbs_mapping_extension_allocation"
+        ]
+        if (
+            str(candidate[2]) == str(business_date)
+            and [item["nm_id"] for item in candidate_rows] == selected
+            and not invalid_candidate
+        ):
+            candidate_semantic_digest = _fingerprint(semantic_rows(candidate_rows))
+            anchors.append((candidate, candidate_rows, candidate_semantic_digest))
+    if not anchors:
+        blockers.append(
+            f"latest qualifying accepted exact-zero anchor is missing for {business_date}"
+        )
+        result = {
+            "business_date": str(business_date),
+            "rows": [],
+            "anchor_candidate_count": 0,
+            "blockers": blockers,
+        }
+        result["fingerprint"] = _fingerprint(result)
+        return result
+    finalization, rows, original_digest = anchors[0]
     capture = conn.execute(
         f"""SELECT capture_id,business_date,capture_kind,formula_version,
                    bundle_version,ready_snapshot_id,ready_plan_version,
@@ -2953,12 +3035,6 @@ def _historical_zero_evidence(
     ).fetchone()
     if capture is None or str(capture[1]) != str(business_date):
         blockers.append("latest finalization does not bind an exact same-date capture")
-    rows = _accepted_facility_components(
-        conn,
-        capture_id=str(finalization[3]),
-        facility_id=str(facility_id),
-        nm_ids=selected,
-    )
     if [item["nm_id"] for item in rows] != selected:
         blockers.append(
             f"{business_date} accepted history does not cover the exact target set"
@@ -2976,50 +3052,51 @@ def _historical_zero_evidence(
             "historical targets are not exact_zero with mapping-extension provenance: "
             + ", ".join(map(str, invalid))
         )
-    semantic_rows = [
-        {
-            "nm_id": item["nm_id"],
-            "state": item["state"],
-            "quantity": item["quantity"],
-            "source_revision": item["source_revision"],
-            "source_digest": item["source_digest"],
-            "source_watermark": item["source_watermark"],
-            "provenance": item["provenance"],
+    lineage: list[dict[str, Any]] = []
+    invalid_lineage: list[dict[str, Any]] = []
+    for lineage_finalization in distinct_finalizations:
+        lineage_rows = rows_by_capture[str(lineage_finalization[3])]
+        lineage_digest = _fingerprint(semantic_rows(lineage_rows))
+        is_anchor = str(lineage_finalization[3]) == str(finalization[3])
+        all_missing = all(
+            item["state"] == "missing"
+            and item["quantity"] is None
+            and not _contains_material_history_evidence(item.get("provenance"))
+            for item in lineage_rows
+        )
+        all_identical_zero = (
+            [item["nm_id"] for item in lineage_rows] == selected
+            and lineage_digest == original_digest
+            and all(
+                item["state"] == "exact_zero"
+                and int(item["quantity"] if item["quantity"] is not None else -1) == 0
+                and str(item["provenance"].get("source") or "")
+                == "fbs_mapping_extension_allocation"
+                for item in lineage_rows
+            )
+        )
+        classification = (
+            "selected_latest_qualifying_anchor"
+            if is_anchor
+            else "nonmaterial_missing_or_absent"
+            if all_missing
+            else "identical_accepted_exact_zero"
+            if all_identical_zero
+            else "blocked_material_or_partition_conflict"
+        )
+        binding = {
+            **_history_finalization_binding(lineage_finalization),
+            "original_partition_digest": lineage_digest,
+            "classification": classification,
+            "component_count": len(lineage_rows),
+            "identical_to_latest": all_identical_zero,
         }
-        for item in rows
-    ]
-    original_digest = _fingerprint(semantic_rows)
-    superseded: list[dict[str, Any]] = []
-    for earlier in finalization_rows[1:]:
-        earlier_rows = _accepted_facility_components(
-            conn,
-            capture_id=str(earlier[3]),
-            facility_id=str(facility_id),
-            nm_ids=selected,
-        )
-        earlier_semantic = [
-            {
-                "nm_id": item["nm_id"],
-                "state": item["state"],
-                "quantity": item["quantity"],
-                "source_revision": item["source_revision"],
-                "source_digest": item["source_digest"],
-                "source_watermark": item["source_watermark"],
-                "provenance": item["provenance"],
-            }
-            for item in earlier_rows
-        ]
-        earlier_digest = _fingerprint(earlier_semantic)
-        superseded.append(
-            {
-                **_history_finalization_binding(earlier),
-                "original_partition_digest": earlier_digest,
-                "identical_to_latest": earlier_digest == original_digest,
-            }
-        )
-    if any(not item["identical_to_latest"] for item in superseded):
+        lineage.append(binding)
+        if classification == "blocked_material_or_partition_conflict":
+            invalid_lineage.append(binding)
+    if invalid_lineage:
         blockers.append(
-            "superseded accepted captures do not preserve the identical original12 digest"
+            "accepted original12 lineage contains material, nonzero, or partition drift"
         )
     next_date = (
         datetime.fromisoformat(str(business_date)).date() + timedelta(days=1)
@@ -3053,8 +3130,34 @@ def _historical_zero_evidence(
         "business_date": str(business_date),
         "latest_finalization": _history_finalization_binding(finalization),
         "latest_original_partition_digest": original_digest,
-        "superseded_finalizations": superseded,
-        "superseded_finalizations_digest": _fingerprint(superseded),
+        "anchor_candidate_count": len(anchors),
+        "anchor_candidate_digest": _fingerprint(
+            [
+                {
+                    **_history_finalization_binding(item[0]),
+                    "original_partition_digest": item[2],
+                }
+                for item in anchors
+            ]
+        ),
+        "accepted_lineage": lineage,
+        "accepted_lineage_digest": _fingerprint(lineage),
+        "invalid_lineage": invalid_lineage[:20],
+        "invalid_lineage_digest": _fingerprint(invalid_lineage),
+        "duplicate_finalization_rows": duplicate_finalizations,
+        "duplicate_finalization_rows_digest": _fingerprint(duplicate_finalizations),
+        "superseded_finalizations": [
+            item
+            for item in lineage
+            if item["classification"] == "identical_accepted_exact_zero"
+        ],
+        "superseded_finalizations_digest": _fingerprint(
+            [
+                item
+                for item in lineage
+                if item["classification"] == "identical_accepted_exact_zero"
+            ]
+        ),
         "accepted_capture": dict(capture) if capture is not None else {},
         "rows": rows,
         "exact_zero_count": sum(item["state"] == "exact_zero" for item in rows),

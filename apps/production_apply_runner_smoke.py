@@ -93,7 +93,15 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             payload.update(
                 {
                     "historical_repair_count": 1,
-                    "fresh_mismatch_count": 7,
+                    "fresh_mismatch_count": 160,
+                    "ready_shape_candidate_count": 1,
+                    "ready_shape_candidate_digest": "sha256:" + "6" * 64,
+                    "causal_event_count": 1,
+                    "causal_event_candidate_digest": "sha256:" + "7" * 64,
+                    "selection_predicate": (
+                        "historical_b.exact_causal_handoff_debit_event"
+                    ),
+                    "selection_details_digest": "sha256:" + "3" * 64,
                     "mismatch_classification_digest": "sha256:" + "8" * 64,
                     "current_active_preserved": True,
                     "current_sync_preserved": True,
@@ -150,6 +158,13 @@ def _exercise_wbc0013_two_phase_runner() -> None:
 
     sequence = iter(
         [
+            {
+                **common,
+                "result": {
+                    **candidate("a"),
+                    "material_qualification_digest": "sha256:" + "0" * 64,
+                },
+            },
             {**common, "result": candidate("a")},
             {**common, "result": candidate("a")},
             {**common, "return_code": None, "transport_ambiguous": True},
@@ -204,10 +219,14 @@ def _exercise_wbc0013_two_phase_runner() -> None:
     assert result["a_submit_count"] == result["b_submit_count"] == 1
     assert [
         item["qualification_state"] for item in result["qualification_attempts"]["a"]
-    ] == ["matching_witness", "qualified"]
+    ] == ["superseded_material_drift", "matching_witness", "qualified"]
     assert [
         item["qualification_state"] for item in result["qualification_attempts"]["b"]
     ] == ["matching_witness", "qualified"]
+    assert result["qualification_attempts"]["b"][-1][
+        "ready_shape_candidate_count"
+    ] == 1
+    assert result["qualification_attempts"]["b"][-1]["causal_event_count"] == 1
 
     typed_error = {
         **common,
@@ -218,6 +237,10 @@ def _exercise_wbc0013_two_phase_runner() -> None:
             "stage": "qualification",
             "code": "dense_qualification_blocked",
             "message": "fixture qualification blocked",
+            "predicate": "dense_a.apply_allowed_after_exact_qualification",
+            "expected_cardinality": 1,
+            "observed_cardinality": 0,
+            "candidate_digest": "sha256:" + "4" * 64,
             "details_digest": "sha256:" + "9" * 64,
         },
     }
@@ -242,6 +265,10 @@ def _exercise_wbc0013_two_phase_runner() -> None:
         "stage": "qualification",
         "code": "dense_qualification_blocked",
         "message": "fixture qualification blocked",
+        "predicate": "dense_a.apply_allowed_after_exact_qualification",
+        "expected_cardinality": 1,
+        "observed_cardinality": 0,
+        "candidate_digest": "sha256:" + "4" * 64,
         "details_digest": "sha256:" + "9" * 64,
     }
 
