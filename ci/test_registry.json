@@ -105,7 +105,8 @@
         ["python3", "apps/change_registry_smoke.py"],
         ["python3", "apps/change_registry_source_acquisition_smoke.py"],
         ["python3", "apps/change_registry_baseline_engine_smoke.py"],
-        ["python3", "apps/change_registry_observer_smoke.py"]
+        ["python3", "apps/change_registry_observer_smoke.py"],
+        ["python3", "apps/change_registry_internal_writers_smoke.py"]
       ]
     },
     "warehouse_recovery": {
@@ -320,6 +321,12 @@
     {
       "id": "change-registry-observer",
       "paths": ["apps/change_registry_observer*.py", "packages/application/change_registry*.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-observer.*", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json", "apps/business_data_maintenance.py", "docs/modules/57_MODULE__CHANGE_REGISTRY_OBSERVER.md", "migration/168_change_registry_observer.md"],
+      "suites": ["web_vitrina"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "change-registry-internal-writers",
+      "paths": ["apps/change_registry_internal_writers_smoke.py", "packages/application/change_registry_writer.py", "packages/application/wb_prices_management.py", "packages/application/wb_spp_tester.py", "packages/application/sheet_vitrina_v1_ads.py", "packages/application/sku_management.py", "packages/application/registry_upload_http_entrypoint.py", "docs/modules/58_MODULE__CHANGE_REGISTRY_INTERNAL_WRITERS.md", "migration/169_change_registry_internal_writers.md"],
       "suites": ["web_vitrina"],
       "release": "live_runtime"
     },

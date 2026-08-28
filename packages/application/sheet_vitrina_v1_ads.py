@@ -14,8 +14,13 @@ from uuid import uuid4
 
 from packages.adapters.wb_promotion import (
     HttpBackedWbPromotionSource,
+    WbPromotionApiError,
     WbPromotionSource,
     extract_advert_ids_from_count,
+)
+from packages.application.change_registry_writer import (
+    InternalWriterRegistry,
+    InternalWriterRegistryError,
 )
 
 
@@ -59,6 +64,8 @@ class SheetVitrinaV1AdsBlock:
         timestamp_factory: Callable[[], str] | None = None,
         cache_ttl_seconds: int = 120,
         safety_config: AdsSafetyConfig | None = None,
+        writer_registry: InternalWriterRegistry | None = None,
+        registry_source_surface: str = "ads_bid_change",
     ) -> None:
         self.runtime = runtime
         self.runtime_dir = runtime_dir
@@ -67,6 +74,8 @@ class SheetVitrinaV1AdsBlock:
         self.timestamp_factory = timestamp_factory or (lambda: datetime.now(timezone.utc).isoformat())
         self.cache_ttl_seconds = int(cache_ttl_seconds)
         self.safety = safety_config or _load_safety_config()
+        self.writer_registry = writer_registry
+        self.registry_source_surface = registry_source_surface
         self._campaign_cache: dict[str, Any] | None = None
         self._state_dir = self.runtime_dir / "sheet_vitrina_v1_ads"
         self._preview_dir = self._state_dir / "previews"
@@ -401,7 +410,87 @@ class SheetVitrinaV1AdsBlock:
             placement=str(preview["placement"]),
             bid_kopecks=int(preview["new_bid_kopecks"]),
         )
-        response_payload = self.source.patch_bids(request_payload)
+        prepared = None
+        registry_receipt = f"wb-ads-bid:{preview['operation_id']}"
+        if self.writer_registry is not None:
+            try:
+                prepared = self.writer_registry.prepare_bid(
+                    source_surface=self.registry_source_surface,
+                    actor=actor,
+                    native_operation_id=str(preview["operation_id"]),
+                    nm_id=int(preview["nm_id"]),
+                    advert_id=int(preview["advert_id"]),
+                    placement=str(preview["placement"]),
+                    before_bid_minor=current_bid,
+                    requested_bid_minor=int(preview["new_bid_kopecks"]),
+                    requested_at=str(preview.get("created_at") or self.timestamp_factory()),
+                    correlation_id=preview_id,
+                    native_audit_reference=(
+                        "sheet_vitrina_v1_ads/bid_audit.jsonl"
+                        f"#operation={preview['operation_id']}"
+                    ),
+                )
+            except InternalWriterRegistryError as exc:
+                raise SheetVitrinaV1AdsError(
+                    "change registry preparation failed; WB bid patch was not called",
+                    http_status=503,
+                    payload={"reason": "registry_fail_closed", "detail": str(exc)},
+                ) from exc
+        try:
+            response_payload = self.source.patch_bids(request_payload)
+        except WbPromotionApiError as exc:
+            if prepared is not None:
+                if exc.http_status is None:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="wb_submit_transport_unknown",
+                        error_message=str(exc),
+                        receipt_reference=registry_receipt,
+                    )
+                else:
+                    self.writer_registry.fail_before_submit(
+                        prepared,
+                        rejected=True,
+                        error_code=f"wb_http_{exc.http_status}",
+                        error_message=str(exc),
+                    )
+            raise
+        except Exception as exc:
+            if prepared is not None:
+                self.writer_registry.ambiguous(
+                    prepared,
+                    error_code="wb_submit_transport_unknown",
+                    error_message=str(exc),
+                    receipt_reference=registry_receipt,
+                )
+            raise
+        if prepared is not None:
+            try:
+                self.writer_registry.submitted(
+                    prepared,
+                    receipt_reference=registry_receipt,
+                    receipt_basis={
+                        "operation_id": str(preview["operation_id"]),
+                        "nm_id": int(preview["nm_id"]),
+                        "advert_id": int(preview["advert_id"]),
+                        "placement": str(preview["placement"]),
+                    },
+                )
+            except InternalWriterRegistryError as exc:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="registry_post_submit_failure",
+                        error_message=str(exc),
+                        receipt_reference=registry_receipt,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+                raise SheetVitrinaV1AdsError(
+                    "WB bid response was received but registry lifecycle is ambiguous",
+                    http_status=503,
+                    payload={"reason": "registry_post_submit_ambiguous"},
+                ) from exc
         audit_event = {
             "event_type": "sheet_vitrina_v1_ads_bid_change_commit",
             "operation_id": str(preview["operation_id"]),
@@ -424,14 +513,108 @@ class SheetVitrinaV1AdsBlock:
         }
         self._append_audit_event(audit_event)
         self._campaign_cache = None
+        registry_readback_status = "not_instrumented"
+        if prepared is not None:
+            try:
+                exact_readback = self.read_exact_bid(
+                    nm_id=int(preview["nm_id"]),
+                    advert_id=int(preview["advert_id"]),
+                    placement=str(preview["placement"]),
+                )
+                if exact_readback.get("current_bid_kopecks") == int(
+                    preview["new_bid_kopecks"]
+                ):
+                    self.writer_registry.confirm_bid(
+                        prepared,
+                        confirmed_bid_minor=int(preview["new_bid_kopecks"]),
+                        readback_basis={
+                            "nm_id": int(preview["nm_id"]),
+                            "advert_id": int(preview["advert_id"]),
+                            "placement": str(preview["placement"]),
+                            "bid_minor": int(preview["new_bid_kopecks"]),
+                        },
+                        receipt_reference=registry_receipt,
+                        native_audit_references=(
+                            "sheet_vitrina_v1_ads/bid_audit.jsonl"
+                            f"#operation={preview['operation_id']}",
+                        ),
+                    )
+                    registry_readback_status = "confirmed"
+                else:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="wb_readback_mismatch",
+                        error_message="exact bid readback did not match requested value",
+                        receipt_reference=registry_receipt,
+                    )
+                    registry_readback_status = "ambiguous"
+            except Exception as exc:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="wb_readback_unavailable",
+                        error_message=str(exc),
+                        receipt_reference=registry_receipt,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+                registry_readback_status = "ambiguous"
         return {
             "contract_name": "sheet_vitrina_v1_ads_bid_change_commit",
             "status": "pending_refresh",
             "operation_id": str(preview["operation_id"]),
+            "registry_operation_id": prepared.operation_id if prepared is not None else "",
+            "registry_receipt_reference": registry_receipt if prepared is not None else "",
+            "registry_readback_status": registry_readback_status,
             "audit_event": audit_event,
             "delayed_refresh_after_seconds": 30,
             "wb_response": response_payload,
         }
+
+    def reconcile_registry_bid(
+        self,
+        *,
+        receipt_reference: str,
+        exact_readback: Mapping[str, Any],
+    ) -> str:
+        """Late-link one exact SKU readback to the already submitted operation."""
+
+        if self.writer_registry is None:
+            return "not_instrumented"
+        prepared = self.writer_registry.find_by_receipt(receipt_reference)
+        stored = self.writer_registry.read_by_receipt(receipt_reference)
+        if prepared is None or stored is None or len(stored["items"]) != 1:
+            raise SheetVitrinaV1AdsError(
+                "registry bid operation is unavailable for reconciliation",
+                http_status=503,
+            )
+        item = stored["items"][0]
+        expected = int(item["requested_value_integer"])
+        observed = _optional_int(exact_readback.get("current_bid_kopecks"))
+        if observed != expected:
+            self.writer_registry.ambiguous(
+                prepared,
+                error_code="wb_readback_mismatch",
+                error_message="late exact bid readback did not match requested value",
+                receipt_reference=receipt_reference,
+            )
+            return "ambiguous"
+        self.writer_registry.confirm_bid(
+            prepared,
+            confirmed_bid_minor=observed,
+            readback_basis={
+                "nm_id": int(item["nm_id"]),
+                "advert_id": int(item["advert_id"]),
+                "placement": str(item["placement"]),
+                "bid_minor": observed,
+            },
+            receipt_reference=receipt_reference,
+            native_audit_references=(
+                "sheet_vitrina_v1_ads/bid_audit.jsonl"
+                f"#operation={prepared.native_operation_id}",
+            ),
+        )
+        return "confirmed"
 
     def _load_campaigns(self, *, bypass_cache: bool = False) -> dict[str, Any]:
         now_monotonic = time.monotonic()

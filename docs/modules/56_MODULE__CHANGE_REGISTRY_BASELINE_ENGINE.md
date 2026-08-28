@@ -3,7 +3,7 @@ title: "Модуль: baseline/diff engine реестра изменений"
 doc_id: "WB-CORE-MODULE-56-CHANGE-REGISTRY-BASELINE-ENGINE"
 doc_type: "module"
 status: "active_internal_engine"
-purpose: "Транзакционно фиксировать joint Prices+Ads checkpoints, нормализованные observations, identity incidents и только доказанные checkpoint_diff facts; давать deterministic interval projection для module-57 observer consumer."
+purpose: "Транзакционно фиксировать joint Prices+Ads checkpoints и доказанные transitions; давать module-57 projection и late-link exact module-58 writer/checkpoint proof без duplicate facts."
 scope: "Один seller/account; explicit sanitized acquisition input; complete-baseline chain; append-only facts/incidents; query-only exact target/field projection."
 source_basis:
   - "docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md"
@@ -99,20 +99,23 @@ complete checkpoint chain, comparable normalized observations and linked
 seller/account/target/field, so a cursor cannot be replayed against another
 projection.
 
-The projector rejects non-checkpoint proof, missing/multiple checkpoint links,
-interval mismatch, before/after mismatch, unproven campaign absence and missing
-transition proof. An explicit non-exact observation closes the prior interval;
-a later exact fact starts a new interval after the evidence gap rather than
-inventing continuous state or an effective time. It does not calculate outcomes,
+Unbound writer proof is inert for projection. After exact reconciliation the
+same fact has one checkpoint link and is admitted when its writer transition
+start belongs to that checkpoint interval. The projector rejects missing or
+multiple checkpoint links, interval mismatch, before/after mismatch, unproven
+campaign absence and missing transition proof. An explicit non-exact
+observation closes the prior interval; a later exact fact starts a new interval
+after the evidence gap rather than inventing continuous state or an effective
+time. It does not calculate outcomes,
 causality, performance, recommendations or ML features.
 
 # 6. Excluded scope
 
 The engine itself does not own the scheduler/timer/manual HTTP scan or public
 API/UI; those belong to module 57. Excluded from the complete solution remain
-Prices/Ads/SKU writer instrumentation, manual-pending activation, Balance
-bridge, historical import/backfill, outcomes/analytics/ML, campaign/price/bid
-WB writes, deletion facts and any ad-hoc production-data apply.
+additional writer surfaces beyond module 58, manual-pending activation, Balance
+bridge, historical import/backfill, public API/UI, outcomes/analytics/ML,
+campaign/price/bid WB writes, deletion facts and any production-data apply.
 
 # 7. Verification
 
@@ -120,6 +123,7 @@ WB writes, deletion facts and any ad-hoc production-data apply.
 first baseline with zero facts, partial-after, exact second diff including zero
 and later campaign creation, zero/many fail-closed incidents, exact repeat,
 transaction rollback/recovery, strict complete chronology, deterministic stable
-cursor projection, explicit evidence-gap windows and rejection of
-unbound/non-checkpoint proof. The module-57 observer smoke additionally proves
-explicit disappearance observations through the same engine.
+cursor projection, inert unbound writer proof and exact race reconciliation in
+both proof orderings. The module-57 observer smoke additionally proves explicit
+disappearance observations and evidence-gap windows through the same engine;
+module-58 smoke proves writer/checkpoint reconciliation.

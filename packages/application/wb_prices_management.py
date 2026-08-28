@@ -12,7 +12,12 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
-from packages.adapters.wb_prices_management import HttpBackedWbPricesManagementSource, WbPricesManagementSource
+from packages.adapters.wb_prices_management import HttpBackedWbPricesManagementSource, WbPricesApiError, WbPricesManagementSource
+from packages.application.change_registry_writer import (
+    InternalWriterRegistry,
+    InternalWriterRegistryError,
+    price_tuple_from_wb,
+)
 from packages.contracts.wb_price_quarantine import (
     WB_QUARANTINE_WARNING_CODE,
     evaluate_wb_price_quarantine_transition,
@@ -54,6 +59,8 @@ class WbPricesManagementBlock:
         now_factory: Callable[[], datetime] | None = None,
         timestamp_factory: Callable[[], str] | None = None,
         safety_config: WbPricesSafetyConfig | None = None,
+        writer_registry: InternalWriterRegistry | None = None,
+        registry_source_surface: str = "prices_upload",
     ) -> None:
         self.runtime = runtime
         self.runtime_dir = runtime_dir
@@ -61,6 +68,8 @@ class WbPricesManagementBlock:
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.timestamp_factory = timestamp_factory or (lambda: datetime.now(timezone.utc).isoformat())
         self.safety = safety_config or _load_safety_config()
+        self.writer_registry = writer_registry
+        self.registry_source_surface = registry_source_surface
         self._state_dir = self.runtime_dir / "sheet_vitrina_v1_prices"
         self._preview_dir = self._state_dir / "previews"
         self._audit_path = self._state_dir / "upload_audit.jsonl"
@@ -252,9 +261,115 @@ class WbPricesManagementBlock:
         changes = preview.get("changes") if isinstance(preview.get("changes"), list) else []
         if not changes:
             raise WbPricesManagementError("preview has no valid changes to upload", http_status=422)
-        response_payload = self.source.upload_task([dict(item) for item in changes if isinstance(item, Mapping)])
+        prepared = None
+        if self.writer_registry is not None:
+            rows_by_nm = {
+                int(row["nmID"]): row
+                for row in preview.get("rows", [])
+                if isinstance(row, Mapping) and row.get("valid") is True
+            }
+            registry_changes = []
+            for change in changes:
+                nm_id = int(change["nmID"])
+                row = rows_by_nm.get(nm_id)
+                if row is None:
+                    raise WbPricesManagementError(
+                        "price preview lost exact tuple evidence",
+                        http_status=409,
+                    )
+                registry_changes.append(
+                    {
+                        "nm_id": nm_id,
+                        "before": price_tuple_from_wb(
+                            price=row["current"]["price"],
+                            discount=row["current"]["discount"],
+                            seller_price=row["current"]["discountedPrice"],
+                        ),
+                        "requested": price_tuple_from_wb(
+                            price=row["new"]["price"],
+                            discount=row["new"]["discount"],
+                            seller_price=row["new"]["discountedPrice"],
+                        ),
+                        "explicit_fields": tuple(
+                            field
+                            for key, field in (
+                                ("price", "original_price_minor"),
+                                ("discount", "discount_bps"),
+                            )
+                            if key in change
+                        ),
+                    }
+                )
+            try:
+                prepared = self.writer_registry.prepare_prices(
+                    source_surface=self.registry_source_surface,
+                    actor=actor,
+                    native_operation_id=str(preview.get("operation_id") or preview_id),
+                    changes=registry_changes,
+                    requested_at=str(preview.get("created_at") or self.timestamp_factory()),
+                    correlation_id=preview_id,
+                    native_audit_reference=(
+                        "sheet_vitrina_v1_prices/upload_audit.jsonl"
+                        f"#operation={preview.get('operation_id') or preview_id}"
+                    ),
+                )
+            except InternalWriterRegistryError as exc:
+                raise WbPricesManagementError(
+                    "change registry preparation failed; WB price upload was not called",
+                    http_status=503,
+                    payload={"reason": "registry_fail_closed", "detail": str(exc)},
+                ) from exc
+        try:
+            response_payload = self.source.upload_task([dict(item) for item in changes if isinstance(item, Mapping)])
+        except WbPricesApiError as exc:
+            if prepared is not None:
+                self.writer_registry.fail_before_submit(
+                    prepared,
+                    rejected=True,
+                    error_code=f"wb_http_{exc.http_status}",
+                    error_message=str(exc),
+                )
+            raise
+        except Exception as exc:
+            if prepared is not None:
+                self.writer_registry.ambiguous(
+                    prepared,
+                    error_code="wb_submit_transport_unknown",
+                    error_message=str(exc),
+                )
+            raise
         data = response_payload.get("data") if isinstance(response_payload.get("data"), Mapping) else {}
         upload_id = _optional_int(data.get("id") or data.get("uploadID") or data.get("upload_id"))
+        registry_receipt = (
+            f"wb-prices-upload:{upload_id}"
+            if upload_id is not None
+            else f"wb-prices-operation:{preview.get('operation_id') or preview_id}"
+        )
+        if prepared is not None:
+            try:
+                self.writer_registry.submitted(
+                    prepared,
+                    receipt_reference=registry_receipt,
+                    receipt_basis={
+                        "upload_id": upload_id,
+                        "already_exists": bool(data.get("alreadyExists")),
+                    },
+                )
+            except InternalWriterRegistryError as exc:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="registry_post_submit_failure",
+                        error_message=str(exc),
+                        receipt_reference=registry_receipt,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+                raise WbPricesManagementError(
+                    "WB price upload response was received but registry lifecycle is ambiguous",
+                    http_status=503,
+                    payload={"reason": "registry_post_submit_ambiguous"},
+                ) from exc
         already_exists = bool(data.get("alreadyExists"))
         status = "upload_already_exists" if already_exists else "upload_task_created"
         event = {
@@ -275,13 +390,33 @@ class WbPricesManagementBlock:
             "uploadID": upload_id,
             "alreadyExists": already_exists,
             "operation_id": event["operation_id"],
+            "registry_operation_id": prepared.operation_id if prepared is not None else "",
             "message": "WB accepted the upload task; final price application must be checked via upload status.",
             "wb_response": response_payload,
         }
 
     def get_upload_task(self, upload_id: int) -> dict[str, Any]:
         upload_id = _as_positive_int(upload_id, "upload_id")
-        payload = self.source.fetch_upload_status(upload_id)
+        registry_receipt_reference = f"wb-prices-upload:{upload_id}"
+        registry_prepared = (
+            self.writer_registry.find_by_receipt(registry_receipt_reference)
+            if self.writer_registry is not None
+            else None
+        )
+        try:
+            payload = self.source.fetch_upload_status(upload_id)
+        except Exception as exc:
+            if registry_prepared is not None:
+                try:
+                    self.writer_registry.ambiguous(
+                        registry_prepared,
+                        error_code="wb_upload_status_unavailable",
+                        error_message=str(exc),
+                        receipt_reference=registry_receipt_reference,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+            raise
         data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
         status_code = _optional_int(data.get("status"))
         status_label = map_upload_status(status_code)
@@ -305,6 +440,63 @@ class WbPricesManagementBlock:
                 result["goods_errors"] = [row for row in details["rows"] if row.get("errorText")]
             except Exception as exc:
                 result["goods_errors_error"] = str(exc)
+        if self.writer_registry is not None and status_code in PRICE_UPLOAD_FINAL_STATUSES:
+            receipt_reference = registry_receipt_reference
+            stored = self.writer_registry.read_by_receipt(receipt_reference)
+            prepared = self.writer_registry.find_by_receipt(receipt_reference)
+            if stored is not None and prepared is not None:
+                if status_code == 3:
+                    by_nm: dict[int, dict[str, int]] = {}
+                    for item in stored["items"]:
+                        by_nm.setdefault(int(item["nm_id"]), {})[
+                            str(item["parameter_field"])
+                        ] = int(item["requested_value_integer"])
+                    current = normalize_goods_payload(
+                        self.source.fetch_goods_by_nm_ids(sorted(by_nm))
+                    )
+                    observed = {
+                        good.nm_id: price_tuple_from_wb(
+                            price=good.price,
+                            discount=good.discount,
+                            seller_price=good.discounted_price,
+                        )
+                        for good in current
+                    }
+                    if set(observed) == set(by_nm) and all(
+                        observed[nm_id] == requested
+                        for nm_id, requested in by_nm.items()
+                    ):
+                        self.writer_registry.confirm_prices(
+                            prepared,
+                            confirmed_by_nm=observed,
+                            readback_basis={
+                                "upload_id": upload_id,
+                                "status_code": status_code,
+                                "confirmed_by_nm": observed,
+                            },
+                            receipt_reference=receipt_reference,
+                            native_audit_references=(
+                                "sheet_vitrina_v1_prices/upload_audit.jsonl"
+                                f"#operation={prepared.native_operation_id}",
+                            ),
+                        )
+                        result["registry_readback_status"] = "confirmed"
+                    else:
+                        self.writer_registry.ambiguous(
+                            prepared,
+                            error_code="wb_readback_mismatch",
+                            error_message="final upload succeeded but exact price tuple did not match",
+                            receipt_reference=receipt_reference,
+                        )
+                        result["registry_readback_status"] = "ambiguous"
+                else:
+                    self.writer_registry.failed_after_submit(
+                        prepared,
+                        error_code=f"wb_upload_{status_label}",
+                        error_message="WB upload reached a non-success final status",
+                        receipt_reference=receipt_reference,
+                    )
+                    result["registry_readback_status"] = "failed"
         return result
 
     def get_upload_task_goods(self, upload_id: int, *, limit: int, offset: int) -> dict[str, Any]:
