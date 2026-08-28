@@ -103,7 +103,8 @@
         ["python3", "apps/sheet_vitrina_v1_reports_ui_smoke.py"],
         ["python3", "apps/sku_inventory_balance_smoke.py"],
         ["python3", "apps/change_registry_smoke.py"],
-        ["python3", "apps/change_registry_source_acquisition_smoke.py"]
+        ["python3", "apps/change_registry_source_acquisition_smoke.py"],
+        ["python3", "apps/change_registry_baseline_engine_smoke.py"]
       ]
     },
     "warehouse_recovery": {
@@ -306,6 +307,12 @@
     {
       "id": "change-registry-source-acquisition",
       "paths": ["apps/change_registry_source_acquisition_smoke.py", "packages/application/change_registry_source_acquisition.py", "packages/adapters/wb_prices_management.py", "packages/adapters/wb_promotion.py", "docs/modules/55_MODULE__CHANGE_REGISTRY_SOURCE_ACQUISITION.md", "migration/166_change_registry_source_acquisition.md"],
+      "suites": ["web_vitrina"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "change-registry-baseline-engine",
+      "paths": ["apps/change_registry_baseline_engine_smoke.py", "packages/application/change_registry_baseline_engine.py", "docs/modules/56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md", "migration/167_change_registry_baseline_engine.md"],
       "suites": ["web_vitrina"],
       "release": "live_runtime"
     },

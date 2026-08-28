@@ -198,5 +198,8 @@ credential-shaped markers. Full WB request/response, headers and bodies оста
 - deletion/migration of existing JSONL/SKU events;
 - production activation, deploy, data writes or PostgreSQL migration.
 
-Следующий блок обязан отдельно определить capture authority, reconcile rules и
-activation gates. Наличие empty schema не означает, что единый реестр включён.
+Следующий bounded block материализован в
+`56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md`: он использует эти immutable
+primitives только при явном internal invocation и не активирует scheduler,
+HTTP/UI или writer capture. Наличие empty schema и этого dark callable engine
+не означает, что единый реестр автоматически включён.
