@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import sys
 
 
@@ -32,6 +34,9 @@ from apps.registry_upload_http_entrypoint_hosted_runtime import (  # noqa: E402
     ACTIVE_HOSTED_RUNTIME_TARGET_ID,
     load_hosted_runtime_target,
 )
+
+
+PRIVATE_PLAN_MAX_BYTES = 12_000_000
 
 
 def run(args: argparse.Namespace) -> int:
@@ -175,6 +180,9 @@ def _write_private(
     *,
     admission_factory: object = admit_root_write,
     owner: str = "ff_pool_dense_fbs_plan",
+    max_output_bytes: int = PRIVATE_PLAN_MAX_BYTES,
+    require_private_parent: bool = False,
+    no_overwrite: bool = False,
 ) -> dict[str, object]:
     output = path.resolve()
     rendered = (
@@ -183,6 +191,58 @@ def _write_private(
         )
         + b"\n"
     )
+    maximum = int(max_output_bytes)
+    if maximum <= 0 or len(rendered) > maximum:
+        return {
+            "written": False,
+            "mode": "stdout_only",
+            "reason": "private_plan_size_limit_exceeded",
+            "error_type": "ValueError",
+            "error": (
+                "private plan exceeds bounded output size: "
+                f"rendered_bytes={len(rendered)}, max_output_bytes={maximum}"
+            ),
+            "size_bytes": len(rendered),
+            "max_size_bytes": maximum,
+        }
+    parent = output.parent
+    if require_private_parent:
+        if parent.is_symlink() or not parent.is_dir():
+            return {
+                "written": False,
+                "mode": "stdout_only",
+                "reason": "private_plan_parent_invalid",
+                "error_type": "ValueError",
+                "error": "private plan parent must already be one regular directory",
+                "size_bytes": len(rendered),
+                "max_size_bytes": maximum,
+            }
+        parent_mode = stat.S_IMODE(parent.stat().st_mode)
+        if parent_mode != 0o700:
+            return {
+                "written": False,
+                "mode": "stdout_only",
+                "reason": "private_plan_parent_mode_invalid",
+                "error_type": "ValueError",
+                "error": (
+                    "private plan parent mode must be 0700: "
+                    f"observed={parent_mode:04o}"
+                ),
+                "size_bytes": len(rendered),
+                "max_size_bytes": maximum,
+            }
+    elif not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if output.is_symlink() or (no_overwrite and output.exists()):
+        return {
+            "written": False,
+            "mode": "stdout_only",
+            "reason": "private_plan_destination_exists",
+            "error_type": "FileExistsError",
+            "error": f"private plan destination already exists: {output}",
+            "size_bytes": len(rendered),
+            "max_size_bytes": maximum,
+        }
     try:
         admission = admission_factory(
             owner=str(owner),
@@ -194,25 +254,65 @@ def _write_private(
             "written": False,
             "mode": "stdout_only",
             "reason": "root_storage_admission_unavailable",
+            "error_type": type(exc).__name__,
             "error": str(exc),
+            "size_bytes": len(rendered),
+            "max_size_bytes": maximum,
         }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    temporary = parent / (
+        f".{output.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
-            handle.write(rendered.decode("utf-8"))
+            handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())
+        if no_overwrite:
+            os.link(temporary, output, follow_symlinks=False)
+            temporary.unlink()
+        else:
+            os.replace(temporary, output)
+        directory_descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except FileExistsError:
+        return {
+            "written": False,
+            "mode": "stdout_only",
+            "reason": "private_plan_destination_exists",
+            "error_type": "FileExistsError",
+            "error": f"private plan destination already exists: {output}",
+            "size_bytes": len(rendered),
+            "max_size_bytes": maximum,
+        }
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if temporary.exists():
+            temporary.unlink()
+    parent_mode = stat.S_IMODE(parent.stat().st_mode)
     return {
         "written": True,
         "mode": "private_file",
         "path": str(output),
         "file_mode": "0600",
+        "parent_mode": f"{parent_mode:04o}",
+        "size_bytes": len(rendered),
+        "max_size_bytes": maximum,
+        "bounded_size": len(rendered) <= maximum,
+        "atomic_publish": True,
+        "no_overwrite": bool(no_overwrite),
+        "durable_file_fsync": True,
+        "durable_directory_fsync": True,
         "root_storage_admission": admission,
     }
 

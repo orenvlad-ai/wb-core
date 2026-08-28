@@ -255,8 +255,13 @@ WBC0013 имеет отдельный exact двухфазный profile:
 Он принимает только текущую каноническую форму `71 = 21 + 50`; 50 —
 owner-approved identity list (исходные 12 плюс WB Content 38). Исторические
 capture/date/lineage и `missing / NULL` остаются audit-only и не входят в
-admission или CAS A. Profile создаёт private-0600 JIT
-планы и требует два consecutive одинаковых material witness для A и B, максимум
+admission или CAS A. Profile создаёт bounded private-0600 JIT планы только в
+зарегистрированном backup destination `production_apply_evidence` внутри
+exact mode-0700 operation directory. План сначала fsync-ится во временный файл
+того же каталога, затем публикуется atomically без overwrite и остаётся durable
+до submit/readback; qualification receipt связывает размер, mode, path,
+file/directory fsync и полный root-storage admission result. Profile требует
+два consecutive одинаковых material witness для A и B, максимум
 с тремя регенерациями до submit. Runner делает ровно один A submit, только
 query-only A reconciliation, затем fresh B plan, ровно один B submit и
 query-only B reconciliation. B выбирает только exact date/nm/version/event из
@@ -268,7 +273,8 @@ Remote command закрепляет deployed path, явный `PYTHONPATH`, targ
 и mode-0700 evidence directory. Любой terminal failure сохраняется в receipt
 как bounded typed `phase/stage/code/message/predicate/expected_cardinality/
 observed_cardinality/candidate_digest/details_digest`; stderr digest не
-заменяет доменную причину.
+заменяет доменную причину. В частности, storage admission сохраняет полный
+`RootStoragePolicyError: <reason>`, а не обобщённую ошибку persistence.
 
 WBC0008 profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
 caller-known detached sanitation job. После submit разрешён только query-only

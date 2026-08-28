@@ -169,11 +169,17 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
     assert registry["filesystems"]["backup"]["emergency_reserve_bytes"] == 8 * GIB
     assert registry["filesystems"]["generation"]["reserve_bytes"] == 8 * GIB
     producers = {item["owner"]: item for item in registry["producers"]}
+    admission_producers = {item["owner"]: item for item in policy["producers"]}
     assert storage_destination_root(
         "ads_historical_recovery",
         policy=policy,
     ) == Path("/opt/wb-core-runtime/state/backups/ads-historical")
     assert producers["production_apply_evidence"]["destination_role"] == "backup"
+    assert admission_producers["production_apply_evidence"] == {
+        "owner": "production_apply_evidence",
+        "classification": "discretionary_root_writer",
+        "path_patterns": [],
+    }
     assert producers["finance_storage_split_coherent_source"]["destination_role"] == "generation"
     assert not [
         item["owner"]
@@ -324,6 +330,60 @@ def _assert_admission(policy: dict[str, object]) -> None:
                 assert "no current write authority" in str(exc)
             else:
                 raise AssertionError("retired producer acquired hosted write authority")
+
+        production_plan = (
+            storage_destination_root("production_apply_evidence", policy=policy)
+            / "production-goals"
+            / ("production-goal-v1-" + "7" * 32)
+            / "wbc0013-a-plan-20260828T120000Z.json"
+        )
+        deployed_defect = deepcopy(policy)
+        deployed_defect["producers"] = [
+            item
+            for item in deployed_defect["producers"]
+            if item["owner"] != "production_apply_evidence"
+        ]
+        try:
+            admit_root_write(
+                owner="production_apply_evidence",
+                destination=production_plan,
+                predicted_output_bytes=108_853,
+                policy=deployed_defect,
+            )
+        except RootStoragePolicyError as exc:
+            assert str(exc) == (
+                "unregistered large root writer owner: production_apply_evidence"
+            )
+        else:
+            raise AssertionError("deployed production-plan storage defect was not reproduced")
+
+        with (
+            mock.patch.object(
+                policy_module.os,
+                "statvfs",
+                return_value=SimpleNamespace(f_bavail=100 * GIB, f_frsize=1),
+            ),
+            mock.patch.object(
+                policy_module,
+                "_assert_filesystem_identity",
+                return_value={"fixture": True},
+            ),
+            mock.patch.object(
+                policy_module,
+                "_required_reserve_bytes",
+                return_value=8 * GIB,
+            ),
+        ):
+            admitted_plan = admit_root_write(
+                owner="production_apply_evidence",
+                destination=production_plan,
+                predicted_output_bytes=108_853,
+                policy=policy,
+            )
+        assert admitted_plan["allowed"] is True
+        assert admitted_plan["destination"] == str(production_plan)
+        assert admitted_plan["destination_role"] == "backup"
+        assert admitted_plan["predicted_output_bytes"] == 108_853
 
 
 def _assert_unregistered_detection(policy: dict[str, object]) -> None:
