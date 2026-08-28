@@ -1,6 +1,6 @@
 {
   "schema": "wb-core.production-apply-manifest/v2",
-  "operation_id": "wbc0020-finance-daily-20260826-20260827",
+  "operation_id": "wbc0020-finance-daily-20260826-20260827-v2",
   "target_id": "wb_core_eu_hosted_runtime_active",
   "deployed_sha_contract": "exact-merge-sha",
   "dry_run_default": true,
@@ -26,7 +26,12 @@
   ],
   "recovery_contract": {
     "mode": "bounded-recovery",
-    "id": "wbc0020-two-exact-operation-query-only-reconciliation-v1"
+    "id": "wbc0020-two-exact-operation-query-only-reconciliation-v2",
+    "supersedes_operation_id": "wbc0020-finance-daily-20260826-20260827",
+    "supersedes_apply_receipt_run_id": 33171234881,
+    "supersedes_apply_receipt_sha256": "sha256:1047cd403640826389c783cc6c66d7b5587748da47008af6ad69a3a669c20ef3",
+    "supersedes_apply_count": 0,
+    "supersedes_terminal_state": "blocked_pre_apply"
   },
   "commands": {
     "dry_run": [

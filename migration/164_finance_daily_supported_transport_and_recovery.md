@@ -46,7 +46,14 @@ plus 6 TOTAL cells, typed before states, expected values, before/after plan CAS,
 non-target digest and Proxy-gap exclusion. It contains normalized aggregates,
 not raw seller-report rows or PII. The immutable evidence also retains the exact
 pre-change general/accepted temporal snapshots and closure row with a CAS
-digest. Apply performs no upstream refetch.
+digest. Expected values use the same six-decimal numeric-cell normalization as
+canonical Vitrina materialization, so harmless IEEE-754 accumulation tails do
+not become false parity mismatches. Apply performs no upstream refetch.
+
+The exact-manifest Apply Runner materializes the canonical hosted SSH identity
+and strict known-hosts options from production environment secrets before the
+four manifest commands. Credentials live only in a temporary mode-0600 contour
+and the inherited SSH environment is restored after the command sequence.
 
 One `BEGIN IMMEDIATE` updates the exact ready `plan_json`, existing accepted
 temporal snapshot/slot and Finance closure state, then inserts

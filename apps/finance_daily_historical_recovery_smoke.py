@@ -79,7 +79,7 @@ def _source(
             fin_buyout_rub=float((index + 1) * 100),
             fin_commission_wb_portal=float(index + 2),
             fin_acquiring_fee=float(-(index + 1)) if index == 0 else float(index + 1),
-            fin_loyalty_rub=float(index) / 10.0,
+            fin_loyalty_rub=(0.1 + 0.2) if index == 0 else float(index) / 10.0,
         )
         for index, nm_id in enumerate(nm_ids)
     ]
@@ -211,6 +211,45 @@ def main() -> None:
         assert plan["source"]["coverage"] == "33/33"
         assert plan["source"]["terminal_status"] == 204
         assert not plan["proxy_gap_exclusion"]["mutated"]
+        assert all(
+            round(float(cell["expected"]), 6) == float(cell["expected"])
+            for cell in plan["after_manifest"]["cells"].values()
+        )
+        first_loyalty = f"SKU:{nm_ids[0]}|fin_loyalty_rub"
+        assert _source(nm_ids).items[0].fin_loyalty_rub != plan["after_manifest"][
+            "cells"
+        ][first_loyalty]["expected"]
+
+        parity_ready = _ready_plan(nm_ids)
+        parity_data = next(
+            sheet for sheet in parity_ready.sheets if sheet.sheet_name == "DATA_VITRINA"
+        )
+        expected = plan["after_manifest"]["cells"]
+        date_index = parity_data.header.index(TARGET_DATE)
+        for row in parity_data.rows:
+            row_id = str(row[1] or "")
+            if row_id in expected:
+                row[date_index] = float(expected[row_id]["expected"])
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current,
+            refreshed_at="2026-08-27T08:11:00Z",
+            plan=parity_ready,
+        )
+        parity_plan, _, _ = build_finance_daily_recovery_plan(
+            runtime,
+            target_date=TARGET_DATE,
+            deployed_sha=DEPLOYED_SHA,
+            block=FixtureBlock(_source(nm_ids)),
+            generated_at="2026-08-28T09:00:30Z",
+        )
+        assert parity_plan["changed_cells"] == 0
+        assert parity_plan["parity_status"] == "exact"
+
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current,
+            refreshed_at="2026-08-27T08:12:00Z",
+            plan=_ready_plan(nm_ids),
+        )
 
         result = apply_finance_daily_recovery(
             runtime,
