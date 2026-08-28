@@ -12,6 +12,7 @@ source_basis:
   - "artifacts/registry_upload_db_backed_runtime/input/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_db_backed_runtime/evidence/initial__registry-upload-db-backed-runtime__evidence.md"
 related_modules:
+  - "packages/application/change_registry.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/application/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
@@ -280,3 +281,12 @@ All shared runtime writers open SQLite through `packages/application/sqlite_cont
 The runtime records only sanitized endpoint/operation/phase, priority, owner process, actual wait, retry count and write-transaction duration. SQL text, paths, document contents, bank details, cookies and secrets are excluded. Schema installation is cached per process and database inode after successful verification; ordinary requests do not replay the large DDL script. External requests, parsing, workbook/PDF generation and heavy calculations stay outside write transactions; commit-critical sections contain only validation against current revisions plus bounded persistence.
 
 If the interactive budget is exhausted before a business commit, the HTTP adapter returns `503`, `Retry-After` and contract `wb_core_sqlite_contention_v1` with a Russian retry/resume message. It never exposes the raw SQLite exception. Transactions roll back before that response, and callers use their existing idempotency/revision contracts on retry. Bank-fee confirm is the explicit post-commit exception: its parent/expense/assignment/CNY-document unit is already complete, so contention in the subsequent derived replay returns Russian `202 pending`, `operation_applied=true` and safe retry; the repeat resumes replay without duplicating business rows.
+
+## Change registry dark foundation
+
+The same StoreRegistry-selected operational SQLite generation contains the
+empty additive `change_registry_*` foundation defined by
+`docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md`. Runtime schema ensure
+installs only tables/indexes/triggers. No existing Prices/Ads/SKU writer is
+instrumented, no historical evidence is imported, and no reader/API/UI is
+activated by this schema addition.
