@@ -1597,18 +1597,38 @@ def main() -> None:
         pass
     else:
         raise AssertionError("foreign legacy release PR binding must fail closed")
-    legacy_result = apply._run_legacy_commands(
-        {
-            "commands": {
-                "dry_run": [sys.executable, "-c", "print('{}')"],
-                "apply": [sys.executable, "-c", "print('{}')"],
-                "readback": [sys.executable, "-c", "print('{}')"],
-                "reconcile": [sys.executable, "-c", "print('{}')"],
-            }
-        }
+    hosted_identity = "WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE"
+    hosted_options = "WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS"
+    os.environ["WB_CORE_DEPLOY_SSH_KEY"] = "fixture-private-key\n"
+    os.environ["WB_CORE_DEPLOY_KNOWN_HOSTS"] = "fixture.example ssh-ed25519 AAAA\n"
+    os.environ[hosted_identity] = "prior-identity"
+    os.environ[hosted_options] = "prior-options"
+    legacy_environment_assertion = (
+        "import os,pathlib;"
+        "p=pathlib.Path(os.environ['WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE']);"
+        "assert p.is_file();"
+        "assert p.read_text() == 'fixture-private-key\\n';"
+        "assert 'StrictHostKeyChecking=yes' in "
+        "os.environ['WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS']"
     )
-    assert legacy_result["state"] == "done"
-    assert legacy_result["apply_count"] == 1
+    try:
+        legacy_result = apply._run_legacy_commands_with_deploy_environment(
+            {
+                "commands": {
+                    phase: [sys.executable, "-c", legacy_environment_assertion]
+                    for phase in ("dry_run", "apply", "readback", "reconcile")
+                }
+            }
+        )
+        assert legacy_result["state"] == "done"
+        assert legacy_result["apply_count"] == 1
+        assert os.environ[hosted_identity] == "prior-identity"
+        assert os.environ[hosted_options] == "prior-options"
+    finally:
+        os.environ.pop("WB_CORE_DEPLOY_SSH_KEY", None)
+        os.environ.pop("WB_CORE_DEPLOY_KNOWN_HOSTS", None)
+        os.environ.pop(hosted_identity, None)
+        os.environ.pop(hosted_options, None)
 
     common = {
         "command_sha256": "f" * 64,

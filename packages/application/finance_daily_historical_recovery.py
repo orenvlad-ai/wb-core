@@ -147,6 +147,11 @@ def _expected_values(
     *,
     nm_ids: list[int],
 ) -> dict[str, float]:
+    def sheet_value(value: float) -> float:
+        """Match the canonical Vitrina numeric cell materialization."""
+
+        return round(float(value), 6)
+
     items = {int(item.nm_id): item for item in result.items}
     if sorted(items) != nm_ids:
         raise ValueError("Finance daily normalized item roster changed")
@@ -154,12 +159,12 @@ def _expected_values(
     for nm_id in nm_ids:
         item = items[nm_id]
         for metric in SKU_METRICS:
-            values[f"SKU:{nm_id}|{metric}"] = float(getattr(item, metric))
+            values[f"SKU:{nm_id}|{metric}"] = sheet_value(getattr(item, metric))
     for total_metric, sku_metric in zip(TOTAL_METRICS[:5], SKU_METRICS, strict=True):
-        values[f"TOTAL|{total_metric}"] = float(
+        values[f"TOTAL|{total_metric}"] = sheet_value(
             sum(float(getattr(items[nm_id], sku_metric)) for nm_id in nm_ids)
         )
-    values["TOTAL|fin_storage_fee_total"] = float(
+    values["TOTAL|fin_storage_fee_total"] = sheet_value(
         result.storage_total.fin_storage_fee_total
     )
     if len(values) != EXPECTED_TARGET_CELLS:

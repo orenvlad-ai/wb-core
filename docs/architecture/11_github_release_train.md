@@ -223,6 +223,11 @@ count, named non-target invariants, idempotency/bounded recovery contract,
 query-only manifest readback и four explicit commands: dry-run, apply,
 readback, reconcile.
 
+Перед исполнением exact-manifest commands Runner материализует canonical hosted
+SSH identity и strict known-hosts options из production environment secrets во
+временный mode-0600 contour. Один и тот же contour используется dry-run, apply,
+readback и reconcile, затем временные файлы и process environment удаляются.
+
 Dry-run success precedes mutation. Apply command запускается максимум один раз.
 Readback и reconciliation запускаются по одному разу даже после nonzero apply,
 чтобы зафиксировать ambiguity без blind retry. Durable apply receipt binds

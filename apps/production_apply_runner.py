@@ -5489,6 +5489,28 @@ def _run_legacy_commands(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_legacy_commands_with_deploy_environment(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Materialize the canonical hosted SSH identity for exact-manifest commands."""
+
+    environment_names = (
+        "WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE",
+        "WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS",
+    )
+    previous = {name: os.environ.get(name) for name in environment_names}
+    try:
+        with tempfile.TemporaryDirectory(prefix="production-apply-deploy-") as directory:
+            configure_deploy_environment(Path(directory))
+            return _run_legacy_commands(manifest)
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _run_legacy_mode(
     *,
     args: argparse.Namespace,
@@ -5550,7 +5572,7 @@ def _run_legacy_mode(
     manifest = _load_legacy_manifest(manifest_path, str(args.manifest_sha256))
     if manifest.get("operation_id") != operation:
         raise ApplyError("manifest operation id mismatch")
-    result = _run_legacy_commands(manifest)
+    result = _run_legacy_commands_with_deploy_environment(manifest)
     approval_body = str(authorization.get("body") or "").strip()
     receipt = {
         "schema": APPLY_RECEIPT_SCHEMA,

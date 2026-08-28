@@ -132,8 +132,10 @@ durably retry-eligible со следующего business day/window, а не з
 Canonical hosted actions `finance-daily-parity`,
 `finance-daily-recovery-plan|apply|readback` принимают только exact accepted
 dates. Parity для 24–25.08 query-only сравнивает все 171 current ready values с
-fresh terminal-204 source. Recovery для 26–27.08 работает последовательно по
-одной date/operation и меняет только 165 SKU Finance cells + 6 Finance TOTAL.
+fresh terminal-204 source после той же canonical six-decimal нормализации,
+которую применяет Vitrina при записи numeric cells. Recovery для 26–27.08
+работает последовательно по одной date/operation и меняет только 165 SKU
+Finance cells + 6 Finance TOTAL.
 
 Private mode-0600 plan вне Git pins deployed SHA, bundle/as-of/snapshot,
 33/33 normalized source, pages/final cursor/source digest, 171 before/after
