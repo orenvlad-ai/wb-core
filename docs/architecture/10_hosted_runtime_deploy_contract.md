@@ -1279,3 +1279,13 @@ business-data barrier before and under the shared warehouse lock; it does not
 stop or change the 06:30/07:30 or any other ordinary service/timer. Deploy and
 post-deploy verification do not run A or B and do not mutate production
 business data.
+
+SSS011 keeps that inert boundary while tightening qualification. Dense A binds
+the exact `12 historical_exact_zero + 38 no_material_value_history` partition
+and all 228 accepted missing components; accepted history is never rewritten or
+retrofilled from current zero. Historical B classifies the fresh mismatch set
+and admits only one causally bound FBS event inside the accepted-version
+publication interval. The deployed CLI returns bounded typed failures, and the
+durable runner receipt preserves their phase, stage, code, message and details
+digest. Post-deploy checks remain import/SHA/inert and query-only; neither A nor
+B is executed by release.

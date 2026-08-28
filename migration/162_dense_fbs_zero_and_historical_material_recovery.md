@@ -12,7 +12,7 @@ inputs, never deploy defaults.
 ## Dense FBS zero repair v2
 
 The strict v2 manifest has exactly two disjoint target partitions:
-`historical_exact_zero` and `default_applicable_absent_history`. Their union,
+`historical_exact_zero` and `no_material_value_history`. Their union,
 plus the exact existing facility/FBS identities, must equal the complete active,
 non-hidden stock-managed roster. Unknown, missing, extra, duplicate and
 overlapping identities fail closed; the operation id is a deterministic
@@ -21,9 +21,16 @@ seller warehouse; legacy facility-less reservation history blocks only when its
 immutable net quantity is non-zero. Mapping-extension allocations, target
 effects, historical zero evidence, canonical WB Content lifecycle/source
 identity, target absence and bounded non-target fingerprints are all CAS
-material. The absent-history partition must have no accepted target-facility
-history; it does not invent a date, global Moscow inference or reservation
-shortcut.
+material. The second partition binds all 228 accepted components for its 38
+identities across the six latest accepted dates. Every row must remain
+`missing / NULL`: that state means only `no_material_value_history`, never a
+historical zero. `exact`, `exact_zero`, quantity, capital, WAC, movement,
+opening, receipt or any other material provenance blocks the operation. The
+latest accepted finalization is selected deterministically by date, sequence
+and identity, SKU components are deduplicated by `nm_id`, and `TOTAL` rows with
+`nm_id=NULL` are typed separately. Superseded same-date captures must preserve
+the identical original-12 semantic digest. No current zero is copied backward
+and no accepted historical row is rewritten.
 
 Apply repeats qualification before and under the shared warehouse writer lock,
 persists the existing dense `repair` intent, and emits exactly one deterministic
@@ -53,7 +60,13 @@ accepted quantity/coverage/capital and expected current active, sync and pool
 identities. Aliases are not accepted. Qualification uses one explicitly bound
 StoreRegistry generation and one true query-only dependency connection; it runs
 no schema ensure, DDL or hidden storage re-resolution. No binding is optional.
-The candidate starts from the accepted version and proves the full pre-debit
+Fresh qualification first classifies the exact mismatch set without assuming
+its size. For each mismatch it considers only immutable FBS events belonging to
+a facility named by accepted provenance and occurring strictly after that
+version's publication and strictly before the next good publication. Thus
+pre-publication events and unrelated stale cells are candidate-level typed
+rejections, not a global cross-product or an abort of the bounded target. The
+candidate starts from the accepted version and proves the full pre-debit
 facility/pool location set plus event arithmetic. It debits only the target
 location while preserving Moscow and every other location. Current pool rows are preservation/CAS evidence only and
 are never copied into the historical candidate.
@@ -81,5 +94,9 @@ plans, requires two consecutive identical material qualifications with at most
 three regenerations, submits A once, performs query-only A reconciliation, then
 builds a fresh B plan, submits B once and performs query-only B reconciliation.
 Every ambiguous response goes directly to same-operation readback and never to
-a blind submit retry. Barrier checks are read-only before and under the shared
-lock; no ordinary service or timer is stopped or changed.
+a blind submit retry. The runner invokes the exact deployed adapter path with
+an explicit `PYTHONPATH`, private mode-0700 evidence directory and exact target/
+generation arguments. Failure receipts retain bounded typed `phase`, `stage`,
+`code`, `message` and `details_digest`; stderr is only transport evidence.
+Barrier checks are read-only before and under the shared lock; no ordinary
+service or timer is stopped or changed.

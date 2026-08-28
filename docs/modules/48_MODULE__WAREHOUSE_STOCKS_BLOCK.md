@@ -246,7 +246,13 @@ version and one handoff event. It binds separate version-plan, full-version-row,
 target-row, provenance and event source/status/evidence/row digests through one
 query-only StoreRegistry generation. A positive finite legacy long WAC remains
 acceptable only under unchanged exact row/provenance evidence and is never
-rewritten; the candidate uses the canonical precision-38 ratio. The full
+rewritten; event multiplication, pre-debit location arithmetic and the
+candidate ratio use Decimal precision 38. Fresh mismatch discovery assumes no
+fixed mismatch-set size and tests only events in the exact interval after the
+accepted version publication and before the next good publication, restricted
+to FBS facilities named by accepted provenance. Pre-publication events and
+unrelated stale cells are typed candidate rejections rather than a global
+version-by-event cross-product. The full
 facility/pool location transform debits the target facility while preserving
 Moscow and all other locations, reconstructs the historical FF target and
 target+TOTAL economics closure, and publishes a new

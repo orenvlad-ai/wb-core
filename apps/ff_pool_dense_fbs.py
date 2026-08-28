@@ -152,8 +152,8 @@ def run(args: argparse.Namespace) -> int:
             historical_exact_zero_nm_ids=list(
                 domain_manifest["partitions"]["historical_exact_zero"]
             ),
-            default_applicable_absent_history_nm_ids=list(
-                domain_manifest["partitions"]["default_applicable_absent_history"]
+            no_material_value_history_nm_ids=list(
+                domain_manifest["partitions"]["no_material_value_history"]
             ),
             seller_warehouse_id=int(domain_manifest["seller_warehouse_id"]),
             official_office_id=int(domain_manifest["official_office_id"]),
@@ -255,7 +255,7 @@ def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
         raise ValueError("zero-repair manifest partitions must be one JSON object")
     partition_fields = {
         "historical_exact_zero",
-        "default_applicable_absent_history",
+        "no_material_value_history",
     }
     if set(partitions) != partition_fields:
         raise ValueError(
@@ -265,7 +265,7 @@ def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
         )
     for field in (
         "historical_exact_zero",
-        "default_applicable_absent_history",
+        "no_material_value_history",
         "expected_roster_nm_ids",
         "expected_existing_nm_ids",
     ):
@@ -280,7 +280,7 @@ def _strict_domain_manifest_v2(payload: dict[str, object]) -> dict[str, object]:
         if len(values) != len(set(values)):
             raise ValueError(f"{field} must not contain duplicate nmIds")
     historical = set(partitions["historical_exact_zero"])
-    absent = set(partitions["default_applicable_absent_history"])
+    absent = set(partitions["no_material_value_history"])
     existing = set(payload["expected_existing_nm_ids"])
     roster = set(payload["expected_roster_nm_ids"])
     if historical & absent:

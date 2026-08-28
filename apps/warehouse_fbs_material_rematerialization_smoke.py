@@ -59,6 +59,7 @@ from packages.application.warehouse_fbs_material_rematerialization import (
     WarehouseFbsMaterialRematerializer,
     _fingerprint,
     _functional_pool_mismatches,
+    _historical_event_aggregate,
     _pool_aggregates,
     _warehouse_metric_lookup,
     ensure_warehouse_fbs_material_schema,
@@ -70,6 +71,7 @@ from packages.application.warehouse_functional_economics_backfill import (
 from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
+from apps.wbc0013_fbs_recovery import _discover_historical_manifests
 
 
 DAY = "2026-08-26"
@@ -101,6 +103,7 @@ class _Clock:
 
 def main() -> None:
     _test_shared_wac_precision_contract()
+    _test_historical_precision38_event_arithmetic()
     _test_atomic_root_prevention()
     _test_lifecycle_canonical_zero_shape()
     _test_incident_plan_apply_idempotency_and_bounds()
@@ -112,6 +115,62 @@ def main() -> None:
     print("warehouse_fbs_material_single_sku_repair_resume: OK")
     print("warehouse_fbs_material_historical_bounded_recovery: OK")
     print("warehouse_fbs_material_cas_bounds_benchmark: OK")
+
+
+def _test_historical_precision38_event_arithmetic() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(
+                   version_id TEXT,warehouse_key TEXT,nm_id INTEGER,quantity TEXT,
+                   capital_rub TEXT,wac_rub TEXT,cost_covered_quantity TEXT,
+                   provenance_json TEXT)"""
+        )
+        quantity_delta = Decimal("-1234567890")
+        frozen_wac = Decimal("0.12345678901234567890123456789")
+        with localcontext() as arithmetic:
+            arithmetic.prec = 38
+            capital_delta = +(quantity_delta * frozen_wac)
+            prior_quantity = Decimal("1") - quantity_delta
+            prior_capital = frozen_wac - capital_delta
+        provenance = {
+            "source_records": [
+                {
+                    "locations": [
+                        {
+                            "facility_id": FACILITY_ID,
+                            "pool": "FBS",
+                            "quantity": canonical_decimal_text(prior_quantity),
+                            "capital_rub": canonical_decimal_text(prior_capital),
+                        }
+                    ]
+                }
+            ]
+        }
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_warehouse_functional_balances "
+            "VALUES('precision38','ff',101,'1',?,?, '2',?)",
+            (
+                canonical_decimal_text(frozen_wac),
+                canonical_decimal_text(frozen_wac),
+                json.dumps(provenance, sort_keys=True),
+            ),
+        )
+        aggregate = _historical_event_aggregate(
+            conn,
+            source_version_id="precision38",
+            facility_id=FACILITY_ID,
+            nm_id=TARGET_NM_ID,
+            event={
+                "event_id": "precision38-event",
+                "physical_quantity_delta": canonical_decimal_text(quantity_delta),
+                "capital_delta_rub": canonical_decimal_text(capital_delta),
+                "frozen_wac_rub": canonical_decimal_text(frozen_wac),
+            },
+        )
+        assert aggregate["quantity"] == "1"
+        assert aggregate["capital_rub"] == canonical_decimal_text(frozen_wac)
+        assert aggregate["locations"][0]["quantity"] == "1"
 
 
 def _build_historical_plan(
@@ -461,6 +520,47 @@ def _test_historical_bounded_recovery_preserves_current() -> None:
                     NOW,
                     json.dumps({"date_columns": ["2026-08-25"], "sentinel": 825}),
                 ),
+            )
+            conn.executemany(
+                """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events(
+                       event_id,cutover_id,order_id,episode_sequence,event_type,
+                       source_order_observation_sequence,
+                       source_status_observation_sequence,source_revision,
+                       status_digest,supplier_status,wb_status,source_observed_at,
+                       facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                       capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at)
+                   VALUES(?,'warehouse_functional_cutover_v1',?,1,'handoff_debit',
+                          1,1,?,?,'complete','sorted',?,?,'FBS',?,1,-1,'-10',
+                          '10',?,?)""",
+                (
+                    (
+                        event_id,
+                        order_id,
+                        f"revision-{order_id}",
+                        _fingerprint(f"status-{order_id}"),
+                        occurred_at,
+                        FACILITY_ID,
+                        TARGET_NM_ID,
+                        _fingerprint(f"evidence-{order_id}"),
+                        occurred_at,
+                    )
+                    for event_id, order_id, occurred_at in (
+                        ("handoff-pre-publication", 9003, "2026-08-26T11:59:59Z"),
+                        ("handoff-next-boundary", 9004, "2026-08-27T12:00:00Z"),
+                    )
+                ),
+            )
+            discovery = _discover_historical_manifests(
+                conn,
+                canonical_target={"accepted": True},
+                storage_generation={"implicit": False, "query_only": True},
+            )
+            assert len(discovery["mismatches"]) >= 2
+            assert len(discovery["manifests"]) == 1
+            assert discovery["manifests"][0]["event_id"] == "handoff-debit-1"
+            assert any(
+                item["classification"] == "rejected_no_event_in_causal_interval"
+                for item in discovery["mismatches"]
             )
             event = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
