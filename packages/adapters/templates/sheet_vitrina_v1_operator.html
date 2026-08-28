@@ -1810,6 +1810,151 @@
       color: var(--muted);
     }
 
+    .fbs-fulfillment-grid {
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      align-items: start;
+    }
+
+    .fbs-settings-card,
+    .fbs-result-card {
+      gap: 12px;
+      padding: 16px;
+    }
+
+    .fbs-settings-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px 12px;
+    }
+
+    .fbs-settings-grid .field {
+      gap: 6px;
+    }
+
+    .fbs-scope-field {
+      grid-column: span 2;
+    }
+
+    .fbs-scope-help {
+      grid-column: 1 / -1;
+      padding: 8px 10px;
+      border-left: 3px solid var(--warning-text);
+      border-radius: 4px;
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .fbs-period-details,
+    .fbs-readiness-details {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-bg);
+    }
+
+    .fbs-period-details > summary,
+    .fbs-readiness-details > summary {
+      cursor: pointer;
+      padding: 10px 12px;
+      color: var(--muted-strong);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .fbs-period-body,
+    .fbs-readiness-body {
+      display: grid;
+      gap: 10px;
+      padding: 0 12px 12px;
+    }
+
+    .fbs-period-options {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(120px, 0.4fr);
+      gap: 10px;
+      align-items: end;
+    }
+
+    .fbs-result-card {
+      display: grid;
+      align-content: start;
+    }
+
+    .fbs-preview-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 0;
+    }
+
+    .fbs-preview-grid div {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-bg);
+    }
+
+    .fbs-preview-grid dt {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .fbs-preview-grid dd {
+      margin: 5px 0 0;
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 800;
+      word-break: break-word;
+    }
+
+    .fbs-preview-meta {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+    }
+
+    .fbs-preview-meta div,
+    .fbs-readiness-list div {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+      gap: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .fbs-preview-meta div:last-child,
+    .fbs-readiness-list div:last-child {
+      padding-bottom: 0;
+      border-bottom: 0;
+    }
+
+    .fbs-preview-meta dt,
+    .fbs-readiness-list dt {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .fbs-preview-meta dd,
+    .fbs-readiness-list dd {
+      margin: 0;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      text-align: right;
+      word-break: break-word;
+    }
+
+    .fbs-readiness-list {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+    }
+
+    .fbs-download-button {
+      width: 100%;
+      justify-content: center;
+    }
+
     .district-selector {
       display: grid;
       gap: 10px;
@@ -3803,6 +3948,26 @@
         min-width: 0;
       }
 
+      .fbs-settings-grid,
+      .fbs-period-options,
+      .fbs-preview-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .fbs-scope-field {
+        grid-column: auto;
+      }
+
+      .fbs-preview-meta div,
+      .fbs-readiness-list div {
+        grid-template-columns: 1fr;
+      }
+
+      .fbs-preview-meta dd,
+      .fbs-readiness-list dd {
+        text-align: left;
+      }
+
       .stock-selector-panel {
         position: static;
         margin-top: 8px;
@@ -4360,20 +4525,28 @@
         </div>
 
         <section class="supply-panel" data-supply-section-panel="fbs-fulfillment">
-          <div class="factory-grid">
-            <section class="block summary-card" aria-labelledby="fbsFulfillmentSettingsTitle">
+          <div class="factory-grid fbs-fulfillment-grid">
+            <section class="block summary-card fbs-settings-card" aria-labelledby="fbsFulfillmentSettingsTitle">
               <div class="wb-supply-overlay-head">
                 <div>
                   <h2 id="fbsFulfillmentSettingsTitle" class="block-title">Заказ на фулфилмент (FBS)</h2>
-                  <p class="field-note"><strong>Остатки WB не учитываются.</strong> Расчёт использует только физический FBS-остаток выбранного ФФ минус подписанный резерв и недополученные активные поставки, назначенные этому ФФ.</p>
+                  <p class="field-note"><strong>Остатки WB не учитываются.</strong> Расчёт использует физический FBS-остаток выбранного ФФ минус подписанный резерв и выбранный охват активных заказов фабрике.</p>
                 </div>
                 <span class="source-pill">Общероссийский спрос</span>
               </div>
-              <div class="field-grid">
+              <div class="fbs-settings-grid">
                 <div class="field">
                   <label for="fbsTargetFacility">Целевой фулфилмент</label>
                   <select id="fbsTargetFacility"><option value="">Выберите ФФ</option></select>
                 </div>
+                <div class="field fbs-scope-field">
+                  <label for="fbsInboundScope">Учитывать заказы фабрике</label>
+                  <select id="fbsInboundScope">
+                    <option value="selected_facility" selected>Только для выбранного ФФ</option>
+                    <option value="all_active">Все активные заказы фабрике</option>
+                  </select>
+                </div>
+                <p id="fbsInboundScopeHelp" class="field-note fbs-scope-help">В общем режиме весь объём на производстве и в пути уменьшает заказ выбранному ФФ. Такой объём нельзя одновременно считать распределённым по регионам.</p>
                 <div class="field">
                   <label for="fbsProductionDays">Срок производства, дней</label>
                   <input id="fbsProductionDays" type="number" min="1" step="1" value="30">
@@ -4395,63 +4568,77 @@
                   <input id="fbsOrderBatchQty" type="number" min="1" step="1" value="250">
                 </div>
               </div>
-              <fieldset class="source-selector">
-                <legend>Период анализа продаж</legend>
-                <label class="source-option">
-                  <input id="fbsHistoryModeLastN" type="radio" name="fbsHistoryMode" value="last_n_days" checked>
-                  <span><strong>Последние N дней</strong><span>Закрытые календарные дни до даты расчёта.</span></span>
-                </label>
-                <div class="field">
-                  <label for="fbsSalesAvgPeriodDays">N дней</label>
-                  <input id="fbsSalesAvgPeriodDays" type="number" min="1" step="1" value="14">
-                </div>
-                <label class="source-option">
-                  <input id="fbsHistoryModeCustom" type="radio" name="fbsHistoryMode" value="custom_period">
-                  <span><strong>Произвольный период</strong><span>Обе границы включаются; дни за пределами не подмешиваются.</span></span>
-                </label>
-                <div class="field-grid">
-                  <div class="field">
-                    <label for="fbsSalesDateFrom">Дата начала</label>
-                    <input id="fbsSalesDateFrom" type="date" disabled>
+              <details class="fbs-period-details" open>
+                <summary>Период анализа продаж</summary>
+                <div class="fbs-period-body">
+                  <div class="fbs-period-options">
+                    <label class="source-option">
+                      <input id="fbsHistoryModeLastN" type="radio" name="fbsHistoryMode" value="last_n_days" checked>
+                      <span><strong>Последние N дней</strong><span>Закрытые дни до даты расчёта.</span></span>
+                    </label>
+                    <div class="field">
+                      <label for="fbsSalesAvgPeriodDays">N дней</label>
+                      <input id="fbsSalesAvgPeriodDays" type="number" min="1" step="1" value="14">
+                    </div>
                   </div>
-                  <div class="field">
-                    <label for="fbsSalesDateTo">Дата окончания</label>
-                    <input id="fbsSalesDateTo" type="date" disabled>
+                  <label class="source-option">
+                    <input id="fbsHistoryModeCustom" type="radio" name="fbsHistoryMode" value="custom_period">
+                    <span><strong>Произвольный период</strong><span>Обе границы включаются; дни за пределами не подмешиваются.</span></span>
+                  </label>
+                  <div class="field-grid">
+                    <div class="field">
+                      <label for="fbsSalesDateFrom">Дата начала</label>
+                      <input id="fbsSalesDateFrom" type="date" disabled>
+                    </div>
+                    <div class="field">
+                      <label for="fbsSalesDateTo">Дата окончания</label>
+                      <input id="fbsSalesDateTo" type="date" disabled>
+                    </div>
                   </div>
                 </div>
-              </fieldset>
+              </details>
               <div class="factory-actions">
-                <button id="fbsFulfillmentCalculateButton" class="action-button" type="button">Рассчитать заказ</button>
-                <button id="fbsFulfillmentDownloadButton" class="action-button secondary-button" type="button" disabled>Скачать XLSX</button>
+                <button id="fbsFulfillmentCalculateButton" class="action-button primary-button" type="button">Рассчитать заказ</button>
               </div>
               <p id="fbsFulfillmentMessage" class="section-message">Читаем готовность источников...</p>
             </section>
 
-            <section class="block result-card" aria-labelledby="fbsFulfillmentReadinessTitle">
-              <h2 id="fbsFulfillmentReadinessTitle" class="block-title">Готовность источников</h2>
-              <dl class="summary-list">
-                <div><dt>Выбранный ФФ</dt><dd id="fbsReadinessFacility">-</dd></div>
-                <div><dt>Физический остаток</dt><dd id="fbsReadinessPhysical">-</dd></div>
-                <div><dt>Подписанный резерв</dt><dd id="fbsReadinessReserved">-</dd></div>
-                <div><dt>Доступный FBS-остаток</dt><dd id="fbsReadinessAvailable">-</dd></div>
-                <div><dt>Входящие поставки</dt><dd id="fbsReadinessInbound">-</dd></div>
-                <div><dt>История orderCount</dt><dd id="fbsHistoryCoverage">-</dd></div>
-                <div><dt>Период источника</dt><dd id="fbsDemandWindow">-</dd></div>
-                <div><dt>Календарных / торговых дней</dt><dd id="fbsDemandDays">-</dd></div>
+            <section class="block result-card fbs-result-card" aria-labelledby="fbsFulfillmentPreviewTitle">
+              <div class="wb-supply-overlay-head">
+                <div>
+                  <h2 id="fbsFulfillmentPreviewTitle" class="block-title">Превью рекомендации</h2>
+                  <p id="fbsPreviewNote" class="field-note">Рассчитайте заказ, чтобы увидеть итог.</p>
+                </div>
+                <span id="fbsResultScopePill" class="source-pill">Нет расчёта</span>
+              </div>
+              <dl class="fbs-preview-grid">
+                <div><dt>К заказу, шт.</dt><dd id="fbsTotalQty">—</dd></div>
+                <div><dt>Горизонт, дней</dt><dd id="fbsHorizonDays">—</dd></div>
+                <div><dt>Расчётный вес</dt><dd id="fbsTotalWeight">—</dd></div>
+                <div><dt>Расчётный объём</dt><dd id="fbsTotalVolume">—</dd></div>
               </dl>
-              <dl class="summary-list">
-                <div><dt>Общее количество</dt><dd id="fbsTotalQty">-</dd></div>
-                <div><dt>Расчётный вес</dt><dd id="fbsTotalWeight">-</dd></div>
-                <div><dt>Расчётный объём</dt><dd id="fbsTotalVolume">-</dd></div>
-                <div><dt>Горизонт, дней</dt><dd id="fbsHorizonDays">-</dd></div>
+              <dl class="fbs-preview-meta">
+                <div><dt>Охват заказов фабрике</dt><dd id="fbsResultInboundScope">—</dd></div>
+                <div><dt>Учтено входящих</dt><dd id="fbsResultInbound">—</dd></div>
+                <div><dt>Позиции к заказу</dt><dd id="fbsResultSkuCount">—</dd></div>
               </dl>
               <p id="fbsReadinessBlockers" class="section-message"></p>
-              <div class="district-table-wrap">
-                <table class="district-table" aria-label="Рекомендация заказа на FBS-фулфилмент">
-                  <thead><tr><th>nmId</th><th>SKU</th><th>Спрос/день</th><th>Physical</th><th>Reserved</th><th>Available</th><th>Inbound</th><th>Target</th><th>К заказу</th></tr></thead>
-                  <tbody id="fbsFulfillmentResultBody"><tr><td colspan="9">Расчёт ещё не выполнен.</td></tr></tbody>
-                </table>
-              </div>
+              <button id="fbsFulfillmentDownloadButton" class="action-button primary-button fbs-download-button" type="button" disabled>Скачать Excel</button>
+              <details id="fbsReadinessDetails" class="fbs-readiness-details">
+                <summary>Готовность источников и детали расчёта</summary>
+                <div class="fbs-readiness-body">
+                  <dl class="fbs-readiness-list">
+                    <div><dt>Выбранный ФФ</dt><dd id="fbsReadinessFacility">—</dd></div>
+                    <div><dt>Физический остаток</dt><dd id="fbsReadinessPhysical">—</dd></div>
+                    <div><dt>Подписанный резерв</dt><dd id="fbsReadinessReserved">—</dd></div>
+                    <div><dt>Доступный FBS-остаток</dt><dd id="fbsReadinessAvailable">—</dd></div>
+                    <div><dt>Входящие поставки</dt><dd id="fbsReadinessInbound">—</dd></div>
+                    <div><dt>История orderCount</dt><dd id="fbsHistoryCoverage">—</dd></div>
+                    <div><dt>Период источника</dt><dd id="fbsDemandWindow">—</dd></div>
+                    <div><dt>Календарных / торговых дней</dt><dd id="fbsDemandDays">—</dd></div>
+                  </dl>
+                </div>
+              </details>
             </section>
           </div>
         </section>
@@ -5575,6 +5762,7 @@
 
       const fbsFulfillmentFields = {
         target_facility_id: document.getElementById("fbsTargetFacility"),
+        inbound_scope: document.getElementById("fbsInboundScope"),
         production_days: document.getElementById("fbsProductionDays"),
         factory_to_target_ff_days: document.getElementById("fbsFactoryToFfDays"),
         ff_safety_days: document.getElementById("fbsSafetyDays"),
@@ -5588,6 +5776,11 @@
       const fbsFulfillmentCalculateButton = document.getElementById("fbsFulfillmentCalculateButton");
       const fbsFulfillmentDownloadButton = document.getElementById("fbsFulfillmentDownloadButton");
       const fbsFulfillmentMessage = document.getElementById("fbsFulfillmentMessage");
+      const fbsPreviewNote = document.getElementById("fbsPreviewNote");
+      const fbsResultScopePill = document.getElementById("fbsResultScopePill");
+      const fbsResultInboundScope = document.getElementById("fbsResultInboundScope");
+      const fbsResultInbound = document.getElementById("fbsResultInbound");
+      const fbsResultSkuCount = document.getElementById("fbsResultSkuCount");
       const fbsReadinessFacility = document.getElementById("fbsReadinessFacility");
       const fbsReadinessPhysical = document.getElementById("fbsReadinessPhysical");
       const fbsReadinessReserved = document.getElementById("fbsReadinessReserved");
@@ -5601,7 +5794,6 @@
       const fbsTotalVolume = document.getElementById("fbsTotalVolume");
       const fbsHorizonDays = document.getElementById("fbsHorizonDays");
       const fbsReadinessBlockers = document.getElementById("fbsReadinessBlockers");
-      const fbsFulfillmentResultBody = document.getElementById("fbsFulfillmentResultBody");
       const legacyFactoryOrderReadiness = document.getElementById("legacyFactoryOrderReadiness");
 
       const factoryFields = {
@@ -5981,6 +6173,7 @@
       let fbsFulfillmentDownloadPath = config.fbs_fulfillment_order_recommendation_path || "";
       let fbsFulfillmentFacilities = [];
       let fbsSalesHistoryCoverage = {};
+      let fbsFulfillmentCurrentResult = null;
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
       let persistedOperatorUiState = readPersistedOperatorUiState();
@@ -13965,6 +14158,16 @@
         return selected ? selected.value : "last_n_days";
       }
 
+      function selectedFbsInboundScope() {
+        return String(fbsFulfillmentFields.inbound_scope.value || "selected_facility");
+      }
+
+      function fbsInboundScopeLabel(scope) {
+        return scope === "all_active"
+          ? "Все активные заказы фабрике"
+          : "Только для выбранного ФФ";
+      }
+
       function syncFbsHistoryModeControls() {
         const custom = selectedFbsHistoryMode() === "custom_period";
         fbsFulfillmentFields.sales_avg_period_days.disabled = custom;
@@ -13975,6 +14178,44 @@
       function selectedFbsFacility() {
         const facilityId = String(fbsFulfillmentFields.target_facility_id.value || "");
         return fbsFulfillmentFacilities.find((item) => String(item.facility_id || "") === facilityId) || null;
+      }
+
+      function fbsFormFingerprint() {
+        const mode = selectedFbsHistoryMode();
+        return JSON.stringify({
+          target_facility_id: String(fbsFulfillmentFields.target_facility_id.value || ""),
+          inbound_scope: selectedFbsInboundScope(),
+          production_days: String(Number(fbsFulfillmentFields.production_days.value || 0)),
+          factory_to_target_ff_days: String(Number(fbsFulfillmentFields.factory_to_target_ff_days.value || 0)),
+          ff_safety_days: String(Number(fbsFulfillmentFields.ff_safety_days.value || 0)),
+          order_cycle_days: String(Number(fbsFulfillmentFields.order_cycle_days.value || 0)),
+          order_batch_qty: String(Number(fbsFulfillmentFields.order_batch_qty.value || 0)),
+          sales_history_mode: mode,
+          sales_avg_period_days: mode === "last_n_days"
+            ? String(Number(fbsFulfillmentFields.sales_avg_period_days.value || 0))
+            : null,
+          sales_date_from: mode === "custom_period" ? fbsFulfillmentFields.sales_date_from.value : null,
+          sales_date_to: mode === "custom_period" ? fbsFulfillmentFields.sales_date_to.value : null
+        });
+      }
+
+      function fbsResultFingerprint(result) {
+        const settings = result && result.settings ? result.settings : {};
+        return JSON.stringify({
+          target_facility_id: String(settings.target_facility_id || result && result.target_facility_id || ""),
+          inbound_scope: String(settings.inbound_scope || "selected_facility"),
+          production_days: String(Number(settings.production_days || 0)),
+          factory_to_target_ff_days: String(Number(settings.factory_to_target_ff_days || 0)),
+          ff_safety_days: String(Number(settings.ff_safety_days || 0)),
+          order_cycle_days: String(Number(settings.order_cycle_days || 0)),
+          order_batch_qty: String(Number(settings.order_batch_qty || 0)),
+          sales_history_mode: String(settings.sales_history_mode || "last_n_days"),
+          sales_avg_period_days: settings.sales_history_mode === "custom_period"
+            ? null
+            : String(Number(settings.sales_avg_period_days || 0)),
+          sales_date_from: settings.sales_history_mode === "custom_period" ? settings.sales_date_from : null,
+          sales_date_to: settings.sales_history_mode === "custom_period" ? settings.sales_date_to : null
+        });
       }
 
       function renderFbsFacilityReadiness() {
@@ -13994,7 +14235,14 @@
         fbsReadinessPhysical.textContent = valueOrDash(facility.physical);
         fbsReadinessReserved.textContent = valueOrDash(facility.reserved);
         fbsReadinessAvailable.textContent = valueOrDash(facility.available);
-        fbsReadinessInbound.textContent = formatWbNumber(facility.remaining_active_inbound_qty || 0) + " · поставок: " + valueOrDash(facility.remaining_active_inbound_shipment_count || 0);
+        const currentInbound = fbsFulfillmentCurrentResult && fbsResultFingerprint(fbsFulfillmentCurrentResult) === fbsFormFingerprint()
+          ? fbsFulfillmentCurrentResult.inbound_coverage || {}
+          : null;
+        fbsReadinessInbound.textContent = currentInbound
+          ? formatWbNumber(currentInbound.total_quantity || 0) + " · поставок: " + valueOrDash(currentInbound.included_shipment_count || 0)
+          : selectedFbsInboundScope() === "all_active"
+            ? "После расчёта · все активные заказы"
+            : formatWbNumber(facility.remaining_active_inbound_qty || 0) + " · поставок: " + valueOrDash(facility.remaining_active_inbound_shipment_count || 0);
         const blockers = Array.isArray(facility.blockers) ? facility.blockers.filter(Boolean) : [];
         if (!fbsSalesHistoryCoverage.earliest_available_date || !fbsSalesHistoryCoverage.latest_available_date) {
           blockers.push("Authoritative история orderCount пока недоступна");
@@ -14008,32 +14256,25 @@
 
       function renderFbsFulfillmentResult(result) {
         if (!result) {
-          fbsFulfillmentResultBody.innerHTML = '<tr><td colspan="9">Расчёт ещё не выполнен.</td></tr>';
+          fbsFulfillmentCurrentResult = null;
+          fbsPreviewNote.textContent = "Рассчитайте заказ, чтобы увидеть итог.";
+          fbsResultScopePill.textContent = "Нет расчёта";
           fbsDemandWindow.textContent = "—";
           fbsDemandDays.textContent = "—";
           fbsTotalQty.textContent = "—";
           fbsTotalWeight.textContent = "—";
           fbsTotalVolume.textContent = "—";
           fbsHorizonDays.textContent = "—";
+          fbsResultInboundScope.textContent = "—";
+          fbsResultInbound.textContent = "—";
+          fbsResultSkuCount.textContent = "—";
+          fbsFulfillmentDownloadPath = "";
           fbsFulfillmentDownloadButton.disabled = true;
           return;
         }
+        fbsFulfillmentCurrentResult = result;
         const rows = Array.isArray(result.rows) ? result.rows : [];
-        fbsFulfillmentResultBody.innerHTML = rows.length
-          ? rows.map((row) => [
-              "<tr>",
-              "<td>" + escapeHtml(row.nm_id) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.sku_comment)) + "</td>",
-              "<td>" + escapeHtml(formatWbNumber(row.national_daily_demand)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.selected_facility_physical_fbs)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.selected_facility_reserved_fbs)) + "</td>",
-              "<td>" + escapeHtml(valueOrDash(row.selected_facility_available_fbs)) + "</td>",
-              "<td>" + escapeHtml(formatWbNumber(row.remaining_active_inbound_qty)) + "</td>",
-              "<td>" + escapeHtml(formatWbNumber(row.target_qty)) + "</td>",
-              "<td><strong>" + escapeHtml(valueOrDash(row.recommended_order_qty)) + "</strong></td>",
-              "</tr>"
-            ].join("")).join("")
-          : '<tr><td colspan="9">Нет строк результата.</td></tr>';
+        const recommendedRows = rows.filter((row) => Number(row.recommended_order_qty || 0) > 0);
         const windowState = result.sales_window || {};
         const modeLabel = windowState.mode === "custom_period" ? "Произвольный период" : "Последние N дней";
         const modeDetail = windowState.mode === "last_n_days" && windowState.requested_last_n_days
@@ -14047,9 +14288,24 @@
         fbsTotalVolume.textContent = valueOrDash(summary.estimated_volume);
         fbsHorizonDays.textContent = valueOrDash(result.horizon_days);
         const inbound = result.inbound_coverage || {};
+        const inboundScope = String(inbound.scope || result.settings && result.settings.inbound_scope || "selected_facility");
+        const inboundScopeText = String(inbound.scope_label || fbsInboundScopeLabel(inboundScope));
+        fbsPreviewNote.textContent = rows.length
+          ? "Рассчитано " + rows.length + " SKU; заказ нужен по " + recommendedRows.length + "."
+          : "В расчёте нет SKU.";
+        fbsResultScopePill.textContent = valueOrDash(result.target_facility_name);
+        fbsResultInboundScope.textContent = inboundScopeText;
+        fbsResultInbound.textContent = formatWbNumber(inbound.total_quantity || 0) + " шт. · " + valueOrDash(inbound.included_shipment_count || 0) + " поставок";
+        fbsResultSkuCount.textContent = recommendedRows.length + " из " + rows.length;
         fbsReadinessInbound.textContent = formatWbNumber(inbound.total_quantity || 0) + " · поставок: " + valueOrDash(inbound.included_shipment_count || 0);
         fbsFulfillmentDownloadPath = result.recommendation_download_path || config.fbs_fulfillment_order_recommendation_path;
         fbsFulfillmentDownloadButton.disabled = !fbsFulfillmentDownloadPath;
+      }
+
+      function invalidateFbsFulfillmentResult() {
+        if (!fbsFulfillmentCurrentResult) return;
+        renderFbsFulfillmentResult(null);
+        setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
       }
 
       function renderFbsFulfillmentStatus(payload) {
@@ -14068,12 +14324,17 @@
           ? historyCoverage.earliest_available_date + " — " + historyCoverage.latest_available_date + " · exact days: " + valueOrDash(historyCoverage.exact_date_snapshot_count)
           : "История пока недоступна";
         if (firstLoad) {
-          ["production_days", "factory_to_target_ff_days", "ff_safety_days", "order_cycle_days", "order_batch_qty", "sales_avg_period_days"].forEach((key) => {
+          ["inbound_scope", "production_days", "factory_to_target_ff_days", "ff_safety_days", "order_cycle_days", "order_batch_qty", "sales_avg_period_days"].forEach((key) => {
             if (defaults[key] !== undefined && fbsFulfillmentFields[key]) fbsFulfillmentFields[key].value = defaults[key];
           });
         }
         renderFbsFacilityReadiness();
-        renderFbsFulfillmentResult(payload ? payload.last_result : null);
+        const lastResult = payload ? payload.last_result : null;
+        renderFbsFulfillmentResult(
+          lastResult && fbsResultFingerprint(lastResult) === fbsFormFingerprint()
+            ? lastResult
+            : null
+        );
         setFbsFulfillmentMessage(
           fbsFulfillmentFacilities.some((facility) => facility.calculation_enabled)
             ? "Готовность прочитана. Остатки WB не учитываются."
@@ -14100,6 +14361,7 @@
         const mode = selectedFbsHistoryMode();
         const payload = {
           target_facility_id: fbsFulfillmentFields.target_facility_id.value,
+          inbound_scope: selectedFbsInboundScope(),
           production_days: fbsFulfillmentFields.production_days.value,
           factory_to_target_ff_days: fbsFulfillmentFields.factory_to_target_ff_days.value,
           ff_safety_days: fbsFulfillmentFields.ff_safety_days.value,
@@ -14125,10 +14387,12 @@
         fbsFulfillmentCalculateButton.textContent = "Считаем...";
         fbsFulfillmentDownloadButton.disabled = true;
         try {
+          const requestPayload = readFbsFulfillmentPayload();
+          renderFbsFulfillmentResult(null);
           const response = await fetch(config.fbs_fulfillment_order_calculate_path, {
             method: "POST",
             headers: {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
-            body: JSON.stringify(readFbsFulfillmentPayload())
+            body: JSON.stringify(requestPayload)
           });
           const payload = await readJson(response);
           if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
@@ -14146,7 +14410,7 @@
 
       async function downloadFbsFulfillmentOrder() {
         if (!fbsFulfillmentDownloadPath) return;
-        await downloadFromPath(fbsFulfillmentDownloadPath, "sheet-vitrina-v1-fbs-fulfillment-order.xlsx", "FBS-рекомендация скачана.", setFbsFulfillmentMessage);
+        await downloadBinary(fbsFulfillmentDownloadPath, "sheet-vitrina-v1-fbs-fulfillment-order.xlsx", "FBS-рекомендация скачана.", setFbsFulfillmentMessage);
       }
 
       async function fetchFactoryStatusPayload(options) {
@@ -15633,8 +15897,22 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       fbsFulfillmentCalculateButton.addEventListener("click", calculateFbsFulfillmentOrder);
       fbsFulfillmentDownloadButton.addEventListener("click", downloadFbsFulfillmentOrder);
-      fbsFulfillmentFields.target_facility_id.addEventListener("change", renderFbsFacilityReadiness);
-      fbsHistoryModeInputs.forEach((input) => input.addEventListener("change", syncFbsHistoryModeControls));
+      fbsFulfillmentFields.target_facility_id.addEventListener("change", () => {
+        invalidateFbsFulfillmentResult();
+        renderFbsFacilityReadiness();
+      });
+      fbsFulfillmentFields.inbound_scope.addEventListener("change", () => {
+        invalidateFbsFulfillmentResult();
+        renderFbsFacilityReadiness();
+      });
+      ["production_days", "factory_to_target_ff_days", "ff_safety_days", "order_cycle_days", "order_batch_qty", "sales_avg_period_days", "sales_date_from", "sales_date_to"].forEach((key) => {
+        fbsFulfillmentFields[key].addEventListener("input", invalidateFbsFulfillmentResult);
+        fbsFulfillmentFields[key].addEventListener("change", invalidateFbsFulfillmentResult);
+      });
+      fbsHistoryModeInputs.forEach((input) => input.addEventListener("change", () => {
+        syncFbsHistoryModeControls();
+        invalidateFbsFulfillmentResult();
+      }));
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
       wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0 }));

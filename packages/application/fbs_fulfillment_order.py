@@ -25,6 +25,9 @@ from packages.application.supply_calculation_registry import (
 from packages.business_time import current_business_date_iso
 from packages.contracts.fbs_fulfillment_order import (
     DEFAULT_SALES_HISTORY_DAYS,
+    INBOUND_SCOPE_ALL_ACTIVE,
+    INBOUND_SCOPE_SELECTED_FACILITY,
+    INBOUND_SCOPES,
     MOSCOW_CITY,
     SALES_HISTORY_MODE_CUSTOM_PERIOD,
     SALES_HISTORY_MODE_LAST_N_DAYS,
@@ -44,6 +47,7 @@ from packages.contracts.supplier_shipments import (
 
 
 DEFAULTS = {
+    "inbound_scope": INBOUND_SCOPE_SELECTED_FACILITY,
     "production_days": 30,
     "factory_to_target_ff_days": 30,
     "ff_safety_days": 15,
@@ -91,6 +95,7 @@ class FbsFulfillmentOrderBlock:
             inbound = self._remaining_inbound(
                 selected_facility_id=str(facility["facility_id"]),
                 active_skus=active_skus,
+                inbound_scope=INBOUND_SCOPE_SELECTED_FACILITY,
             )
             facility["remaining_active_inbound_qty"] = inbound["total_quantity"]
             facility["remaining_active_inbound_shipment_count"] = inbound[
@@ -168,6 +173,7 @@ class FbsFulfillmentOrderBlock:
         inbound = self._remaining_inbound(
             selected_facility_id=str(selected["facility_id"]),
             active_skus=active_skus,
+            inbound_scope=settings.inbound_scope,
         )
         inbound_by_nm = {
             int(key): float(value)
@@ -409,12 +415,15 @@ class FbsFulfillmentOrderBlock:
         *,
         selected_facility_id: str,
         active_skus: list[tuple[int, str]],
+        inbound_scope: str,
     ) -> dict[str, Any]:
         active_nm_ids = {nm_id for nm_id, _ in active_skus}
         totals: dict[int, float] = {}
         evidence_rows: list[dict[str, Any]] = []
         unassigned_count = 0
         explicit_other_count = 0
+        unassigned_quantity = 0.0
+        explicit_other_quantity = 0.0
         for shipment in self.runtime.list_supplier_shipments():
             status = str(shipment.get("order_status") or "")
             if status not in {ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT}:
@@ -422,10 +431,8 @@ class FbsFulfillmentOrderBlock:
             explicit_target = str(shipment.get("target_facility_id") or "").strip()
             if not explicit_target:
                 unassigned_count += 1
-                continue
-            if explicit_target != selected_facility_id:
+            elif explicit_target != selected_facility_id:
                 explicit_other_count += 1
-                continue
             detail = self.runtime.load_supplier_shipment(
                 str(shipment.get("shipment_id") or "")
             )
@@ -445,29 +452,68 @@ class FbsFulfillmentOrderBlock:
                     continue
                 if nm_id not in active_nm_ids or quantity <= 0:
                     continue
-                totals[nm_id] = totals.get(nm_id, 0.0) + quantity
                 quantity_by_nm[nm_id] = quantity_by_nm.get(nm_id, 0.0) + quantity
                 shipment_qty += quantity
+            if not explicit_target:
+                unassigned_quantity += shipment_qty
+            elif explicit_target != selected_facility_id:
+                explicit_other_quantity += shipment_qty
+            include_shipment = (
+                inbound_scope == INBOUND_SCOPE_ALL_ACTIVE
+                or explicit_target == selected_facility_id
+            )
+            if not include_shipment:
+                continue
             if shipment_qty > 0:
+                for nm_id, quantity in quantity_by_nm.items():
+                    totals[nm_id] = totals.get(nm_id, 0.0) + quantity
                 evidence_rows.append(
                     {
                         "shipment_id": str(shipment.get("shipment_id") or ""),
                         "order_status": status,
                         "target_facility_id": explicit_target,
-                        "target_assignment_source": "explicit",
+                        "target_assignment_source": (
+                            "explicit" if explicit_target else "unassigned"
+                        ),
                         "remaining_quantity": shipment_qty,
                         "quantity_by_nm_id": quantity_by_nm,
                     }
                 )
         return {
             "selected_facility_id": selected_facility_id,
+            "scope": inbound_scope,
+            "scope_label": (
+                "Все активные заказы фабрике"
+                if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE
+                else "Только для выбранного ФФ"
+            ),
             "quantity_by_nm_id": totals,
             "total_quantity": sum(totals.values()),
             "included_shipments": evidence_rows,
             "included_shipment_count": len(evidence_rows),
-            "unassigned_target_excluded_count": unassigned_count,
+            "unassigned_target_active_count": unassigned_count,
+            "unassigned_target_excluded_count": (
+                0 if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else unassigned_count
+            ),
+            "unassigned_target_included_count": (
+                unassigned_count if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else 0
+            ),
+            "unassigned_target_eligible_quantity": unassigned_quantity,
+            "unassigned_target_included": inbound_scope == INBOUND_SCOPE_ALL_ACTIVE,
             "legacy_null_target_fallback_moscow_count": 0,
-            "explicit_other_facility_excluded_count": explicit_other_count,
+            "explicit_other_facility_active_count": explicit_other_count,
+            "explicit_other_facility_excluded_count": (
+                0 if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else explicit_other_count
+            ),
+            "explicit_other_facility_included_count": (
+                explicit_other_count
+                if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE
+                else 0
+            ),
+            "explicit_other_facility_eligible_quantity": explicit_other_quantity,
+            "explicit_other_facility_included": (
+                inbound_scope == INBOUND_SCOPE_ALL_ACTIVE
+            ),
             "active_statuses": [ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT],
             "accepted_or_inactive_excluded": True,
         }
@@ -510,6 +556,7 @@ class FbsFulfillmentOrderBlock:
                 "Итоговый demand basis, шт/день",
                 "WB stock used",
                 "Целевой фулфилмент",
+                "Охват заказов фабрике",
             ]
         ]
         for item in result.rows:
@@ -539,6 +586,7 @@ class FbsFulfillmentOrderBlock:
                     round(item.national_daily_demand, 6),
                     "false",
                     f"{result.target_facility_name} ({result.target_facility_id})",
+                    result.inbound_coverage.get("scope_label", ""),
                 ]
             )
         rows.extend(
@@ -548,6 +596,16 @@ class FbsFulfillmentOrderBlock:
                 ["Горизонт, дней", "", result.horizon_days],
                 ["Остатки WB учитываются", "", "Нет"],
                 ["Область спроса", "", NATIONAL_DEMAND_SCOPE],
+                [
+                    "Охват заказов фабрике",
+                    "",
+                    result.inbound_coverage.get("scope_label", ""),
+                ],
+                [
+                    "Учтено активных входящих, шт",
+                    "",
+                    result.inbound_coverage.get("total_quantity", 0),
+                ],
             ]
         )
         filename = (
@@ -583,6 +641,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FbsFulfillmentOrderSettings:
         date_to = None
     return FbsFulfillmentOrderSettings(
         target_facility_id=str(payload.get("target_facility_id") or "").strip(),
+        inbound_scope=_inbound_scope(payload.get("inbound_scope")),
         production_days=_positive_int(
             payload.get("production_days", DEFAULTS["production_days"]),
             "Срок производства",
@@ -615,6 +674,15 @@ def _parse_settings(payload: Mapping[str, Any]) -> FbsFulfillmentOrderSettings:
             "Дата расчёта",
         ),
     )
+
+
+def _inbound_scope(value: Any) -> str:
+    normalized = str(value or INBOUND_SCOPE_SELECTED_FACILITY).strip()
+    if normalized not in INBOUND_SCOPES:
+        raise ValueError(
+            "Охват заказов фабрике должен быть selected_facility или all_active"
+        )
+    return normalized
 
 
 def _resolve_sales_window(

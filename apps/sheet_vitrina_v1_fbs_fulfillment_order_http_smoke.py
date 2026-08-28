@@ -99,6 +99,12 @@ def main() -> int:
                 "Последние N дней",
                 "Произвольный период",
                 "Целевой фулфилмент",
+                "Учитывать заказы фабрике",
+                "Только для выбранного ФФ",
+                "Все активные заказы фабрике",
+                "Превью рекомендации",
+                "Скачать Excel",
+                "Готовность источников и детали расчёта",
                 "fbsFulfillmentCalculateButton",
                 "legacyFactoryOrderDetails",
                 "Старый WB-сценарий",
@@ -108,12 +114,16 @@ def main() -> int:
                 assert token in html, token
             assert 'data-supply-section-panel="fbs-fulfillment"' in html
             assert 'data-supply-section-panel="factory" hidden' in html
+            assert 'aria-label="Рекомендация заказа на FBS-фулфилмент"' not in html
+            assert "downloadFromPath(fbsFulfillmentDownloadPath" not in html
+            assert "downloadBinary(fbsFulfillmentDownloadPath" in html
 
             status_code, status = _get_json(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH
             )
             assert status_code == 200, status
             assert status["wb_stock_used"] is False
+            assert status["defaults"]["inbound_scope"] == "selected_facility"
             facilities = {item["facility_id"]: item for item in status["facilities"]}
             assert facilities[MOSCOW_ID]["calculation_enabled"] is True
             assert facilities["ff-orenburg"]["calculation_enabled"] is False
@@ -128,6 +138,13 @@ def main() -> int:
             )
             assert invalid_code == 422
             assert "обязательны" in invalid["error"]
+
+            invalid_scope_code, invalid_scope = _post_json(
+                base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+                {"target_facility_id": MOSCOW_ID, "inbound_scope": "invalid"},
+            )
+            assert invalid_scope_code == 422
+            assert "Охват заказов фабрике" in invalid_scope["error"]
 
             calc_code, result = _post_json(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
@@ -148,6 +165,28 @@ def main() -> int:
             assert result["sales_window"]["calendar_day_count"] == 3
             assert result["sales_window"]["outside_window_samples_used"] is False
             assert result["target_facility_id"] == MOSCOW_ID
+            assert result["settings"]["inbound_scope"] == "selected_facility"
+            assert result["inbound_coverage"]["total_quantity"] == 15
+
+            all_code, all_result = _post_json(
+                base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+                {
+                    "target_facility_id": MOSCOW_ID,
+                    "inbound_scope": "all_active",
+                    "production_days": 10,
+                    "factory_to_target_ff_days": 5,
+                    "ff_safety_days": 3,
+                    "order_cycle_days": 2,
+                    "order_batch_qty": 50,
+                    "sales_history_mode": "custom_period",
+                    "sales_date_from": "2026-04-10",
+                    "sales_date_to": "2026-04-12",
+                },
+            )
+            assert all_code == 200, all_result
+            assert all_result["settings"]["inbound_scope"] == "all_active"
+            assert all_result["inbound_coverage"]["total_quantity"] == 535
+            assert all_result["inbound_coverage"]["included_shipment_count"] == 3
 
             export_code, export_body, export_headers = _get_bytes(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH
@@ -159,6 +198,11 @@ def main() -> int:
             assert "Включённые даты" in export_rows[0]
             assert "Итоговый demand basis, шт/день" in export_rows[0]
             assert "Целевой фулфилмент" in export_rows[0]
+            assert "Охват заказов фабрике" in export_rows[0]
+            assert any(
+                "Все активные заказы фабрике" in [str(cell) for cell in row]
+                for row in export_rows
+            )
 
             legacy_code, legacy = _get_json(base + DEFAULT_FACTORY_ORDER_STATUS_PATH)
             assert legacy_code == 200
