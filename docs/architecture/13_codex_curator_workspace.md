@@ -1,123 +1,78 @@
 # Codex Main Task Workspace v2
 
+## Main workspace
+
 Main task автоматически получает `wbc NNNN <русское название>` и pin через
 local `wbc-task-intake` skill. Она хранит accepted goal/decisions, короткий
-passport, scope, acceptance и final owner-facing result.
+passport, scope, acceptance и final owner-facing result. Root
+[`AGENTS.md`](../../AGENTS.md) остаётся mandatory operational entrypoint;
+execution lifecycle, stop-lines, actor routing и correction ownership
+канонически определены в
+[`07_codex_execution_protocol.md`](07_codex_execution_protocol.md).
 
-Это единственная owner-facing surface goal. Пользователь не выбирает trust
-tier или approval mode: implementation intent автоматически действует до
-`COMPLETE`/supersede через canonical authorization envelope. Любой curator или
-subagent до owner-facing gate обязан получить valid receipt
+Main task — единственная owner-facing surface goal. Пользователь не выбирает
+trust tier или approval mode: implementation intent действует до
+`COMPLETE`/supersede через canonical authorization envelope. До любого
+owner-facing gate нужен valid receipt
 [`codex_authorization_gate.py`](../../apps/codex_authorization_gate.py) по
-[`15_codex_authorization_router.md`](15_codex_authorization_router.md). Non-owner
-surface маршрутизирует structured evidence сюда, а не публикует второй вопрос;
-duplicate pending/answered gate и subset accepted extension suppress-ятся.
+[`15_codex_authorization_router.md`](15_codex_authorization_router.md).
 
-Explicit `design-only`/`branch-only`/`до PR`/`до merge`/`до deploy` stop-line
-имеет приоритет над default completion. Она даёт соответственно no
-implementation, clean tested branch без PR либо draft PR machine hold для обеих
-последних границ, поскольку current Release Runner требует non-draft и связывает
-merge/deploy. Hold снимает только явная user instruction, действительно
-расширяющая boundary; technical success и terminal subagent этого не делают.
+## Visible internal execution
 
-Каждый technical execution block получает one fresh visible internal subagent
-`wbc NNNN SSS <latin transliteration>` без pin через
-`collaboration.spawn_agent`. Semantic name — deterministic transliteration
-русского имени, не English translation, максимум 20 символов. Default
-concurrency — one. Он виден в `Subagents`/`Activity`, получает compact passport
-вместо полного history fork и не создаёт `::created-thread`. Sidebar thread
-tools не являются fallback; их недоступность заканчивается exact tooling
-blocker-ом.
+Каждый technical execution block получает один fresh visible internal subagent
+через `collaboration.spawn_agent`. Он виден в `Subagents`/`Activity`, не
+pin-ится и не создаёт sidebar task или `::created-thread`; default concurrency
+— one. Exact naming, compact passport, `fork_turns:"none"`, diagnostic/
+implementation boundaries и one-branch/one-PR ownership задаёт execution
+protocol, а не workspace UI.
 
-`Read-only` ограничивает mutation/authority, но не выбирает actor. Diagnostic/
-read-only block собирает новое substantive technical evidence без branch/
-worktree/PR/mutation; implementation block владеет одной branch и, без explicit
-stop-line, одним non-draft PR.
-Если owner-facing technical conclusion требует нового evidence из repository/
-code, logs, server, database, external API либо длительного ожидания, это
-technical execution block. Main напрямую делает только curator-control reads:
-fresh protocol/docs для routing, compact preflight bounded passport и exact
-schema/digest/identity readback уже существующего immutable task/subagent/PR/
-check/release/apply receipt/status artifact. Этот read не dispatch-ится только
-без нового domain evidence, inference, external/server/database/log
-investigation или long wait; semantic interpretation, mismatch diagnosis,
-substantive evidence и long wait требуют fresh subagent. Pure conceptual answer,
-clarification/design conversation и conclusion из уже существующего exact
-handoff subagent-а не dispatch-ятся. Routing не использует оценку сложности,
-времени или числа tool calls. Diagnostic/read-only dispatch внутри запрошенной
-цели не требует отдельного human confirmation или gate.
+После successful spawn main сохраняет текущий turn активным до meaningful
+callback либо terminal handoff и держит ровно один outstanding event/terminal
+wait. Quiet mode не завершает turn. Progress публикуется только на meaningful
+transitions: tool timeout разрешает немедленно и молча re-arm тот же wait, но не
+является progress evidence и не разрешает heartbeat, duplicate monitor либо
+status polling. Subagent возвращает terminal payload ровно один раз и становится
+`Done`; это terminal state блока, не automatic acceptance всей main task.
 
-Evidence read/tool branch молча выполняется только для exact acceptance
-predicate, blocker или current failure hypothesis. Active context и terminal
-handoff ссылаются на durable full logs/manifests/receipts через exact pointer/
-digest, bounded relevant ranges/component diff и conclusion, не дублируют raw
-artifacts; reread разрешён после new event/drift/question. Это не добавляет
-owner narration, checklist или обязательный artifact и не ослабляет provenance.
+Вся видимая внутренняя работа subagent-а — progress, рабочие пояснения,
+сообщения и technical handoff — по умолчанию ведётся на русском. Исключения:
+exact code, command, identifier, source quote и задача, явно требующая другого
+target language. Правило относится только к видимым сообщениям.
 
-Каждый block использует compact passport, exact `fork_turns:"none"` и следующий
-последовательный `SSS`. Diagnostic block заканчивается terminal diagnosis; если
-после неё отдельно разрешена implementation, это следующий bounded block с
-новым subagent. Правило применяется к blocks, начатым после merge этой редакции;
-уже начатый main-owned read-only turn не прерывается и не переклассифицируется.
+## One owner surface and continuation
 
-Same-scope corrections в текущем block/PR продолжают его. Новый PR, включая
-recovery, возможен только после terminal handoff и получает следующий `SSS`. Pause/blocker
-терминален, не indefinitely Active. После successful spawn main сохраняет
-текущий turn активным до meaningful callback/terminal handoff, держит ровно
-один outstanding event/terminal wait и не публикует final, не становится idle
-и не возвращает управление пользователю, пока subagent non-terminal. Quiet
-mode не завершает turn. Progress публикуется только на meaningful transitions:
-tool timeout разрешает немедленно и молча re-arm тот же wait, но не является
-progress evidence и не разрешает `list_agents`, worktree/Git/CI/status reads
-или heartbeat. После meaningful callback/event wait можно повторить. Callback
-или terminal handoff будит main для owner-facing transition в том же turn, без
-пользовательского `посмотри`. Subagent возвращает terminal payload ровно один
-раз без межканального дублирования и становится Done.
+После handoff только owning main task публикует итог, задаёт допустимый
+business-вопрос и dispatch-ит continuation. Другой main curator может один раз
+передать owner-у structured evidence и exact pointer, но не ведёт параллельный
+monitoring или управление той же целью, не пишет исполнителю повторно и не
+публикует второй status либо question. Duplicate pending/answered gate и subset
+accepted extension обрабатываются router-ом, а не новым owner message.
 
-Task passport считает terminal pre-submit failures и выпущенные correction PR
-одной family только при том же accepted goal и той же operation/lifecycle
-failure family. После второго terminal pre-submit failure либо второго
-последовательного correction release этой family третий incremental patch/retry
-заменяется на automatic `EVIDENCE_BLOCKED` consolidated diagnostic block без
-human gate. Он строит bounded production-shaped matrix по доказанным failures и
-применимым соседним phases из execution protocol; следующий implementation PR
-после terminal diagnosis консолидирует все доказанные same-family corrections
-до следующей live boundary. Ordinary tasks, first/second isolated correction,
-materially new family/scope и post-submit same-operation query-only
-reconciliation не получают matrix; one-submit/no-blind-retry/terminal identity
-guards сохраняются.
+Meaningful callback или terminal handoff будит owning main для owner-facing
+transition в том же turn; пользователь не должен писать `посмотри`. Pause или
+blocker является terminal transition блока, а не причиной держать duplicate
+executor/monitor active. Новый bounded block и continuation dispatch следуют
+execution protocol и не меняют owning owner surface.
 
-Workspace не создаёт discretionary permission questions. Proposed interruption
-имеет только `AUTO_CONTINUE`, `EVIDENCE_BLOCKED` или `HUMAN_REQUIRED` с closed
-reason codes. SQLite/file/server/service location не является gate; точный
-semantic/final effect является. Missing evidence запускает diagnosis/correction,
-pre-submit same-goal correction продолжает fresh identity, а submitted/
-ambiguous operation допускает только same-operation query-only reconciliation.
-`HUMAN_REQUIRED` возможен лишь для exact новых business semantic/final target/
-destination/external-publication/financial/security-access/credential/protected
-data/неallowlisted irreversible deltas. Слова `material`, `risky`, generic
-`scope expansion` или `production DB write` gate не доказывают.
+## Compact technical handoff
 
-Router действует только для blocks, начатых после merge его редакции, и не
-переклассифицирует существующие `wbc 0008`/`wbc 0010`.
+Один terminal handoff содержит обязательное ядро: terminal status/outcome;
+фактический effect или явное отсутствие mutation; blocker либо business result;
+exact durable receipt/artifact pointers; остаточный risk и next action. Для
+repo block сюда также входят exact PR/head/merge/main и применимые plan/check/
+release receipt bindings, но только как компактные pointers и result.
 
-Когда exact live resource меняют background producers, curator/executor сам
-выбирает cheapest safe consistency strategy из root `AGENTS.md` и
-[`07_codex_execution_protocol.md`](07_codex_execution_protocol.md); user mode,
-questionnaire или gate не создаются. Ordinary repo/read-only work без consistent
-boundary claim не меняется. Blanket producer stop запрещён, unknown writer/
-timer/cron/job/FD даёт `EVIDENCE_BLOCKED` с automatic diagnosis, а любой
-selective pause начинается late и не считается завершённым без exact
-prior-state restore и catch-up/readback proof.
+Полные raw logs, row/roster/digest lists и другие объёмные evidence остаются в
+durable artifacts и не копируются в handoff. Исключение — exact данные, без
+которых нельзя понять blocker или доказать terminal result. Это форма одного
+сообщения, не новый artifact, checklist или gate.
 
-Post-task
-[`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) доступен
-только одному куратору production protocol/documentation как внутреннее
-read-only guidance. Обычные main/domain curators и technical execution subagents не
-читают и не вызывают его как execution checklist и не меняют из-за него
-поведение; для них остаются только root `AGENTS.md` и релевантные authoritative
-domain docs. Checklist не создаёт workspace actor, gate, approval, test, task,
-PR или mutation.
+## Owner-facing result
 
-Workspace не создаёт registry, scheduler, monitor, reviewer, callback service
-или release state. User chats не archive/unpin/delete автоматически.
+Main curator не пересылает technical handoff дословно. Он даёт короткий
+outcome-first пересказ простым русским языком, понятный нетехническому взрослому:
+минимум jargon и identifiers, но сохранены значимые status, blocker, risk и
+next action. Технические детали предоставляются по запросу.
+
+Workspace не создаёт registry, scheduler, callback service, reviewer или
+release state. User tasks не archive/unpin/delete автоматически.

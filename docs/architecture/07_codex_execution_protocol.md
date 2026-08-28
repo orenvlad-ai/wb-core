@@ -140,17 +140,24 @@ PR по одному accepted goal и одной operation/lifecycle failure fam
 двух terminal pre-submit failures либо двух последовательно выпущенных
 correction PR одной family третий incremental `one more patch/retry` запрещён.
 Вместо него main получает `EVIDENCE_BLOCKED` без human gate и dispatch-ит один
-consolidated diagnostic block с bounded production-shaped lifecycle scenario
-matrix. Matrix выводится из уже доказанных failures и только применимых соседних
-phases: preflight, readiness, JIT, worker namespace, timer state, submit,
-readback, release interruption. Новый implementation PR допустим после terminal
-diagnosis и объединяет все доказанные same-family corrections, доступные до
-следующей live boundary.
+consolidated diagnostic block. Diagnosis считается достаточным только после
+одного terminal query-only/no-submit rehearsal через deployed operation path:
+он не выполняет mutation и охватывает все применимые для этой operation family
+phases из закрытого набора `preflight`, `readiness`,
+`JIT`, `worker namespace`, `storage admission/private plan persistence`,
+`submit boundary`, `query-only readback`, `release interruption`. Неприменимая
+phase явно исключается с причиной. Это один bounded same-family rehearsal, а не
+blanket test suite; он не запускается для ordinary tasks.
+
+После terminal diagnosis следующий implementation PR объединяет все выявленные
+same-family corrections. Post-submit same-operation reconciliation остаётся
+отдельным query-only continuation и не объединяется с pre-submit rehearsal или
+новым submit.
 
 Loop breaker не применяется к ordinary tasks, первой или второй isolated
 correction, materially new scope/failure family либо post-submit
-same-operation query-only reconciliation; blanket fixed test suite из него не
-следует. Blind retry, one-submit и terminal identity rules не ослабляются.
+same-operation query-only reconciliation. Blind retry, one-submit и terminal
+identity rules не ослабляются.
 
 Subagent terminal status и main-task outcome — разные state machines. `Done`
 означает только завершение bounded technical execution block; main task отдельно
@@ -201,42 +208,12 @@ approval, test, task, PR или mutation; возможное изменение 
 
 ## Deterministic human-only boundary
 
-Каждый proposed interruption обязан получить ровно один outcome:
-`AUTO_CONTINUE`, `EVIDENCE_BLOCKED` или `HUMAN_REQUIRED`, с closed reason codes
-и byte-stable `decision_digest`/receipt. Gate классифицируется по semantic/final
-effect, не по storage medium: SQLite/file/server/service/production location
-сами по себе gate не создают. Protected business fact — отдельная semantic
-категория; repo-declared operational control metadata не становится business
-данными из-за места хранения.
-
-`HUMAN_REQUIRED` возможен только при exact machine delta для одного из closed
-predicates: новый business semantic, final target, destination, external/
-publication/financial/security-access effect, credential/login/2FA/captcha
-capability, protected-data final delta или irreversible final delta вне
-allowlist. Субъективные `material`, `risky`, `scope expansion`, generic
-`business-data mutation`, `production DB write` или одно слово `irreversible`
-не разрешают question. Без доказанного predicate permission question является
-protocol-invalid; dominant technical recommendation выполняется автономно,
-если не нужна уникальная business preference пользователя.
-
-Missing identity/evidence означает `EVIDENCE_BLOCKED` и automatic diagnosis/
-correction. Same-goal pre-submit code/runtime defect, fresh sequential identity,
-unrelated/stale warning и exact allowlisted dependency remediation означают
-`AUTO_CONTINUE`. Terminal identities не переиспользуются. После
-`submitted`/`ambiguous` разрешён только same-operation query-only readback и
-reconciliation; blind retry запрещён. Required dependency нельзя bypass-ить:
-temporary remediation или auxiliary final transition automatic только при
-exact allowlist, bounded identity, zero undeclared business/finance/external/
-publication/security/destination effects и preservation/readback predicates.
-
-Goal имеет одну owner-facing surface. Non-owner route-ит structured evidence
-owner-у; duplicate pending/answered gate suppress-ится, accepted extension и её
-subset повторно не спрашиваются. Human capability gate остаётся exact.
-Platform/tool limitation — exact blocker, не запрос покомандных approvals.
-
-Этот router contract применяется только к technical blocks, начатым после
-merge его редакции. Он не меняет и не переклассифицирует задним числом
-`wbc 0008` или `wbc 0010`.
+Closed outcomes, literal authorization boundaries, owner-gate deduplication и
+post-submit state machine задаёт только
+[`15_codex_authorization_router.md`](15_codex_authorization_router.md).
+Workspace ownership и owner-facing publication задаёт
+[`13_codex_curator_workspace.md`](13_codex_curator_workspace.md). Execution не
+добавляет собственных reason codes, числовых limits или permission questions.
 
 ## Execution contours
 
@@ -339,8 +316,9 @@ readback/reconciliation. Legacy exact-manifest gate остаётся совме�
 
 ## Terminal handoff
 
-Handoff фиксирует status; included/excluded result; PR/head/merge/main SHA;
-plan hash и checks; release receipt; exact deployed/apply state; task/subagent
-identity; risks/blockers. Main chat использует его для owner-facing summary.
-Только пользователь принимает задачу; агенты не синтезируют acceptance и не
-archive/unpin пользовательские tasks автоматически.
+Compact technical handoff, default visible language и owner-facing пересказ
+определены в
+[`13_codex_curator_workspace.md`](13_codex_curator_workspace.md). Durable full
+evidence остаётся по exact pointers; execution lifecycle не создаёт второй
+handoff artifact или gate. Только пользователь принимает задачу; агенты не
+синтезируют acceptance и не archive/unpin пользовательские tasks автоматически.

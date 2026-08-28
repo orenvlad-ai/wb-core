@@ -14,6 +14,14 @@ regression contract — `apps/codex_authorization_gate_smoke.py`.
 `approval_policy=never` и full technical execution остаются routine platform
 profile, а не пользовательским выбором.
 
+Обычные owner phrases вроде `одним проходом`, `сразу` или `доведи до конца`
+задают goal и отсутствие лишних пауз, но сами по себе не создают `max 1 PR`,
+`max 1 retry`, `max 1 attempt/minute` либо другую числовую или lifecycle
+границу. Router не выводит quantitative limit из разговорного усиления:
+ограничение действует только когда пользователь задал его буквально. Явная
+stop-line и literal quantitative limit имеют приоритет над default completion и
+сохраняются в envelope без расширительного толкования.
+
 Contract применяется только к technical blocks, начатым после merge этой
 редакции. Он не будит, не меняет, не reclassify и не трактует задним числом
 `wbc 0008` или `wbc 0010`.
@@ -207,6 +215,10 @@ surfaces получает одинаковый `decision_digest`.
 
 Таким образом один goal не публикует два owner questions, а answered decision
 не теряется при routine correction или смене technical actor.
+Кто после technical handoff публикует owner-facing outcome и dispatch-ит
+continuation, определяет workspace contract
+[`13_codex_curator_workspace.md`](13_codex_curator_workspace.md); router
+определяет только authorization outcome и publication disposition.
 
 ## Independent safety guards
 
