@@ -3,11 +3,71 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import time
 from typing import Any, Mapping, Protocol, Sequence
 from urllib import error, parse, request as urllib_request
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
+
+
+SAFE_RESPONSE_HEADER_NAMES = {
+    "content-type",
+    "date",
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-ratelimit-retry",
+    "x-rate-limit-limit",
+    "x-rate-limit-remaining",
+    "x-rate-limit-reset",
+    "x-rate-limit-retry",
+}
+
+
+@dataclass(frozen=True)
+class WbPromotionApiError(RuntimeError):
+    """Structured non-secret WB Promotion API error."""
+
+    method: str
+    url: str
+    http_status: int | None = None
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body_summary: str = ""
+    retry_after_seconds: float | None = None
+    transport_error: str = ""
+
+    def __post_init__(self) -> None:
+        RuntimeError.__init__(self, self._message())
+
+    def _message(self) -> str:
+        endpoint = _safe_endpoint(self.url)
+        if self.http_status is not None:
+            detail = (
+                f"WB Promotion API {self.method} {endpoint} failed with status "
+                f"{self.http_status}"
+            )
+            if self.body_summary:
+                detail = f"{detail}: {self.body_summary}"
+            return detail
+        return (
+            f"WB Promotion API {self.method} {endpoint} transport failed: "
+            f"{self.transport_error}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "endpoint": _safe_endpoint(self.url),
+            "http_status": self.http_status,
+            "headers": dict(self.headers),
+            "body_summary": self.body_summary,
+            "retry_after_seconds": self.retry_after_seconds,
+            "transport_error": self.transport_error,
+        }
 
 
 class WbPromotionSource(Protocol):
@@ -219,12 +279,22 @@ class HttpBackedWbPromotionSource:
                 raw = response.read().decode("utf-8").strip()
                 return json.loads(raw) if raw else {}
         except error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8")
-            raise RuntimeError(
-                f"WB Promotion API {method} {url} failed with status {exc.code}: {body_text}"
+            body_text = exc.read().decode("utf-8", errors="replace")
+            safe_headers = _safe_headers(dict(exc.headers.items()))
+            raise WbPromotionApiError(
+                method=method,
+                url=url,
+                http_status=int(exc.code),
+                headers=safe_headers,
+                body_summary=_body_summary(body_text),
+                retry_after_seconds=_retry_after_seconds(safe_headers),
             ) from exc
         except error.URLError as exc:
-            raise RuntimeError(f"WB Promotion API {method} {url} transport failed: {exc}") from exc
+            raise WbPromotionApiError(
+                method=method,
+                url=url,
+                transport_error=str(exc),
+            ) from exc
 
 
 def extract_advert_ids_from_count(payload: Mapping[str, Any]) -> list[int]:
@@ -261,3 +331,59 @@ def _is_int_like(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _safe_endpoint(url: str) -> str:
+    parsed = parse.urlparse(url)
+    path = parsed.path or "/"
+    return path if not parsed.query else f"{path}?{parsed.query}"
+
+
+def _safe_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized = str(key).strip().lower()
+        if (
+            normalized in SAFE_RESPONSE_HEADER_NAMES
+            or "ratelimit" in normalized
+            or "rate-limit" in normalized
+        ):
+            result[str(key)] = str(value)
+    return result
+
+
+def _body_summary(body: str) -> str:
+    normalized = " ".join(str(body or "").replace("\x00", "").split())
+    return normalized[:800]
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    normalized = {
+        str(key).strip().lower(): str(value).strip()
+        for key, value in headers.items()
+    }
+    for name in (
+        "retry-after",
+        "x-ratelimit-retry",
+        "x-rate-limit-retry",
+        "x-ratelimit-reset",
+        "x-rate-limit-reset",
+    ):
+        raw_value = normalized.get(name, "")
+        if not raw_value:
+            continue
+        try:
+            parsed = float(raw_value)
+        except (TypeError, ValueError):
+            if name != "retry-after":
+                continue
+            try:
+                retry_at = parsedate_to_datetime(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        if parsed >= 0:
+            return parsed
+    return None
