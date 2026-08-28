@@ -1625,16 +1625,30 @@ def _validate_wbc0013_candidate(
     for field, value in expected.items():
         if payload.get(field) != value:
             raise ApplyError(f"WBC0013 {phase} qualification escaped goal: {field}")
-    if phase == "b" and (
-        not isinstance(payload.get("fresh_mismatch_count"), int)
-        or int(payload["fresh_mismatch_count"]) <= 0
-        or re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(payload.get("mismatch_classification_digest") or ""),
-        )
-        is None
-    ):
-        raise ApplyError("WBC0013 B fresh mismatch classification is invalid")
+    if phase == "b":
+        if (
+            not isinstance(payload.get("fresh_mismatch_count"), int)
+            or int(payload["fresh_mismatch_count"]) <= 0
+            or payload.get("ready_shape_candidate_count") != 1
+            or payload.get("causal_event_count") != 1
+            or not str(payload.get("selection_predicate") or "").startswith(
+                "historical_b."
+            )
+        ):
+            raise ApplyError("WBC0013 B bounded selector cardinality is invalid")
+        for field in (
+            "ready_shape_candidate_digest",
+            "causal_event_candidate_digest",
+            "selection_details_digest",
+            "mismatch_classification_digest",
+        ):
+            if (
+                re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")
+                )
+                is None
+            ):
+                raise ApplyError(f"WBC0013 B selector digest is invalid: {field}")
     for field in ("manifest_sha256", "material_qualification_digest"):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
             raise ApplyError(
@@ -1662,6 +1676,10 @@ def _wbc0013_typed_failure(
             "stage": str(payload.get("stage") or ""),
             "code": str(payload.get("code") or ""),
             "message": str(payload.get("message") or ""),
+            "predicate": str(payload.get("predicate") or ""),
+            "expected_cardinality": payload.get("expected_cardinality"),
+            "observed_cardinality": payload.get("observed_cardinality"),
+            "candidate_digest": str(payload.get("candidate_digest") or ""),
             "details_digest": str(payload.get("details_digest") or ""),
         }
         if (
@@ -1669,6 +1687,16 @@ def _wbc0013_typed_failure(
             and candidate["stage"] == stage
             and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,120}", candidate["code"])
             and 0 < len(candidate["message"]) <= 500
+            and re.fullmatch(
+                r"[a-zA-Z0-9_.:-]{1,200}", candidate["predicate"]
+            )
+            and isinstance(candidate["expected_cardinality"], int)
+            and int(candidate["expected_cardinality"]) >= 0
+            and isinstance(candidate["observed_cardinality"], int)
+            and int(candidate["observed_cardinality"]) >= 0
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", candidate["candidate_digest"]
+            )
             and re.fullmatch(
                 r"sha256:[0-9a-f]{64}", candidate["details_digest"]
             )
@@ -1686,6 +1714,10 @@ def _wbc0013_typed_failure(
             if transport
             else "command failed without one valid typed failure payload"
         ),
+        "predicate": f"wbc0013.{phase}.{stage}.command_success",
+        "expected_cardinality": 1,
+        "observed_cardinality": 0,
+        "candidate_digest": payload_digest([]),
         "details_digest": payload_digest(
             {
                 "return_code": evidence.get("return_code"),
@@ -1746,6 +1778,10 @@ def run_wbc0013_goal(
                     "stage": "qualification",
                     "code": "qualification_candidate_invalid",
                     "message": str(exc)[:500],
+                    "predicate": f"wbc0013.{phase}.qualification_candidate_valid",
+                    "expected_cardinality": 1,
+                    "observed_cardinality": 0,
+                    "candidate_digest": payload_digest([payload]),
                     "details_digest": payload_digest(payload),
                 }
                 qualification[phase].append(
@@ -1769,6 +1805,20 @@ def run_wbc0013_goal(
                     **(
                         {
                             "fresh_mismatch_count": payload["fresh_mismatch_count"],
+                            "ready_shape_candidate_count": payload[
+                                "ready_shape_candidate_count"
+                            ],
+                            "ready_shape_candidate_digest": payload[
+                                "ready_shape_candidate_digest"
+                            ],
+                            "causal_event_count": payload["causal_event_count"],
+                            "causal_event_candidate_digest": payload[
+                                "causal_event_candidate_digest"
+                            ],
+                            "selection_predicate": payload["selection_predicate"],
+                            "selection_details_digest": payload[
+                                "selection_details_digest"
+                            ],
                             "mismatch_classification_digest": payload[
                                 "mismatch_classification_digest"
                             ],
@@ -1853,6 +1903,10 @@ def run_wbc0013_goal(
                 "stage": "readback",
                 "code": "readback_not_reconciled",
                 "message": "query-only A readback did not prove exact reconciliation",
+                "predicate": "wbc0013.a.readback_exact_reconciliation",
+                "expected_cardinality": 1,
+                "observed_cardinality": 0,
+                "candidate_digest": payload_digest([a_result]),
                 "details_digest": payload_digest(a_result),
             }
         )
@@ -1948,6 +2002,10 @@ def run_wbc0013_goal(
                 "stage": "readback",
                 "code": "readback_not_reconciled",
                 "message": "query-only B readback did not prove exact reconciliation",
+                "predicate": "wbc0013.b.readback_exact_reconciliation",
+                "expected_cardinality": 1,
+                "observed_cardinality": 0,
+                "candidate_digest": payload_digest([b_result]),
                 "details_digest": payload_digest(b_result),
             }
         )

@@ -853,12 +853,16 @@ v2 manifest containing exact disjoint `historical_exact_zero` and
 `no_material_value_history` partitions, the complete stock-managed
 roster and exact existing-row partition; no production identity is compiled
 into the adapter. The second partition requires canonical WB Content lifecycle
-evidence plus exactly 228 accepted `missing / NULL` components across six
-deterministically selected finalizations. Those rows mean
+evidence plus exactly 228 accepted `missing / NULL` components across the latest
+six unique capture ids by finalization sequence; duplicate finalization rows do
+not consume a slot and no fixed date count is assumed. All older/newer distinct
+captures are audited for material evidence. Those rows mean
 `no_material_value_history`, not zero; all historical dates remain immutable,
 and any exact/zero/value/WAC/movement/opening/receipt evidence fails closed.
 `TOTAL.nm_id=NULL` is never converted to an SKU identity, and superseded
-same-date captures must retain the identical original-12 digest. Qualification scopes mapped order identity to the
+lineages may contain only nonmaterial missing/NULL or the identical accepted
+original-12 zero digest. Discovery accepts multiple identical qualifying dates
+and binds the latest qualifying sequence/capture. Qualification scopes mapped order identity to the
 exact seller warehouse and treats facility-less legacy reservations as an
 effect only when their immutable line sum is non-zero. The plan pins active
 target, StoreRegistry generation, mapping/allocation, target-effect/history and

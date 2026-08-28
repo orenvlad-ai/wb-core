@@ -22,15 +22,22 @@ immutable net quantity is non-zero. Mapping-extension allocations, target
 effects, historical zero evidence, canonical WB Content lifecycle/source
 identity, target absence and bounded non-target fingerprints are all CAS
 material. The second partition binds all 228 accepted components for its 38
-identities across the six latest accepted dates. Every row must remain
+identities across the latest six unique accepted `capture_id` values ordered by
+`finalization_sequence`; duplicate finalization rows for one capture do not
+consume a slot. Every selected capture must contribute exactly 38 rows and
+every row must remain
 `missing / NULL`: that state means only `no_material_value_history`, never a
 historical zero. `exact`, `exact_zero`, quantity, capital, WAC, movement,
 opening, receipt or any other material provenance blocks the operation. The
-latest accepted finalization is selected deterministically by date, sequence
-and identity, SKU components are deduplicated by `nm_id`, and `TOTAL` rows with
-`nm_id=NULL` are typed separately. Superseded same-date captures must preserve
-the identical original-12 semantic digest. No current zero is copied backward
-and no accepted historical row is rewritten.
+selector audits every older and newer distinct accepted capture for material
+evidence; it assumes no fixed calendar-date count. Historical-zero discovery
+accepts any number of qualifying business dates only when their original-12
+partition and semantic digest are identical, then binds the latest qualifying
+sequence/capture. Other original-12 lineages may contain only nonmaterial
+`missing / NULL` evidence or that identical accepted exact-zero partition;
+nonzero, material provenance or partition drift blocks. `TOTAL` rows with
+`nm_id=NULL` remain typed separately. No current zero is copied backward and no
+accepted historical row is rewritten.
 
 Apply repeats qualification before and under the shared warehouse writer lock,
 persists the existing dense `repair` intent, and emits exactly one deterministic
@@ -61,11 +68,15 @@ identities. Aliases are not accepted. Qualification uses one explicitly bound
 StoreRegistry generation and one true query-only dependency connection; it runs
 no schema ensure, DDL or hidden storage re-resolution. No binding is optional.
 Fresh qualification first classifies the exact mismatch set without assuming
-its size. For each mismatch it considers only immutable FBS events belonging to
-a facility named by accepted provenance and occurring strictly after that
-version's publication and strictly before the next good publication. Thus
-pre-publication events and unrelated stale cells are candidate-level typed
-rejections, not a global cross-product or an abort of the bounded target. The
+its size. It proves the ready-side prerequisites before event expansion:
+positive order, blank target own cost and exactly six missing TOTAL dependencies.
+Unrelated stale cells are bounded local rejections. Exactly one ready-shaped
+version/SKU must remain; only then does discovery query immutable FBS events
+belonging to facilities named by that accepted provenance and occurring strictly
+after that version's publication and before the next good publication. Exactly
+one causal event is required. This prevents a mismatch-by-event cross-product
+or capacity explosion while 0 or greater-than-1 readiness/event cardinality
+fails closed with a typed predicate and bounded candidate digests. The
 candidate starts from the accepted version and proves the full pre-debit
 facility/pool location set plus event arithmetic. It debits only the target
 location while preserving Moscow and every other location. Current pool rows are preservation/CAS evidence only and
@@ -97,6 +108,7 @@ Every ambiguous response goes directly to same-operation readback and never to
 a blind submit retry. The runner invokes the exact deployed adapter path with
 an explicit `PYTHONPATH`, private mode-0700 evidence directory and exact target/
 generation arguments. Failure receipts retain bounded typed `phase`, `stage`,
-`code`, `message` and `details_digest`; stderr is only transport evidence.
+`code`, `message`, `predicate`, expected/observed cardinality, candidate digest
+and details digest; stderr is only transport evidence.
 Barrier checks are read-only before and under the shared lock; no ordinary
 service or timer is stopped or changed.

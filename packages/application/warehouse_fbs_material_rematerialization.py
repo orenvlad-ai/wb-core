@@ -2935,6 +2935,73 @@ def _ready_updates_for_candidate(
     return updates, closure
 
 
+def historical_ready_shape_evidence(
+    conn: sqlite3.Connection,
+    *,
+    business_date: str,
+    nm_id: int,
+) -> dict[str, Any]:
+    """Classify the immutable ready-side prerequisites before event expansion."""
+
+    target_date = _iso_date(business_date)
+    target_nm_id = int(nm_id)
+    snapshots = _ready_snapshots_for_date(conn, target_date)
+    observations: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    if not snapshots or len(snapshots) > MAX_READY_SNAPSHOTS:
+        blockers.append("ready_snapshot_scope_missing_or_broad")
+    for snapshot in snapshots[:MAX_READY_SNAPSHOTS]:
+        cells = _ready_cells(_loads(snapshot["plan_json"], {}), target_date)
+        positive_order = (
+            _cell_decimal(cells.get(f"SKU:{target_nm_id}|orderSum")) > ZERO
+            if cells
+            else False
+        )
+        blank_own_cost = (
+            cells.get(f"SKU:{target_nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}")
+            in {None, ""}
+            if cells
+            else False
+        )
+        missing_total = sorted(
+            key
+            for key in CRITICAL_TOTAL_METRIC_KEYS
+            if cells.get(f"TOTAL|{key}") in {None, ""}
+        )
+        observation = {
+            "bundle_version": str(snapshot["bundle_version"]),
+            "as_of_date": str(snapshot["as_of_date"]),
+            "plan_sha256": _sha_text(str(snapshot["plan_json"])),
+            "plan_bytes": int(snapshot["plan_bytes"] or 0),
+            "exact_date_cells": bool(cells),
+            "positive_order": positive_order,
+            "blank_own_cost": blank_own_cost,
+            "missing_total_metric_keys": missing_total,
+            "missing_total_metric_digest": _fingerprint(missing_total),
+        }
+        observations.append(observation)
+        if not cells:
+            blockers.append("ready_snapshot_exact_date_cells_missing")
+        if not positive_order:
+            blockers.append("historical_positive_order_evidence_missing")
+        if not blank_own_cost:
+            blockers.append("historical_target_cost_shape_drift")
+        if missing_total != sorted(CRITICAL_TOTAL_METRIC_KEYS):
+            blockers.append("historical_total_dependency_shape_drift")
+    result = {
+        "business_date": target_date,
+        "nm_id": target_nm_id,
+        "snapshot_count": len(snapshots),
+        "snapshot_observations": observations,
+        "snapshot_observations_digest": _fingerprint(observations),
+        "critical_total_metric_keys": list(CRITICAL_TOTAL_METRIC_KEYS),
+        "blockers": sorted(set(blockers)),
+        "eligible": bool(observations) and not blockers,
+    }
+    result["fingerprint"] = _fingerprint(result)
+    return result
+
+
 def _pool_aggregates(
     conn: sqlite3.Connection, nm_ids: Iterable[int]
 ) -> dict[int, dict[str, Any]]:
