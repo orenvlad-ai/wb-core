@@ -232,17 +232,17 @@ Actor routing применяется к technical execution blocks, начаты
 этой редакции. Уже начатый main-owned read-only turn не прерывается и не
 переклассифицируется задним числом.
 
-## Post-task protocol audit boundary
+## Post-task conformance and audit boundary
 
-[`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md) —
-внутреннее read-only guidance только для одного куратора, который оптимизирует
-production protocol и process documentation после завершившихся задач. Это не
-часть execution lifecycle. Обычные main/domain curators и technical execution
-subagents не читают и не вызывают его как checklist и не меняют из-за него
-исполнение: их единственный operational entrypoint — root `AGENTS.md` и
-релевантные authoritative domain docs. Audit checklist сам не добавляет gate,
-approval, test, task, PR или mutation; возможное изменение протокола проходит
-отдельным обычным repo block только после отдельного решения.
+Owner phrase `«Сверка»` invokes the main-only read-only post-task pipeline from
+[`16_codex_protocol_conformance_pipeline.md`](16_codex_protocol_conformance_pipeline.md).
+It emits only protocol-conformance facts; the separate analysis/decision layer
+remains
+[`14_codex_task_audit_checklist.md`](14_codex_task_audit_checklist.md). Neither
+document is part of execution lifecycle or ordinary-task overhead. Ordinary
+main/domain curators and technical execution subagents do not read or apply
+either document as an execution checklist. Any resulting change remains a
+separately authorized repository block.
 
 ## Deterministic human-only boundary
 
