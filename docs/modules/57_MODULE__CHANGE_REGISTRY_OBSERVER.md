@@ -22,10 +22,14 @@ POST/PATCH adapter, Balance writer, recommendation or
 
 The service is `wb-core-change-registry-observer.service`; its timer runs every
 two hours, around minute 17, 24/7, independently from Vitrina refresh. The
-service is also started by the live-runtime deploy after the repo-owned flag is
-installed. Its deterministic two-hour scheduled slot makes a deploy and timer
-collision one scan. The first successful production run is therefore an
-explicit activation baseline.
+service is also started by the live-runtime deploy. Both the observer unit and
+`wb-core-registry-http.service` receive the exact activation flag and account
+scope declared in the canonical hosted target `runtime_env`; the owner-managed
+environment file remains the credential/source-secret boundary and is not a
+second activation source. A targeted smoke rejects any target/unit value or
+env-file binding drift. The deterministic two-hour scheduled slot makes a
+deploy and timer collision one scan. The first successful production run is
+therefore an explicit activation baseline.
 
 ## Observation and fact semantics
 
