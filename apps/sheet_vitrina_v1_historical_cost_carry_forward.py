@@ -93,6 +93,10 @@ from packages.business_time import business_date_from_timestamp  # noqa: E402
 
 SCHEMA_VERSION = "sheet_vitrina_v1_historical_analytical_cost_carry_forward_v1"
 SELECTION_METHOD = "same_sku_last_trusted_prior_cost_no_cost_change_v1"
+OWNER_FIXED_SELECTION_METHOD = "owner_fixed_historical_analytical_cost_v1"
+OWNER_FIXED_BUSINESS_DATE = "2026-08-26"
+OWNER_FIXED_NM_ID = 428853741
+OWNER_FIXED_UNIT_COST_RUB = Decimal("117.537167")
 VERSIONS_TABLE = "sheet_vitrina_v1_historical_analytical_cost_versions"
 MAX_SOURCE_LOOKBACK_DAYS = 31
 ZERO = Decimal("0")
@@ -132,6 +136,8 @@ def run(
     deployed_sha_file: Path | None = None,
     target_file: Path | None = None,
     created_at: str | None = None,
+    owner_fixed_unit_cost_rub: str = "",
+    owner_authorization_digest: str = "",
 ) -> dict[str, Any]:
     runtime_dir = runtime_dir.expanduser().resolve()
     evidence_dir = evidence_dir.expanduser().resolve()
@@ -147,6 +153,12 @@ def run(
         raise HistoricalCostCarryForwardError(
             "target_identity_invalid", "nm_id must be positive"
         )
+    owner_fixed = _owner_fixed_input(
+        business_date=target_date,
+        nm_id=target_nm_id,
+        unit_cost_rub=owner_fixed_unit_cost_rub,
+        owner_authorization_digest=owner_authorization_digest,
+    )
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
     if not runtime.db_path.is_file():
         raise HistoricalCostCarryForwardError(
@@ -180,6 +192,7 @@ def run(
             nm_id=target_nm_id,
             created_at=timestamp,
             storage_generation=generation,
+            owner_fixed=owner_fixed,
         )
         _ensure_private_evidence_dir(evidence_dir)
         output = evidence_dir / (
@@ -227,6 +240,19 @@ def run(
             "source_business_date": plan["source"]["business_date"],
             "source_unit_cost_rub": plan["source"]["unit_cost_rub"],
             "source_digest": plan["source"]["source_digest"],
+            "selection_method": plan["selection_method"],
+            "owner_fixed_unit_cost_rub": plan["source"].get(
+                "owner_fixed_unit_cost_rub"
+            ),
+            "owner_authorization_digest": plan["source"].get(
+                "owner_authorization_digest"
+            ),
+            "inventory_cost_formula_version": plan["formula"][
+                "inventory_cost_formula_version"
+            ],
+            "physical_history_consulted": plan["cost_event_evidence"].get(
+                "physical_history_consulted"
+            ),
             "before_metrics": plan["before"]["metrics"],
             "after_metrics": plan["after"]["metrics"],
             "non_target_digest": plan["before"]["non_target_digest"],
@@ -291,6 +317,7 @@ def run(
                 nm_id=target_nm_id,
                 created_at=str(reviewed["created_at"]),
                 storage_generation=generation,
+                owner_fixed=owner_fixed,
             )
             if _digest(_material_plan(rebuilt)) != _digest(_material_plan(reviewed)):
                 raise HistoricalCostCarryForwardError(
@@ -401,6 +428,7 @@ def _build_plan(
     nm_id: int,
     created_at: str,
     storage_generation: Mapping[str, Any],
+    owner_fixed: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     with _query_only_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -411,16 +439,11 @@ def _build_plan(
             raise HistoricalCostCarryForwardError(
                 "target_date_column_missing", "target ready snapshot lacks the exact date column"
             )
-        source = _select_prior_source(
+        source, event_evidence = _resolve_source_and_event_evidence(
             conn,
             business_date=business_date,
             nm_id=nm_id,
-        )
-        event_evidence = _prove_no_cost_changing_event(
-            conn,
-            source_date=str(source["business_date"]),
-            business_date=business_date,
-            nm_id=nm_id,
+            owner_fixed=owner_fixed,
         )
         version_id = "hvacf_" + hashlib.sha256(
             _canonical_json(
@@ -430,7 +453,7 @@ def _build_plan(
                     "nm_id": nm_id,
                     "source_digest": source["source_digest"],
                     "target_plan_sha256": _sha_text(str(snapshot["plan_json"])),
-                    "selection_method": SELECTION_METHOD,
+                    "selection_method": source["selection_method"],
                 }
             ).encode("utf-8")
         ).hexdigest()[:24]
@@ -514,7 +537,7 @@ def _build_plan(
             "operation_id": operation_id,
             "version_id": version_id,
             "created_at": created_at,
-            "selection_method": SELECTION_METHOD,
+            "selection_method": source["selection_method"],
             "business_date": business_date,
             "nm_id": nm_id,
             "storage_generation": dict(storage_generation),
@@ -579,6 +602,101 @@ def _target_snapshot(conn: sqlite3.Connection, *, business_date: str) -> dict[st
             details={"candidate_count": len(rows)},
         )
     return {**dict(rows[0]), "candidate_count": len(rows)}
+
+
+def _owner_fixed_input(
+    *,
+    business_date: str,
+    nm_id: int,
+    unit_cost_rub: str,
+    owner_authorization_digest: str,
+) -> dict[str, Any] | None:
+    raw_cost = str(unit_cost_rub or "").strip()
+    authorization_digest = str(owner_authorization_digest or "").strip().lower()
+    if not raw_cost and not authorization_digest:
+        return None
+    cost = _decimal(raw_cost)
+    if not (
+        business_date == OWNER_FIXED_BUSINESS_DATE
+        and nm_id == OWNER_FIXED_NM_ID
+        and cost == OWNER_FIXED_UNIT_COST_RUB
+        and raw_cost == format(OWNER_FIXED_UNIT_COST_RUB, "f")
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", authorization_digest)
+        and COMMON_INVENTORY_COST_FORMULA_VERSION == "our_inventory_wac_wb_ff_v1"
+    ):
+        raise HistoricalCostCarryForwardError(
+            "owner_fixed_input_invalid",
+            "typed owner-fixed input is not the exact authorized target/value/formula",
+        )
+    return {
+        "selection_method": OWNER_FIXED_SELECTION_METHOD,
+        "business_date": business_date,
+        "nm_id": nm_id,
+        "unit_cost_rub": raw_cost,
+        "owner_authorization_digest": authorization_digest,
+        "inventory_cost_formula_version": COMMON_INVENTORY_COST_FORMULA_VERSION,
+    }
+
+
+def _resolve_source_and_event_evidence(
+    conn: sqlite3.Connection,
+    *,
+    business_date: str,
+    nm_id: int,
+    owner_fixed: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if owner_fixed is None:
+        source = _select_prior_source(
+            conn,
+            business_date=business_date,
+            nm_id=nm_id,
+        )
+        return source, _prove_no_cost_changing_event(
+            conn,
+            source_date=str(source["business_date"]),
+            business_date=business_date,
+            nm_id=nm_id,
+        )
+    fixed = _owner_fixed_input(
+        business_date=business_date,
+        nm_id=nm_id,
+        unit_cost_rub=str(owner_fixed.get("unit_cost_rub") or ""),
+        owner_authorization_digest=str(
+            owner_fixed.get("owner_authorization_digest") or ""
+        ),
+    )
+    if fixed is None:
+        raise HistoricalCostCarryForwardError(
+            "owner_fixed_input_missing", "typed owner-fixed input is incomplete"
+        )
+    source_material = {
+        "selection_method": OWNER_FIXED_SELECTION_METHOD,
+        "business_date": business_date,
+        "nm_id": nm_id,
+        "owner_fixed_unit_cost_rub": fixed["unit_cost_rub"],
+        "owner_authorization_digest": fixed["owner_authorization_digest"],
+        "formula_version": fixed["inventory_cost_formula_version"],
+        "analytical_only": True,
+        "warehouse_truth_reconstructed": False,
+    }
+    source = {
+        **source_material,
+        "unit_cost_rub": fixed["unit_cost_rub"],
+        "source_digest": _digest(source_material),
+    }
+    event_material = {
+        "selection_method": OWNER_FIXED_SELECTION_METHOD,
+        "business_date": business_date,
+        "nm_id": nm_id,
+        "owner_fixed_unit_cost_rub": fixed["unit_cost_rub"],
+        "owner_authorization_digest": fixed["owner_authorization_digest"],
+        "inventory_cost_formula_version": fixed[
+            "inventory_cost_formula_version"
+        ],
+        "physical_history_consulted": False,
+        "cost_change_admission_applicable": False,
+    }
+    return source, {**event_material, "digest": _digest(event_material)}
 
 
 def _select_prior_source(
@@ -977,7 +1095,9 @@ def _persisted_formula_inputs(
             "reason": "" if resolved else "no_positive_persisted_presentation_cost",
             "formula_version": COMMON_INVENTORY_COST_FORMULA_VERSION,
             "selection_method": (
-                SELECTION_METHOD if item_nm_id == target_nm_id else "persisted_ready_snapshot_exact_cell_v1"
+                str(source["selection_method"])
+                if item_nm_id == target_nm_id
+                else "persisted_ready_snapshot_exact_cell_v1"
             ),
             "analytical_only": True,
             "business_date": business_date,
@@ -1002,7 +1122,14 @@ def _persisted_formula_inputs(
             "stock_qty": float(quantity),
             "cost_covered_qty": float(quantity if resolved else ZERO),
             "our_wb_unit_cost_rub": float(cost) if cost is not None and cost > ZERO else None,
-            "source_status": "historical_analytical_carry_forward" if item_nm_id == target_nm_id else "persisted_ready_snapshot_exact",
+            "source_status": (
+                "owner_fixed_historical_analytical_cost"
+                if item_nm_id == target_nm_id
+                and source["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+                else "historical_analytical_carry_forward"
+                if item_nm_id == target_nm_id
+                else "persisted_ready_snapshot_exact"
+            ),
             "selection_method": evidence["selection_method"],
             "source_digest": evidence["source_digest"],
             "inventory_cost_evidence": evidence,
@@ -1070,12 +1197,26 @@ def _exact_closure_payload(
         "source_business_date": str(source["business_date"]),
         "source_unit_cost_rub": str(source["unit_cost_rub"]),
         "source_digest": str(source["source_digest"]),
-        "selection_method": SELECTION_METHOD,
+        "selection_method": str(source["selection_method"]),
         "event_evidence_digest": str(event_evidence["digest"]),
         "formula_inputs_digest": formula_inputs_digest,
         "created_at": created_at,
         "analytical_only": True,
         "warehouse_truth_reconstructed": False,
+        **(
+            {
+                "owner_fixed_unit_cost_rub": str(
+                    source["owner_fixed_unit_cost_rub"]
+                ),
+                "owner_authorization_digest": str(
+                    source["owner_authorization_digest"]
+                ),
+                "inventory_cost_formula_version": str(source["formula_version"]),
+                "physical_history_consulted": False,
+            }
+            if source["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+            else {}
+        ),
     }
     return after
 
@@ -1091,6 +1232,15 @@ def _submit_once(
 ) -> dict[str, Any]:
     target = dict(plan["target"])
     after_json = str(target["after_plan_json"])
+    if (
+        plan["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+        and _authorization_digest(approval_reference)
+        != str(plan["source"].get("owner_authorization_digest") or "")
+    ):
+        raise HistoricalCostCarryForwardError(
+            "owner_authorization_binding_mismatch",
+            "owner-fixed manifest is not bound to the exact authorization digest",
+        )
     with sqlite3.connect(db_path, timeout=30) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
@@ -1131,16 +1281,23 @@ def _submit_once(
                 "immediate_non_target_cas_drift",
                 "another ready snapshot changed immediately before submit",
             )
-        current_source = _select_prior_source(
-            conn,
-            business_date=str(plan["business_date"]),
-            nm_id=int(plan["nm_id"]),
+        owner_fixed = (
+            {
+                "unit_cost_rub": str(
+                    plan["source"].get("owner_fixed_unit_cost_rub") or ""
+                ),
+                "owner_authorization_digest": str(
+                    plan["source"].get("owner_authorization_digest") or ""
+                ),
+            }
+            if plan["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+            else None
         )
-        current_event_evidence = _prove_no_cost_changing_event(
+        current_source, current_event_evidence = _resolve_source_and_event_evidence(
             conn,
-            source_date=str(current_source["business_date"]),
             business_date=str(plan["business_date"]),
             nm_id=int(plan["nm_id"]),
+            owner_fixed=owner_fixed,
         )
         current_payload = _loads_object(current["plan_json"], "immediate target snapshot")
         current_cells = _ready_cells(current_payload, str(plan["business_date"]))
@@ -1193,7 +1350,7 @@ def _submit_once(
                 str(plan["source"]["business_date"]),
                 str(plan["source"]["unit_cost_rub"]),
                 str(plan["source"]["source_digest"]),
-                SELECTION_METHOD,
+                str(plan["selection_method"]),
                 str(plan["cost_event_evidence"]["digest"]),
                 str(plan["formula"]["inputs_digest"]),
                 str(target["bundle_version"]),
@@ -1299,6 +1456,45 @@ def _readback(
             snapshot_id=str(version["target_snapshot_id"]),
         )
         expected_after_sha = str(version["after_plan_sha256"])
+        metadata = payload.get("metadata")
+        marker_versions = (
+            metadata.get("historical_analytical_cost_carry_forward", {})
+            if isinstance(metadata, Mapping)
+            else {}
+        )
+        marker = (
+            marker_versions.get(str(version["version_id"]), {})
+            if isinstance(marker_versions, Mapping)
+            else {}
+        )
+        owner_fixed = str(version["selection_method"]) == OWNER_FIXED_SELECTION_METHOD
+        owner_authorization_digest = _authorization_digest(
+            str(version["approval_reference"])
+        )
+        owner_fixed_exact = (
+            not owner_fixed
+            or (
+                isinstance(marker, Mapping)
+                and str(version["business_date"]) == OWNER_FIXED_BUSINESS_DATE
+                and int(version["nm_id"]) == OWNER_FIXED_NM_ID
+                and str(version["source_unit_cost_rub"])
+                == format(OWNER_FIXED_UNIT_COST_RUB, "f")
+                and _decimal(
+                    cells.get(
+                        f"SKU:{OWNER_FIXED_NM_ID}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"
+                    )
+                )
+                == OWNER_FIXED_UNIT_COST_RUB
+                and marker.get("selection_method") == OWNER_FIXED_SELECTION_METHOD
+                and marker.get("owner_fixed_unit_cost_rub")
+                == format(OWNER_FIXED_UNIT_COST_RUB, "f")
+                and marker.get("owner_authorization_digest")
+                == owner_authorization_digest
+                and marker.get("inventory_cost_formula_version")
+                == COMMON_INVENTORY_COST_FORMULA_VERSION
+                and marker.get("physical_history_consulted") is False
+            )
+        )
         exact = (
             str(version["status"]) == "accepted"
             and int(version["submit_count"]) == 1
@@ -1307,6 +1503,7 @@ def _readback(
             and other_ready_snapshots_digest
             == str(version["other_ready_snapshots_digest"])
             and all(value not in {None, ""} for value in metrics["after_required_values"])
+            and owner_fixed_exact
         )
         if expected_plan is not None:
             exact = exact and (
@@ -1330,6 +1527,18 @@ def _readback(
             "source_unit_cost_rub": str(version["source_unit_cost_rub"]),
             "source_digest": str(version["source_digest"]),
             "selection_method": str(version["selection_method"]),
+            "owner_fixed_unit_cost_rub": (
+                str(version["source_unit_cost_rub"]) if owner_fixed else None
+            ),
+            "owner_authorization_digest": (
+                owner_authorization_digest if owner_fixed else None
+            ),
+            "inventory_cost_formula_version": (
+                marker.get("inventory_cost_formula_version") if owner_fixed else None
+            ),
+            "physical_history_consulted": (
+                marker.get("physical_history_consulted") if owner_fixed else None
+            ),
             "after_plan_sha256": expected_after_sha,
             "non_target_digest": non_target,
             "other_ready_snapshots_digest": other_ready_snapshots_digest,
@@ -1607,6 +1816,11 @@ def _decimal(value: Any) -> Decimal | None:
     return parsed if parsed.is_finite() else None
 
 
+def _authorization_digest(value: str) -> str:
+    match = re.search(r"(sha256:[0-9a-f]{64})$", str(value or "").strip().lower())
+    return match.group(1) if match is not None else ""
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(
         value,
@@ -1726,6 +1940,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--deployed-sha-file", type=Path)
     parser.add_argument("--target-file", type=Path)
     parser.add_argument("--approval-reference", default="")
+    parser.add_argument("--owner-fixed-unit-cost-rub", default="")
+    parser.add_argument("--owner-authorization-digest", default="")
     return parser.parse_args()
 
 
@@ -1755,6 +1971,8 @@ def main() -> int:
                 approval_reference=args.approval_reference,
                 deployed_sha_file=args.deployed_sha_file,
                 target_file=args.target_file,
+                owner_fixed_unit_cost_rub=args.owner_fixed_unit_cost_rub,
+                owner_authorization_digest=args.owner_authorization_digest,
             )
         print(_canonical_json(result))
         return 0 if result.get("status") in {"ready", "submitted", "reconciled"} else 2

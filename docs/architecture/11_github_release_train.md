@@ -280,12 +280,14 @@ observed_cardinality/candidate_digest/details_digest`; stderr digest не
 A/B identity и имеет собственный exact profile:
 
 ```text
-/wb-core authorize-goal-v1 task WBC0013 profile historical-analytical-cost-carry-forward target wb_core_eu_hosted_runtime_active business-date 2026-08-26 nm 428853741 accepted-versions 1 ready-snapshots 1
+/wb-core authorize-goal-v1 task WBC0013 profile historical-analytical-cost-carry-forward target wb_core_eu_hosted_runtime_active business-date 2026-08-26 nm 428853741 unit-cost-rub 117.537167 accepted-versions 1 ready-snapshots 1
 ```
 
-Он допускает только latest earlier version-tagged own cost того же SKU после
-query-only доказательства отсутствия cost-changing events, два одинаковых JIT
-material witness и максимум один submit. Candidate создаётся штатной формулой,
+Typed owner-fixed lane принимает literal `117.537167 RUB` как historical
+analytical estimate, связывает его с digest exact OWNER/MEMBER authorization и
+не выводит из lifecycle/warehouse WAC. Обычный trusted carry-forward lane
+сохраняет прежнюю event admission без ослабления. Два одинаковых JIT material
+witness допускают максимум один submit. Candidate создаётся штатной формулой,
 но write set ограничен одной accepted analytical version и CAS одного ready
 snapshot; warehouse/source truth не меняется. После submit разрешён только
 same-operation query-only readback, включая exact target/non-target digests и

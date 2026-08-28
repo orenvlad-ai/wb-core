@@ -1,4 +1,4 @@
-# Migration 163: historical analytical own-cost carry-forward
+# Migration 163: historical analytical own-cost input
 
 ## Release boundary
 
@@ -10,7 +10,15 @@ deployed SHA, explicit StoreRegistry generation and private JIT evidence.
 
 ## Source and event admission
 
-The only admissible source is the latest earlier positive own-unit-cost cell of
+The exact owner-fixed lane for `2026-08-26 / nmId 428853741` accepts the typed
+literal `117.537167 RUB` with marker
+`owner_fixed_historical_analytical_cost_v1`. Its source digest binds the literal,
+target, formula version and exact owner-authorization digest. It is an analytical
+estimate, not lifecycle-derived or warehouse WAC, so physical/lifecycle history
+is not consulted for this typed lane and remains unchanged.
+
+The ordinary carry-forward lane remains unchanged: its only admissible source is
+the latest earlier positive own-unit-cost cell of
 the same SKU from a ready Vitrina snapshot whose inventory-cost publication is
 tagged with `our_inventory_wac_wb_ff_v1`. The plan binds its date, value,
 snapshot identity and digest. A 31-day maximum lookback prevents an unbounded
@@ -45,7 +53,8 @@ and raw/history sources are read-only evidence.
 ## Exact production profile
 
 The default-off `historical-analytical-cost-carry-forward` profile accepts only
-WBC0013 date `2026-08-26`, nmId `428853741`, one accepted Vitrina version and one
+WBC0013 date `2026-08-26`, nmId `428853741`, typed literal `117.537167 RUB`, one
+accepted Vitrina version and one
 updated ready snapshot. Two consecutive identical query-only material witnesses
 qualify at most one submit. After the submit, only same-operation query-only
 readback is allowed; a terminal or ambiguous identity is never retried. The

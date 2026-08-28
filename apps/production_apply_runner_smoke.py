@@ -47,7 +47,12 @@ HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
     "profile historical-analytical-cost-carry-forward "
     "target wb_core_eu_hosted_runtime_active business-date 2026-08-26 "
-    "nm 428853741 accepted-versions 1 ready-snapshots 1"
+    "nm 428853741 unit-cost-rub 117.537167 "
+    "accepted-versions 1 ready-snapshots 1"
+)
+HISTORICAL_COST_APPROVAL_DIGEST = "sha256:" + "9" * 64
+HISTORICAL_COST_APPROVAL_REFERENCE = (
+    "github:fixture:" + HISTORICAL_COST_APPROVAL_DIGEST
 )
 
 
@@ -59,6 +64,7 @@ def _exercise_historical_cost_runner() -> None:
     )
     assert goal["profile"] == apply.HISTORICAL_COST_GOAL_PROFILE
     assert goal["max_mutation_submits"] == 1
+    assert goal["owner_fixed_unit_cost_rub"] == "117.537167"
     operation = "production-goal-v1-" + "8" * 32
     evidence_dir = (
         "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
@@ -107,8 +113,13 @@ def _exercise_historical_cost_runner() -> None:
         "source_digest": "sha256:" + "3" * 64,
         "non_target_digest": "sha256:" + "4" * 64,
         "other_ready_snapshots_digest": "sha256:" + "5" * 64,
-        "source_business_date": "2026-08-25",
-        "source_unit_cost_rub": "10.25",
+        "selection_method": "owner_fixed_historical_analytical_cost_v1",
+        "source_business_date": "2026-08-26",
+        "source_unit_cost_rub": "117.537167",
+        "owner_fixed_unit_cost_rub": "117.537167",
+        "owner_authorization_digest": HISTORICAL_COST_APPROVAL_DIGEST,
+        "inventory_cost_formula_version": "our_inventory_wac_wb_ff_v1",
+        "physical_history_consulted": False,
         "after_metrics": {"after_required_values": list(range(1, 13))},
         "plan_persistence": persistence,
     }
@@ -126,6 +137,12 @@ def _exercise_historical_cost_runner() -> None:
         "submit_count": 1,
         "business_date": "2026-08-26",
         "nm_id": 428853741,
+        "selection_method": "owner_fixed_historical_analytical_cost_v1",
+        "source_unit_cost_rub": "117.537167",
+        "owner_fixed_unit_cost_rub": "117.537167",
+        "owner_authorization_digest": HISTORICAL_COST_APPROVAL_DIGEST,
+        "inventory_cost_formula_version": "our_inventory_wac_wb_ff_v1",
+        "physical_history_consulted": False,
         "accepted_vitrina_version_count": 1,
         "updated_ready_snapshot_count": 1,
         "runtime_controls_changed": False,
@@ -153,7 +170,7 @@ def _exercise_historical_cost_runner() -> None:
             merge_sha=MERGE_SHA,
             goal=goal,
             operation=operation,
-            approval_reference="github:fixture",
+            approval_reference=HISTORICAL_COST_APPROVAL_REFERENCE,
         )
     finally:
         apply.command_evidence = original_command
@@ -172,8 +189,8 @@ def _exercise_historical_cost_runner() -> None:
                 "return_code": 2,
                 "result": {
                     "status": "blocked",
-                    "code": "cost_changing_event_or_ambiguity",
-                    "message": "intervening receipt blocks carry-forward",
+                    "code": "owner_fixed_input_invalid",
+                    "message": "typed fixed input is invalid",
                     "submit_count": 0,
                 },
             }
@@ -189,12 +206,12 @@ def _exercise_historical_cost_runner() -> None:
             merge_sha=MERGE_SHA,
             goal=goal,
             operation=operation,
-            approval_reference="github:fixture",
+            approval_reference=HISTORICAL_COST_APPROVAL_REFERENCE,
         )
     finally:
         apply.command_evidence = original_command
     assert blocked["state"] == "blocked" and blocked["apply_count"] == 0
-    assert blocked["failure"]["code"] == "cost_changing_event_or_ambiguity"
+    assert blocked["failure"]["code"] == "owner_fixed_input_invalid"
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:

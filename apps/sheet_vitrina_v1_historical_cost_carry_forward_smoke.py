@@ -18,6 +18,9 @@ if str(ROOT) not in sys.path:
 
 from apps.sheet_vitrina_v1_historical_cost_carry_forward import (
     ALLOWED_TOTAL_KEYS,
+    OWNER_FIXED_SELECTION_METHOD,
+    OWNER_FIXED_NM_ID,
+    OWNER_FIXED_UNIT_COST_RUB,
     SKU_FORMULA_KEYS,
     HistoricalCostCarryForwardError,
     _build_plan,
@@ -37,6 +40,8 @@ from packages.application.ff_pool_foundation import LINES_TABLE, OPERATIONS_TABL
 
 
 SOURCE_DAY = "2026-08-25"
+OWNER_AUTHORIZATION_DIGEST = "sha256:" + "a" * 64
+OWNER_APPROVAL_REFERENCE = "smoke:owner-authorized:" + OWNER_AUTHORIZATION_DIGEST
 
 
 def main() -> None:
@@ -49,7 +54,13 @@ def _exercise_success_and_one_submit() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         runtime = _seed(root, mixed=False)
-        _prepare_prior_source_and_blank_target(runtime.db_path)
+        _remap_target_nm_id(runtime.db_path)
+        _prepare_prior_source_and_blank_target(
+            runtime.db_path, target_nm_id=OWNER_FIXED_NM_ID
+        )
+        _seed_blocking_physical_history(
+            runtime.db_path, target_nm_id=OWNER_FIXED_NM_ID
+        )
         protected_before = _protected_digest(runtime.db_path)
         database_before = _file_sha(runtime.db_path)
         result = run(
@@ -57,19 +68,24 @@ def _exercise_success_and_one_submit() -> None:
             evidence_dir=root / "private-evidence",
             operation_id="smoke-historical-analytical-cost",
             business_date=DAY,
-            nm_id=TARGET_NM_ID,
+            nm_id=OWNER_FIXED_NM_ID,
             apply=False,
             created_at="2026-08-28T12:00:00Z",
+            owner_fixed_unit_cost_rub=format(OWNER_FIXED_UNIT_COST_RUB, "f"),
+            owner_authorization_digest=OWNER_AUTHORIZATION_DIGEST,
         )
         assert result["status"] == "ready"
         assert result["database_written"] is False
-        assert result["source_business_date"] == SOURCE_DAY
-        assert float(result["source_unit_cost_rub"]) > 0
+        assert result["source_business_date"] == DAY
+        assert result["source_unit_cost_rub"] == "117.537167"
+        assert result["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+        assert result["owner_authorization_digest"] == OWNER_AUTHORIZATION_DIGEST
+        assert result["physical_history_consulted"] is False
         assert _file_sha(runtime.db_path) == database_before
         assert _protected_digest(runtime.db_path) == protected_before
 
         plan = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
-        assert plan["cost_event_evidence"]["cost_changing_event_count"] == 0
+        assert plan["cost_event_evidence"]["physical_history_consulted"] is False
         assert plan["before"]["non_target_digest"] == plan["after"]["non_target_digest"]
         assert all(
             value not in {None, ""}
@@ -80,7 +96,7 @@ def _exercise_success_and_one_submit() -> None:
             plan=plan,
             manifest_sha256=result["manifest_sha256"],
             deployed_sha="1" * 40,
-            approval_reference="smoke:owner-authorized",
+            approval_reference=OWNER_APPROVAL_REFERENCE,
             backup={
                 "path": str(root / "backup.sqlite3"),
                 "sha256": "2" * 64,
@@ -96,7 +112,9 @@ def _exercise_success_and_one_submit() -> None:
         )
         assert reconciled["status"] == "reconciled"
         assert reconciled["submit_count"] == 1
-        assert reconciled["source_business_date"] == SOURCE_DAY
+        assert reconciled["source_business_date"] == DAY
+        assert reconciled["source_unit_cost_rub"] == "117.537167"
+        assert reconciled["owner_authorization_digest"] == OWNER_AUTHORIZATION_DIGEST
         assert _protected_digest(runtime.db_path) == protected_before
         with sqlite3.connect(runtime.db_path) as conn:
             payload = json.loads(
@@ -113,14 +131,18 @@ def _exercise_success_and_one_submit() -> None:
             accepted = next(iter(marker.values()))
             assert accepted["analytical_only"] is True
             assert accepted["warehouse_truth_reconstructed"] is False
-            assert accepted["source_business_date"] == SOURCE_DAY
+            assert accepted["source_business_date"] == DAY
+            assert accepted["selection_method"] == OWNER_FIXED_SELECTION_METHOD
+            assert accepted["owner_fixed_unit_cost_rub"] == "117.537167"
+            assert accepted["owner_authorization_digest"] == OWNER_AUTHORIZATION_DIGEST
+            assert accepted["physical_history_consulted"] is False
         try:
             _submit_once(
                 db_path=runtime.db_path,
                 plan=plan,
                 manifest_sha256=result["manifest_sha256"],
                 deployed_sha="1" * 40,
-                approval_reference="smoke:owner-authorized",
+                approval_reference=OWNER_APPROVAL_REFERENCE,
                 backup={"path": "unused", "sha256": "0", "size_bytes": 0, "integrity_check": "ok"},
             )
         except HistoricalCostCarryForwardError as exc:
@@ -188,7 +210,9 @@ def _exercise_receipt_blocks_before_submit() -> None:
         assert _file_sha(runtime.db_path) == before
 
 
-def _prepare_prior_source_and_blank_target(db_path: Path) -> None:
+def _prepare_prior_source_and_blank_target(
+    db_path: Path, *, target_nm_id: int = TARGET_NM_ID
+) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         target = conn.execute(
@@ -251,7 +275,7 @@ def _prepare_prior_source_and_blank_target(db_path: Path) -> None:
         for key in ALLOWED_TOTAL_KEYS:
             cells[f"TOTAL|{key}"][2] = None
         for key in SKU_FORMULA_KEYS:
-            cells[f"SKU:{TARGET_NM_ID}|{key}"][2] = None
+            cells[f"SKU:{target_nm_id}|{key}"][2] = None
         conn.execute(
             "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
             "WHERE bundle_version=? AND as_of_date=? AND snapshot_id=?",
@@ -262,6 +286,104 @@ def _prepare_prior_source_and_blank_target(db_path: Path) -> None:
                 target["snapshot_id"],
             ),
         )
+        conn.commit()
+
+
+def _remap_target_nm_id(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        snapshots = conn.execute(
+            "SELECT rowid,plan_json FROM sheet_vitrina_v1_ready_snapshots"
+        ).fetchall()
+        for rowid, plan_json in snapshots:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE rowid=?",
+                (
+                    str(plan_json).replace(
+                        f"SKU:{TARGET_NM_ID}|", f"SKU:{OWNER_FIXED_NM_ID}|"
+                    ),
+                    rowid,
+                ),
+            )
+        conn.commit()
+
+
+def _seed_blocking_physical_history(
+    db_path: Path, *, target_nm_id: int
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                   version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                   cost_covered_quantity,quality,certified,wb_quantity,
+                   wb_in_way_to_client,wb_in_way_from_client,provenance_json)
+               SELECT balance.version_id,balance.warehouse_key,?,balance.quantity,
+                      CASE WHEN version.business_effective_date=?
+                                AND balance.warehouse_key='ff' THEN '11'
+                           ELSE balance.wac_rub END,
+                      CASE WHEN version.business_effective_date=?
+                                AND balance.warehouse_key='ff'
+                           THEN CAST(balance.quantity * 11 AS TEXT)
+                           ELSE balance.capital_rub END,
+                      balance.cost_covered_quantity,balance.quality,balance.certified,
+                      balance.wb_quantity,balance.wb_in_way_to_client,
+                      balance.wb_in_way_from_client,balance.provenance_json
+                 FROM sheet_vitrina_v1_warehouse_functional_balances balance
+                 JOIN sheet_vitrina_v1_warehouse_functional_versions version
+                   ON version.version_id=balance.version_id
+                WHERE balance.nm_id=?""",
+            (target_nm_id, DAY, DAY, TARGET_NM_ID),
+        )
+        rows = []
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
+            "WHERE nm_id=?",
+            (target_nm_id,),
+        ).fetchone()[0]
+        for index in range(92 - existing):
+            event_id = (
+                "ffbf_87cea959c9d600da99caa1ab68ef"
+                if index == 0
+                else f"owner-fixed-blocking-event-{index:02d}"
+            )
+            event_type = "handoff_debit" if index == 0 else "reserve"
+            delta = -1 if index == 0 else 1
+            capital = "-9" if index == 0 else "117.537167"
+            frozen = "9" if index == 0 else "117.537167"
+            rows.append(
+                (
+                    event_id,
+                    "warehouse_functional_cutover_v1",
+                    20_000 + index,
+                    event_type,
+                    f"owner-fixed-revision-{index}",
+                    f"owner-fixed-status-{index}",
+                    FACILITY_ID,
+                    target_nm_id,
+                    delta,
+                    capital,
+                    frozen,
+                    f"owner-fixed-evidence-{index}",
+                )
+            )
+        conn.executemany(
+            """INSERT INTO sheet_vitrina_v1_ff_pool_fbs_lifecycle_events(
+                   event_id,cutover_id,order_id,episode_sequence,event_type,
+                   source_order_observation_sequence,
+                   source_status_observation_sequence,source_revision,
+                   status_digest,supplier_status,wb_status,source_observed_at,
+                   facility_id,pool,nm_id,quantity,physical_quantity_delta,
+                   capital_delta_rub,frozen_wac_rub,evidence_digest,occurred_at)
+               VALUES(?,?,?,1,?,1,1,?,?,'complete','sorted',
+                      '2026-08-26T12:02:00Z',?,'FBS',?,1,?,?,?,?,
+                      '2026-08-26T12:02:00Z')""",
+            rows,
+        )
+        observed = conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_pool_fbs_lifecycle_events "
+            "WHERE nm_id=?",
+            (target_nm_id,),
+        ).fetchone()[0]
+        assert observed == 92
         conn.commit()
 
 

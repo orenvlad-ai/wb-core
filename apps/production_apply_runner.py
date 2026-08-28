@@ -220,7 +220,9 @@ HISTORICAL_COST_AUTH_RE = re.compile(
     r"profile (?P<profile>historical-analytical-cost-carry-forward) "
     r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
     r"business-date (?P<business_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
-    r"nm (?P<nm_id>[1-9][0-9]*) accepted-versions (?P<versions>[1-9][0-9]*) "
+    r"nm (?P<nm_id>[1-9][0-9]*) unit-cost-rub "
+    r"(?P<unit_cost_rub>[1-9][0-9]*\.[0-9]{6}) "
+    r"accepted-versions (?P<versions>[1-9][0-9]*) "
     r"ready-snapshots (?P<snapshots>[1-9][0-9]*)$"
 )
 LEGACY_AUTH_RE = re.compile(
@@ -905,6 +907,7 @@ def validate_authorization(
             "target_id": raw["target"],
             "business_date": raw["business_date"],
             "nm_id": int(raw["nm_id"]),
+            "owner_fixed_unit_cost_rub": raw["unit_cost_rub"],
             "expected_accepted_version_count": int(raw["versions"]),
             "expected_updated_ready_snapshot_count": int(raw["snapshots"]),
             "max_mutation_submits": 1,
@@ -915,6 +918,7 @@ def validate_authorization(
         if (
             goal["business_date"] != "2026-08-26"
             or goal["nm_id"] != 428853741
+            or goal["owner_fixed_unit_cost_rub"] != "117.537167"
             or goal["expected_accepted_version_count"] != 1
             or goal["expected_updated_ready_snapshot_count"] != 1
         ):
@@ -1839,6 +1843,12 @@ def _historical_cost_remote_command(
     if phase not in {"plan", "apply", "readback"}:
         raise ApplyError("unsupported historical analytical cost phase")
     target_dir = str(target["target_dir"])
+    authorization_match = re.search(
+        r"(sha256:[0-9a-f]{64})$", str(approval_reference or "")
+    )
+    if authorization_match is None:
+        raise ApplyError("historical analytical cost authorization digest is invalid")
+    owner_authorization_digest = authorization_match.group(1)
     parts = [
         "python3",
         f"{target_dir}/apps/sheet_vitrina_v1_historical_cost_carry_forward.py",
@@ -1857,6 +1867,10 @@ def _historical_cost_remote_command(
         str(goal["business_date"]),
         "--nm-id",
         str(goal["nm_id"]),
+        "--owner-fixed-unit-cost-rub",
+        str(goal["owner_fixed_unit_cost_rub"]),
+        "--owner-authorization-digest",
+        owner_authorization_digest,
     ]
     if phase in {"apply", "readback"}:
         if (
@@ -1867,7 +1881,7 @@ def _historical_cost_remote_command(
             raise ApplyError("historical analytical cost manifest binding is invalid")
         parts.extend(["--manifest", manifest_path])
     if phase == "apply":
-        if not approval_reference or len(approval_reference) > 500:
+        if len(approval_reference) > 500:
             raise ApplyError("historical analytical cost approval binding is invalid")
         parts.extend(
             [
@@ -1908,6 +1922,7 @@ def _validate_historical_cost_candidate(
     *,
     merge_sha: str,
     evidence_dir: str,
+    owner_authorization_digest: str,
 ) -> None:
     expected = {
         "status": "ready",
@@ -1950,10 +1965,20 @@ def _validate_historical_cost_candidate(
                 f"historical analytical cost digest is invalid: {field}"
             )
     if not (
-        str(payload.get("source_business_date") or "") < str(goal["business_date"])
-        and float(payload.get("source_unit_cost_rub") or 0) > 0
+        payload.get("selection_method")
+        == "owner_fixed_historical_analytical_cost_v1"
+        and payload.get("source_business_date") == goal["business_date"]
+        and payload.get("source_unit_cost_rub")
+        == goal["owner_fixed_unit_cost_rub"]
+        and payload.get("owner_fixed_unit_cost_rub")
+        == goal["owner_fixed_unit_cost_rub"]
+        and payload.get("owner_authorization_digest")
+        == owner_authorization_digest
+        and payload.get("inventory_cost_formula_version")
+        == "our_inventory_wac_wb_ff_v1"
+        and payload.get("physical_history_consulted") is False
     ):
-        raise ApplyError("historical analytical cost prior source is invalid")
+        raise ApplyError("historical analytical owner-fixed source is invalid")
     required_values = (payload.get("after_metrics") or {}).get(
         "after_required_values"
     )
@@ -2012,6 +2037,12 @@ def run_historical_cost_goal(
         / operation
     )
     attempts: list[dict[str, Any]] = []
+    authorization_match = re.search(
+        r"(sha256:[0-9a-f]{64})$", str(approval_reference or "")
+    )
+    if authorization_match is None:
+        raise ApplyError("historical analytical cost authorization digest is invalid")
+    owner_authorization_digest = authorization_match.group(1)
     previous = ""
     candidate: Mapping[str, Any] | None = None
     for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
@@ -2023,6 +2054,7 @@ def run_historical_cost_goal(
                 evidence_dir=evidence_dir,
                 goal=goal,
                 phase="plan",
+                approval_reference=approval_reference,
             )
         )
         payload = evidence.get("result")
@@ -2030,7 +2062,11 @@ def run_historical_cost_goal(
             if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
                 raise ApplyError("query-only qualification command failed")
             _validate_historical_cost_candidate(
-                payload, goal, merge_sha=merge_sha, evidence_dir=evidence_dir
+                payload,
+                goal,
+                merge_sha=merge_sha,
+                evidence_dir=evidence_dir,
+                owner_authorization_digest=owner_authorization_digest,
             )
         except ApplyError as exc:
             attempts.append(
@@ -2115,6 +2151,7 @@ def run_historical_cost_goal(
             phase="readback",
             manifest_path=str(candidate["manifest_path"]),
             manifest_sha256=str(candidate["manifest_sha256"]),
+            approval_reference=approval_reference,
         )
     )
     readback = readback_evidence.get("result")
@@ -2133,6 +2170,17 @@ def run_historical_cost_goal(
         and readback.get("submit_count") == 1
         and readback.get("business_date") == goal["business_date"]
         and readback.get("nm_id") == goal["nm_id"]
+        and readback.get("selection_method")
+        == "owner_fixed_historical_analytical_cost_v1"
+        and readback.get("source_unit_cost_rub")
+        == goal["owner_fixed_unit_cost_rub"]
+        and readback.get("owner_fixed_unit_cost_rub")
+        == goal["owner_fixed_unit_cost_rub"]
+        and readback.get("owner_authorization_digest")
+        == owner_authorization_digest
+        and readback.get("inventory_cost_formula_version")
+        == "our_inventory_wac_wb_ff_v1"
+        and readback.get("physical_history_consulted") is False
         and readback.get("accepted_vitrina_version_count") == 1
         and readback.get("updated_ready_snapshot_count") == 1
         and readback.get("runtime_controls_changed") is False

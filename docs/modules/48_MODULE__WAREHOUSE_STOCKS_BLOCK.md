@@ -269,8 +269,11 @@ fresh historical B once, with two identical material witnesses per phase and no
 blind retry.
 
 Migration 163 is a distinct presentation-only lane and never resumes or rewrites
-historical B. It may carry the latest earlier version-tagged own cost of the same
-SKU into one historical ready-snapshot date only after query-only functional,
+historical B. For the exact owner-fixed `2026-08-26 / 428853741` target it accepts
+the typed `117.537167 RUB` analytical estimate with owner-authorization digest;
+this value is not lifecycle-derived or warehouse WAC. The ordinary route may
+carry the latest earlier version-tagged own cost of the same SKU into one
+historical ready-snapshot date only after query-only functional,
 movement and lifecycle evidence proves no receipt, revaluation, WAC drift or
 other cost-changing event between source and cutoff. The server-side economics
 formula computes the target SKU and six TOTAL dependencies, but publication
