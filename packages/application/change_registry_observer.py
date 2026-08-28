@@ -8,6 +8,7 @@ one short atomic transaction through a transaction hook.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -49,6 +50,53 @@ LEASE_SECONDS = 1800
 TERMINAL_JOB_STATES = frozenset({"complete", "partial", "failed", "busy"})
 RUNNABLE_JOB_STATES = frozenset({"accepted", "running"})
 _DEPLOYED_SHA = re.compile(r"[0-9a-f]{40}")
+SOURCE_STATUSES = {"not_observed", "complete", "partial", "failed", "invalid"}
+PERSISTENCE_STAGE_BINDINGS = {
+    "baseline_ingest": ("change_registry_baseline", "ingest"),
+    "baseline_result": ("change_registry_baseline", "transaction_hook_result"),
+    "source_manifest_prices": (CHECKPOINT_SOURCE_MANIFESTS_TABLE, "insert_prices"),
+    "source_manifest_ads": (CHECKPOINT_SOURCE_MANIFESTS_TABLE, "insert_ads"),
+    "terminal_job_event": (OBSERVER_JOB_EVENTS_TABLE, "insert_terminal"),
+    "scheduled_health": (OBSERVER_HEALTH_EVENTS_TABLE, "insert_scheduled_health"),
+    "lease_release": (OBSERVER_LEASES_TABLE, "cas_release"),
+    "transaction_commit": ("operational_store", "commit"),
+}
+FALLBACK_STAGE_BINDINGS = {
+    "fallback_store_open": ("operational_store", "open_failure_evidence_rw"),
+    "fallback_begin": ("operational_store", "begin_immediate_failure_evidence"),
+    "fallback_terminal_job_event": (OBSERVER_JOB_EVENTS_TABLE, "insert_failed_terminal"),
+    "fallback_scheduled_health": (OBSERVER_HEALTH_EVENTS_TABLE, "insert_failed_health"),
+    "fallback_lease_release": (OBSERVER_LEASES_TABLE, "cas_release"),
+    "fallback_commit": ("operational_store", "commit_failure_evidence"),
+}
+_SAFE_IDENTIFIER = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+    r"(?:,\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)*"
+)
+_SAFE_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
+_TRIGGER_CONSTRAINTS = {
+    "change registry canonical row is immutable": "change_registry_immutable",
+    "change registry canonical row is append-only": "change_registry_append_only",
+    "change registry observer lease CAS mismatch": "change_registry_observer_lease_cas",
+    "change registry observer lease rows are retained": "change_registry_observer_lease_retained",
+}
+_SQLITE_CATEGORIES = {
+    "SQLITE_CONSTRAINT_UNIQUE": "unique",
+    "SQLITE_CONSTRAINT_PRIMARYKEY": "primary_key",
+    "SQLITE_CONSTRAINT_FOREIGNKEY": "foreign_key",
+    "SQLITE_CONSTRAINT_NOTNULL": "not_null",
+    "SQLITE_CONSTRAINT_CHECK": "check",
+    "SQLITE_CONSTRAINT_TRIGGER": "trigger",
+    "SQLITE_CONSTRAINT_ROWID": "rowid",
+    "SQLITE_CONSTRAINT": "constraint",
+    "SQLITE_BUSY": "busy",
+    "SQLITE_LOCKED": "locked",
+    "SQLITE_READONLY": "readonly",
+    "SQLITE_FULL": "full",
+    "SQLITE_IOERR": "io",
+    "SQLITE_CORRUPT": "corrupt",
+    "SQLITE_SCHEMA": "schema",
+}
 
 
 class ChangeRegistryObserverError(ValueError):
@@ -57,6 +105,36 @@ class ChangeRegistryObserverError(ValueError):
 
 class ChangeRegistryObserverBusy(ChangeRegistryObserverError):
     """Another scan owns the exact seller/account lease."""
+
+
+class ChangeRegistryObserverTerminalEvidenceError(ChangeRegistryObserverError):
+    """Both the primary failure and fallback persistence remain inspectable."""
+
+    def __init__(
+        self,
+        primary: Mapping[str, Any],
+        fallback: Mapping[str, Any],
+        rescue: Mapping[str, Any],
+    ) -> None:
+        super().__init__(
+            "observer terminal evidence persistence failed after a primary failure"
+        )
+        self.primary_evidence = dict(primary)
+        self.fallback_evidence = dict(fallback)
+        self.rescue_evidence = dict(rescue)
+
+
+@dataclass
+class _PersistenceStage:
+    stage: str = ""
+    table: str = ""
+    operation: str = ""
+
+    def enter(self, stage: str, bindings: Mapping[str, tuple[str, str]]) -> None:
+        table, operation = bindings[stage]
+        self.stage = stage
+        self.table = table
+        self.operation = operation
 
 
 def utc_now() -> str:
@@ -119,6 +197,120 @@ def _insert_idempotent(
         )
 
 
+def _source_status(snapshot: Mapping[str, Any]) -> str:
+    status = str(snapshot.get("completeness_status") or "").strip().lower()
+    return status if status in {"complete", "partial", "failed"} else "invalid"
+
+
+def _safe_error_code(exc: Exception) -> str:
+    name = type(exc).__name__
+    return name[:120] if _SAFE_TOKEN.fullmatch(name) else "Exception"
+
+
+def _sqlite_identity(exc: Exception) -> tuple[int | None, str]:
+    raw_code = getattr(exc, "sqlite_errorcode", None)
+    errorcode = (
+        int(raw_code)
+        if isinstance(raw_code, int) and 0 <= int(raw_code) <= 65535
+        else None
+    )
+    raw_name = str(getattr(exc, "sqlite_errorname", "") or "")
+    errorname = (
+        raw_name[:80]
+        if re.fullmatch(r"SQLITE_[A-Z0-9_]+", raw_name)
+        else ""
+    )
+    return errorcode, errorname
+
+
+def _constraint_evidence(exc: Exception, errorname: str) -> tuple[str, str]:
+    category = _SQLITE_CATEGORIES.get(errorname, "")
+    if isinstance(exc, sqlite3.Error) and not category:
+        category = "sqlite_database"
+    raw = " ".join(str(exc).split())
+    constraint = ""
+    if category in {"unique", "not_null"}:
+        prefix = (
+            "UNIQUE constraint failed: "
+            if category == "unique"
+            else "NOT NULL constraint failed: "
+        )
+        if raw.startswith(prefix):
+            candidate = raw[len(prefix) :]
+            if len(candidate) <= 320 and _SAFE_IDENTIFIER.fullmatch(candidate):
+                constraint = candidate
+    elif category == "check" and raw.startswith("CHECK constraint failed: "):
+        candidate = raw[len("CHECK constraint failed: ") :]
+        if len(candidate) <= 320 and _SAFE_IDENTIFIER.fullmatch(candidate):
+            constraint = candidate
+    elif category == "trigger":
+        constraint = _TRIGGER_CONSTRAINTS.get(raw, "")
+    return category, constraint
+
+
+def _failure_evidence(
+    exc: Exception,
+    *,
+    failure_origin: str,
+    source_status: str,
+    persistence: _PersistenceStage | None = None,
+) -> dict[str, Any]:
+    exact_source_status = (
+        source_status if source_status in SOURCE_STATUSES else "invalid"
+    )
+    error_code = _safe_error_code(exc)
+    sqlite_errorcode, sqlite_errorname = _sqlite_identity(exc)
+    category, constraint = _constraint_evidence(exc, sqlite_errorname)
+    if not category:
+        if failure_origin == "source_acquisition":
+            category = "source_acquisition"
+        elif isinstance(exc, ChangeRegistryObserverBusy):
+            category = "lease_ownership"
+        elif isinstance(exc, ChangeRegistryObserverError):
+            category = "observer_validation"
+        else:
+            category = "local_persistence"
+    if isinstance(exc, sqlite3.Error):
+        detail = f"; constraint={constraint}" if constraint else ""
+        safe_message = f"SQLite failure: {sqlite_errorname or 'SQLITE_ERROR'}; category={category}{detail}."
+    elif failure_origin == "source_acquisition":
+        safe_message = f"Source acquisition failed: {error_code}."
+    else:
+        safe_message = f"Local persistence failed: {error_code}; category={category}."
+    safe_message = safe_message[:400]
+    payload = {
+        "error_code": error_code,
+        "error_message": safe_message,
+        "source_status": exact_source_status,
+        "failure_origin": failure_origin,
+        "persistence_stage": persistence.stage if persistence else "",
+        "persistence_table": persistence.table if persistence else "",
+        "persistence_operation": persistence.operation if persistence else "",
+        "sqlite_errorcode": sqlite_errorcode,
+        "sqlite_errorname": sqlite_errorname,
+        "constraint_category": category,
+        "constraint_name": constraint,
+    }
+    payload["error_digest"] = canonical_digest(payload)
+    return payload
+
+
+def _fallback_columns(failure: Mapping[str, Any] | None) -> dict[str, Any]:
+    evidence = dict(failure or {})
+    return {
+        "fallback_persistence_stage": str(evidence.get("persistence_stage") or "")[:80],
+        "fallback_persistence_table": str(evidence.get("persistence_table") or "")[:160],
+        "fallback_persistence_operation": str(evidence.get("persistence_operation") or "")[:160],
+        "fallback_error_code": str(evidence.get("error_code") or "")[:120],
+        "fallback_error_message": str(evidence.get("error_message") or "")[:800],
+        "fallback_sqlite_errorcode": evidence.get("sqlite_errorcode"),
+        "fallback_sqlite_errorname": str(evidence.get("sqlite_errorname") or "")[:80],
+        "fallback_constraint_category": str(evidence.get("constraint_category") or "")[:80],
+        "fallback_constraint_name": str(evidence.get("constraint_name") or "")[:320],
+        "fallback_error_digest": str(evidence.get("error_digest") or ""),
+    }
+
+
 class ChangeRegistryObserver:
     def __init__(
         self,
@@ -129,6 +321,12 @@ class ChangeRegistryObserver:
         acquirer_factory: Callable[[], ChangeRegistrySourceAcquirer] | None = None,
         now_fn: Callable[[], str] | None = None,
         lease_seconds: int = LEASE_SECONDS,
+        persistence_stage_hook: (
+            Callable[[str, sqlite3.Connection | None], None] | None
+        ) = None,
+        fallback_stage_hook: (
+            Callable[[str, sqlite3.Connection | None], None] | None
+        ) = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
         self.seller_id = str(seller_id or "").strip()
@@ -146,11 +344,33 @@ class ChangeRegistryObserver:
                 account_scope=self.account_scope,
             )
         )
+        self.persistence_stage_hook = persistence_stage_hook
+        self.fallback_stage_hook = fallback_stage_hook
         self.engine = ChangeRegistryBaselineEngine(
             runtime_dir=self.runtime_dir,
             seller_id=self.seller_id,
             account_scope=self.account_scope,
         )
+
+    def _enter_persistence_stage(
+        self,
+        state: _PersistenceStage,
+        stage: str,
+        conn: sqlite3.Connection | None,
+    ) -> None:
+        state.enter(stage, PERSISTENCE_STAGE_BINDINGS)
+        if self.persistence_stage_hook is not None:
+            self.persistence_stage_hook(stage, conn)
+
+    def _enter_fallback_stage(
+        self,
+        state: _PersistenceStage,
+        stage: str,
+        conn: sqlite3.Connection | None,
+    ) -> None:
+        state.enter(stage, FALLBACK_STAGE_BINDINGS)
+        if self.fallback_stage_hook is not None:
+            self.fallback_stage_hook(stage, conn)
 
     def initialize_schema(self) -> None:
         ChangeRegistryRepository(self.runtime_dir).initialize_schema()
@@ -221,11 +441,40 @@ class ChangeRegistryObserver:
             return self.read_job(exact_job_id)
         try:
             snapshot = self.acquirer_factory().acquire()
+        except Exception as exc:
+            primary = _failure_evidence(
+                exc,
+                failure_origin="source_acquisition",
+                source_status="failed",
+            )
+            try:
+                self._fail_job(exact_job_id, trigger, slot, primary)
+            except ChangeRegistryObserverTerminalEvidenceError as terminal_exc:
+                raise terminal_exc from exc
+            raise
+        source_status = _source_status(snapshot)
+        persistence = _PersistenceStage()
+        try:
             return self._persist(
-                exact_job_id, trigger, slot, snapshot, inject_db_failure
+                exact_job_id,
+                trigger,
+                slot,
+                snapshot,
+                source_status,
+                persistence,
+                inject_db_failure,
             )
         except Exception as exc:
-            self._fail_job(exact_job_id, trigger, slot, exc)
+            primary = _failure_evidence(
+                exc,
+                failure_origin="local_persistence",
+                source_status=source_status,
+                persistence=persistence,
+            )
+            try:
+                self._fail_job(exact_job_id, trigger, slot, primary)
+            except ChangeRegistryObserverTerminalEvidenceError as terminal_exc:
+                raise terminal_exc from exc
             raise
 
     def submit_manual(self, *, requested_by: str, job_id: str = "") -> dict[str, Any]:
@@ -264,9 +513,40 @@ class ChangeRegistryObserver:
         def worker() -> None:
             try:
                 snapshot = self.acquirer_factory().acquire()
-                self._persist(exact_job_id, "manual", "", snapshot, False)
             except Exception as exc:  # pragma: no cover - integration boundary
-                self._fail_job(exact_job_id, "manual", "", exc)
+                primary = _failure_evidence(
+                    exc,
+                    failure_origin="source_acquisition",
+                    source_status="failed",
+                )
+                try:
+                    self._fail_job(exact_job_id, "manual", "", primary)
+                except ChangeRegistryObserverTerminalEvidenceError:
+                    return
+                return
+            source_status = _source_status(snapshot)
+            persistence = _PersistenceStage()
+            try:
+                self._persist(
+                    exact_job_id,
+                    "manual",
+                    "",
+                    snapshot,
+                    source_status,
+                    persistence,
+                    False,
+                )
+            except Exception as exc:  # pragma: no cover - integration boundary
+                primary = _failure_evidence(
+                    exc,
+                    failure_origin="local_persistence",
+                    source_status=source_status,
+                    persistence=persistence,
+                )
+                try:
+                    self._fail_job(exact_job_id, "manual", "", primary)
+                except ChangeRegistryObserverTerminalEvidenceError:
+                    return
 
         threading.Thread(
             target=worker,
@@ -448,9 +728,10 @@ class ChangeRegistryObserver:
         trigger: str,
         slot: str,
         snapshot: Mapping[str, Any],
+        source_status: str,
+        persistence: _PersistenceStage,
         inject_db_failure: bool,
     ) -> dict[str, Any]:
-        interval = snapshot.get("interval") or {}
         canonical_snapshot = canonicalize_acquisition_timestamps(snapshot)
         if not isinstance(canonical_snapshot, Mapping):
             raise ChangeRegistryObserverError("acquisition snapshot must be an object")
@@ -465,6 +746,9 @@ class ChangeRegistryObserver:
             conn: sqlite3.Connection,
             receipt: Mapping[str, Any],
         ) -> None:
+            self._enter_persistence_stage(
+                persistence, "baseline_result", conn
+            )
             lease = conn.execute(
                 f"SELECT * FROM {OBSERVER_LEASES_TABLE} "
                 "WHERE seller_id=? AND account_scope=?",
@@ -478,7 +762,14 @@ class ChangeRegistryObserver:
             outcome = str(receipt["completeness_status"])
             fact_count = int(receipt["row_counts"]["facts"])
             self._persist_source_manifests(
-                conn, checkpoint_id, completed_at, canonical_snapshot
+                conn,
+                checkpoint_id,
+                completed_at,
+                canonical_snapshot,
+                persistence,
+            )
+            self._enter_persistence_stage(
+                persistence, "terminal_job_event", conn
             )
             self._append_job_event(
                 conn,
@@ -488,15 +779,30 @@ class ChangeRegistryObserver:
                 persisted_at,
                 checkpoint_id,
                 fact_count,
+                source_status=source_status,
             )
             if trigger == "scheduled":
+                self._enter_persistence_stage(
+                    persistence, "scheduled_health", conn
+                )
                 self._append_health(
                     conn, job_id, slot, outcome, persisted_at, checkpoint_id
                 )
+            self._enter_persistence_stage(
+                persistence, "lease_release", conn
+            )
             self._release(conn, job_id, persisted_at)
+            self._enter_persistence_stage(
+                persistence, "transaction_commit", conn
+            )
             if inject_db_failure:
-                raise sqlite3.OperationalError("injected observer DB failure")
+                raise sqlite3.OperationalError(
+                    "injected observer transaction commit failure"
+                )
 
+        self._enter_persistence_stage(
+            persistence, "baseline_ingest", None
+        )
         self.engine.ingest(
             canonical_snapshot, transaction_hook=persist_observer_metadata
         )
@@ -508,9 +814,15 @@ class ChangeRegistryObserver:
         checkpoint_id: str,
         created_at: str,
         snapshot: Mapping[str, Any],
+        persistence: _PersistenceStage,
     ) -> None:
         sources = snapshot.get("sources") or {}
         for source_name in ("prices", "ads"):
+            self._enter_persistence_stage(
+                persistence,
+                f"source_manifest_{source_name}",
+                conn,
+            )
             source = dict(sources.get(source_name) or {})
             counts = dict(source.get("counts") or {})
             observed = int(
@@ -576,7 +888,37 @@ class ChangeRegistryObserver:
         *,
         error_code: str = "",
         error_message: str = "",
+        source_status: str = "not_observed",
+        failure: Mapping[str, Any] | None = None,
+        fallback_failure: Mapping[str, Any] | None = None,
     ) -> None:
+        typed = dict(failure or {})
+        exact_source_status = str(
+            typed.get("source_status") or source_status or "not_observed"
+        )
+        if exact_source_status not in SOURCE_STATUSES:
+            exact_source_status = "invalid"
+        primary = {
+            "error_code": str(typed.get("error_code") or error_code)[:120],
+            "error_message": str(
+                typed.get("error_message") or error_message
+            )[:800],
+            "source_status": exact_source_status,
+            "failure_origin": str(typed.get("failure_origin") or ""),
+            "persistence_stage": str(typed.get("persistence_stage") or "")[:80],
+            "persistence_table": str(typed.get("persistence_table") or "")[:160],
+            "persistence_operation": str(
+                typed.get("persistence_operation") or ""
+            )[:160],
+            "sqlite_errorcode": typed.get("sqlite_errorcode"),
+            "sqlite_errorname": str(typed.get("sqlite_errorname") or "")[:80],
+            "constraint_category": str(
+                typed.get("constraint_category") or ""
+            )[:80],
+            "constraint_name": str(typed.get("constraint_name") or "")[:320],
+            "error_digest": str(typed.get("error_digest") or ""),
+        }
+        fallback = _fallback_columns(fallback_failure)
         evidence = canonical_digest(
             {
                 "job_id": job_id,
@@ -584,7 +926,8 @@ class ChangeRegistryObserver:
                 "state": state,
                 "checkpoint_id": checkpoint_id,
                 "fact_count": fact_count,
-                "error_code": error_code,
+                **primary,
+                **fallback,
             }
         )
         _insert(
@@ -598,8 +941,8 @@ class ChangeRegistryObserver:
                 "occurred_at": occurred_at,
                 "checkpoint_id": checkpoint_id,
                 "fact_count": fact_count,
-                "error_code": error_code[:120],
-                "error_message": error_message[:800],
+                **primary,
+                **fallback,
                 "evidence_digest": evidence,
             },
         )
@@ -634,9 +977,10 @@ class ChangeRegistryObserver:
                 "health_state": health,
             }
         )
-        _insert(
+        _insert_idempotent(
             conn,
             OBSERVER_HEALTH_EVENTS_TABLE,
+            "health_event_id",
             {
                 "health_event_id": _id(
                     "crhe_", [self.seller_id, self.account_scope, slot]
@@ -667,12 +1011,135 @@ class ChangeRegistryObserver:
             )
 
     def _fail_job(
-        self, job_id: str, trigger: str, slot: str, exc: Exception
+        self,
+        job_id: str,
+        trigger: str,
+        slot: str,
+        primary_failure: Mapping[str, Any],
     ) -> None:
         now = canonical_utc_timestamp(self.now_fn())
+        fallback_stage = _PersistenceStage()
+        try:
+            self._enter_fallback_stage(
+                fallback_stage, "fallback_store_open", None
+            )
+            with self.store_registry.session(
+                "operational",
+                mode="rw",
+                operation="change_registry_observer_fail",
+            ) as conn:
+                self._enter_fallback_stage(
+                    fallback_stage, "fallback_begin", conn
+                )
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    state = self._last_job_state(conn, job_id)
+                    if state in TERMINAL_JOB_STATES:
+                        conn.commit()
+                        return
+                    sequence = self._next_event_sequence(conn, job_id)
+                    self._enter_fallback_stage(
+                        fallback_stage,
+                        "fallback_terminal_job_event",
+                        conn,
+                    )
+                    self._append_job_event(
+                        conn,
+                        job_id,
+                        sequence,
+                        "failed",
+                        now,
+                        None,
+                        0,
+                        failure=primary_failure,
+                    )
+                    if trigger == "scheduled":
+                        self._enter_fallback_stage(
+                            fallback_stage,
+                            "fallback_scheduled_health",
+                            conn,
+                        )
+                        self._append_health(
+                            conn, job_id, slot, "failed", now, None
+                        )
+                    lease = conn.execute(
+                        f"SELECT owner_job_id FROM {OBSERVER_LEASES_TABLE} "
+                        "WHERE seller_id=? AND account_scope=?",
+                        (self.seller_id, self.account_scope),
+                    ).fetchone()
+                    if (
+                        lease is not None
+                        and str(lease["owner_job_id"]) == job_id
+                    ):
+                        self._enter_fallback_stage(
+                            fallback_stage,
+                            "fallback_lease_release",
+                            conn,
+                        )
+                        self._release(conn, job_id, now)
+                    self._enter_fallback_stage(
+                        fallback_stage, "fallback_commit", conn
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        except Exception as fallback_exc:
+            fallback_failure = _failure_evidence(
+                fallback_exc,
+                failure_origin="local_persistence",
+                source_status=str(
+                    primary_failure.get("source_status") or "invalid"
+                ),
+                persistence=fallback_stage,
+            )
+            rescue_stage = _PersistenceStage()
+            try:
+                self._rescue_failure_evidence(
+                    job_id=job_id,
+                    trigger=trigger,
+                    slot=slot,
+                    now=now,
+                    primary_failure=primary_failure,
+                    fallback_failure=fallback_failure,
+                    stage=rescue_stage,
+                )
+            except Exception as rescue_exc:
+                rescue_failure = _failure_evidence(
+                    rescue_exc,
+                    failure_origin="local_persistence",
+                    source_status=str(
+                        primary_failure.get("source_status") or "invalid"
+                    ),
+                    persistence=rescue_stage,
+                )
+                raise ChangeRegistryObserverTerminalEvidenceError(
+                    primary_failure,
+                    fallback_failure,
+                    rescue_failure,
+                ) from rescue_exc
+
+    def _rescue_failure_evidence(
+        self,
+        *,
+        job_id: str,
+        trigger: str,
+        slot: str,
+        now: str,
+        primary_failure: Mapping[str, Any],
+        fallback_failure: Mapping[str, Any],
+        stage: _PersistenceStage,
+    ) -> None:
+        stage.stage = "fallback_rescue_store_open"
+        stage.table = "operational_store"
+        stage.operation = "open_rescue_rw"
         with self.store_registry.session(
-            "operational", mode="rw", operation="change_registry_observer_fail"
+            "operational",
+            mode="rw",
+            operation="change_registry_observer_fail_rescue",
         ) as conn:
+            stage.stage = "fallback_rescue_begin"
+            stage.operation = "begin_immediate_rescue"
             conn.execute("BEGIN IMMEDIATE")
             try:
                 state = self._last_job_state(conn, job_id)
@@ -680,6 +1147,9 @@ class ChangeRegistryObserver:
                     conn.commit()
                     return
                 sequence = self._next_event_sequence(conn, job_id)
+                stage.stage = "fallback_rescue_terminal_job_event"
+                stage.table = OBSERVER_JOB_EVENTS_TABLE
+                stage.operation = "insert_failed_terminal_with_fallback"
                 self._append_job_event(
                     conn,
                     job_id,
@@ -688,23 +1158,43 @@ class ChangeRegistryObserver:
                     now,
                     None,
                     0,
-                    error_code=type(exc).__name__,
-                    error_message=(
-                        "Сканирование не завершено; источник или локальное "
-                        "сохранение вернули ошибку."
-                    ),
+                    failure=primary_failure,
+                    fallback_failure=fallback_failure,
                 )
                 if trigger == "scheduled":
-                    self._append_health(
-                        conn, job_id, slot, "failed", now, None
-                    )
+                    stage.stage = "fallback_rescue_scheduled_health"
+                    stage.table = OBSERVER_HEALTH_EVENTS_TABLE
+                    stage.operation = "ensure_failed_health"
+                    existing_health = conn.execute(
+                        f"SELECT * FROM {OBSERVER_HEALTH_EVENTS_TABLE} "
+                        "WHERE seller_id=? AND account_scope=? "
+                        "AND scheduled_slot=?",
+                        (self.seller_id, self.account_scope, slot),
+                    ).fetchone()
+                    if existing_health is None:
+                        self._append_health(
+                            conn, job_id, slot, "failed", now, None
+                        )
+                    elif not (
+                        str(existing_health["job_id"]) == job_id
+                        and str(existing_health["outcome"]) == "failed"
+                    ):
+                        raise ChangeRegistryObserverError(
+                            "scheduled health slot owns different failure evidence"
+                        )
                 lease = conn.execute(
                     f"SELECT owner_job_id FROM {OBSERVER_LEASES_TABLE} "
                     "WHERE seller_id=? AND account_scope=?",
                     (self.seller_id, self.account_scope),
                 ).fetchone()
                 if lease is not None and str(lease["owner_job_id"]) == job_id:
+                    stage.stage = "fallback_rescue_lease_release"
+                    stage.table = OBSERVER_LEASES_TABLE
+                    stage.operation = "cas_release"
                     self._release(conn, job_id, now)
+                stage.stage = "fallback_rescue_commit"
+                stage.table = "operational_store"
+                stage.operation = "commit_rescue_failure_evidence"
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -802,7 +1292,22 @@ class ChangeRegistryReadSurface:
             ).fetchone()
             jobs = conn.execute(
                 f"""SELECT job.*,event.state,event.occurred_at AS status_at,
-                           event.checkpoint_id,event.fact_count,event.error_code
+                           event.checkpoint_id,event.fact_count,event.error_code,
+                           event.error_message,event.source_status,
+                           event.failure_origin,event.persistence_stage,
+                           event.persistence_table,event.persistence_operation,
+                           event.sqlite_errorcode,event.sqlite_errorname,
+                           event.constraint_category,event.constraint_name,
+                           event.error_digest,event.fallback_persistence_stage,
+                           event.fallback_persistence_table,
+                           event.fallback_persistence_operation,
+                           event.fallback_error_code,
+                           event.fallback_error_message,
+                           event.fallback_sqlite_errorcode,
+                           event.fallback_sqlite_errorname,
+                           event.fallback_constraint_category,
+                           event.fallback_constraint_name,
+                           event.fallback_error_digest
                     FROM {OBSERVER_JOBS_TABLE} job
                     JOIN {OBSERVER_JOB_EVENTS_TABLE} event ON event.job_id=job.job_id
                     WHERE job.seller_id=? AND job.account_scope=?
@@ -1011,8 +1516,10 @@ __all__ = [
     "ChangeRegistryObserver",
     "ChangeRegistryObserverBusy",
     "ChangeRegistryObserverError",
+    "ChangeRegistryObserverTerminalEvidenceError",
     "ChangeRegistryReadSurface",
     "DEFAULT_ACCOUNT_SCOPE",
+    "PERSISTENCE_STAGE_BINDINGS",
     "TERMINAL_JOB_STATES",
     "activation_job_id",
     "scheduled_slot",

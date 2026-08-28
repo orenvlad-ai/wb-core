@@ -687,6 +687,57 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             ),
             error_code TEXT NOT NULL DEFAULT '',
             error_message TEXT NOT NULL DEFAULT '' CHECK(length(error_message)<=800),
+            source_status TEXT NOT NULL DEFAULT 'not_observed' CHECK(
+                source_status IN ('not_observed','complete','partial','failed','invalid')
+            ),
+            failure_origin TEXT NOT NULL DEFAULT '' CHECK(
+                failure_origin IN ('','source_acquisition','local_persistence')
+            ),
+            persistence_stage TEXT NOT NULL DEFAULT '' CHECK(length(persistence_stage)<=80),
+            persistence_table TEXT NOT NULL DEFAULT '' CHECK(length(persistence_table)<=160),
+            persistence_operation TEXT NOT NULL DEFAULT '' CHECK(length(persistence_operation)<=160),
+            sqlite_errorcode INTEGER CHECK(
+                sqlite_errorcode IS NULL OR (
+                    typeof(sqlite_errorcode)='integer'
+                    AND sqlite_errorcode>=0 AND sqlite_errorcode<=65535
+                )
+            ),
+            sqlite_errorname TEXT NOT NULL DEFAULT '' CHECK(length(sqlite_errorname)<=80),
+            constraint_category TEXT NOT NULL DEFAULT '' CHECK(length(constraint_category)<=80),
+            constraint_name TEXT NOT NULL DEFAULT '' CHECK(length(constraint_name)<=320),
+            error_digest TEXT NOT NULL DEFAULT '' CHECK(
+                error_digest='' OR {_digest_check('error_digest')}
+            ),
+            fallback_persistence_stage TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_persistence_stage)<=80
+            ),
+            fallback_persistence_table TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_persistence_table)<=160
+            ),
+            fallback_persistence_operation TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_persistence_operation)<=160
+            ),
+            fallback_error_code TEXT NOT NULL DEFAULT '' CHECK(length(fallback_error_code)<=120),
+            fallback_error_message TEXT NOT NULL DEFAULT '' CHECK(length(fallback_error_message)<=800),
+            fallback_sqlite_errorcode INTEGER CHECK(
+                fallback_sqlite_errorcode IS NULL OR (
+                    typeof(fallback_sqlite_errorcode)='integer'
+                    AND fallback_sqlite_errorcode>=0
+                    AND fallback_sqlite_errorcode<=65535
+                )
+            ),
+            fallback_sqlite_errorname TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_sqlite_errorname)<=80
+            ),
+            fallback_constraint_category TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_constraint_category)<=80
+            ),
+            fallback_constraint_name TEXT NOT NULL DEFAULT '' CHECK(
+                length(fallback_constraint_name)<=320
+            ),
+            fallback_error_digest TEXT NOT NULL DEFAULT '' CHECK(
+                fallback_error_digest='' OR {_digest_check('fallback_error_digest')}
+            ),
             evidence_digest TEXT NOT NULL CHECK({_digest_check('evidence_digest')}),
             CHECK({_identity_text_check('job_event_id', 120)}),
             UNIQUE(job_id,sequence_no)
@@ -988,6 +1039,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
         END;
         """
     )
+    _ensure_observer_job_event_evidence_columns(conn)
     for table in IMMUTABLE_TABLES:
         trigger_stem = table.removeprefix("change_registry_")
         conn.executescript(
@@ -1004,6 +1056,89 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             END;
             """
         )
+
+
+def _ensure_observer_job_event_evidence_columns(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add the observer failure-attribution columns to an existing generation."""
+
+    declarations = {
+        "source_status": (
+            "TEXT NOT NULL DEFAULT 'not_observed' CHECK("
+            "source_status IN ('not_observed','complete','partial','failed','invalid'))"
+        ),
+        "failure_origin": (
+            "TEXT NOT NULL DEFAULT '' CHECK("
+            "failure_origin IN ('','source_acquisition','local_persistence'))"
+        ),
+        "persistence_stage": "TEXT NOT NULL DEFAULT '' CHECK(length(persistence_stage)<=80)",
+        "persistence_table": "TEXT NOT NULL DEFAULT '' CHECK(length(persistence_table)<=160)",
+        "persistence_operation": "TEXT NOT NULL DEFAULT '' CHECK(length(persistence_operation)<=160)",
+        "sqlite_errorcode": (
+            "INTEGER CHECK(sqlite_errorcode IS NULL OR ("
+            "typeof(sqlite_errorcode)='integer' AND sqlite_errorcode>=0 "
+            "AND sqlite_errorcode<=65535))"
+        ),
+        "sqlite_errorname": "TEXT NOT NULL DEFAULT '' CHECK(length(sqlite_errorname)<=80)",
+        "constraint_category": "TEXT NOT NULL DEFAULT '' CHECK(length(constraint_category)<=80)",
+        "constraint_name": "TEXT NOT NULL DEFAULT '' CHECK(length(constraint_name)<=320)",
+        "error_digest": (
+            "TEXT NOT NULL DEFAULT '' CHECK(error_digest='' OR "
+            "(length(error_digest)=71 AND substr(error_digest,1,7)='sha256:' "
+            "AND lower(substr(error_digest,8))=substr(error_digest,8) "
+            "AND substr(error_digest,8) NOT GLOB '*[^0-9a-f]*'))"
+        ),
+        "fallback_persistence_stage": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_persistence_stage)<=80)"
+        ),
+        "fallback_persistence_table": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_persistence_table)<=160)"
+        ),
+        "fallback_persistence_operation": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_persistence_operation)<=160)"
+        ),
+        "fallback_error_code": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_error_code)<=120)"
+        ),
+        "fallback_error_message": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_error_message)<=800)"
+        ),
+        "fallback_sqlite_errorcode": (
+            "INTEGER CHECK(fallback_sqlite_errorcode IS NULL OR ("
+            "typeof(fallback_sqlite_errorcode)='integer' "
+            "AND fallback_sqlite_errorcode>=0 "
+            "AND fallback_sqlite_errorcode<=65535))"
+        ),
+        "fallback_sqlite_errorname": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_sqlite_errorname)<=80)"
+        ),
+        "fallback_constraint_category": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_constraint_category)<=80)"
+        ),
+        "fallback_constraint_name": (
+            "TEXT NOT NULL DEFAULT '' CHECK(length(fallback_constraint_name)<=320)"
+        ),
+        "fallback_error_digest": (
+            "TEXT NOT NULL DEFAULT '' CHECK(fallback_error_digest='' OR "
+            "(length(fallback_error_digest)=71 "
+            "AND substr(fallback_error_digest,1,7)='sha256:' "
+            "AND lower(substr(fallback_error_digest,8))=substr(fallback_error_digest,8) "
+            "AND substr(fallback_error_digest,8) NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    }
+    existing = {
+        str(row[1])
+        for row in conn.execute(
+            f"PRAGMA table_info({OBSERVER_JOB_EVENTS_TABLE})"
+        ).fetchall()
+    }
+    for column, declaration in declarations.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE {OBSERVER_JOB_EVENTS_TABLE} "
+                f"ADD COLUMN {column} {declaration}"
+            )
 
 
 class ChangeRegistryRepository:

@@ -26,13 +26,16 @@ from packages.application.change_registry import (  # noqa: E402
     OBSERVATION_VALUES_TABLE,
     OBSERVER_HEALTH_EVENTS_TABLE,
     OBSERVER_JOB_EVENTS_TABLE,
+    OBSERVER_LEASES_TABLE,
     canonical_digest,
+    ensure_change_registry_schema,
 )
 from packages.application.change_registry_observer import (  # noqa: E402
     ChangeRegistryObserver,
     ChangeRegistryObserverBusy,
     ChangeRegistryObserverError,
     ChangeRegistryReadSurface,
+    PERSISTENCE_STAGE_BINDINGS,
     activation_job_id,
 )
 from packages.application.change_registry_source_acquisition import (  # noqa: E402
@@ -275,7 +278,14 @@ class SnapshotAcquirer:
         return deepcopy(self.snapshot)
 
 
-def _observer(runtime_dir: Path, snapshot: Mapping[str, Any], now: str) -> tuple[ChangeRegistryObserver, SnapshotAcquirer]:
+def _observer(
+    runtime_dir: Path,
+    snapshot: Mapping[str, Any],
+    now: str,
+    *,
+    persistence_stage_hook: Any = None,
+    fallback_stage_hook: Any = None,
+) -> tuple[ChangeRegistryObserver, SnapshotAcquirer]:
     acquirer = SnapshotAcquirer(snapshot)
     return (
         ChangeRegistryObserver(
@@ -284,9 +294,55 @@ def _observer(runtime_dir: Path, snapshot: Mapping[str, Any], now: str) -> tuple
             account_scope=ACCOUNT,
             acquirer_factory=lambda: acquirer,
             now_fn=lambda: now,
+            persistence_stage_hook=persistence_stage_hook,
+            fallback_stage_hook=fallback_stage_hook,
         ),
         acquirer,
     )
+
+
+def _sqlite_integrity_error(*, malicious: bool = False) -> sqlite3.IntegrityError:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE stage_failure(value TEXT UNIQUE)")
+        conn.execute("INSERT INTO stage_failure(value) VALUES('owned')")
+        try:
+            conn.execute("INSERT INTO stage_failure(value) VALUES('owned')")
+        except sqlite3.IntegrityError as exc:
+            if malicious:
+                exc.args = (
+                    "UNIQUE constraint failed: stage_failure.value; "
+                    "SELECT token FROM /private/runtime/secret " + "x" * 5000,
+                )
+            return exc
+    finally:
+        conn.close()
+    raise AssertionError("failed to construct SQLite IntegrityError")
+
+
+class StageFailure:
+    def __init__(self, stage: str, *, malicious: bool = False) -> None:
+        self.stage = stage
+        self.malicious = malicious
+        self.calls = 0
+
+    def __call__(self, stage: str, _conn: sqlite3.Connection | None) -> None:
+        if stage == self.stage:
+            self.calls += 1
+            raise _sqlite_integrity_error(malicious=self.malicious)
+
+
+class FailingSource:
+    def __init__(self) -> None:
+        self.upload_task_calls = 0
+        self.patch_bids_calls = 0
+        self.balance_wb_patch_called = False
+
+    def acquire(self) -> dict[str, Any]:
+        raise RuntimeError(
+            "Authorization=secret-token /private/runtime/source SELECT * "
+            + "payload" * 1000
+        )
 
 
 def _counts(db_path: Path) -> dict[str, int]:
@@ -311,6 +367,71 @@ def _atomic_result_counts(db_path: Path) -> dict[str, int]:
                 FACT_LINKS_TABLE,
             )
         }
+
+
+def _terminal_event(db_path: Path, job_id: str) -> dict[str, Any]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f"SELECT * FROM {OBSERVER_JOB_EVENTS_TABLE} "
+            "WHERE job_id=? ORDER BY sequence_no DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise AssertionError("terminal observer event is missing")
+    return dict(row)
+
+
+def _assert_released_lease(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        lease = conn.execute(
+            f"SELECT * FROM {OBSERVER_LEASES_TABLE} LIMIT 1"
+        ).fetchone()
+    assert lease is not None
+    assert dict(lease)["owner_job_id"] == ""
+    assert int(dict(lease)["revision"]) == 2
+
+
+def _assert_legacy_event_schema_upgrade(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"""CREATE TABLE {OBSERVER_JOB_EVENTS_TABLE}(
+                job_event_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                sequence_no INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                checkpoint_id TEXT,
+                fact_count INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                evidence_digest TEXT NOT NULL,
+                UNIQUE(job_id,sequence_no)
+            )"""
+        )
+        ensure_change_registry_schema(conn)
+        conn.commit()
+        columns = {
+            str(row[1])
+            for row in conn.execute(
+                f"PRAGMA table_info({OBSERVER_JOB_EVENTS_TABLE})"
+            ).fetchall()
+        }
+    assert {
+        "source_status",
+        "failure_origin",
+        "persistence_stage",
+        "persistence_table",
+        "persistence_operation",
+        "sqlite_errorcode",
+        "sqlite_errorname",
+        "constraint_category",
+        "constraint_name",
+        "error_digest",
+        "fallback_persistence_stage",
+        "fallback_error_digest",
+    } <= columns
 
 
 def main() -> None:
@@ -342,7 +463,7 @@ def main() -> None:
             incomplete_after.st_size,
             incomplete_after.st_mtime_ns,
         )
-
+        _assert_legacy_event_schema_upgrade(Path(tmp) / "legacy-observer.sqlite3")
         runtime_dir = Path(tmp) / "runtime"
         runtime_dir.mkdir(parents=True)
         db_path = runtime_dir / "registry_upload_runtime.sqlite3"
@@ -490,7 +611,21 @@ def main() -> None:
             pass
         else:
             raise AssertionError("concurrent observer did not fail closed on the lease")
-        holder._fail_job("lease-holder", "manual", "", RuntimeError("smoke release"))
+        holder_failure = {
+            "error_code": "RuntimeError",
+            "error_message": "Local persistence failed: RuntimeError; category=local_persistence.",
+            "source_status": "invalid",
+            "failure_origin": "local_persistence",
+            "persistence_stage": "lease_test_cleanup",
+            "persistence_table": OBSERVER_LEASES_TABLE,
+            "persistence_operation": "release",
+            "sqlite_errorcode": None,
+            "sqlite_errorname": "",
+            "constraint_category": "local_persistence",
+            "constraint_name": "",
+        }
+        holder_failure["error_digest"] = canonical_digest(holder_failure)
+        holder._fail_job("lease-holder", "manual", "", holder_failure)
 
         crash_digest = canonical_digest(
             {
@@ -563,13 +698,232 @@ def main() -> None:
         atomic_before_failure = _atomic_result_counts(db_path)
         observer, _ = _observer(runtime_dir, _snapshot(45, price=3333), "2026-08-29T00:45:00Z")
         try:
-            observer.run(trigger_kind="manual", requested_by="operator", job_id="db-rollback", inject_db_failure=True)
+            observer.run(
+                trigger_kind="manual",
+                requested_by="operator",
+                job_id="db-rollback",
+                inject_db_failure=True,
+            )
         except sqlite3.OperationalError:
             pass
         else:
             raise AssertionError("injected DB failure was not surfaced")
         assert _counts(db_path) == before_failure
         assert _atomic_result_counts(db_path) == atomic_before_failure
+
+        expected_stage_order = (
+            "baseline_ingest",
+            "baseline_result",
+            "source_manifest_prices",
+            "source_manifest_ads",
+            "terminal_job_event",
+            "scheduled_health",
+            "lease_release",
+            "transaction_commit",
+        )
+        assert tuple(PERSISTENCE_STAGE_BINDINGS) == expected_stage_order
+        for index, stage in enumerate(expected_stage_order):
+            stage_runtime = Path(tmp) / f"failure-{index}-{stage}"
+            stage_runtime.mkdir(parents=True)
+            stage_db = stage_runtime / "registry_upload_runtime.sqlite3"
+            failure = StageFailure(stage)
+            stage_observer, stage_adapter = _observer(
+                stage_runtime,
+                _snapshot(45, price=3333),
+                "2026-08-29T00:45:00Z",
+                persistence_stage_hook=failure,
+            )
+            job_id = f"stage-failure-{index}"
+            try:
+                stage_observer.run(
+                    trigger_kind="scheduled",
+                    requested_by="systemd",
+                    scheduled_slot_value="2026-08-29T00:00:00Z",
+                    job_id=job_id,
+                )
+            except sqlite3.IntegrityError:
+                pass
+            else:
+                raise AssertionError(f"{stage} IntegrityError was not surfaced")
+            assert failure.calls == 1
+            assert _atomic_result_counts(stage_db) == {
+                CHECKPOINTS_TABLE: 0,
+                CHECKPOINT_SOURCE_MANIFESTS_TABLE: 0,
+                OBSERVATION_VALUES_TABLE: 0,
+                IDENTITY_INCIDENTS_TABLE: 0,
+                FACTS_TABLE: 0,
+                FACT_LINKS_TABLE: 0,
+            }
+            event = _terminal_event(stage_db, job_id)
+            expected_table, expected_operation = PERSISTENCE_STAGE_BINDINGS[stage]
+            assert event["state"] == "failed"
+            assert event["source_status"] == "complete"
+            assert event["failure_origin"] == "local_persistence"
+            assert event["persistence_stage"] == stage
+            assert event["persistence_table"] == expected_table
+            assert event["persistence_operation"] == expected_operation
+            assert event["sqlite_errorcode"] == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+            assert event["sqlite_errorname"] == "SQLITE_CONSTRAINT_UNIQUE"
+            assert event["constraint_category"] == "unique"
+            assert event["constraint_name"] == "stage_failure.value"
+            assert event["error_message"] == (
+                "SQLite failure: SQLITE_CONSTRAINT_UNIQUE; category=unique; "
+                "constraint=stage_failure.value."
+            )
+            assert str(event["error_digest"]).startswith("sha256:")
+            assert not event["fallback_error_code"]
+            _assert_released_lease(stage_db)
+            with sqlite3.connect(stage_db) as conn:
+                assert conn.execute(
+                    f"SELECT COUNT(*) FROM {OBSERVER_HEALTH_EVENTS_TABLE}"
+                ).fetchone()[0] == 1
+                before_replay_events = conn.execute(
+                    f"SELECT COUNT(*) FROM {OBSERVER_JOB_EVENTS_TABLE}"
+                ).fetchone()[0]
+            replay = stage_observer.run(
+                trigger_kind="scheduled",
+                requested_by="systemd",
+                scheduled_slot_value="2026-08-29T00:00:00Z",
+                job_id=job_id,
+            )
+            assert replay["events"][-1]["persistence_stage"] == stage
+            assert failure.calls == 1
+            with sqlite3.connect(stage_db) as conn:
+                assert conn.execute(
+                    f"SELECT COUNT(*) FROM {OBSERVER_JOB_EVENTS_TABLE}"
+                ).fetchone()[0] == before_replay_events
+            assert stage_adapter.upload_task_calls == 0
+            assert stage_adapter.patch_bids_calls == 0
+            assert stage_adapter.balance_wb_patch_called is False
+
+        source_runtime = Path(tmp) / "source-failure-runtime"
+        source_runtime.mkdir(parents=True)
+        source_failure = FailingSource()
+        source_observer = ChangeRegistryObserver(
+            source_runtime,
+            seller_id=SELLER,
+            account_scope=ACCOUNT,
+            acquirer_factory=lambda: source_failure,
+            now_fn=lambda: "2026-08-29T01:00:00Z",
+        )
+        try:
+            source_observer.run(
+                trigger_kind="scheduled",
+                requested_by="systemd",
+                scheduled_slot_value="2026-08-29T00:00:00Z",
+                job_id="source-acquisition-failure",
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("source acquisition failure was not surfaced")
+        source_event = _terminal_event(
+            source_runtime / "registry_upload_runtime.sqlite3",
+            "source-acquisition-failure",
+        )
+        assert source_event["source_status"] == "failed"
+        assert source_event["failure_origin"] == "source_acquisition"
+        assert source_event["persistence_stage"] == ""
+        assert source_event["persistence_table"] == ""
+        assert source_event["persistence_operation"] == ""
+        assert source_event["sqlite_errorcode"] is None
+        assert source_event["sqlite_errorname"] == ""
+        assert source_event["constraint_category"] == "source_acquisition"
+        assert source_event["error_message"] == "Source acquisition failed: RuntimeError."
+        assert len(source_event["error_message"]) <= 400
+        assert "secret-token" not in source_event["error_message"]
+        assert "/private" not in source_event["error_message"]
+        assert "SELECT" not in source_event["error_message"]
+        _assert_released_lease(
+            source_runtime / "registry_upload_runtime.sqlite3"
+        )
+        assert source_failure.upload_task_calls == 0
+        assert source_failure.patch_bids_calls == 0
+        assert source_failure.balance_wb_patch_called is False
+
+        sanitized_runtime = Path(tmp) / "sanitized-failure-runtime"
+        sanitized_runtime.mkdir(parents=True)
+        malicious = StageFailure("terminal_job_event", malicious=True)
+        sanitized_observer, _ = _observer(
+            sanitized_runtime,
+            _snapshot(46, price=3334),
+            "2026-08-29T00:46:00Z",
+            persistence_stage_hook=malicious,
+        )
+        try:
+            sanitized_observer.run(
+                trigger_kind="manual",
+                requested_by="operator",
+                job_id="sanitized-integrity-failure",
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("malicious IntegrityError was not surfaced")
+        sanitized_event = _terminal_event(
+            sanitized_runtime / "registry_upload_runtime.sqlite3",
+            "sanitized-integrity-failure",
+        )
+        assert sanitized_event["constraint_name"] == ""
+        assert len(sanitized_event["error_message"]) <= 400
+        assert "secret-token" not in sanitized_event["error_message"]
+        assert "/private" not in sanitized_event["error_message"]
+        assert "SELECT" not in sanitized_event["error_message"]
+
+        fallback_runtime = Path(tmp) / "fallback-failure-runtime"
+        fallback_runtime.mkdir(parents=True)
+        primary_failure = StageFailure("baseline_result")
+        fallback_failure = StageFailure(
+            "fallback_scheduled_health", malicious=True
+        )
+        fallback_observer, _ = _observer(
+            fallback_runtime,
+            _snapshot(47, price=3335),
+            "2026-08-29T00:47:00Z",
+            persistence_stage_hook=primary_failure,
+            fallback_stage_hook=fallback_failure,
+        )
+        try:
+            fallback_observer.run(
+                trigger_kind="scheduled",
+                requested_by="systemd",
+                scheduled_slot_value="2026-08-29T00:00:00Z",
+                job_id="fallback-write-failure",
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("primary failure with fallback recovery was not surfaced")
+        fallback_event = _terminal_event(
+            fallback_runtime / "registry_upload_runtime.sqlite3",
+            "fallback-write-failure",
+        )
+        assert fallback_event["persistence_stage"] == "baseline_result"
+        assert fallback_event["error_code"] == "IntegrityError"
+        assert fallback_event["fallback_persistence_stage"] == "fallback_scheduled_health"
+        assert fallback_event["fallback_persistence_table"] == OBSERVER_HEALTH_EVENTS_TABLE
+        assert fallback_event["fallback_persistence_operation"] == "insert_failed_health"
+        assert fallback_event["fallback_error_code"] == "IntegrityError"
+        assert fallback_event["fallback_sqlite_errorname"] == "SQLITE_CONSTRAINT_UNIQUE"
+        assert fallback_event["fallback_constraint_category"] == "unique"
+        assert fallback_event["fallback_constraint_name"] == ""
+        assert str(fallback_event["fallback_error_digest"]).startswith("sha256:")
+        assert "secret-token" not in fallback_event["fallback_error_message"]
+        assert "/private" not in fallback_event["fallback_error_message"]
+        assert "SELECT" not in fallback_event["fallback_error_message"]
+        assert _atomic_result_counts(
+            fallback_runtime / "registry_upload_runtime.sqlite3"
+        ) == {
+            CHECKPOINTS_TABLE: 0,
+            CHECKPOINT_SOURCE_MANIFESTS_TABLE: 0,
+            OBSERVATION_VALUES_TABLE: 0,
+            IDENTITY_INCIDENTS_TABLE: 0,
+            FACTS_TABLE: 0,
+            FACT_LINKS_TABLE: 0,
+        }
+        _assert_released_lease(
+            fallback_runtime / "registry_upload_runtime.sqlite3"
+        )
 
         for hour, slot in ((2, "2026-08-29T02:00:00Z"), (4, "2026-08-29T04:00:00Z")):
             observer, _ = _observer(runtime_dir, _snapshot(hour * 60, complete=False), slot)
