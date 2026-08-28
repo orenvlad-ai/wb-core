@@ -130,3 +130,8 @@ Excluded: baseline diff engine, historical import/backfill, registry rows,
 checkpoints, facts, observer/scheduler/lease/job, public API/UI, writer
 instrumentation, manual pending, Balance bridge, analytics/recommendations,
 campaign/price/bid mutation and any production data write.
+
+The separately bounded successor is
+`56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md`. It consumes this module's
+sanitized manifest only after an explicit internal call; acquisition itself
+still performs zero persistence and does not activate that consumer.
