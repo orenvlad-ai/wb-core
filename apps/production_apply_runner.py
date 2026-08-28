@@ -744,6 +744,7 @@ def _collect_warm_readiness_attempts(
 def parse_legacy_release_receipt(
     comments: list[Mapping[str, Any]],
     *,
+    pr: int,
     merge_sha: str,
     manifest_sha: str,
     operation: str,
@@ -762,10 +763,18 @@ def parse_legacy_release_receipt(
         except (IndexError, json.JSONDecodeError):
             continue
         manifest = payload.get("manifest")
+        release_operation = str(payload.get("operation_id") or "")
         if (
-            payload.get("state") == "awaiting_apply"
-            and payload.get("operation_id") == operation
+            payload.get("schema") == "wb-core.release-receipt/v2"
+            and payload.get("state") == "awaiting_apply"
+            and re.fullmatch(r"release-v2-[0-9a-f]{32}", release_operation) is not None
+            and f"<!-- {RECEIPT_MARKER} operation={release_operation} -->" in body
+            and payload.get("repository") == CANONICAL_REPOSITORY
+            and payload.get("pull_request") == pr
+            and payload.get("release_kind") == "production_mutation"
             and payload.get("merge_sha") == merge_sha
+            and payload.get("deployed_sha") == merge_sha
+            and not payload.get("reason_codes")
             and isinstance(manifest, Mapping)
             and manifest.get("sha256") == manifest_sha
             and manifest.get("operation_id") == operation
@@ -5516,6 +5525,7 @@ def _run_legacy_mode(
         return 0
     release_receipt = parse_legacy_release_receipt(
         comments,
+        pr=args.pr,
         merge_sha=merge_sha,
         manifest_sha=str(args.manifest_sha256),
         operation=operation,
