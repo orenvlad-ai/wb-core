@@ -276,6 +276,21 @@ observed_cardinality/candidate_digest/details_digest`; stderr digest не
 заменяет доменную причину. В частности, storage admission сохраняет полный
 `RootStoragePolicyError: <reason>`, а не обобщённую ошибку persistence.
 
+Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
+A/B identity и имеет собственный exact profile:
+
+```text
+/wb-core authorize-goal-v1 task WBC0013 profile historical-analytical-cost-carry-forward target wb_core_eu_hosted_runtime_active business-date 2026-08-26 nm 428853741 accepted-versions 1 ready-snapshots 1
+```
+
+Он допускает только latest earlier version-tagged own cost того же SKU после
+query-only доказательства отсутствия cost-changing events, два одинаковых JIT
+material witness и максимум один submit. Candidate создаётся штатной формулой,
+но write set ограничен одной accepted analytical version и CAS одного ready
+snapshot; warehouse/source truth не меняется. После submit разрешён только
+same-operation query-only readback, включая exact target/non-target digests и
+все двенадцать target+TOTAL dependency cells. Deploy profile не запускает.
+
 WBC0008 profile создаёт два одинаковых JIT material-CAS witness, затем ровно один
 caller-known detached sanitation job. После submit разрешён только query-only
 job/archive readback; ambiguous transport не запускает submit повторно. Exact

@@ -16,6 +16,7 @@ source_basis:
   - "migration/155_functional_economics_inventory_blend_publication.md"
   - "migration/161_applicability_gated_dense_fbs.md"
   - "migration/162_dense_fbs_zero_and_historical_material_recovery.md"
+  - "migration/163_historical_analytical_cost_carry_forward.md"
 related_modules:
   - "packages/application/warehouse_functional.py"
   - "packages/application/ff_pool_foundation.py"
@@ -42,6 +43,7 @@ related_modules:
   - "apps/warehouse_fbs_material_rematerialization_smoke.py"
   - "apps/warehouse_fbs_historical_recovery.py"
   - "apps/wbc0013_fbs_recovery.py"
+  - "apps/sheet_vitrina_v1_historical_cost_carry_forward.py"
   - "apps/warehouse_cost_queue_replay.py"
   - "apps/sqlite_backup_archive.py"
   - "apps/ff_stage_7a_production.py"
@@ -59,7 +61,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 162 shares the exact precision-38 ledger WAC contract and adds owner-gated historical one-SKU recovery that preserves current active/pool truth; deploy remains inert."
+update_note: "Active truth remains versioned functional balances. Migration 163 adds an owner-gated analytical carry-forward for one historical Vitrina closure without reconstructing or changing warehouse truth; deploy remains inert."
 ---
 
 # 1. Active warehouse contract
@@ -265,6 +267,18 @@ Deploy, timers and ordinary refresh never call it. The default-off WBC0013
 Production Apply profile runs dense A once, query-only reconciliation, then a
 fresh historical B once, with two identical material witnesses per phase and no
 blind retry.
+
+Migration 163 is a distinct presentation-only lane and never resumes or rewrites
+historical B. It may carry the latest earlier version-tagged own cost of the same
+SKU into one historical ready-snapshot date only after query-only functional,
+movement and lifecycle evidence proves no receipt, revaluation, WAC drift or
+other cost-changing event between source and cutoff. The server-side economics
+formula computes the target SKU and six TOTAL dependencies, but publication
+copies only that exact closure and an `analytical_only` provenance marker. One
+append-only analytical version and one ready-snapshot CAS are the entire write
+set; functional versions/balances, current pools, movements, orders and raw
+history remain unchanged. Exact target-payload and all-other-ready-snapshot
+digests, one-submit identity, backup and query-only readback are mandatory.
 
 # 2. Physical and cost rules
 
