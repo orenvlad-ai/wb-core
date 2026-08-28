@@ -487,6 +487,21 @@ update_note: "Proxy V4 excludes both accrued and capitalized transit from percen
   - `closure_rate_limited`
   - `closure_exhausted`
   - `success`
+- `fin_report_daily` принимает closed-day success только после supported Finance
+  POST terminal `204`, exact date и full active-roster coverage. Один
+  runtime-owned endpoint/account lease с минимумом 60 секунд serializes weekly
+  Finance, full/manual/group refresh и closure retry; repeated click/run не
+  создаёт параллельную acquisition или duplicate publication. `429` сохраняет
+  typed cursor/pages/header hints/next-at, partial pages никогда не publish-ятся.
+  Same-day exhaustion не terminal-forgets дату: на следующем business day/window
+  closure снова eligible с первым bounded attempt, сохраняя last-good values.
+- Repo-owned historical Finance recovery для accepted 26–27.08 targets only one
+  closed-day column per operation: 33 × 5 SKU Finance cells plus 6 Finance TOTAL
+  = 171. It updates the existing accepted temporal/closure seams and exact
+  Finance STATUS row. Overall semantic health is then reduced from every STATUS
+  source; recovery cannot force whole-day green while another group is missing.
+  `SKU:428853741|proxy_profit_3_rub` on 26.08 and every non-Finance cell/date are
+  explicit non-targets guarded by the ready-plan non-target digest.
 - Для accepted-state policy current checkpoint применяет source-aware invalid signatures:
   - `seller_funnel_snapshot`: zero-filled payload или `source_fetched_at < next business day start in Asia/Yekaterinburg`
   - `web_source_snapshot`: zero-filled payload или `search_analytics_raw.fetched_at < next business day start in Asia/Yekaterinburg`

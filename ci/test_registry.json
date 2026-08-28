@@ -197,6 +197,9 @@
         ["python3", "apps/finance_storage_candidate_abort_smoke.py"],
         ["python3", "apps/finance_storage_transport_job_smoke.py"],
         ["python3", "apps/finance_storage_post_manifest_recovery_smoke.py"],
+        ["python3", "apps/fin_report_daily_finance_transport_smoke.py"],
+        ["python3", "apps/finance_daily_historical_recovery_smoke.py"],
+        ["python3", "apps/wbc0020_finance_daily_recovery_smoke.py"],
         ["python3", "apps/wb_finance_weekly_smoke.py"],
         ["python3", "apps/wb_finance_fbs_pooled_cost_smoke.py"],
         ["python3", "apps/wb_finance_weekly_business_approved_backfill_smoke.py"],
@@ -316,6 +319,12 @@
       "paths": ["apps/ff_*", "apps/fbs_*", "apps/wb_fbs_*", "apps/wb_supplies_*", "apps/wbc0013_fbs_recovery.py", "apps/cny_ledger*", "apps/fixtures/russian_payment_orders/**", "apps/warehouse_*", "apps/inventory_planning_*", "apps/russian_payment_orders*", "apps/supplier_*", "packages/adapters/official_api_rate_budget.py", "packages/adapters/wb_fbs_*", "packages/application/canonical_rub_money.py", "packages/application/canonical_wb_cost_resolver.py", "packages/application/cny_ledger*", "packages/application/demand_estimation.py", "packages/application/factory_order_supply.py", "packages/application/ff_*", "packages/application/fbs_*", "packages/application/inventory_planning*", "packages/application/own_product_capital.py", "packages/application/russian_payment_orders.py", "packages/application/simple_xlsx.py", "packages/application/supplier_*", "packages/application/warehouse_*", "packages/application/wb_fbs_*", "packages/application/wb_regional_supply.py", "packages/application/wb_supplies*", "packages/contracts/factory_order_supply.py", "packages/contracts/ff_*", "packages/contracts/fbs_*", "packages/contracts/russian_payment_orders.py", "artifacts/warehouse_chain_audit_*/**"],
       "exclude_paths": ["apps/inventory_planning_*", "packages/application/inventory_planning*"],
       "suites": ["fulfillment"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "finance-daily-vitrina",
+      "paths": ["apps/fin_report_daily*", "apps/finance_daily*", "apps/wbc0020_finance*", "packages/adapters/fin_report_daily*", "packages/adapters/wb_finance_api.py", "packages/application/fin_report_daily*", "packages/application/finance_daily*", "packages/contracts/fin_report_daily*"],
+      "suites": ["finance_storage", "web_vitrina"],
       "release": "live_runtime"
     },
     {

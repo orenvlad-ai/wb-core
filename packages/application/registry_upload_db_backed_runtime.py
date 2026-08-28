@@ -407,6 +407,12 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            _assert_finance_daily_recovery_values_preserved(
+                conn,
+                bundle_version=current_state.bundle_version,
+                as_of_date=plan.as_of_date,
+                plan=plan,
+            )
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_ready_snapshots(
@@ -725,6 +731,309 @@ class RegistryUploadDbBackedRuntime:
                 f"sheet_vitrina_v1 ready snapshot column missing: column_date={date_key}"
             )
         return _deserialize_sheet_vitrina_plan(row["plan_json"])
+
+    def load_sheet_vitrina_ready_snapshot_record_covering_date_any_bundle(
+        self,
+        *,
+        column_date: str,
+    ) -> dict[str, Any]:
+        """Return the exact persisted identity for the newest covering plan."""
+
+        date_key = str(column_date or "").strip()
+        _validate_iso_date(date_key, field_name="column_date")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT bundle_version, activated_at, as_of_date, snapshot_id,
+                       plan_version, refreshed_at, plan_json
+                FROM sheet_vitrina_v1_ready_snapshots AS snapshot
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM json_each(snapshot.plan_json, '$.date_columns') AS date_column
+                    WHERE date_column.value = ?
+                )
+                ORDER BY snapshot.activated_at DESC, snapshot.refreshed_at DESC,
+                         snapshot.as_of_date DESC, snapshot.bundle_version DESC
+                LIMIT 1
+                """,
+                (date_key,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"sheet_vitrina_v1 ready snapshot column missing: column_date={date_key}"
+            )
+        return {
+            "bundle_version": str(row["bundle_version"]),
+            "activated_at": str(row["activated_at"]),
+            "as_of_date": str(row["as_of_date"]),
+            "snapshot_id": str(row["snapshot_id"]),
+            "plan_version": str(row["plan_version"]),
+            "refreshed_at": str(row["refreshed_at"]),
+            "plan": _deserialize_sheet_vitrina_plan(row["plan_json"]),
+        }
+
+    def apply_finance_daily_historical_recovery(
+        self,
+        *,
+        operation_id: str,
+        plan_fingerprint: str,
+        approval_reference: str,
+        actor: str,
+        deployed_sha: str,
+        applied_at: str,
+        target_date: str,
+        bundle_version: str,
+        as_of_date: str,
+        snapshot_id: str,
+        before_plan_digest: str,
+        after_plan_digest: str,
+        non_target_digest: str,
+        before_temporal_state_digest: str,
+        before_temporal_state: Mapping[str, Any],
+        before_manifest: Mapping[str, Any],
+        after_manifest: Mapping[str, Any],
+        changed_cells: int,
+        source_digest: str,
+        source_pages: int,
+        source_terminal_cursor: int,
+        source_payload: Any,
+        captured_at: str,
+        after_plan: SheetVitrinaV1Envelope,
+    ) -> dict[str, Any]:
+        """Atomically publish one reviewed 171-cell Finance recovery.
+
+        The accepted normalized daily payload is stored in the existing
+        temporal-source seams; this audit is an operation receipt, not another
+        Finance ledger.  The ready snapshot is compare-and-swapped against the
+        exact reviewed before/after plan digests.
+        """
+
+        normalized_operation_id = str(operation_id or "").strip()
+        normalized_fingerprint = str(plan_fingerprint or "").strip()
+        normalized_approval = str(approval_reference or "").strip()
+        normalized_actor = str(actor or "").strip()
+        normalized_sha = str(deployed_sha or "").strip()
+        if not normalized_operation_id:
+            raise ValueError("Finance daily recovery operation_id is required")
+        if not normalized_fingerprint.startswith("sha256:"):
+            raise ValueError("Finance daily recovery plan fingerprint is required")
+        if not normalized_approval or not normalized_actor:
+            raise ValueError("Finance daily recovery approval and actor are required")
+        if not re.fullmatch(r"[0-9a-f]{40}", normalized_sha):
+            raise ValueError("Finance daily recovery exact deployed SHA is required")
+        _validate_timestamp(applied_at, field_name="applied_at")
+        _validate_timestamp(captured_at, field_name="captured_at")
+        _validate_iso_date(target_date, field_name="target_date")
+        if int(changed_cells) < 0 or int(changed_cells) > 171:
+            raise ValueError("Finance daily recovery changed_cells is outside 0..171")
+        if not source_digest.startswith("sha256:"):
+            raise ValueError("Finance daily recovery source digest is required")
+        if not before_temporal_state_digest.startswith("sha256:"):
+            raise ValueError("Finance daily recovery temporal before-state digest is required")
+        if _finance_daily_temporal_state_digest(before_temporal_state) != before_temporal_state_digest:
+            raise ValueError("Finance daily recovery temporal before-state content is invalid")
+        if source_pages < 1 or source_terminal_cursor < 0:
+            raise ValueError("Finance daily recovery source pagination evidence is invalid")
+
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        changed = False
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT snapshot_id, plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ? AND as_of_date = ?
+                    """,
+                    (bundle_version, as_of_date),
+                ).fetchone()
+                if row is None or str(row["snapshot_id"] or "") != snapshot_id:
+                    raise ValueError("Finance daily recovery ready snapshot identity changed")
+                current_plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
+                current_digest = _sheet_vitrina_plan_digest(current_plan)
+                if current_digest not in {before_plan_digest, after_plan_digest}:
+                    raise ValueError("Finance daily recovery ready snapshot changed after review")
+                existing = conn.execute(
+                    """
+                    SELECT plan_fingerprint, after_plan_digest, applied_at
+                    FROM sheet_vitrina_v1_finance_daily_recovery_audit
+                    WHERE operation_id = ?
+                    """,
+                    (normalized_operation_id,),
+                ).fetchone()
+                if existing is not None and (
+                    str(existing["plan_fingerprint"] or "") != normalized_fingerprint
+                    or str(existing["after_plan_digest"] or "") != after_plan_digest
+                ):
+                    raise ValueError("Finance daily recovery operation identity conflict")
+                if existing is not None and current_digest != after_plan_digest:
+                    raise ValueError("Finance daily recovery audit exists without applied plan")
+                if existing is None and current_digest == after_plan_digest:
+                    raise ValueError("Finance daily recovery applied plan has no operation audit")
+                current_temporal_state = _finance_daily_temporal_state(
+                    conn,
+                    target_date=target_date,
+                )
+                if existing is None and (
+                    _finance_daily_temporal_state_digest(current_temporal_state)
+                    != before_temporal_state_digest
+                ):
+                    raise ValueError("Finance daily recovery temporal state changed after review")
+                if current_digest == before_plan_digest:
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_ready_snapshots
+                        SET plan_json = ?
+                        WHERE bundle_version = ? AND as_of_date = ?
+                        """,
+                        (_serialize_sheet_vitrina_plan(after_plan), bundle_version, as_of_date),
+                    )
+                    changed = True
+                if existing is None:
+                    payload_json = _serialize_temporal_source_payload(source_payload)
+                    for snapshot_role in (None, "accepted_closed"):
+                        if snapshot_role is None:
+                            conn.execute(
+                                """
+                                INSERT INTO temporal_source_snapshots(
+                                    source_key, snapshot_date, captured_at, payload_json
+                                ) VALUES('fin_report_daily', ?, ?, ?)
+                                ON CONFLICT(source_key, snapshot_date) DO UPDATE SET
+                                    captured_at=excluded.captured_at,
+                                    payload_json=excluded.payload_json
+                                """,
+                                (target_date, captured_at, payload_json),
+                            )
+                        else:
+                            conn.execute(
+                                """
+                                INSERT INTO temporal_source_slot_snapshots(
+                                    source_key, snapshot_date, snapshot_role,
+                                    captured_at, payload_json
+                                ) VALUES('fin_report_daily', ?, ?, ?, ?)
+                                ON CONFLICT(source_key, snapshot_date, snapshot_role) DO UPDATE SET
+                                    captured_at=excluded.captured_at,
+                                    payload_json=excluded.payload_json
+                                """,
+                                (target_date, snapshot_role, captured_at, payload_json),
+                            )
+                    prior_closure = conn.execute(
+                        """
+                        SELECT attempt_count
+                        FROM temporal_source_closure_state
+                        WHERE source_key='fin_report_daily'
+                          AND target_date=? AND slot_kind='yesterday_closed'
+                        """,
+                        (target_date,),
+                    ).fetchone()
+                    attempt_count = max(1, int(prior_closure["attempt_count"] or 0)) if prior_closure else 1
+                    conn.execute(
+                        """
+                        INSERT INTO temporal_source_closure_state(
+                            source_key, target_date, slot_kind, state, attempt_count,
+                            next_retry_at, last_reason, last_attempt_at,
+                            last_success_at, accepted_at
+                        ) VALUES('fin_report_daily', ?, 'yesterday_closed', 'success', ?,
+                                 NULL, 'historical_recovery_terminal_204', ?, ?, ?)
+                        ON CONFLICT(source_key, target_date, slot_kind) DO UPDATE SET
+                            state='success', attempt_count=excluded.attempt_count,
+                            next_retry_at=NULL, last_reason=excluded.last_reason,
+                            last_attempt_at=excluded.last_attempt_at,
+                            last_success_at=excluded.last_success_at,
+                            accepted_at=excluded.accepted_at
+                        """,
+                        (target_date, attempt_count, applied_at, applied_at, applied_at),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO sheet_vitrina_v1_finance_daily_recovery_audit(
+                            operation_id, target_date, bundle_version, as_of_date,
+                            snapshot_id, plan_fingerprint, approval_reference, actor,
+                            deployed_sha, source_digest, source_pages,
+                            source_terminal_cursor, before_plan_digest,
+                            after_plan_digest, non_target_digest, changed_cells,
+                            before_temporal_state_digest, before_temporal_state_json,
+                            before_manifest_json, after_manifest_json, applied_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            normalized_operation_id, target_date, bundle_version,
+                            as_of_date, snapshot_id, normalized_fingerprint,
+                            normalized_approval, normalized_actor, normalized_sha,
+                            source_digest, int(source_pages), int(source_terminal_cursor),
+                            before_plan_digest, after_plan_digest, non_target_digest,
+                            int(changed_cells),
+                            before_temporal_state_digest,
+                            json.dumps(before_temporal_state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                            json.dumps(before_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                            json.dumps(after_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                            applied_at,
+                        ),
+                    )
+                readback = conn.execute(
+                    """
+                    SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version=? AND as_of_date=?
+                    """,
+                    (bundle_version, as_of_date),
+                ).fetchone()
+                if readback is None or _sheet_vitrina_plan_digest(
+                    _deserialize_sheet_vitrina_plan(readback["plan_json"])
+                ) != after_plan_digest:
+                    raise ValueError("Finance daily recovery transactional readback mismatch")
+                temporal_readback = _finance_daily_temporal_state(
+                    conn,
+                    target_date=target_date,
+                )
+                general = temporal_readback.get("general_snapshot")
+                accepted = temporal_readback.get("accepted_closed_snapshot")
+                closure_state = temporal_readback.get("closure_state")
+                expected_payload_json = _serialize_temporal_source_payload(source_payload)
+                expected_temporal_timestamp = (
+                    str(existing["applied_at"])
+                    if existing is not None
+                    else captured_at
+                )
+                if not (
+                    isinstance(general, Mapping)
+                    and isinstance(accepted, Mapping)
+                    and isinstance(closure_state, Mapping)
+                    and general.get("captured_at") == expected_temporal_timestamp
+                    and accepted.get("captured_at") == expected_temporal_timestamp
+                    and general.get("payload_json") == expected_payload_json
+                    and accepted.get("payload_json") == expected_payload_json
+                    and closure_state.get("state") == "success"
+                    and closure_state.get("next_retry_at") is None
+                    and closure_state.get("last_reason") == "historical_recovery_terminal_204"
+                    and closure_state.get("last_attempt_at") == expected_temporal_timestamp
+                    and closure_state.get("last_success_at") == expected_temporal_timestamp
+                    and closure_state.get("accepted_at") == expected_temporal_timestamp
+                ):
+                    raise ValueError("Finance daily recovery temporal transactional readback mismatch")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "applied" if changed else "no_op",
+            "operation_id": normalized_operation_id,
+            "target_date": target_date,
+            "changed_cells": int(changed_cells) if changed else 0,
+            "accepted_target_cells": 171,
+            "source_digest": source_digest,
+            "source_pages": int(source_pages),
+            "terminal_204": True,
+            "deployed_sha": normalized_sha,
+            "applied_at": (
+                str(existing["applied_at"])
+                if existing is not None
+                else applied_at
+            ),
+        }
 
     def list_sheet_vitrina_ready_snapshot_dates(
         self,
@@ -9080,6 +9389,139 @@ def _sheet_vitrina_plan_digest(plan: SheetVitrinaV1Envelope) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _finance_daily_temporal_state(
+    conn: sqlite3.Connection,
+    *,
+    target_date: str,
+) -> dict[str, Any]:
+    """Return the exact existing Finance temporal slice for CAS/backup evidence."""
+
+    general = conn.execute(
+        """
+        SELECT captured_at, payload_json
+        FROM temporal_source_snapshots
+        WHERE source_key='fin_report_daily' AND snapshot_date=?
+        """,
+        (target_date,),
+    ).fetchone()
+    accepted = conn.execute(
+        """
+        SELECT captured_at, payload_json
+        FROM temporal_source_slot_snapshots
+        WHERE source_key='fin_report_daily' AND snapshot_date=?
+          AND snapshot_role='accepted_closed'
+        """,
+        (target_date,),
+    ).fetchone()
+    closure = conn.execute(
+        """
+        SELECT state, attempt_count, next_retry_at, last_reason, last_attempt_at,
+               last_success_at, accepted_at
+        FROM temporal_source_closure_state
+        WHERE source_key='fin_report_daily' AND target_date=?
+          AND slot_kind='yesterday_closed'
+        """,
+        (target_date,),
+    ).fetchone()
+
+    def snapshot_value(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "captured_at": str(row["captured_at"]),
+            "payload_json": str(row["payload_json"]),
+        }
+
+    return {
+        "general_snapshot": snapshot_value(general),
+        "accepted_closed_snapshot": snapshot_value(accepted),
+        "closure_state": (
+            {
+                "state": str(closure["state"]),
+                "attempt_count": int(closure["attempt_count"]),
+                "next_retry_at": closure["next_retry_at"],
+                "last_reason": closure["last_reason"],
+                "last_attempt_at": closure["last_attempt_at"],
+                "last_success_at": closure["last_success_at"],
+                "accepted_at": closure["accepted_at"],
+            }
+            if closure is not None
+            else None
+        ),
+    }
+
+
+def _finance_daily_temporal_state_digest(state: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(state),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _assert_finance_daily_recovery_values_preserved(
+    conn: sqlite3.Connection,
+    *,
+    bundle_version: str,
+    as_of_date: str,
+    plan: SheetVitrinaV1Envelope,
+) -> None:
+    """Fail closed if an ordinary producer would regress an audited recovery."""
+
+    audits = conn.execute(
+        """
+        SELECT target_date, after_manifest_json
+        FROM sheet_vitrina_v1_finance_daily_recovery_audit
+        WHERE bundle_version=? AND as_of_date=?
+        ORDER BY applied_at, operation_id
+        """,
+        (bundle_version, as_of_date),
+    ).fetchall()
+    if not audits:
+        return
+    data = next(
+        (item for item in plan.sheets if item.sheet_name == "DATA_VITRINA"),
+        None,
+    )
+    if data is None:
+        raise ValueError("Finance daily recovery guard requires DATA_VITRINA")
+    rows = {
+        str(row[1] or ""): row
+        for row in data.rows
+        if len(row) > 1 and str(row[1] or "")
+    }
+    for audit in audits:
+        target_date = str(audit["target_date"])
+        if target_date not in data.header:
+            raise ValueError(
+                "Finance daily recovery guard rejected a producer without "
+                f"the protected date {target_date}"
+            )
+        column_index = data.header.index(target_date)
+        manifest = json.loads(str(audit["after_manifest_json"]))
+        cells = dict(manifest.get("cells") or {}) if isinstance(manifest, Mapping) else {}
+        if len(cells) != 171:
+            raise ValueError("Finance daily recovery guard audit is not 171 cells")
+        for row_id, cell in cells.items():
+            row = rows.get(str(row_id))
+            expected = dict(cell).get("expected") if isinstance(cell, Mapping) else None
+            if row is None or len(row) <= column_index:
+                raise ValueError(
+                    "Finance daily recovery guard rejected an incompatible producer plan"
+                )
+            try:
+                matches = float(row[column_index]) == float(expected)
+            except (TypeError, ValueError):
+                matches = False
+            if not matches:
+                raise ValueError(
+                    "Finance daily recovery guard rejected a producer regression: "
+                    f"target_date={target_date}; row_id={row_id}"
+                )
+
+
 def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
     try:
         payload = json.loads(raw_value)
@@ -11127,6 +11569,33 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (operation_id, bundle_version, as_of_date)
         );
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_finance_daily_recovery_audit (
+            operation_id TEXT PRIMARY KEY,
+            target_date TEXT NOT NULL,
+            bundle_version TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            plan_fingerprint TEXT NOT NULL,
+            approval_reference TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            deployed_sha TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            source_pages INTEGER NOT NULL,
+            source_terminal_cursor INTEGER NOT NULL,
+            before_plan_digest TEXT NOT NULL,
+            after_plan_digest TEXT NOT NULL,
+            non_target_digest TEXT NOT NULL,
+            changed_cells INTEGER NOT NULL,
+            before_temporal_state_digest TEXT NOT NULL,
+            before_temporal_state_json TEXT NOT NULL,
+            before_manifest_json TEXT NOT NULL,
+            after_manifest_json TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_finance_daily_recovery_by_date
+        ON sheet_vitrina_v1_finance_daily_recovery_audit(target_date, applied_at);
+
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_incident_rematerialization_by_date
         ON sheet_vitrina_v1_incident_rematerialization_audit(
             as_of_date,
@@ -12490,6 +12959,18 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_auto_update_state",
         column_name="last_run_result_json",
         column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_finance_daily_recovery_audit",
+        column_name="before_temporal_state_digest",
+        column_sql="TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_finance_daily_recovery_audit",
+        column_name="before_temporal_state_json",
+        column_sql="TEXT NOT NULL DEFAULT '{}'",
     )
     _ensure_column(
         conn,

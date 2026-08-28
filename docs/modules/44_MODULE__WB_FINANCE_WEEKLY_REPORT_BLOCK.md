@@ -12,6 +12,25 @@
 
 Raw identity is `(seller_id, report_id, rrd_id)`. Different `reportType` values remain separate evidence and combine only in derived aggregates. Finance money is accumulated with `Decimal`; absence is never converted to zero.
 
+## Supported acquisition and shared quota
+
+Weekly ingestion and daily Web Vitrina now share
+`packages/adapters/wb_finance_api.py`: the supported official
+`POST /api/finance/v1/sales-reports/detailed` client. Weekly calls use exact
+date bounds with `period=weekly`; daily calls use `period=daily`. Both paginate
+by `rrdId`, cap `limit` at 100,000 and accept completion only on terminal
+`HTTP 204`.
+
+One runtime-owned interprocess lease serializes every producer for this exact
+Finance account/endpoint. It enforces at least 60 seconds between requests and
+honours later server `Retry-After`/`X-RateLimit-*` hints. The weekly timer,
+Vitrina auto/manual/group refresh and closed-day retry therefore cannot spend
+the same quota concurrently. `429` is typed `rate_limited` and returned without
+an immediate client retry; partial pages never reach weekly raw ingest or daily
+publication. Token rotation does not create a second quota identity: the lease
+is bound to the canonical hosted account identity, while authorization values
+remain redacted.
+
 ## Storage and rebuildability
 
 The logical store registry currently resolves both `finance_raw` and

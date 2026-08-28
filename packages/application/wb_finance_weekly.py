@@ -13,9 +13,13 @@ import re
 import sqlite3
 import time
 from typing import Any, Callable, Iterable, Mapping
-import urllib.error
-import urllib.request
 from zoneinfo import ZoneInfo
+
+from packages.adapters.wb_finance_api import (
+    FINANCE_URL,
+    FinanceHttpResult,
+    WbFinanceApiClient,
+)
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.finance_raw_storage import (
@@ -44,7 +48,6 @@ from packages.application.warehouse_archival_estimate import (
 from packages.business_time import business_date_from_timestamp
 
 
-FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v3_signed_review_points"
 SKU_AGGREGATE_FORMULA_VERSION = "wb_finance_weekly_sku_aggregate_v5"
 CALCULATION_REFERENCE_CONTRACT_VERSION = "wb_finance_calculation_reference_v3"
@@ -587,123 +590,6 @@ def historical_week_bounds(today: date | None = None) -> list[tuple[date, date]]
         result.append((cursor, cursor + timedelta(days=6)))
         cursor += timedelta(days=7)
     return result
-
-
-@dataclass(frozen=True)
-class FinanceHttpResult:
-    status: int
-    rows: list[dict[str, Any]]
-    headers: Mapping[str, str]
-
-
-class WbFinanceApiClient:
-    """Official Finance API client with rrdId pagination and rate-limit handling."""
-
-    def __init__(
-        self,
-        token: str,
-        *,
-        url: str = FINANCE_URL,
-        limit: int = 100_000,
-        min_interval_seconds: float = 60.0,
-        max_retries: int = 8,
-        sleep: Callable[[float], None] = time.sleep,
-        request: Callable[[dict[str, Any]], FinanceHttpResult] | None = None,
-    ) -> None:
-        if not token:
-            raise ValueError("WB_API_TOKEN is required for Finance API")
-        self._token = token
-        self.url = url
-        self.limit = min(max(1, int(limit)), 100_000)
-        self.min_interval_seconds = max(0.0, float(min_interval_seconds))
-        self.max_retries = max(0, int(max_retries))
-        self.sleep = sleep
-        self._request_override = request
-        self._last_request_at = 0.0
-
-    def fetch_week(self, date_from: date, date_to: date) -> list[dict[str, Any]]:
-        all_rows: list[dict[str, Any]] = []
-        rrd_id = 0
-        seen_cursors: set[int] = set()
-        while True:
-            payload = {
-                "dateFrom": date_from.isoformat(),
-                "dateTo": date_to.isoformat(),
-                "limit": self.limit,
-                "rrdId": rrd_id,
-                "period": "weekly",
-            }
-            response = self._request_with_retry(payload)
-            if response.status == 204:
-                break
-            if response.status != 200:
-                raise RuntimeError(f"Finance API unexpected HTTP {response.status}")
-            rows = response.rows
-            if not rows:
-                break
-            all_rows.extend(rows)
-            next_cursor = int(str(rows[-1].get("rrdId") or "0"))
-            if next_cursor <= 0 or next_cursor == rrd_id or next_cursor in seen_cursors:
-                raise RuntimeError("Finance API pagination cursor did not advance")
-            seen_cursors.add(next_cursor)
-            rrd_id = next_cursor
-        return all_rows
-
-    def _request_with_retry(self, payload: dict[str, Any]) -> FinanceHttpResult:
-        attempt = 0
-        while True:
-            elapsed = time.monotonic() - self._last_request_at
-            if self._last_request_at and elapsed < self.min_interval_seconds:
-                self.sleep(self.min_interval_seconds - elapsed)
-            self._last_request_at = time.monotonic()
-            response = self._request(payload)
-            if response.status != 429:
-                return response
-            if attempt >= self.max_retries:
-                raise RuntimeError("Finance API rate limit retry budget exhausted")
-            attempt += 1
-            raw_retry = str(
-                response.headers.get("X-Ratelimit-Retry")
-                or response.headers.get("Retry-After")
-                or "60"
-            )
-            try:
-                retry_seconds = float(raw_retry)
-            except ValueError:
-                retry_seconds = 60.0
-            if retry_seconds > 10_000:
-                retry_seconds /= 1_000.0
-            self.sleep(max(self.min_interval_seconds, retry_seconds, 1.0))
-
-    def _request(self, payload: dict[str, Any]) -> FinanceHttpResult:
-        if self._request_override is not None:
-            return self._request_override(payload)
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            self.url,
-            data=body,
-            headers={
-                "Authorization": self._token,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                raw = response.read()
-                rows = json.loads(raw) if raw else []
-                return FinanceHttpResult(
-                    int(response.status), list(rows), dict(response.headers.items())
-                )
-        except urllib.error.HTTPError as exc:
-            exc.read()
-            return FinanceHttpResult(
-                int(exc.code), [], dict(exc.headers.items()) if exc.headers else {}
-            )
-
-    def __repr__(self) -> str:
-        return f"WbFinanceApiClient(url={self.url!r}, token=<redacted>)"
 
 
 def classify_deduction(row: Mapping[str, Any]) -> str:

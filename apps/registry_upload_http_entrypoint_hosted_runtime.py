@@ -65,6 +65,7 @@ FF_FBS_MAPPING_EXTENSION_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_CUTOVER_PRODUCTION_TIMEOUT_SECONDS = 7200.0
 FF_POOL_RECOVERY_SUPERSESSION_TIMEOUT_SECONDS = 1800.0
 VITRINA_INCIDENT_REMATERIALIZATION_TIMEOUT_SECONDS = 900.0
+FINANCE_DAILY_RECOVERY_TIMEOUT_SECONDS = 900.0
 FF_INVENTORY_RECONCILIATION_TIMEOUT_SECONDS = 1800.0
 WAREHOUSE_RECOVERY_LIFECYCLE_TIMEOUT_SECONDS = 7200.0
 DEPLOY_STATUS_READBACK_ATTEMPTS = 37
@@ -7346,6 +7347,165 @@ def run_ff_pool_recovery_supersession_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_finance_daily_recovery_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file or resolve_target_file())
+    action = str(args.finance_daily_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("Finance daily reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_finance_daily_recovery(
+        target,
+        action=action,
+        target_date=str(args.target_date or ""),
+        operation_id=str(args.operation_id or ""),
+        plan_path=plan_path,
+        fingerprint=str(args.fingerprint or ""),
+        approval_reference=str(args.approval_reference or ""),
+        actor=str(args.actor or ""),
+    )
+    output = str(args.output or "").strip()
+    if action == "plan":
+        if not output:
+            raise ValueError("Finance daily recovery plan requires --output")
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("Finance daily reviewed plan must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    elif output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("Finance daily evidence must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"finance-daily-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_finance_daily_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    target_date: str,
+    operation_id: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    actor: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"finance-daily-{action}")
+    if action not in {"parity", "plan", "apply", "readback"}:
+        raise ValueError(f"unsupported Finance daily recovery action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action="finance-daily-apply", dry_run=False)
+    allowed_dates = (
+        {"2026-08-24", "2026-08-25"}
+        if action == "parity"
+        else {"2026-08-26", "2026-08-27"}
+    )
+    normalized_date = ""
+    if action != "readback":
+        try:
+            normalized_date = date.fromisoformat(target_date).isoformat()
+        except ValueError as exc:
+            raise ValueError("Finance daily exact target date must be YYYY-MM-DD") from exc
+        if normalized_date not in allowed_dates:
+            raise ValueError("Finance daily target date is outside the accepted exact scope")
+    elif not operation_id.strip():
+        raise ValueError("Finance daily readback requires exact --operation-id")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("Finance daily recovery requires the canonical active runtime dir")
+    if target.environment_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        raise ValueError("Finance daily recovery requires the canonical hosted environment file")
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    runner_args = [
+        "python3",
+        "apps/finance_daily_historical_recovery.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        "--deployed-sha-file",
+        runtime_sha_path,
+    ]
+    reviewed_plan_json = ""
+    if action in {"parity", "plan"}:
+        runner_args.extend([action, "--target-date", normalized_date, "--stdout-plan"])
+    elif action == "readback":
+        runner_args.extend(["readback", "--operation-id", operation_id.strip()])
+    else:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("Finance daily apply requires an existing --plan-file")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        try:
+            reviewed = json.loads(reviewed_plan_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Finance daily reviewed plan is invalid JSON") from exc
+        if (
+            not isinstance(reviewed, dict)
+            or reviewed.get("contract_name") != "finance_daily_historical_recovery"
+            or int(reviewed.get("contract_version") or 0) != 1
+            or reviewed.get("mode") != "recovery"
+            or reviewed.get("apply_allowed") is not True
+            or reviewed.get("target_date") != normalized_date
+            or int(reviewed.get("expected_sku_count") or 0) != 33
+            or int(reviewed.get("expected_target_cells") or 0) != 171
+            or str(reviewed.get("fingerprint") or "") != fingerprint
+        ):
+            raise ValueError("Finance daily reviewed plan does not match exact apply scope")
+        if not approval_reference.strip() or not actor.strip():
+            raise ValueError("Finance daily apply requires approval reference and actor")
+        runner_args.extend(
+            [
+                "apply",
+                "--target-date",
+                normalized_date,
+                "--reviewed-plan-stdin",
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference.strip(),
+                "--actor",
+                actor.strip(),
+            ]
+        )
+    shell_command = " && ".join(
+        [
+            f"test -s {shlex.quote(runtime_sha_path)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if action == "apply" else None,
+        cwd=ROOT,
+        timeout=FINANCE_DAILY_RECOVERY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Finance daily {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Finance daily runner returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") in {"error", "blocked"}:
+        raise RuntimeError("Finance daily runner returned an incomplete result")
+    return payload
+
+
 def run_vitrina_incident_rematerialization_command(
     args: argparse.Namespace,
 ) -> int:
@@ -12061,6 +12221,70 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ads_historical_readback.set_defaults(
         handler=run_ads_historical_recovery_command,
         ads_historical_action="readback",
+    )
+
+    finance_daily_parity = subparsers.add_parser(
+        "finance-daily-parity",
+        help="Query-only exact 171-cell Finance parity for 2026-08-24 or 2026-08-25.",
+    )
+    finance_daily_parity.add_argument("--target-date", required=True)
+    finance_daily_parity.add_argument("--output", default="")
+    finance_daily_parity.set_defaults(
+        handler=run_finance_daily_recovery_command,
+        finance_daily_action="parity",
+        operation_id="",
+        plan_file="",
+        fingerprint="",
+        approval_reference="",
+        actor="",
+    )
+
+    finance_daily_plan = subparsers.add_parser(
+        "finance-daily-recovery-plan",
+        help="Fetch and persist one private exact-date 171-cell Finance recovery plan.",
+    )
+    finance_daily_plan.add_argument("--target-date", required=True)
+    finance_daily_plan.add_argument("--output", required=True)
+    finance_daily_plan.set_defaults(
+        handler=run_finance_daily_recovery_command,
+        finance_daily_action="plan",
+        operation_id="",
+        plan_file="",
+        fingerprint="",
+        approval_reference="",
+        actor="",
+    )
+
+    finance_daily_apply = subparsers.add_parser(
+        "finance-daily-recovery-apply",
+        help="Apply one exact reviewed Finance recovery plan and reconcile it.",
+    )
+    finance_daily_apply.add_argument("--target-date", required=True)
+    finance_daily_apply.add_argument("--plan-file", required=True)
+    finance_daily_apply.add_argument("--fingerprint", required=True)
+    finance_daily_apply.add_argument("--approval-reference", required=True)
+    finance_daily_apply.add_argument("--actor", required=True)
+    finance_daily_apply.add_argument("--output", default="")
+    finance_daily_apply.set_defaults(
+        handler=run_finance_daily_recovery_command,
+        finance_daily_action="apply",
+        operation_id="",
+    )
+
+    finance_daily_readback = subparsers.add_parser(
+        "finance-daily-recovery-readback",
+        help="Query-only readback for one exact Finance recovery operation.",
+    )
+    finance_daily_readback.add_argument("--operation-id", required=True)
+    finance_daily_readback.add_argument("--output", default="")
+    finance_daily_readback.set_defaults(
+        handler=run_finance_daily_recovery_command,
+        finance_daily_action="readback",
+        target_date="",
+        plan_file="",
+        fingerprint="",
+        approval_reference="",
+        actor="",
     )
 
     vitrina_incident_dry_run = subparsers.add_parser(

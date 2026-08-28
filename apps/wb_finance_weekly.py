@@ -274,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         client = WbFinanceApiClient(
             os.environ.get("WB_API_TOKEN", ""),
             min_interval_seconds=args.min_interval_seconds,
+            rate_gate_root=Path(args.runtime_dir),
         )
         if args.command == "backfill":
             result = block.run_backfill(

@@ -1,7 +1,7 @@
 """Контракты блока fin report daily."""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,7 @@ class FinReportDailySuccess:
     count: int
     items: list[FinReportDailyItem]
     storage_total: FinReportDailyStorageTotal
+    diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True)

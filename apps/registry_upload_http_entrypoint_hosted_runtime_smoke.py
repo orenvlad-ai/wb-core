@@ -602,6 +602,69 @@ def main() -> None:
                 raise AssertionError(
                     "Vitrina incident dry-run must stream the exact reviewed plan"
                 )
+
+    with TemporaryDirectory(prefix="finance-daily-hosted-smoke-") as finance_temp_dir:
+        finance_plan = {
+            "contract_name": "finance_daily_historical_recovery",
+            "contract_version": 1,
+            "mode": "recovery",
+            "target_date": "2026-08-26",
+            "expected_sku_count": 33,
+            "expected_target_cells": 171,
+            "apply_allowed": True,
+            "fingerprint": "sha256:finance-daily-reviewed",
+        }
+        finance_plan_path = Path(finance_temp_dir) / "plan.json"
+        finance_plan_path.write_text(json.dumps(finance_plan), encoding="utf-8")
+        for action in ("parity", "plan", "apply", "readback"):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    finance_plan
+                    if action in {"parity", "plan"}
+                    else {
+                        "status": "complete" if action == "readback" else "applied",
+                        "accepted_cells": "171/171",
+                    }
+                ),
+                stderr="",
+            )
+            with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+                hosted_runtime._run_remote_finance_daily_recovery(
+                    active_target,
+                    action=action,
+                    target_date=(
+                        "2026-08-24" if action == "parity" else (
+                            "" if action == "readback" else "2026-08-26"
+                        )
+                    ),
+                    operation_id="wbc0020-finance-smoke" if action == "readback" else "",
+                    plan_path=finance_plan_path if action == "apply" else None,
+                    fingerprint="sha256:finance-daily-reviewed" if action == "apply" else "",
+                    approval_reference="WBC0020 owner accepted" if action == "apply" else "",
+                    actor="smoke" if action == "apply" else "",
+                )
+            if run_mock.call_args.kwargs.get("timeout") != hosted_runtime.FINANCE_DAILY_RECOVERY_TIMEOUT_SECONDS:
+                raise AssertionError("Finance daily hosted runner lost its bounded timeout")
+            remote_command = " ".join(run_mock.call_args.args[0])
+            if "apps/finance_daily_historical_recovery.py" not in remote_command:
+                raise AssertionError("Finance daily hosted action bypassed the repo-owned runner")
+            if ".wb-core-runtime-sha" not in remote_command or "/opt/wb-ai/.env" not in remote_command:
+                raise AssertionError("Finance daily hosted action lost exact runtime/env binding")
+            if action == "apply":
+                if (
+                    "--reviewed-plan-stdin" not in remote_command
+                    or run_mock.call_args.kwargs.get("input")
+                    != finance_plan_path.read_text(encoding="utf-8")
+                ):
+                    raise AssertionError(
+                        "Finance daily apply lost the exact reviewed stdin plan"
+                    )
+            elif action in {"parity", "plan"} and "--stdout-plan" not in remote_command:
+                raise AssertionError(
+                    "Finance daily plan/parity must stream the exact reviewed plan"
+                )
     with TemporaryDirectory(prefix="finance-canonical-hosted-smoke-") as finance_temp_dir:
         finance_plan_path = Path(finance_temp_dir) / "plan.json"
         finance_plan_path.write_text(

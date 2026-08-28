@@ -254,6 +254,25 @@ The runtime owns append-only `sheet_vitrina_v1_wb_incident_policy_revisions` by 
 
 `sheet_vitrina_v1_incident_rematerialization_audit` owns the bounded ready-snapshot publication audit. One operation/date row pins operation and plan fingerprint, approval reference/actor, bundle/snapshot identity, target dates, semantic before/after plan digests, non-target digest, changed-cell count, compact before/after incident manifests and apply timestamp. Apply updates only the matching ready snapshot `plan_json` inside `BEGIN IMMEDIATE`, accepts only the reviewed before/after digest, preserves raw temporal stocks and unrelated fields, and requires transactional plus second-plan idempotent readback.
 
+`sheet_vitrina_v1_finance_daily_recovery_audit` is the operation receipt for one
+exact daily Finance recovery; it is not a Finance row ledger. The row pins
+operation/fingerprint/approval/actor/deployed SHA, exact date and ready-snapshot
+identity, terminal page/cursor/source digest, before/after/non-target plan
+digests, changed-cell count and compact 171-cell before/after manifests. One
+operation also retains the exact pre-change general/accepted temporal payloads
+and closure row plus their digest. One
+`BEGIN IMMEDIATE` CAS publishes the reviewed ready plan, the existing
+`temporal_source_snapshots` and `accepted_closed` payload plus closure success,
+then inserts this audit. Raw seller-report rows are never persisted here.
+Same-identity repeat is zero-write/no-op; conflicting or auditless after-image
+fails closed. Readback opens the selected operational generation in SQLite
+`mode=ro`, sets `query_only=ON`, and verifies 171/171, 33/33, terminal 204,
+source/plan/non-target digests, duplicate absence and closure state.
+After an audit exists, ordinary full/group/auto refresh publication fails
+closed if it would regress any protected exact Finance cell; a producer with
+the same 171 values remains admissible. This prevents a plan built before the
+recovery from overwriting the bounded result without stopping global timers.
+
 ## Global SQLite contention contract
 
 All shared runtime writers open SQLite through `packages/application/sqlite_contention.py`. Interactive requests have a 30-second bounded budget and shorter jittered backoff; background processes have a 10-second budget and yield longer between attempts. Each individual SQLite attempt uses a 250 ms busy timeout. Only `SQLITE_BUSY`/`SQLITE_LOCKED` is retried, so business validation and unrelated database errors are never repeated. The warehouse functional process retains its explicit process-local 120-second override.
