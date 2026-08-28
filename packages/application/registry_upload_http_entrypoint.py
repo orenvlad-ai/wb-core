@@ -2364,10 +2364,21 @@ class RegistryUploadHttpEntrypoint:
         user_key: str,
         actor: str,
     ) -> dict[str, Any]:
-        return self.sku_inventory_balance_block.calculate(
+        return self.sku_inventory_balance_block.start_calculation_operation(
             payload,
             user_key=user_key,
             actor=actor,
+        )
+
+    def handle_sku_inventory_balance_operation_request(
+        self,
+        operation_id: str,
+        *,
+        user_key: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.get_calculation_operation(
+            operation_id,
+            user_key=user_key,
         )
 
     def handle_sku_inventory_balance_settings_save_request(

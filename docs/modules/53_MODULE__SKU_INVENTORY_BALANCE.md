@@ -17,6 +17,7 @@ related_modules:
   - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md"
 related_tables:
+  - "sheet_vitrina_v1_inventory_balance_operations"
   - "sheet_vitrina_v1_inventory_balance_calculations"
   - "sheet_vitrina_v1_inventory_balance_overrides"
   - "sheet_vitrina_v1_inventory_balance_apply_jobs"
@@ -26,6 +27,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/sku-management/inventory-balance"
   - "POST /v1/sheet-vitrina-v1/sku-management/inventory-balance/settings"
   - "POST /v1/sheet-vitrina-v1/sku-management/inventory-balance/calculate"
+  - "GET /v1/sheet-vitrina-v1/sku-management/inventory-balance/operations/{operation_id}"
   - "GET /v1/sheet-vitrina-v1/sku-management/inventory-balance/calculations?limit=20"
   - "GET /v1/sheet-vitrina-v1/sku-management/inventory-balance/calculations/{calculation_id}"
   - "POST /v1/sheet-vitrina-v1/sku-management/inventory-balance/calculations/{calculation_id}/override"
@@ -37,7 +39,7 @@ related_runners:
   - "apps/sku_inventory_balance_smoke.py"
   - "apps/sku_inventory_balance_browser_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Formula v2 adds a Balance-only exact aggregate-WB opening fallback with immutable provenance; warehouse/regional incident semantics and live WB boundaries remain unchanged."
+update_note: "Новый расчёт использует durable operation v1: быстрый 202, idempotency-key dedupe, server-backed progress/result и bounded background worker; formula v2, immutable calculations and live WB boundaries remain unchanged."
 ---
 
 # 1. Product surface and ownership
@@ -53,7 +55,13 @@ update_note: "Formula v2 adds a Balance-only exact aggregate-WB opening fallback
 
 # 2. Immutable calculation registry
 
-Каждый явный `Новый расчёт` создаёт новый `calculation_id`. Строка в `sheet_vitrina_v1_inventory_balance_calculations` содержит versioned formula, source digest, settings, полный payload, actor/time и `previous_calculation_id`. SQLite triggers запрещают update/delete calculation rows. Новый source snapshot никогда не переписывает прежнее решение. Bounded registry endpoint и экранный реестр показывают последние расчёты, lineage, versioned protocols и связанные apply jobs/status/manifest digest.
+Каждый явный `Новый расчёт` сначала создаёт durable row в `sheet_vitrina_v1_inventory_balance_operations`. Browser до POST генерирует stable `operation_id` и отдельный `idempotency_key`, сохраняет только эту recovery identity, а server атомарно принимает exact sanitized settings и возвращает быстрый `202` с byte-stable acceptance receipt. Повтор того же `user + idempotency_key` с тем же digest возвращает те же bytes и не запускает второй worker; divergent payload или занятая identity fail closed. После transport uncertainty browser выполняет только `GET .../operations/{operation_id}` и не делает blind resubmit.
+
+Operation contract `sheet_vitrina_v1_sku_inventory_balance_operation/v1` имеет server-backed states `accepted → running → succeeded|failed`, versioned phase/progress, controlled error, durable outcome и единственный nullable result. Один process держит максимум один calculation worker thread и не имеет очереди; HTTP request завершается до тяжёлого source/Ads расчёта, поэтому current single-thread `HTTPServer` продолжает обслуживать соседние GET/health. Новая independent operation при занятом worker получает controlled `409`; same-key readback остаётся доступен. После process interruption незавершённая operation terminalize-ится как explicit `failed/no_calculation_created` и retry разрешён только новой operation identity.
+
+Только terminal `succeeded` в одной SQLite transaction вставляет ровно одну строку calculation с unique `operation_id` и записывает этот же `calculation_id` в operation outcome. Failure до insert остаётся explicit и не выводится как success по косвенным признакам. Bounded observability логирует и отдаёт через status только sanitized operation id, phase, duration и durable outcome без payload, user identity или secrets.
+
+Каждая successful operation создаёт новый `calculation_id`. Строка в `sheet_vitrina_v1_inventory_balance_calculations` содержит versioned formula, source digest, settings, полный payload, actor/time, `operation_id` и `previous_calculation_id`. SQLite triggers запрещают update/delete calculation rows. Новый source snapshot никогда не переписывает прежнее решение. Bounded registry endpoint и экранный реестр показывают последние расчёты, lineage, versioned protocols и связанные apply jobs/status/manifest digest.
 
 Расчёт возвращает lineage к предыдущему calculation и future observation fields. Наблюдения имеют отдельную append-only таблицу `sheet_vitrina_v1_inventory_balance_outcomes`; исходный calculation и применённые значения не переписываются результатом наблюдения.
 
@@ -107,16 +115,16 @@ Download строится из выбранного immutable calculation плю
 - `Расчёт` — stock pace inputs/bounds и formula version;
 - `Кампании` — exact identities, CPO и current/calculated/manual/final bids плюс outcome placeholders;
 - `Поставки` — все exact milestones: date/quantity, available-before/cumulative-after, source identity, next/subsequent role и ETA evidence/quality;
-- `Источники` — calculation/source digest, lineage, settings и no-training boundary;
+- `Источники` — operation/calculation identity, source digest, lineage, settings и no-training boundary;
 - `История расчётов` — immutable registry chain.
 
 `Решения` содержит отдельные колонки `Следующая поставка`, `Последующая поставка` и `WB источник`. `Расчёт` отдельно показывает raw WB, коэффициент, учтённый WB и evidence mode; `Источники` сохраняет полный per-SKU WB evidence lineage. Aggregate mode в UI/XLSX всегда подписан как aggregate-only без складской раскладки. Перед response workbook повторно открывается через XLSX reader и проверяет primary/campaign/inbound sheets. XLSX остаётся export artifact и не становится calculation/source truth.
 
 # 7. Verification and exclusions
 
-`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook provenance readback, durable progress and disabled live adapter without preview/commit calls.
+`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook provenance readback, durable progress and disabled live adapter without preview/commit calls. Тот же smoke разрывает клиентский socket до response, удерживает тяжёлый worker, доказывает быстрый соседний GET, byte-stable same-key `202`, later operation GET recovery и exact one operation/one calculation.
 
-`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings, columns, grouped CPC/CPM recommendations, inline override, select-all, confirmation, server-backed terminal progress and отсутствие browser `PATCH`.
+`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings, columns, grouped CPC/CPM recommendations, inline override, select-all, confirmation, disabled/working calculate button, animated operation progress, transport-loss readback without raw `Failed to fetch`, reload recovery, server-backed terminal result and отсутствие browser `PATCH`.
 
 Explicit exclusion policy `sku_inventory_balance_exclusions_v1` удаляет из calculation rows/UI/XLSX только exact nmID `497413772`, `497415593`, `497416931` с reason `iPhone Air glass is outside inventory-balance scope`; name substring matching запрещён. Policy version, полный configured list и matched rows сохраняются в lineage и `Источники`.
 
