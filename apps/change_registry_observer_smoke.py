@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
+import shlex
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
@@ -44,6 +46,71 @@ from apps.change_registry_source_acquisition_smoke import (  # noqa: E402
 
 SELLER = "seller-primary"
 ACCOUNT = "seller-portal-primary"
+
+
+def _unit_environment(path: Path) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("Environment="):
+            tokens = shlex.split(line.split("=", 1)[1])
+        elif line.startswith("ExecStart="):
+            tokens = shlex.split(line.split("=", 1)[1])
+        else:
+            continue
+        for token in tokens:
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            if key in {"CHANGE_REGISTRY_OBSERVER_ENABLED", "CHANGE_REGISTRY_ACCOUNT_SCOPE"}:
+                if key in environment and environment[key] != value:
+                    raise AssertionError(f"conflicting {key} values in {path}")
+                environment[key] = value
+    return environment
+
+
+def _assert_canonical_hosted_activation_wiring() -> None:
+    target_path = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "input"
+        / "hosted_runtime_target__europe_api.json"
+    )
+    target = json.loads(target_path.read_text(encoding="utf-8"))
+    runtime_env = target["runtime_env"]
+    expected = {
+        "CHANGE_REGISTRY_OBSERVER_ENABLED": runtime_env["CHANGE_REGISTRY_OBSERVER_ENABLED"],
+        "CHANGE_REGISTRY_ACCOUNT_SCOPE": runtime_env["CHANGE_REGISTRY_ACCOUNT_SCOPE"],
+    }
+    assert expected == {
+        "CHANGE_REGISTRY_OBSERVER_ENABLED": "true",
+        "CHANGE_REGISTRY_ACCOUNT_SCOPE": ACCOUNT,
+    }
+
+    units_dir = ROOT / target["systemd_units_source_dir"]
+    observer_unit = units_dir / "wb-core-change-registry-observer.service"
+    http_unit = units_dir / "wb-core-registry-http.service"
+    assert _unit_environment(observer_unit) == expected
+    assert _unit_environment(http_unit) == expected
+
+    environment_file = target["environment_file"]
+    observer_text = observer_unit.read_text(encoding="utf-8")
+    http_text = http_unit.read_text(encoding="utf-8")
+    assert f"--env-file {environment_file}" in observer_text
+    assert f"EnvironmentFile={environment_file}" in http_text
+
+    managed_units = {item["name"]: item for item in target["managed_systemd_units"]}
+    assert managed_units[observer_unit.name] == {
+        "name": observer_unit.name,
+        "enable": False,
+        "restart": True,
+    }
+    assert managed_units["wb-core-change-registry-observer.timer"] == {
+        "name": "wb-core-change-registry-observer.timer",
+        "enable": True,
+        "restart": True,
+    }
 
 
 def _exact_integer(value: int) -> dict[str, Any]:
@@ -228,6 +295,7 @@ def _atomic_result_counts(db_path: Path) -> dict[str, int]:
 
 
 def main() -> None:
+    _assert_canonical_hosted_activation_wiring()
     with TemporaryDirectory(prefix="change-registry-observer-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime_dir.mkdir(parents=True)
