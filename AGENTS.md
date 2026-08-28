@@ -76,11 +76,12 @@ compatibility не является blocker, current canonical source acquisitio
   owning main task публикует owner outcome/допустимый business question и
   dispatch-ит continuation; compact handoff и plain-Russian пересказ определяет
   doc13.
-- Post-task
-  [`docs/architecture/14_codex_task_audit_checklist.md`](docs/architecture/14_codex_task_audit_checklist.md)
-  не является execution checklist. Его читаёт только curator, отдельно
-  оптимизирующий production protocol; ordinary main/domain curators и technical
-  subagents его не применяют.
+- Main-only post-task `Сверка` по
+  [`docs/architecture/16_codex_protocol_conformance_pipeline.md`](docs/architecture/16_codex_protocol_conformance_pipeline.md)
+  выдаёт только факты для отдельного analysis/decision layer из
+  [`docs/architecture/14_codex_task_audit_checklist.md`](docs/architecture/14_codex_task_audit_checklist.md).
+  Оба документа не являются execution checklists: ordinary tasks/subagents их не
+  читают и не применяют.
 
 ## Authorization и safety invariants
 
