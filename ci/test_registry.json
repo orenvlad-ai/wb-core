@@ -106,6 +106,7 @@
         ["python3", "apps/change_registry_source_acquisition_smoke.py"],
         ["python3", "apps/change_registry_baseline_engine_smoke.py"],
         ["python3", "apps/change_registry_observer_smoke.py"],
+        ["python3", "apps/change_registry_manual_pending_smoke.py"],
         ["python3", "apps/change_registry_internal_writers_smoke.py"]
       ]
     },
@@ -320,7 +321,7 @@
     },
     {
       "id": "change-registry-observer",
-      "paths": ["apps/change_registry_observer*.py", "packages/application/change_registry*.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-observer.*", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json", "apps/business_data_maintenance.py", "docs/modules/57_MODULE__CHANGE_REGISTRY_OBSERVER.md", "migration/168_change_registry_observer.md", "migration/170_change_registry_observer_failure_attribution.md"],
+      "paths": ["apps/change_registry_observer*.py", "apps/change_registry_manual_pending_smoke.py", "packages/application/change_registry*.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-change-registry-observer.*", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json", "apps/business_data_maintenance.py", "docs/modules/53_MODULE__SKU_INVENTORY_BALANCE.md", "docs/modules/57_MODULE__CHANGE_REGISTRY_OBSERVER.md", "migration/168_change_registry_observer.md", "migration/170_change_registry_observer_failure_attribution.md", "migration/171_change_registry_manual_pending.md"],
       "suites": ["web_vitrina"],
       "release": "live_runtime"
     },

@@ -335,6 +335,20 @@ def main() -> None:
         override.blur()
         page.wait_for_timeout(50)
         page.locator("[data-inventory-balance-preset]").select_option("all")
+        page.locator("[data-inventory-balance-manual-pending]").click()
+        assert page.locator("[data-inventory-balance-confirm]").is_visible()
+        manual_confirmation = page.locator(
+            "[data-inventory-balance-confirm-body]"
+        ).inner_text()
+        assert "Применить на портале" in page.locator(
+            "[data-inventory-balance-confirm-title]"
+        ).inner_text()
+        assert "Реестр будет ждать доказанное изменение 24 часа" in manual_confirmation
+        assert "не выполняет POST/PATCH в WB" in manual_confirmation
+        assert "Подтвердить ожидание 24 часа" in page.locator(
+            "[data-inventory-balance-confirm-start]"
+        ).inner_text()
+        page.locator("[data-inventory-balance-confirm-close]").first.click()
         page.locator("[data-inventory-balance-apply]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
         confirmation = page.locator("[data-inventory-balance-confirm-body]").inner_text()

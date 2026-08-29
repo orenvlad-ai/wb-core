@@ -112,6 +112,7 @@ from packages.application.change_registry_observer import (
     ChangeRegistryReadSurface,
     DEFAULT_ACCOUNT_SCOPE as CHANGE_REGISTRY_ACCOUNT_SCOPE,
 )
+from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -1354,6 +1355,13 @@ class RegistryUploadHttpEntrypoint:
                 sku_management_block=self.sku_management_block,
                 now_factory=self.now_factory,
                 timestamp_factory=self.activated_at_factory,
+                manual_pending_registry=(
+                    ChangeRegistryRepository(self.runtime.runtime_dir)
+                    if registry_seller_id
+                    else None
+                ),
+                seller_id=registry_seller_id,
+                account_scope=registry_scope,
             )
         )
         self.change_registry_enabled = os.environ.get(
@@ -2533,6 +2541,16 @@ class RegistryUploadHttpEntrypoint:
         actor: str,
     ) -> dict[str, Any]:
         return self.sku_inventory_balance_block.start_apply(payload, actor=actor)
+
+    def handle_sku_inventory_balance_manual_pending_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        return self.sku_inventory_balance_block.start_manual_pending(
+            payload, actor=actor
+        )
 
     def handle_sku_inventory_balance_apply_job_request(self, job_id: str) -> dict[str, Any]:
         return self.sku_inventory_balance_block.get_apply_job(job_id)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import hashlib
 import json
@@ -2199,6 +2199,604 @@ class ChangeRegistryRepository:
                     (event["pending_event_id"], row["occurred_at"], *target_values),
                 )
             return event
+
+    def register_manual_pending(
+        self,
+        *,
+        seller_id: str,
+        account_scope: str,
+        calculation_id: str,
+        recommendations: Sequence[Mapping[str, Any]],
+        actor_principal: str,
+        requested_at: str,
+    ) -> dict[str, Any]:
+        """Register exact Balance recommendations without creating an attempt/fact.
+
+        The recommendation id is the idempotency identity.  A replay with the
+        same immutable bytes returns the existing lifecycle; reusing the id for
+        another target/value fails closed.
+        """
+
+        exact_seller = _identifier(seller_id, "seller_id")
+        exact_scope = _identifier(account_scope, "account_scope")
+        exact_calculation = _identifier(
+            calculation_id, "calculation_id", maximum=240
+        )
+        exact_actor = _identifier(
+            actor_principal, "actor_principal", maximum=160
+        )
+        exact_requested_at = _timestamp(requested_at, "requested_at")
+        if not recommendations:
+            raise ChangeRegistryError("at least one exact recommendation is required")
+        normalized: list[dict[str, Any]] = []
+        seen_recommendations: set[str] = set()
+        seen_targets: set[tuple[Any, ...]] = set()
+        for raw in recommendations:
+            recommendation_id = _identifier(
+                raw.get("recommendation_item_id"),
+                "recommendation_item_id",
+                maximum=160,
+            )
+            if recommendation_id in seen_recommendations:
+                raise ChangeRegistryError("duplicate recommendation_item_id")
+            seen_recommendations.add(recommendation_id)
+            if str(raw.get("action_type") or "") != "bid_change":
+                raise ChangeRegistryError("only exact bid_change is active")
+            target_raw = raw.get("target")
+            if not isinstance(target_raw, Mapping):
+                raise ChangeRegistryError("recommendation target must be an object")
+            if str(target_raw.get("seller_id") or "") != exact_seller:
+                raise ChangeRegistryConflict("recommendation seller scope mismatch")
+            if str(target_raw.get("account_scope") or "") != exact_scope:
+                raise ChangeRegistryConflict("recommendation account scope mismatch")
+            if str(target_raw.get("parameter_field") or "") != "bid_minor":
+                raise ChangeRegistryError("only bid_minor recommendation is active")
+            target = target_identity(
+                "bid",
+                nm_id=target_raw.get("nm_id"),
+                advert_id=target_raw.get("advert_id"),
+                placement=target_raw.get("placement"),
+            )
+            target_key = (
+                target.target_kind,
+                target.nm_id,
+                target.advert_id,
+                target.placement,
+                "bid_minor",
+            )
+            if target_key in seen_targets:
+                raise ChangeRegistryError("selection contains duplicate exact target")
+            seen_targets.add(target_key)
+            before = _canonicalize_field_value("bid_minor", raw.get("before_value"))
+            desired = _canonicalize_field_value(
+                "bid_minor", raw.get("requested_value")
+            )
+            _validate_field_value("bid_minor", before, requested=False)
+            _validate_field_value("bid_minor", desired, requested=True)
+            if before == desired:
+                raise ChangeRegistryError("recommendation target already has desired value")
+            normalized.append(
+                {
+                    "recommendation_item_id": recommendation_id,
+                    "target": target,
+                    "before": before,
+                    "desired": desired,
+                }
+            )
+
+        operation_id = _stable_registry_id(
+            "crop",
+            {
+                "source_surface": "sku_inventory_balance_manual_pending",
+                "seller_id": exact_seller,
+                "account_scope": exact_scope,
+                "calculation_id": exact_calculation,
+                "recommendation_item_ids": sorted(seen_recommendations),
+            },
+        )
+        provenance_basis = {
+            "operation_id": operation_id,
+            "calculation_id": exact_calculation,
+            "recommendations": [
+                {
+                    "recommendation_item_id": item["recommendation_item_id"],
+                    "target": item["target"].__dict__,
+                    "before": _canonical_value_payload(item["before"]),
+                    "desired": _canonical_value_payload(item["desired"]),
+                }
+                for item in sorted(
+                    normalized, key=lambda value: value["recommendation_item_id"]
+                )
+            ],
+        }
+        results: list[dict[str, Any]] = []
+        with self._transaction("register_manual_pending") as conn:
+            operation_row = {
+                "operation_id": operation_id,
+                "seller_id": exact_seller,
+                "account_scope": exact_scope,
+                "source_surface": "sku_inventory_balance_manual_pending",
+                "actor_principal": exact_actor,
+                "actor_kind": "human",
+                "requested_at": exact_requested_at,
+                "created_at": exact_requested_at,
+                "native_idempotency_key": "",
+                "correlation_id": "",
+                "calculation_id": exact_calculation,
+                "apply_operation_id": "",
+                "provenance_digest": canonical_digest(provenance_basis),
+                "mapping_version": MAPPING_VERSION,
+            }
+            existing_operation = conn.execute(
+                f"SELECT * FROM {OPERATIONS_TABLE} WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if existing_operation is None:
+                self._insert_idempotent_conn(
+                    conn, OPERATIONS_TABLE, "operation_id", operation_row
+                )
+            else:
+                # Actor/time are receipt metadata, not recommendation identity.
+                immutable = dict(operation_row)
+                immutable["actor_principal"] = existing_operation["actor_principal"]
+                immutable["requested_at"] = existing_operation["requested_at"]
+                immutable["created_at"] = existing_operation["created_at"]
+                if not _row_matches(existing_operation, immutable):
+                    raise ChangeRegistryConflict(
+                        "manual pending operation identity owns different bytes"
+                    )
+            for item in normalized:
+                recommendation_id = item["recommendation_item_id"]
+                target = item["target"]
+                existing_item = conn.execute(
+                    f"SELECT * FROM {ITEMS_TABLE} WHERE recommendation_item_id=?",
+                    (recommendation_id,),
+                ).fetchall()
+                if len(existing_item) > 1:
+                    raise ChangeRegistryConflict(
+                        "recommendation_item_id is not globally atomic"
+                    )
+                change_item_id = _stable_registry_id(
+                    "critem", {"recommendation_item_id": recommendation_id}
+                )
+                before = item["before"]
+                desired = item["desired"]
+                item_row = {
+                    "change_item_id": change_item_id,
+                    "operation_id": operation_id,
+                    "seller_id": exact_seller,
+                    "account_scope": exact_scope,
+                    "target_kind": target.target_kind,
+                    "nm_id": target.nm_id,
+                    "advert_id": target.advert_id,
+                    "placement": target.placement,
+                    "parameter_field": "bid_minor",
+                    **before.columns("before_value"),
+                    **desired.columns("requested_value"),
+                    "recommendation_item_id": recommendation_id,
+                    "mapping_version": MAPPING_VERSION,
+                    "created_at": (
+                        str(existing_operation["created_at"])
+                        if existing_operation is not None
+                        else exact_requested_at
+                    ),
+                }
+                if existing_item:
+                    if not _row_matches(existing_item[0], item_row):
+                        raise ChangeRegistryConflict(
+                            "recommendation_item_id owns different immutable payload"
+                        )
+                    results.append(
+                        self._manual_pending_status_conn(conn, recommendation_id)
+                    )
+                    continue
+                self._require_exact_manual_baseline_conn(
+                    conn,
+                    seller_id=exact_seller,
+                    account_scope=exact_scope,
+                    target=target,
+                    before=before,
+                    requested_at=exact_requested_at,
+                )
+                pending_id = _stable_registry_id(
+                    "crmp", {"recommendation_item_id": recommendation_id}
+                )
+                pointer = self._manual_pointer_conn(
+                    conn, exact_seller, exact_scope, target, "bid_minor"
+                )
+                if pointer is not None and int(pointer["active"]) == 1:
+                    previous_event = conn.execute(
+                        f"SELECT * FROM {MANUAL_PENDING_EVENTS_TABLE} "
+                        "WHERE pending_id=? ORDER BY sequence_no DESC LIMIT 1",
+                        (pointer["current_pending_id"],),
+                    ).fetchone()
+                    if previous_event is None:
+                        raise ChangeRegistryConflict("active pending event is missing")
+                    self._append_manual_pending_event_conn(
+                        conn,
+                        pending_event_id=_stable_registry_id(
+                            "crmpe",
+                            {
+                                "pending_id": previous_event["pending_id"],
+                                "state": "superseded",
+                            },
+                        ),
+                        pending_id=str(previous_event["pending_id"]),
+                        change_item_id=str(previous_event["change_item_id"]),
+                        sequence_no=2,
+                        state="superseded",
+                        occurred_at=exact_requested_at,
+                        evidence_basis={
+                            "superseded_by_recommendation_item_id": recommendation_id
+                        },
+                        supersedes_pending_id=pending_id,
+                    )
+                self._insert_idempotent_conn(
+                    conn, ITEMS_TABLE, "change_item_id", item_row
+                )
+                self._append_manual_pending_event_conn(
+                    conn,
+                    pending_event_id=_stable_registry_id(
+                        "crmpe", {"pending_id": pending_id, "state": "pending"}
+                    ),
+                    pending_id=pending_id,
+                    change_item_id=change_item_id,
+                    sequence_no=1,
+                    state="pending",
+                    occurred_at=exact_requested_at,
+                    evidence_basis={
+                        "recommendation_item_id": recommendation_id,
+                        "pre_pending_value": _canonical_value_payload(before),
+                        "desired_value": _canonical_value_payload(desired),
+                        "expires_after_hours": 24,
+                    },
+                )
+                self._reconcile_pending_conn(conn, pending_id, exact_requested_at)
+                results.append(
+                    self._manual_pending_status_conn(conn, recommendation_id)
+                )
+        return {
+            "contract_name": "change_registry_manual_pending/v1",
+            "operation_id": operation_id,
+            "calculation_id": exact_calculation,
+            "items": results,
+            "external_writes": False,
+            "attempts_created": 0,
+            "facts_created": 0,
+        }
+
+    def reconcile_manual_pending_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        seller_id: str,
+        account_scope: str,
+        checkpoint_id: str,
+        reconciled_at: str,
+    ) -> None:
+        checkpoint = conn.execute(
+            f"SELECT * FROM {CHECKPOINTS_TABLE} WHERE checkpoint_id=? "
+            "AND seller_id=? AND account_scope=? AND completeness_status='complete'",
+            (checkpoint_id, seller_id, account_scope),
+        ).fetchone()
+        if checkpoint is None:
+            return
+        rows = conn.execute(
+            f"SELECT current_pending_id FROM {MANUAL_PENDING_CURRENT_TABLE} "
+            "WHERE seller_id=? AND account_scope=? AND active=1 "
+            "ORDER BY current_pending_id",
+            (seller_id, account_scope),
+        ).fetchall()
+        for row in rows:
+            self._reconcile_pending_conn(
+                conn, str(row["current_pending_id"]), reconciled_at
+            )
+
+    def manual_pending_statuses(
+        self, recommendation_item_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        exact_ids = sorted(
+            {
+                _identifier(value, "recommendation_item_id", maximum=160)
+                for value in recommendation_item_ids
+                if str(value or "").strip()
+            }
+        )
+        if not exact_ids:
+            return {}
+        with self._read_session("manual_pending_statuses") as conn:
+            return {
+                recommendation_id: self._manual_pending_status_conn(
+                    conn, recommendation_id
+                )
+                for recommendation_id in exact_ids
+                if conn.execute(
+                    f"SELECT 1 FROM {ITEMS_TABLE} WHERE recommendation_item_id=?",
+                    (recommendation_id,),
+                ).fetchone()
+                is not None
+            }
+
+    def _require_exact_manual_baseline_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        seller_id: str,
+        account_scope: str,
+        target: TargetIdentity,
+        before: CanonicalValue,
+        requested_at: str,
+    ) -> None:
+        observation = conn.execute(
+            f"""SELECT value.* FROM {CHECKPOINTS_TABLE} checkpoint
+                JOIN {OBSERVATION_VALUES_TABLE} value
+                  ON value.checkpoint_id=checkpoint.checkpoint_id
+                WHERE checkpoint.seller_id=? AND checkpoint.account_scope=?
+                  AND checkpoint.completeness_status='complete'
+                  AND checkpoint.completed_at<=?
+                  AND value.target_kind=? AND value.nm_id=?
+                  AND value.advert_id=? AND value.placement=?
+                  AND value.parameter_field='bid_minor'
+                ORDER BY checkpoint.completed_at DESC,checkpoint.checkpoint_id DESC
+                LIMIT 1""",
+            (
+                seller_id,
+                account_scope,
+                requested_at,
+                target.target_kind,
+                target.nm_id,
+                target.advert_id,
+                target.placement,
+            ),
+        ).fetchone()
+        if observation is None or str(observation["observation_status"]) not in {
+            "exact",
+            "exact_zero",
+        }:
+            raise ChangeRegistryError(
+                "exact pre-pending observer value is unavailable for this target"
+            )
+        observed = CanonicalValue(
+            str(observation["value_kind"]),
+            observation["value_integer"],
+            observation["value_text"],
+        )
+        if observed != before:
+            raise ChangeRegistryConflict(
+                "Balance current value differs from latest exact observer value"
+            )
+
+    def _reconcile_pending_conn(
+        self, conn: sqlite3.Connection, pending_id: str, reconciled_at: str
+    ) -> None:
+        event = conn.execute(
+            f"SELECT * FROM {MANUAL_PENDING_EVENTS_TABLE} WHERE pending_id=? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (pending_id,),
+        ).fetchone()
+        if event is None or str(event["state"]) != "pending":
+            return
+        item = self._required_row(
+            conn, ITEMS_TABLE, "change_item_id", event["change_item_id"]
+        )
+        expires_at = (
+            _timestamp_moment(str(event["occurred_at"])) + timedelta(hours=24)
+        ).isoformat().replace("+00:00", "Z")
+        fact = conn.execute(
+            f"""SELECT fact.* FROM {FACTS_TABLE} fact
+                WHERE fact.seller_id=? AND fact.account_scope=?
+                  AND fact.target_kind=? AND fact.nm_id=? AND fact.advert_id=?
+                  AND fact.placement=? AND fact.parameter_field=?
+                  AND fact.observed_to>? AND fact.observed_to<=?
+                  AND fact.before_value_kind=?
+                  AND fact.before_value_integer IS ?
+                  AND fact.before_value_text IS ?
+                ORDER BY fact.observed_to,fact.fact_id LIMIT 1""",
+            (
+                item["seller_id"],
+                item["account_scope"],
+                item["target_kind"],
+                item["nm_id"],
+                item["advert_id"],
+                item["placement"],
+                item["parameter_field"],
+                event["occurred_at"],
+                expires_at,
+                item["before_value_kind"],
+                item["before_value_integer"],
+                item["before_value_text"],
+            ),
+        ).fetchone()
+        if fact is not None:
+            matched = (
+                fact["after_value_kind"] == item["requested_value_kind"]
+                and fact["after_value_integer"] == item["requested_value_integer"]
+                and fact["after_value_text"] == item["requested_value_text"]
+            )
+            state = "matched" if matched else "deviated"
+            occurred_at = str(fact["proven_at"])
+            self._append_manual_pending_event_conn(
+                conn,
+                pending_event_id=_stable_registry_id(
+                    "crmpe", {"pending_id": pending_id, "state": state}
+                ),
+                pending_id=pending_id,
+                change_item_id=str(item["change_item_id"]),
+                sequence_no=2,
+                state=state,
+                occurred_at=occurred_at,
+                evidence_basis={"fact_id": fact["fact_id"], "state": state},
+                related_fact_id=str(fact["fact_id"]),
+            )
+            if matched:
+                for link_kind, linked_id in (
+                    ("change_item", str(item["change_item_id"])),
+                    ("recommendation_item", str(item["recommendation_item_id"])),
+                ):
+                    append_fact_link_in_transaction(
+                        self,
+                        conn,
+                        fact_id=str(fact["fact_id"]),
+                        link_kind=link_kind,
+                        linked_id=linked_id,
+                        linked_at=occurred_at,
+                        evidence_basis={
+                            "pending_id": pending_id,
+                            "state": "matched",
+                            "fact_id": fact["fact_id"],
+                        },
+                    )
+            return
+        if _timestamp_moment(reconciled_at) >= _timestamp_moment(expires_at):
+            self._append_manual_pending_event_conn(
+                conn,
+                pending_event_id=_stable_registry_id(
+                    "crmpe", {"pending_id": pending_id, "state": "expired"}
+                ),
+                pending_id=pending_id,
+                change_item_id=str(item["change_item_id"]),
+                sequence_no=2,
+                state="expired",
+                occurred_at=expires_at,
+                evidence_basis={"pending_id": pending_id, "expired_at": expires_at},
+            )
+
+    def _append_manual_pending_event_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        pending_event_id: str,
+        pending_id: str,
+        change_item_id: str,
+        sequence_no: int,
+        state: str,
+        occurred_at: str,
+        evidence_basis: Mapping[str, Any],
+        related_fact_id: str | None = None,
+        supersedes_pending_id: str = "",
+    ) -> None:
+        row = {
+            "pending_event_id": pending_event_id,
+            "pending_id": pending_id,
+            "change_item_id": change_item_id,
+            "sequence_no": sequence_no,
+            "state": state,
+            "related_fact_id": related_fact_id,
+            "supersedes_pending_id": supersedes_pending_id,
+            "occurred_at": occurred_at,
+            "evidence_digest": canonical_digest(evidence_basis),
+            "native_event_key": state,
+        }
+        self._insert_idempotent_conn(
+            conn, MANUAL_PENDING_EVENTS_TABLE, "pending_event_id", row
+        )
+        item = self._required_row(conn, ITEMS_TABLE, "change_item_id", change_item_id)
+        pointer = self._manual_pointer_conn(
+            conn,
+            str(item["seller_id"]),
+            str(item["account_scope"]),
+            target_identity(
+                str(item["target_kind"]),
+                nm_id=item["nm_id"],
+                advert_id=item["advert_id"],
+                placement=item["placement"],
+            ),
+            str(item["parameter_field"]),
+        )
+        target_values = (
+            item["seller_id"], item["account_scope"], item["target_kind"],
+            item["nm_id"], item["advert_id"], item["placement"],
+            item["parameter_field"],
+        )
+        active = 1 if state == "pending" else 0
+        if pointer is None:
+            _plain_insert(
+                conn,
+                MANUAL_PENDING_CURRENT_TABLE,
+                {
+                    "seller_id": item["seller_id"],
+                    "account_scope": item["account_scope"],
+                    "target_kind": item["target_kind"],
+                    "nm_id": item["nm_id"],
+                    "advert_id": item["advert_id"],
+                    "placement": item["placement"],
+                    "parameter_field": item["parameter_field"],
+                    "current_pending_id": pending_id,
+                    "current_event_id": pending_event_id,
+                    "active": active,
+                    "revision": 1,
+                    "updated_at": occurred_at,
+                },
+            )
+        else:
+            conn.execute(
+                f"UPDATE {MANUAL_PENDING_CURRENT_TABLE} SET "
+                "current_pending_id=?,current_event_id=?,active=?,"
+                "revision=revision+1,updated_at=? WHERE "
+                "seller_id=? AND account_scope=? AND target_kind=? AND nm_id=? "
+                "AND advert_id=? AND placement=? AND parameter_field=?",
+                (pending_id, pending_event_id, active, occurred_at, *target_values),
+            )
+
+    @staticmethod
+    def _manual_pointer_conn(
+        conn: sqlite3.Connection,
+        seller_id: str,
+        account_scope: str,
+        target: TargetIdentity,
+        parameter_field: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            f"SELECT * FROM {MANUAL_PENDING_CURRENT_TABLE} WHERE "
+            "seller_id=? AND account_scope=? AND target_kind=? AND nm_id=? "
+            "AND advert_id=? AND placement=? AND parameter_field=?",
+            (
+                seller_id, account_scope, target.target_kind, target.nm_id,
+                target.advert_id, target.placement, parameter_field,
+            ),
+        ).fetchone()
+
+    def _manual_pending_status_conn(
+        self, conn: sqlite3.Connection, recommendation_item_id: str
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            f"""SELECT item.*,operation.calculation_id,event.pending_id,
+                       event.state,event.occurred_at,event.related_fact_id
+                FROM {ITEMS_TABLE} item
+                JOIN {OPERATIONS_TABLE} operation
+                  ON operation.operation_id=item.operation_id
+                JOIN {MANUAL_PENDING_EVENTS_TABLE} event
+                  ON event.change_item_id=item.change_item_id
+                 AND event.sequence_no=(
+                    SELECT MAX(sequence_no) FROM {MANUAL_PENDING_EVENTS_TABLE} latest
+                    WHERE latest.pending_id=event.pending_id
+                 )
+                WHERE item.recommendation_item_id=?""",
+            (recommendation_item_id,),
+        ).fetchone()
+        if row is None:
+            raise ChangeRegistryNotFound("manual pending recommendation is missing")
+        expires_at = (
+            _timestamp_moment(str(row["created_at"])) + timedelta(hours=24)
+        ).isoformat().replace("+00:00", "Z")
+        return {
+            "pending_id": str(row["pending_id"]),
+            "recommendation_item_id": recommendation_item_id,
+            "calculation_id": str(row["calculation_id"]),
+            "state": str(row["state"]),
+            "requested_at": str(row["created_at"]),
+            "expires_at": expires_at,
+            "target": {
+                "target_kind": str(row["target_kind"]),
+                "nm_id": int(row["nm_id"]),
+                "advert_id": int(row["advert_id"]),
+                "placement": str(row["placement"]),
+                "parameter_field": str(row["parameter_field"]),
+            },
+            "before_value": row["before_value_integer"],
+            "requested_value": row["requested_value_integer"],
+            "related_fact_id": str(row["related_fact_id"] or ""),
+        }
 
     def read_operation(self, operation_id: str) -> dict[str, Any]:
         exact_id = _identifier(operation_id, "operation_id")

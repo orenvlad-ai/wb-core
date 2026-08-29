@@ -23,6 +23,9 @@ from packages.application.change_registry import (
     CHECKPOINT_SOURCE_MANIFESTS_TABLE,
     FACTS_TABLE,
     IDENTITY_INCIDENTS_TABLE,
+    ITEMS_TABLE,
+    MANUAL_PENDING_CURRENT_TABLE,
+    MANUAL_PENDING_EVENTS_TABLE,
     OBSERVER_HEALTH_EVENTS_TABLE,
     OBSERVER_JOB_EVENTS_TABLE,
     OBSERVER_JOBS_TABLE,
@@ -771,6 +774,15 @@ class ChangeRegistryObserver:
             self._enter_persistence_stage(
                 persistence, "terminal_job_event", conn
             )
+            ChangeRegistryRepository(
+                self.runtime_dir
+            ).reconcile_manual_pending_in_transaction(
+                conn,
+                seller_id=self.seller_id,
+                account_scope=self.account_scope,
+                checkpoint_id=checkpoint_id,
+                reconciled_at=persisted_at,
+            )
             self._append_job_event(
                 conn,
                 job_id,
@@ -1264,6 +1276,9 @@ class ChangeRegistryReadSurface:
                 OBSERVER_JOB_EVENTS_TABLE,
                 OBSERVER_JOBS_TABLE,
                 ANNOTATION_REVISIONS_TABLE,
+                ITEMS_TABLE,
+                MANUAL_PENDING_CURRENT_TABLE,
+                MANUAL_PENDING_EVENTS_TABLE,
             }
             actual_tables = {
                 str(row[0])
@@ -1329,6 +1344,27 @@ class ChangeRegistryReadSurface:
                 "AND account_scope=? ORDER BY observed_at DESC,incident_id DESC LIMIT ?",
                 (self.seller_id, self.account_scope, exact_limit),
             ).fetchall()
+            manual_pending = conn.execute(
+                f"""SELECT item.recommendation_item_id,event.pending_id,event.state,
+                           event.occurred_at,event.related_fact_id,item.created_at,
+                           item.target_kind,item.nm_id,item.advert_id,item.placement,
+                           item.parameter_field,item.before_value_integer,
+                           item.requested_value_integer,pointer.active
+                    FROM {ITEMS_TABLE} item
+                    JOIN {MANUAL_PENDING_EVENTS_TABLE} event
+                      ON event.change_item_id=item.change_item_id
+                    LEFT JOIN {MANUAL_PENDING_CURRENT_TABLE} pointer
+                      ON pointer.current_pending_id=event.pending_id
+                     AND pointer.current_event_id=event.pending_event_id
+                    WHERE item.seller_id=? AND item.account_scope=?
+                      AND event.sequence_no=(
+                        SELECT MAX(sequence_no)
+                        FROM {MANUAL_PENDING_EVENTS_TABLE} latest
+                        WHERE latest.pending_id=event.pending_id
+                      )
+                    ORDER BY item.created_at DESC,item.change_item_id DESC LIMIT ?""",
+                (self.seller_id, self.account_scope, exact_limit),
+            ).fetchall()
             source_manifests = (
                 conn.execute(
                     f"SELECT source_name,completeness_status,expected_count,"
@@ -1350,6 +1386,10 @@ class ChangeRegistryReadSurface:
             scoped_subjects.update(
                 ("identity_incident", str(row["incident_id"]))
                 for row in incidents
+            )
+            scoped_subjects.update(
+                ("manual_pending", str(row["pending_id"]))
+                for row in manual_pending
             )
             annotations = [
                 dict(row)
@@ -1391,6 +1431,32 @@ class ChangeRegistryReadSurface:
                     "fact_id": fact["fact_id"],
                 }
             )
+        pending_payloads = []
+        for row in manual_pending:
+            requested_at = str(row["created_at"])
+            expires_at = (
+                _moment(requested_at) + timedelta(hours=24)
+            ).isoformat().replace("+00:00", "Z")
+            pending_payloads.append(
+                {
+                    "pending_id": str(row["pending_id"]),
+                    "recommendation_item_id": str(row["recommendation_item_id"]),
+                    "state": str(row["state"]),
+                    "active": bool(row["active"] or 0),
+                    "requested_at": requested_at,
+                    "expires_at": expires_at,
+                    "target": {
+                        "target_kind": str(row["target_kind"]),
+                        "nm_id": int(row["nm_id"]),
+                        "advert_id": int(row["advert_id"]),
+                        "placement": str(row["placement"]),
+                        "parameter_field": str(row["parameter_field"]),
+                    },
+                    "before_value": row["before_value_integer"],
+                    "requested_value": row["requested_value_integer"],
+                    "related_fact_id": str(row["related_fact_id"] or ""),
+                }
+            )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -1415,6 +1481,7 @@ class ChangeRegistryReadSurface:
             "interval_state": interval_state,
             "incidents": [dict(row) for row in incidents],
             "jobs": [dict(row) for row in jobs],
+            "manual_pending": pending_payloads,
             "annotations": annotations,
             "interval_semantics": (
                 "Время изменения известно только внутри окна между двумя наблюдениями."
@@ -1448,6 +1515,7 @@ class ChangeRegistryReadSurface:
             "interval_state": [],
             "incidents": [],
             "jobs": [],
+            "manual_pending": [],
             "annotations": [],
             "interval_semantics": (
                 "Время изменения известно только внутри окна между двумя наблюдениями."
@@ -1493,6 +1561,18 @@ class ChangeRegistryReadSurface:
         )
 
     def _owns_subject(self, subject_kind: str, subject_id: str) -> bool:
+        if subject_kind == "manual_pending" and subject_id:
+            with self.store_registry.session(
+                "operational", mode="ro", operation="change_registry_annotation_scope"
+            ) as conn:
+                row = conn.execute(
+                    f"SELECT 1 FROM {MANUAL_PENDING_EVENTS_TABLE} event "
+                    f"JOIN {ITEMS_TABLE} item ON item.change_item_id=event.change_item_id "
+                    "WHERE event.pending_id=? AND item.seller_id=? "
+                    "AND item.account_scope=? LIMIT 1",
+                    (subject_id, self.seller_id, self.account_scope),
+                ).fetchone()
+            return row is not None
         table_and_id = {
             "fact": (FACTS_TABLE, "fact_id"),
             "checkpoint": (CHECKPOINTS_TABLE, "checkpoint_id"),

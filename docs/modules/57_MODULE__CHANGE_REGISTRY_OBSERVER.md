@@ -17,8 +17,10 @@ transaction uses `ChangeRegistryBaselineEngine` and its transaction hook to
 persist the result: checkpoint, bounded source summaries, scalar observations,
 identity incidents, immutable facts and links, terminal job event, scheduled
 health and lease release. A failure rolls that result back as a unit. No WB
-POST/PATCH adapter, Balance writer, recommendation or
-`manual_pending` row is reachable from this module.
+POST/PATCH adapter or Balance writer is reachable from this module. После
+создания operator-owned `manual_pending` тот же transaction hook дополнительно
+связывает уже доказанный exact fact либо детерминированно закрывает ожидание;
+он не создаёт факт из pending и не вызывает WB.
 
 `wb-core-change-registry-observer.service` is timer-owned only; its timer runs
 every two hours, around minute 17, 24/7, independently from Vitrina refresh and
@@ -76,6 +78,15 @@ the primary failure is never replaced by the fallback exception.
   the same exact identity available for later change-item links.
 - `observed_from` and `observed_to` are the observation window. The Registry UI never
   presents either boundary as an invented effective time.
+- Pending запоминает pre-pending exact observed value и desired target. Только
+  первый proven transition после pending и до `+24h` может закрыть lifecycle:
+  exact target даёт `matched` и links к change item/recommendation, иное exact
+  значение даёт `deviated` без ложного fulfillment-link. Existing fact только
+  получает недостающие links, поэтому observer/manual race не создаёт дубль.
+- Если transition не доказан за 24 часа, ближайший scan/status reconciliation
+  добавляет `expired` без fact/change. Значение, существовавшее до pending, не
+  является match. Cardinality `0|many` не имеет exact bid observation и потому
+  fail closed до создания pending.
 
 ## Health and concurrency
 
@@ -108,11 +119,11 @@ Under `Управление SKU → Реестр изменений`, the existi
 authorization section owns:
 
 - `GET /v1/sheet-vitrina-v1/sku-management/change-registry` — sanitized
-  overview/status, fact intervals, identity incidents, jobs and annotation
-  revisions;
+  overview/status, manual-pending state/history, fact intervals, identity
+  incidents, jobs and annotation revisions;
 - `POST .../change-registry/manual-scan` — asynchronous read-only scan admission;
 - `POST .../change-registry/annotations` — append-only fact/checkpoint/incident
-  annotation revision.
+  annotation revision, включая append-only комментарий к deviated pending.
 
 The payload contains no WB raw response, token, secret or mutable business
 action. The already-published narrow `/sku-management/` nginx prefix owns all

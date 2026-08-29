@@ -159,6 +159,7 @@ def _snapshot(
     minute: int,
     *,
     price: int | Mapping[str, Any] = 10000,
+    bid: int = 0,
     complete: bool = True,
     include_good: bool = True,
     mapping: tuple[int, ...] = (101,),
@@ -193,11 +194,11 @@ def _snapshot(
                 "nm_id": mapping[0] if mapping else 101,
                 "advert_id": 201,
                 "placement": "search",
-                "bid_minor": _exact_integer(0),
-                "target_digest": canonical_digest({"bid": 0, "mapping": mapping}),
+                "bid_minor": _exact_integer(bid),
+                "target_digest": canonical_digest({"bid": bid, "mapping": mapping}),
             }
         ],
-        "record_digest": canonical_digest({"campaign": 201, "mapping": mapping}),
+        "record_digest": canonical_digest({"campaign": 201, "mapping": mapping, "bid": bid}),
     }
     incidents = []
     if not mapping_exact:
