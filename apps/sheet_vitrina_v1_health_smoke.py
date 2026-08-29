@@ -149,14 +149,20 @@ class _FakeRuntime:
             {
                 "source_key": "seller_funnel_snapshot",
                 "snapshot_date": YESTERDAY,
-                "snapshot_role": "accepted_closed",
+                "snapshot_role": "accepted_closed_day_snapshot",
                 "payload": {"kind": "success", "requested_count": 2, "covered_count": 2},
             },
             {
                 "source_key": "spp_proxy",
                 "snapshot_date": YESTERDAY,
-                "snapshot_role": "accepted_current",
+                "snapshot_role": "accepted_current_snapshot",
                 "payload": {"kind": "incomplete", "requested_count": 2, "covered_count": 1},
+            },
+            {
+                "source_key": "seller_funnel_snapshot",
+                "snapshot_date": TODAY,
+                "snapshot_role": "accepted_current_snapshot",
+                "payload": {"kind": "success", "requested_count": 2, "covered_count": 2},
             },
         ]
 
@@ -184,7 +190,27 @@ def main() -> None:
     assert evaluation["signals"]["today_current"]["state"] == "incomplete"
     assert evaluation["signals"]["bot_health"]["state"] == "ok"
     assert evaluation["bot_date_observations"]["incomplete_count"] >= 1
+    assert not any(
+        item["source_key"] == "seller_funnel_snapshot" and item["date"] == TODAY
+        for item in evaluation["bot_date_observations"]["gaps"]
+    )
     assert all(not item["apply_allowed"] for item in evaluation["recovery_preview"]["actions"])
+
+    legacy_runtime = _FakeRuntime()
+    legacy_sku = next(
+        item for item in legacy_runtime.refresh_status.source_outcomes
+        if item["source_key"] == "sku_action_events"
+    )
+    for item in legacy_sku["slots"]:
+        item["covered_count"] = 0
+        item["status"] = "warning"
+        item["note"] = "missing rows mean no confirmed change, not zero"
+    legacy_evaluation = evaluate_web_vitrina_health(runtime=legacy_runtime, now=NOW, history_days=2)
+    assert all(
+        item["expectation_state"] == "no_events"
+        for item in legacy_evaluation["expectation_matrix"]
+        if item["source_key"] == "sku_action_events"
+    )
 
     seller_gap = deepcopy(evaluation["expectation_matrix"])
     seller_cell = next(

@@ -42,11 +42,12 @@ HISTORICAL_RECOVERY_SOURCE_KEYS = {
     "sku_action_events",
 }
 BOT_HISTORICAL_ROLES = {
-    "seller_funnel_snapshot": "accepted_closed",
-    "web_source_snapshot": "accepted_closed",
-    "promo_by_price": "accepted_closed",
-    "spp_proxy": "accepted_current",
+    "seller_funnel_snapshot": "accepted_closed_day_snapshot",
+    "web_source_snapshot": "accepted_closed_day_snapshot",
+    "promo_by_price": "accepted_closed_day_snapshot",
+    "spp_proxy": "accepted_current_snapshot",
 }
+BOT_CURRENT_ROLE = "accepted_current_snapshot"
 
 
 def evaluate_web_vitrina_health(
@@ -190,7 +191,7 @@ def detect_bot_backed_date_gaps(
     while cursor <= end:
         day = cursor.isoformat()
         for source_key, historical_role in BOT_HISTORICAL_ROLES.items():
-            role = "accepted_current" if day == today else historical_role
+            role = BOT_CURRENT_ROLE if day == today else historical_role
             row = indexed.get((source_key, day, role))
             state, reason = _observation_state(
                 row,
@@ -287,7 +288,14 @@ def _expectation_cell(
             str(slot.get(key) or "").strip()
             for key in ("freshness", "snapshot_date", "date", "date_from", "date_to")
         }
-        if source_key == "sku_action_events" and "empty_semantics=no_confirmed_event" in note:
+        if (
+            source_key == "sku_action_events"
+            and kind == "success"
+            and (
+                "empty_semantics=no_confirmed_event" in note
+                or "missing rows mean no confirmed change" in note.lower()
+            )
+        ):
             state, reason = "no_events", "scope evaluated; no confirmed operator changes"
         elif temporal_policy == TEMPORAL_POLICY_DUAL_DAY_INTRADAY_TOLERANT and _accepted_fallback(
             temporal_policy=temporal_policy,
