@@ -7388,6 +7388,8 @@
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
     const METRIC_PRESENTATION_VERSION = 5;
+    const METRIC_PRESENTATION_SAVE_RETRY_LIMIT = 2;
+    const METRIC_PRESENTATION_SAVE_RETRY_BASE_DELAY_MS = 600;
     const METRIC_PRESENTATION_LEGACY_VERSIONS = new Set([2, 3, 4]);
     const INCIDENT_EFFECTIVE_SHOWN_MIGRATION = "incident_effective_shown_v1";
     const SKU_PRESETS_SEEDED_MIGRATION = "sku_presets_seeded_v1";
@@ -7790,6 +7792,13 @@
           saveInFlight: false,
           savePending: false,
           pendingBaseRevision: null,
+          pendingBaseConfig: null,
+          desiredConfig: null,
+          materializedConfig: null,
+          dirty: false,
+          retryCount: 0,
+          retryExhausted: false,
+          saveStatus: "idle",
           lastError: ""
         }
       },
@@ -12240,6 +12249,294 @@
       return result;
     }
 
+    function metricPresentationJsonEqual(left, right) {
+      return JSON.stringify(left || null) === JSON.stringify(right || null);
+    }
+
+    function metricPresentationConfigOrEmpty(candidate) {
+      return normalizePersistedMetricPresentation(candidate) || {
+        version: METRIC_PRESENTATION_VERSION,
+        scopes: {},
+        presentation: {order: [], display: {}, manual: false},
+        expanded_anchors: [],
+        sku_presets: [],
+        sku_highlight_metric_keys: [],
+        sku_metric_selection: {mode: "manual", presetId: "", all: true, metricKeys: []},
+        migrations: {
+          incidentEffectiveShownV1: true,
+          skuPresetsSeededV1: true,
+          unifiedPresentationV1: true,
+          sellerPriceWeightedV1: true,
+          inventoryPlanningMetricKeysV1: []
+        }
+      };
+    }
+
+    function longestCommonMetricPresentationSequence(left, right) {
+      const leftValues = uniqueLogicalMetricIds(left, 500);
+      const rightValues = uniqueLogicalMetricIds(right, 500);
+      const rows = Array.from({length: leftValues.length + 1}, function() {
+        return new Uint16Array(rightValues.length + 1);
+      });
+      for (let leftIndex = leftValues.length - 1; leftIndex >= 0; leftIndex -= 1) {
+        for (let rightIndex = rightValues.length - 1; rightIndex >= 0; rightIndex -= 1) {
+          rows[leftIndex][rightIndex] = leftValues[leftIndex] === rightValues[rightIndex]
+            ? rows[leftIndex + 1][rightIndex + 1] + 1
+            : Math.max(rows[leftIndex + 1][rightIndex], rows[leftIndex][rightIndex + 1]);
+        }
+      }
+      const result = [];
+      let leftIndex = 0;
+      let rightIndex = 0;
+      while (leftIndex < leftValues.length && rightIndex < rightValues.length) {
+        if (leftValues[leftIndex] === rightValues[rightIndex]) {
+          result.push(leftValues[leftIndex]);
+          leftIndex += 1;
+          rightIndex += 1;
+        } else if (rows[leftIndex + 1][rightIndex] >= rows[leftIndex][rightIndex + 1]) {
+          leftIndex += 1;
+        } else {
+          rightIndex += 1;
+        }
+      }
+      return result;
+    }
+
+    function mergeMetricPresentationOrderedValues(baseValues, localValues, remoteValues, limit) {
+      const boundedLimit = Number(limit || 500);
+      const base = uniqueLogicalMetricIds(baseValues, boundedLimit);
+      const local = uniqueLogicalMetricIds(localValues, boundedLimit);
+      const remote = uniqueLogicalMetricIds(remoteValues, boundedLimit);
+      if (metricPresentationJsonEqual(base, local)) {
+        return remote;
+      }
+      const localSet = new Set(local);
+      const removed = new Set(base.filter(function(value) { return !localSet.has(value); }));
+      const stable = new Set(longestCommonMetricPresentationSequence(base, local));
+      const moving = new Set(local.filter(function(value) { return !stable.has(value); }));
+      const result = remote.filter(function(value) {
+        return !removed.has(value) && !moving.has(value);
+      });
+      local.forEach(function(value, localIndex) {
+        if (!moving.has(value)) {
+          return;
+        }
+        let previous = "";
+        for (let index = localIndex - 1; index >= 0; index -= 1) {
+          if (result.indexOf(local[index]) !== -1) {
+            previous = local[index];
+            break;
+          }
+        }
+        let next = "";
+        for (let index = localIndex + 1; index < local.length; index += 1) {
+          if (result.indexOf(local[index]) !== -1) {
+            next = local[index];
+            break;
+          }
+        }
+        let insertIndex = result.length;
+        if (previous) {
+          insertIndex = result.indexOf(previous) + 1;
+        } else if (next) {
+          insertIndex = result.indexOf(next);
+        }
+        result.splice(insertIndex, 0, value);
+      });
+      return uniqueLogicalMetricIds(result, boundedLimit);
+    }
+
+    function mergeMetricPresentationMap(baseMap, localMap, remoteMap) {
+      const base = baseMap && typeof baseMap === "object" ? baseMap : {};
+      const local = localMap && typeof localMap === "object" ? localMap : {};
+      const remote = remoteMap && typeof remoteMap === "object" ? remoteMap : {};
+      const result = Object.assign({}, remote);
+      new Set(Object.keys(base).concat(Object.keys(local))).forEach(function(key) {
+        const baseHas = Object.prototype.hasOwnProperty.call(base, key);
+        const localHas = Object.prototype.hasOwnProperty.call(local, key);
+        const locallyChanged = baseHas !== localHas || (
+          localHas && !metricPresentationJsonEqual(base[key], local[key])
+        );
+        if (!locallyChanged) {
+          return;
+        }
+        if (localHas) {
+          result[key] = local[key];
+        } else {
+          delete result[key];
+        }
+      });
+      return result;
+    }
+
+    function mergeMetricPresentationPresets(basePresets, localPresets, remotePresets) {
+      const normalizePresets = function(candidate) {
+        return (Array.isArray(candidate) ? candidate : []).map(function(preset) {
+          return {
+            presetId: String(preset.presetId || preset.preset_id || ""),
+            name: String(preset.name || ""),
+            metricKeys: uniqueMetricKeys(preset.metricKeys || preset.metric_keys, 500)
+          };
+        }).filter(function(preset) { return !!preset.presetId; });
+      };
+      const base = normalizePresets(basePresets);
+      const local = normalizePresets(localPresets);
+      const remote = normalizePresets(remotePresets);
+      const byId = function(items) {
+        return new Map(items.map(function(item) { return [item.presetId, item]; }));
+      };
+      const baseById = byId(base);
+      const localById = byId(local);
+      const resultById = byId(remote);
+      new Set(Array.from(baseById.keys()).concat(Array.from(localById.keys()))).forEach(function(presetId) {
+        const basePreset = baseById.get(presetId) || null;
+        const localPreset = localById.get(presetId) || null;
+        if (metricPresentationJsonEqual(basePreset, localPreset)) {
+          return;
+        }
+        if (localPreset) {
+          resultById.set(presetId, localPreset);
+        } else {
+          resultById.delete(presetId);
+        }
+      });
+      const mergedIds = mergeMetricPresentationOrderedValues(
+        base.map(function(item) { return item.presetId; }),
+        local.map(function(item) { return item.presetId; }),
+        remote.map(function(item) { return item.presetId; }),
+        40
+      );
+      Array.from(resultById.keys()).forEach(function(presetId) {
+        if (mergedIds.indexOf(presetId) === -1) {
+          mergedIds.push(presetId);
+        }
+      });
+      return mergedIds.map(function(presetId) { return resultById.get(presetId); }).filter(Boolean);
+    }
+
+    function rebaseMetricPresentationConfig(baseCandidate, localCandidate, remoteCandidate) {
+      const base = metricPresentationConfigOrEmpty(baseCandidate);
+      const local = metricPresentationConfigOrEmpty(localCandidate);
+      const remote = metricPresentationConfigOrEmpty(remoteCandidate);
+      const basePresentation = base.presentation || {};
+      const localPresentation = local.presentation || {};
+      const remotePresentation = remote.presentation || {};
+      const localSelection = local.sku_metric_selection || {};
+      const baseSelection = base.sku_metric_selection || {};
+      const remoteSelection = remote.sku_metric_selection || {};
+      const mergedSelection = metricPresentationJsonEqual(baseSelection, localSelection)
+        ? remoteSelection
+        : localSelection;
+      const baseMigrations = base.migrations || {};
+      const localMigrations = local.migrations || {};
+      const remoteMigrations = remote.migrations || {};
+      const mergedMigrations = mergeMetricPresentationMap(
+        baseMigrations,
+        localMigrations,
+        remoteMigrations
+      );
+      mergedMigrations.inventoryPlanningMetricKeysV1 = mergeMetricPresentationOrderedValues(
+        baseMigrations.inventoryPlanningMetricKeysV1,
+        localMigrations.inventoryPlanningMetricKeysV1,
+        remoteMigrations.inventoryPlanningMetricKeysV1,
+        500
+      );
+      return {
+        version: Math.max(
+          METRIC_PRESENTATION_VERSION,
+          Number(local.version || 0),
+          Number(remote.version || 0)
+        ),
+        scopes: {},
+        presentation: {
+          order: mergeMetricPresentationOrderedValues(
+            basePresentation.order,
+            localPresentation.order,
+            remotePresentation.order,
+            500
+          ),
+          display: mergeMetricPresentationMap(
+            basePresentation.display,
+            localPresentation.display,
+            remotePresentation.display
+          ),
+          manual: metricPresentationJsonEqual(basePresentation.manual, localPresentation.manual)
+            ? !!remotePresentation.manual
+            : !!localPresentation.manual
+        },
+        expanded_anchors: mergeMetricPresentationOrderedValues(
+          base.expanded_anchors,
+          local.expanded_anchors,
+          remote.expanded_anchors,
+          500
+        ),
+        sku_presets: mergeMetricPresentationPresets(
+          base.sku_presets,
+          local.sku_presets,
+          remote.sku_presets
+        ),
+        sku_highlight_metric_keys: mergeMetricPresentationOrderedValues(
+          base.sku_highlight_metric_keys,
+          local.sku_highlight_metric_keys,
+          remote.sku_highlight_metric_keys,
+          SKU_METRIC_HIGHLIGHT_PALETTE.length
+        ),
+        sku_metric_selection: {
+          mode: String(mergedSelection.mode || "manual"),
+          presetId: String(mergedSelection.presetId || mergedSelection.preset_id || ""),
+          all: mergedSelection.all !== false,
+          metricKeys: uniqueMetricKeys(
+            mergedSelection.metricKeys || mergedSelection.metric_keys,
+            500
+          )
+        },
+        migrations: mergedMigrations
+      };
+    }
+
+    function serializeMetricPresentationConfig(candidate) {
+      const normalized = metricPresentationConfigOrEmpty(candidate);
+      const presentation = normalized.presentation || {};
+      const selection = normalized.sku_metric_selection || {};
+      const migrations = normalized.migrations || {};
+      return {
+        version: METRIC_PRESENTATION_VERSION,
+        presentation: {
+          order: uniqueLogicalMetricIds(presentation.order, 500),
+          display: Object.assign({}, presentation.display || {}),
+          manual: !!presentation.manual
+        },
+        expanded_anchors: uniqueLogicalMetricIds(normalized.expanded_anchors, 500),
+        sku_presets: (normalized.sku_presets || []).map(function(preset) {
+          return {
+            preset_id: String(preset.presetId || preset.preset_id || ""),
+            name: String(preset.name || ""),
+            metric_keys: uniqueMetricKeys(preset.metricKeys || preset.metric_keys, 500)
+          };
+        }),
+        sku_highlight_metric_keys: uniqueMetricKeys(
+          normalized.sku_highlight_metric_keys,
+          SKU_METRIC_HIGHLIGHT_PALETTE.length
+        ),
+        sku_metric_selection: {
+          mode: String(selection.mode || "manual"),
+          preset_id: String(selection.presetId || selection.preset_id || ""),
+          all: selection.all !== false,
+          metric_keys: uniqueMetricKeys(selection.metricKeys || selection.metric_keys, 500)
+        },
+        migrations: {
+          incident_effective_shown_v1: !!migrations.incidentEffectiveShownV1,
+          sku_presets_seeded_v1: !!migrations.skuPresetsSeededV1,
+          unified_presentation_v1: !!migrations.unifiedPresentationV1,
+          seller_price_weighted_v1: !!migrations.sellerPriceWeightedV1,
+          inventory_planning_metric_keys_v1: uniqueMetricKeys(
+            migrations.inventoryPlanningMetricKeysV1,
+            500
+          )
+        }
+      };
+    }
+
     function metricPresentationUserConfigPath() {
       return String(WEB_VITRINA_CONFIG.user_config_path || "");
     }
@@ -12274,6 +12571,13 @@
         serverConfig.revision = Number(payload && payload.revision ? payload.revision : 0) || 0;
         serverConfig.updatedAt = String((payload && payload.updated_at) || "");
         serverConfig.config = normalizedConfig;
+        serverConfig.desiredConfig = null;
+        serverConfig.pendingBaseConfig = null;
+        serverConfig.materializedConfig = null;
+        serverConfig.dirty = false;
+        serverConfig.retryCount = 0;
+        serverConfig.retryExhausted = false;
+        serverConfig.saveStatus = normalizedConfig ? "saved" : "idle";
         serverConfig.lastError = "";
       } catch (error) {
         serverConfig.loaded = true;
@@ -12291,6 +12595,10 @@
         return {source: "default", payload: null};
       }
       const serverConfig = state.metricPresentation.serverConfig || {};
+      const desiredPayload = normalizePersistedMetricPresentation(serverConfig.desiredConfig);
+      if (serverConfig.dirty && desiredPayload) {
+        return {source: "pending", payload: desiredPayload};
+      }
       const serverPayload = normalizePersistedMetricPresentation(serverConfig.config);
       if (serverConfig.loaded && serverConfig.available && serverPayload) {
         return {source: "server", payload: serverPayload};
@@ -12703,7 +13011,8 @@
         persistMetricPresentation({
           serverBaseRevision: persistedCandidate.source === "local_migration"
             ? 0
-            : Number(state.metricPresentation.serverConfig.revision || 0)
+            : Number(state.metricPresentation.serverConfig.revision || 0),
+          serverBaseConfig: persistedBeforeSellerPriceMigration
         });
       }
       renderMetricPresentationPanel(payload);
@@ -12808,12 +13117,31 @@
       const payload = buildMetricPresentationPersistedPayload();
       writeMetricPresentationLocalCache(storageKey, payload);
       if (normalizedOptions.skipServer) {
+        if (!state.metricPresentation.serverConfig.dirty) {
+          state.metricPresentation.serverConfig.materializedConfig = payload;
+        } else {
+          state.metricPresentation.serverConfig.desiredConfig = payload;
+        }
         return;
       }
-      if (state.metricPresentation.serverConfig && state.metricPresentation.serverConfig.available) {
-        state.metricPresentation.serverConfig.config = payload;
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      if (!serverConfig.dirty) {
+        serverConfig.pendingBaseConfig = normalizedOptions.serverBaseConfig
+          || serverConfig.materializedConfig
+          || serverConfig.config
+          || null;
+        serverConfig.retryCount = 0;
+        serverConfig.retryExhausted = false;
+      } else if (serverConfig.retryExhausted) {
+        serverConfig.retryCount = 0;
+        serverConfig.retryExhausted = false;
       }
+      serverConfig.dirty = true;
+      serverConfig.desiredConfig = payload;
+      serverConfig.saveStatus = "pending";
+      serverConfig.lastError = "";
       scheduleMetricPresentationServerSave(normalizedOptions.serverBaseRevision);
+      renderMetricPresentationPanel(state.composition);
     }
 
     function scheduleMetricPresentationServerSave(serverBaseRevision) {
@@ -12822,9 +13150,12 @@
         return;
       }
       if (typeof serverBaseRevision === "number") {
-        serverConfig.pendingBaseRevision = serverBaseRevision;
+        if (typeof serverConfig.pendingBaseRevision !== "number") {
+          serverConfig.pendingBaseRevision = serverBaseRevision;
+        }
       }
       serverConfig.savePending = true;
+      serverConfig.retryExhausted = false;
       if (serverConfig.saveTimer) {
         window.clearTimeout(serverConfig.saveTimer);
       }
@@ -12834,19 +13165,106 @@
       }, 300);
     }
 
+    function metricPresentationSaveStatusText() {
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      if (serverConfig.saveStatus === "saving") {
+        return "сохраняется";
+      }
+      if (serverConfig.saveStatus === "retrying") {
+        return "не сохранено, повтор " + String(serverConfig.retryCount || 0)
+          + "/" + String(METRIC_PRESENTATION_SAVE_RETRY_LIMIT);
+      }
+      if (serverConfig.saveStatus === "conflict_retrying") {
+        return "обновлено на серверной ревизии, повтор " + String(serverConfig.retryCount || 0)
+          + "/" + String(METRIC_PRESENTATION_SAVE_RETRY_LIMIT);
+      }
+      if (serverConfig.saveStatus === "failed") {
+        return "не сохранено, изменение осталось ожидающим";
+      }
+      if (serverConfig.saveStatus === "saved") {
+        return "сохранено";
+      }
+      if (serverConfig.saveStatus === "pending") {
+        return "ожидает сохранения";
+      }
+      return "";
+    }
+
+    function renderMetricPresentationPersistenceState() {
+      if (!state.composition) {
+        return;
+      }
+      renderMetricPresentationPanel(state.composition);
+    }
+
+    function scheduleMetricPresentationSaveRetry(reason) {
+      const serverConfig = state.metricPresentation.serverConfig || {};
+      if (!serverConfig.dirty || !serverConfig.desiredConfig) {
+        return;
+      }
+      if (serverConfig.retryCount >= METRIC_PRESENTATION_SAVE_RETRY_LIMIT) {
+        serverConfig.savePending = true;
+        serverConfig.retryExhausted = true;
+        serverConfig.saveStatus = "failed";
+        appendVisibleActionLogLine(
+          "Настройки метрик не сохранены после ограниченных повторов. Изменение осталось ожидающим.",
+          {statusLabel: "Не сохранено", tone: "warning", detail: serverConfig.lastError || reason}
+        );
+        renderMetricPresentationPersistenceState();
+        return;
+      }
+      serverConfig.retryCount += 1;
+      serverConfig.savePending = true;
+      serverConfig.retryExhausted = false;
+      serverConfig.saveStatus = reason === "conflict" ? "conflict_retrying" : "retrying";
+      const delay = METRIC_PRESENTATION_SAVE_RETRY_BASE_DELAY_MS * serverConfig.retryCount;
+      if (serverConfig.saveTimer) {
+        window.clearTimeout(serverConfig.saveTimer);
+      }
+      serverConfig.saveTimer = window.setTimeout(function() {
+        serverConfig.saveTimer = null;
+        flushMetricPresentationServerSave();
+      }, delay);
+      appendVisibleActionLogLine(
+        reason === "conflict"
+          ? "Настройки метрик объединены с новой серверной ревизией; выполняется ограниченный повтор."
+          : "Настройки метрик пока не сохранены; выполняется ограниченный повтор.",
+        {
+          statusLabel: "Повтор " + String(serverConfig.retryCount),
+          tone: "warning",
+          detail: serverConfig.lastError || reason
+        }
+      );
+      renderMetricPresentationPersistenceState();
+    }
+
     async function flushMetricPresentationServerSave() {
       const serverConfig = state.metricPresentation.serverConfig || {};
-      if (serverConfig.saveInFlight || !serverConfig.savePending || !serverConfig.available || !metricPresentationUserConfigPath()) {
+      if (
+        serverConfig.saveInFlight
+        || !serverConfig.savePending
+        || !serverConfig.available
+        || !serverConfig.dirty
+        || !serverConfig.desiredConfig
+        || !metricPresentationUserConfigPath()
+      ) {
         return;
       }
       serverConfig.savePending = false;
       serverConfig.saveInFlight = true;
+      serverConfig.saveStatus = "saving";
+      serverConfig.retryExhausted = false;
       const explicitBaseRevision = typeof serverConfig.pendingBaseRevision === "number"
         ? serverConfig.pendingBaseRevision
         : null;
       serverConfig.pendingBaseRevision = null;
       const baseRevision = explicitBaseRevision === null ? (Number(serverConfig.revision) || 0) : explicitBaseRevision;
-      const configPayload = buildMetricPresentationPersistedPayload();
+      const configPayloadNormalized = metricPresentationConfigOrEmpty(serverConfig.desiredConfig);
+      const configPayload = serializeMetricPresentationConfig(configPayloadNormalized);
+      const baseConfigPayload = metricPresentationConfigOrEmpty(
+        serverConfig.pendingBaseConfig || serverConfig.materializedConfig || serverConfig.config
+      );
+      renderMetricPresentationPersistenceState();
       try {
         const response = await fetch(metricPresentationUserConfigPath(), {
           method: "POST",
@@ -12868,16 +13286,22 @@
           serverConfig.config = normalizePersistedMetricPresentation(current.config);
           serverConfig.status = String(current.status || "ok");
           serverConfig.lastError = "server_config_conflict";
-          const latestLocalPayload = buildMetricPresentationPersistedPayload();
-          if (JSON.stringify(latestLocalPayload) !== JSON.stringify(configPayload)) {
-            serverConfig.savePending = true;
-            serverConfig.pendingBaseRevision = Number(serverConfig.revision) || 0;
-            return;
-          }
+          const latestLocalPayload = metricPresentationConfigOrEmpty(
+            serverConfig.desiredConfig || configPayloadNormalized
+          );
+          serverConfig.desiredConfig = rebaseMetricPresentationConfig(
+            baseConfigPayload,
+            latestLocalPayload,
+            serverConfig.config
+          );
+          serverConfig.pendingBaseConfig = serverConfig.config;
+          serverConfig.pendingBaseRevision = Number(serverConfig.revision) || 0;
+          serverConfig.dirty = true;
           if (state.composition && serverConfig.config) {
             initializeMetricPresentation(state.composition);
             renderTable();
           }
+          scheduleMetricPresentationSaveRetry("conflict");
           return;
         }
         if (!response.ok) {
@@ -12885,14 +13309,38 @@
         }
         serverConfig.revision = Number(payload && payload.revision ? payload.revision : serverConfig.revision) || 0;
         serverConfig.updatedAt = String((payload && payload.updated_at) || "");
-        serverConfig.config = normalizePersistedMetricPresentation(payload && payload.config) || configPayload;
+        serverConfig.config = normalizePersistedMetricPresentation(payload && payload.config) || configPayloadNormalized;
         serverConfig.status = "ok";
         serverConfig.lastError = "";
+        const latestLocalPayload = metricPresentationConfigOrEmpty(serverConfig.desiredConfig || configPayloadNormalized);
+        if (metricPresentationJsonEqual(latestLocalPayload, configPayloadNormalized)) {
+          serverConfig.desiredConfig = null;
+          serverConfig.pendingBaseConfig = null;
+          serverConfig.materializedConfig = serverConfig.config;
+          serverConfig.dirty = false;
+          serverConfig.savePending = false;
+          serverConfig.retryCount = 0;
+          serverConfig.retryExhausted = false;
+          serverConfig.saveStatus = "saved";
+        } else {
+          serverConfig.desiredConfig = rebaseMetricPresentationConfig(
+            configPayloadNormalized,
+            latestLocalPayload,
+            serverConfig.config
+          );
+          serverConfig.pendingBaseConfig = serverConfig.config;
+          serverConfig.pendingBaseRevision = Number(serverConfig.revision) || 0;
+          serverConfig.savePending = true;
+          serverConfig.saveStatus = "pending";
+        }
       } catch (error) {
         serverConfig.lastError = String(error && error.message ? error.message : error);
+        serverConfig.dirty = true;
+        scheduleMetricPresentationSaveRetry("transient");
       } finally {
         serverConfig.saveInFlight = false;
-        if (serverConfig.savePending) {
+        renderMetricPresentationPersistenceState();
+        if (serverConfig.savePending && !serverConfig.saveTimer && !serverConfig.retryExhausted) {
           flushMetricPresentationServerSave();
         }
       }
@@ -13039,6 +13487,10 @@
       }
       if (totalCount && hiddenCount) {
         summaryParts.push("Скрыто: " + hiddenCount);
+      }
+      const persistenceStatus = metricPresentationSaveStatusText();
+      if (persistenceStatus) {
+        summaryParts.push("Настройки: " + persistenceStatus);
       }
       metricsPresentationSummaryNode.textContent = summaryParts.join(" · ");
       if (!logicalMetrics.length) {

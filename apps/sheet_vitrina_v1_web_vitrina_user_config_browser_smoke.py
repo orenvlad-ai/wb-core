@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import timedelta
 from dataclasses import replace
 from http import HTTPStatus
@@ -84,6 +85,7 @@ LEGACY_SELLER_PRICE_LOGICAL_ID = (
 WEIGHTED_SELLER_PRICE_LOGICAL_ID = (
     f"pair::{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}::{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"
 )
+CTR_LOGICAL_METRIC_ID = "pair::ctr::ctr"
 TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
     "[data-metric-display-select]"
@@ -110,6 +112,8 @@ def main() -> None:
                     server.reset_user_config()
                     _run_buyout_pair_checks(browser, server)
                     server.reset_user_config()
+                    _run_ctr_persistence_checks(browser, server)
+                    server.reset_user_config()
                     _run_checks(browser, server)
                 finally:
                     browser.close()
@@ -122,6 +126,12 @@ def main() -> None:
                 "buyout_total_sku_logical_pair",
                 "buyout_saved_preset_compatibility",
                 "buyout_shared_display_control",
+                "ctr_failed_save_pending_retry",
+                "ctr_conflict_catalog_rebase",
+                "user_config_retry_loop_bounded",
+                "ctr_page_reread_catalog_evolution",
+                "ctr_hard_reload_dom_order",
+                "ctr_total_sku_single_pair",
                 "proxy_v4_unit_margin_pair_blank_period_render",
                 "local_migration_total_basis",
                 "local_migration_scope_only_preserved",
@@ -591,6 +601,256 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
     context.close()
 
 
+def _metric_modal_order(page) -> list[str]:
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+          '[data-metric-config-row]:not(.is-header)'
+        )).map((row) => row.getAttribute('data-logical-metric-id') || '')"""
+    )
+
+
+def _table_metric_dom_index(page, metric_key: str) -> int:
+    return int(
+        page.evaluate(
+            """(metricKey) => Array.from(document.querySelectorAll(
+              '[data-table-body] tr[data-row-kind="total"] td[data-col-id="metric_label"]'
+            )).findIndex((node) => (node.getAttribute('data-metric-key') || '') === metricKey)""",
+            metric_key,
+        )
+    )
+
+
+def _dispatch_metric_drag_after(page, logical_metric_id: str, target_logical_metric_id: str) -> None:
+    source_selector = (
+        f'[data-metric-config-row="{logical_metric_id}"] [data-metric-drag-handle]'
+    )
+    target_selector = f'[data-metric-config-row="{target_logical_metric_id}"]'
+    page.evaluate(
+        """({sourceSelector, targetSelector}) => {
+          const source = document.querySelector(sourceSelector);
+          const target = document.querySelector(targetSelector);
+          if (!source || !target) throw new Error('missing CTR DnD source or target');
+          const rect = target.getBoundingClientRect();
+          const data = new DataTransfer();
+          const init = {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: data,
+            clientX: rect.left + Math.max(8, Math.min(rect.width / 2, rect.width - 4)),
+            clientY: rect.top + Math.max(4, rect.height * 0.75)
+          };
+          source.dispatchEvent(new DragEvent('dragstart', init));
+          target.dispatchEvent(new DragEvent('dragover', init));
+          target.dispatchEvent(new DragEvent('drop', init));
+          source.dispatchEvent(new DragEvent('dragend', init));
+        }""",
+        {"sourceSelector": source_selector, "targetSelector": target_selector},
+    )
+
+
+def _reread_page_composition(page) -> None:
+    page.evaluate("() => loadPageComposition()")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=10000)
+
+
+def _run_ctr_persistence_checks(browser, server: "FixtureServer") -> None:
+    seed_context = browser.new_context()
+    seed_page = seed_context.new_page()
+    seed_page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    _open_metrics(seed_page)
+    seed_page.wait_for_selector(f'[data-metric-config-row="{CTR_LOGICAL_METRIC_ID}"]')
+    ctr_rows = seed_page.locator(f'[data-metric-config-row="{CTR_LOGICAL_METRIC_ID}"]')
+    if (
+        ctr_rows.count() != 1
+        or ctr_rows.first.get_attribute("data-total-metric-key") != "ctr"
+        or ctr_rows.first.get_attribute("data-sku-metric-key") != "ctr"
+    ):
+        raise AssertionError("CTR must be one exact TOTAL/SKU logical pair")
+    initial_config = seed_page.evaluate("() => buildMetricPresentationPersistedPayload()")
+    initial_order = list(initial_config.get("presentation", {}).get("order") or [])
+    if initial_order.count(CTR_LOGICAL_METRIC_ID) != 1 or len(initial_order) < 4:
+        raise AssertionError(f"CTR seed logical order is invalid: {initial_order}")
+    seed_context.close()
+
+    server.user_config = {
+        "status": "ok",
+        "revision": 10,
+        "updated_at": "2026-08-29T08:00:00Z",
+        "config": initial_config,
+    }
+    server.save_count = 0
+    server.request_count = 0
+    server.transient_failures_remaining = 1
+
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    _open_metrics(page)
+    page.wait_for_selector(f'[data-metric-config-row="{CTR_LOGICAL_METRIC_ID}"]')
+    before_order = _metric_modal_order(page)
+    target = next(item for item in before_order if item != CTR_LOGICAL_METRIC_ID)
+    _dispatch_metric_drag_after(page, CTR_LOGICAL_METRIC_ID, target)
+    desired_order = _metric_modal_order(page)
+    if desired_order == before_order or desired_order.index(CTR_LOGICAL_METRIC_ID) != desired_order.index(target) + 1:
+        raise AssertionError(f"CTR drag did not create the desired order: {desired_order}")
+
+    _wait_for_server_request_count(server, 1)
+    page.wait_for_function(
+        "() => (document.querySelector('[data-metrics-presentation-summary]') || {}).textContent.includes('повтор 1/2')",
+        timeout=5000,
+    )
+    if server.save_count != 0 or server.user_config["config"]["presentation"]["order"] != initial_order:
+        raise AssertionError("controlled failed save must not be reported as persisted")
+
+    _reread_page_composition(page)
+    _open_metrics(page)
+    pending_reread_order = _metric_modal_order(page)
+    if pending_reread_order != desired_order:
+        raise AssertionError(
+            "pending CTR order must survive ordinary page-composition reread, "
+            f"desired={desired_order}, reread={pending_reread_order}"
+        )
+    _wait_for_server_save_count(server, 1)
+    page.wait_for_function(
+        "() => (document.querySelector('[data-metrics-presentation-summary]') || {}).textContent.includes('Настройки: сохранено')",
+        timeout=5000,
+    )
+    if server.user_config["config"]["presentation"]["order"] != desired_order:
+        raise AssertionError(f"bounded retry did not persist latest CTR revision: {server.user_config}")
+
+    persisted_dom_index = _table_metric_dom_index(page, "ctr")
+    if persisted_dom_index < 0:
+        raise AssertionError("CTR must remain rendered after the retry")
+    context.close()
+
+    reload_context = browser.new_context()
+    reload_page = reload_context.new_page()
+    reload_page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    _open_metrics(reload_page)
+    if _metric_modal_order(reload_page) != desired_order:
+        raise AssertionError("new browser must restore the retried CTR logical order")
+    if _table_metric_dom_index(reload_page, "ctr") != persisted_dom_index:
+        raise AssertionError("hard reload must restore the same rendered CTR DOM index")
+
+    conflict_base_order = _metric_modal_order(reload_page)
+    remote_config = deepcopy(server.user_config["config"])
+    remote_order = list(remote_config["presentation"]["order"])
+    remote_moved_id = next(
+        item for item in reversed(remote_order) if item != CTR_LOGICAL_METRIC_ID
+    )
+    remote_order.remove(remote_moved_id)
+    remote_order.insert(0, remote_moved_id)
+    remote_display_id = next(
+        item for item in remote_order if item not in {CTR_LOGICAL_METRIC_ID, remote_moved_id}
+    )
+    remote_config["presentation"]["order"] = remote_order
+    remote_config["presentation"].setdefault("display", {})[remote_display_id] = "hidden"
+    remote_config["sku_presets"] = [
+        *remote_config.get("sku_presets", []),
+        {"preset_id": "remote-focus", "name": "Чужой фокус", "metric_keys": ["ctr"]},
+    ]
+    remote_config["sku_highlight_metric_keys"] = ["ctr"]
+    remote_config["sku_metric_selection"] = {
+        "mode": "manual",
+        "preset_id": "",
+        "all": True,
+        "metric_keys": [],
+    }
+    server.user_config = {
+        "status": "ok",
+        "revision": int(server.user_config["revision"]) + 1,
+        "updated_at": "2026-08-29T08:05:00Z",
+        "config": remote_config,
+    }
+    request_before = server.request_count
+    save_before = server.save_count
+    conflict_target = next(
+        item for item in reversed(conflict_base_order) if item != CTR_LOGICAL_METRIC_ID
+    )
+    _dispatch_metric_drag_after(reload_page, CTR_LOGICAL_METRIC_ID, conflict_target)
+    _wait_for_server_request_count(server, request_before + 2)
+    _wait_for_server_save_count(server, save_before + 1)
+    conflict_saved = server.user_config["config"]
+    conflict_order = conflict_saved["presentation"]["order"]
+    if (
+        conflict_order[0] != remote_moved_id
+        or conflict_order.index(CTR_LOGICAL_METRIC_ID) != conflict_order.index(conflict_target) + 1
+        or conflict_saved["presentation"]["display"].get(remote_display_id) != "hidden"
+        or "remote-focus" not in [preset.get("preset_id") for preset in conflict_saved.get("sku_presets", [])]
+        or conflict_saved.get("sku_highlight_metric_keys") != ["ctr"]
+    ):
+        raise AssertionError(f"409 rebase clobbered local or newer remote presentation state: {conflict_saved}")
+
+    synthetic_rebase = reload_page.evaluate(
+        """() => rebaseMetricPresentationConfig(
+          {version: 5, presentation: {order: ['a', 'b'], display: {a: 'shown'}, manual: true}, expanded_anchors: ['a'], sku_presets: [], sku_highlight_metric_keys: [], sku_metric_selection: {mode: 'manual', all: true, metric_keys: []}, migrations: {unified_presentation_v1: true, seller_price_weighted_v1: true}},
+          {version: 5, presentation: {order: ['b', 'a'], display: {a: 'shown'}, manual: true}, expanded_anchors: ['a'], sku_presets: [], sku_highlight_metric_keys: [], sku_metric_selection: {mode: 'manual', all: true, metric_keys: []}, migrations: {unified_presentation_v1: true, seller_price_weighted_v1: true}},
+          {version: 5, presentation: {order: ['a', 'b'], display: {a: 'hidden'}, manual: true}, expanded_anchors: ['a', 'remote-anchor'], sku_presets: [{preset_id: 'remote', name: 'Remote', metric_keys: ['ctr']}], sku_highlight_metric_keys: ['ctr'], sku_metric_selection: {mode: 'manual', all: true, metric_keys: []}, migrations: {unified_presentation_v1: true, seller_price_weighted_v1: true}}
+        )"""
+    )
+    if (
+        synthetic_rebase["expanded_anchors"] != ["a", "remote-anchor"]
+        or synthetic_rebase["presentation"]["display"].get("a") != "hidden"
+        or synthetic_rebase["sku_presets"][0]["presetId"] != "remote"
+        or synthetic_rebase["sku_highlight_metric_keys"] != ["ctr"]
+    ):
+        raise AssertionError(f"three-way rebase must preserve untouched remote fields: {synthetic_rebase}")
+
+    _add_fixture_logical_metric_pair(
+        server.composition,
+        metric_key="catalog_probe",
+        label="Каталожная проверка",
+        section_id="section:Воронка",
+        section_label="Воронка",
+    )
+    _reread_page_composition(reload_page)
+    _open_metrics(reload_page)
+    added_order = _metric_modal_order(reload_page)
+    probe_logical_id = "pair::catalog_probe::catalog_probe"
+    if (
+        [item for item in added_order if item != probe_logical_id] != conflict_order
+        or added_order[-1] != probe_logical_id
+    ):
+        raise AssertionError(
+            "new catalog metrics must append canonically without sorting existing user order, "
+            f"before={conflict_order}, after={added_order}"
+        )
+    _remove_fixture_metric(server.composition, "catalog_probe")
+    _reread_page_composition(reload_page)
+    _open_metrics(reload_page)
+    if _metric_modal_order(reload_page) != conflict_order:
+        raise AssertionError("archiving another catalog metric must not disturb CTR/user order")
+    reload_context.close()
+
+    final_context = browser.new_context()
+    final_page = final_context.new_page()
+    final_page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    _open_metrics(final_page)
+    final_order = _metric_modal_order(final_page)
+    if final_order != conflict_order or final_order.count(CTR_LOGICAL_METRIC_ID) != 1:
+        raise AssertionError(f"final hard reload lost or duplicated CTR: {final_order}")
+    if _table_metric_dom_index(final_page, "ctr") < 0:
+        raise AssertionError("final hard reload must render CTR in the table DOM")
+    bounded_request_before = server.request_count
+    bounded_save_before = server.save_count
+    server.transient_failures_remaining = 5
+    final_page.locator(
+        f'[data-metric-config-row="{CTR_LOGICAL_METRIC_ID}"] [data-metric-display-select]'
+    ).select_option("collapsed")
+    _wait_for_server_request_count(server, bounded_request_before + 3)
+    final_page.wait_for_function(
+        "() => (document.querySelector('[data-metrics-presentation-summary]') || {}).textContent.includes('изменение осталось ожидающим')",
+        timeout=7000,
+    )
+    final_page.wait_for_timeout(1600)
+    if server.request_count != bounded_request_before + 3 or server.save_count != bounded_save_before:
+        raise AssertionError(
+            "failed user-config save must stop after the bounded retry budget, "
+            f"requests={server.request_count - bounded_request_before}, saves={server.save_count - bounded_save_before}"
+        )
+    final_context.close()
+
+
 def _run_checks(browser, server: "FixtureServer") -> None:
     local_candidate = {
         "version": 2,
@@ -793,6 +1053,19 @@ def _wait_for_server_save_count(server: "FixtureServer", expected: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"user config save was not observed, expected {expected}, got {server.save_count}")
+
+
+def _wait_for_server_request_count(server: "FixtureServer", expected: int) -> None:
+    import time
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if server.request_count >= expected:
+            return
+        time.sleep(0.02)
+    raise AssertionError(
+        f"user config save request was not observed, expected {expected}, got {server.request_count}"
+    )
 
 
 def _open_sku_metric_picker(page) -> None:
@@ -1189,7 +1462,7 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
     )
     view_model = build_web_vitrina_view_model(contract)
     adapter = build_web_vitrina_gravity_table_adapter(view_model)
-    return build_web_vitrina_page_composition(
+    composition = build_web_vitrina_page_composition(
         contract=contract,
         view_model=view_model,
         adapter=adapter,
@@ -1203,6 +1476,79 @@ def _build_composition(runtime_dir: Path) -> dict[str, object]:
         activity_surface=_build_activity_surface_fixture(),
         metric_catalog=_active_incident_metric_catalog(),
     )
+    _add_fixture_logical_metric_pair(
+        composition,
+        metric_key="ctr",
+        label="CTR в воронке",
+        section_id="section:Воронка",
+        section_label="Воронка",
+    )
+    return composition
+
+
+def _add_fixture_logical_metric_pair(
+    composition: dict[str, object],
+    *,
+    metric_key: str,
+    label: str,
+    section_id: str,
+    section_label: str,
+) -> None:
+    table_surface = composition.get("table_surface") or {}
+    rows = table_surface.get("rows") or []
+    total_source = next(row for row in rows if row.get("row_kind") == "total")
+    sku_source = next(row for row in rows if row.get("row_kind") == "sku")
+    additions = []
+    for source, row_kind in ((total_source, "total"), (sku_source, "sku")):
+        row = deepcopy(source)
+        scope_key = str((row.get("values") or {}).get("scope_key", {}).get("value") or row_kind)
+        row["row_id"] = f"{scope_key}|{metric_key}"
+        row["section_id"] = section_id
+        row["search_text"] = f"{scope_key} {label} {section_label} {metric_key}"
+        row["filter_tokens"] = deepcopy(row.get("filter_tokens") or {})
+        row["filter_tokens"]["metric_key"] = [metric_key]
+        row["filter_tokens"]["section"] = [section_label]
+        row["filter_tokens"]["section_id"] = [section_id]
+        row["values"] = deepcopy(row.get("values") or {})
+        row["values"]["metric_key"].update(value=metric_key, display_text=metric_key)
+        row["values"]["metric_label"].update(value=label, display_text=label)
+        row["values"]["section"].update(value=section_label, display_text=section_label)
+        additions.append(row)
+    rows.extend(additions)
+    table_surface["rows"] = rows
+    table_surface["row_count"] = len(rows)
+    controls = (composition.get("filter_surface") or {}).get("controls") or []
+    metric_control = next(control for control in controls if control.get("control_id") == "metric")
+    metric_control.setdefault("options", []).extend(
+        [
+            {
+                "value": metric_key,
+                "label": label,
+                "count": 1,
+                "scope_group_id": scope,
+                "scope_group_label": "Итого" if scope == "total" else "SKU",
+                "section_id": section_id,
+                "section_label": section_label,
+            }
+            for scope in ("total", "sku")
+        ]
+    )
+
+
+def _remove_fixture_metric(composition: dict[str, object], metric_key: str) -> None:
+    table_surface = composition.get("table_surface") or {}
+    rows = [
+        row
+        for row in table_surface.get("rows") or []
+        if str((row.get("values") or {}).get("metric_key", {}).get("value") or "") != metric_key
+    ]
+    table_surface["rows"] = rows
+    table_surface["row_count"] = len(rows)
+    controls = (composition.get("filter_surface") or {}).get("controls") or []
+    metric_control = next(control for control in controls if control.get("control_id") == "metric")
+    metric_control["options"] = [
+        option for option in metric_control.get("options") or [] if option.get("value") != metric_key
+    ]
 
 
 def _with_proxy_v4_rows(plan, *, nm_ids: list[int]):
@@ -1238,6 +1584,8 @@ class FixtureServer:
             "config": None,
         }
         self.save_count = 0
+        self.request_count = 0
+        self.transient_failures_remaining = 0
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
@@ -1250,6 +1598,8 @@ class FixtureServer:
             "config": None,
         }
         self.save_count = 0
+        self.request_count = 0
+        self.transient_failures_remaining = 0
 
     def __enter__(self) -> "FixtureServer":
         port = _reserve_free_port()
@@ -1291,6 +1641,16 @@ class FixtureServer:
                     return
                 length = int(self.headers.get("Content-Length") or "0")
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                server.request_count += 1
+                if server.transient_failures_remaining > 0:
+                    server.transient_failures_remaining -= 1
+                    _write(
+                        self,
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "application/json; charset=utf-8",
+                        json.dumps({"error": "temporary_user_config_failure"}),
+                    )
+                    return
                 base_revision = int(payload.get("base_revision") or 0)
                 current_revision = int(server.user_config.get("revision") or 0)
                 if base_revision != current_revision:

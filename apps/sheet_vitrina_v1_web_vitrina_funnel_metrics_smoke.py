@@ -122,6 +122,7 @@ def main() -> None:
             "Показы в воронке",
             "CTR в воронке",
             "Открытия карточки в воронке",
+            "Процент выкупа",
         ]:
             raise AssertionError(f"TOTAL funnel order mismatch, got {total_funnel_order}")
 
@@ -135,6 +136,7 @@ def main() -> None:
             f"SKU:{enabled[0].nm_id}|view_count",
             f"SKU:{enabled[0].nm_id}|ctr",
             f"SKU:{enabled[0].nm_id}|open_card_count",
+            f"SKU:{enabled[0].nm_id}|buyoutPercent",
         ]:
             raise AssertionError(f"SKU funnel order mismatch, got {first_sku_order}")
 
