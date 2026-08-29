@@ -594,6 +594,13 @@ Saved metric-presentation state is compatible by intersection with the current s
 
 ## 3.1.2 Daily live refresh scheduling
 
+The backend health contour is specified canonically in
+`docs/modules/59_MODULE__WEB_VITRINA_HEALTH.md`. Its permanent non-persistent
+06:30 candidate and 07:30 confirmation timers are additional to, and do not
+rewrite, the existing runtime-managed daytime schedule below. Confirmation may
+use only its deterministic source-group recovery preview; it is not a second
+blind full refresh.
+
 - Daily auto-refresh materialize-ится поверх existing heavy route through runtime-managed schedules:
   - default business rows = `11:00, 20:00 Asia/Yekaterinburg`
   - editable schedule storage = runtime JSON under the hosted runtime dir via `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules`

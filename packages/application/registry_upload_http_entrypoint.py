@@ -182,6 +182,11 @@ from packages.application.sheet_vitrina_v1_temporal_policy import (
     source_nonblocking_slot_reason,
     slot_counts_toward_source_status,
 )
+from packages.application.sheet_vitrina_v1_source_groups import (
+    WEB_VITRINA_SOURCE_GROUP_ORDER,
+    WEB_VITRINA_SOURCE_GROUPS,
+    WEB_VITRINA_SOURCE_KEY_TO_GROUP,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -371,6 +376,7 @@ SHEET_VITRINA_SELLER_SESSION_CHECK_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-s
 SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 SHEET_VITRINA_SELLER_RECOVERY_LAUNCHER_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
+SHEET_VITRINA_HEALTH_CANDIDATE_TRIGGER = "web_vitrina_health_candidate"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
 SHEET_VITRINA_ACTIVE_JOB_STALE_AFTER_SECONDS = 2 * 60 * 60
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
@@ -642,65 +648,6 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         "promo_count_by_price",
         "promo_entry_price_best",
     ),
-}
-WEB_VITRINA_SOURCE_GROUPS = {
-    "wb_api": {
-        "label_ru": "WB API",
-        "source_keys": (
-            "sales_funnel_history",
-            "sf_period",
-            "spp",
-            "stocks",
-            "ads_compact",
-            "fin_report_daily",
-            "prices_snapshot",
-            "ads_bids",
-        ),
-    },
-    "seller_portal_bot": {
-        "label_ru": "Seller Portal / бот",
-        "source_keys": (
-            "seller_funnel_snapshot",
-            "web_source_snapshot",
-            "promo_by_price",
-        ),
-    },
-    "wb_public_card_bot": {
-        "label_ru": "WB public card / бот",
-        "source_keys": (
-            "spp_proxy",
-        ),
-    },
-    "other_sources": {
-        "label_ru": "Прочие источники",
-        "source_keys": (
-            "cost_price",
-            "sku_action_events",
-        ),
-    },
-    ONEC_STOCKS_SOURCE_GROUP_ID: {
-        "label_ru": ONEC_STOCKS_SOURCE_GROUP_LABEL_RU,
-        "source_keys": (
-            ONEC_STOCKS_SOURCE_KEY,
-        ),
-    },
-    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID: {
-        "label_ru": OWN_PRODUCT_CAPITAL_SOURCE_GROUP_LABEL_RU,
-        "source_keys": (OWN_PRODUCT_CAPITAL_SOURCE_KEY,),
-    },
-}
-WEB_VITRINA_SOURCE_GROUP_ORDER = (
-    "wb_api",
-    ONEC_STOCKS_SOURCE_GROUP_ID,
-    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
-    "seller_portal_bot",
-    "wb_public_card_bot",
-    "other_sources",
-)
-WEB_VITRINA_SOURCE_KEY_TO_GROUP = {
-    source_key: group_id
-    for group_id, group in WEB_VITRINA_SOURCE_GROUPS.items()
-    for source_key in group["source_keys"]
 }
 WEB_VITRINA_OTHER_SOURCES_DERIVED_METRIC_KEYS = (
     "proxy_margin_pct_total",
@@ -2962,6 +2909,11 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        if str(trigger_source or "").strip() == SHEET_VITRINA_HEALTH_CANDIDATE_TRIGGER:
+            # The 06:30 health candidate is deliberately outside the operator's
+            # 10/13/16/19/22 schedule ledger.  It still uses the canonical full
+            # auto-update runner, single-flight lock and ready/history writer.
+            return self.start_sheet_refresh_job(as_of_date=as_of_date, auto_load=True)
         if _is_night_refresh_experiment_trigger(trigger_source):
             active_job = self.operator_jobs.active_job(
                 operations=("auto_update", "refresh", "refresh_group"),

@@ -1,0 +1,10 @@
+[Unit]
+Description=WB Core Web Vitrina 07:30 Health Confirmation Timer
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 Asia/Yekaterinburg
+AccuracySec=1m
+Unit=wb-core-sheet-vitrina-health-confirmation.service
+
+[Install]
+WantedBy=timers.target

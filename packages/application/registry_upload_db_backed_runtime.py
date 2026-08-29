@@ -2797,6 +2797,44 @@ class RegistryUploadDbBackedRuntime:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
 
+    def list_temporal_source_slot_observations(
+        self,
+        *,
+        source_keys: list[str],
+        date_from: str,
+        date_to: str,
+    ) -> list[dict[str, Any]]:
+        _validate_iso_date(date_from, field_name="date_from")
+        _validate_iso_date(date_to, field_name="date_to")
+        normalized_keys = sorted({str(item or "").strip() for item in source_keys if str(item or "").strip()})
+        if not normalized_keys or date_to < date_from:
+            return []
+        placeholders = ",".join("?" for _ in normalized_keys)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT source_key, snapshot_date, snapshot_role, captured_at, payload_json
+                FROM temporal_source_slot_snapshots
+                WHERE source_key IN ({placeholders})
+                  AND snapshot_date >= ? AND snapshot_date <= ?
+                ORDER BY snapshot_date, source_key, snapshot_role
+                """,
+                (*normalized_keys, date_from, date_to),
+            ).fetchall()
+        return [
+            {
+                "source_key": str(row["source_key"]),
+                "snapshot_date": str(row["snapshot_date"]),
+                "snapshot_role": str(row["snapshot_role"]),
+                "captured_at": str(row["captured_at"]),
+                "payload": _to_jsonable(
+                    _deserialize_temporal_source_payload(row["payload_json"])
+                ),
+            }
+            for row in rows
+        ]
+
     def delete_temporal_source_slot_snapshots(
         self,
         *,
@@ -5318,6 +5356,163 @@ class RegistryUploadDbBackedRuntime:
             payload.setdefault("source_key", normalized_key)
             payload["checked_at"] = str(row["checked_at"] or "")
             return payload
+
+    def save_sheet_vitrina_health_observation(
+        self,
+        *,
+        observation_id: str,
+        business_date: str,
+        phase: str,
+        observed_at: str,
+        ready_snapshot_id: str,
+        payload_fingerprint: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized_id = str(observation_id or "").strip()
+        normalized_phase = str(phase or "").strip()
+        if not normalized_id or not normalized_phase:
+            raise ValueError("health observation_id and phase are required")
+        _validate_iso_date(business_date, field_name="business_date")
+        _validate_timestamp(observed_at, field_name="observed_at")
+        if not str(payload_fingerprint or "").startswith("sha256:"):
+            raise ValueError("health payload_fingerprint is required")
+        serialized = json.dumps(
+            _to_jsonable(dict(payload)),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        inserted = False
+        transition_count = 0
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior = conn.execute(
+                    """
+                    SELECT observation_id, payload_fingerprint, payload_json
+                    FROM sheet_vitrina_v1_health_observations
+                    WHERE business_date=?
+                    ORDER BY observed_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (business_date,),
+                ).fetchone()
+                cursor = conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_health_observations(
+                        observation_id, business_date, phase, observed_at,
+                        ready_snapshot_id, payload_fingerprint, payload_json
+                    ) VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(observation_id) DO NOTHING
+                    """,
+                    (
+                        normalized_id,
+                        business_date,
+                        normalized_phase,
+                        observed_at,
+                        str(ready_snapshot_id or ""),
+                        str(payload_fingerprint),
+                        serialized,
+                    ),
+                )
+                inserted = int(cursor.rowcount or 0) == 1
+                if inserted:
+                    previous_payload = (
+                        _loads_json_object(prior["payload_json"])
+                        if prior is not None
+                        else {}
+                    )
+                    previous_signals = previous_payload.get("signals") or {}
+                    current_signals = dict(payload).get("signals") or {}
+                    for signal_key in sorted(set(previous_signals) | set(current_signals)):
+                        previous_state = str(
+                            (previous_signals.get(signal_key) or {}).get("state") or "unobserved"
+                        )
+                        current_state = str(
+                            (current_signals.get(signal_key) or {}).get("state") or "unobserved"
+                        )
+                        if previous_state == current_state:
+                            continue
+                        transition_seed = (
+                            f"{business_date}|{signal_key}|"
+                            f"{str(prior['observation_id']) if prior is not None else ''}|{normalized_id}"
+                        )
+                        transition_id = "health-transition-" + hashlib.sha256(
+                            transition_seed.encode("utf-8")
+                        ).hexdigest()
+                        conn.execute(
+                            """
+                            INSERT INTO sheet_vitrina_v1_health_transitions(
+                                transition_id, business_date, signal_key,
+                                previous_state, current_state,
+                                previous_payload_fingerprint, current_payload_fingerprint,
+                                observed_at, observation_id
+                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(transition_id) DO NOTHING
+                            """,
+                            (
+                                transition_id,
+                                business_date,
+                                signal_key,
+                                previous_state,
+                                current_state,
+                                str(prior["payload_fingerprint"] or "") if prior is not None else "",
+                                str(payload_fingerprint),
+                                observed_at,
+                                normalized_id,
+                            ),
+                        )
+                        transition_count += 1
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "appended" if inserted else "already_recorded",
+            "observation_id": normalized_id,
+            "business_date": business_date,
+            "phase": normalized_phase,
+            "payload_fingerprint": str(payload_fingerprint),
+            "transition_count": transition_count,
+        }
+
+    def load_latest_sheet_vitrina_health_observation(
+        self,
+        *,
+        business_date: str | None = None,
+    ) -> dict[str, Any] | None:
+        if business_date:
+            _validate_iso_date(business_date, field_name="business_date")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            if business_date:
+                row = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_health_observations
+                    WHERE business_date=?
+                    ORDER BY observed_at DESC, rowid DESC LIMIT 1
+                    """,
+                    (business_date,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_health_observations
+                    ORDER BY business_date DESC, observed_at DESC, rowid DESC LIMIT 1
+                    """
+                ).fetchone()
+        if row is None:
+            return None
+        return {
+            "observation_id": str(row["observation_id"]),
+            "business_date": str(row["business_date"]),
+            "phase": str(row["phase"]),
+            "observed_at": str(row["observed_at"]),
+            "ready_snapshot_id": str(row["ready_snapshot_id"]),
+            "payload_fingerprint": str(row["payload_fingerprint"]),
+            "payload": _loads_json_object(row["payload_json"]),
+        }
 
     def save_supplier_shipment_upload(
         self,
@@ -12125,6 +12320,50 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             checked_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_health_observations (
+            observation_id TEXT PRIMARY KEY,
+            business_date TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            ready_snapshot_id TEXT NOT NULL,
+            payload_fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_health_observations_by_date
+        ON sheet_vitrina_v1_health_observations(business_date, observed_at DESC);
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_observations_no_update
+        BEFORE UPDATE ON sheet_vitrina_v1_health_observations
+        BEGIN SELECT RAISE(ABORT, 'health observations are append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_observations_no_delete
+        BEFORE DELETE ON sheet_vitrina_v1_health_observations
+        BEGIN SELECT RAISE(ABORT, 'health observations are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_health_transitions (
+            transition_id TEXT PRIMARY KEY,
+            business_date TEXT NOT NULL,
+            signal_key TEXT NOT NULL,
+            previous_state TEXT NOT NULL,
+            current_state TEXT NOT NULL,
+            previous_payload_fingerprint TEXT NOT NULL,
+            current_payload_fingerprint TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            observation_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_health_observations(observation_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_health_transitions_by_date
+        ON sheet_vitrina_v1_health_transitions(business_date, observed_at DESC, signal_key);
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_transitions_no_update
+        BEFORE UPDATE ON sheet_vitrina_v1_health_transitions
+        BEGIN SELECT RAISE(ABORT, 'health transitions are append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_transitions_no_delete
+        BEFORE DELETE ON sheet_vitrina_v1_health_transitions
+        BEGIN SELECT RAISE(ABORT, 'health transitions are append-only'); END;
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
             upload_id TEXT PRIMARY KEY,

@@ -79,6 +79,7 @@
       "depends_on": ["release_safety"],
       "requires_browser": false,
       "commands": [
+        ["python3", "apps/sheet_vitrina_v1_health_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_night_refresh_experiment_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_control_refresh_canary_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"],

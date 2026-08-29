@@ -78,6 +78,26 @@
       "restart": false
     },
     {
+      "name": "wb-core-sheet-vitrina-health-candidate.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-sheet-vitrina-health-candidate.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
+      "name": "wb-core-sheet-vitrina-health-confirmation.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-sheet-vitrina-health-confirmation.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-feedbacks-auto-complaints-tick.service",
       "enable": false,
       "restart": false
