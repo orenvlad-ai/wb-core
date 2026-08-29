@@ -22,6 +22,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from packages.application.sku_management import SkuManagementError
+from packages.application.change_registry import ChangeRegistryRepository
 from packages.business_time import current_business_date_iso
 
 
@@ -38,6 +39,7 @@ CONFIG_KEY = "sku_inventory_balance"
 CONFIG_SCHEMA_VERSION = 1
 DRY_RUN_MODE = "dry_run"
 LIVE_MODE = "live_wb"
+MANUAL_PENDING_CONTRACT = "change_registry_manual_pending/v1"
 TERMINAL_ITEM_STATES = {"succeeded", "failed", "skipped", "ambiguous"}
 SUPPORTED_CAMPAIGN_STATUSES = {4, 9, 11}
 EXCLUSION_POLICY_VERSION = "sku_inventory_balance_exclusions_v1"
@@ -166,6 +168,9 @@ class SkuInventoryBalanceBlock:
         now_factory: Callable[[], datetime] | None = None,
         timestamp_factory: Callable[[], str] | None = None,
         apply_adapter: InventoryBalanceApplyAdapter | None = None,
+        manual_pending_registry: ChangeRegistryRepository | None = None,
+        seller_id: str = "",
+        account_scope: str = "seller-portal-primary",
     ) -> None:
         self.runtime = runtime
         self.sku_management_block = sku_management_block
@@ -174,6 +179,9 @@ class SkuInventoryBalanceBlock:
             lambda: datetime.now(timezone.utc).isoformat()
         )
         self.apply_adapter = apply_adapter or DryRunInventoryBalanceApplyAdapter()
+        self.manual_pending_registry = manual_pending_registry
+        self.seller_id = str(seller_id or "").strip()
+        self.account_scope = str(account_scope or "").strip()
         if self.apply_adapter.mode != DRY_RUN_MODE or self.apply_adapter.external_writes_enabled:
             raise SkuInventoryBalanceError(
                 "HTTP inventory-balance runtime accepts only the dry-run adapter",
@@ -1186,6 +1194,67 @@ class SkuInventoryBalanceBlock:
             conn.commit()
         return self.get_apply_job(job_id)
 
+    def start_manual_pending(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        if self.manual_pending_registry is None or not self.seller_id:
+            raise SkuInventoryBalanceError(
+                "manual portal fallback is unavailable", http_status=503
+            )
+        if payload.get("confirmed") is not True:
+            raise SkuInventoryBalanceError(
+                "explicit confirmation is required", http_status=409
+            )
+        calculation_id = str(payload.get("calculation_id") or "").strip()
+        if not calculation_id:
+            raise SkuInventoryBalanceError("calculation_id is required")
+        calculation = self.get_calculation(calculation_id)
+        selected_ids = {
+            str(value).strip()
+            for value in (payload.get("recommendation_item_ids") or [])
+            if str(value).strip()
+        }
+        if not selected_ids:
+            raise SkuInventoryBalanceError(
+                "at least one recommendation_item_id is required", http_status=422
+            )
+        recommendations: list[dict[str, Any]] = []
+        for row in calculation.get("rows") or []:
+            for target in row.get("campaign_recommendations") or []:
+                if str(target.get("recommendation_item_id") or "") not in selected_ids:
+                    continue
+                if not target.get("can_apply"):
+                    raise SkuInventoryBalanceError(
+                        "selected recommendation is not actionable", http_status=409
+                    )
+                recommendations.append(
+                    {
+                        "recommendation_item_id": target["recommendation_item_id"],
+                        "action_type": target["action_type"],
+                        "target": target["exact_target"],
+                        "before_value": target["current_bid_minor"],
+                        "requested_value": target["final_target_bid_minor"],
+                    }
+                )
+        if {item["recommendation_item_id"] for item in recommendations} != selected_ids:
+            raise SkuInventoryBalanceError(
+                "selection contains unknown recommendation_item_id", http_status=404
+            )
+        receipt = self.manual_pending_registry.register_manual_pending(
+            seller_id=self.seller_id,
+            account_scope=self.account_scope,
+            calculation_id=calculation_id,
+            recommendations=recommendations,
+            actor_principal=actor,
+            requested_at=self.timestamp_factory(),
+        )
+        receipt["boundary"] = {
+            "wb_upload_task_calls": 0,
+            "wb_patch_bids_calls": 0,
+            "balance_live_apply": False,
+        }
+        return receipt
+
     def resume_apply(self, job_id: str, *, actor: str, limit: int = 10) -> dict[str, Any]:
         limit = min(max(int(limit), 1), 50)
         self._terminalize_stale_running_items(job_id)
@@ -1478,6 +1547,7 @@ class SkuInventoryBalanceBlock:
             ).fetchall()
         by_key = {str(item["target_key"]): item for item in overrides}
         payload = deepcopy(payload)
+        recommendation_ids: list[str] = []
         for balance_row in payload.get("rows") or []:
             for target in balance_row.get("campaign_recommendations") or []:
                 override = by_key.get(str(target["target_key"]))
@@ -1499,6 +1569,46 @@ class SkuInventoryBalanceBlock:
                     and target.get("final_target_bid_rub") is not None
                     and float(target["current_bid_rub"]) != float(target["final_target_bid_rub"])
                 )
+                target["action_type"] = "bid_change"
+                target["current_bid_minor"] = _rub_to_minor(
+                    target.get("current_bid_rub")
+                )
+                target["final_target_bid_minor"] = _rub_to_minor(
+                    target.get("final_target_bid_rub")
+                )
+                target["exact_target"] = {
+                    "seller_id": self.seller_id,
+                    "account_scope": self.account_scope,
+                    "target_kind": "bid",
+                    "nm_id": int(target["nm_id"]),
+                    "advert_id": int(target["advert_id"]),
+                    "placement": str(target["placement"]),
+                    "parameter_field": "bid_minor",
+                }
+                recommendation_basis = {
+                    "contract": "sku_inventory_balance_bid_recommendation/v1",
+                    "calculation_id": str(row["calculation_id"]),
+                    "target": target["exact_target"],
+                    "before_value": target["current_bid_minor"],
+                    "requested_value": target["final_target_bid_minor"],
+                    "override_updated_at": target.get("override_updated_at") or "",
+                }
+                target["recommendation_item_id"] = (
+                    "ibr_" + sha256(
+                        json.dumps(
+                            recommendation_basis,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                target["manual_pending_available"] = bool(
+                    target["can_apply"]
+                    and self.manual_pending_registry is not None
+                    and self.seller_id
+                )
+                recommendation_ids.append(target["recommendation_item_id"])
             balance_row["new_cpc_campaigns"] = [
                 item for item in balance_row.get("campaign_recommendations") or []
                 if item.get("campaign_group") == "new_cpc"
@@ -1513,6 +1623,22 @@ class SkuInventoryBalanceBlock:
         payload["registry_immutable"] = True
         payload["overrides_are_separate"] = True
         payload["apply_capability"] = self._apply_capability()
+        statuses = (
+            self.manual_pending_registry.manual_pending_statuses(recommendation_ids)
+            if self.manual_pending_registry is not None and recommendation_ids
+            else {}
+        )
+        for balance_row in payload.get("rows") or []:
+            for target in balance_row.get("campaign_recommendations") or []:
+                target["manual_pending"] = statuses.get(
+                    str(target.get("recommendation_item_id") or "")
+                )
+        payload["manual_pending_capability"] = {
+            "available": bool(self.manual_pending_registry is not None and self.seller_id),
+            "contract_name": MANUAL_PENDING_CONTRACT,
+            "expiration_hours": 24,
+            "external_writes": False,
+        }
         return payload
 
     def _terminalize_stale_running_items(self, job_id: str) -> None:
@@ -1882,6 +2008,19 @@ def _campaign_recommendation(
         ),
         "calculation_reason": "ставка масштабирована по отношению целевого темпа к текущему; WB minimum является нижней границей",
     }
+
+
+def _rub_to_minor(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(
+            (Decimal(str(value)) * Decimal("100")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def _allocate_campaign_targets(

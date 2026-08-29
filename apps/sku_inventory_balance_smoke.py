@@ -85,6 +85,26 @@ class FakeRuntime:
         return row
 
 
+class FakeManualPendingRegistry:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def manual_pending_statuses(self, recommendation_item_ids: list[str]) -> dict:
+        del recommendation_item_ids
+        return {}
+
+    def register_manual_pending(self, **payload: object) -> dict:
+        self.calls.append(dict(payload))
+        return {
+            "contract_name": "change_registry_manual_pending/v1",
+            "operation_id": "crop_smoke",
+            "items": [],
+            "external_writes": False,
+            "attempts_created": 0,
+            "facts_created": 0,
+        }
+
+
 class FakeAdsBlock:
     def build_sku_detail(self, nm_id: int, params: dict | None = None) -> dict:
         del params
@@ -814,6 +834,19 @@ def main() -> None:
         assert cpc["can_apply"] is False
         assert cpc["allocation_action"] == "hold_other_group"
         cpm = deficit["old_cpm_campaigns"][0]
+        assert cpm["recommendation_item_id"].startswith("ibr_")
+        assert cpm["action_type"] == "bid_change"
+        assert cpm["exact_target"] == {
+            "seller_id": "",
+            "account_scope": "seller-portal-primary",
+            "target_kind": "bid",
+            "nm_id": cpm["nm_id"],
+            "advert_id": cpm["advert_id"],
+            "placement": cpm["placement"],
+            "parameter_field": "bid_minor",
+        }
+        assert cpm["current_bid_minor"] == int(cpm["current_bid_rub"] * 100)
+        assert cpm["manual_pending_available"] is False
         calculated_bid = cpm["calculated_target_bid_rub"]
         assert cpm["cpo_rub"] == 80
         assert cpm["can_apply"] is True
@@ -829,6 +862,36 @@ def main() -> None:
         no_supply_campaign = calculation["rows"][2]["new_cpc_campaigns"][0]
         assert no_supply_campaign["manual_override_allowed"] is False
         assert no_supply_campaign["can_apply"] is False
+        pending_registry = FakeManualPendingRegistry()
+        block.manual_pending_registry = pending_registry  # type: ignore[assignment]
+        block.seller_id = "seller-primary"
+        configured = block.get_calculation(calculation["calculation_id"])
+        configured_cpm = configured["rows"][0]["old_cpm_campaigns"][0]
+        assert configured_cpm["manual_pending_available"] is True
+        pending_receipt = block.start_manual_pending(
+            {
+                "calculation_id": calculation["calculation_id"],
+                "recommendation_item_ids": [configured_cpm["recommendation_item_id"]],
+                "confirmed": True,
+            },
+            actor="operator",
+        )
+        assert pending_receipt["boundary"] == {
+            "wb_upload_task_calls": 0,
+            "wb_patch_bids_calls": 0,
+            "balance_live_apply": False,
+        }
+        assert len(pending_registry.calls) == 1
+        submitted = pending_registry.calls[0]["recommendations"]
+        assert isinstance(submitted, list) and submitted == [
+            {
+                "recommendation_item_id": configured_cpm["recommendation_item_id"],
+                "action_type": "bid_change",
+                "target": configured_cpm["exact_target"],
+                "before_value": configured_cpm["current_bid_minor"],
+                "requested_value": configured_cpm["final_target_bid_minor"],
+            }
+        ]
         try:
             block.save_override(
                 calculation["calculation_id"],

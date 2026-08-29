@@ -225,6 +225,7 @@ DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_
 DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/operations"
 DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/calculations"
 DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/apply-jobs"
+DEFAULT_SKU_INVENTORY_BALANCE_MANUAL_PENDING_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/manual-pending"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -1444,6 +1445,7 @@ def _build_handler(
                 DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
                 DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,
                 DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH,
+                DEFAULT_SKU_INVENTORY_BALANCE_MANUAL_PENDING_PATH,
             } or (
                 parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX + "/")
                 and parsed.path.endswith("/override")
@@ -1468,6 +1470,11 @@ def _build_handler(
                         )
                     elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH:
                         result = entrypoint.handle_sku_inventory_balance_apply_start_request(
+                            body,
+                            actor=actor,
+                        )
+                    elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_MANUAL_PENDING_PATH:
+                        result = entrypoint.handle_sku_inventory_balance_manual_pending_request(
                             body,
                             actor=actor,
                         )
@@ -10093,6 +10100,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "sku_inventory_balance_operations_path": DEFAULT_SKU_INVENTORY_BALANCE_OPERATIONS_PATH,
         "sku_inventory_balance_calculations_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATIONS_PREFIX,
         "sku_inventory_balance_apply_jobs_path": DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH,
+        "sku_inventory_balance_manual_pending_path": DEFAULT_SKU_INVENTORY_BALANCE_MANUAL_PENDING_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "instructions_path": DEFAULT_INSTRUCTIONS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,

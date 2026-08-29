@@ -114,6 +114,10 @@ Editable control находится в detail row и подписан едини
 
 Current HTTP contract принимает только `mode=dry_run`. Default adapter возвращает `wb_patch_called=false` и не вызывает WB source. `mode=live_wb` возвращает fail-closed 403.
 
+Отдельное действие `Применить на портале` не является apply-протоколом и не вызывает WB. Для каждой выбранной exact bid-рекомендации payload содержит стабильный `recommendation_item_id`, typed target `seller/account/nmID/advert_id/placement/bid_minor`, наблюдаемое current и recommended target в копейках. После отдельного подтверждения Registry создаёт только append-only `manual_pending` на 24 часа. Confirmation дословно сообщает, что оператор меняет ставку самостоятельно на портале, а HTTP endpoint не выполняет `POST/PATCH` в WB. `campaign_state` этим release не активируется.
+
+Один exact target имеет максимум один active pending. Новая immutable рекомендация supersede-ит прежнюю через CAS pointer; replay того же `recommendation_item_id` idempotent, а divergent bytes fail closed. `Проверить изменения сейчас` переиспользует существующий authenticated observer manual scan; scheduled двухчасовой observer остаётся без изменений.
+
 Код содержит отдельную future live adapter boundary, но она не подключена к runtime. Даже прямой вызов запрещён default-false capability provider. Если отдельная будущая задача откроет capability, adapter обязан переиспользовать действующий exact single-target `SkuManagementBlock.preview_bid → commit_bid → matching readback`; отдельный bulk PATCH, обход preview, inferred success и blind retry запрещены.
 
 # 6. Workbook contract
