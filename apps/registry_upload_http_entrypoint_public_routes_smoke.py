@@ -45,6 +45,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/maintenance/write-barrier",
         "/v1/sheet-vitrina-v1/job",
         "/v1/sheet-vitrina-v1/web-vitrina",
+        "/v1/sheet-vitrina-v1/web-vitrina/performance",
         "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
         "/v1/sheet-vitrina-v1/web-vitrina/business-projection/status",
         "/v1/sheet-vitrina-v1/web-vitrina/user-config",
@@ -155,6 +156,72 @@ def main() -> None:
         manifest,
         proxy_pass_url="http://127.0.0.1:8765",
     )
+    web_vitrina_route = next(
+        route for route in routes if route["path"] == "/v1/sheet-vitrina-v1/web-vitrina"
+    )
+    if web_vitrina_route.get("response_compression") != {
+        "kind": "gzip_json_v1",
+        "level": 1,
+        "min_length": 1024,
+        "content_types": ["application/json"],
+        "vary": True,
+    }:
+        raise AssertionError(
+            f"Web Vitrina route must own the typed bounded gzip contract, got {web_vitrina_route}"
+        )
+    performance_route = next(
+        route
+        for route in routes
+        if route["path"] == "/v1/sheet-vitrina-v1/web-vitrina/performance"
+    )
+    if performance_route.get("methods") != ["POST"] or performance_route.get("response_compression"):
+        raise AssertionError(
+            f"Web Vitrina RUM route must publish POST without response gzip, got {performance_route}"
+        )
+    invalid_compression_manifest = json.loads(json.dumps(manifest))
+    invalid_health_route = next(
+        route
+        for route in invalid_compression_manifest["routes"]
+        if route["path"] == "/v1/sheet-vitrina-v1/web-vitrina/health"
+    )
+    invalid_health_route["response_compression"] = dict(
+        web_vitrina_route["response_compression"]
+    )
+    try:
+        hosted_runtime._validated_public_routes(invalid_compression_manifest)
+    except ValueError as exc:
+        if "allowed only on the exact Web Vitrina GET route" not in str(exc):
+            raise AssertionError(f"typed gzip validator returned the wrong failure: {exc}") from exc
+    else:
+        raise AssertionError("typed gzip validator accepted compression on the health route")
+    vitrina_location = _exact_location_block(
+        rendered,
+        "/v1/sheet-vitrina-v1/web-vitrina",
+    )
+    if vitrina_location.count("if ($request_method != GET) { return 405; }") != 1:
+        raise AssertionError(
+            "compressed Web Vitrina location must fail closed for non-GET methods"
+        )
+    for directive in (
+        "gzip on;",
+        "gzip_comp_level 1;",
+        "gzip_min_length 1024;",
+        "gzip_types application/json;",
+        "gzip_vary on;",
+    ):
+        if vitrina_location.count(directive) != 1:
+            raise AssertionError(
+                f"exact Web Vitrina location must contain {directive!r} once, got {vitrina_location}"
+            )
+        if rendered.count(directive) != 1:
+            raise AssertionError(f"{directive!r} must remain scoped to one exact location")
+    for path in (
+        "/v1/sheet-vitrina-v1/web-vitrina/health",
+        "/v1/sheet-vitrina-v1/web-vitrina/health/recovery/start",
+        "/v1/sheet-vitrina-v1/web-vitrina/performance",
+    ):
+        if "gzip" in _exact_location_block(rendered, path):
+            raise AssertionError(f"non-page-composition location must not inherit gzip: {path}")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/maintenance/write-barrier {") != 1:
@@ -624,6 +691,17 @@ def _run_json(command: list[str]) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("runner must emit a JSON object")
     return payload
+
+
+def _exact_location_block(rendered: str, path: str) -> str:
+    marker = f"    location = {path} {{\n"
+    start = rendered.find(marker)
+    if start < 0:
+        raise AssertionError(f"rendered nginx block is missing exact location {path}")
+    end = rendered.find("    }\n", start)
+    if end < 0:
+        raise AssertionError(f"rendered nginx block has unterminated exact location {path}")
+    return rendered[start : end + len("    }\n")]
 
 
 def _write_current_live_fixture(

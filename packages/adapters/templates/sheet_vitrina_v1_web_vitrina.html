@@ -7810,6 +7810,28 @@
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
+    const WEB_VITRINA_PERFORMANCE_METRICS = [
+      "shell_ttfb_ms",
+      "shell_download_ms",
+      "shell_json_parse_ms",
+      "shell_merge_render_ms",
+      "shell_double_raf_paint_ms",
+      "shell_transfer_bytes",
+      "shell_encoded_body_bytes",
+      "shell_decoded_body_bytes",
+      "table_ttfb_ms",
+      "table_download_ms",
+      "table_json_parse_ms",
+      "table_merge_render_ms",
+      "table_double_raf_paint_ms",
+      "table_transfer_bytes",
+      "table_encoded_body_bytes",
+      "table_decoded_body_bytes"
+    ];
+    const webVitrinaPerformanceState = {
+      claimedRequestId: 0,
+      envelopeSent: false
+    };
     const state = {
       composition: null,
       requestSequence: 0,
@@ -17028,6 +17050,120 @@
       }
     }
 
+    function createWebVitrinaPerformanceMetrics() {
+      return WEB_VITRINA_PERFORMANCE_METRICS.reduce(function(metrics, name) {
+        metrics[name] = null;
+        return metrics;
+      }, {});
+    }
+
+    function boundedPerformanceDuration(startedAt, finishedAt) {
+      const started = Number(startedAt);
+      const finished = Number(finishedAt);
+      if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) {
+        return null;
+      }
+      return Math.min(600000, Math.round((finished - started) * 1000) / 1000);
+    }
+
+    function webVitrinaViewportBucket() {
+      if (window.innerWidth <= 560) {
+        return "compact_560";
+      }
+      if (window.innerWidth >= 1440) {
+        return "wide_1440";
+      }
+      return "standard";
+    }
+
+    function webVitrinaResourceBytes(url, prefix, metrics) {
+      let entry = null;
+      try {
+        const entries = window.performance.getEntriesByName(String(url || ""), "resource");
+        entry = entries.length ? entries[entries.length - 1] : null;
+      } catch (error) {
+        entry = null;
+      }
+      ["transfer", "encoded_body", "decoded_body"].forEach(function(kind) {
+        const metricName = prefix + "_" + kind + "_bytes";
+        const fieldName = {
+          transfer: "transferSize",
+          encoded_body: "encodedBodySize",
+          decoded_body: "decodedBodySize"
+        }[kind];
+        const value = entry ? Number(entry[fieldName]) : NaN;
+        metrics[metricName] = Number.isFinite(value) && value >= 0
+          ? Math.min(1000000000, Math.round(value))
+          : null;
+      });
+    }
+
+    async function readMeasuredJsonResponse(response, fallbackErrorText, prefix, startedAt, metrics) {
+      const headersAt = window.performance.now();
+      metrics[prefix + "_ttfb_ms"] = boundedPerformanceDuration(startedAt, headersAt);
+      const text = await response.text();
+      const downloadedAt = window.performance.now();
+      metrics[prefix + "_download_ms"] = boundedPerformanceDuration(headersAt, downloadedAt);
+      const parseStartedAt = window.performance.now();
+      try {
+        const payload = JSON.parse(text);
+        const parsedAt = window.performance.now();
+        metrics[prefix + "_json_parse_ms"] = boundedPerformanceDuration(parseStartedAt, parsedAt);
+        webVitrinaResourceBytes(response.url, prefix, metrics);
+        return payload;
+      } catch (error) {
+        throw new Error(fallbackErrorText);
+      }
+    }
+
+    function measureDoubleAnimationFrame(startedAt) {
+      return new Promise(function(resolve) {
+        window.requestAnimationFrame(function() {
+          window.requestAnimationFrame(function() {
+            resolve(boundedPerformanceDuration(startedAt, window.performance.now()));
+          });
+        });
+      });
+    }
+
+    function sendWebVitrinaPerformanceEnvelope(metrics) {
+      if (webVitrinaPerformanceState.envelopeSent || !WEB_VITRINA_CONFIG.performance_path) {
+        return;
+      }
+      webVitrinaPerformanceState.envelopeSent = true;
+      try {
+        const unavailableMetrics = WEB_VITRINA_PERFORMANCE_METRICS.filter(function(name) {
+          return metrics[name] === null;
+        });
+        const body = JSON.stringify({
+          contract_name: "web_vitrina_performance_v1",
+          envelope_kind: "page_load",
+          viewport_bucket: webVitrinaViewportBucket(),
+          metrics: metrics,
+          unavailable_metrics: unavailableMetrics
+        });
+        if (new TextEncoder().encode(body).byteLength > 4096) {
+          return;
+        }
+        fetch(WEB_VITRINA_CONFIG.performance_path, {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          keepalive: true,
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-WB-Web-Vitrina-Performance": "1"
+          },
+          body: body
+        }).catch(function() {
+          // Telemetry is strictly best-effort and must never affect the UI.
+        });
+      } catch (error) {
+        // Telemetry is strictly best-effort and must never affect the UI.
+      }
+    }
+
     function processMonitoringItem(processKey) {
       return state.processMonitoring.processes[String(processKey || "")] || null;
     }
@@ -22960,8 +23096,14 @@
       scheduleBusinessProjectionPoll(1500);
     }
 
-    async function loadDeferredTableData(requestId, shellPayload) {
+    async function loadDeferredTableData(
+      requestId,
+      shellPayload,
+      performanceMetrics,
+      shellPaintPromise
+    ) {
       try {
+        const tableRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
             includeTableData: true
@@ -22971,7 +23113,15 @@
             headers: {"Accept": "application/json"}
           }
         );
-        const payload = await readJsonResponse(response, "non-json response from table data route");
+        const payload = performanceMetrics
+          ? await readMeasuredJsonResponse(
+              response,
+              "non-json response from table data route",
+              "table",
+              tableRequestStartedAt,
+              performanceMetrics
+            )
+          : await readJsonResponse(response, "non-json response from table data route");
         if (requestId !== state.requestSequence) {
           return;
         }
@@ -22986,10 +23136,25 @@
         if (String(tableSurface.table_data_state || "included") !== "included") {
           throw new Error("table data payload did not include rows");
         }
+        const tableRenderStartedAt = window.performance.now();
         const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
         resetFilterState(renderPayload);
         renderPage(renderPayload, {tableFreshness: "fresh"});
         markFreshTableDisplayed(renderPayload);
+        const tableRenderFinishedAt = window.performance.now();
+        if (performanceMetrics) {
+          performanceMetrics.table_merge_render_ms = boundedPerformanceDuration(
+            tableRenderStartedAt,
+            tableRenderFinishedAt
+          );
+          const paintValues = await Promise.all([
+            shellPaintPromise || Promise.resolve(null),
+            measureDoubleAnimationFrame(tableRenderFinishedAt)
+          ]);
+          performanceMetrics.shell_double_raf_paint_ms = paintValues[0];
+          performanceMetrics.table_double_raf_paint_ms = paintValues[1];
+          sendWebVitrinaPerformanceEnvelope(performanceMetrics);
+        }
       } catch (error) {
         if (requestId !== state.requestSequence) {
           return;
@@ -23015,6 +23180,14 @@
       const requestKey = tableSnapshotRequestKey();
       const showingCachedTable = hasDisplayedCachedTableForRequest(requestKey);
       state.requestSequence = requestId;
+      let performanceMetrics = null;
+      if (
+        !webVitrinaPerformanceState.envelopeSent
+        && webVitrinaPerformanceState.claimedRequestId === 0
+      ) {
+        webVitrinaPerformanceState.claimedRequestId = requestId;
+        performanceMetrics = createWebVitrinaPerformanceMetrics();
+      }
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Загрузка", tone: "warning", detail: "загрузка page composition"});
       if (showingCachedTable) {
@@ -23032,6 +23205,7 @@
         setTableFreshnessIndicator("hidden");
       }
       try {
+        const shellRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
             includeSourceStatus: !!normalizedOptions.includeSourceStatus
@@ -23040,7 +23214,15 @@
           headers: {"Accept": "application/json"}
           }
         );
-        const payload = await readJsonResponse(response, "non-json response from page composition surface");
+        const payload = performanceMetrics
+          ? await readMeasuredJsonResponse(
+              response,
+              "non-json response from page composition surface",
+              "shell",
+              shellRequestStartedAt,
+              performanceMetrics
+            )
+          : await readJsonResponse(response, "non-json response from page composition surface");
         if (requestId !== state.requestSequence) {
           return;
         }
@@ -23053,18 +23235,51 @@
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") === "deferred") {
+          let shellPaintPromise = null;
           if (!showingCachedTable) {
+            const shellRenderStartedAt = window.performance.now();
             resetFilterState(payload);
             renderPage(payload);
+            const shellRenderFinishedAt = window.performance.now();
+            if (performanceMetrics) {
+              performanceMetrics.shell_merge_render_ms = boundedPerformanceDuration(
+                shellRenderStartedAt,
+                shellRenderFinishedAt
+              );
+              shellPaintPromise = measureDoubleAnimationFrame(shellRenderFinishedAt);
+            }
           } else {
             state.tableSnapshot.freshLoading = true;
             setTableFreshnessIndicator("stale_loading", state.composition);
           }
-          loadDeferredTableData(requestId, payload);
+          loadDeferredTableData(
+            requestId,
+            payload,
+            performanceMetrics,
+            shellPaintPromise
+          );
         } else {
+          const tableRenderStartedAt = window.performance.now();
           resetFilterState(payload);
           renderPage(payload, {tableFreshness: "fresh"});
           markFreshTableDisplayed(payload);
+          const tableRenderFinishedAt = window.performance.now();
+          if (performanceMetrics) {
+            performanceMetrics.table_ttfb_ms = performanceMetrics.shell_ttfb_ms;
+            performanceMetrics.table_download_ms = performanceMetrics.shell_download_ms;
+            performanceMetrics.table_json_parse_ms = performanceMetrics.shell_json_parse_ms;
+            performanceMetrics.table_transfer_bytes = performanceMetrics.shell_transfer_bytes;
+            performanceMetrics.table_encoded_body_bytes = performanceMetrics.shell_encoded_body_bytes;
+            performanceMetrics.table_decoded_body_bytes = performanceMetrics.shell_decoded_body_bytes;
+            performanceMetrics.table_merge_render_ms = boundedPerformanceDuration(
+              tableRenderStartedAt,
+              tableRenderFinishedAt
+            );
+            performanceMetrics.table_double_raf_paint_ms = await measureDoubleAnimationFrame(
+              tableRenderFinishedAt
+            );
+            sendWebVitrinaPerformanceEnvelope(performanceMetrics);
+          }
         }
       } catch (error) {
         if (requestId !== state.requestSequence) {

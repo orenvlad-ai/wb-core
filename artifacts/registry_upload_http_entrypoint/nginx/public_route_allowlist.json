@@ -262,7 +262,20 @@
       "name": "sheet_vitrina_web_vitrina",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina",
-      "methods": ["GET"]
+      "methods": ["GET"],
+      "response_compression": {
+        "kind": "gzip_json_v1",
+        "level": 1,
+        "min_length": 1024,
+        "content_types": ["application/json"],
+        "vary": true
+      }
+    },
+    {
+      "name": "sheet_vitrina_web_vitrina_performance",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina/performance",
+      "methods": ["POST"]
     },
     {
       "name": "sheet_vitrina_warehouses",
