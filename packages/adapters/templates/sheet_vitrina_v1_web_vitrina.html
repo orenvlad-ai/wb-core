@@ -1822,6 +1822,117 @@
       white-space: nowrap;
     }
 
+    .vitrina-health-cluster {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex: 0 0 auto;
+    }
+
+    .vitrina-health-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 28px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .vitrina-health-indicator:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .vitrina-health-indicator-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+
+    .vitrina-health-indicator.tone-success { color: #4ade80; border-color: rgba(74, 222, 128, 0.34); }
+    .vitrina-health-indicator.tone-warning { color: #fbbf24; border-color: rgba(251, 191, 36, 0.34); }
+    .vitrina-health-indicator.tone-error { color: #f87171; border-color: rgba(248, 113, 113, 0.38); }
+    .vitrina-health-indicator.tone-neutral { color: #94a3b8; }
+
+    .health-modal-card {
+      width: min(760px, calc(100vw - 28px));
+      max-height: min(780px, calc(100vh - 28px));
+      overflow: auto;
+    }
+
+    .health-modal-summary,
+    .health-recovery-confirmation,
+    .health-recovery-result {
+      margin: 0 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-subtle);
+      padding: 10px 12px;
+      color: var(--muted-strong);
+      line-height: 1.45;
+    }
+
+    .health-detail-groups {
+      display: grid;
+      gap: 10px;
+    }
+
+    .health-detail-group {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: var(--panel);
+    }
+
+    .health-detail-group h4,
+    .health-detail-group p {
+      margin: 0;
+    }
+
+    .health-source-list,
+    .health-recovery-list {
+      display: grid;
+      gap: 7px;
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .health-source-row,
+    .health-recovery-row {
+      display: grid;
+      gap: 3px;
+      border-top: 1px solid var(--border);
+      padding-top: 7px;
+      font-size: 12px;
+    }
+
+    .health-source-state {
+      color: var(--muted-strong);
+    }
+
+    .health-recovery-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .health-recovery-confirmation[hidden],
+    .health-recovery-result[hidden] {
+      display: none;
+    }
+
     .table-filters-toggle {
       min-height: 28px;
       padding: 5px 9px;
@@ -5018,7 +5129,7 @@
       color: var(--error-text);
     }
 
-    @media (max-width: 1279px) {
+    @media (max-width: 1399px) {
       .table-heading-row {
         display: flex;
         flex-wrap: wrap;
@@ -5044,6 +5155,12 @@
       .table-filters-rail-inner {
         height: auto;
         min-height: 58px;
+      }
+    }
+
+    @media (min-width: 1400px) and (max-width: 1479px) {
+      .table-heading-row {
+        grid-template-columns: minmax(110px, 1fr) minmax(600px, 680px) auto;
       }
     }
 
@@ -5125,6 +5242,12 @@
 
       .table-load-action-cluster {
         margin-left: 0;
+        flex-wrap: wrap;
+      }
+
+      .vitrina-health-cluster {
+        flex: 1 1 100%;
+        justify-content: flex-start;
       }
 
       .table-filters-rail-inner {
@@ -5660,6 +5783,11 @@
               <span class="table-load-action-cluster">
                 <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-controls="table-filters-rail">Фильтры</button>
                 <button class="button secondary metrics-settings-button" type="button" data-metrics-settings-open aria-label="Настроить метрики" aria-haspopup="dialog" aria-controls="metrics-presentation-dialog">Метрики</button>
+                <div class="vitrina-health-cluster" data-health-cluster role="group" aria-label="Здоровье витрины">
+                  <button class="vitrina-health-indicator tone-neutral" type="button" data-health-indicator="yesterday_closed" aria-haspopup="dialog" aria-controls="vitrina-health-dialog" aria-label="Вчера: наблюдаем"><span class="vitrina-health-indicator-dot" aria-hidden="true"></span><span>Вчера</span></button>
+                  <button class="vitrina-health-indicator tone-neutral" type="button" data-health-indicator="today_current" aria-haspopup="dialog" aria-controls="vitrina-health-dialog" aria-label="Сегодня: наблюдаем"><span class="vitrina-health-indicator-dot" aria-hidden="true"></span><span>Сегодня</span></button>
+                  <button class="vitrina-health-indicator tone-neutral" type="button" data-health-indicator="bot_health" aria-haspopup="dialog" aria-controls="vitrina-health-dialog" aria-label="BOT: наблюдаем"><span class="vitrina-health-indicator-dot" aria-hidden="true"></span><span>BOT</span></button>
+                </div>
                 <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
                 <div class="top-progress" data-global-progress hidden>
                   <span class="top-progress-pulse" aria-hidden="true"></span>
@@ -6855,6 +6983,38 @@
     </section>
   </main>
 
+  <div class="operator-modal-backdrop" data-health-modal hidden>
+    <section class="health-modal-card operator-modal-card" id="vitrina-health-dialog" role="dialog" aria-modal="true" aria-labelledby="vitrina-health-title" aria-describedby="vitrina-health-summary" tabindex="-1">
+      <div class="ads-modal-head">
+        <div>
+          <h3 class="ads-modal-title" id="vitrina-health-title">Здоровье витрины</h3>
+          <p class="panel-note">Серверное наблюдение и точечный план восстановления</p>
+        </div>
+        <button class="button ghost" type="button" data-health-modal-close>Закрыть</button>
+      </div>
+      <div class="ads-modal-body">
+        <p class="health-modal-summary" id="vitrina-health-summary" data-health-modal-summary>Наблюдение ещё не загружено.</p>
+        <div class="health-detail-groups" data-health-detail-groups></div>
+        <section class="health-detail-group" aria-labelledby="vitrina-health-recovery-title">
+          <h4 id="vitrina-health-recovery-title">Восстановление</h4>
+          <p class="panel-note">Доступны только действия из текущего серверного предпросмотра.</p>
+          <ul class="health-recovery-list" data-health-recovery-list></ul>
+        </section>
+        <section class="health-recovery-confirmation" data-health-recovery-confirmation hidden aria-live="polite">
+          <p data-health-recovery-confirmation-text></p>
+          <div class="health-recovery-actions">
+            <button class="button secondary" type="button" data-health-recovery-cancel>Отмена</button>
+            <button class="button primary" type="button" data-health-recovery-confirm>Запустить точечное обновление</button>
+          </div>
+        </section>
+        <p class="health-recovery-result" data-health-recovery-result hidden role="status" aria-live="polite"></p>
+      </div>
+      <div class="ads-modal-actions">
+        <button class="button secondary" type="button" data-health-modal-close>Закрыть</button>
+      </div>
+    </section>
+  </div>
+
   <div class="ads-modal-backdrop operator-modal-backdrop" data-ads-modal hidden>
     <section class="ads-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="ads-bid-modal-title">
       <div class="ads-modal-head">
@@ -7159,6 +7319,17 @@
     const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
     const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
+    const healthIndicatorButtons = Array.from(document.querySelectorAll("[data-health-indicator]"));
+    const healthModalNode = document.querySelector("[data-health-modal]");
+    const healthModalDialogNode = document.querySelector("#vitrina-health-dialog");
+    const healthModalSummaryNode = document.querySelector("[data-health-modal-summary]");
+    const healthDetailGroupsNode = document.querySelector("[data-health-detail-groups]");
+    const healthRecoveryListNode = document.querySelector("[data-health-recovery-list]");
+    const healthRecoveryConfirmationNode = document.querySelector("[data-health-recovery-confirmation]");
+    const healthRecoveryConfirmationTextNode = document.querySelector("[data-health-recovery-confirmation-text]");
+    const healthRecoveryConfirmButton = document.querySelector("[data-health-recovery-confirm]");
+    const healthRecoveryCancelButton = document.querySelector("[data-health-recovery-cancel]");
+    const healthRecoveryResultNode = document.querySelector("[data-health-recovery-result]");
     const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
     const metricsPresentationPanelNode = document.querySelector("[data-metrics-presentation]");
     const metricsPresentationBodyNode = document.querySelector("[data-metrics-presentation-body]");
@@ -7645,6 +7816,13 @@
       actionSequence: 0,
       page: {
         lastRenderedAt: null
+      },
+      health: {
+        surface: null,
+        selectedIndicatorId: "yesterday_closed",
+        opener: null,
+        pendingAction: null,
+        submitting: false
       },
       processMonitoring: {
         loading: false,
@@ -8206,6 +8384,65 @@
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
     });
+    healthIndicatorButtons.forEach(function(button) {
+      button.addEventListener("click", function() {
+        openHealthModal(button, button.getAttribute("data-health-indicator"));
+      });
+    });
+    if (healthModalNode) {
+      healthModalNode.addEventListener("click", function(event) {
+        if (event.target === healthModalNode || event.target.closest("[data-health-modal-close]")) {
+          closeHealthModal();
+          return;
+        }
+        const recoveryButton = event.target.closest("[data-health-recovery-index]");
+        if (recoveryButton) {
+          const preview = (state.health.surface || {}).recovery_preview || {};
+          const action = (preview.actions || [])[Number(recoveryButton.getAttribute("data-health-recovery-index"))];
+          prepareHealthRecovery(action);
+          return;
+        }
+        if (event.target.closest("[data-health-open-settings]")) {
+          closeHealthModal();
+          activateUnifiedTab(SETTINGS_UNIFIED_TAB);
+        }
+      });
+    }
+    if (healthRecoveryConfirmButton) {
+      healthRecoveryConfirmButton.addEventListener("click", confirmHealthRecovery);
+    }
+    if (healthRecoveryCancelButton) {
+      healthRecoveryCancelButton.addEventListener("click", function() {
+        state.health.pendingAction = null;
+        healthRecoveryConfirmationNode.hidden = true;
+      });
+    }
+    document.addEventListener("keydown", function(event) {
+      if (!healthModalNode || healthModalNode.hidden) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeHealthModal();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(healthModalNode.querySelectorAll(
+        'button:not([disabled]):not([hidden]), details > summary, [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(function(node) { return node.offsetParent !== null; });
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!healthModalNode.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }, true);
     sourceStatusLoadButton.addEventListener("click", function() {
       loadSourceStatusDetails({force: true});
     });
@@ -15914,6 +16151,240 @@
       });
     }
 
+    function healthIndicatorById(indicatorId) {
+      const surface = state.health.surface || {};
+      return (surface.indicators || []).find(function(item) {
+        return String(item.indicator_id || "") === String(indicatorId || "");
+      }) || null;
+    }
+
+    function applyHealthSurface(surface) {
+      state.health.surface = surface && surface.contract ? surface : null;
+      healthIndicatorButtons.forEach(function(button) {
+        const indicatorId = String(button.getAttribute("data-health-indicator") || "");
+        const indicator = healthIndicatorById(indicatorId) || {
+          label: String(button.textContent || "Статус").trim(),
+          tone: "neutral",
+          status_label: "Наблюдаем",
+          reason: "Серверное наблюдение пока недоступно."
+        };
+        const tone = normalizeTone(indicator.tone || "neutral");
+        const label = String(indicator.label || indicatorId);
+        const statusLabel = String(indicator.status_label || "Наблюдаем");
+        const reason = String(indicator.reason || "");
+        button.className = "vitrina-health-indicator tone-" + tone;
+        button.setAttribute("aria-label", label + ": " + statusLabel + (reason ? ". " + reason : ""));
+        button.setAttribute("title", label + ": " + statusLabel + (reason ? " · " + reason : ""));
+        button.setAttribute("data-health-state", String(indicator.state || "observing"));
+      });
+      if (healthModalNode && !healthModalNode.hidden) {
+        renderHealthModal();
+      }
+    }
+
+    function healthSourceGroupsForIndicator(surface, indicatorId) {
+      const groups = Array.isArray(surface.source_groups) ? surface.source_groups : [];
+      const isBot = indicatorId === "bot_health";
+      return groups.map(function(group) {
+        const groupId = String(group.source_group_id || "");
+        const sources = (group.sources || []).filter(function(source) {
+          if (isBot) {
+            return (groupId === SELLER_BOT_SOURCE_GROUP_ID || groupId === "wb_public_card_bot")
+              && String(source.date_role || "") === "today_current";
+          }
+          return String(source.date_role || "") === indicatorId;
+        });
+        return {...group, sources: sources};
+      }).filter(function(group) { return group.sources.length > 0; });
+    }
+
+    function renderHealthSourceGroup(group) {
+      const rows = (group.sources || []).map(function(source) {
+        const counts = Number(source.requested_count || 0) > 0
+          ? " · покрытие " + String(source.covered_count || 0) + "/" + String(source.requested_count || 0)
+          : "";
+        return '<li class="health-source-row">' +
+          '<strong>' + escapeHtml(source.source_key || "источник") + '</strong>' +
+          '<span class="health-source-state">' + escapeHtml(source.expectation_label || source.expectation_state || "неизвестно") + counts + '</span>' +
+          '<span>' + escapeHtml(source.reason || "Причина не указана") + '</span>' +
+          '</li>';
+      }).join("");
+      return '<details class="health-detail-group">' +
+        '<summary><strong>' + escapeHtml(group.source_group_label || group.source_group_id || "Источники") + '</strong> · ' + String((group.sources || []).length) + '</summary>' +
+        '<ul class="health-source-list">' + rows + '</ul>' +
+        '</details>';
+    }
+
+    function renderHealthRecovery(surface) {
+      if (!healthRecoveryListNode) return;
+      const preview = surface.recovery_preview || {};
+      const actions = Array.isArray(preview.actions) ? preview.actions : [];
+      if (!actions.length) {
+        healthRecoveryListNode.innerHTML = '<li class="health-recovery-row">Точечное восстановление не требуется.</li>';
+        return;
+      }
+      healthRecoveryListNode.innerHTML = actions.map(function(action, index) {
+        const submission = action.submission || {};
+        const sourceKeys = (action.gap_source_keys || []).join(", ") || "источник не указан";
+        let controls = "";
+        if (submission.submitted) {
+          controls = '<span class="health-source-state">Запуск уже принят' +
+            (submission.status ? ' · ' + escapeHtml(submission.status) : '') + '</span>';
+        } else if (action.operator_apply_allowed === true && action.apply_allowed === true && action.hook === "group_refresh") {
+          controls = '<button class="button secondary" type="button" data-health-recovery-index="' + String(index) + '"' +
+            (state.health.submitting ? ' disabled' : '') + '>Предпросмотр восстановления</button>';
+        } else if (action.settings_required) {
+          controls = '<button class="button secondary" type="button" data-health-open-settings>Открыть Настройки</button>';
+        }
+        return '<li class="health-recovery-row">' +
+          '<strong>' + escapeHtml(action.source_group_label || action.source_group_id || "Группа") + ' · ' + escapeHtml(action.target_date || "дата не указана") + '</strong>' +
+          '<span>' + escapeHtml(sourceKeys) + '</span>' +
+          '<span class="health-source-state">' + escapeHtml(action.reason || "Действие недоступно") + '</span>' +
+          (controls ? '<div class="health-recovery-actions">' + controls + '</div>' : '') +
+          '</li>';
+      }).join("");
+    }
+
+    function renderHealthModal() {
+      const surface = state.health.surface || {};
+      const cycle = surface.morning_cycle || {};
+      const latest = surface.latest_observation || {};
+      const indicator = healthIndicatorById(state.health.selectedIndicatorId) || {};
+      const nextCandidate = cycle.next_candidate_at ? formatScheduleTimestampDisplay(cycle.next_candidate_at, surface.business_timezone, {noSeconds: true}) : "—";
+      const nextConfirmation = cycle.next_confirmation_at ? formatScheduleTimestampDisplay(cycle.next_confirmation_at, surface.business_timezone, {noSeconds: true}) : "—";
+      const observationText = latest.available
+        ? "Последнее наблюдение: " + String(latest.phase || "—") + " · " + formatTimestampDisplay(latest.observed_at, {noSeconds: true})
+        : "Штатных наблюдений за этот бизнес-день ещё нет.";
+      if (healthModalSummaryNode) {
+        healthModalSummaryNode.textContent =
+          String(indicator.label || "Здоровье") + ": " + String(indicator.status_label || "Наблюдаем") + ". " +
+          String(indicator.reason || cycle.label || "Ожидаем серверное наблюдение.") + " " +
+          "Бизнес-даты: сегодня " + String(surface.business_date || "—") + ", вчера " + String(surface.yesterday_date || "—") + ". " +
+          observationText + " Следующие действия: кандидат 06:30 — " + nextCandidate + "; подтверждение 07:30 — " + nextConfirmation + ".";
+      }
+      if (healthDetailGroupsNode) {
+        const groups = healthSourceGroupsForIndicator(surface, state.health.selectedIndicatorId);
+        const transitionRows = (surface.transitions || []).slice(0, 6).map(function(item) {
+          return '<li>' + escapeHtml(item.signal_key || "сигнал") + ': ' + escapeHtml(item.previous_state || "—") + ' → ' + escapeHtml(item.current_state || "—") + ' · ' + escapeHtml(formatTimestampDisplay(item.observed_at, {noSeconds: true})) + '</li>';
+        }).join("");
+        healthDetailGroupsNode.innerHTML = groups.length
+          ? groups.map(renderHealthSourceGroup).join("")
+          : '<section class="health-detail-group"><p>Детали появятся после первого серверного наблюдения.</p></section>';
+        if (transitionRows) {
+          healthDetailGroupsNode.innerHTML += '<details class="health-detail-group"><summary><strong>Последние переходы</strong></summary><ul class="health-source-list">' + transitionRows + '</ul></details>';
+        }
+      }
+      renderHealthRecovery(surface);
+    }
+
+    function openHealthModal(opener, indicatorId) {
+      if (!healthModalNode || !healthModalDialogNode) return;
+      state.health.opener = opener || document.activeElement;
+      state.health.selectedIndicatorId = String(indicatorId || "yesterday_closed");
+      state.health.pendingAction = null;
+      state.health.submitting = false;
+      healthRecoveryConfirmationNode.hidden = true;
+      healthRecoveryResultNode.hidden = true;
+      renderHealthModal();
+      healthModalNode.hidden = false;
+      document.body.style.overflow = "hidden";
+      healthModalDialogNode.focus();
+    }
+
+    function closeHealthModal() {
+      if (!healthModalNode || healthModalNode.hidden) return;
+      healthModalNode.hidden = true;
+      document.body.style.overflow = "";
+      state.health.pendingAction = null;
+      state.health.submitting = false;
+      if (state.health.opener && typeof state.health.opener.focus === "function") {
+        state.health.opener.focus();
+      }
+    }
+
+    function prepareHealthRecovery(action) {
+      if (!action || action.operator_apply_allowed !== true || action.apply_allowed !== true || action.hook !== "group_refresh") return;
+      state.health.pendingAction = action;
+      healthRecoveryConfirmationNode.hidden = false;
+      healthRecoveryConfirmationTextNode.textContent =
+        "Будет запущено одно точечное обновление группы «" + String(action.source_group_label || action.source_group_id || "") +
+        "» за " + String(action.target_date || "") + ". После завершения сервер заново оценит здоровье; технический успех сам по себе не сделает индикатор зелёным.";
+      healthRecoveryResultNode.hidden = true;
+      healthRecoveryConfirmButton.disabled = false;
+      healthRecoveryConfirmButton.focus();
+    }
+
+    async function refreshHealthSurface() {
+      if (!WEB_VITRINA_CONFIG.health_path) return state.health.surface;
+      const response = await fetch(WEB_VITRINA_CONFIG.health_path, {
+        method: "GET",
+        headers: {"Accept": "application/json"},
+        cache: "no-store"
+      });
+      const payload = await readJsonResponse(response, "non-json response from health route");
+      if (!response.ok) {
+        throw new Error((payload && payload.error) ? payload.error : "health route returned " + response.status);
+      }
+      applyHealthSurface(payload);
+      return payload;
+    }
+
+    async function confirmHealthRecovery() {
+      if (state.health.submitting || !state.health.pendingAction) return;
+      const surface = state.health.surface || {};
+      const latest = surface.latest_observation || {};
+      const preview = surface.recovery_preview || {};
+      const action = state.health.pendingAction;
+      state.health.submitting = true;
+      healthRecoveryConfirmButton.disabled = true;
+      renderHealthRecovery(surface);
+      healthRecoveryResultNode.hidden = false;
+      healthRecoveryResultNode.textContent = "Проверяем актуальность плана и запускаем одно точечное обновление…";
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.health_recovery_start_path, {
+          method: "POST",
+          headers: {"Accept": "application/json", "Content-Type": "application/json"},
+          body: JSON.stringify({
+            observation_id: String(latest.observation_id || ""),
+            plan_fingerprint: String(preview.plan_fingerprint || ""),
+            action_fingerprint: String(action.action_fingerprint || ""),
+            source_group_id: String(action.source_group_id || ""),
+            target_date: String(action.target_date || "")
+          })
+        });
+        const payload = await readJsonResponse(response, "non-json response from health recovery route");
+        if (!response.ok) {
+          const conflict = Number(response.status) === 409;
+          throw new Error((payload && payload.message) ? payload.message : (conflict ? "План изменился. Обновите витрину." : "Не удалось запустить восстановление."));
+        }
+        const jobPath = String(payload.job_path || "");
+        healthRecoveryResultNode.textContent = payload.idempotent_replay
+          ? "Этот точечный запуск уже был принят. Читаем его результат…"
+          : "Точечное обновление запущено. Ожидаем серверный результат…";
+        const terminal = await pollSheetJob(jobPath, undefined);
+        if (!terminal || terminal.status !== "success") {
+          throw new Error(String((terminal && terminal.error) || "Точечное обновление завершилось ошибкой."));
+        }
+        healthRecoveryResultNode.textContent = "Технический запуск завершён. Перечитываем серверное здоровье и витрину…";
+        const refreshed = await refreshHealthSurface();
+        await loadPageComposition();
+        const semantic = (refreshed.indicators || []).find(function(item) { return item.indicator_id === "yesterday_closed"; }) || {};
+        healthRecoveryResultNode.hidden = false;
+        healthRecoveryResultNode.textContent = "Серверная проверка «Вчера»: " + String(semantic.status_label || "не определено") + ". " + String(semantic.reason || "");
+        healthRecoveryConfirmationNode.hidden = true;
+        state.health.pendingAction = null;
+      } catch (error) {
+        healthRecoveryResultNode.hidden = false;
+        healthRecoveryResultNode.textContent = String(error && error.message ? error.message : error) + " Обновите страницу и проверьте актуальный план.";
+        healthRecoveryConfirmationNode.hidden = true;
+        state.health.pendingAction = null;
+        try { await refreshHealthSurface(); } catch (refreshError) { /* keep fail-closed message */ }
+      } finally {
+        state.health.submitting = false;
+        renderHealthRecovery(state.health.surface || {});
+      }
+    }
+
     function renderPage(payload, options) {
       const normalizedOptions = options || {};
       state.composition = payload;
@@ -15921,6 +16392,7 @@
       state.page.lastRenderedAt = new Date();
       registerTableSurfaceAssets(payload);
       setStatusBadge(payload);
+      applyHealthSurface(payload.health_surface || {});
       renderSummaryCards(payload.summary_cards || []);
       applySellerSessionFromRuntimePayload(payload);
       renderActivitySurface(payload.activity_surface || {});

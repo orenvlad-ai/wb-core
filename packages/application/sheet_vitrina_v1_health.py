@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 from typing import Any, Iterable, Mapping
 
-from packages.business_time import current_business_date_iso
+from packages.business_time import (
+    CANONICAL_BUSINESS_TIMEZONE,
+    CANONICAL_BUSINESS_TIMEZONE_NAME,
+    current_business_date_iso,
+    to_business_datetime,
+)
 from packages.application.sheet_vitrina_v1_source_groups import (
     WEB_VITRINA_SOURCE_GROUPS,
     active_source_expectations,
@@ -25,6 +30,7 @@ from packages.application.sheet_vitrina_v1_temporal_policy import (
 
 
 HEALTH_CONTRACT = "sheet_vitrina_v1_web_health/v1"
+HEALTH_OPERATOR_CONTRACT = "sheet_vitrina_v1_web_health_operator/v1"
 GOOD_EXPECTATION_STATES = {"complete", "exact_zero", "inapplicable", "no_events", "accepted_fallback"}
 BOT_GROUP_IDS = {"seller_portal_bot", "wb_public_card_bot"}
 HISTORICAL_RECOVERY_SOURCE_KEYS = {
@@ -48,6 +54,18 @@ BOT_HISTORICAL_ROLES = {
     "spp_proxy": "accepted_current_snapshot",
 }
 BOT_CURRENT_ROLE = "accepted_current_snapshot"
+HEALTH_CURRENT_EXPECTATION_HOUR = 10
+
+_EXPECTATION_LABELS_RU = {
+    "complete": "полные данные",
+    "exact_zero": "подтверждённый ноль",
+    "inapplicable": "не требуется",
+    "no_events": "событий не было",
+    "accepted_fallback": "принято последнее подтверждённое",
+    "partial": "частичные данные",
+    "missing": "данных нет",
+    "failure": "ошибка источника",
+}
 
 
 def evaluate_web_vitrina_health(
@@ -167,6 +185,116 @@ def persist_web_vitrina_health_evaluation(
         payload_fingerprint=fingerprint,
         payload=dict(evaluation),
     )
+
+
+def build_web_vitrina_health_operator_surface(
+    *,
+    runtime: Any,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Project durable health evidence into one safe operator-facing surface."""
+
+    observed_now = now or datetime.now(timezone.utc)
+    business_now = to_business_datetime(observed_now)
+    business_date = current_business_date_iso(observed_now)
+    yesterday_date = (date.fromisoformat(business_date) - timedelta(days=1)).isoformat()
+    observations = runtime.list_sheet_vitrina_health_observations(
+        business_date=business_date,
+        limit=30,
+    )
+    latest = observations[0] if observations else None
+    phases = {str(item.get("phase") or "") for item in observations}
+    candidate_observed = "candidate" in phases
+    confirmation_observed = "confirmation" in phases
+    morning_pair_complete = candidate_observed and confirmation_observed
+    if morning_pair_complete:
+        cycle_state = "confirmed"
+        cycle_label = "Утренний цикл подтверждён"
+    elif candidate_observed:
+        cycle_state = "candidate_observed"
+        cycle_label = "Кандидат получен, ждём проверку 07:30"
+    else:
+        cycle_state = "observing"
+        cycle_label = "Наблюдаем до первого штатного цикла"
+
+    payload = dict((latest or {}).get("payload") or {})
+    raw_signals = dict(payload.get("signals") or {})
+    current_boundary = datetime.combine(
+        date.fromisoformat(business_date),
+        time(hour=HEALTH_CURRENT_EXPECTATION_HOUR),
+        tzinfo=CANONICAL_BUSINESS_TIMEZONE,
+    )
+    indicators = [
+        _operator_indicator(
+            indicator_id="yesterday_closed",
+            label="Вчера",
+            signal=raw_signals.get("yesterday_closed") or {},
+            observing=not morning_pair_complete,
+            observing_reason=cycle_label,
+        ),
+        _operator_indicator(
+            indicator_id="today_current",
+            label="Сегодня",
+            signal=raw_signals.get("today_current") or {},
+            observing=(not morning_pair_complete or business_now < current_boundary),
+            observing_reason=(
+                cycle_label
+                if not morning_pair_complete
+                else f"Ожидаем первый дневной контроль после {HEALTH_CURRENT_EXPECTATION_HOUR:02d}:00"
+            ),
+        ),
+        _operator_indicator(
+            indicator_id="bot_health",
+            label="BOT",
+            signal=raw_signals.get("bot_health") or {},
+            observing=not morning_pair_complete,
+            observing_reason=cycle_label,
+        ),
+    ]
+    matrix = [
+        dict(item)
+        for item in payload.get("expectation_matrix") or []
+        if isinstance(item, Mapping)
+    ]
+    details = _operator_source_group_details(matrix)
+    preview = _operator_recovery_preview(
+        payload.get("recovery_preview") or {},
+        morning_pair_complete=morning_pair_complete,
+    )
+    transitions = runtime.list_sheet_vitrina_health_transitions(
+        business_date=business_date,
+        limit=12,
+    )
+    return {
+        "contract": HEALTH_OPERATOR_CONTRACT,
+        "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "business_date": business_date,
+        "yesterday_date": yesterday_date,
+        "generated_at": observed_now.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "morning_cycle": {
+            "state": cycle_state,
+            "label": cycle_label,
+            "candidate_observed": candidate_observed,
+            "confirmation_observed": confirmation_observed,
+            "pair_complete": morning_pair_complete,
+            "next_candidate_at": _next_business_occurrence(observed_now, hour=6, minute=30),
+            "next_confirmation_at": _next_business_occurrence(observed_now, hour=7, minute=30),
+            "today_expectation_boundary": current_boundary.isoformat(),
+        },
+        "latest_observation": _operator_observation_metadata(latest),
+        "indicators": indicators,
+        "source_groups": details,
+        "transitions": [
+            {
+                "signal_key": str(item.get("signal_key") or ""),
+                "previous_state": str(item.get("previous_state") or ""),
+                "current_state": str(item.get("current_state") or ""),
+                "observed_at": str(item.get("observed_at") or ""),
+            }
+            for item in transitions
+        ],
+        "recovery_preview": preview,
+    }
 
 
 def detect_bot_backed_date_gaps(
@@ -402,6 +530,205 @@ def _bot_signal(*, matrix: list[Mapping[str, Any]], seller_health: Mapping[str, 
         "generic_auth_is_nonblocking": True,
         "lawful_empty_is_nonblocking": True,
     }
+
+
+def _operator_indicator(
+    *,
+    indicator_id: str,
+    label: str,
+    signal: Mapping[str, Any],
+    observing: bool,
+    observing_reason: str,
+) -> dict[str, Any]:
+    problem_sources = sorted(
+        {
+            str(item)
+            for item in signal.get("problem_sources") or signal.get("confirmed_problems") or []
+            if str(item)
+        }
+    )
+    if observing:
+        return {
+            "indicator_id": indicator_id,
+            "label": label,
+            "state": "observing",
+            "tone": "neutral",
+            "status_label": "Наблюдаем",
+            "reason": observing_reason,
+            "problem_count": 0,
+            "problem_sources": [],
+        }
+    raw_state = str(signal.get("state") or "").strip().lower()
+    if raw_state == "ok":
+        state, tone, status_label = "ok", "success", "Норма"
+        reason = "Обязательные ожидания подтверждены серверным наблюдением."
+    elif raw_state == "error":
+        state, tone, status_label = "error", "error", "Ошибка"
+        if indicator_id == "bot_health" and any(
+            item.startswith("seller_portal_session:") for item in problem_sources
+        ):
+            reason = "Подтверждена проблема сессии Seller Portal; восстановите её в Настройках."
+        elif problem_sources:
+            reason = "Подтверждена ошибка: " + ", ".join(problem_sources) + "."
+        else:
+            reason = "Есть подтверждённая ошибка обязательного источника или BOT-контура."
+    else:
+        state, tone, status_label = "incomplete", "warning", "Неполно"
+        reason = (
+            "Не подтверждены источники: " + ", ".join(problem_sources) + "."
+            if problem_sources
+            else "Часть обязательных данных ещё не подтверждена."
+        )
+    return {
+        "indicator_id": indicator_id,
+        "label": label,
+        "state": state,
+        "tone": tone,
+        "status_label": status_label,
+        "reason": reason,
+        "problem_count": int(signal.get("problem_count") or signal.get("confirmed_problem_count") or 0),
+        "problem_sources": problem_sources,
+    }
+
+
+def _operator_observation_metadata(observation: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not observation:
+        return {
+            "available": False,
+            "observation_id": "",
+            "phase": "unobserved",
+            "observed_at": "",
+            "ready_snapshot_id": "",
+            "payload_fingerprint": "",
+        }
+    return {
+        "available": True,
+        "observation_id": str(observation.get("observation_id") or ""),
+        "phase": str(observation.get("phase") or ""),
+        "observed_at": str(observation.get("observed_at") or ""),
+        "ready_snapshot_id": str(observation.get("ready_snapshot_id") or ""),
+        "payload_fingerprint": str(observation.get("payload_fingerprint") or ""),
+    }
+
+
+def _operator_source_group_details(matrix: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for cell in matrix:
+        group_id = str(cell.get("source_group_id") or "unclassified")
+        state = str(cell.get("expectation_state") or "missing")
+        grouped.setdefault(group_id, []).append(
+            {
+                "source_key": str(cell.get("source_key") or ""),
+                "date_role": str(cell.get("date_role") or ""),
+                "target_date": str(cell.get("target_date") or ""),
+                "expectation_state": state,
+                "expectation_label": _EXPECTATION_LABELS_RU.get(state, "неизвестно"),
+                "reason": _operator_expectation_reason(cell),
+                "requested_count": _coerce_int(cell.get("requested_count")),
+                "covered_count": _coerce_int(cell.get("covered_count")),
+            }
+        )
+    ordered_ids = [
+        group_id for group_id in WEB_VITRINA_SOURCE_GROUPS if group_id in grouped
+    ] + sorted(set(grouped) - set(WEB_VITRINA_SOURCE_GROUPS))
+    return [
+        {
+            "source_group_id": group_id,
+            "source_group_label": str(
+                (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get("label_ru")
+                or "Прочие источники"
+            ),
+            "sources": grouped[group_id],
+        }
+        for group_id in ordered_ids
+    ]
+
+
+def _operator_expectation_reason(cell: Mapping[str, Any]) -> str:
+    state = str(cell.get("expectation_state") or "")
+    source_key = str(cell.get("source_key") or "")
+    if state == "complete":
+        return "Дата и обязательное покрытие подтверждены."
+    if state == "exact_zero":
+        return "Источник проверен и подтвердил точный ноль."
+    if state == "inapplicable":
+        return "Для этого источника данный временной слот не требуется."
+    if state == "no_events":
+        return "Проверка выполнена: подтверждённых изменений цены или ставки не было."
+    if state == "accepted_fallback":
+        return "Использовано последнее подтверждённое значение по разрешённому правилу."
+    if source_key in {"spp", "spp_proxy"}:
+        return "Источнику нужно новое текущее наблюдение; исторический повтор недоступен."
+    if state == "partial":
+        return "Покрыта только часть обязательного набора."
+    if state == "missing":
+        return "Серверное наблюдение для этой даты отсутствует."
+    return "Источник завершился ошибкой; подробности доступны в штатном логе загрузки."
+
+
+def _operator_recovery_preview(
+    preview: Mapping[str, Any],
+    *,
+    morning_pair_complete: bool,
+) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = []
+    for raw in preview.get("actions") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        source_keys = sorted({str(item) for item in raw.get("gap_source_keys") or [] if str(item)})
+        hook = str(raw.get("hook") or "none")
+        exact_apply_allowed = bool(raw.get("apply_allowed")) and hook == "group_refresh"
+        group_id = str(raw.get("source_group_id") or "")
+        unsupported_current_only = bool(set(source_keys) & {"spp", "spp_proxy"})
+        if exact_apply_allowed and morning_pair_complete:
+            reason = "Доступно одно точечное обновление этой группы с повторной проверкой результата."
+        elif exact_apply_allowed:
+            reason = "Восстановление станет доступно после штатной пары 06:30/07:30."
+        elif unsupported_current_only:
+            reason = "Автоматическое историческое восстановление недоступно: источнику нужно новое текущее наблюдение."
+        elif group_id == "seller_portal_bot":
+            reason = "Автоматический повтор недоступен; при проблеме с сессией восстановите её в Настройках."
+        else:
+            reason = "Для этой группы нет точного исторического recovery-hook; доступен только просмотр."
+        actions.append(
+            {
+                "source_group_id": group_id,
+                "source_group_label": str(
+                    (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get("label_ru")
+                    or group_id
+                ),
+                "target_date": str(raw.get("target_date") or ""),
+                "gap_source_keys": source_keys,
+                "recoverable_source_keys": sorted(
+                    {str(item) for item in raw.get("recoverable_source_keys") or [] if str(item)}
+                ),
+                "hook": hook,
+                "apply_allowed": exact_apply_allowed,
+                "operator_apply_allowed": exact_apply_allowed and morning_pair_complete,
+                "action_fingerprint": str(raw.get("action_fingerprint") or ""),
+                "reason": reason,
+                "settings_required": group_id == "seller_portal_bot" and not exact_apply_allowed,
+            }
+        )
+    return {
+        "status": str(preview.get("status") or "unavailable"),
+        "target_date": str(preview.get("target_date") or ""),
+        "gap_count": _coerce_int(preview.get("gap_count")),
+        "plan_fingerprint": str(preview.get("plan_fingerprint") or ""),
+        "actions": actions,
+    }
+
+
+def _next_business_occurrence(now: datetime, *, hour: int, minute: int) -> str:
+    business_now = to_business_datetime(now)
+    candidate = datetime.combine(
+        business_now.date(),
+        time(hour=hour, minute=minute),
+        tzinfo=CANONICAL_BUSINESS_TIMEZONE,
+    )
+    if candidate <= business_now:
+        candidate += timedelta(days=1)
+    return candidate.isoformat()
 
 
 def _observation_state(

@@ -5514,6 +5514,144 @@ class RegistryUploadDbBackedRuntime:
             "payload": _loads_json_object(row["payload_json"]),
         }
 
+    def list_sheet_vitrina_health_observations(
+        self,
+        *,
+        business_date: str,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        _validate_iso_date(business_date, field_name="business_date")
+        bounded_limit = max(1, min(int(limit), 100))
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_health_observations
+                WHERE business_date=?
+                ORDER BY observed_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (business_date, bounded_limit),
+            ).fetchall()
+        return [
+            {
+                "observation_id": str(row["observation_id"]),
+                "business_date": str(row["business_date"]),
+                "phase": str(row["phase"]),
+                "observed_at": str(row["observed_at"]),
+                "ready_snapshot_id": str(row["ready_snapshot_id"]),
+                "payload_fingerprint": str(row["payload_fingerprint"]),
+                "payload": _loads_json_object(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def list_sheet_vitrina_health_transitions(
+        self,
+        *,
+        business_date: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        _validate_iso_date(business_date, field_name="business_date")
+        bounded_limit = max(1, min(int(limit), 100))
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_health_transitions
+                WHERE business_date=?
+                ORDER BY observed_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (business_date, bounded_limit),
+            ).fetchall()
+        return [
+            {
+                "transition_id": str(row["transition_id"]),
+                "business_date": str(row["business_date"]),
+                "signal_key": str(row["signal_key"]),
+                "previous_state": str(row["previous_state"]),
+                "current_state": str(row["current_state"]),
+                "observed_at": str(row["observed_at"]),
+                "observation_id": str(row["observation_id"]),
+            }
+            for row in rows
+        ]
+
+    def save_sheet_vitrina_health_recovery_receipt(
+        self,
+        *,
+        action_fingerprint: str,
+        plan_fingerprint: str,
+        observation_id: str,
+        target_date: str,
+        source_group_id: str,
+        job_id: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        if not str(action_fingerprint or "").startswith("sha256:"):
+            raise ValueError("health recovery action_fingerprint is required")
+        if not str(plan_fingerprint or "").startswith("sha256:"):
+            raise ValueError("health recovery plan_fingerprint is required")
+        if not str(observation_id or "").strip() or not str(source_group_id or "").strip():
+            raise ValueError("health recovery observation and source group are required")
+        if not str(job_id or "").strip():
+            raise ValueError("health recovery job_id is required")
+        _validate_iso_date(target_date, field_name="target_date")
+        _validate_timestamp(created_at, field_name="created_at")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_health_recovery_receipts(
+                        action_fingerprint,plan_fingerprint,observation_id,
+                        target_date,source_group_id,job_id,created_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(action_fingerprint) DO NOTHING
+                    """,
+                    (
+                        str(action_fingerprint),
+                        str(plan_fingerprint),
+                        str(observation_id),
+                        target_date,
+                        str(source_group_id),
+                        str(job_id),
+                        created_at,
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_health_recovery_receipts
+                    WHERE action_fingerprint=?
+                    """,
+                    (str(action_fingerprint),),
+                ).fetchone()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return _sheet_vitrina_health_recovery_receipt_to_dict(row)
+
+    def load_sheet_vitrina_health_recovery_receipt(
+        self,
+        action_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        normalized = str(action_fingerprint or "").strip()
+        if not normalized:
+            return None
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_health_recovery_receipts
+                WHERE action_fingerprint=?
+                """,
+                (normalized,),
+            ).fetchone()
+        return _sheet_vitrina_health_recovery_receipt_to_dict(row) if row else None
+
     def save_supplier_shipment_upload(
         self,
         *,
@@ -11396,6 +11534,18 @@ def _sheet_vitrina_user_row_to_dict(row: sqlite3.Row, *, include_password_hash: 
     return payload
 
 
+def _sheet_vitrina_health_recovery_receipt_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "action_fingerprint": str(row["action_fingerprint"]),
+        "plan_fingerprint": str(row["plan_fingerprint"]),
+        "observation_id": str(row["observation_id"]),
+        "target_date": str(row["target_date"]),
+        "source_group_id": str(row["source_group_id"]),
+        "job_id": str(row["job_id"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, SimpleNamespace):
         return {key: _to_jsonable(item) for key, item in vars(value).items()}
@@ -12364,6 +12514,27 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_transitions_no_delete
         BEFORE DELETE ON sheet_vitrina_v1_health_transitions
         BEGIN SELECT RAISE(ABORT, 'health transitions are append-only'); END;
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_health_recovery_receipts (
+            action_fingerprint TEXT PRIMARY KEY,
+            plan_fingerprint TEXT NOT NULL,
+            observation_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_health_observations(observation_id),
+            target_date TEXT NOT NULL,
+            source_group_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_health_recovery_receipts_by_date
+        ON sheet_vitrina_v1_health_recovery_receipts(target_date, created_at DESC);
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_recovery_receipts_no_update
+        BEFORE UPDATE ON sheet_vitrina_v1_health_recovery_receipts
+        BEGIN SELECT RAISE(ABORT, 'health recovery receipts are append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS sheet_vitrina_v1_health_recovery_receipts_no_delete
+        BEFORE DELETE ON sheet_vitrina_v1_health_recovery_receipts
+        BEGIN SELECT RAISE(ABORT, 'health recovery receipts are append-only'); END;
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
             upload_id TEXT PRIMARY KEY,

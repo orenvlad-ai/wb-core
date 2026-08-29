@@ -313,6 +313,18 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_web_vitrina_health",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina/health",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_web_vitrina_health_recovery_start",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/web-vitrina/health/recovery/start",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina_business_projection_status",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina/business-projection/status",
