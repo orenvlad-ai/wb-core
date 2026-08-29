@@ -43,6 +43,17 @@ Each persisted bounded source summary also carries the acquisition's explicit
 zero-persistence and zero WB `POST`/`PATCH` counters for query-only production
 readback.
 
+Every local persistence boundary is named before it executes:
+`baseline_ingest`, `baseline_result`, the separate Prices/Ads source-manifest
+inserts, terminal job-event insert, scheduled-health insert, lease release and
+transaction commit. A rolled-back primary failure is copied into the fallback
+terminal event with its original stage, logical table/operation, sanitized
+SQLite error code/name, allowlisted constraint category/identifier, bounded
+safe message and deterministic digest. SQL text, raw source payloads, runtime
+paths, tokens and secrets are never retained. If the fallback transaction
+itself fails, a rescue event retains both primary and fallback typed evidence;
+the primary failure is never replaced by the fallback exception.
+
 ## Observation and fact semantics
 
 - The first `joint_complete` checkpoint persists source summaries and
@@ -81,6 +92,15 @@ seller/account/actor and client key without wall-clock bytes. Two consecutive
 scheduled `partial`/`failed` outcomes set health to `degraded`; manual and
 activation jobs do not change that counter. The next scheduled complete resets
 it to `normal`.
+
+Terminal job evidence keeps source acquisition and local persistence separate.
+`source_status` records `complete`, `partial`, `failed` or invalid returned
+source evidence; `failure_origin=source_acquisition` is used only when source
+acquisition raises before a result exists, while
+`failure_origin=local_persistence` retains the exact persistence stage after a
+source result exists. A failed persistence transaction creates no checkpoint,
+source manifest, observation, incident, fact or baseline; fallback health and
+lease release remain scheduled-slot idempotent.
 
 ## Authenticated read surface
 
