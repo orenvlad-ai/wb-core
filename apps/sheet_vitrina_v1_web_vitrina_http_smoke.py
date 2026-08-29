@@ -11,6 +11,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,11 +24,13 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+    DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
+from packages.application.web_vitrina_performance import WEB_VITRINA_PERFORMANCE_METRICS
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
@@ -104,6 +107,45 @@ def main() -> None:
         try:
             base_url = f"http://127.0.0.1:{config.port}"
 
+            rum_metrics = {name: None for name in WEB_VITRINA_PERFORMANCE_METRICS}
+            rum_payload = {
+                "contract_name": "web_vitrina_performance_v1",
+                "envelope_kind": "page_load",
+                "viewport_bucket": "standard",
+                "metrics": rum_metrics,
+                "unavailable_metrics": sorted(rum_metrics),
+            }
+            rum_status, rum_raw = _post_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH}",
+                rum_payload,
+                origin=base_url,
+            )
+            if rum_status != 204 or rum_raw:
+                raise AssertionError(f"valid RUM envelope must return empty 204, got {rum_status} {rum_raw!r}")
+            sensitive_rum = dict(rum_payload)
+            sensitive_rum["sku"] = enabled[0].nm_id
+            sensitive_status, _ = _post_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH}",
+                sensitive_rum,
+                origin=base_url,
+            )
+            if sensitive_status != 422:
+                raise AssertionError(f"sensitive/unknown RUM field must be rejected, got {sensitive_status}")
+            cross_site_status, _ = _post_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH}",
+                rum_payload,
+                origin="https://example.invalid",
+            )
+            if cross_site_status != 403:
+                raise AssertionError(f"cross-site RUM envelope must be rejected, got {cross_site_status}")
+            oversized_status, _ = _post_raw_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH}",
+                b'{"padding":"' + (b"x" * 5000) + b'"}',
+                origin=base_url,
+            )
+            if oversized_status != 413:
+                raise AssertionError(f"oversized RUM envelope must be rejected before buffering, got {oversized_status}")
+
             contract_status, contract_raw = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}")
             contract_payload = json.loads(contract_raw)
             if contract_status != 200:
@@ -118,19 +160,24 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina page route mismatch, got {contract_payload}")
             if contract_payload.get("read_route") != DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
                 raise AssertionError(f"web-vitrina read route mismatch, got {contract_payload}")
-            if contract_payload.get("meta", {}).get("row_count") != 4:
+            contract_rows = list(contract_payload.get("rows") or [])
+            contract_row_count = len(contract_rows)
+            if contract_payload.get("meta", {}).get("row_count") != contract_row_count:
                 raise AssertionError(f"web-vitrina meta row_count mismatch, got {contract_payload}")
+            if contract_payload.get("status_summary", {}).get("data_sheet_row_count") != 4:
+                raise AssertionError(f"web-vitrina fixture data row count mismatch, got {contract_payload}")
             if contract_payload.get("status_summary", {}).get("read_model") != "persisted_ready_snapshot":
                 raise AssertionError(f"web-vitrina read seam mismatch, got {contract_payload}")
             if contract_payload.get("meta", {}).get("as_of_date") != "2026-04-19":
                 raise AssertionError(f"web-vitrina default as_of_date mismatch, got {contract_payload}")
-            row_ids = [row["row_id"] for row in contract_payload.get("rows") or []]
-            if row_ids != [
+            row_ids = [row["row_id"] for row in contract_rows]
+            seeded_row_ids = [
                 "TOTAL|total_view_count",
                 f"GROUP:{enabled[0].group}|view_count",
                 f"SKU:{enabled[0].nm_id}|view_count",
                 f"SKU:{enabled[1].nm_id}|orderSum",
-            ]:
+            ]
+            if any(row_id not in row_ids for row_id in seeded_row_ids):
                 raise AssertionError(f"web-vitrina rows mismatch, got {row_ids}")
 
             period_status, period_payload = _get_json(
@@ -145,16 +192,36 @@ def main() -> None:
             if period_payload.get("meta", {}).get("date_columns") != ["2026-04-18", "2026-04-19", "2026-04-20"]:
                 raise AssertionError(f"web-vitrina period date columns mismatch, got {period_payload}")
 
-            composition_status, composition_payload = _get_json(
+            composition_status, composition_raw, composition_headers = _get_raw(
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
             )
+            composition_payload = json.loads(composition_raw.decode("utf-8"))
             if composition_status != 200:
                 raise AssertionError(f"web-vitrina page composition surface must return 200, got {composition_status}")
+            diagnostics = (composition_payload.get("meta") or {}).get("page_composition_diagnostics") or {}
+            if diagnostics.get("payload_bytes") != len(composition_raw):
+                raise AssertionError(
+                    f"payload_bytes must equal the decoded response body length, got {diagnostics} vs {len(composition_raw)}"
+                )
+            if composition_headers.get("Content-Length") != str(len(composition_raw)):
+                raise AssertionError(
+                    f"Content-Length must describe the exact reused body, got {composition_headers}"
+                )
+            if composition_headers.get("Content-Encoding"):
+                raise AssertionError("loopback application response must remain logically uncompressed")
+            if composition_headers.get("Cache-Control") != "private, no-store":
+                raise AssertionError(f"page composition must remain private/no-store, got {composition_headers}")
+            server_timing = composition_headers.get("Server-Timing", "")
+            if not re.fullmatch(
+                r"build;dur=\d+\.\d{3}, encode;dur=\d+\.\d{3}",
+                server_timing,
+            ):
+                raise AssertionError(f"page composition Server-Timing is invalid: {server_timing!r}")
             if composition_payload.get("composition_name") != "web_vitrina_page_composition":
                 raise AssertionError(f"web-vitrina page composition identity mismatch, got {composition_payload}")
             if composition_payload.get("meta", {}).get("current_state") != "ready":
                 raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
-            if composition_payload.get("table_surface", {}).get("total_row_count") != 4:
+            if composition_payload.get("table_surface", {}).get("total_row_count") != contract_row_count:
                 raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
             composition_table = composition_payload.get("table_surface") or {}
             if composition_table.get("table_data_state") != "deferred":
@@ -163,7 +230,7 @@ def main() -> None:
                 raise AssertionError(f"default page composition must not inline table rows/groupings, got {composition_table}")
             if composition_table.get("returned_row_count") != 0:
                 raise AssertionError(f"default page composition returned row count mismatch, got {composition_table}")
-            composition_payload_bytes = len(json.dumps(composition_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            composition_payload_bytes = len(composition_raw)
             if composition_payload_bytes > 90000:
                 raise AssertionError(f"default page composition payload must stay bounded, got {composition_payload_bytes} bytes")
             composition_meta = composition_payload.get("meta", {})
@@ -270,7 +337,10 @@ def main() -> None:
             full_table_surface = full_table_payload.get("table_surface") or {}
             if full_table_surface.get("table_data_state") != "included":
                 raise AssertionError(f"explicit table-data route must include rows, got {full_table_surface}")
-            if len(full_table_surface.get("rows") or []) != 4 or full_table_surface.get("returned_row_count") != 4:
+            if (
+                len(full_table_surface.get("rows") or []) != contract_row_count
+                or full_table_surface.get("returned_row_count") != contract_row_count
+            ):
                 raise AssertionError(f"explicit table-data row shape mismatch, got {full_table_surface}")
 
             details_status, details_payload = _get_json(
@@ -630,6 +700,40 @@ def _reserve_free_port() -> int:
 def _get_json(url: str) -> tuple[int, dict[str, object]]:
     with urllib_request.urlopen(url) as response:
         return int(response.status), json.loads(response.read().decode("utf-8"))
+
+
+def _get_raw(url: str) -> tuple[int, bytes, dict[str, str]]:
+    with urllib_request.urlopen(url) as response:
+        body = response.read()
+        return int(response.status), body, dict(response.headers.items())
+
+
+def _post_json(url: str, payload: object, *, origin: str) -> tuple[int, bytes]:
+    return _post_raw_json(
+        url,
+        json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        origin=origin,
+    )
+
+
+def _post_raw_json(url: str, body: bytes, *, origin: str) -> tuple[int, bytes]:
+    request = urllib_request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Sec-Fetch-Site": "same-origin",
+            "X-WB-Web-Vitrina-Performance": "1",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request) as response:
+            return int(response.status), response.read()
+    except urllib_error.HTTPError as exc:
+        return int(exc.code), exc.read()
 
 
 def _get_text(url: str) -> tuple[int, str]:

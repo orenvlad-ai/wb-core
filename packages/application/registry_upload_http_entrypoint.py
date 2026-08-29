@@ -12202,10 +12202,6 @@ def _with_page_composition_diagnostics(
     }
     meta["page_composition_diagnostics"] = diagnostics
     normalized["meta"] = meta
-    for _ in range(2):
-        diagnostics["payload_bytes"] = len(
-            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ) + 1
     return normalized
 
 
