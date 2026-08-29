@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 from types import SimpleNamespace
 import sys
 
@@ -21,8 +22,10 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint,
     SHEET_VITRINA_HEALTH_CANDIDATE_TRIGGER,
+    SheetVitrinaHealthRecoveryConflict,
 )
 from packages.application.sheet_vitrina_v1_health import (
+    build_web_vitrina_health_operator_surface,
     evaluate_web_vitrina_health,
     persist_web_vitrina_health_evaluation,
 )
@@ -170,6 +173,202 @@ class _FakeRuntime:
         return SimpleNamespace(config_v2=[SimpleNamespace(enabled=True), SimpleNamespace(enabled=True)])
 
 
+class _HealthSurfaceRuntime:
+    def __init__(self, payload: dict[str, object], *, phases: tuple[str, ...]) -> None:
+        self.observations = [
+            {
+                "observation_id": f"health-{phase}",
+                "business_date": TODAY,
+                "phase": phase,
+                "observed_at": f"2026-08-29T0{index + 1}:30:00Z",
+                "ready_snapshot_id": "snapshot",
+                "payload_fingerprint": str(payload.get("fingerprint") or "sha256:payload"),
+                "payload": deepcopy(payload),
+            }
+            for index, phase in enumerate(phases)
+        ]
+        self.receipts: dict[str, dict[str, object]] = {}
+
+    def list_sheet_vitrina_health_observations(self, *, business_date: str, limit: int):
+        assert business_date == TODAY
+        return list(reversed(self.observations))[:limit]
+
+    def list_sheet_vitrina_health_transitions(self, *, business_date: str, limit: int):
+        assert business_date == TODAY
+        return [
+            {
+                "signal_key": "yesterday_closed",
+                "previous_state": "unobserved",
+                "current_state": "incomplete",
+                "observed_at": "2026-08-29T02:30:00Z",
+            }
+        ][:limit]
+
+    def load_sheet_vitrina_health_recovery_receipt(self, action_fingerprint: str):
+        return deepcopy(self.receipts.get(action_fingerprint))
+
+    def save_sheet_vitrina_health_recovery_receipt(self, **payload):
+        fingerprint = str(payload["action_fingerprint"])
+        self.receipts.setdefault(fingerprint, dict(payload))
+        return deepcopy(self.receipts[fingerprint])
+
+
+class _HealthJobs:
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict[str, object]] = {}
+        self.active: dict[str, object] | None = None
+
+    def active_job(self, *, operations):
+        del operations
+        return deepcopy(self.active)
+
+    def get(self, job_id: str):
+        if job_id not in self.jobs:
+            raise ValueError("job not found")
+        return deepcopy(self.jobs[job_id])
+
+
+def _operator_payload(
+    *,
+    yesterday_state: str = "ok",
+    today_state: str = "ok",
+    bot_state: str = "ok",
+    recoverable: bool = False,
+    unsupported: bool = False,
+) -> dict[str, object]:
+    matrix = [
+        {
+            "source_group_id": "wb_api",
+            "source_key": "fin_report_daily",
+            "date_role": "yesterday_closed",
+            "target_date": YESTERDAY,
+            "expectation_state": "complete" if yesterday_state == "ok" else "partial",
+            "requested_count": 2,
+            "covered_count": 2 if yesterday_state == "ok" else 1,
+        },
+        {
+            "source_group_id": "other_sources",
+            "source_key": "sku_action_events",
+            "date_role": "today_current",
+            "target_date": TODAY,
+            "expectation_state": "no_events",
+            "requested_count": 0,
+            "covered_count": 0,
+        },
+        {
+            "source_group_id": "wb_api",
+            "source_key": "stocks",
+            "date_role": "today_current",
+            "target_date": TODAY,
+            "expectation_state": "inapplicable",
+            "requested_count": 0,
+            "covered_count": 0,
+        },
+    ]
+    actions: list[dict[str, object]] = []
+    if recoverable:
+        matrix.append(
+            {
+                "source_group_id": "wb_api",
+                "source_key": "sales_funnel_history",
+                "date_role": "yesterday_closed",
+                "target_date": YESTERDAY,
+                "expectation_state": "missing",
+                "requested_count": 2,
+                "covered_count": 0,
+            }
+        )
+        actions.append(
+            {
+                "source_group_id": "wb_api",
+                "target_date": YESTERDAY,
+                "gap_source_keys": ["sales_funnel_history"],
+                "recoverable_source_keys": ["sales_funnel_history"],
+                "hook": "group_refresh",
+                "apply_allowed": True,
+                "action_fingerprint": "sha256:recoverable-action",
+            }
+        )
+    if unsupported:
+        matrix.append(
+            {
+                "source_group_id": "wb_public_card_bot",
+                "source_key": "spp_proxy",
+                "date_role": "yesterday_closed",
+                "target_date": YESTERDAY,
+                "expectation_state": "partial",
+                "requested_count": 2,
+                "covered_count": 1,
+            }
+        )
+        actions.append(
+            {
+                "source_group_id": "wb_public_card_bot",
+                "target_date": YESTERDAY,
+                "gap_source_keys": ["spp_proxy"],
+                "recoverable_source_keys": [],
+                "hook": "none",
+                "apply_allowed": False,
+                "action_fingerprint": "sha256:unsupported-action",
+            }
+        )
+    return {
+        "contract": "sheet_vitrina_v1_web_health/v1",
+        "business_date": TODAY,
+        "yesterday_date": YESTERDAY,
+        "fingerprint": "sha256:operator-payload",
+        "expectation_matrix": matrix,
+        "signals": {
+            "yesterday_closed": {
+                "state": yesterday_state,
+                "problem_count": 0 if yesterday_state == "ok" else 1,
+                "problem_sources": [] if yesterday_state == "ok" else ["fin_report_daily"],
+            },
+            "today_current": {
+                "state": today_state,
+                "problem_count": 0 if today_state == "ok" else 1,
+                "problem_sources": [] if today_state == "ok" else ["current_source"],
+            },
+            "bot_health": {
+                "state": bot_state,
+                "confirmed_problem_count": 0 if bot_state == "ok" else 1,
+                "confirmed_problems": [] if bot_state == "ok" else ["seller_portal_session:invalid"],
+            },
+        },
+        "recovery_preview": {
+            "status": "recovery_needed" if actions else "closed",
+            "target_date": YESTERDAY,
+            "gap_count": len(actions),
+            "plan_fingerprint": "sha256:operator-plan",
+            "actions": actions,
+        },
+    }
+
+
+def _health_entrypoint_shell(runtime: _HealthSurfaceRuntime, jobs: _HealthJobs):
+    shell = object.__new__(RegistryUploadHttpEntrypoint)
+    shell.runtime = runtime
+    shell.operator_jobs = jobs
+    shell._health_recovery_lock = threading.RLock()
+    shell.now_factory = lambda: datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc)
+    shell.activated_at_factory = lambda: "2026-08-29T06:00:00Z"
+    launches: list[dict[str, object]] = []
+
+    def _start(**payload):
+        launches.append(dict(payload))
+        job = {
+            "job_id": "health-job-1",
+            "operation": "refresh_group",
+            "status": "running",
+            "started_at": "2026-08-29T06:00:00Z",
+        }
+        jobs.jobs[str(job["job_id"])] = job
+        return deepcopy(job)
+
+    shell.start_sheet_source_group_refresh_job = _start
+    return shell, launches
+
+
 def main() -> None:
     _assert_sku_no_event_status_is_covered()
     evaluation = evaluate_web_vitrina_health(runtime=_FakeRuntime(), now=NOW, history_days=2)
@@ -227,6 +426,129 @@ def main() -> None:
         for item in seller_preview["actions"]
     )
 
+    observing_runtime = _HealthSurfaceRuntime(
+        _operator_payload(yesterday_state="incomplete", bot_state="error"),
+        phases=("shadow",),
+    )
+    observing_surface = build_web_vitrina_health_operator_surface(
+        runtime=observing_runtime,
+        now=NOW,
+    )
+    assert observing_surface["morning_cycle"]["state"] == "observing"
+    assert {item["state"] for item in observing_surface["indicators"]} == {"observing"}
+
+    confirmed_runtime = _HealthSurfaceRuntime(
+        _operator_payload(),
+        phases=("candidate", "confirmation"),
+    )
+    confirmed_surface = build_web_vitrina_health_operator_surface(
+        runtime=confirmed_runtime,
+        now=NOW,
+    )
+    confirmed_by_id = {item["indicator_id"]: item for item in confirmed_surface["indicators"]}
+    assert confirmed_by_id["yesterday_closed"]["state"] == "ok"
+    assert confirmed_by_id["today_current"]["state"] == "observing"
+    assert confirmed_by_id["bot_health"]["state"] == "ok"
+    after_boundary = build_web_vitrina_health_operator_surface(
+        runtime=confirmed_runtime,
+        now=datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc),
+    )
+    assert {item["indicator_id"]: item for item in after_boundary["indicators"]}["today_current"]["state"] == "ok"
+
+    bot_failure_runtime = _HealthSurfaceRuntime(
+        _operator_payload(bot_state="error"),
+        phases=("candidate", "confirmation"),
+    )
+    bot_failure_surface = build_web_vitrina_health_operator_surface(
+        runtime=bot_failure_runtime,
+        now=datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc),
+    )
+    bot_failure_by_id = {item["indicator_id"]: item for item in bot_failure_surface["indicators"]}
+    assert bot_failure_by_id["yesterday_closed"]["state"] == "ok"
+    assert bot_failure_by_id["bot_health"]["state"] == "error"
+
+    recovery_runtime = _HealthSurfaceRuntime(
+        _operator_payload(yesterday_state="incomplete", recoverable=True),
+        phases=("candidate", "confirmation"),
+    )
+    recovery_jobs = _HealthJobs()
+    recovery_shell, recovery_launches = _health_entrypoint_shell(recovery_runtime, recovery_jobs)
+    recovery_surface = recovery_shell.handle_sheet_web_vitrina_health_request()
+    recovery_action = next(
+        item for item in recovery_surface["recovery_preview"]["actions"]
+        if item["hook"] == "group_refresh"
+    )
+    request = {
+        "observation_id": recovery_surface["latest_observation"]["observation_id"],
+        "plan_fingerprint": recovery_surface["recovery_preview"]["plan_fingerprint"],
+        "action_fingerprint": recovery_action["action_fingerprint"],
+        "source_group_id": recovery_action["source_group_id"],
+        "target_date": recovery_action["target_date"],
+    }
+    started = recovery_shell.handle_sheet_web_vitrina_health_recovery_start_request(request)
+    assert started["status"] == "running" and started["idempotent_replay"] is False
+    replay = recovery_shell.handle_sheet_web_vitrina_health_recovery_start_request(request)
+    assert replay["job_id"] == started["job_id"] and replay["idempotent_replay"] is True
+    assert len(recovery_launches) == 1
+    stale_request = {**request, "action_fingerprint": "sha256:new-action"}
+    try:
+        recovery_shell.handle_sheet_web_vitrina_health_recovery_start_request(stale_request)
+    except SheetVitrinaHealthRecoveryConflict as exc:
+        assert exc.reason == "stale_health_action"
+    else:
+        raise AssertionError("stale recovery action was not rejected")
+
+    active_runtime = _HealthSurfaceRuntime(
+        _operator_payload(yesterday_state="incomplete", recoverable=True),
+        phases=("candidate", "confirmation"),
+    )
+    active_jobs = _HealthJobs()
+    active_jobs.active = {"job_id": "already-running", "status": "running", "operation": "refresh"}
+    active_shell, active_launches = _health_entrypoint_shell(active_runtime, active_jobs)
+    active_surface = active_shell.handle_sheet_web_vitrina_health_request()
+    active_action = active_surface["recovery_preview"]["actions"][0]
+    try:
+        active_shell.handle_sheet_web_vitrina_health_recovery_start_request(
+            {
+                "observation_id": active_surface["latest_observation"]["observation_id"],
+                "plan_fingerprint": active_surface["recovery_preview"]["plan_fingerprint"],
+                "action_fingerprint": active_action["action_fingerprint"],
+                "source_group_id": active_action["source_group_id"],
+                "target_date": active_action["target_date"],
+            }
+        )
+    except SheetVitrinaHealthRecoveryConflict as exc:
+        assert exc.reason == "active_vitrina_writer"
+    else:
+        raise AssertionError("active writer was not rejected")
+    assert active_launches == []
+
+    unsupported_runtime = _HealthSurfaceRuntime(
+        _operator_payload(yesterday_state="incomplete", unsupported=True),
+        phases=("candidate", "confirmation"),
+    )
+    unsupported_jobs = _HealthJobs()
+    unsupported_shell, unsupported_launches = _health_entrypoint_shell(unsupported_runtime, unsupported_jobs)
+    unsupported_surface = unsupported_shell.handle_sheet_web_vitrina_health_request()
+    unsupported_action = unsupported_surface["recovery_preview"]["actions"][0]
+    assert unsupported_action["operator_apply_allowed"] is False
+    assert "историческое восстановление недоступно" in unsupported_action["reason"]
+    try:
+        unsupported_shell.handle_sheet_web_vitrina_health_recovery_start_request(
+            {
+                "observation_id": unsupported_surface["latest_observation"]["observation_id"],
+                "plan_fingerprint": unsupported_surface["recovery_preview"]["plan_fingerprint"],
+                "action_fingerprint": unsupported_action["action_fingerprint"],
+                "source_group_id": unsupported_action["source_group_id"],
+                "target_date": unsupported_action["target_date"],
+            }
+        )
+    except SheetVitrinaHealthRecoveryConflict as exc:
+        assert exc.reason == "unsupported_health_recovery"
+    else:
+        raise AssertionError("unsupported recovery was not rejected")
+    assert unsupported_launches == []
+
     with tempfile.TemporaryDirectory(prefix="web-vitrina-health-") as temp_dir:
         db_path = Path(temp_dir) / "operational.sqlite"
         runtime = RegistryUploadDbBackedRuntime(Path(temp_dir), operational_db_path=db_path)
@@ -247,6 +569,26 @@ def main() -> None:
         assert repeated["status"] == "already_recorded"
         latest = runtime.load_latest_sheet_vitrina_health_observation(business_date=TODAY)
         assert latest and latest["payload_fingerprint"] == evaluation["fingerprint"]
+        durable_receipt = runtime.save_sheet_vitrina_health_recovery_receipt(
+            action_fingerprint="sha256:durable-action",
+            plan_fingerprint="sha256:durable-plan",
+            observation_id=str(latest["observation_id"]),
+            target_date=YESTERDAY,
+            source_group_id="wb_api",
+            job_id="job-1",
+            created_at="2026-08-29T03:03:00Z",
+        )
+        repeated_receipt = runtime.save_sheet_vitrina_health_recovery_receipt(
+            action_fingerprint="sha256:durable-action",
+            plan_fingerprint="sha256:different-plan",
+            observation_id=str(latest["observation_id"]),
+            target_date=YESTERDAY,
+            source_group_id="wb_api",
+            job_id="job-2",
+            created_at="2026-08-29T03:04:00Z",
+        )
+        assert durable_receipt == repeated_receipt
+        assert runtime.load_sheet_vitrina_health_recovery_receipt("sha256:durable-action") == durable_receipt
         with sqlite3.connect(runtime.store_registry.resolve("operational")) as conn:
             try:
                 conn.execute(

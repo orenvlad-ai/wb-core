@@ -26,6 +26,7 @@ import zlib
 
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint,
+    SheetVitrinaHealthRecoveryConflict,
     SupplierAccountingPackageBlockedError,
 )
 from packages.application.business_data_write_barrier import (
@@ -138,6 +139,10 @@ DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH = (
 DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE = "page_composition"
 WEB_VITRINA_HISTORY_MODE_EXPLICIT = "explicit"
 DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+DEFAULT_SHEET_WEB_VITRINA_HEALTH_PATH = "/v1/sheet-vitrina-v1/web-vitrina/health"
+DEFAULT_SHEET_WEB_VITRINA_HEALTH_RECOVERY_START_PATH = (
+    "/v1/sheet-vitrina-v1/web-vitrina/health/recovery/start"
+)
 DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
 DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH = "/v1/sheet-vitrina-v1/web-vitrina/user-config"
@@ -1255,6 +1260,36 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     load_result,
+                )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_HEALTH_RECOVERY_START_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    job_payload = entrypoint.handle_sheet_web_vitrina_health_recovery_start_request(
+                        payload
+                    )
+                except SheetVitrinaHealthRecoveryConflict as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, exc.payload())
+                    return
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina health recovery failed: {exc}"},
+                    )
+                    return
+                _write_json_response(
+                    self,
+                    HTTPStatus.ACCEPTED,
+                    _with_sheet_job_urls(job_payload, sheet_job_path),
                 )
                 return
 
@@ -3726,6 +3761,19 @@ def _build_handler(
                     filename=filename,
                     as_attachment=True,
                 )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_HEALTH_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_web_vitrina_health_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina health read failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if (
@@ -10034,6 +10082,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "wb_incident_policy_settings_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
+        "health_path": DEFAULT_SHEET_WEB_VITRINA_HEALTH_PATH,
+        "health_recovery_start_path": DEFAULT_SHEET_WEB_VITRINA_HEALTH_RECOVERY_START_PATH,
         "user_config_path": DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
         "research_options_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,

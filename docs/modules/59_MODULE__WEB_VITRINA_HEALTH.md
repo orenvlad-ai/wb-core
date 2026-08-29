@@ -4,16 +4,17 @@ doc_id: "WB-CORE-MODULE-59-WEB-VITRINA-HEALTH"
 doc_type: "module"
 status: "active"
 purpose: "Разделить закрытие вчерашнего дня, текущую актуальность и BOT/session/collector health на server-owned evidence."
-scope: "Expectation matrix, append-only shadow telemetry, 30-day bot gap detection, recovery preview/hooks and permanent 06:30/07:30 Asia/Yekaterinburg contour; no user-facing UI."
+scope: "Expectation matrix, append-only telemetry, 30-day bot gap detection, compact operator indicators/details, exact idempotent recovery preview/start/readback and permanent 06:30/07:30 Asia/Yekaterinburg contour."
 source_basis:
   - "packages/application/sheet_vitrina_v1_health.py"
   - "packages/application/sheet_vitrina_v1_source_groups.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "apps/sheet_vitrina_v1_health_tick.py"
+  - "apps/sheet_vitrina_v1_health_browser_smoke.py"
 related_runners:
   - "apps/sheet_vitrina_v1_health_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Backend-only health foundation; no metric/formula/history rewrite and no performance work."
+update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; no metric/formula/history rewrite and no performance work."
 ---
 
 # 1. Expectation and signal contract
@@ -54,6 +55,16 @@ group-refresh hooks for historical-capable sources. Current-only rollover
 sources remain preview-only for a historical gap; no value is invented and no
 mass historical apply occurs.
 
+Recovery submissions append an idempotency receipt to
+`sheet_vitrina_v1_health_recovery_receipts`. The action fingerprint is bound to
+the exact observation, plan fingerprint, business date, source group and
+existing `refresh_group` job. A repeat returns that same job; a changed/stale
+plan, mismatched identity, missing transient status after restart or active
+Vitrina writer fails closed with `409` and never creates a second submit. The
+job reuses the existing group-refresh writer and job polling. On terminal it
+persists a new `phase=recovery` observation; technical job success does not
+promote a still-incomplete semantic signal.
+
 # 3. Permanent morning contour
 
 - `wb-core-sheet-vitrina-health-candidate.timer` runs at `06:30
@@ -71,5 +82,34 @@ The existing runtime-managed `10:00, 13:00, 16:00, 19:00, 22:00
 Asia/Yekaterinburg` interval slots and the 15-minute temporal closure state
 machine remain unchanged. Manual/full/auto/group refresh, Finance
 `dual_day_intraday_tolerant`, stocks yesterday-only, inventory history, FBS,
-formulas, metric values and user-facing lamps/BOT badge/recovery controls keep
+formulas, metric values, load controls, filters and user configuration keep
 their existing contracts.
+
+# 4. Operator surface
+
+Protected `GET /v1/sheet-vitrina-v1/web-vitrina/health` is the only
+operator-facing projection. The same object is embedded into page composition;
+the browser never recalculates source health. The compact table-header cluster
+contains independent `Вчера`, `Сегодня` and `BOT` indicators. Before the first
+real candidate plus confirmation pair for the business date, all three remain
+neutral `Наблюдаем`. After the pair, `Вчера` and `BOT` follow their independent
+server signals. `Сегодня` stays neutral until the server-owned first daytime
+expectation boundary at `10:00 Asia/Yekaterinburg`, then follows the persisted
+current-day signal.
+
+Click or keyboard focus opens one accessible compact dialog with business
+dates, latest observation/phase, server-provided source groups/keys,
+`complete/missing/partial/inapplicable/no_events/accepted_fallback` explanations,
+recent transitions and the next 06:30/07:30 actions. Raw JSON, trace text,
+credentials and storage-state contents are not rendered.
+
+Protected `POST /v1/sheet-vitrina-v1/web-vitrina/health/recovery/start` accepts
+only the exact current observation/plan/action/group/date identity shown by the
+read surface. A runnable button exists only for `hook=group_refresh` with both
+`apply_allowed=true` and `operator_apply_allowed=true`, and always opens a
+confirmation first. `hook=none`, including historical `spp`/`spp_proxy` gaps,
+is preview-only and explains that automatic historical recovery is unavailable
+and a new current observation is required. Login/relogin remains exclusively in
+`Настройки → Источники и сессии`; no credential/session control is added to the
+Vitrina header. After a terminal job, the UI rereads both health and page
+composition and displays the new semantic result.

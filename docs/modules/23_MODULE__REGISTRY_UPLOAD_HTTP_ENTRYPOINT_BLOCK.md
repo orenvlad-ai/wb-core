@@ -60,6 +60,9 @@ related_tables:
   - "FORMULAS_V2"
   - "sheet_vitrina_v1_users"
   - "sheet_vitrina_v1_source_health_status"
+  - "sheet_vitrina_v1_health_observations"
+  - "sheet_vitrina_v1_health_transitions"
+  - "sheet_vitrina_v1_health_recovery_receipts"
 related_endpoints:
   - "POST /v1/registry-upload/bundle"
   - "POST /v1/cost-price/upload"
@@ -91,6 +94,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/status"
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
   - "POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh"
+  - "GET /v1/sheet-vitrina-v1/web-vitrina/health"
+  - "POST /v1/sheet-vitrina-v1/web-vitrina/health/recovery/start"
   - "GET /sheet-vitrina-v1/operator"
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /sheet-vitrina-v1/instructions"
@@ -410,6 +415,9 @@ current_update_note: "`Настройки` встроены в общий WebCor
     - main table display headers are Russian and include `Обновлено`; this field is a per-row last successful update timestamp in the vitrina snapshot metadata, not the business data date
     - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `WB public card / бот`, `Прочие источники`, each with one compact date control, a route-specific `Проверить` and optional safe `Повторить сбор` action plus group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text. The group map covers every visible main-table metric exactly once; residual calculated/formula metrics, including proxy profit and proxy margin, belong to `Прочие источники`.
     - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` is the date-scoped web-vitrina group action seam; payload includes `{async: true, source_group_id, as_of_date}`. The client surfaces launch/loading/error state per group and writes a visible launch-failure line when the POST returns non-2xx before job creation; once the route reaches the app, it starts a job/log-backed partial refresh/load for one source group and one selected date, and must not clear, overwrite or timestamp unrelated groups or unrelated date cells. Group/global job results expose `updated_cells` metadata for transient UI highlighting: `updated` cells are green, `latest_confirmed`/fallback cells are yellow, and the styling is browser-session-only.
+    - `GET /v1/sheet-vitrina-v1/web-vitrina/health` returns the latest durable operator projection used unchanged by page composition: independent `Вчера`/`Сегодня`/`BOT` states, morning-pair evidence, safe source-group details, next 06:30/07:30 actions and the exact recovery preview. Before the first same-day candidate+confirmation pair every indicator is neutral; the browser performs no health arithmetic. `Сегодня` remains neutral until the server-owned 10:00 expectation boundary.
+    - `POST /v1/sheet-vitrina-v1/web-vitrina/health/recovery/start` accepts only the exact current observation, plan/action fingerprints, target date and source group. It reuses the existing single-flight `refresh_group` writer and job status; the durable action-fingerprint receipt makes a repeated submit return the same job. Stale/changed plan, active writer, unsupported hook, mismatched receipt identity or lost transient status fails closed with `409`. Terminal technical success persists and rereads a new semantic health observation; it never forces green.
+    - Health recovery does not expose a second scheduler or generic login control. `hook=none`, including historical `spp`/`spp_proxy`, is preview-only with a precise current-observation message. Seller login/relogin remains exclusively in `Настройки → Источники и сессии`.
     - Historical product-capital publication keeps that same partial-update contract: `webcore_product_capital` alone may use an existing prior-bundle ready snapshot as the merge base when current bundle has no row for the selected date. The result is saved into current bundle with only WebCore metric/status cells updated; all unrelated groups remain preserved. Other source groups still reject such a date until a current-bundle snapshot exists.
     - for `source_group_id=seller_portal_bot`, the same group-refresh job runs a seller-session preflight before plan build/source fetch. Invalid/missing/wrong-supplier/probe-error session returns a structured action-required job result (`source_group_id`, source group label, `failed_stage=session_preflight`, `session_status`, reason and operator next step) and does not start the heavy bot fetch. Valid canonical session continues into normal source fetch and the final result records the preflight status/path without exposing storage contents.
     - successful group-refresh writes through the shared server-side accepted/runtime contour (`ЕБД` / `единая база данных`) and selected ready snapshot, not through Google Sheets/GAS, browser UI state or localStorage; web-vitrina and reports must consume that same server-side truth layer.

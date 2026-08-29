@@ -139,6 +139,11 @@ from packages.application.sheet_vitrina_v1_archived_metrics import (
     active_refresh_summary,
     filter_archived_public_metrics,
 )
+from packages.application.sheet_vitrina_v1_health import (
+    build_web_vitrina_health_operator_surface,
+    evaluate_web_vitrina_health,
+    persist_web_vitrina_health_evaluation,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
@@ -970,6 +975,28 @@ def _confirmed_auto_updates_update_payload(
     return payload
 
 
+class SheetVitrinaHealthRecoveryConflict(RuntimeError):
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+        self.details = dict(details or {})
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "status": "conflict",
+            "reason": self.reason,
+            "message": str(self),
+            "reload_required": True,
+            **self.details,
+        }
+
+
 class RegistryUploadHttpEntrypoint:
     """Тонкий entrypoint: ingest/update current truth, heavy refresh и cheap read готового snapshot."""
 
@@ -1037,6 +1064,7 @@ class RegistryUploadHttpEntrypoint:
         )
         self.promo_artifact_gc_runner = promo_artifact_gc_runner or run_promo_campaign_archive_light_gc
         self._sheet_cycle_lock = threading.RLock()
+        self._health_recovery_lock = threading.RLock()
         self.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=self.runtime,
             promo_live_source_block=PromoLiveSourceBlock(runtime_dir=self.runtime.runtime_dir),
@@ -1552,21 +1580,24 @@ class RegistryUploadHttpEntrypoint:
                 else None
             )
             return _with_page_composition_diagnostics(
-                build_web_vitrina_page_error_composition(
-                    page_route=page_route,
-                    read_route=read_route,
-                    operator_route=operator_route,
-                    as_of_date=effective_as_of_date,
-                    error_message=str(exc),
-                    available_snapshot_dates=available_snapshot_dates,
-                    default_as_of_date=default_as_of_date,
-                    selected_as_of_date=as_of_date,
-                    selected_date_from=selected_date_from,
-                    selected_date_to=selected_date_to,
-                    default_date_from=canonical_default_range[0],
-                    default_date_to=canonical_default_range[1],
-                    activity_surface=activity_surface,
-                ),
+                {
+                    **build_web_vitrina_page_error_composition(
+                        page_route=page_route,
+                        read_route=read_route,
+                        operator_route=operator_route,
+                        as_of_date=effective_as_of_date,
+                        error_message=str(exc),
+                        available_snapshot_dates=available_snapshot_dates,
+                        default_as_of_date=default_as_of_date,
+                        selected_as_of_date=as_of_date,
+                        selected_date_from=selected_date_from,
+                        selected_date_to=selected_date_to,
+                        default_date_from=canonical_default_range[0],
+                        default_date_to=canonical_default_range[1],
+                        activity_surface=activity_surface,
+                    ),
+                    "health_surface": self.handle_sheet_web_vitrina_health_request(),
+                },
                 started_perf=page_composition_started_perf,
                 include_source_status=include_source_status,
                 include_table_data=include_table_data,
@@ -1638,23 +1669,26 @@ class RegistryUploadHttpEntrypoint:
                     )
 
         return _with_page_composition_diagnostics(
-            build_web_vitrina_page_composition(
-                page_route=page_route,
-                read_route=read_route,
-                operator_route=operator_route,
-                available_snapshot_dates=available_snapshot_dates,
-                selected_as_of_date=as_of_date,
-                selected_date_from=selected_date_from,
-                selected_date_to=selected_date_to,
-                default_date_from=canonical_default_range[0],
-                default_date_to=canonical_default_range[1],
-                contract=contract,
-                view_model=view_model,
-                adapter=adapter,
-                activity_surface=activity_surface,
-                include_table_data=include_table_data,
-                metric_catalog=incident_metric_catalog,
-            ),
+            {
+                **build_web_vitrina_page_composition(
+                    page_route=page_route,
+                    read_route=read_route,
+                    operator_route=operator_route,
+                    available_snapshot_dates=available_snapshot_dates,
+                    selected_as_of_date=as_of_date,
+                    selected_date_from=selected_date_from,
+                    selected_date_to=selected_date_to,
+                    default_date_from=canonical_default_range[0],
+                    default_date_to=canonical_default_range[1],
+                    contract=contract,
+                    view_model=view_model,
+                    adapter=adapter,
+                    activity_surface=activity_surface,
+                    include_table_data=include_table_data,
+                    metric_catalog=incident_metric_catalog,
+                ),
+                "health_surface": self.handle_sheet_web_vitrina_health_request(),
+            },
             started_perf=page_composition_started_perf,
             include_source_status=include_source_status,
             include_table_data=include_table_data,
@@ -3081,6 +3115,7 @@ class RegistryUploadHttpEntrypoint:
         *,
         source_group_id: str,
         as_of_date: str | None = None,
+        health_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_group_id = _normalize_source_group_id(source_group_id)
         source_keys = set(_source_group_config(normalized_group_id)["source_keys"])
@@ -3123,15 +3158,190 @@ class RegistryUploadHttpEntrypoint:
             selected_as_of_date,
             now=now,
         )
-        return self.operator_jobs.start(
-            operation="refresh_group",
-            runner=lambda log: self._run_sheet_source_group_refresh(
+        def runner(log: OperatorLogEmitter) -> dict[str, Any]:
+            return self._run_sheet_source_group_refresh(
                 source_group_id=normalized_group_id,
                 selected_as_of_date=selected_as_of_date,
                 target_snapshot_as_of_date=target_snapshot_as_of_date,
                 log=log,
-            ),
+            )
+
+        if health_recovery:
+            recovery_context = dict(health_recovery)
+
+            def runner(log: OperatorLogEmitter) -> dict[str, Any]:
+                return self._run_sheet_health_recovery(
+                    source_group_id=normalized_group_id,
+                    selected_as_of_date=selected_as_of_date,
+                    target_snapshot_as_of_date=target_snapshot_as_of_date,
+                    recovery_context=recovery_context,
+                    log=log,
+                )
+        return self.operator_jobs.start(
+            operation="refresh_group",
+            runner=runner,
         )
+
+    def handle_sheet_web_vitrina_health_request(self) -> dict[str, Any]:
+        surface = build_web_vitrina_health_operator_surface(
+            runtime=self.runtime,
+            now=self.now_factory(),
+        )
+        preview = surface.get("recovery_preview") or {}
+        for action in preview.get("actions") or []:
+            fingerprint = str(action.get("action_fingerprint") or "")
+            receipt = self.runtime.load_sheet_vitrina_health_recovery_receipt(fingerprint)
+            if not receipt:
+                action["submission"] = {"submitted": False}
+                continue
+            submission: dict[str, Any] = {
+                "submitted": True,
+                "job_id": str(receipt.get("job_id") or ""),
+                "created_at": str(receipt.get("created_at") or ""),
+            }
+            try:
+                job = self.operator_jobs.get(submission["job_id"])
+            except ValueError:
+                submission["status"] = "status_unavailable"
+            else:
+                submission["status"] = str(job.get("status") or "")
+            action["submission"] = submission
+        return surface
+
+    def handle_sheet_web_vitrina_health_recovery_start_request(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "observation_id": str(payload.get("observation_id") or "").strip(),
+            "plan_fingerprint": str(payload.get("plan_fingerprint") or "").strip(),
+            "action_fingerprint": str(payload.get("action_fingerprint") or "").strip(),
+            "source_group_id": str(payload.get("source_group_id") or "").strip(),
+            "target_date": str(payload.get("target_date") or "").strip(),
+        }
+        if any(not value for value in required.values()):
+            raise ValueError("health recovery requires exact observation, plan, action, group and date")
+        with self._health_recovery_lock:
+            existing = self.runtime.load_sheet_vitrina_health_recovery_receipt(
+                required["action_fingerprint"]
+            )
+            if existing:
+                if any(
+                    str(existing.get(key) or "") != required[request_key]
+                    for key, request_key in (
+                        ("observation_id", "observation_id"),
+                        ("plan_fingerprint", "plan_fingerprint"),
+                        ("source_group_id", "source_group_id"),
+                        ("target_date", "target_date"),
+                    )
+                ):
+                    raise SheetVitrinaHealthRecoveryConflict(
+                        "recovery_fingerprint_identity_mismatch",
+                        "Этот fingerprint уже связан с другим точечным планом. Повтор запрещён; обновите страницу.",
+                        details={"submitted": True},
+                    )
+                job_id = str(existing.get("job_id") or "")
+                try:
+                    job = self.operator_jobs.get(job_id)
+                except ValueError as exc:
+                    raise SheetVitrinaHealthRecoveryConflict(
+                        "recovery_already_submitted_status_unavailable",
+                        "Этот точечный запуск уже был принят; его transient-статус недоступен после перезапуска. Обновите витрину.",
+                        details={"job_id": job_id, "submitted": True},
+                    ) from exc
+                return {
+                    **job,
+                    "idempotent_replay": True,
+                    "health_recovery": {
+                        "source_group_id": required["source_group_id"],
+                        "target_date": required["target_date"],
+                        "action_fingerprint": required["action_fingerprint"],
+                    },
+                }
+            surface = self.handle_sheet_web_vitrina_health_request()
+            latest = surface.get("latest_observation") or {}
+            preview = surface.get("recovery_preview") or {}
+            if not bool((surface.get("morning_cycle") or {}).get("pair_complete")):
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "morning_cycle_observing",
+                    "Точечное восстановление доступно после штатной пары 06:30/07:30.",
+                )
+            if (
+                str(latest.get("observation_id") or "") != required["observation_id"]
+                or str(preview.get("plan_fingerprint") or "") != required["plan_fingerprint"]
+            ):
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "stale_health_plan",
+                    "План здоровья изменился. Обновите страницу и проверьте новый предпросмотр.",
+                )
+            action = next(
+                (
+                    item
+                    for item in preview.get("actions") or []
+                    if str(item.get("action_fingerprint") or "") == required["action_fingerprint"]
+                ),
+                None,
+            )
+            if not action or (
+                str(action.get("source_group_id") or "") != required["source_group_id"]
+                or str(action.get("target_date") or "") != required["target_date"]
+            ):
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "stale_health_action",
+                    "Действие больше не входит в текущий план. Обновите страницу.",
+                )
+            if not bool(action.get("apply_allowed")) or str(action.get("hook") or "") != "group_refresh":
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "unsupported_health_recovery",
+                    str(action.get("reason") or "Автоматическое историческое восстановление недоступно."),
+                )
+            active_job = self.operator_jobs.active_job(
+                operations=("auto_update", "refresh", "refresh_group"),
+            )
+            if active_job:
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "active_vitrina_writer",
+                    "Сейчас уже идёт загрузка витрины. Дождитесь её завершения и обновите страницу.",
+                    details={"active_job_id": str(active_job.get("job_id") or "")},
+                )
+            job = self.start_sheet_source_group_refresh_job(
+                source_group_id=required["source_group_id"],
+                as_of_date=required["target_date"],
+                health_recovery={
+                    **required,
+                    "recoverable_source_keys": list(action.get("recoverable_source_keys") or []),
+                },
+            )
+            if bool(job.get("single_flight")):
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "active_vitrina_writer",
+                    "Параллельная загрузка уже заняла writer. Обновите страницу после её завершения.",
+                    details={"active_job_id": str(job.get("job_id") or "")},
+                )
+            saved = self.runtime.save_sheet_vitrina_health_recovery_receipt(
+                action_fingerprint=required["action_fingerprint"],
+                plan_fingerprint=required["plan_fingerprint"],
+                observation_id=required["observation_id"],
+                target_date=required["target_date"],
+                source_group_id=required["source_group_id"],
+                job_id=str(job.get("job_id") or ""),
+                created_at=self.activated_at_factory(),
+            )
+            if str(saved.get("job_id") or "") != str(job.get("job_id") or ""):
+                raise SheetVitrinaHealthRecoveryConflict(
+                    "recovery_submit_receipt_ambiguous",
+                    "Запуск принят, но его idempotency receipt не совпал. Повтор запрещён; обновите страницу.",
+                    details={"job_id": str(job.get("job_id") or ""), "submitted": True},
+                )
+            return {
+                **job,
+                "idempotent_replay": False,
+                "health_recovery": {
+                    "source_group_id": required["source_group_id"],
+                    "target_date": required["target_date"],
+                    "action_fingerprint": required["action_fingerprint"],
+                },
+            }
 
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
         return self.operator_jobs.get(job_id)
@@ -7549,6 +7759,46 @@ class RegistryUploadHttpEntrypoint:
         )
         emit(_format_log_event("our_wb_cost_recalculate_finish", cycle="refresh", **payload))
         return payload
+
+    def _run_sheet_health_recovery(
+        self,
+        *,
+        source_group_id: str,
+        selected_as_of_date: str,
+        target_snapshot_as_of_date: str,
+        recovery_context: Mapping[str, Any],
+        log: OperatorLogEmitter | None,
+    ) -> dict[str, Any]:
+        result = self._run_sheet_source_group_refresh(
+            source_group_id=source_group_id,
+            selected_as_of_date=selected_as_of_date,
+            target_snapshot_as_of_date=target_snapshot_as_of_date,
+            log=log,
+        )
+        evaluation = evaluate_web_vitrina_health(
+            runtime=self.runtime,
+            now=self.now_factory(),
+        )
+        observation = persist_web_vitrina_health_evaluation(
+            runtime=self.runtime,
+            evaluation=evaluation,
+            phase="recovery",
+            observed_at=self.activated_at_factory(),
+        )
+        return {
+            **result,
+            "health_recovery": {
+                "source_group_id": source_group_id,
+                "target_date": selected_as_of_date,
+                "action_fingerprint": str(recovery_context.get("action_fingerprint") or ""),
+                "observation_id": str(observation.get("observation_id") or ""),
+                "observation_status": str(observation.get("status") or ""),
+                "semantic_yesterday_state": str(
+                    (evaluation.get("signals") or {}).get("yesterday_closed", {}).get("state")
+                    or ""
+                ),
+            },
+        }
 
     def _run_sheet_source_group_refresh(
         self,
