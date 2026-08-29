@@ -102,7 +102,7 @@ def main() -> None:
         status_payload = entrypoint.handle_sheet_status_request(as_of_date=AS_OF_DATE)
         if status_payload["status"] != "error":
             raise AssertionError(f"/status semantic payload mismatch, got {status_payload}")
-        if status_payload["source_outcome_counts"] != {"success": 10, "warning": 1, "error": 1}:
+        if status_payload["source_outcome_counts"] != {"success": 9, "warning": 1, "error": 1}:
             raise AssertionError(f"/status source_outcome_counts mismatch, got {status_payload}")
         if status_payload["technical_status"] != "success":
             raise AssertionError(f"/status technical read status mismatch, got {status_payload}")

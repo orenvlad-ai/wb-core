@@ -1861,11 +1861,20 @@ class SheetVitrinaV1LivePlanBlock:
                     date_from="",
                     date_to="",
                     requested_count=len(requested_nm_ids),
-                    covered_count=len(covered),
+                    # This source evaluates an event scope, not a value row per SKU.
+                    # A missing event is lawful "no confirmed change", so coverage
+                    # means that the requested scope was evaluated successfully.
+                    covered_count=(
+                        len(covered)
+                        if current_lookups.sku_action_error
+                        else len(requested_nm_ids)
+                    ),
                     missing_nm_ids=[],
                     note=current_lookups.sku_action_error or (
                         "source=WebCore; confirmed operator event daily delta; "
-                        "missing rows mean no confirmed change, not zero"
+                        "missing rows mean no confirmed change, not zero; "
+                        f"confirmed_event_rows={len(covered)}; "
+                        "empty_semantics=no_confirmed_event"
                     ),
                 )
                 statuses.append(action_status)

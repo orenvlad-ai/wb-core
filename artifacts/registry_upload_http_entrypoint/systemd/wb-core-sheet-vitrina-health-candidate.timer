@@ -1,0 +1,10 @@
+[Unit]
+Description=WB Core Web Vitrina 06:30 Health Candidate Timer
+
+[Timer]
+OnCalendar=*-*-* 06:30:00 Asia/Yekaterinburg
+AccuracySec=1m
+Unit=wb-core-sheet-vitrina-health-candidate.service
+
+[Install]
+WantedBy=timers.target

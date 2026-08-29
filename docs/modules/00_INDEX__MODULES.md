@@ -272,6 +272,7 @@ update_note: "Обновлён through module 52: compact typed inventory histor
 | `51_MODULE__WAREHOUSE_RECOVERY_POLICY.md` | `warehouse_recovery_policy` | `warehouse/recovery/control-plane` | Central T0/T1/T2/T3 recovery, capacity, retention and query-only operator status contract |
 | `52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md` | `web_vitrina_inventory_history` | `web-vitrina/runtime-history` | Compact typed TOTAL/SKU WB+FBS history, closed-day supersession, partial numeric totals and owner-gated historical backfill |
 | `53_MODULE__SKU_INVENTORY_BALANCE.md` | `sku_inventory_balance` | `web/operator/sku-decisions` | Immutable `Управление SKU → Баланс запасов`: conservative pacing, old CPM/new CPC exact targets, separate manual overrides, primary `Решения` XLSX and durable dry-run-only apply jobs with live WB fail closed |
+| `59_MODULE__WEB_VITRINA_HEALTH.md` | `web_vitrina_health` | `web-vitrina/runtime-health` | Server-owned two-role expectation matrix, independent closure/current/BOT signals, append-only shadow receipts, 30-day bot gap detection and bounded 06:30/07:30 recovery contour without UI or performance changes |
 
 # 5. Как эта папка используется дальше
 
