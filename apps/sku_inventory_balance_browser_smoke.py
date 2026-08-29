@@ -319,21 +319,25 @@ def main() -> None:
         override.fill("725.25")
         override.blur()
         page.wait_for_function(
-            "document.querySelector('[data-inventory-balance-status]').textContent.includes('ibc_browser')"
+            "document.querySelector('[data-inventory-balance-details-row=\"101\"]') && document.querySelector('[data-inventory-balance-details-row=\"101\"]').textContent.includes('Изменено вручную')"
         )
         assert "Изменено вручную" in page.locator(
             '[data-inventory-balance-details-row="101"]'
         ).inner_text()
         override.fill("800")
         override.blur()
-        page.wait_for_timeout(50)
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-details-row=\"101\"]') && !document.querySelector('[data-inventory-balance-details-row=\"101\"]').textContent.includes('Изменено вручную')"
+        )
         assert "Изменено вручную" not in page.locator(
             '[data-inventory-balance-details-row="101"]'
         ).inner_text()
         assert override.input_value() == "800"
         override.fill("725.25")
         override.blur()
-        page.wait_for_timeout(50)
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-details-row=\"101\"]') && document.querySelector('[data-inventory-balance-details-row=\"101\"]').textContent.includes('Изменено вручную')"
+        )
         page.locator("[data-inventory-balance-preset]").select_option("all")
         page.locator("[data-inventory-balance-manual-pending]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
