@@ -96,6 +96,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     validate_cutover_ff_debit_coverage,
 )
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
+    HISTORICAL_REPAIR_METADATA_KEY,
     WAREHOUSE_TARGET_KEYS,
     _exact_functional_snapshot_dates,
     _revalidate_functional_economics_material_cas,
@@ -4592,13 +4593,24 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         source_fingerprint="sha256:certified-exact-day-probe",
         cutover_business_date="2026-07-18",
     )
-    certified_presentation = json.loads(certified_exact_probe["after_plan_json"])[
-        "metadata"
-    ].get("server_cell_presentation", {})
+    certified_payload = json.loads(certified_exact_probe["after_plan_json"])
+    certified_presentation = certified_payload["metadata"].get(
+        "server_cell_presentation", {}
+    )
     _assert(
-        "2026-07-20"
-        not in certified_presentation.get("SKU:104|own_capital_WB_qty", {}),
-        "certification removes the stale yellow exact-date presentation",
+        certified_presentation["SKU:104|own_capital_WB_qty"]["2026-07-20"][
+            "state"
+        ]
+        == "unconfirmed"
+        and certified_payload["metadata"][HISTORICAL_REPAIR_METADATA_KEY][
+            "dates"
+        ]["2026-07-20"]["status"]
+        == "historical_repair_required"
+        and certified_payload["metadata"]["warehouse_history_coverage"][
+            "2026-07-20"
+        ]["functional_version_id"]
+        == "whfv_provisional_exact",
+        "ordinary certification cannot rewrite a closed functional identity",
     )
     scoped_totals_probe = _transform_snapshot(
         **{
