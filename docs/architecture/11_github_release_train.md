@@ -309,6 +309,15 @@ fail closed. Events/outbox/timestamps и широкие ready envelopes audit-on
 Workflow остаётся default-off в `production` environment; release/deploy его
 не запускает, timers/services не останавливаются.
 
+StoreRegistry binding использует canonical typed fields `generation_id`,
+`manifest_sha256` и `schema_revision`. `generation_id` и `schema_revision` —
+exact non-empty opaque strings: Runner не выводит из них prefix, число или
+порядок и не выполняет integer coercion. Два consecutive witness обязаны иметь
+одинаковые normalized material digest, phase identity и весь StoreRegistry
+binding; private manifest, writer-lock rebuild, submit и readback проверяют его
+exact equality. Empty, non-string или изменившийся revision блокирует phase до
+submit с нулём business mutation.
+
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:
 

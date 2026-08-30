@@ -179,6 +179,93 @@ def _assert_pre_prepare_abort_skips_stale_restore() -> None:
         raise AssertionError("unstarted abort must preserve the warehouse boundary")
 
 
+def _assert_wbc0027_opaque_schema_revision_contract() -> None:
+    target = hosted_runtime.load_hosted_runtime_target(
+        hosted_runtime.DEFAULT_TARGET_FILE
+    )
+    operation_id = "production-goal-v1-" + "a" * 32
+    deployed_sha = "b" * 40
+    evidence_dir = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        + operation_id
+    )
+    payload = {
+        "status": "ready",
+        "profile": "product-capital-qualified-economics",
+        "target_id": hosted_runtime.ACTIVE_HOSTED_RUNTIME_TARGET_ID,
+        "goal_operation_id": operation_id,
+        "phase": "product",
+        "deployed_sha": deployed_sha,
+        "storage_generation": {
+            "generation_id": "opaque-generation-live-shape",
+            "manifest_sha256": "sha256:" + "c" * 64,
+            "schema_revision": "operational_v1",
+        },
+        "plan_persistence": {"no_create": True},
+    }
+    completed = subprocess.CompletedProcess(
+        args=["ssh"], returncode=0, stdout=json.dumps(payload), stderr=""
+    )
+    with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run:
+        result = hosted_runtime._run_remote_wbc0027_capital_recovery(
+            target,
+            action="plan",
+            deployed_sha=deployed_sha,
+            operation_id=operation_id,
+            evidence_dir=evidence_dir,
+            manifest_path="",
+            manifest_sha256="",
+            phase_operation_id="",
+            phase_fingerprint="",
+            approval_reference="",
+            phase="product",
+            product_phase_operation_id="",
+            no_create=True,
+        )
+    if result["storage_generation"] != payload["storage_generation"]:
+        raise AssertionError("hosted WBC0027 wrapper changed opaque StoreRegistry identity")
+    shell = str(run.call_args.args[0][-1])
+    if " plan " not in f" {shell} " or "--no-create" not in shell or " apply " in f" {shell} ":
+        raise AssertionError("hosted WBC0027 qualification must remain query-only/no-create")
+
+    for malformed_revision in ("", " operational_v1", 172, None):
+        malformed = {
+            **payload,
+            "storage_generation": {
+                **payload["storage_generation"],
+                "schema_revision": malformed_revision,
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            args=["ssh"], returncode=0, stdout=json.dumps(malformed), stderr=""
+        )
+        with mock.patch.object(
+            hosted_runtime.subprocess, "run", return_value=completed
+        ):
+            try:
+                hosted_runtime._run_remote_wbc0027_capital_recovery(
+                    target,
+                    action="plan",
+                    deployed_sha=deployed_sha,
+                    operation_id=operation_id,
+                    evidence_dir=evidence_dir,
+                    manifest_path="",
+                    manifest_sha256="",
+                    phase_operation_id="",
+                    phase_fingerprint="",
+                    approval_reference="",
+                    phase="product",
+                    product_phase_operation_id="",
+                    no_create=True,
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(
+                    "hosted WBC0027 wrapper accepted malformed schema revision"
+                )
+
+
 def _assert_fbs_status_probe_uses_public_contract() -> None:
     result = {
         "route": "fbs_fulfillment_order_status",
@@ -217,6 +304,7 @@ def _assert_fbs_status_probe_uses_public_contract() -> None:
 def main() -> None:
     _assert_deploy_status_readback_retry()
     _assert_pre_prepare_abort_skips_stale_restore()
+    _assert_wbc0027_opaque_schema_revision_contract()
     _assert_fbs_status_probe_uses_public_contract()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"

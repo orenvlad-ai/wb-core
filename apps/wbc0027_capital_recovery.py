@@ -63,7 +63,7 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
 from packages.application.warehouse_sync_lock import warehouse_sync_lock  # noqa: E402
 
 
-PHASE_CONTRACT = "wbc0027_capital_recovery_phase_v2"
+PHASE_CONTRACT = "wbc0027_capital_recovery_phase_v3"
 PROFILE = "product-capital-qualified-economics"
 CANONICAL_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 MUTATION_KIND_PRODUCT = "wbc0027_product_capital_version_bound_recovery"
@@ -143,7 +143,7 @@ def _generation(runtime_dir: Path) -> dict[str, Any]:
     return {
         "generation_id": operational.generation_id,
         "manifest_sha256": manifest.manifest_sha256,
-        "schema_version": operational.schema_revision,
+        "schema_revision": operational.schema_revision,
         "operational_path": str((runtime_dir / operational.relative_path).resolve()),
     }
 
@@ -472,11 +472,39 @@ def _file_digest(path: Path) -> str:
     return "sha256:" + value.hexdigest()
 
 
+def _stable_opaque_identifier(value: Any, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+    ):
+        raise Wbc0027RecoveryError(f"WBC0027 {field} must be one exact non-empty string")
+    return value
+
+
+def _sha256_identifier(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise Wbc0027RecoveryError(f"WBC0027 {field} must be one exact SHA-256")
+    return value
+
+
+def _exact_int(value: Any, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise Wbc0027RecoveryError(f"WBC0027 {field} must be one exact integer")
+    return value
+
+
 def _phase_generation(generation: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "generation_id": str(generation.get("generation_id") or ""),
-        "manifest_sha256": str(generation.get("manifest_sha256") or ""),
-        "schema_version": int(generation.get("schema_version") or 0),
+        "generation_id": _stable_opaque_identifier(
+            generation.get("generation_id"), field="generation_id"
+        ),
+        "manifest_sha256": _sha256_identifier(
+            generation.get("manifest_sha256"), field="manifest_sha256"
+        ),
+        "schema_revision": _stable_opaque_identifier(
+            generation.get("schema_revision"), field="schema_revision"
+        ),
     }
 
 
@@ -511,15 +539,6 @@ def _phase_envelope(
     if phase not in {"product", "economics"}:
         raise Wbc0027RecoveryError("WBC0027 phase is unsupported")
     generation_binding = _phase_generation(generation)
-    if (
-        not generation_binding["generation_id"]
-        or re.fullmatch(
-            r"sha256:[0-9a-f]{64}", generation_binding["manifest_sha256"]
-        )
-        is None
-        or generation_binding["schema_version"] <= 0
-    ):
-        raise Wbc0027RecoveryError("WBC0027 StoreRegistry generation is incomplete")
     material_digest = _digest(material)
     phase_fingerprint = _digest(
         {
@@ -798,15 +817,38 @@ def _economics_material(
     economics: Mapping[str, Any], *, product_phase_operation_id: str
 ) -> dict[str, Any]:
     semantic_patches = _economics_semantic_patches(economics)
+    source_operation_id = _stable_opaque_identifier(
+        economics.get("source_operation_id"), field="source_operation_id"
+    )
+    source_digest = _sha256_identifier(
+        economics.get("source_digest"), field="source_digest"
+    )
+    protected = economics.get("protected_invariant")
+    if (
+        source_operation_id != SOURCE_OPERATION_ID
+        or source_digest != SOURCE_OPERATION_DIGEST
+        or not isinstance(protected, Mapping)
+        or _exact_int(protected.get("nm_id"), field="protected_nm_id")
+        != 428853741
+        or not isinstance(protected.get("unit_cost_rub"), str)
+        or protected.get("unit_cost_rub") != "117.537167"
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 economics source or protected Decimal/text identity drifted"
+        )
     return {
         "phase": "economics",
         "target_dates": list(economics["target_dates"]),
-        "logical_repair_count": int(economics["logical_repair_count"]),
-        "persisted_repair_count": int(economics["persisted_repair_count"]),
-        "patch_count": int(economics["patch_count"]),
-        "source_operation_id": str(economics["source_operation_id"]),
-        "source_digest": str(economics["source_digest"]),
-        "protected_invariant": dict(economics["protected_invariant"]),
+        "logical_repair_count": _exact_int(
+            economics["logical_repair_count"], field="logical_repair_count"
+        ),
+        "persisted_repair_count": _exact_int(
+            economics["persisted_repair_count"], field="persisted_repair_count"
+        ),
+        "patch_count": _exact_int(economics["patch_count"], field="patch_count"),
+        "source_operation_id": source_operation_id,
+        "source_digest": source_digest,
+        "protected_invariant": dict(protected),
         "evidence_blocked": list(economics["evidence_blocked"]),
         "semantic_patches": semantic_patches,
         "exact_target_before_digest": _digest(
@@ -1463,7 +1505,10 @@ def _validate_candidate(
             "product_cell_count": EXPECTED_PRODUCT_CELLS,
             "product_mismatch_count": EXPECTED_PRODUCT_MISMATCHES,
         }
-        if any(int(counts.get(key) or -1) != value for key, value in required.items()):
+        if any(
+            _exact_int(counts.get(key), field=key) != value
+            for key, value in required.items()
+        ):
             raise Wbc0027RecoveryError("reviewed product counts are not production-exact")
         special = material.get("special_20260821") or {}
         if not (
@@ -1481,6 +1526,8 @@ def _validate_candidate(
             and material.get("persisted_repair_count")
             == EXPECTED_ECONOMICS_PERSISTED_REPAIRS
             and len(material.get("evidence_blocked") or []) == 12
+            and (material.get("protected_invariant") or {}).get("nm_id")
+            == 428853741
             and (material.get("protected_invariant") or {}).get("unit_cost_rub")
             == "117.537167"
         ):

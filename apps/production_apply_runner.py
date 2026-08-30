@@ -1931,21 +1931,37 @@ def _validate_wbc0027_candidate(
         "material_qualification_digest",
         "phase_fingerprint",
     ):
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
+        value = payload.get(field)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+        ):
             raise ApplyError(f"WBC0027 {phase} candidate digest is invalid: {field}")
-    if re.fullmatch(
-        r"recovery_[0-9a-f]{32}", str(payload.get("phase_operation_id") or "")
+    phase_operation_id = payload.get("phase_operation_id")
+    if not isinstance(phase_operation_id, str) or re.fullmatch(
+        r"recovery_[0-9a-f]{32}", phase_operation_id
     ) is None:
         raise ApplyError("WBC0027 phase operation identity is invalid")
     generation = payload.get("storage_generation")
+    generation_id = (
+        generation.get("generation_id") if isinstance(generation, Mapping) else None
+    )
+    schema_revision = (
+        generation.get("schema_revision") if isinstance(generation, Mapping) else None
+    )
+    manifest_sha256 = (
+        generation.get("manifest_sha256") if isinstance(generation, Mapping) else None
+    )
     if not (
         isinstance(generation, Mapping)
-        and str(generation.get("generation_id") or "").startswith("operational-")
-        and re.fullmatch(
-            r"sha256:[0-9a-f]{64}", str(generation.get("manifest_sha256") or "")
-        )
-        and isinstance(generation.get("schema_version"), int)
-        and int(generation["schema_version"]) > 0
+        and isinstance(generation_id, str)
+        and bool(generation_id)
+        and generation_id.strip() == generation_id
+        and isinstance(schema_revision, str)
+        and bool(schema_revision)
+        and schema_revision.strip() == schema_revision
+        and isinstance(manifest_sha256, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256)
     ):
         raise ApplyError("WBC0027 StoreRegistry generation binding is invalid")
     manifest_path = str(payload.get("manifest_path") or "")
@@ -1991,7 +2007,7 @@ def _validate_wbc0027_candidate(
     ):
         raise ApplyError("WBC0027 private plan persistence receipt is invalid")
     if phase == "product":
-        counts = payload.get("product_counts") or {}
+        counts = payload.get("product_counts")
         count_bindings = {
             "product_row_count": goal["expected_product_row_count"],
             "product_cell_count": goal["expected_product_cell_count"],
@@ -2002,28 +2018,48 @@ def _validate_wbc0027_candidate(
             "secondary_row_count": goal["expected_secondary_row_count"],
             "secondary_mismatch_count": goal["expected_secondary_mismatch_count"],
         }
-        special = payload.get("special_20260821") or {}
-        if any(counts.get(key) != value for key, value in count_bindings.items()) or not (
-            special.get("as_of_date") == goal["special_business_date"]
+        special = payload.get("special_20260821")
+        hard_non_target = payload.get("hard_non_target")
+        evidence_blocked = payload.get("evidence_blocked")
+        if not isinstance(counts, Mapping) or any(
+            not isinstance(counts.get(key), int)
+            or isinstance(counts.get(key), bool)
+            or counts.get(key) != value
+            for key, value in count_bindings.items()
+        ) or not (
+            isinstance(special, Mapping)
+            and isinstance(hard_non_target, Mapping)
+            and isinstance(evidence_blocked, list)
+            and bool(evidence_blocked)
+            and special.get("as_of_date") == goal["special_business_date"]
             and special.get("nm_id") == goal["special_nm_id"]
             and special.get("cell_count") == goal["expected_special_cell_count"]
-            and (payload.get("hard_non_target") or {}).get("from_date")
+            and hard_non_target.get("from_date")
             == goal["hard_non_target_from"]
-            and (payload.get("evidence_blocked") or [{}])[0].get("as_of_date")
+            and isinstance(evidence_blocked[0], Mapping)
+            and evidence_blocked[0].get("as_of_date")
             == goal["evidence_blocked_date"]
         ):
             raise ApplyError("WBC0027 product qualification is not exact")
     else:
+        evidence_blocked = payload.get("evidence_blocked")
+        protected = payload.get("protected_invariant")
         if not (
-            payload.get("logical_repair_count")
+            isinstance(payload.get("logical_repair_count"), int)
+            and not isinstance(payload.get("logical_repair_count"), bool)
+            and payload.get("logical_repair_count")
             == goal["expected_economics_logical_count"]
+            and isinstance(payload.get("persisted_repair_count"), int)
+            and not isinstance(payload.get("persisted_repair_count"), bool)
             and payload.get("persisted_repair_count")
             == goal["expected_economics_persisted_count"]
-            and len(payload.get("evidence_blocked") or [])
+            and isinstance(evidence_blocked, list)
+            and len(evidence_blocked)
             == goal["expected_economics_blocked_count"]
-            and (payload.get("protected_invariant") or {}).get("nm_id")
+            and isinstance(protected, Mapping)
+            and protected.get("nm_id")
             == goal["protected_nm_id"]
-            and (payload.get("protected_invariant") or {}).get("unit_cost_rub")
+            and protected.get("unit_cost_rub")
             == goal["protected_unit_cost_rub"]
             and payload.get("product_phase_operation_id")
             == product_phase_operation_id
@@ -3309,7 +3345,7 @@ def run_wbc0027_goal(
     def qualify(
         phase: str, *, product_phase_operation_id: str = ""
     ) -> Mapping[str, Any] | None:
-        previous = ""
+        previous: dict[str, Any] | None = None
         for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
             evidence = command_evidence(
                 _wbc0027_remote_command(
@@ -3345,7 +3381,15 @@ def run_wbc0027_goal(
                     }
                 )
                 return None
-            current = str(payload["material_qualification_digest"])
+            current = {
+                "material_qualification_digest": payload[
+                    "material_qualification_digest"
+                ],
+                "phase_fingerprint": payload["phase_fingerprint"],
+                "phase_operation_id": payload["phase_operation_id"],
+                "storage_generation": dict(payload["storage_generation"]),
+                "deployed_sha": payload["deployed_sha"],
+            }
             qualification[phase].append(
                 {
                     **{key: value for key, value in evidence.items() if key != "result"},
@@ -3354,18 +3398,20 @@ def run_wbc0027_goal(
                     "manifest_sha256": payload["manifest_sha256"],
                     "phase_operation_id": payload["phase_operation_id"],
                     "phase_fingerprint": payload["phase_fingerprint"],
-                    "material_qualification_digest": current,
+                    "material_qualification_digest": current[
+                        "material_qualification_digest"
+                    ],
                     "storage_generation": dict(payload["storage_generation"]),
                     "plan_persistence": dict(payload["plan_persistence"]),
                 }
             )
-            if current == previous:
+            if previous is not None and current == previous:
                 qualification[phase][-2]["qualification_state"] = "matching_witness"
                 qualification[phase][-1]["qualification_state"] = "qualified"
                 return payload
             if len(qualification[phase]) > 1:
                 qualification[phase][-2]["qualification_state"] = (
-                    "superseded_material_drift"
+                    "superseded_material_or_generation_drift"
                 )
             qualification[phase][-1]["qualification_state"] = "candidate"
             previous = current
@@ -3401,7 +3447,7 @@ def run_wbc0027_goal(
         return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
 
     def readback_exact(
-        evidence: Mapping[str, Any], *, phase: str, phase_operation_id: str
+        evidence: Mapping[str, Any], *, phase: str, candidate: Mapping[str, Any]
     ) -> bool:
         payload = evidence.get("result")
         return bool(
@@ -3413,8 +3459,11 @@ def run_wbc0027_goal(
             and payload.get("profile") == WBC0027_GOAL_PROFILE
             and payload.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
             and payload.get("goal_operation_id") == operation
-            and payload.get("phase_operation_id") == phase_operation_id
+            and payload.get("phase_operation_id") == candidate["phase_operation_id"]
+            and payload.get("phase_fingerprint") == candidate["phase_fingerprint"]
             and payload.get("deployed_sha") == merge_sha
+            and payload.get("storage_generation")
+            == candidate["storage_generation"]
             and payload.get("query_only") is True
             and payload.get("database_written") is False
             and payload.get("production_mutation_submit_count") == 0
@@ -3445,7 +3494,7 @@ def run_wbc0027_goal(
     if not readback_exact(
         product_readback,
         phase="product",
-        phase_operation_id=str(product_candidate["phase_operation_id"]),
+        candidate=product_candidate,
     ):
         product_payload = product_apply.get("result")
         product_state = (
@@ -3487,7 +3536,7 @@ def run_wbc0027_goal(
     economics_exact = readback_exact(
         economics_readback,
         phase="economics",
-        phase_operation_id=str(economics_candidate["phase_operation_id"]),
+        candidate=economics_candidate,
     )
     economics_payload = economics_apply.get("result")
     economics_state = (

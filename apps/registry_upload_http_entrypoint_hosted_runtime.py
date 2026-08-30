@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import ssl
@@ -7665,6 +7666,24 @@ def _run_remote_wbc0027_capital_recovery(
     if not isinstance(payload, dict) or payload.get("status") == "blocked":
         raise RuntimeError("WBC0027 capital runner returned an incomplete result")
     generation = payload.get("storage_generation")
+    generation_id = generation.get("generation_id") if isinstance(generation, dict) else None
+    schema_revision = generation.get("schema_revision") if isinstance(generation, dict) else None
+    generation_manifest_sha256 = (
+        generation.get("manifest_sha256") if isinstance(generation, dict) else None
+    )
+    exact_generation = bool(
+        isinstance(generation_id, str)
+        and generation_id
+        and generation_id.strip() == generation_id
+        and isinstance(schema_revision, str)
+        and schema_revision
+        and schema_revision.strip() == schema_revision
+        and isinstance(generation_manifest_sha256, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", generation_manifest_sha256)
+    )
+    terminal_pre_submit_failure = bool(
+        action == "apply" and payload.get("status") in {"not_applied", "ambiguous"}
+    )
     if not (
         payload.get("profile") == "product-capital-qualified-economics"
         and payload.get("target_id") == target.target_id
@@ -7674,15 +7693,12 @@ def _run_remote_wbc0027_capital_recovery(
             payload.get("deployed_sha") == deployed_sha
             or payload.get("status") in {"not_applied", "ambiguous"}
         )
+        and (terminal_pre_submit_failure or exact_generation)
         and (
-            action == "apply"
-            and payload.get("status") in {"not_applied", "ambiguous"}
-            or isinstance(generation, dict)
-            and str(generation.get("generation_id") or "").startswith("operational-")
-            and re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(generation.get("manifest_sha256") or ""),
-            )
+            action == "plan"
+            or terminal_pre_submit_failure
+            or payload.get("phase_operation_id") == phase_operation_id
+            and payload.get("phase_fingerprint") == phase_fingerprint
         )
     ):
         raise RuntimeError("WBC0027 capital runner binding drifted")
