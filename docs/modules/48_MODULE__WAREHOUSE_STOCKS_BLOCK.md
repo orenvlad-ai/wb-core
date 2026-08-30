@@ -171,6 +171,16 @@ the combined surface after canonical publication. Incident-adjusted values
 fail closed without exact snapshot-bound per-SKU evidence; aggregate-only WB
 never fabricates current district values.
 
+The same boundary protects persisted closed Web Vitrina economics. Once a ready
+date is bound to an exact functional version, a later warehouse business
+projection or capital-event revision cannot rewrite that date through ordinary
+hourly/current publication. Candidate drift or WB/FF evidence mismatch preserves
+the last-good warehouse/cost/Proxy values and emits typed
+`historical_repair_required` evidence. It never changes the exact historical
+version or silently replaces numbers/confirmed zero with blanks. Historical
+change requires a separate version-bound reconciliation contract; current-day
+warehouse publication remains independent.
+
 Migration 147 narrows the ordinary main Web Vitrina planning profile to raw WB,
 signed FBS total, one row per active FBS facility and raw combined total.
 Incident-aware effective WB/combined aliases and every incident metric family

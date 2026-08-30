@@ -90,6 +90,12 @@ from packages.application.warehouse_recovery_policy import (
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_functional_economics_backfill"
+HISTORICAL_REPAIR_CONTRACT = (
+    "sheet_vitrina_v1_functional_economics_historical_repair_required/v1"
+)
+HISTORICAL_REPAIR_METADATA_KEY = (
+    "functional_economics_historical_repair_required"
+)
 TARGET_KEYS = {
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
@@ -97,7 +103,7 @@ TARGET_KEYS = {
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
-}
+    }
 WAREHOUSE_TARGET_KEYS = set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS) | set(
     OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS
 )
@@ -329,6 +335,7 @@ def build_functional_economics_backfill_plan(
     archived_rows_removed = 0
     presentation_changes = 0
     coverage_changes = 0
+    repair_signal_changes = 0
     non_target_before: list[list[str]] = []
     non_target_after: list[list[str]] = []
     non_target_mismatches: list[dict[str, str]] = []
@@ -376,6 +383,7 @@ def build_functional_economics_backfill_plan(
         archived_rows_removed += int(transformed["archived_rows_removed"])
         presentation_changes += int(transformed["presentation_changes"])
         coverage_changes += int(transformed["coverage_changes"])
+        repair_signal_changes += int(transformed["repair_signal_changes"])
         # Marker/timestamp churn is not a business change.  Do not force a
         # coherent multi-gigabyte backup when every target cell already equals
         # the canonical value and no row is inserted or archived.
@@ -387,6 +395,7 @@ def build_functional_economics_backfill_plan(
                 "archived_rows_removed",
                 "presentation_changes",
                 "coverage_changes",
+                "repair_signal_changes",
             )
         )
         if material_change and transformed["after_plan_json"] != snapshot["plan_json"]:
@@ -401,6 +410,9 @@ def build_functional_economics_backfill_plan(
                     "archived_rows_removed": transformed["archived_rows_removed"],
                     "presentation_changes": transformed["presentation_changes"],
                     "coverage_changes": transformed["coverage_changes"],
+                    "repair_signal_changes": transformed[
+                        "repair_signal_changes"
+                    ],
                     "dates": transformed["dates"],
                 }
             )
@@ -434,6 +446,7 @@ def build_functional_economics_backfill_plan(
         "archived_row_count": archived_rows_removed,
         "presentation_change_count": presentation_changes,
         "coverage_change_count": coverage_changes,
+        "historical_repair_signal_change_count": repair_signal_changes,
         "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
         "ready_snapshot_manifest_digest": _snapshot_manifest_digest(snapshots),
         "warehouse_input_manifest_digest": warehouse_input_manifest_digest,
@@ -1488,6 +1501,7 @@ def _transform_snapshot(
                 "archived_rows_removed": 0,
                 "presentation_changes": 0,
                 "coverage_changes": 0,
+                "repair_signal_changes": 0,
                 "dates": [],
                 "non_target_before": before_digest,
                 "non_target_after": before_digest,
@@ -1502,6 +1516,7 @@ def _transform_snapshot(
             "archived_rows_removed": archived_rows_removed,
             "presentation_changes": 0,
             "coverage_changes": 0,
+            "repair_signal_changes": 0,
             "dates": [],
             "non_target_before": before_digest,
             "non_target_after": _non_target_digest(plan),
@@ -1536,6 +1551,11 @@ def _transform_snapshot(
     sku_result: dict[tuple[str, int], dict[str, Decimal | None]] = {}
     sku_v4_result: dict[tuple[str, int], dict[str, Decimal | None]] = {}
     existing_coverage = metadata.get("warehouse_history_coverage")
+    existing_repair_registry = _historical_repair_registry(
+        metadata.get(HISTORICAL_REPAIR_METADATA_KEY)
+    )
+    repair_registry = deepcopy(existing_repair_registry)
+    repair_dates = repair_registry.setdefault("dates", {})
     warehouse_coverage: dict[str, dict[str, Any]] = (
         deepcopy(existing_coverage)
         if targeted and isinstance(existing_coverage, dict)
@@ -1551,6 +1571,51 @@ def _transform_snapshot(
         uncovered_scope_nm_ids = sorted(scope_nm_ids - covered_nm_ids) if warehouse_known else sorted(scope_nm_ids)
         warehouse_totals_known = warehouse_known and not uncovered_scope_nm_ids
         live_day = day == str(operation_business_date or current_business_date_iso())[:10]
+        existing_day_coverage = (
+            dict(existing_coverage.get(day) or {})
+            if isinstance(existing_coverage, Mapping)
+            else {}
+        )
+        closed_history_guard = _closed_history_guard_active(
+            targeted=targeted,
+            day=day,
+            operation_business_date=str(
+                operation_business_date or current_business_date_iso()
+            )[:10],
+            existing_coverage=existing_day_coverage,
+        )
+        day_repair_entry = deepcopy(
+            repair_dates.get(day) if isinstance(repair_dates, Mapping) else None
+        )
+        if not isinstance(day_repair_entry, dict):
+            day_repair_entry = {}
+        day_repair_issues = [
+            dict(item)
+            for item in day_repair_entry.get("issues") or []
+            if isinstance(item, Mapping)
+        ]
+        existing_functional_version_id = str(
+            existing_day_coverage.get("functional_version_id") or ""
+        )
+        candidate_functional_version_id = str(warehouse_version_ids.get(day) or "")
+        if (
+            closed_history_guard
+            and candidate_functional_version_id
+            and candidate_functional_version_id != existing_functional_version_id
+        ):
+            day_repair_issues = _add_historical_repair_issue(
+                day_repair_issues,
+                scope="TOTAL",
+                nm_id=None,
+                family="warehouse_product_capital",
+                component="functional_version_identity",
+                reason_codes=["closed_date_functional_version_drift"],
+                metric_keys=[OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY],
+                last_good_preserved=_cell_has_value(
+                    by_id.get(f"TOTAL|{OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY}"),
+                    index=index,
+                ),
+            )
         if warehouse_applicable:
             warehouse_coverage[day] = {
                 "status": (
@@ -1617,6 +1682,34 @@ def _transform_snapshot(
                         day=day,
                     )
                     continue
+                if closed_history_guard:
+                    if not _cell_matches_value(row, index=index, value=value):
+                        day_repair_issues = _add_historical_repair_issue(
+                            day_repair_issues,
+                            scope=scope,
+                            nm_id=nm_id,
+                            family="warehouse_product_capital",
+                            component="closed_date_candidate",
+                            reason_codes=[
+                                _closed_date_drift_reason(
+                                    existing_functional_version_id=str(
+                                        existing_day_coverage.get(
+                                            "functional_version_id"
+                                        )
+                                        or ""
+                                    ),
+                                    candidate_functional_version_id=str(
+                                        warehouse_version_ids.get(day) or ""
+                                    ),
+                                )
+                            ],
+                            metric_keys=[metric_key],
+                            last_good_preserved=_cell_has_value(
+                                row,
+                                index=index,
+                            ),
+                        )
+                    continue
                 changed += _set_cell(row, index, value)
                 presentation_changes += _set_warehouse_cell_presentation(
                     metadata,
@@ -1672,14 +1765,66 @@ def _transform_snapshot(
                         ],
                     }
                 )
+            repair_metric_keys = _historical_repair_metric_keys(
+                cost_state=cost_state,
+                order_sum=order_sum,
+                order_count=order_count,
+                ads_sum=ads_sum,
+                include_proxy_v4=(
+                    day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE
+                    and (proxy_v4_parameters or {}).get(day) is not None
+                ),
+            )
+            repair_reason_codes = _historical_inventory_repair_reason_codes(
+                cost_state
+            )
+            if closed_history_guard and repair_reason_codes:
+                day_repair_issues = _add_historical_repair_issue(
+                    day_repair_issues,
+                    scope=scope,
+                    nm_id=nm_id,
+                    family="our_wb_cost_proxy_3_4",
+                    component="inventory_cost_evidence",
+                    reason_codes=repair_reason_codes,
+                    metric_keys=repair_metric_keys,
+                    last_good_preserved=any(
+                        _cell_has_value(by_id.get(f"{scope}|{metric_key}"), index=index)
+                        for metric_key in repair_metric_keys
+                    ),
+                )
             sku_result[(scope, index)] = calculated
             if mutate_sku:
                 for metric_key, value in values.items():
-                    changed += _set_cell(
-                        by_id[f"{scope}|{metric_key}"],
-                        index,
-                        value,
-                    )
+                    row = by_id[f"{scope}|{metric_key}"]
+                    if closed_history_guard:
+                        if not _cell_matches_value(row, index=index, value=value):
+                            day_repair_issues = _add_historical_repair_issue(
+                                day_repair_issues,
+                                scope=scope,
+                                nm_id=nm_id,
+                                family="our_wb_cost_proxy_3_4",
+                                component="closed_date_candidate",
+                                reason_codes=[
+                                    _closed_date_drift_reason(
+                                        existing_functional_version_id=str(
+                                            existing_day_coverage.get(
+                                                "functional_version_id"
+                                            )
+                                            or ""
+                                        ),
+                                        candidate_functional_version_id=str(
+                                            warehouse_version_ids.get(day) or ""
+                                        ),
+                                    )
+                                ],
+                                metric_keys=[metric_key],
+                                last_good_preserved=_cell_has_value(
+                                    row,
+                                    index=index,
+                                ),
+                            )
+                        continue
+                    changed += _set_cell(row, index, value)
             else:
                 for metric_key, value in values.items():
                     _assert_targeted_unrelated_cell_current(
@@ -1689,7 +1834,11 @@ def _transform_snapshot(
                         row_id=f"{scope}|{metric_key}",
                         day=day,
                     )
-            if day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE and mutate_sku:
+            if (
+                day >= INVENTORY_COST_BLEND_EFFECTIVE_DATE
+                and mutate_sku
+                and not closed_history_guard
+            ):
                 presentation_changes += _set_inventory_cost_cell_presentation(
                     metadata,
                     row_id=f"{scope}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
@@ -1806,8 +1955,22 @@ def _transform_snapshot(
                 }
             )
         for metric_key, value in total_values.items():
-            changed += _set_cell(by_id[f"TOTAL|{metric_key}"], index, value)
-        if total_cost_evidence is not None:
+            row = by_id[f"TOTAL|{metric_key}"]
+            if closed_history_guard:
+                if not _cell_matches_value(row, index=index, value=value):
+                    day_repair_issues = _add_historical_repair_issue(
+                        day_repair_issues,
+                        scope="TOTAL",
+                        nm_id=None,
+                        family="our_wb_cost_proxy_3_4",
+                        component="closed_date_aggregate_candidate",
+                        reason_codes=["closed_date_candidate_drift"],
+                        metric_keys=[metric_key],
+                        last_good_preserved=_cell_has_value(row, index=index),
+                    )
+                continue
+            changed += _set_cell(row, index, value)
+        if total_cost_evidence is not None and not closed_history_guard:
             presentation_changes += _set_inventory_cost_cell_presentation(
                 metadata,
                 row_id=f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
@@ -1852,6 +2015,34 @@ def _transform_snapshot(
             for metric_key, value in warehouse_total_values.items():
                 row = by_id.get(f"TOTAL|{metric_key}")
                 if row is not None:
+                    if closed_history_guard:
+                        if not _cell_matches_value(row, index=index, value=value):
+                            day_repair_issues = _add_historical_repair_issue(
+                                day_repair_issues,
+                                scope="TOTAL",
+                                nm_id=None,
+                                family="warehouse_product_capital",
+                                component="closed_date_aggregate_candidate",
+                                reason_codes=[
+                                    _closed_date_drift_reason(
+                                        existing_functional_version_id=str(
+                                            existing_day_coverage.get(
+                                                "functional_version_id"
+                                            )
+                                            or ""
+                                        ),
+                                        candidate_functional_version_id=str(
+                                            warehouse_version_ids.get(day) or ""
+                                        ),
+                                    )
+                                ],
+                                metric_keys=[metric_key],
+                                last_good_preserved=_cell_has_value(
+                                    row,
+                                    index=index,
+                                ),
+                            )
+                        continue
                     changed += _set_cell(row, index, value)
                     presentation_changes += _set_warehouse_cell_presentation(
                         metadata,
@@ -1866,6 +2057,58 @@ def _transform_snapshot(
                             if warehouse_totals_known
                             else None
                         ),
+                    )
+        if closed_history_guard and day_repair_issues:
+            stable_functional_version_id = str(
+                existing_day_coverage.get("functional_version_id")
+                or warehouse_version_ids.get(day)
+                or ""
+            )
+            day_repair_entry = {
+                "status": "historical_repair_required",
+                "business_date": day,
+                "functional_version_id": stable_functional_version_id,
+                "issues": _sorted_historical_repair_issues(day_repair_issues),
+                "repair_contract": "version_bound_historical_reconciliation",
+                "ordinary_publication_applied": False,
+            }
+            repair_dates[day] = day_repair_entry
+            warehouse_coverage[day] = {
+                **dict(warehouse_coverage.get(day) or existing_day_coverage),
+                "status": "historical_repair_required",
+                "reason_ru": (
+                    "Закрытая дата сохранена без перепубликации: новая складская "
+                    "проекция не согласована с её точной функциональной версией. "
+                    "Требуется отдельная историческая сверка."
+                ),
+                "functional_version_id": stable_functional_version_id,
+                "historical_repair_required": True,
+                "repair_issue_count": len(day_repair_entry["issues"]),
+            }
+            repair_reasons_by_scope: dict[str, set[str]] = {}
+            for issue in day_repair_entry["issues"]:
+                if str(issue.get("family") or "") == "our_wb_cost_proxy_3_4":
+                    repair_reasons_by_scope.setdefault(
+                        str(issue.get("scope") or ""), set()
+                    ).update(
+                        str(reason)
+                        for reason in issue.get("reason_codes") or []
+                        if str(reason or "")
+                    )
+            for scope, scope_reasons in sorted(repair_reasons_by_scope.items()):
+                cost_key = (
+                    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY
+                    if scope == "TOTAL"
+                    else OUR_WB_UNIT_COST_RUB_METRIC_KEY
+                )
+                row_id = f"{scope}|{cost_key}"
+                if row_id in by_id:
+                    presentation_changes += _set_historical_repair_cell_presentation(
+                        metadata,
+                        row_id=row_id,
+                        day=day,
+                        functional_version_id=stable_functional_version_id,
+                        reason_codes=sorted(scope_reasons),
                     )
     marker = {
         "cutover_id": FUNCTIONAL_CUTOVER_ID,
@@ -1908,6 +2151,27 @@ def _transform_snapshot(
             marker["latest_business_date"] = target_latest_date
     if metadata.get(marker_key) != marker:
         metadata[marker_key] = marker
+    final_repair_registry: dict[str, Any] | None = None
+    if repair_dates:
+        final_repair_registry = {
+            "contract_name": HISTORICAL_REPAIR_CONTRACT,
+            "status": "historical_repair_required",
+            "dates": {
+                str(day): deepcopy(repair_dates[day])
+                for day in sorted(repair_dates)
+            },
+        }
+        metadata[HISTORICAL_REPAIR_METADATA_KEY] = final_repair_registry
+    else:
+        metadata.pop(HISTORICAL_REPAIR_METADATA_KEY, None)
+    repair_signal_changes = int(
+        _historical_repair_registry_or_none(
+            original.get("metadata", {}).get(HISTORICAL_REPAIR_METADATA_KEY)
+            if isinstance(original.get("metadata"), Mapping)
+            else None
+        )
+        != final_repair_registry
+    )
     coverage_changes = int(metadata.get("warehouse_history_coverage") != warehouse_coverage)
     metadata["warehouse_history_coverage"] = warehouse_coverage
     timestamps = metadata.setdefault("row_last_updated_at_by_row_id", {})
@@ -1949,10 +2213,236 @@ def _transform_snapshot(
         "archived_rows_removed": archived_rows_removed,
         "presentation_changes": presentation_changes,
         "coverage_changes": coverage_changes,
+        "repair_signal_changes": repair_signal_changes,
         "dates": [dates[index] for index in relevant_indices],
         "non_target_before": before_digest,
         "non_target_after": after_digest,
     }
+
+
+def _historical_repair_registry(raw: Any) -> dict[str, Any]:
+    normalized = _historical_repair_registry_or_none(raw)
+    if normalized is not None:
+        return normalized
+    return {
+        "contract_name": HISTORICAL_REPAIR_CONTRACT,
+        "status": "historical_repair_required",
+        "dates": {},
+    }
+
+
+def _historical_repair_registry_or_none(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise FunctionalEconomicsBackfillError(
+            "historical repair registry must be an object"
+        )
+    contract_name = str(raw.get("contract_name") or "")
+    if contract_name != HISTORICAL_REPAIR_CONTRACT:
+        raise FunctionalEconomicsBackfillError(
+            "historical repair registry contract is unsupported"
+        )
+    dates = raw.get("dates")
+    if not isinstance(dates, Mapping):
+        raise FunctionalEconomicsBackfillError(
+            "historical repair registry dates must be an object"
+        )
+    normalized_dates: dict[str, dict[str, Any]] = {}
+    for day, entry in sorted(dates.items()):
+        day_key = str(day)[:10]
+        try:
+            date.fromisoformat(day_key)
+        except ValueError as exc:
+            raise FunctionalEconomicsBackfillError(
+                "historical repair registry date is invalid"
+            ) from exc
+        if not isinstance(entry, Mapping):
+            raise FunctionalEconomicsBackfillError(
+                "historical repair registry date entry must be an object"
+            )
+        normalized_dates[day_key] = deepcopy(dict(entry))
+    if not normalized_dates:
+        return None
+    return {
+        "contract_name": HISTORICAL_REPAIR_CONTRACT,
+        "status": "historical_repair_required",
+        "dates": normalized_dates,
+    }
+
+
+def _closed_history_guard_active(
+    *,
+    targeted: bool,
+    day: str,
+    operation_business_date: str,
+    existing_coverage: Mapping[str, Any],
+) -> bool:
+    if targeted or day >= operation_business_date:
+        return False
+    if str(existing_coverage.get("status") or "") not in {
+        "live",
+        "closed",
+        "historical_repair_required",
+    }:
+        return False
+    return bool(str(existing_coverage.get("functional_version_id") or ""))
+
+
+def _closed_date_drift_reason(
+    *,
+    existing_functional_version_id: str,
+    candidate_functional_version_id: str,
+) -> str:
+    if (
+        existing_functional_version_id
+        and candidate_functional_version_id
+        and existing_functional_version_id != candidate_functional_version_id
+    ):
+        return "closed_date_functional_version_drift"
+    return "closed_date_candidate_drift"
+
+
+def _historical_inventory_repair_reason_codes(
+    cost_state: Mapping[str, Any] | None,
+) -> list[str]:
+    evidence = (
+        cost_state.get("inventory_cost_evidence")
+        if isinstance(cost_state, Mapping)
+        else None
+    )
+    if not isinstance(evidence, Mapping):
+        return []
+    quantity = _optional_decimal(evidence.get("quantity")) or ZERO
+    if quantity <= ZERO or str(evidence.get("status") or "") == "resolved":
+        return []
+    reasons = {
+        str(reason)
+        for reason in evidence.get("reason_codes") or [evidence.get("reason")]
+        if str(reason or "") and str(reason or "") != "no_physical_inventory"
+    }
+    return sorted(reasons)
+
+
+def _historical_repair_metric_keys(
+    *,
+    cost_state: Mapping[str, Any] | None,
+    order_sum: Decimal | None,
+    order_count: Decimal | None,
+    ads_sum: Decimal | None,
+    include_proxy_v4: bool,
+) -> list[str]:
+    del ads_sum
+    evidence = (
+        cost_state.get("inventory_cost_evidence")
+        if isinstance(cost_state, Mapping)
+        else None
+    )
+    quantity = (
+        _optional_decimal(evidence.get("quantity"))
+        if isinstance(evidence, Mapping)
+        else None
+    ) or ZERO
+    if quantity <= ZERO:
+        return []
+    result = [OUR_WB_UNIT_COST_RUB_METRIC_KEY]
+    if order_sum is not None and order_sum > ZERO:
+        result.extend(
+            [
+                OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+            ]
+        )
+        if include_proxy_v4:
+            result.extend(
+                [
+                    PROXY_V4_PROFIT_RUB_METRIC_KEY,
+                    PROXY_V4_MARGIN_PCT_METRIC_KEY,
+                ]
+            )
+    if include_proxy_v4 and order_count is not None and order_count > ZERO:
+        result.append(PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY)
+    return sorted(set(result))
+
+
+def _cell_matches_value(
+    row: list[Any] | None,
+    *,
+    index: int,
+    value: Decimal | None,
+) -> bool:
+    current = row[2 + index] if row is not None and len(row) > 2 + index else ""
+    expected: Any = "" if value is None else float(value)
+    return _same_cell(current, expected)
+
+
+def _cell_has_value(row: list[Any] | None, *, index: int) -> bool:
+    return bool(
+        row is not None
+        and len(row) > 2 + index
+        and row[2 + index] not in (None, "")
+    )
+
+
+def _add_historical_repair_issue(
+    issues: list[dict[str, Any]],
+    *,
+    scope: str,
+    nm_id: int | None,
+    family: str,
+    component: str,
+    reason_codes: Iterable[str],
+    metric_keys: Iterable[str],
+    last_good_preserved: bool,
+) -> list[dict[str, Any]]:
+    reasons = sorted({str(value) for value in reason_codes if str(value or "")})
+    metrics = sorted({str(value) for value in metric_keys if str(value or "")})
+    if not reasons or not metrics:
+        return issues
+    key = (str(scope), str(family), str(component))
+    for item in issues:
+        if (
+            str(item.get("scope") or ""),
+            str(item.get("family") or ""),
+            str(item.get("component") or ""),
+        ) != key:
+            continue
+        item["reason_codes"] = sorted(
+            {str(value) for value in item.get("reason_codes") or []} | set(reasons)
+        )
+        item["metric_keys"] = sorted(
+            {str(value) for value in item.get("metric_keys") or []} | set(metrics)
+        )
+        item["last_good_preserved"] = bool(
+            item.get("last_good_preserved") or last_good_preserved
+        )
+        return issues
+    issues.append(
+        {
+            "scope": str(scope),
+            "nm_id": int(nm_id) if nm_id is not None else None,
+            "family": str(family),
+            "component": str(component),
+            "reason_codes": reasons,
+            "metric_keys": metrics,
+            "last_good_preserved": bool(last_good_preserved),
+        }
+    )
+    return issues
+
+
+def _sorted_historical_repair_issues(
+    issues: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        [deepcopy(dict(item)) for item in issues],
+        key=lambda item: (
+            str(item.get("scope") or ""),
+            str(item.get("family") or ""),
+            str(item.get("component") or ""),
+            ",".join(str(value) for value in item.get("metric_keys") or []),
+        ),
+    )
 
 
 def _warehouse_history_unavailable_reason(
@@ -2063,6 +2553,45 @@ def _set_inventory_cost_cell_presentation(
             evidence if isinstance(evidence, Mapping) else {}
         ),
         "source": "WebCore · WB+FF",
+    }
+    raw = metadata.setdefault("server_cell_presentation", {})
+    if not isinstance(raw, dict):
+        raise FunctionalEconomicsBackfillError(
+            "ready snapshot server_cell_presentation must be an object"
+        )
+    by_date = raw.setdefault(row_id, {})
+    if not isinstance(by_date, dict):
+        raise FunctionalEconomicsBackfillError(
+            f"ready snapshot presentation for {row_id} must be an object"
+        )
+    if by_date.get(day) == expected:
+        return 0
+    by_date[day] = expected
+    return 1
+
+
+def _set_historical_repair_cell_presentation(
+    metadata: dict[str, Any],
+    *,
+    row_id: str,
+    day: str,
+    functional_version_id: str,
+    reason_codes: Iterable[str],
+) -> int:
+    """Keep last-good value visible while disclosing the frozen history state."""
+
+    reasons = sorted({str(reason) for reason in reason_codes if str(reason or "")})
+    expected = {
+        "state": "historical_repair_required",
+        "tone": "yellow",
+        "reason": (
+            "Закрытая дата сохранена без перепубликации: новая складская "
+            "проекция не согласована с точной функциональной версией. "
+            "Требуется отдельная историческая сверка."
+        ),
+        "source": "WebCore · WB+FF",
+        "functional_version_id": str(functional_version_id),
+        "reason_codes": reasons,
     }
     raw = metadata.setdefault("server_cell_presentation", {})
     if not isinstance(raw, dict):
@@ -2654,6 +3183,7 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
     if isinstance(metadata, dict):
         metadata.pop("functional_economics_backfill", None)
         metadata.pop("warehouse_history_coverage", None)
+        metadata.pop(HISTORICAL_REPAIR_METADATA_KEY, None)
         presentation = metadata.get("server_cell_presentation")
         if isinstance(presentation, dict):
             for row_id in list(presentation):

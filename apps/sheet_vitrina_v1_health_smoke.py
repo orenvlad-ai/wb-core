@@ -30,6 +30,10 @@ from packages.application.sheet_vitrina_v1_health import (
     mark_web_vitrina_health_cycle_incomplete,
     persist_web_vitrina_health_evaluation,
 )
+from packages.application.warehouse_functional_economics_backfill import (
+    HISTORICAL_REPAIR_CONTRACT,
+    HISTORICAL_REPAIR_METADATA_KEY,
+)
 from apps.sheet_vitrina_v1_auto_refresh_tick import JobPollDeadlineError
 from apps.sheet_vitrina_v1_health_tick import _execute_health_tick
 from packages.application.sheet_vitrina_v1_live_plan import SOURCE_TEMPORAL_POLICIES
@@ -74,6 +78,7 @@ def _slot(
 
 class _FakeRuntime:
     def __init__(self) -> None:
+        self.repair_registry: dict[str, object] | None = None
         outcomes: list[dict[str, object]] = []
         for source_key, policy in SOURCE_TEMPORAL_POLICIES.items():
             slots = [_slot(source_key, "yesterday_closed", YESTERDAY)]
@@ -175,6 +180,16 @@ class _FakeRuntime:
     def load_current_state(self):
         return SimpleNamespace(config_v2=[SimpleNamespace(enabled=True), SimpleNamespace(enabled=True)])
 
+    def load_sheet_vitrina_ready_snapshot_any_bundle(self, *, as_of_date: str):
+        assert as_of_date == self.refresh_status.as_of_date
+        return SimpleNamespace(
+            metadata=(
+                {HISTORICAL_REPAIR_METADATA_KEY: deepcopy(self.repair_registry)}
+                if self.repair_registry is not None
+                else {}
+            )
+        )
+
 
 class _TickRuntime(_FakeRuntime):
     def __init__(self) -> None:
@@ -235,7 +250,13 @@ class _TickRuntime(_FakeRuntime):
 
 
 class _HealthSurfaceRuntime:
-    def __init__(self, payload: dict[str, object], *, phases: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        payload: dict[str, object],
+        *,
+        phases: tuple[str, ...],
+        repair_registry: dict[str, object] | None = None,
+    ) -> None:
         self.observations = [
             {
                 "observation_id": f"health-{phase}",
@@ -249,6 +270,17 @@ class _HealthSurfaceRuntime:
             for index, phase in enumerate(phases)
         ]
         self.receipts: dict[str, dict[str, object]] = {}
+        self.repair_registry = deepcopy(repair_registry)
+
+    def load_sheet_vitrina_ready_snapshot_any_bundle(self, *, as_of_date: str):
+        del as_of_date
+        return SimpleNamespace(
+            metadata=(
+                {HISTORICAL_REPAIR_METADATA_KEY: deepcopy(self.repair_registry)}
+                if self.repair_registry is not None
+                else {}
+            )
+        )
 
     def list_sheet_vitrina_health_observations(self, *, business_date: str, limit: int):
         assert business_date == TODAY
@@ -377,6 +409,7 @@ def _operator_payload(
         "contract": "sheet_vitrina_v1_web_health/v1",
         "business_date": TODAY,
         "yesterday_date": YESTERDAY,
+        "ready_snapshot": {"as_of_date": YESTERDAY},
         "fingerprint": "sha256:operator-payload",
         "expectation_matrix": matrix,
         "signals": {
@@ -473,6 +506,46 @@ def main() -> None:
         if item["source_key"] == "sku_action_events"
     )
 
+    repair_registry = {
+        "contract_name": HISTORICAL_REPAIR_CONTRACT,
+        "status": "historical_repair_required",
+        "dates": {
+            YESTERDAY: {
+                "status": "historical_repair_required",
+                "functional_version_id": "whfv_closed",
+                "ordinary_publication_applied": False,
+                "repair_contract": "version_bound_historical_reconciliation",
+                "issues": [
+                    {
+                        "scope": "SKU:801",
+                        "nm_id": 801,
+                        "family": "our_wb_cost_proxy_3_4",
+                        "component": "inventory_cost_evidence",
+                        "reason_codes": ["ff_stage_evidence_mismatch"],
+                        "metric_keys": ["our_wb_unit_cost_rub"],
+                        "last_good_preserved": True,
+                    }
+                ],
+            }
+        },
+    }
+    repair_runtime = _FakeRuntime()
+    repair_runtime.repair_registry = repair_registry
+    repair_evaluation = evaluate_web_vitrina_health(
+        runtime=repair_runtime,
+        now=NOW,
+        history_days=2,
+    )
+    repair_cell = next(
+        item
+        for item in repair_evaluation["expectation_matrix"]
+        if item["source_key"] == "warehouse_functional_history"
+    )
+    assert repair_cell["expectation_state"] == "failure"
+    assert repair_cell["affected_dates"] == [YESTERDAY]
+    assert repair_cell["last_good_preserved_count"] == 1
+    assert repair_evaluation["signals"]["yesterday_closed"]["state"] == "error"
+
     seller_gap = deepcopy(evaluation["expectation_matrix"])
     seller_cell = next(
         item for item in seller_gap
@@ -511,6 +584,31 @@ def main() -> None:
     assert confirmed_by_id["yesterday_closed"]["state"] == "ok"
     assert confirmed_by_id["today_current"]["state"] == "observing"
     assert confirmed_by_id["bot_health"]["state"] == "ok"
+    repair_surface = build_web_vitrina_health_operator_surface(
+        runtime=_HealthSurfaceRuntime(
+            _operator_payload(),
+            phases=("candidate", "confirmation"),
+            repair_registry=repair_registry,
+        ),
+        now=datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc),
+    )
+    repair_indicators = {
+        item["indicator_id"]: item for item in repair_surface["indicators"]
+    }
+    assert repair_indicators["yesterday_closed"]["state"] == "error"
+    repair_group = next(
+        item
+        for item in repair_surface["source_groups"]
+        if item["source_group_id"] == "warehouse_history"
+    )
+    assert repair_group["source_group_label"] == "История складских метрик"
+    repair_action = next(
+        item
+        for item in repair_surface["recovery_preview"]["actions"]
+        if item["source_group_id"] == "warehouse_history"
+    )
+    assert repair_action["operator_apply_allowed"] is False
+    assert repair_action["hook"] == "none"
     after_boundary = build_web_vitrina_health_operator_surface(
         runtime=confirmed_runtime,
         now=datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc),

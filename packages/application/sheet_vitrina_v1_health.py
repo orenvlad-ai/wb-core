@@ -19,6 +19,9 @@ from packages.application.sheet_vitrina_v1_source_groups import (
     active_source_expectations,
 )
 from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_ONLY_SOURCE_KEYS
+from packages.application.warehouse_functional_economics_backfill import (
+    HISTORICAL_REPAIR_METADATA_KEY,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     TEMPORAL_POLICY_ACCEPTED_CURRENT_ROLLOVER,
     TEMPORAL_POLICY_DUAL_DAY_INTRADAY_TOLERANT,
@@ -57,6 +60,8 @@ BOT_HISTORICAL_ROLES = {
 BOT_CURRENT_ROLE = "accepted_current_snapshot"
 HEALTH_CURRENT_EXPECTATION_HOUR = 10
 HEALTH_RUNTIME_SOURCE_GROUP_ID = "health_runtime"
+WAREHOUSE_HISTORY_SOURCE_GROUP_ID = "warehouse_history"
+WAREHOUSE_HISTORY_SOURCE_KEY = "warehouse_functional_history"
 
 _EXPECTATION_LABELS_RU = {
     "complete": "полные данные",
@@ -115,6 +120,14 @@ def evaluate_web_vitrina_health(
                 yesterday_slot=slots.get(TEMPORAL_SLOT_YESTERDAY_CLOSED),
             )
             matrix.append(cell)
+
+    matrix.extend(
+        _current_historical_repair_cells(
+            runtime,
+            snapshot_as_of_date=str(refresh_status.as_of_date or ""),
+            target_date=yesterday,
+        )
+    )
 
     yesterday_cells = [item for item in matrix if item["date_role"] == TEMPORAL_SLOT_YESTERDAY_CLOSED]
     today_cells = [item for item in matrix if item["date_role"] == TEMPORAL_SLOT_TODAY_CURRENT]
@@ -309,6 +322,28 @@ def build_web_vitrina_health_operator_surface(
         time(hour=HEALTH_CURRENT_EXPECTATION_HOUR),
         tzinfo=CANONICAL_BUSINESS_TIMEZONE,
     )
+    matrix = [
+        dict(item)
+        for item in payload.get("expectation_matrix") or []
+        if isinstance(item, Mapping)
+        and str(item.get("source_key") or "") != WAREHOUSE_HISTORY_SOURCE_KEY
+    ]
+    matrix.extend(
+        _current_historical_repair_cells(
+            runtime,
+            snapshot_as_of_date=str(
+                ((payload.get("ready_snapshot") or {}).get("as_of_date")) or ""
+            ),
+            target_date=yesterday_date,
+        )
+    )
+    raw_signals["yesterday_closed"] = _matrix_signal(
+        [
+            item
+            for item in matrix
+            if item.get("date_role") == TEMPORAL_SLOT_YESTERDAY_CLOSED
+        ]
+    )
     indicators = [
         _operator_indicator(
             indicator_id="yesterday_closed",
@@ -336,14 +371,18 @@ def build_web_vitrina_health_operator_surface(
             observing_reason=cycle_label,
         ),
     ]
-    matrix = [
-        dict(item)
-        for item in payload.get("expectation_matrix") or []
-        if isinstance(item, Mapping)
-    ]
     details = _operator_source_group_details(matrix)
+    historical_repair_cells = [
+        item
+        for item in matrix
+        if str(item.get("source_key") or "") == WAREHOUSE_HISTORY_SOURCE_KEY
+    ]
     preview = _operator_recovery_preview(
-        payload.get("recovery_preview") or {},
+        _with_historical_repair_preview(
+            payload.get("recovery_preview") or {},
+            cells=historical_repair_cells,
+            target_date=yesterday_date,
+        ),
         morning_pair_complete=morning_pair_complete,
     )
     transitions = runtime.list_sheet_vitrina_health_transitions(
@@ -476,6 +515,135 @@ def build_recovery_preview(
     }
     preview["plan_fingerprint"] = _fingerprint(preview)
     return preview
+
+
+def _current_historical_repair_cells(
+    runtime: Any,
+    *,
+    snapshot_as_of_date: str,
+    target_date: str,
+) -> list[dict[str, Any]]:
+    """Overlay daytime closed-history degradation onto durable morning health."""
+
+    snapshot = None
+    load_any = getattr(runtime, "load_sheet_vitrina_ready_snapshot_any_bundle", None)
+    if callable(load_any) and snapshot_as_of_date:
+        try:
+            snapshot = load_any(as_of_date=snapshot_as_of_date)
+        except (LookupError, RuntimeError, ValueError):
+            snapshot = None
+    if snapshot is None:
+        load_current = getattr(runtime, "load_sheet_vitrina_ready_snapshot", None)
+        if callable(load_current):
+            try:
+                snapshot = load_current()
+            except (LookupError, RuntimeError, ValueError):
+                snapshot = None
+    metadata = getattr(snapshot, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return []
+    registry = metadata.get(HISTORICAL_REPAIR_METADATA_KEY)
+    dates = registry.get("dates") if isinstance(registry, Mapping) else None
+    if not isinstance(dates, Mapping) or not dates:
+        return []
+    affected_dates = sorted(str(day)[:10] for day in dates)
+    issues = [
+        dict(issue)
+        for day in affected_dates
+        for issue in (
+            (dates.get(day) or {}).get("issues")
+            if isinstance(dates.get(day), Mapping)
+            else []
+        )
+        if isinstance(issue, Mapping)
+    ]
+    issue_count = len(issues)
+    preserved_count = sum(
+        1 for issue in issues if bool(issue.get("last_good_preserved"))
+    )
+    date_label = (
+        affected_dates[0]
+        if len(affected_dates) == 1
+        else f"{affected_dates[0]}..{affected_dates[-1]}"
+    )
+    return [
+        {
+            "source_group_id": WAREHOUSE_HISTORY_SOURCE_GROUP_ID,
+            "source_key": WAREHOUSE_HISTORY_SOURCE_KEY,
+            "date_role": TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            "target_date": target_date,
+            "temporal_policy": "version_bound_historical_reconciliation",
+            "expectation_state": "failure",
+            "reason": (
+                "Закрытая история сохранена без перепубликации, но складская "
+                f"проекция расходится с точной версией за {date_label}; "
+                "требуется отдельная историческая сверка."
+            ),
+            "kind": "historical_repair_required",
+            "requested_count": issue_count,
+            "covered_count": preserved_count,
+            "affected_dates": affected_dates,
+            "issue_count": issue_count,
+            "last_good_preserved_count": preserved_count,
+        }
+    ]
+
+
+def _with_historical_repair_preview(
+    preview: Mapping[str, Any],
+    *,
+    cells: list[Mapping[str, Any]],
+    target_date: str,
+) -> dict[str, Any]:
+    value = deepcopy(dict(preview))
+    if not cells:
+        return value
+    raw_actions = [
+        deepcopy(dict(item))
+        for item in value.get("actions") or []
+        if isinstance(item, Mapping)
+    ]
+    had_historical_action = any(
+        str(item.get("source_group_id") or "")
+        == WAREHOUSE_HISTORY_SOURCE_GROUP_ID
+        for item in raw_actions
+    )
+    actions = [
+        deepcopy(dict(item))
+        for item in raw_actions
+        if str(item.get("source_group_id") or "")
+        != WAREHOUSE_HISTORY_SOURCE_GROUP_ID
+    ]
+    action = {
+        "source_group_id": WAREHOUSE_HISTORY_SOURCE_GROUP_ID,
+        "target_date": target_date,
+        "gap_source_keys": [WAREHOUSE_HISTORY_SOURCE_KEY],
+        "recoverable_source_keys": [],
+        "hook": "none",
+        "apply_allowed": False,
+        "reason": (
+            "ordinary/full/group refresh запрещён; требуется отдельный "
+            "version-bound historical reconciliation contract"
+        ),
+    }
+    action["action_fingerprint"] = _fingerprint(action)
+    actions.append(action)
+    value.update(
+        {
+            "target_date": target_date,
+            "status": "recovery_needed",
+            "gap_count": (
+                max(_coerce_int(value.get("gap_count")), 0)
+                - int(had_historical_action)
+                + 1
+            ),
+            "actions": actions,
+        }
+    )
+    fingerprint_payload = deepcopy(value)
+    fingerprint_payload.pop("plan_fingerprint", None)
+    value["plan_fingerprint"] = _fingerprint(fingerprint_payload)
+    return value
 
 
 def _expectation_cell(
@@ -746,7 +914,13 @@ def _operator_source_group_details(matrix: list[Mapping[str, Any]]) -> list[dict
                 (
                     "Утренний контур"
                     if group_id == HEALTH_RUNTIME_SOURCE_GROUP_ID
-                    else (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get("label_ru")
+                    else (
+                        "История складских метрик"
+                        if group_id == WAREHOUSE_HISTORY_SOURCE_GROUP_ID
+                        else (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get(
+                            "label_ru"
+                        )
+                    )
                 )
                 or "Прочие источники"
             ),
@@ -761,6 +935,11 @@ def _operator_expectation_reason(cell: Mapping[str, Any]) -> str:
     source_key = str(cell.get("source_key") or "")
     if source_key.startswith("health_cycle_"):
         return str(cell.get("reason") or "Утренний контур не завершил штатную проверку.")
+    if source_key == WAREHOUSE_HISTORY_SOURCE_KEY:
+        return str(
+            cell.get("reason")
+            or "Закрытая история требует отдельной исторической сверки."
+        )
     if state == "complete":
         return "Дата и обязательное покрытие подтверждены."
     if state == "exact_zero":

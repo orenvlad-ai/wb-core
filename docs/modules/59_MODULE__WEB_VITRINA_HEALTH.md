@@ -14,7 +14,7 @@ source_basis:
 related_runners:
   - "apps/sheet_vitrina_v1_health_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; morning runner now has a shorter application poll deadline, guaranteed launch/terminal receipts and durable fail-closed timeout evidence; no metric/formula/history rewrite and no performance work."
+update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; closed-history repair evidence is overlaid after any daytime publication and has no ordinary refresh hook."
 ---
 
 # 1. Expectation and signal contract
@@ -39,6 +39,15 @@ The three top-level signals are independent:
 confirmed price/bid change, the scope is covered and the semantic state is
 `no_events`; a real lookup error remains an error.
 
+The evaluator also reads the current ready snapshot's typed
+`functional_economics_historical_repair_required` registry. Any closed-date
+numeric-to-missing/coverage regression or exact warehouse/cost evidence mismatch
+adds an independent failing `warehouse_functional_history` expectation. This
+overlay is evaluated on every health read, so a daytime ordinary publication
+cannot remain green merely because the 06:30/07:30 pair predates the regression.
+The registry retains exact affected dates/SKU/families/reasons while the Vitrina
+continues to show preserved last-good cells.
+
 # 2. Durable shadow truth and recovery seam
 
 Every candidate, confirmation or explicit shadow evaluation appends one
@@ -54,6 +63,10 @@ recovery preview groups exact gaps and exposes only existing single-flight
 group-refresh hooks for historical-capable sources. Current-only rollover
 sources remain preview-only for a historical gap; no value is invented and no
 mass historical apply occurs.
+
+Closed warehouse economics is deliberately not assigned a group-refresh hook.
+Its recovery preview is `hook=none`: only a separately reviewed version-bound
+historical reconciliation may change the closed target cells.
 
 Recovery submissions append an idempotency receipt to
 `sheet_vitrina_v1_health_recovery_receipts`. The action fingerprint is bound to
@@ -134,3 +147,8 @@ Runner failures appear as the synthetic server-owned `Утренний конт�
 group with a safe reason and cycle execution metadata (`phase`, failure code,
 job identity/status and single-flight flag). They do not create a runnable
 recovery action and cannot render `Вчера` or `BOT` green.
+
+Closed warehouse-economics drift appears as the separate
+`История складских метрик` group. Its safe explanation lists the affected date
+range and preserves an explicit non-green `Вчера` signal at any time of day;
+the operator surface never offers full/group refresh as repair.

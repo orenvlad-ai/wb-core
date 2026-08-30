@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal
 import inspect
 import json
@@ -35,9 +36,11 @@ from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     _inventory_cost_evidence_reason,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
 )
@@ -49,6 +52,7 @@ from packages.application.own_product_capital import (  # noqa: E402
 )
 from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    PROXY_V4_MARGIN_PCT_METRIC_KEY,
     PROXY_V4_PROFIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
@@ -56,6 +60,7 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     extend_metrics_with_proxy_v4,
 )
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
+    HISTORICAL_REPAIR_METADATA_KEY,
     _transform_snapshot,
     build_functional_economics_backfill_plan,
 )
@@ -319,6 +324,192 @@ def _test_ordinary_functional_economics_publication() -> None:
         and missing_positive_after["TOTAL|total_proxy_profit_4_rub"][3] == ""
         and missing_positive_after["TOTAL|proxy_margin_4_pct_total"][3] == "",
         "positive orders with missing blended cost fail closed for both Proxy totals",
+    )
+
+    late_payload = json.loads(result["after_plan_json"])
+    current_day = "2026-08-23"
+    late_payload["date_columns"].append(current_day)
+    late_sheet = late_payload["sheets"][0]
+    late_sheet["header"].append(current_day)
+    for row in late_sheet["rows"]:
+        row.append(deepcopy(row[3] if len(row) > 3 else ""))
+    late_rows = {row[1]: row for row in late_sheet["rows"]}
+    late_rows["SKU:801|proxy_margin_4_pct"][3] = 0
+    protected_keys = {
+        OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+        OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+        OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+        PROXY_V4_PROFIT_RUB_METRIC_KEY,
+        PROXY_V4_MARGIN_PCT_METRIC_KEY,
+        PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+    }
+    protected_before = {
+        row_id: deepcopy(row[3])
+        for row_id, row in late_rows.items()
+        if row_id.startswith("SKU:801|")
+        and row_id.split("|", 1)[1] in protected_keys
+    }
+    non_target_before = {
+        row_id: deepcopy(row[3:5])
+        for row_id, row in late_rows.items()
+        if row_id in {
+            "SKU:801|orderSum",
+            "SKU:801|orderCount",
+            "SKU:801|ads_sum",
+        }
+    }
+    mismatch_products = deepcopy(products)
+    mismatch_products[801][own_stage_metric_key("FF", "qty")] = 8.0
+    mismatch_blended = build_inventory_cost_blend_lookup(
+        as_of_date=INVENTORY_COST_BLEND_EFFECTIVE_DATE,
+        wb_compat_lookup=wb_compat,
+        product_capital_lookup=mismatch_products,
+    )
+    current_products = deepcopy(products)
+    for product in current_products.values():
+        product["_warehouse_version_id"] = "whfv_current"
+        product["_warehouse_effective_at"] = "2026-08-23T06:18:57Z"
+        product["_warehouse_published_at"] = "2026-08-23T06:19:59Z"
+    current_blended = build_inventory_cost_blend_lookup(
+        as_of_date=current_day,
+        wb_compat_lookup=wb_compat,
+        product_capital_lookup=current_products,
+    )
+    late_snapshot = {
+        **snapshot,
+        "as_of_date": current_day,
+        "refreshed_at": "2026-08-23T06:20:00Z",
+        "plan_json": json.dumps(
+            late_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    late_result = _transform_snapshot(
+        late_snapshot,
+        costs={
+            dates[0]: wb_compat,
+            dates[1]: mismatch_blended,
+            current_day: current_blended,
+        },
+        warehouse_metrics={
+            dates[0]: products,
+            dates[1]: mismatch_products,
+            current_day: current_products,
+        },
+        warehouse_exact_dates={*dates, current_day},
+        warehouse_covered_nm_ids={
+            day: {801, 802, 803} for day in [*dates, current_day]
+        },
+        warehouse_version_ids={
+            dates[0]: "whfv_exact_as_of",
+            dates[1]: "whfv_exact_as_of",
+            current_day: "whfv_current",
+        },
+        parameters={**v3, current_day: DEFAULT_PROXY_PARAMETERS},
+        proxy_v4_parameters={**v4, current_day: _proxy_v4_parameters()},
+        source_fingerprint="sha256:late-warehouse-revision",
+        cutover_business_date="2026-07-18",
+        operation_business_date=current_day,
+    )
+    late_after = json.loads(late_result["after_plan_json"])
+    late_after_rows = {row[1]: row for row in late_after["sheets"][0]["rows"]}
+    _assert(
+        {
+            row_id: deepcopy(late_after_rows[row_id][3])
+            for row_id in protected_before
+        }
+        == protected_before,
+        "late warehouse revision cannot rewrite a closed cost/Proxy image",
+    )
+    _assert(
+        late_after_rows["SKU:801|proxy_margin_4_pct"][3] == 0,
+        "closed exact zero remains exact zero instead of becoming missing",
+    )
+    _assert(
+        {
+            row_id: deepcopy(late_after_rows[row_id][3:5])
+            for row_id in non_target_before
+        }
+        == non_target_before,
+        "orders and ads remain outside historical economics publication",
+    )
+    _equal(
+        late_after_rows["SKU:801|our_wb_unit_cost_rub"][4],
+        Decimal("19"),
+        "current date continues through the ordinary publisher",
+    )
+    repair_registry = late_after["metadata"][HISTORICAL_REPAIR_METADATA_KEY]
+    repair_day = repair_registry["dates"][INVENTORY_COST_BLEND_EFFECTIVE_DATE]
+    cost_issues = [
+        issue
+        for issue in repair_day["issues"]
+        if issue["scope"] == "SKU:801"
+        and issue["family"] == "our_wb_cost_proxy_3_4"
+    ]
+    _assert(
+        repair_day["status"] == "historical_repair_required"
+        and repair_day["ordinary_publication_applied"] is False
+        and any(
+            "ff_stage_evidence_mismatch" in issue["reason_codes"]
+            for issue in cost_issues
+        )
+        and all(issue["last_good_preserved"] for issue in cost_issues),
+        "closed mismatch emits typed version-bound repair evidence",
+    )
+    _assert(
+        not any(
+            issue["scope"] == "SKU:803"
+            and issue["family"] == "our_wb_cost_proxy_3_4"
+            for issue in repair_day["issues"]
+        ),
+        "zero-denominator/no-inventory remains distinct from historical missing",
+    )
+    _assert(
+        late_after["metadata"]["warehouse_history_coverage"][
+            INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ]["status"]
+        == "historical_repair_required"
+        and late_after["metadata"]["warehouse_history_coverage"][current_day][
+            "status"
+        ]
+        == "live",
+        "closed mismatch is non-green while the current date remains live",
+    )
+    late_repeat = _transform_snapshot(
+        {**late_snapshot, "plan_json": late_result["after_plan_json"]},
+        costs={
+            dates[0]: wb_compat,
+            dates[1]: mismatch_blended,
+            current_day: current_blended,
+        },
+        warehouse_metrics={
+            dates[0]: products,
+            dates[1]: mismatch_products,
+            current_day: current_products,
+        },
+        warehouse_exact_dates={*dates, current_day},
+        warehouse_covered_nm_ids={
+            day: {801, 802, 803} for day in [*dates, current_day]
+        },
+        warehouse_version_ids={
+            dates[0]: "whfv_exact_as_of",
+            dates[1]: "whfv_exact_as_of",
+            current_day: "whfv_current",
+        },
+        parameters={**v3, current_day: DEFAULT_PROXY_PARAMETERS},
+        proxy_v4_parameters={**v4, current_day: _proxy_v4_parameters()},
+        source_fingerprint="sha256:late-warehouse-revision",
+        cutover_business_date="2026-07-18",
+        operation_business_date=current_day,
+    )
+    _assert(
+        late_repeat["changed_cells"] == 0
+        and late_repeat["presentation_changes"] == 0
+        and late_repeat["coverage_changes"] == 0
+        and late_repeat["repair_signal_changes"] == 0,
+        "repeated closed-history protection is idempotent",
     )
 
 

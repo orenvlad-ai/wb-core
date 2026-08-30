@@ -70,6 +70,17 @@ later business-date overhead/version never rewrites an earlier ready date.
 Ready dates before `2026-08-22` retain their existing WB compatibility values;
 this repo/live release is not a historical backfill.
 
+After a ready date has a closed exact functional identity, the ordinary
+publisher freezes its cost, Proxy 3/4 and dependent TOTAL cells byte-semantically.
+If a later capital-event revision makes the public warehouse projection disagree
+with that date-bound functional evidence, the publisher keeps the last-good
+numeric or exact-zero cells and appends
+`functional_economics_historical_repair_required` with exact date, SKU, family,
+component and reason codes. It does not turn those cells into `missing`, change
+the immutable functional version or run a historical refresh. Only a separate
+version-bound targeted reconciliation may alter such a closed image; the current
+business date continues through the ordinary path.
+
 The ordinary functional-economics publisher must first load the exact-date
 product-capital image and only then build the shared WB-compatibility + WB/FF
 blend. That one lookup supplies the visible per-SKU cost, Proxy 3 and Proxy 4;
