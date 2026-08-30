@@ -892,6 +892,18 @@ durable identity without repeating the handoff. Pool overhead keeps its existing
 same-transaction queue; guided receipt/recovery keeps its durable posted/replay
 continuation. There is no active-then-best-effort recalculation window.
 
+Source-effect time and current material-publication time are separate exact
+facts. A lifecycle operation keeps the canonical business date derived from its
+immutable status observation, while its current aggregate successor and targeted
+queue bind the exact active functional version's business date. The latter must
+also equal the canonical business date of `published_at`; a stale or future
+active version fails closed. A late source observation may therefore catch the
+current aggregate up without rewriting a closed ready snapshot or pretending
+that the source event occurred on the current date. The source and material
+dates are both present in the successor fingerprint/provenance. The frozen
+cutover-manifest date is never reused as the business date of an ordinary
+post-cutover debit.
+
 The bounded internal recovery planner accepts only one proven active-date
 facility × FBS × SKU mismatch, binds the current balance watermark to an
 immutable lifecycle event or pool-document operation, recomputes own cost and

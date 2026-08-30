@@ -1124,12 +1124,13 @@ def drain_post_checkpoint_fbs_lifecycle(
             summary["identity_pending"] += 1
             continue
         order = _order_payload(raw_order, mapped, quantity=int(row[6]))
+        source_business_date = current_business_date(str(row[7]))
         try:
             require_fbs_pair_writeable(
                 conn,
                 facility_id=str(order["facility_id"]),
                 nm_id=int(order["nm_id"]),
-                effective_date=current_business_date(str(row[7])),
+                effective_date=source_business_date,
                 projection_epoch=int(manifest["feature_epoch"]),
             )
         except FbsApplicabilityError as exc:
@@ -1259,6 +1260,7 @@ def drain_post_checkpoint_fbs_lifecycle(
                     quantity_delta=-int(order["quantity"]),
                     wac=handoff_wac,
                     occurred_at=now,
+                    source_business_date=source_business_date,
                 )
                 summary["fulfilled"] += 1
         elif state == "reserved":
@@ -1625,6 +1627,7 @@ def _apply_exact_physical_delta(
     quantity_delta: int,
     wac: Decimal,
     occurred_at: str,
+    source_business_date: str | None = None,
 ) -> None:
     facility_id = str(order["facility_id"])
     nm_id = int(order["nm_id"])
@@ -1656,6 +1659,9 @@ def _apply_exact_physical_delta(
         if new_quantity == 0
         else canonical_decimal_text(_decimal_ratio(new_capital, new_quantity))
     )
+    exact_source_business_date = str(
+        source_business_date or manifest["business_date"]
+    )
     operation_id = "ffbo_" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:28]
     conn.execute(
         f"""INSERT INTO {OPERATIONS_TABLE}(
@@ -1670,7 +1676,7 @@ def _apply_exact_physical_delta(
             str(order["order_id"]),
             event_id,
             epoch,
-            str(manifest["business_date"]),
+            exact_source_business_date,
             occurred_at,
             _json({"event_id": event_id, "mutates_wb": False}),
         ),
@@ -1738,20 +1744,33 @@ def _apply_exact_physical_delta(
             capital_delta=capital_delta,
         )
         return
+    active_business_date = conn.execute(
+        """SELECT version.business_effective_date
+           FROM sheet_vitrina_v1_warehouse_functional_active active
+           JOIN sheet_vitrina_v1_warehouse_functional_versions version
+             ON version.version_id=active.version_id
+           WHERE active.slot=1"""
+    ).fetchone()
+    if active_business_date is None or not str(active_business_date[0] or ""):
+        raise FfPoolFbsLifecycleError(
+            "fbs_material_active_business_date_missing",
+            "Canonical FBS lifecycle publication requires an exact active business date",
+        )
     try:
         material = publish_fbs_pool_aggregate_revision(
             conn,
             affected_nm_ids=[nm_id],
             source_kind="fbs_order_lifecycle_event",
             source_id=event_id,
-            business_date=str(manifest["business_date"]),
+            business_date=str(active_business_date[0]),
             published_at=occurred_at,
+            source_business_date=exact_source_business_date,
         )
         _enqueue_lifecycle_material_recalculation(
             conn,
             event_id=event_id,
             nm_id=nm_id,
-            business_date=str(manifest["business_date"]),
+            business_date=str(material["business_date"]),
             requested_at=occurred_at,
             target_version_id=str(material["target_version_id"]),
         )

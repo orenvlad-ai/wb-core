@@ -48,7 +48,7 @@ from packages.application.warehouse_functional_lock import (
     warehouse_functional_write_lock,
 )
 from packages.application.business_data_write_barrier import barrier_status
-from packages.business_time import current_business_date_iso
+from packages.business_time import business_date_from_timestamp, current_business_date_iso
 
 if TYPE_CHECKING:
     from packages.application.registry_upload_db_backed_runtime import (
@@ -196,11 +196,14 @@ def publish_fbs_pool_aggregate_revision(
     source_id: str,
     business_date: str,
     published_at: str,
+    source_business_date: str = "",
 ) -> dict[str, Any]:
     """Publish pool detail and every functional operand as one new version.
 
-    The caller owns the shared writer lock and SQLite transaction.  This seam
-    is used by lifecycle debit, guided receipt/recovery and pool overhead.
+    The caller owns the shared writer lock and SQLite transaction. ``business_date``
+    is the exact current material-version date. ``source_business_date`` may
+    retain an earlier immutable event/document date, but can never be later.
+    This seam is used by lifecycle debit, guided receipt/recovery and pool overhead.
     """
 
     nm_ids = sorted({int(value) for value in affected_nm_ids if int(value) > 0})
@@ -214,14 +217,63 @@ def publish_fbs_pool_aggregate_revision(
             "FBS material publication exceeds the bounded SKU closure",
             details={"target_count": len(nm_ids)},
         )
+    material_business_date = _iso_date(business_date)
+    source_effective_date = _iso_date(source_business_date or material_business_date)
+    active = _active_version(conn)
+    if active is None:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_active_missing",
+            "One exact good active functional version is required",
+        )
+    active_business_date = _iso_date(active["business_effective_date"])
+    if active_business_date != material_business_date:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_business_date_drift",
+            "FBS material effect and source functional version use different business dates",
+            details={
+                "active_version_id": str(active["version_id"]),
+                "active_business_date": active_business_date,
+                "material_business_date": material_business_date,
+                "source_business_date": source_effective_date,
+            },
+        )
+    try:
+        publication_business_date = business_date_from_timestamp(str(published_at))
+    except (TypeError, ValueError) as exc:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_publication_time_invalid",
+            "FBS material publication requires one timezone-aware timestamp",
+        ) from exc
+    if material_business_date != publication_business_date:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_active_business_date_stale",
+            "Active functional version does not belong to the publication business date",
+            details={
+                "active_version_id": str(active["version_id"]),
+                "active_business_date": material_business_date,
+                "publication_business_date": publication_business_date,
+                "source_business_date": source_effective_date,
+            },
+        )
+    if source_effective_date > material_business_date:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_source_business_date_future",
+            "FBS source effect cannot be later than its current material publication",
+            details={
+                "active_version_id": str(active["version_id"]),
+                "material_business_date": material_business_date,
+                "source_business_date": source_effective_date,
+            },
+        )
     candidate = _build_candidate(
         conn,
         affected_nm_ids=nm_ids,
         source_kind=source_kind,
         source_id=source_id,
-        business_date=_iso_date(business_date),
+        business_date=material_business_date,
         published_at=str(published_at),
         allow_source_mismatch=False,
+        source_business_date=source_effective_date,
     )
     return _persist_candidate_and_switch(
         conn,
@@ -1864,6 +1916,7 @@ def _build_candidate(
     business_date: str,
     published_at: str,
     allow_source_mismatch: bool,
+    source_business_date: str = "",
     source_version_id_override: str = "",
     target_aggregates_override: Mapping[int, Mapping[str, Any]] | None = None,
     version_kind: str = "fbs_material_revision",
@@ -1873,6 +1926,13 @@ def _build_candidate(
         raise WarehouseFbsMaterialError(
             "fbs_material_active_missing",
             "One exact good active functional version is required",
+        )
+    material_business_date = _iso_date(business_date)
+    source_effective_date = _iso_date(source_business_date or material_business_date)
+    if source_effective_date > material_business_date:
+        raise WarehouseFbsMaterialError(
+            "fbs_material_source_business_date_future",
+            "FBS source effect cannot be later than its material publication",
         )
     source_version_id = str(source_version_id_override or active["version_id"])
     source = conn.execute(
@@ -1884,7 +1944,7 @@ def _build_candidate(
             "fbs_material_source_missing",
             "One exact good source functional version is required",
         )
-    if str(source["business_effective_date"] or "") != business_date:
+    if str(source["business_effective_date"] or "") != material_business_date:
         raise WarehouseFbsMaterialError(
             "fbs_material_business_date_drift",
             "FBS material effect and source functional version use different business dates",
@@ -1959,7 +2019,8 @@ def _build_candidate(
                     "source": CONTRACT_NAME,
                     "source_kind": str(source_kind),
                     "source_id": str(source_id),
-                    "business_date": business_date,
+                    "business_date": source_effective_date,
+                    "material_business_date": material_business_date,
                     "flow_quantity": str(aggregate["quantity"]),
                     "flow_capital_rub": str(aggregate["capital_rub"]),
                     "cost_freshness": "exact",
@@ -1972,7 +2033,8 @@ def _build_candidate(
                 "source_version_id": source_version_id,
                 "source_kind": str(source_kind),
                 "source_id": str(source_id),
-                "business_date": business_date,
+                "business_date": source_effective_date,
+                "material_business_date": material_business_date,
                 "published_at": published_at,
                 "pool_digest": str(aggregate["digest"]),
             },
@@ -2004,7 +2066,8 @@ def _build_candidate(
     source_watermarks["fbs_material_revision"] = {
         "source_kind": str(source_kind),
         "source_id": str(source_id),
-        "business_date": business_date,
+        "business_date": material_business_date,
+        "source_business_date": source_effective_date,
         "target_nm_ids": targets,
         "pool_digests": [target_aggregates[nm_id]["digest"] for nm_id in targets],
     }
@@ -2020,7 +2083,8 @@ def _build_candidate(
         "source_plan_fingerprint": str(source["plan_fingerprint"]),
         "source_kind": str(source_kind),
         "source_id": str(source_id),
-        "business_date": business_date,
+        "business_date": material_business_date,
+        "source_business_date": source_effective_date,
         "published_at": published_at,
         "target_nm_ids": targets,
         "roster_digest": roster_digest,
@@ -2104,6 +2168,8 @@ def _persist_candidate_and_switch(
                 "idempotent": True,
                 "source_version_id": source_version_id,
                 "target_version_id": target_version_id,
+                "business_date": str(candidate["business_date"]),
+                "source_business_date": str(candidate["source_business_date"]),
             }
         raise WarehouseFbsMaterialError(
             "fbs_material_candidate_identity_conflict",
@@ -2341,6 +2407,8 @@ def _persist_candidate_and_switch(
         "idempotent": False,
         "source_version_id": source_version_id,
         "target_version_id": target_version_id,
+        "business_date": str(candidate["business_date"]),
+        "source_business_date": str(candidate["source_business_date"]),
         "candidate_fingerprint": str(candidate["candidate_fingerprint"]),
         "business_projection": projection,
         "functional_balance_rows": len(candidate["lines"]),
