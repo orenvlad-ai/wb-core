@@ -1,6 +1,6 @@
 {
   "schema": "wb-core.production-apply-manifest/v2",
-  "operation_id": "wbc0010-autoanswers-budget-recovery-20260830",
+  "operation_id": "wbc0010-autoanswers-budget-recovery-20260830-correction-v1",
   "target_id": "wb_core_eu_hosted_runtime_active",
   "deployed_sha_contract": "exact-merge-sha",
   "dry_run_default": true,
