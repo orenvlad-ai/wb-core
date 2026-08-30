@@ -23,6 +23,7 @@ from packages.application.change_registry_writer import (  # noqa: E402
     InternalWriterRegistry,
 )
 from packages.application.sheet_vitrina_v1_ads import (  # noqa: E402
+    AdsBidSafetyThresholdPolicy,
     AdsSafetyConfig,
     SheetVitrinaV1AdsBlock,
     SheetVitrinaV1AdsError,
@@ -74,8 +75,73 @@ class FakeLiveAdapter:
         self.preflight_calls: list[list[str]] = []
         self.readback_calls: list[list[str]] = []
 
-    def preflight(self, targets, *, min_bid_interval_seconds, sleep):
-        del min_bid_interval_seconds, sleep
+    def owner_confirmation_policy(self) -> dict:
+        return {
+            "contract_name": "inventory_balance_owner_confirmed_bid_thresholds/v1",
+            "safety_threshold_policy": (
+                AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE.value
+            ),
+            "warnings_only": [
+                "absolute_max_bid",
+                "max_absolute_increase",
+                "max_percent_increase",
+            ],
+            "thresholds": {
+                "absolute_max_bid_rub": 1_000,
+                "max_absolute_increase_rub": 100,
+                "max_percent_increase": 50,
+            },
+            "direct_submit": True,
+            "staircase_submit": False,
+        }
+
+    def safety_threshold_warnings(self, target) -> list[dict]:
+        current = int(target["current_bid_minor"])
+        requested = int(target["final_target_bid_minor"])
+        warnings: list[dict] = []
+        if requested > 100_000:
+            warnings.append(
+                {
+                    "code": "absolute_max_bid",
+                    "current_bid_minor": current,
+                    "requested_bid_minor": requested,
+                    "threshold_minor": 100_000,
+                }
+            )
+        increase = requested - current
+        if increase > 10_000:
+            warnings.append(
+                {
+                    "code": "max_absolute_increase",
+                    "current_bid_minor": current,
+                    "requested_bid_minor": requested,
+                    "delta_minor": increase,
+                    "threshold_minor": 10_000,
+                }
+            )
+        if current > 0 and increase > 0:
+            delta_percent = Decimal(increase * 100) / Decimal(current)
+            if delta_percent > Decimal("50"):
+                warnings.append(
+                    {
+                        "code": "max_percent_increase",
+                        "current_bid_minor": current,
+                        "requested_bid_minor": requested,
+                        "delta_percent": float(delta_percent),
+                        "threshold_percent": 50,
+                    }
+                )
+        return warnings
+
+    def preflight(
+        self,
+        targets,
+        *,
+        min_bid_interval_seconds,
+        sleep,
+        safety_threshold_policy,
+    ):
+        del min_bid_interval_seconds, sleep, safety_threshold_policy
         if self.preflight_failure:
             raise RuntimeError("simulated worker interruption before submit")
         keys = [str(item["target_key"]) for item in targets]
@@ -229,6 +295,27 @@ def _target(index: int) -> dict:
     }
 
 
+def _threshold_targets() -> list[dict]:
+    values = [(500, 601), (100, 151), (900, 1_001)]
+    result = []
+    for offset, (current, requested) in enumerate(values, start=1):
+        target = _target(100 + offset)
+        target.update(
+            {
+                "payment_type": "cpc",
+                "campaign_group": "new_cpc",
+                "placement": "recommendations",
+                "target_key": (
+                    f"bid:{target['advert_id']}:{target['nm_id']}:recommendations"
+                ),
+                "current_bid_rub": current,
+                "calculated_target_bid_rub": requested,
+            }
+        )
+        result.append(target)
+    return result
+
+
 def _build_runtime(
     runtime_dir: Path,
     adapter: FakeLiveAdapter,
@@ -261,9 +348,15 @@ def _build_runtime(
     return block, sku, writer
 
 
-def _insert_calculation(block: SkuInventoryBalanceBlock, count: int, suffix: str) -> dict:
+def _insert_calculation(
+    block: SkuInventoryBalanceBlock,
+    count: int,
+    suffix: str,
+    *,
+    targets: list[dict] | None = None,
+) -> dict:
     calculation_id = f"ibc_live_smoke_{suffix}"
-    targets = [_target(index) for index in range(1, count + 1)]
+    exact_targets = targets or [_target(index) for index in range(1, count + 1)]
     payload = {
         "contract_name": CALCULATION_CONTRACT,
         "calculation_id": calculation_id,
@@ -275,7 +368,7 @@ def _insert_calculation(block: SkuInventoryBalanceBlock, count: int, suffix: str
                 "name": f"SKU {item['nm_id']}",
                 "campaign_recommendations": [item],
             }
-            for item in targets
+            for item in exact_targets
         ],
     }
     now = datetime.now(timezone.utc).isoformat()
@@ -426,6 +519,128 @@ def _ads_guard_case(root: Path) -> None:
     )[0]
     assert recovered["ok"] is True
     assert rate_sleeps == [0.5]
+
+
+def _ads_threshold_policy_case(root: Path) -> None:
+    sources = _threshold_targets()
+    targets = [
+        {
+            **source,
+            "current_bid_minor": int(source["current_bid_rub"]) * 100,
+            "requested_bid_minor": int(source["calculated_target_bid_rub"]) * 100,
+            "recommendation_item_id": f"threshold-{index}",
+        }
+        for index, source in enumerate(sources, start=1)
+    ]
+    promotion = FakePromotionSource(targets)
+    ads = SheetVitrinaV1AdsBlock(
+        runtime=object(),
+        runtime_dir=root,
+        source=promotion,
+        safety_config=AdsSafetyConfig(
+            write_enabled=True,
+            absolute_max_bid_kopecks=100_000,
+            max_percent_increase=Decimal("50"),
+            max_absolute_increase_kopecks=10_000,
+            preview_ttl_seconds=120,
+        ),
+    )
+
+    strict = ads.preflight_bid_targets(targets, sleep=lambda _seconds: None)
+    assert [item["error_code"] for item in strict] == ["safety_guard"] * 3
+    assert promotion.patch_payloads == []
+
+    confirmed = ads.preflight_bid_targets(
+        targets,
+        sleep=lambda _seconds: None,
+        safety_threshold_policy=(
+            AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE
+        ),
+    )
+    assert all(item["ok"] for item in confirmed), confirmed
+    warning_codes = [
+        {warning["code"] for warning in item["safety_warnings"]}
+        for item in confirmed
+    ]
+    assert "max_absolute_increase" in warning_codes[0]
+    assert "max_percent_increase" in warning_codes[1]
+    assert "absolute_max_bid" in warning_codes[2]
+    ads.submit_bid_targets(confirmed)
+    assert len(promotion.patch_payloads) == 1
+    submitted = {
+        int(item["nm_id"]): int(item["bid_kopecks"])
+        for campaign in promotion.patch_payloads[0]["bids"]
+        for item in campaign["nm_bids"]
+    }
+    assert submitted == {
+        int(item["nm_id"]): int(item["requested_bid_minor"])
+        for item in targets
+    }
+
+
+def _balance_confirmed_threshold_case(root: Path) -> None:
+    adapter = FakeLiveAdapter()
+    block, _sku, _writer = _build_runtime(root, adapter)
+    calculation = _insert_calculation(
+        block,
+        3,
+        "confirmed-thresholds",
+        targets=_threshold_targets(),
+    )
+    request = {
+        "calculation_id": calculation["calculation_id"],
+        "nm_ids": [row["nm_id"] for row in calculation["rows"]],
+        "mode": LIVE_MODE,
+        "confirmed": False,
+    }
+    try:
+        block.start_apply(request, actor="operator")
+    except SkuInventoryBalanceError as exc:
+        assert exc.http_status == 409
+    else:  # pragma: no cover
+        raise AssertionError("unconfirmed Balance manifest was accepted")
+    assert adapter.submit_attempts == []
+    assert _table_count(block.runtime.db_path, "sheet_vitrina_v1_inventory_balance_apply_jobs") == 0
+
+    job = block.start_apply({**request, "confirmed": True}, actor="operator")
+    terminal = _wait_terminal(block, job["job_id"])
+    assert terminal["state"] == "completed", terminal
+    assert terminal["progress"]["applied"] == 3
+    assert [len(batch) for batch in adapter.accepted_batches] == [1, 2]
+    with sqlite3.connect(block.runtime.db_path) as conn:
+        job_row = conn.execute(
+            """SELECT apply_manifest_json,apply_manifest_digest
+               FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=?""",
+            (job["job_id"],),
+        ).fetchone()
+        registry_rows = conn.execute(
+            """SELECT requested_value_integer FROM change_registry_items
+               ORDER BY requested_value_integer"""
+        ).fetchall()
+        linked = conn.execute(
+            """SELECT COUNT(*) FROM change_registry_operations
+               WHERE calculation_id=? AND apply_operation_id=?""",
+            (calculation["calculation_id"], job["job_id"]),
+        ).fetchone()[0]
+    manifest = json.loads(str(job_row[0]))
+    confirmation = manifest["owner_confirmation"]
+    assert confirmation["confirmed"] is True
+    assert confirmation["scope"] == "exact_immutable_manifest_targets"
+    assert confirmation["direct_submit"] is True
+    assert confirmation["staircase_submit"] is False
+    manifest_warning_codes = {
+        warning["code"]
+        for target in manifest["targets"]
+        for warning in target["safety_warnings"]
+    }
+    assert {
+        "max_absolute_increase",
+        "max_percent_increase",
+        "absolute_max_bid",
+    }.issubset(manifest_warning_codes)
+    assert str(job_row[1])
+    assert int(linked) == 3
+    assert [int(row[0]) for row in registry_rows] == [15_100, 60_100, 100_100]
 
 
 def _rate_limit_case(root: Path) -> None:
@@ -579,6 +794,8 @@ def main() -> None:
     with TemporaryDirectory(prefix="inventory-balance-live-") as tmp:
         base = Path(tmp)
         _ads_guard_case(base / "ads-guard")
+        _ads_threshold_policy_case(base / "ads-threshold-policy")
+        _balance_confirmed_threshold_case(base / "balance-threshold-policy")
         _regular_batch_case(base / "regular")
         _rate_limit_case(base / "rate")
         _transport_unknown_case(base / "transport")
