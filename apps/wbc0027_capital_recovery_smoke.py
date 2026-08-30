@@ -24,11 +24,18 @@ def _plan() -> dict:
         "status": "ready",
         "production_mutation_count": 0,
         "deployed_sha": "a" * 40,
+        "storage_generation": {
+            "generation_id": "operational-smoke",
+            "manifest_sha256": "sha256:" + "c" * 64,
+            "schema_version": "operational_v1",
+            "operational_path": "/private/operational.sqlite3",
+        },
         "plan_fingerprint": "sha256:" + "b" * 64,
         "product_operation_id": "recovery_" + "1" * 32,
         "economics_operation_id": "recovery_" + "2" * 32,
         "product_capital": {
             "before_target_digest": "sha256:0e29a9f06148b6fb9102f5f37db7522523b1202c7d36751023efe9831e56e94a",
+            "non_target_digest": "sha256:" + "d" * 64,
             "counts": {
                 "primary_row_count": 936,
                 "primary_cell_count": 19656,
@@ -40,10 +47,13 @@ def _plan() -> dict:
         },
         "functional_economics": {
             "before_digest": "sha256:529850e0be1d1518f6f6de2f32f650206c6afbf73a093df81359cf42d3e21253",
+            "non_target_digest": "sha256:" + "e" * 64,
             "logical_repair_count": 298,
             "persisted_repair_count": 472,
             "evidence_blocked": [f"blocked-{index}" for index in range(12)],
         },
+        "ready_snapshot_digest": "sha256:" + "f" * 64,
+        "outbox_digest": "sha256:" + "0" * 64,
     }
 
 
@@ -52,7 +62,7 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validation = validate_production_manifest(manifest)
     assert validation["valid"], validation
-    assert manifest["operation_id"] == "wbc0027-product-capital-and-qualified-economics-v1"
+    assert manifest["operation_id"] == "wbc0027-product-capital-and-qualified-economics-v2"
     assert manifest["expected_affected_record_count"] == 1155
 
     with tempfile.TemporaryDirectory(prefix="wbc0027-release-smoke-") as temp:
@@ -94,6 +104,8 @@ def main() -> None:
             dry = operation.dry_run()
             assert dry["production_mutation_count"] == 0
             assert dry["product_counts"]["primary_mismatch_count"] == 7655
+            assert dry["manifest_operation_id"].endswith("-v2")
+            assert dry["storage_generation"]["generation_id"] == "operational-smoke"
             applied = operation.apply()
             assert applied["status"] == "reconciled"
             repeated = operation.apply()

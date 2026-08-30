@@ -1,6 +1,6 @@
 {
   "schema": "wb-core.production-apply-manifest/v2",
-  "operation_id": "wbc0027-product-capital-and-qualified-economics-v1",
+  "operation_id": "wbc0027-product-capital-and-qualified-economics-v2",
   "target_id": "wb_core_eu_hosted_runtime_active",
   "deployed_sha_contract": "exact-merge-sha",
   "dry_run_default": true,
@@ -27,7 +27,7 @@
   ],
   "recovery_contract": {
     "mode": "bounded-recovery",
-    "id": "wbc0027-two-independent-t1-operations-query-only-reconciliation-v1",
+    "id": "wbc0027-two-independent-t1-operations-query-only-reconciliation-v2",
     "product_capital_primary_rows": 936,
     "product_capital_secondary_rows": 216,
     "qualified_economics_logical_cells": 298,

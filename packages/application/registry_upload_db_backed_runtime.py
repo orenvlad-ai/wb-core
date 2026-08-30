@@ -408,6 +408,12 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.warehouse_business_projection import (
+                ensure_warehouse_business_projection_schema,
+                materialize_warehouse_business_projection_reconciliation,
+            )
+
+            ensure_warehouse_business_projection_schema(conn)
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
@@ -449,6 +455,13 @@ class RegistryUploadDbBackedRuntime:
                 bundle_version=current_state.bundle_version,
                 refreshed_at=refreshed_at,
                 generation_identity=current_state.bundle_version,
+            )
+            # The ready-snapshot writer owns exact warehouse-history bindings.
+            # Materialize the exhaustive product-capital reconciliation here;
+            # status GETs only read the compact durable result.
+            materialize_warehouse_business_projection_reconciliation(
+                conn,
+                materialized_at=refreshed_at,
             )
             conn.commit()
 

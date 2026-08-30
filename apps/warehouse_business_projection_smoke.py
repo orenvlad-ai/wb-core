@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,11 +35,17 @@ from packages.application.warehouse_business_projection import (  # noqa: E402
     CURRENT_ROW_TABLE,
     OUTBOX_TABLE,
     STATE_TABLE,
+    _fingerprint,
+    _load_warehouse_business_projection_status_from_connection,
+    _metric_rows,
     apply_warehouse_business_projection_overlay,
     drain_warehouse_business_projection_outbox,
     ensure_functional_version_business_time_schema,
+    ensure_warehouse_business_projection_schema,
     load_warehouse_business_projection_status,
+    materialize_warehouse_business_projection_reconciliation,
     publish_functional_version_business_projection,
+    reconcile_warehouse_business_projection,
 )
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -183,7 +191,22 @@ def main() -> None:
         assert overlay_evidence["incidents"][0]["status"] == "historical_repair_required"
         guarded_status = load_warehouse_business_projection_status(runtime)
         assert guarded_status["health_status"] == "historical_repair_required"
-        assert guarded_status["reconciliation"]["unbound_row_count"] == 1
+        assert guarded_status["reconciliation"]["materialization_state"] == "stale"
+        assert guarded_status["reconciliation"]["counts_exact"] is False
+        assert (
+            guarded_status["reconciliation"]["invalidation_reason"]
+            == "projection_rows_changed_after_reconciliation"
+        )
+        assert guarded_status["reconciliation"]["dirty_projection_row_count"] == 1
+        with sqlite3.connect(
+            f"file:{runtime.db_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            exact_incident = reconcile_warehouse_business_projection(conn)
+        assert exact_incident["unbound_row_count"] == 1, exact_incident
+        assert exact_incident["mismatch_count"] >= 1, exact_incident
         before_qty = _all_quantity_digest(runtime)
 
         cost = block.record_order_level_cost_payment(
@@ -245,6 +268,7 @@ def main() -> None:
         assert repeated_status["outbox_counts"] == {
             "pending_exact_functional": 3
         }, repeated_status
+        _assert_status_scale_regression(Path(temp) / "scale-runtime")
     print("warehouse_business_projection_smoke: OK")
 
 
@@ -647,6 +671,312 @@ def _assert_late_transit_cost_scope_is_bounded(
         ).fetchone()
     assert source_kind == "functional_transit_cost_revision"
     assert status == "complete"
+
+
+def _assert_status_scale_regression(runtime_dir: Path) -> None:
+    """174 days x 34 SKU would make the former status path issue 6k+ queries."""
+
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    runtime.db_path.parent.mkdir(parents=True, exist_ok=True)
+    start_date = date(2026, 1, 1)
+    dates = [(start_date + timedelta(days=index)).isoformat() for index in range(174)]
+    sku_ids = list(range(100001, 100035))
+    timestamp = "2026-06-24T10:00:00Z"
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_warehouse_functional_schema(conn)
+        ensure_functional_version_business_time_schema(conn)
+        ensure_warehouse_business_projection_schema(conn)
+        version_rows = []
+        snapshot_rows = []
+        balance_rows = []
+        projection_rows = []
+        for selected_date in dates:
+            version_id = "scale-version-" + selected_date
+            source_digest = _fingerprint(
+                {"version_id": version_id, "date": selected_date}
+            )
+            version_rows.append(
+                (
+                    version_id,
+                    timestamp,
+                    source_digest,
+                    source_digest,
+                    timestamp,
+                    selected_date,
+                    timestamp,
+                )
+            )
+            snapshot_rows.append(
+                (
+                    "scale-snapshot-" + selected_date,
+                    version_id,
+                    timestamp,
+                    selected_date,
+                    json.dumps(sku_ids),
+                    len(sku_ids),
+                    _fingerprint({"snapshot": selected_date}),
+                    timestamp,
+                )
+            )
+            daily_balances = []
+            for offset, nm_id in enumerate(sku_ids, start=1):
+                quantity = str(offset)
+                capital = str(offset * 10)
+                balance = {
+                    "version_id": version_id,
+                    "warehouse_key": "ff",
+                    "nm_id": nm_id,
+                    "quantity": quantity,
+                    "wac_rub": "10",
+                    "capital_rub": capital,
+                    "cost_covered_quantity": quantity,
+                    "quality": "moving_weighted_average",
+                    "certified": 1,
+                    "wb_quantity": "0",
+                    "wb_in_way_to_client": "0",
+                    "wb_in_way_from_client": "0",
+                    "provenance_json": "{}",
+                }
+                daily_balances.append(balance)
+                balance_rows.append(
+                    tuple(
+                        balance[key]
+                        for key in (
+                            "version_id",
+                            "warehouse_key",
+                            "nm_id",
+                            "quantity",
+                            "wac_rub",
+                            "capital_rub",
+                            "cost_covered_quantity",
+                            "quality",
+                            "certified",
+                            "wb_quantity",
+                            "wb_in_way_to_client",
+                            "wb_in_way_from_client",
+                            "provenance_json",
+                        )
+                    )
+                )
+            metrics_by_nm = _metric_rows(
+                daily_balances,
+                affected_nm_ids=sku_ids,
+            )
+            for nm_id, values in sorted(metrics_by_nm.items()):
+                metrics = dict(values["metrics"])
+                presentation = dict(values["presentation"])
+                provenance = {
+                    "contract_name": "warehouse_business_projection",
+                    "contract_version": 1,
+                    "source": "canonical_functional_warehouse_version",
+                    "business_effective_date": selected_date,
+                    "as_of_date": selected_date,
+                    "base_version_id": version_id,
+                    "published_version_id": version_id,
+                    "functional_version_id": version_id,
+                    "snapshot_date": selected_date,
+                    "source_digest": source_digest,
+                    "published_at": timestamp,
+                    "missing_exact_projection_date": False,
+                }
+                provenance["publication_identity"] = _fingerprint(
+                    {
+                        "functional_version_id": version_id,
+                        "snapshot_date": selected_date,
+                        "nm_id": nm_id,
+                        "metrics": metrics,
+                    }
+                )
+                material = {
+                    "as_of_date": selected_date,
+                    "nm_id": nm_id,
+                    "metrics": metrics,
+                    "presentation": presentation,
+                    "provenance": provenance,
+                }
+                projection_rows.append(
+                    (
+                        selected_date,
+                        nm_id,
+                        "scale-revision",
+                        json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+                        json.dumps(
+                            presentation,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        json.dumps(
+                            provenance,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        _fingerprint(material),
+                        timestamp,
+                    )
+                )
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                version_id,cutover_id,version_kind,effective_at,status,
+                plan_fingerprint,local_source_digest,source_watermarks_json,
+                created_at,business_effective_date,published_at
+            ) VALUES(?,'warehouse_functional_cutover_v1','hourly_wb_sync',?,
+                     'good',?,?,'{}',?,?,?)
+            """,
+            version_rows,
+        )
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                snapshot_id,version_id,fetched_at,snapshot_date,
+                requested_nm_ids_json,pagination_complete,page_count,
+                page_offsets_json,raw_row_count,raw_rows_digest,raw_rows_json,
+                items_json,created_at
+            ) VALUES(?,?,?,?,?,1,1,'[0]',?,?,'[]','[]',?)
+            """,
+            snapshot_rows,
+        )
+        conn.executemany(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                cost_covered_quantity,quality,certified,wb_quantity,
+                wb_in_way_to_client,wb_in_way_from_client,provenance_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            balance_rows,
+        )
+        conn.executemany(
+            f"""
+            INSERT INTO {CURRENT_ROW_TABLE}(
+                as_of_date,nm_id,revision_id,metrics_json,presentation_json,
+                provenance_json,row_fingerprint,published_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            projection_rows,
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {STATE_TABLE}(
+                slot,revision_no,revision_id,source_revision,
+                business_effective_date,published_at,status,updated_at
+            ) VALUES(1,174,'scale-revision','scale-source',? ,?,'ready',?)
+            """,
+            (dates[0], timestamp, timestamp),
+        )
+        conn.commit()
+
+        materialize_selects: list[str] = []
+        conn.set_trace_callback(
+            lambda statement: materialize_selects.append(statement)
+            if statement.lstrip().upper().startswith("SELECT")
+            else None
+        )
+        started = time.perf_counter()
+        materialized = materialize_warehouse_business_projection_reconciliation(
+            conn,
+            materialized_at=timestamp,
+        )
+        materialize_elapsed = time.perf_counter() - started
+        conn.set_trace_callback(None)
+        conn.commit()
+    expected_scope_count = len(dates) * (len(sku_ids) + 1)
+    assert materialized["status"] == "published_exact", materialized
+    assert materialized["date_count"] == len(dates), materialized
+    assert materialized["scope_count"] == expected_scope_count, materialized
+    assert materialized["cell_count"] == expected_scope_count * 21, materialized
+    assert materialized["mismatch_count"] == 0, materialized
+    assert materialized["owned_metric_key_count"] == 42, materialized
+    assert len(materialize_selects) <= 10, materialize_selects
+    assert materialize_elapsed < 5.0, materialize_elapsed
+
+    with sqlite3.connect(
+        f"file:{runtime.db_path.resolve().as_posix()}?mode=ro",
+        uri=True,
+        timeout=1.0,
+    ) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        status_selects: list[str] = []
+        conn.set_trace_callback(
+            lambda statement: status_selects.append(statement)
+            if statement.lstrip().upper().startswith("SELECT")
+            else None
+        )
+        started = time.perf_counter()
+        status = _load_warehouse_business_projection_status_from_connection(conn)
+        status_elapsed = time.perf_counter() - started
+        conn.set_trace_callback(None)
+    assert status["health_status"] == "published_exact", status
+    assert status["reconciliation"]["counts_exact"] is True, status
+    assert status["reconciliation"]["digest"] == materialized["digest"], status
+    assert len(status_selects) <= 8, status_selects
+    assert status_elapsed < 1.0, status_elapsed
+
+    writer = sqlite3.connect(runtime.db_path, timeout=1.0)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        locked_started = time.perf_counter()
+        locked_status = load_warehouse_business_projection_status(runtime)
+        locked_elapsed = time.perf_counter() - locked_started
+        assert locked_status["health_status"] == "published_exact", locked_status
+        assert locked_elapsed < 1.0, locked_elapsed
+    finally:
+        writer.rollback()
+        writer.close()
+
+    with sqlite3.connect(runtime.db_path) as conn:
+        row = conn.execute(
+            f"SELECT metrics_json FROM {CURRENT_ROW_TABLE} "
+            "WHERE as_of_date=? AND nm_id=?",
+            (dates[-1], sku_ids[0]),
+        ).fetchone()
+        drifted = json.loads(str(row[0]))
+        drifted[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = None
+        drifted[OWN_TOTAL_QTY_METRIC_KEY] = (
+            float(drifted[OWN_TOTAL_QTY_METRIC_KEY]) + 1.0
+        )
+        conn.execute(
+            f"UPDATE {CURRENT_ROW_TABLE} SET metrics_json=? "
+            "WHERE as_of_date=? AND nm_id=?",
+            (
+                json.dumps(drifted, sort_keys=True, separators=(",", ":")),
+                dates[-1],
+                sku_ids[0],
+            ),
+        )
+        conn.commit()
+    stale_status = load_warehouse_business_projection_status(runtime)
+    assert stale_status["health_status"] == "historical_repair_required", stale_status
+    assert stale_status["reconciliation"]["materialization_state"] == "stale"
+    with sqlite3.connect(
+        f"file:{runtime.db_path.resolve().as_posix()}?mode=ro",
+        uri=True,
+    ) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        incident = reconcile_warehouse_business_projection(conn)
+    assert incident["mismatch_count"] >= 2, incident
+    assert incident["numeric_to_missing_count"] >= 1, incident
+    assert incident["cost_only_quantity_drift_count"] >= 1, incident
+    assert incident["closed_date_rewrite_count"] >= 1, incident
+    assert incident["digest"] != materialized["digest"], incident
+    legacy_minimum_query_count = len(dates) * (len(sku_ids) + 1)
+    assert legacy_minimum_query_count > 6000
+    assert len(status_selects) * 100 < legacy_minimum_query_count
+    print(
+        "warehouse_business_projection_status_scale: "
+        f"days={len(dates)} scopes={expected_scope_count} "
+        f"materialize_selects={len(materialize_selects)} "
+        f"status_selects={len(status_selects)} "
+        f"materialize_ms={materialize_elapsed * 1000:.3f} "
+        f"status_ms={status_elapsed * 1000:.3f} "
+        f"writer_lock_status_ms={locked_elapsed * 1000:.3f}"
+    )
 
 
 if __name__ == "__main__":

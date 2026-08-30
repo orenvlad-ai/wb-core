@@ -46,6 +46,7 @@ from packages.application.warehouse_business_projection import (  # noqa: E402
     _persist_projection_revision,
     _version_balances,
     ensure_warehouse_business_projection_schema,
+    materialize_warehouse_business_projection_reconciliation,
     reconcile_warehouse_business_projection,
 )
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
@@ -747,6 +748,7 @@ def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any
         raise Wbc0027RecoveryError("economics T1 recovery is not mutation-ready")
     with sqlite3.connect(runtime.db_path, timeout=30) as conn:
         conn.row_factory = sqlite3.Row
+        ensure_warehouse_business_projection_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         patch_identities = {tuple(item["identity"]) for item in economics["patches"]}
         current_non_target = _digest(
@@ -770,6 +772,10 @@ def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any
             )
             if changed.rowcount != 1:
                 raise Wbc0027RecoveryError("economics ready-snapshot CAS failed")
+        materialize_warehouse_business_projection_reconciliation(
+            conn,
+            materialized_at=_now(),
+        )
         conn.commit()
     registry.retain(operation_id, after_digest=str(economics["after_digest"]), non_target_digest=str(economics["non_target_digest"]))
     return {"status": "submitted", "operation_id": operation_id, "submit_count": 1, "updated_snapshot_count": len(economics["patches"])}
