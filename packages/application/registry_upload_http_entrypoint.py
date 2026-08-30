@@ -215,6 +215,9 @@ from packages.application.warehouse_functional import (
     _validated_wb_goods,
     enqueue_warehouse_targeted_recalculation,
 )
+from packages.application.warehouse_functional_economics_backfill import (
+    carry_forward_closed_functional_economics_metadata,
+)
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
@@ -11819,6 +11822,11 @@ def _with_full_refresh_metadata(
             previous_plan=previous_plan,
         )
         plan, proxy_v4_preservation = preserve_proxy_v4_historical_cells(
+            plan,
+            previous_plan=previous_plan,
+            business_date=business_date,
+        )
+        plan = carry_forward_closed_functional_economics_metadata(
             plan,
             previous_plan=previous_plan,
             business_date=business_date,

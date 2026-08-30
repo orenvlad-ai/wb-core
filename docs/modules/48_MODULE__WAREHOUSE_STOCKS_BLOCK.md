@@ -181,6 +181,12 @@ version or silently replaces numbers/confirmed zero with blanks. Historical
 change requires a separate version-bound reconciliation contract; current-day
 warehouse publication remains independent.
 
+Full Vitrina refresh preserves that boundary by carrying the exact closed-date
+coverage, functional-economics marker, repair registry and target presentation
+evidence together with the frozen last-good cells. It never copies current-date
+mutable evidence backward or fabricates closure. The following hourly publisher
+must complete in one pass and an immediate rebuild must be a no-op.
+
 Migration 147 narrows the ordinary main Web Vitrina planning profile to raw WB,
 signed FBS total, one row per active FBS facility and raw combined total.
 Incident-aware effective WB/combined aliases and every incident metric family

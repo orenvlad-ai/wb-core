@@ -46,7 +46,11 @@ adds an independent failing `warehouse_functional_history` expectation. This
 overlay is evaluated on every health read, so a daytime ordinary publication
 cannot remain green merely because the 06:30/07:30 pair predates the regression.
 The registry retains exact affected dates/SKU/families/reasons while the Vitrina
-continues to show preserved last-good cells.
+continues to show preserved last-good cells. Ordinary full refresh carries this
+closed-date registry and its matching presentation evidence into the new durable
+ready snapshot; current-date mutable evidence is not copied backward. Therefore
+the overlay remains visible immediately after refresh without an automatic repair
+hook.
 
 # 2. Durable shadow truth and recovery seam
 

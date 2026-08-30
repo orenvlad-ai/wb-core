@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -87,6 +88,7 @@ from packages.application.warehouse_recovery_policy import (
     capture_before_images,
     recovery_operation_id,
 )
+from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_functional_economics_backfill"
@@ -148,6 +150,188 @@ _WAREHOUSE_INPUT_COMPONENT_NAMES = {
 
 class FunctionalEconomicsBackfillError(RuntimeError):
     pass
+
+
+def carry_forward_closed_functional_economics_metadata(
+    plan: SheetVitrinaV1Envelope,
+    *,
+    previous_plan: SheetVitrinaV1Envelope,
+    business_date: str,
+) -> SheetVitrinaV1Envelope:
+    """Preserve exact closed-date economics evidence across an ordinary refresh.
+
+    The ordinary Vitrina builder owns source refreshes, not warehouse-history
+    certification.  When it reuses last-good closed cells it must therefore
+    carry the matching version-bound evidence as one unit.  Current-date
+    metadata stays owned by the fresh candidate and is never copied backward.
+    """
+
+    business_day = str(business_date or "")[:10]
+    try:
+        date.fromisoformat(business_day)
+    except ValueError as exc:
+        raise FunctionalEconomicsBackfillError(
+            "ordinary refresh business date is invalid"
+        ) from exc
+    plan_dates = {
+        str(day)[:10]
+        for day in getattr(plan, "date_columns", [])
+        if str(day or "")[:10]
+    }
+    closed_dates = {day for day in plan_dates if day < business_day}
+    if not closed_dates:
+        return plan
+
+    metadata = deepcopy(dict(getattr(plan, "metadata", {}) or {}))
+    previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
+
+    previous_coverage = previous_metadata.get("warehouse_history_coverage")
+    if previous_coverage is not None:
+        if not isinstance(previous_coverage, Mapping):
+            raise FunctionalEconomicsBackfillError(
+                "previous warehouse history coverage must be an object"
+            )
+        candidate_coverage = metadata.get("warehouse_history_coverage")
+        if candidate_coverage is not None and not isinstance(
+            candidate_coverage, Mapping
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "candidate warehouse history coverage must be an object"
+            )
+        merged_coverage = deepcopy(dict(candidate_coverage or {}))
+        for day in sorted(closed_dates):
+            if day not in previous_coverage:
+                continue
+            entry = previous_coverage[day]
+            if not isinstance(entry, Mapping):
+                raise FunctionalEconomicsBackfillError(
+                    "previous warehouse history coverage entry must be an object"
+                )
+            merged_coverage[day] = deepcopy(dict(entry))
+        if merged_coverage:
+            metadata["warehouse_history_coverage"] = merged_coverage
+
+    previous_registry = _historical_repair_registry_or_none(
+        previous_metadata.get(HISTORICAL_REPAIR_METADATA_KEY)
+    )
+    candidate_registry = _historical_repair_registry_or_none(
+        metadata.get(HISTORICAL_REPAIR_METADATA_KEY)
+    )
+    merged_repair_dates = deepcopy(
+        dict(candidate_registry.get("dates") or {})
+        if candidate_registry is not None
+        else {}
+    )
+    if previous_registry is not None:
+        for day, entry in previous_registry["dates"].items():
+            if day in closed_dates:
+                merged_repair_dates[day] = deepcopy(dict(entry))
+    if merged_repair_dates:
+        metadata[HISTORICAL_REPAIR_METADATA_KEY] = {
+            "contract_name": HISTORICAL_REPAIR_CONTRACT,
+            "status": "historical_repair_required",
+            "dates": {
+                day: merged_repair_dates[day]
+                for day in sorted(merged_repair_dates)
+            },
+        }
+    else:
+        metadata.pop(HISTORICAL_REPAIR_METADATA_KEY, None)
+
+    previous_presentation = previous_metadata.get("server_cell_presentation")
+    if previous_presentation is not None:
+        if not isinstance(previous_presentation, Mapping):
+            raise FunctionalEconomicsBackfillError(
+                "previous server cell presentation must be an object"
+            )
+        candidate_presentation = metadata.get("server_cell_presentation")
+        if candidate_presentation is not None and not isinstance(
+            candidate_presentation, Mapping
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "candidate server cell presentation must be an object"
+            )
+        merged_presentation = deepcopy(dict(candidate_presentation or {}))
+        for row_id, raw_by_date in previous_presentation.items():
+            metric_key = str(row_id or "").partition("|")[2]
+            if metric_key not in PRESENTATION_TARGET_KEYS:
+                continue
+            if not isinstance(raw_by_date, Mapping):
+                raise FunctionalEconomicsBackfillError(
+                    "previous target cell presentation must be an object"
+                )
+            candidate_by_date = merged_presentation.get(str(row_id))
+            if candidate_by_date is not None and not isinstance(
+                candidate_by_date, Mapping
+            ):
+                raise FunctionalEconomicsBackfillError(
+                    "candidate target cell presentation must be an object"
+                )
+            merged_by_date = deepcopy(dict(candidate_by_date or {}))
+            for day, entry in raw_by_date.items():
+                day_key = str(day)[:10]
+                if day_key in closed_dates:
+                    merged_by_date[day_key] = deepcopy(entry)
+            if merged_by_date:
+                merged_presentation[str(row_id)] = merged_by_date
+        if merged_presentation:
+            metadata["server_cell_presentation"] = merged_presentation
+
+    previous_marker = previous_metadata.get("functional_economics_backfill")
+    candidate_marker = metadata.get("functional_economics_backfill")
+    if candidate_marker is not None and not isinstance(candidate_marker, Mapping):
+        raise FunctionalEconomicsBackfillError(
+            "candidate functional economics marker must be an object"
+        )
+    if previous_marker is not None:
+        if not isinstance(previous_marker, Mapping):
+            raise FunctionalEconomicsBackfillError(
+                "previous functional economics marker must be an object"
+            )
+        marker_from = str(previous_marker.get("date_from") or "")[:10]
+        marker_to = str(previous_marker.get("date_to") or "")[:10]
+        try:
+            date.fromisoformat(marker_from)
+            date.fromisoformat(marker_to)
+        except ValueError as exc:
+            raise FunctionalEconomicsBackfillError(
+                "previous functional economics marker date range is invalid"
+            ) from exc
+        marker_dates_are_closed = (
+            marker_from in closed_dates
+            and marker_to in closed_dates
+            and marker_from <= marker_to
+        )
+        inventory_publication = previous_marker.get("inventory_cost_publication")
+        if inventory_publication is not None and not isinstance(
+            inventory_publication, Mapping
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "previous inventory cost publication marker must be an object"
+            )
+        date_evidence = (
+            inventory_publication.get("date_evidence")
+            if isinstance(inventory_publication, Mapping)
+            else None
+        )
+        if date_evidence is not None and not isinstance(date_evidence, Mapping):
+            raise FunctionalEconomicsBackfillError(
+                "previous inventory cost date evidence must be an object"
+            )
+        marker_evidence_dates_are_closed = all(
+            str(day)[:10] in closed_dates
+            for day in (date_evidence or {})
+        )
+        if (
+            candidate_marker is None
+            and marker_dates_are_closed
+            and marker_evidence_dates_are_closed
+        ):
+            metadata["functional_economics_backfill"] = deepcopy(
+                dict(previous_marker)
+            )
+
+    return replace(plan, metadata=metadata)
 
 
 def build_functional_economics_backfill_plan(

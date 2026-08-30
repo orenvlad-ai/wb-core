@@ -81,6 +81,14 @@ the immutable functional version or run a historical refresh. Only a separate
 version-bound targeted reconciliation may alter such a closed image; the current
 business date continues through the ordinary path.
 
+An ordinary full refresh carries the frozen cell and its exact closed-date
+evidence as one unit: `warehouse_history_coverage`, the completed functional-
+economics marker, typed repair registry and target presentation evidence. Only
+dates strictly before the canonical business date are eligible; current-date
+coverage/presentation remains owned by the fresh candidate. This makes the next
+hourly economics publication converge in one write and its immediate rebuild a
+no-op instead of creating a second presentation-only delta.
+
 The ordinary functional-economics publisher must first load the exact-date
 product-capital image and only then build the shared WB-compatibility + WB/FF
 blend. That one lookup supplies the visible per-SKU cost, Proxy 3 and Proxy 4;
