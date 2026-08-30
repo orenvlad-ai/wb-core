@@ -113,12 +113,22 @@ def _deployment_quiesce() -> Any:
     registry_service = "wb-core-registry-http.service"
 
     def unit_state(unit: str) -> dict[str, Any]:
+        is_timer = unit.endswith(".timer")
+        properties = [
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "Result",
+            "InvocationID",
+        ]
+        if not is_timer:
+            properties.extend(("MainPID", "ExecMainStatus"))
         result = subprocess.run(
             [
                 "systemctl",
                 "show",
                 unit,
-                "--property=LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,InvocationID",
+                "--property=" + ",".join(properties),
                 "--no-pager",
             ],
             check=True,
@@ -132,28 +142,57 @@ def _deployment_quiesce() -> Any:
             key, separator, value = line.partition("=")
             if separator:
                 values[key] = value
-        required = {
-            "LoadState",
-            "ActiveState",
-            "SubState",
-            "Result",
-            "MainPID",
-            "ExecMainStatus",
-            "InvocationID",
-        }
+        required = set(properties)
         if not required.issubset(values):
             missing = ",".join(sorted(required - set(values)))
             raise RuntimeError(f"systemd quiesce state is incomplete for {unit}: {missing}")
-        return {
+        state = {
             "unit": unit,
+            "unit_kind": "timer" if is_timer else "service",
             "load_state": values["LoadState"],
             "active_state": values["ActiveState"],
             "sub_state": values["SubState"],
             "result": values["Result"],
-            "main_pid": values["MainPID"],
-            "exec_main_status": values["ExecMainStatus"],
+            "main_pid": None if is_timer else values["MainPID"],
+            "exec_main_status": None if is_timer else values["ExecMainStatus"],
             "invocation_id": values["InvocationID"],
         }
+        if state["load_state"] != "loaded":
+            raise RuntimeError(f"systemd quiesce unit is not loaded: {unit}")
+        if state["result"] not in {"", "success"}:
+            raise RuntimeError(f"systemd quiesce unit is unhealthy: {unit}")
+        active_state = str(state["active_state"])
+        sub_state = str(state["sub_state"])
+        if is_timer:
+            healthy_timer = (
+                active_state == "active" and sub_state in {"waiting", "running"}
+            ) or (
+                active_state == "inactive" and sub_state == "dead"
+            )
+            if not healthy_timer:
+                raise RuntimeError(f"systemd quiesce timer state is invalid: {unit}")
+            return state
+        try:
+            main_pid = int(str(state["main_pid"]))
+            exec_main_status = int(str(state["exec_main_status"]))
+        except ValueError as error:
+            raise RuntimeError(
+                f"systemd quiesce service process state is invalid: {unit}"
+            ) from error
+        healthy_service = (
+            active_state in {"active", "activating"}
+            and sub_state in {"running", "start"}
+            and main_pid > 0
+            and exec_main_status == 0
+        ) or (
+            active_state == "inactive"
+            and sub_state == "dead"
+            and main_pid == 0
+            and exec_main_status == 0
+        )
+        if not healthy_service:
+            raise RuntimeError(f"systemd quiesce service state is invalid: {unit}")
+        return state
 
     def is_active(state: dict[str, Any]) -> bool:
         return str(state["active_state"]) in {

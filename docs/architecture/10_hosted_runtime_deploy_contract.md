@@ -807,7 +807,10 @@ Archived MCP compatibility publication gate:
   cannot lose startup to a concurrent bounded worker transaction;
 - canonical deploy sets `WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE=1` for
   `prepare-deploy`. The repo-owned quiet window records the exact timer/service
-  state and first stops only the Autoanswers timers that were active, closing
+  state with role-aware systemd fields: timer units do not require service-only
+  `MainPID`/`ExecMainStatus`, while service units retain exact process/status
+  validation. Unknown, failed and impossible timer/service states remain
+  fail-closed. The window first stops only the Autoanswers timers that were active, closing
   new worker/readonly admission. It boundedly waits for both paired oneshots to
   become terminal and never issues `systemctl stop` to an active oneshot. A
   timeout fails closed before registry or schema mutation and restores exactly

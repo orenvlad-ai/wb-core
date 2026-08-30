@@ -204,7 +204,9 @@ def main() -> int:
         "apps.wb_autoanswers_runtime_test.RuntimeTest.test_budget_reconciliation_fingerprint_binds_complete_settings",
         "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_drains_active_provider_job_without_service_stop",
         "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_timeout_restores_timers_without_killing_worker",
-        "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_accepts_terminal_failed_oneshot_and_preserves_no_active_timer",
+        "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_preserves_no_active_timer",
+        "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_rejects_unhealthy_timer",
+        "apps.wb_autoanswers_activation_test.ActivationTest.test_deploy_quiesce_rejects_unhealthy_service",
     ):
         suite.addTests(loader.loadTestsFromName(name))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
