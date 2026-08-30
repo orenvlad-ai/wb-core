@@ -3,17 +3,19 @@ title: "Модуль: единая инструментация внутренн
 doc_id: "WB-CORE-MODULE-58-CHANGE-REGISTRY-INTERNAL-WRITERS"
 doc_type: "module"
 status: "active"
-purpose: "Гарантированно фиксировать внутренние price/bid interventions до WB submit и завершать их только доказанным lifecycle."
-scope: "Standalone Prices/Ads, SKU Management price/bid, Balance bid apply и каждый SPP measurement/restore transition; один canonical seller/account; immutable StoreRegistry operational storage."
+purpose: "Гарантированно фиксировать внутренние price/bid/campaign-state interventions до WB submit и завершать их только доказанным lifecycle."
+scope: "Standalone Prices/Ads, SKU Management price/bid, Balance bid/campaign-state apply и каждый SPP measurement/restore transition; один canonical seller/account; immutable StoreRegistry operational storage."
 source_basis:
   - "docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md"
   - "docs/modules/56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md"
+  - "docs/modules/53_MODULE__SKU_INVENTORY_BALANCE.md"
   - "packages/application/change_registry_writer.py"
   - "packages/application/registry_upload_http_entrypoint.py"
 related_runners:
   - "apps/change_registry_internal_writers_smoke.py"
+  - "apps/sku_inventory_balance_live_apply_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Balance live bid apply подключён к тому же writer seam; deploy по-прежнему не выполняет WB mutation."
+update_note: "Balance campaign_state подключён к тому же writer seam и durable queue; факт появляется только после exact state readback, deploy по-прежнему не выполняет WB mutation."
 ---
 
 # 1. Runtime binding and surfaces
@@ -42,9 +44,12 @@ Bid identity is seller/account + nmID + advert_id + placement + `bid_minor`;
 integer zero is valid.
 
 Balance batch is transport grouping only: it prepares one immutable operation,
-item and attempt per atomic target before the shared PATCH. Every operation
-carries `calculation_id`, `apply_job_id` and stable `recommendation_item_id`;
-analytics never treats a transport batch as one intervention.
+item and attempt per atomic target before the shared bid PATCH or single
+campaign-state call. Every operation carries `calculation_id`, `apply_job_id`
+and stable `recommendation_item_id`; analytics never treats a transport batch
+as one intervention. State items use exact-one campaign identity, empty
+placement and canonical `campaign_state` before/requested text values; bid and
+state never share one numeric parameter.
 
 # 3. Submit, proof and ambiguity
 
@@ -52,6 +57,12 @@ A single returned WB submit appends `submitted` with only sanitized receipt
 identity/digest. Exact matching WB readback then appends `confirmed` and one
 `wb_readback` fact for each changed canonical field. Unchanged tuple members
 remain atomic items but do not become transition facts.
+
+For Balance campaign state, official status mapping is `4=ready`, `9=active`,
+`11=paused`; official `start` admits `4|11`, while official reversible `pause`
+admits `9`. A matching fresh readback of the requested canonical state is the
+only confirmation proof. Unsupported/currently unresolvable actions fail
+closed before submit.
 
 An explicit WB rejection before acceptance terminates the created attempt as
 `rejected`/`failed`. Transport uncertainty or nonmatching/unverifiable readback
@@ -74,7 +85,8 @@ intervals remain separate facts.
 
 # 5. Excluded scope
 
-Excluded: historical import/backfill, campaign-state writers, automatic WB
+Excluded: historical import/backfill, campaign creation/deletion, automatic WB
 probes, deployment-time writes and production-mutation manifests. Balance
-dry-run continues to report `wb_patch_called=false` and creates zero registry
-rows; confirmed live Balance targets use the same immutable proof contract.
+dry-run continues to report both `wb_patch_called=false` and
+`wb_campaign_action_called=false` and creates zero registry rows; confirmed
+live Balance bid/state targets use the same immutable proof contract.

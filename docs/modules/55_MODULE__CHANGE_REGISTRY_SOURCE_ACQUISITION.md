@@ -22,7 +22,7 @@ related_modules:
 related_runners:
   - "apps/change_registry_source_acquisition_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Strict acquisition remains persistence-free; module 56 validates/persists it and active module 57 schedules observation without WB mutation."
+update_note: "Strict acquisition remains persistence-free and read-only; its exact campaign state/payment/placement evidence is also the canonical readback vocabulary used by the separate module-58 writer."
 ---
 
 # 1. Scope and activation boundary
@@ -144,6 +144,11 @@ Excluded: baseline diff engine, historical import/backfill, registry rows,
 checkpoints, facts, observer/scheduler/lease/job, public API/UI, writer
 instrumentation, manual pending, Balance bridge, analytics/recommendations,
 campaign/price/bid mutation and any production data write.
+
+The active Balance state writer does not route through this acquirer and does
+not relax its zero-POST/PATCH seam. It uses the same normalized official
+campaign-state vocabulary only through module 37/53, then module 58 records the
+separate exact writer/readback proof.
 
 The separately bounded successor is
 `56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md`. It consumes this module's

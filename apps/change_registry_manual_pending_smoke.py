@@ -32,6 +32,9 @@ from packages.application.change_registry import (  # noqa: E402
 from packages.application.change_registry_observer import (  # noqa: E402
     ChangeRegistryReadSurface,
 )
+from packages.application.change_registry_writer import (  # noqa: E402
+    InternalWriterRegistry,
+)
 
 
 def _recommendation(
@@ -244,6 +247,32 @@ def main() -> None:
         else:
             raise AssertionError("zero-cardinality identity created a pending lifecycle")
         assert _counts(invalid)["items"] == 0
+
+        live_writer_only = root / "live-writer-only"
+        live_writer_repository = ChangeRegistryRepository(live_writer_only)
+        live_writer_repository.initialize_schema()
+        live_writer = InternalWriterRegistry(
+            runtime_dir=live_writer_only,
+            seller_id=SELLER,
+            account_scope=ACCOUNT,
+        )
+        live_writer.prepare_bid(
+            source_surface="sku_inventory_balance",
+            actor="operator",
+            native_operation_id="live-apply-without-manual-pending",
+            nm_id=101,
+            advert_id=201,
+            placement="search",
+            before_bid_minor=1000,
+            requested_bid_minor=1100,
+            requested_at="2026-08-29T00:01:00Z",
+            calculation_id="ibcalc_live_writer",
+            apply_operation_id="ibapply_live_writer",
+            recommendation_item_id="ibr_live_writer_only",
+        )
+        assert live_writer_repository.manual_pending_statuses(
+            ["ibr_live_writer_only"]
+        ) == {}
 
     print("change_registry_manual_pending_smoke: OK")
 

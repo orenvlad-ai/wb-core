@@ -32,7 +32,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/09_official_api_secret_boundary.md"
 source_of_truth_level: "module_canonical"
-update_note: "Guarded bid commit prepares the immutable registry before the sole WB patch and confirms only exact bid readback; native audit remains evidence."
+update_note: "Guarded bid commit remains unchanged; shared Promotion boundary now also exposes official start/pause plus exact state readback only to the Balance durable writer."
 ---
 
 # 1. Идентификатор и статус
@@ -78,10 +78,24 @@ Read endpoints:
 - `GET /api/advert/v0/bids/recommendations` loads recommended bids for CPM; CPC renders as `not_available`.
 - `GET /adv/v3/fullstats` loads campaign/SKU aggregate metrics.
 
-Write endpoint:
+Bid write endpoint:
 - `PATCH /api/advert/v1/bids` is called only from `POST /v1/sheet-vitrina-v1/ads/bid-change/commit`.
 
-Frontend must never call WB Promotion API directly and must never issue an ads `PATCH`.
+Campaign-state endpoints exposed only through the server-side Balance durable
+apply adapter are:
+
+- `GET /adv/v0/start?id=<advert_id>` for official status `4` (ready) or `11` (paused);
+- `GET /adv/v0/pause?id=<advert_id>` for official status `9` (active).
+
+Canonical state mapping is `4=ready`, `9=active`, `11=paused`. The operator
+word `остановить` maps to reversible official `pause`; terminal `/stop` is not
+used. Before either call Balance refetches detail, proves exact-one nmID,
+payment/placement evidence and raw-status/state CAS. Exact post-call advert
+detail readback is mandatory; unsupported transition fails closed before the
+call. The standalone `Реклама` preview/commit routes do not expose state
+actions.
+
+Frontend must never call WB Promotion API directly and must never issue an ads `PATCH` or campaign-state request.
 
 # 4. Reverse Mapping Design
 
@@ -192,10 +206,10 @@ These use fake Promotion API sources and do not call live WB write methods. They
 - WB Media.
 - normquery/search cluster bid editing.
 - auto-bidding.
-- bulk bid changes.
+- bulk bid changes from the standalone `Реклама` surface (Balance owns its separately documented bounded apply protocol).
 - campaign-first top-level UI.
 - Google Sheets/GAS write/load revival.
 
 ## `Управление SKU` reuse
 
-The `Управление SKU` section reuses this exact WB Promotion adapter, campaign membership/min-bid/current-bid validation and single-target PATCH contract. Its quick table uses one reverse placement index so it does not issue fullstats/minimum/recommendation requests for every SKU. Preview reads only the selected advert and exact minimum; commit reads that advert and minimum again. Post-PATCH readback uses `read_exact_bid` with bounded early cadence/deadline for only `nm_id + advert_id + placement`; it does not rebuild expanded SKU detail or refetch fullstats/minimum/recommendations. Success is recorded only after that exact tuple returns the requested bid and carries the preserved campaign identity. That section is enabled by normal runtime construction and does not inherit the standalone tab's legacy `SHEET_VITRINA_ADS_WRITE_ENABLED` switch; section auth, preview, explicit confirmation, stale/safety validation, single-use action, audit and readback are its sufficient gates. The original `Реклама` tab gate is unchanged.
+The `Управление SKU` section reuses this exact WB Promotion adapter, campaign membership/min-bid/current-bid validation and single-target PATCH contract. Its quick table uses one reverse placement index so it does not issue fullstats/minimum/recommendation requests for every SKU. Preview reads only the selected advert and exact minimum; commit reads that advert and minimum again. Post-PATCH readback uses `read_exact_bid` with bounded early cadence/deadline for only `nm_id + advert_id + placement`; it does not rebuild expanded SKU detail or refetch fullstats/minimum/recommendations. Success is recorded only after that exact tuple returns the requested bid and carries the preserved campaign identity. That section is enabled by normal runtime construction and does not inherit the standalone tab's legacy `SHEET_VITRINA_ADS_WRITE_ENABLED` switch; section auth, preview, explicit confirmation, stale/safety validation, single-use action, audit and readback are its sufficient gates. `Баланс запасов` additionally reuses the adapter's explicit state preflight/submit/readback methods only through module 53/58; it does not add state controls to the standalone Ads tab. The original `Реклама` tab gate is unchanged.

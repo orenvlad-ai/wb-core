@@ -3,7 +3,7 @@ title: "Модуль: единый реестр изменений — foundatio
 doc_id: "WB-CORE-MODULE-54-CHANGE-REGISTRY-FOUNDATION"
 doc_type: "module"
 status: "active_foundation"
-purpose: "Зафиксировать server-owned append-only contract seller actions и observation/health evidence для read-only observer и future internal price/bid capture."
+purpose: "Зафиксировать server-owned append-only contract seller actions и observation/health evidence для read-only observer и internal price/bid/campaign-state capture."
 scope: "Additive operational SQLite schema, deterministic scalar canonicalization, immutable repository primitives, stable reads/cursors and a transaction-safe non-canonical manual-pending coordination seam."
 source_basis:
   - "AGENTS.md"
@@ -20,7 +20,7 @@ related_modules:
 related_runners:
   - "apps/change_registry_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Foundation remains immutable; module 57 owns the read-only observer and module 58 activates only future internal price/bid capture through shared repository transactions."
+update_note: "Foundation remains immutable; module 57 owns observation/manual-pending, while module 58 captures proven internal price/bid/campaign-state writer lifecycles."
 ---
 
 # 1. Решение о storage и граница активации
@@ -37,9 +37,10 @@ PostgreSQL target. Смена storage architecture, cross-store move или Post
 migration остаются отдельным решением.
 
 Canonical baseline/diff engine описан в module 56; активный read-only observer
-и UI/API — в module 57. Future internal Prices, Ads, SKU Management и SPP
-writes используют только application seam модуля 58. Balance и refresh не
-создают action rows. Existing Prices/Ads JSONL и
+и UI/API — в module 57. Internal Prices, Ads, SKU Management, Balance и SPP
+writes используют только application seam модуля 58. Balance calculation,
+preview, dry-run и refresh не создают action rows; confirmed live bid/state
+writer создаёт их непосредственно перед единственным submit. Existing Prices/Ads JSONL и
 `sheet_vitrina_v1_sku_action_events` остаются native evidence и не удаляются,
 не переписываются и не импортируются этим блоком.
 
@@ -162,8 +163,11 @@ action и не campaign transition fact без отдельного proof.
   pending event. Update требует stable identity и monotonic `revision+1`, delete
   запрещён; repository меняет event и pointer в одном `BEGIN IMMEDIATE`.
 
-Manual-pending product behavior не активировано этим блоком. Pointer нельзя
-использовать как historical truth или proven fact.
+Manual-pending product behavior активируется только модулем 57/Balance manual
+flow, не самим foundation. Lookup обязан начинаться с реальных pending events:
+наличие live-writer item с `recommendation_item_id`, но без manual event, не
+делает его pending candidate. Pointer нельзя использовать как historical truth
+или proven fact.
 
 # 5. Immutability, idempotency и reads
 
@@ -194,7 +198,7 @@ credential-shaped markers. Full WB request/response, headers and bodies оста
 - historical import/backfill/baseline;
 - observer, diff, scheduler, lease/job runtime или health collection;
 - Prices/Ads/SKU writer instrumentation;
-- campaign creation/write behavior;
+- campaign creation/deletion behavior (typed campaign-state writer capture принадлежит module 58);
 - manual-pending UX/business behavior;
 - public API, Web Vitrina UI или multi-account UI;
 - outcome/causal analytics, recommendations generation или interval projection;

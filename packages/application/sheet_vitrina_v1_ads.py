@@ -26,6 +26,7 @@ from packages.application.change_registry_writer import (
 
 
 SUPPORTED_BID_STATUSES = {4, 9, 11}
+CAMPAIGN_STATE_BY_STATUS = {4: "ready", 9: "active", 11: "paused"}
 SUPPORTED_PLACEMENTS = {"combined", "search", "recommendations"}
 MIN_BID_PLACEMENT = {
     "combined": "combined",
@@ -593,6 +594,177 @@ class SheetVitrinaV1AdsBlock:
                     ),
                     "error_code": "" if row is not None else "placement_not_found",
                     "message": "" if row is not None else "Размещение не найдено при проверке.",
+                }
+            )
+        return results
+
+    def preflight_campaign_state_targets(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Fresh exact campaign identity/CAS gate for Balance state actions."""
+
+        normalized = [_normalize_campaign_state_target(item) for item in targets]
+        advert_ids = sorted({item["advert_id"] for item in normalized})
+        payload = self.source.fetch_adverts(
+            advert_ids, statuses=sorted(CAMPAIGN_STATE_BY_STATUS)
+        )
+        raw_adverts = payload.get("adverts") if isinstance(payload, Mapping) else []
+        campaigns = {
+            int(campaign["advert_id"]): campaign
+            for campaign in (
+                _parse_campaign(item)
+                for item in (raw_adverts or [])
+                if isinstance(item, Mapping)
+            )
+            if int(campaign["advert_id"]) > 0
+        }
+        results: list[dict[str, Any]] = []
+        for item in normalized:
+            campaign = campaigns.get(item["advert_id"])
+            if campaign is None:
+                results.append(
+                    _bulk_preflight_error(
+                        item, "campaign_not_found", "Кампания не найдена в WB."
+                    )
+                )
+                continue
+            candidate_nm_ids = sorted(
+                {
+                    int(value)
+                    for value in (
+                        _optional_int(row.get("nm_id"))
+                        for row in campaign.get("nm_settings", [])
+                        if isinstance(row, Mapping)
+                    )
+                    if value is not None
+                }
+            )
+            if candidate_nm_ids != [item["nm_id"]]:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "campaign_identity_incident",
+                        "Кампания должна однозначно принадлежать ровно одному SKU.",
+                        candidate_nm_ids=candidate_nm_ids,
+                    )
+                )
+                continue
+            payment_type = str(campaign.get("payment_type") or "").strip().lower()
+            if payment_type != item["payment_type"] or payment_type not in {"cpm", "cpc"}:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "campaign_payment_changed",
+                        "Тип оплаты кампании изменился после расчёта.",
+                    )
+                )
+                continue
+            placements = {
+                str(row["placement"])
+                for row in _campaign_placement_rows(campaign)
+                if int(row["nm_id"]) == item["nm_id"]
+            }
+            if item["placement_evidence"] not in placements:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "campaign_placement_changed",
+                        "Размещение кампании изменилось после расчёта.",
+                    )
+                )
+                continue
+            status = _as_int(campaign.get("status"), default=0)
+            state = CAMPAIGN_STATE_BY_STATUS.get(status, "")
+            if status != item["current_campaign_status"] or state != item["current_campaign_state"]:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "stale_campaign_state",
+                        "Состояние кампании изменилось после расчёта.",
+                        observed_campaign_status=status,
+                        observed_campaign_state=state,
+                    )
+                )
+                continue
+            allowed = (
+                item["state_action"] == "pause" and status == 9
+            ) or (
+                item["state_action"] == "start" and status in {4, 11}
+            )
+            if not allowed:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "campaign_state_action_unavailable",
+                        "Выбранное действие недоступно из текущего состояния кампании.",
+                    )
+                )
+                continue
+            results.append(
+                {
+                    **item,
+                    "ok": True,
+                    "observed_campaign_status": status,
+                    "observed_campaign_state": state,
+                }
+            )
+        return results
+
+    def submit_campaign_state(
+        self, target: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        normalized = _normalize_campaign_state_target(target)
+        if normalized["state_action"] == "start":
+            return self.source.start_campaign(normalized["advert_id"])
+        if normalized["state_action"] == "pause":
+            return self.source.pause_campaign(normalized["advert_id"])
+        raise SheetVitrinaV1AdsError(
+            "unsupported campaign state action", http_status=422
+        )
+
+    def read_campaign_state_targets(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        normalized = [_normalize_campaign_state_target(item) for item in targets]
+        advert_ids = sorted({item["advert_id"] for item in normalized})
+        payload = self.source.fetch_adverts(
+            advert_ids, statuses=sorted(CAMPAIGN_STATE_BY_STATUS)
+        )
+        raw_adverts = payload.get("adverts") if isinstance(payload, Mapping) else []
+        campaigns = {
+            int(campaign["advert_id"]): campaign
+            for campaign in (
+                _parse_campaign(item)
+                for item in (raw_adverts or [])
+                if isinstance(item, Mapping)
+            )
+            if int(campaign["advert_id"]) > 0
+        }
+        results: list[dict[str, Any]] = []
+        for item in normalized:
+            campaign = campaigns.get(item["advert_id"])
+            candidate_nm_ids = sorted(
+                {
+                    int(value)
+                    for value in (
+                        _optional_int(row.get("nm_id"))
+                        for row in (campaign or {}).get("nm_settings", [])
+                        if isinstance(row, Mapping)
+                    )
+                    if value is not None
+                }
+            )
+            status = _as_int((campaign or {}).get("status"), default=0)
+            state = CAMPAIGN_STATE_BY_STATUS.get(status, "")
+            ok = candidate_nm_ids == [item["nm_id"]] and bool(state)
+            results.append(
+                {
+                    **item,
+                    "ok": ok,
+                    "observed_campaign_status": status if campaign else None,
+                    "observed_campaign_state": state,
+                    "error_code": "" if ok else "campaign_state_readback_unavailable",
+                    "message": "" if ok else "Состояние кампании не подтверждено.",
                 }
             )
         return results
@@ -1434,6 +1606,48 @@ def _normalize_bulk_bid_target(value: Mapping[str, Any]) -> dict[str, Any]:
         "requested_bid_minor": _as_positive_int(
             value.get("requested_bid_minor"), "requested_bid_minor"
         ),
+    }
+
+
+def _normalize_campaign_state_target(value: Mapping[str, Any]) -> dict[str, Any]:
+    target_key = str(value.get("target_key") or "").strip()
+    if not target_key:
+        raise SheetVitrinaV1AdsError(
+            "campaign state target_key is required", http_status=422
+        )
+    action = str(value.get("state_action") or "").strip().lower()
+    if action not in {"start", "pause"}:
+        raise SheetVitrinaV1AdsError(
+            "unsupported campaign state action", http_status=422
+        )
+    current_status = _as_int(value.get("current_campaign_status"), default=0)
+    current_state = str(value.get("current_campaign_state") or "").strip().lower()
+    requested_state = str(value.get("requested_campaign_state") or "").strip().lower()
+    expected_requested = "active" if action == "start" else "paused"
+    if CAMPAIGN_STATE_BY_STATUS.get(current_status) != current_state:
+        raise SheetVitrinaV1AdsError(
+            "campaign state/status mapping is inconsistent", http_status=422
+        )
+    if requested_state != expected_requested or current_state == requested_state:
+        raise SheetVitrinaV1AdsError(
+            "campaign state action does not describe a transition", http_status=422
+        )
+    payment_type = str(value.get("payment_type") or "").strip().lower()
+    if payment_type not in {"cpm", "cpc"}:
+        raise SheetVitrinaV1AdsError(
+            "unsupported campaign payment type", http_status=422
+        )
+    return {
+        **dict(value),
+        "target_key": target_key,
+        "nm_id": _as_positive_int(value.get("nm_id"), "nm_id"),
+        "advert_id": _as_positive_int(value.get("advert_id"), "advert_id"),
+        "placement_evidence": normalize_placement(value.get("placement_evidence")),
+        "payment_type": payment_type,
+        "state_action": action,
+        "current_campaign_status": current_status,
+        "current_campaign_state": current_state,
+        "requested_campaign_state": requested_state,
     }
 
 

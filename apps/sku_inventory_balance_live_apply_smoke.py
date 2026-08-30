@@ -11,13 +11,17 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.adapters.wb_promotion import WbPromotionApiError  # noqa: E402
+from packages.adapters.wb_promotion import (  # noqa: E402
+    HttpBackedWbPromotionSource,
+    WbPromotionApiError,
+)
 from packages.application.change_registry import ChangeRegistryRepository  # noqa: E402
 from packages.application.change_registry_writer import (  # noqa: E402
     InternalWriterRegistry,
@@ -63,14 +67,18 @@ class FakeLiveAdapter:
         self,
         *,
         first_submit: str = "ok",
+        state_submit: str = "ok",
         mismatch_keys: set[str] | None = None,
         preflight_failure: bool = False,
     ) -> None:
         self.first_submit = first_submit
+        self.state_submit = state_submit
         self.mismatch_keys = set(mismatch_keys or ())
         self.preflight_failure = preflight_failure
         self.current: dict[str, int] = {}
+        self.current_states: dict[str, str] = {}
         self.submit_attempts: list[list[str]] = []
+        self.state_submit_attempts: list[str] = []
         self.accepted_batches: list[list[str]] = []
         self.preflight_calls: list[list[str]] = []
         self.readback_calls: list[list[str]] = []
@@ -205,6 +213,52 @@ class FakeLiveAdapter:
             for target in targets
         ]
 
+    def preflight_state(self, targets):
+        result = []
+        for target in targets:
+            key = str(target["target_key"])
+            self.current_states.setdefault(
+                key, str(target["current_campaign_state"])
+            )
+            result.append(
+                {
+                    **dict(target),
+                    "ok": True,
+                    "observed_campaign_status": int(
+                        target["current_campaign_status"]
+                    ),
+                    "observed_campaign_state": self.current_states[key],
+                }
+            )
+        return result
+
+    def submit_state(self, target):
+        key = str(target["target_key"])
+        self.state_submit_attempts.append(key)
+        if self.state_submit == "rate_limit":
+            raise WbPromotionApiError(
+                method="GET",
+                url="https://advert-api.wildberries.ru/adv/v0/pause?id=50101",
+                http_status=429,
+                headers={"retry-after": "0"},
+                retry_after_seconds=0,
+            )
+        self.current_states[key] = str(target["requested_campaign_state"])
+        return {"status": "accepted"}
+
+    def readback_state(self, targets):
+        return [
+            {
+                **dict(target),
+                "ok": True,
+                "observed_campaign_state": self.current_states.get(
+                    str(target["target_key"]),
+                    str(target["current_campaign_state"]),
+                ),
+            }
+            for target in targets
+        ]
+
 
 class FakePromotionSource:
     def __init__(self, targets: list[dict]) -> None:
@@ -213,6 +267,8 @@ class FakePromotionSource:
         self.rate_limit_min_advert = 0
         self.patch_payloads: list[dict] = []
         self.min_calls: list[int] = []
+        self.statuses = {int(item["advert_id"]): 9 for item in targets}
+        self.state_calls: list[tuple[str, int]] = []
 
     def fetch_adverts(self, advert_ids, *, statuses=None, payment_type=""):
         del statuses, payment_type
@@ -232,7 +288,7 @@ class FakePromotionSource:
             adverts.append(
                 {
                     "id": int(advert_id),
-                    "status": 9,
+                    "status": self.statuses[int(advert_id)],
                     "bid_type": "manual",
                     "settings": {
                         "name": f"campaign-{advert_id}",
@@ -270,6 +326,16 @@ class FakePromotionSource:
 
     def patch_bids(self, payload):
         self.patch_payloads.append(dict(payload))
+        return {"status": "accepted"}
+
+    def start_campaign(self, advert_id: int):
+        self.state_calls.append(("start", int(advert_id)))
+        self.statuses[int(advert_id)] = 9
+        return {"status": "accepted"}
+
+    def pause_campaign(self, advert_id: int):
+        self.state_calls.append(("pause", int(advert_id)))
+        self.statuses[int(advert_id)] = 11
         return {"status": "accepted"}
 
 
@@ -314,6 +380,30 @@ def _threshold_targets() -> list[dict]:
         )
         result.append(target)
     return result
+
+
+def _state_target(index: int, *, status: int = 9) -> dict:
+    target = _target(index)
+    state = {4: "ready", 9: "active", 11: "paused"}[status]
+    action = "pause" if status == 9 else "start"
+    target.update(
+        {
+            "campaign_status": status,
+            "campaign_state": state,
+            "state_action_available": True,
+            "state_action": action,
+            "state_action_label": (
+                "остановить"
+                if action == "pause"
+                else "возобновить"
+                if status == 11
+                else "запустить"
+            ),
+            "can_apply": False,
+            "calculated_target_bid_rub": target["current_bid_rub"],
+        }
+    )
+    return target
 
 
 def _build_runtime(
@@ -521,6 +611,89 @@ def _ads_guard_case(root: Path) -> None:
     assert rate_sleeps == [0.5]
 
 
+def _ads_campaign_state_case(root: Path) -> None:
+    http_source = HttpBackedWbPromotionSource()
+    http_calls: list[dict] = []
+    http_source._runtime = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        base_url="https://advert-api.wildberries.ru",
+        token="not-a-real-token",
+        timeout_seconds=1,
+    )
+    http_source._request_json = (  # type: ignore[method-assign]
+        lambda **kwargs: http_calls.append(dict(kwargs)) or {}
+    )
+    http_source.start_campaign(7001)
+    http_source.pause_campaign(7002)
+    assert [item["method"] for item in http_calls] == ["GET", "GET"]
+    assert http_calls[0]["url"].endswith("/adv/v0/start?id=7001")
+    assert http_calls[1]["url"].endswith("/adv/v0/pause?id=7002")
+
+    source = _state_target(50, status=9)
+    transport = {
+        **source,
+        "target_key": f"state:{source['nm_id']}:{source['advert_id']}",
+        "placement_evidence": source["placement"],
+        "current_campaign_status": 9,
+        "current_campaign_state": "active",
+        "requested_campaign_state": "paused",
+        "recommendation_item_id": "state-active-pause",
+    }
+    promotion = FakePromotionSource(
+        [
+            {
+                **source,
+                "current_bid_minor": int(source["current_bid_rub"]) * 100,
+            }
+        ]
+    )
+    ads = SheetVitrinaV1AdsBlock(
+        runtime=object(),
+        runtime_dir=root,
+        source=promotion,
+        safety_config=AdsSafetyConfig(
+            write_enabled=True,
+            absolute_max_bid_kopecks=1_000_000,
+            max_percent_increase=Decimal("1000"),
+            max_absolute_increase_kopecks=1_000_000,
+            preview_ttl_seconds=120,
+        ),
+    )
+    preflight = ads.preflight_campaign_state_targets([transport])
+    assert preflight[0]["ok"] is True, preflight
+    ads.submit_campaign_state(preflight[0])
+    assert promotion.state_calls == [("pause", int(source["advert_id"]))]
+    paused = ads.read_campaign_state_targets([transport])
+    assert paused[0]["observed_campaign_state"] == "paused"
+
+    resumed_target = {
+        **transport,
+        "state_action": "start",
+        "current_campaign_status": 11,
+        "current_campaign_state": "paused",
+        "requested_campaign_state": "active",
+    }
+    resumed_preflight = ads.preflight_campaign_state_targets([resumed_target])
+    assert resumed_preflight[0]["ok"] is True, resumed_preflight
+    ads.submit_campaign_state(resumed_preflight[0])
+    assert promotion.state_calls[-1] == ("start", int(source["advert_id"]))
+    assert ads.read_campaign_state_targets([resumed_target])[0][
+        "observed_campaign_state"
+    ] == "active"
+
+    promotion.identity_incident_advert = int(source["advert_id"])
+    incident = ads.preflight_campaign_state_targets(
+        [
+            {
+                **transport,
+                "current_campaign_status": 9,
+                "current_campaign_state": "active",
+            }
+        ]
+    )[0]
+    assert incident["ok"] is False
+    assert incident["error_code"] == "campaign_identity_incident"
+
+
 def _ads_threshold_policy_case(root: Path) -> None:
     sources = _threshold_targets()
     targets = [
@@ -548,6 +721,9 @@ def _ads_threshold_policy_case(root: Path) -> None:
 
     strict = ads.preflight_bid_targets(targets, sleep=lambda _seconds: None)
     assert [item["error_code"] for item in strict] == ["safety_guard"] * 3
+    assert strict[0]["message"] == (
+        "requested_bid_rub exceeds absolute increase threshold"
+    )
     assert promotion.patch_payloads == []
 
     confirmed = ads.preflight_bid_targets(
@@ -641,6 +817,154 @@ def _balance_confirmed_threshold_case(root: Path) -> None:
     assert str(job_row[1])
     assert int(linked) == 3
     assert [int(row[0]) for row in registry_rows] == [15_100, 60_100, 100_100]
+
+
+def _campaign_state_queue_case(root: Path) -> None:
+    adapter = FakeLiveAdapter()
+    block, sku, _writer = _build_runtime(root, adapter)
+    source = _state_target(501, status=9)
+    calculation = _insert_calculation(
+        block, 1, "campaign-state-only", targets=[source]
+    )
+    exact = calculation["rows"][0]["campaign_recommendations"][0]
+    job = block.start_apply(
+        {
+            "calculation_id": calculation["calculation_id"],
+            "nm_ids": [],
+            "target_keys": [],
+            "state_actions": [
+                {
+                    "nm_id": source["nm_id"],
+                    "advert_id": source["advert_id"],
+                    "action": "pause",
+                }
+            ],
+            "mode": LIVE_MODE,
+            "confirmed": True,
+        },
+        actor="operator",
+    )
+    terminal = _wait_terminal(block, job["job_id"])
+    assert terminal["state"] == "completed", terminal
+    assert terminal["progress"]["applied"] == 1
+    assert terminal["summary"]["bid_count"] == 0
+    assert terminal["summary"]["campaign_state_count"] == 1
+    assert terminal["wb_patch_called"] is False
+    assert terminal["wb_campaign_action_called"] is True
+    assert adapter.submit_attempts == []
+    assert adapter.state_submit_attempts == [
+        f"state:{source['nm_id']}:{source['advert_id']}"
+    ]
+    assert sku.confirmed_events == []
+    item = terminal["items"][0]
+    assert item["action_type"] == "campaign_state"
+    assert item["current_campaign_state"] == "active"
+    assert item["requested_campaign_state"] == "paused"
+    assert item["result"]["confirmed_campaign_state"] == "paused"
+    assert item["recommendation_item_id"] == exact[
+        "campaign_state_recommendation_item_id"
+    ]
+    with sqlite3.connect(block.runtime.db_path) as conn:
+        registry_item = conn.execute(
+            """SELECT parameter_field,before_value_text,requested_value_text,
+                      recommendation_item_id
+               FROM change_registry_items"""
+        ).fetchone()
+        fact = conn.execute(
+            """SELECT parameter_field,before_value_text,after_value_text
+               FROM change_registry_facts"""
+        ).fetchone()
+        links = {
+            row[0]
+            for row in conn.execute(
+                "SELECT link_kind FROM change_registry_fact_links"
+            ).fetchall()
+        }
+        operation = conn.execute(
+            """SELECT calculation_id,apply_operation_id
+               FROM change_registry_operations"""
+        ).fetchone()
+    assert registry_item == (
+        "campaign_state",
+        "active",
+        "paused",
+        exact["campaign_state_recommendation_item_id"],
+    )
+    assert fact == ("campaign_state", "active", "paused")
+    assert {"change_item", "recommendation_item", "native_audit"}.issubset(links)
+    assert operation == (calculation["calculation_id"], job["job_id"])
+
+
+def _mixed_bid_and_state_queue_case(root: Path) -> None:
+    adapter = FakeLiveAdapter()
+    block, _sku, _writer = _build_runtime(root, adapter)
+    bid = _target(601)
+    state = _state_target(602, status=11)
+    calculation = _insert_calculation(
+        block, 2, "mixed-bid-state", targets=[bid, state]
+    )
+    job = block.start_apply(
+        {
+            "calculation_id": calculation["calculation_id"],
+            "nm_ids": [],
+            "target_keys": [bid["target_key"]],
+            "state_actions": [
+                {
+                    "nm_id": state["nm_id"],
+                    "advert_id": state["advert_id"],
+                    "action": "start",
+                }
+            ],
+            "mode": LIVE_MODE,
+            "confirmed": True,
+        },
+        actor="operator",
+    )
+    terminal = _wait_terminal(block, job["job_id"])
+    assert terminal["state"] == "completed", terminal
+    assert terminal["progress"]["applied"] == 2
+    assert terminal["summary"]["bid_count"] == 1
+    assert terminal["summary"]["campaign_state_count"] == 1
+    assert len(adapter.submit_attempts) == 1
+    assert adapter.state_submit_attempts == [
+        f"state:{state['nm_id']}:{state['advert_id']}"
+    ]
+    assert {item["action_type"] for item in terminal["items"]} == {
+        "bid_change",
+        "campaign_state",
+    }
+
+
+def _campaign_state_rate_limit_is_hard_case(root: Path) -> None:
+    adapter = FakeLiveAdapter(state_submit="rate_limit")
+    block, _sku, _writer = _build_runtime(root, adapter)
+    source = _state_target(603, status=9)
+    calculation = _insert_calculation(
+        block, 1, "campaign-state-rate-limit", targets=[source]
+    )
+    job = block.start_apply(
+        {
+            "calculation_id": calculation["calculation_id"],
+            "nm_ids": [],
+            "target_keys": [],
+            "state_actions": [
+                {
+                    "nm_id": source["nm_id"],
+                    "advert_id": source["advert_id"],
+                    "action": "pause",
+                }
+            ],
+            "mode": LIVE_MODE,
+            "confirmed": True,
+        },
+        actor="operator",
+    )
+    terminal = _wait_terminal(block, job["job_id"])
+    assert terminal["state"] == "completed_with_errors", terminal
+    assert len(adapter.state_submit_attempts) == 1
+    assert terminal["progress"]["applied"] == 0
+    assert terminal["items"][0]["error_code"] == "wb_http_429"
+    assert terminal["wb_campaign_action_called"] is True
 
 
 def _rate_limit_case(root: Path) -> None:
@@ -794,8 +1118,12 @@ def main() -> None:
     with TemporaryDirectory(prefix="inventory-balance-live-") as tmp:
         base = Path(tmp)
         _ads_guard_case(base / "ads-guard")
+        _ads_campaign_state_case(base / "ads-campaign-state")
         _ads_threshold_policy_case(base / "ads-threshold-policy")
         _balance_confirmed_threshold_case(base / "balance-threshold-policy")
+        _campaign_state_queue_case(base / "campaign-state-queue")
+        _mixed_bid_and_state_queue_case(base / "mixed-bid-state-queue")
+        _campaign_state_rate_limit_is_hard_case(base / "campaign-state-rate-limit")
         _regular_batch_case(base / "regular")
         _rate_limit_case(base / "rate")
         _transport_unknown_case(base / "transport")

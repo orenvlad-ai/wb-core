@@ -200,6 +200,51 @@ class InternalWriterRegistry:
             stage="",
         )
 
+    def prepare_campaign_state(
+        self,
+        *,
+        source_surface: str,
+        actor: str,
+        native_operation_id: str,
+        nm_id: int,
+        advert_id: int,
+        before_state: str,
+        requested_state: str,
+        requested_at: str,
+        correlation_id: str = "",
+        calculation_id: str = "",
+        apply_operation_id: str = "",
+        recommendation_item_id: str = "",
+        native_audit_reference: str = "",
+    ) -> PreparedWriterOperation:
+        target = target_identity(
+            "campaign",
+            nm_id=_positive_int(nm_id, "nm_id"),
+            advert_id=_positive_int(advert_id, "advert_id"),
+            placement="",
+        )
+        return self._prepare(
+            source_surface=source_surface,
+            actor=actor,
+            native_operation_id=native_operation_id,
+            requested_at=requested_at,
+            atomic_values=[
+                (
+                    target,
+                    "campaign_state",
+                    _campaign_state(before_state, "before_state"),
+                    _campaign_state(requested_state, "requested_state"),
+                    recommendation_item_id,
+                )
+            ],
+            explicit_fields=("campaign_state",),
+            correlation_id=correlation_id,
+            calculation_id=calculation_id,
+            apply_operation_id=apply_operation_id,
+            native_audit_reference=native_audit_reference,
+            stage="",
+        )
+
     def submitted(
         self,
         prepared: PreparedWriterOperation,
@@ -334,6 +379,26 @@ class InternalWriterRegistry:
             native_audit_references=native_audit_references,
         )
 
+    def confirm_campaign_state(
+        self,
+        prepared: PreparedWriterOperation,
+        *,
+        confirmed_state: str,
+        readback_basis: Mapping[str, Any],
+        receipt_reference: str = "",
+        native_audit_references: Sequence[str] = (),
+    ) -> None:
+        exact_state = _campaign_state(confirmed_state, "confirmed_state")
+        self._confirm(
+            prepared,
+            confirmed_by_item_key={
+                key: exact_state for key in prepared.change_item_ids
+            },
+            readback_basis=readback_basis,
+            receipt_reference=receipt_reference,
+            native_audit_references=native_audit_references,
+        )
+
     def find_by_receipt(
         self, receipt_reference: str
     ) -> PreparedWriterOperation | None:
@@ -372,7 +437,7 @@ class InternalWriterRegistry:
         actor: str,
         native_operation_id: str,
         requested_at: str,
-        atomic_values: Sequence[tuple[Any, str, int, int, str]],
+        atomic_values: Sequence[tuple[Any, str, Any, Any, str]],
         explicit_fields: Sequence[str],
         correlation_id: str,
         calculation_id: str,
@@ -515,7 +580,7 @@ class InternalWriterRegistry:
         self,
         prepared: PreparedWriterOperation,
         *,
-        confirmed_by_item_key: Mapping[str, int],
+        confirmed_by_item_key: Mapping[str, Any],
         readback_basis: Mapping[str, Any],
         receipt_reference: str,
         native_audit_references: Sequence[str],
@@ -590,6 +655,13 @@ def _non_negative_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise InternalWriterRegistryError(f"{name} must be a non-negative integer")
     return value
+
+
+def _campaign_state(value: Any, name: str) -> str:
+    state = str(value or "").strip().lower()
+    if state not in {"ready", "active", "paused"}:
+        raise InternalWriterRegistryError(f"{name} is not an actionable campaign state")
+    return state
 
 
 def _identity(value: Any, name: str) -> str:

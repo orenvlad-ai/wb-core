@@ -645,10 +645,27 @@ def main() -> None:
         assert empty["calculation"] is None
         assert empty["apply_capability"]["wb_patch_reachable"] is False
         assert empty["settings"]["calculation"]["wb_confidence_coefficient"] == 0.5
+        assert len(empty["settings"]["table"]["visible_columns"]) == 14
+        assert "new_cpc_campaigns" in empty["settings"]["table"]["visible_columns"]
+        assert "old_cpm_campaigns" in empty["settings"]["table"]["visible_columns"]
+
+        empty_table_settings = block.save_settings(
+            {
+                "base_revision": 0,
+                "calculation": empty["settings"]["calculation"],
+                "table": {"visible_columns": [], "column_order": []},
+            },
+            user_key="operator",
+        )
+        assert len(empty_table_settings["table"]["visible_columns"]) == 14
+        assert empty_table_settings["table"]["column_order"][:2] == [
+            "select",
+            "product",
+        ]
 
         settings = block.save_settings(
             {
-                "base_revision": 0,
+                "base_revision": 1,
                 "calculation": {
                     "wb_confidence_coefficient": 0.5,
                     "safety_stock_days": 10,
@@ -662,7 +679,7 @@ def main() -> None:
             },
             user_key="operator",
         )
-        assert settings["revision"] == 1
+        assert settings["revision"] == 2
         assert settings["table"]["column_order"][:2] == ["select", "product"]
         assert settings["table"]["preset"] == "deficit"
 
