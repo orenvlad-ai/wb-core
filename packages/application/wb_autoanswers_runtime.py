@@ -4961,10 +4961,20 @@ class AutoanswersRepository:
                 r.transition_run_id,
                 r.provider_call_started_at,
                 r.released_reason,
+                r.status AS reservation_status,
+                r.reserved_usd,
+                r.actual_cost_usd AS reservation_actual_cost_usd,
                 r.created_at AS reservation_created_at,
                 r.updated_at AS reservation_updated_at,
+                j.feedback_id,
+                j.content_version,
+                j.state AS job_state,
                 j.last_error_code,
-                j.attempts
+                j.attempts,
+                j.lease_owner,
+                j.lease_until,
+                j.started_at,
+                j.completed_at
             FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
             JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
               ON j.processing_key=r.processing_key
@@ -4974,6 +4984,15 @@ class AutoanswersRepository:
               AND (
                     j.last_error_code IN ('node_timeout','node_invalid_json')
                     OR j.last_error_code LIKE 'node_process_exit_%'
+                    OR (
+                        r.released_reason='stale_or_orphaned'
+                        AND j.state='processing'
+                        AND j.last_error_code IS NULL
+                        AND j.completed_at IS NULL
+                        AND j.lease_owner IS NOT NULL
+                        AND j.lease_until IS NOT NULL
+                        AND j.lease_until<=r.updated_at
+                    )
                   )
               AND NOT EXISTS(
                     SELECT 1
@@ -4996,10 +5015,40 @@ class AutoanswersRepository:
                     WHERE u.processing_key=r.processing_key
                       AND u.attempt_number=j.attempts
                   )
+              AND NOT EXISTS(
+                    SELECT 1
+                    FROM sheet_vitrina_v1_wb_publication_jobs p
+                    WHERE p.processing_key=r.processing_key
+                  )
             ORDER BY r.provider_call_started_at,r.processing_key
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            candidate = dict(row)
+            candidate["recovery_action"] = (
+                "append_hold_and_terminalize_interrupted_processing"
+                if str(candidate.get("job_state") or "") == STATE_PROCESSING
+                and candidate.get("last_error_code") is None
+                else "append_hold_only"
+            )
+            candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _budget_reconciliation_run_cap(
+        conn: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            """
+            SELECT sweep_id,transition_run_id,policy_epoch,target_mode,state,
+                   run_max_usd,run_max_paid_reviews
+            FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else {}
 
     def budget_reconciliation_plan(self) -> dict[str, Any]:
         """Build an exact read-only plan for unknown provider-cost boundaries."""
@@ -5014,6 +5063,7 @@ class AutoanswersRepository:
                 WHERE singleton=1
                 """
             ).fetchone()
+            active_run_cap = self._budget_reconciliation_run_cap(conn)
         upper_bound = _money(settings.max_reservation_per_review_usd)
         holds = [
             {
@@ -5024,10 +5074,18 @@ class AutoanswersRepository:
             }
             for candidate in candidates
         ]
+        terminalizations = sum(
+            1
+            for hold in holds
+            if hold["recovery_action"]
+            == "append_hold_and_terminalize_interrupted_processing"
+        )
         identity = {
             "contract": "wb_autoanswers_budget_reconciliation_v1",
             "policy_epoch": int(settings.policy_epoch),
+            "settings_revision": autoanswers_settings_revision(settings),
             "max_reservation_per_review_usd": str(upper_bound),
+            "active_run_cap": active_run_cap,
             "runtime_stop_reason": (
                 str(runtime["stop_reason"] or "") if runtime is not None else ""
             ),
@@ -5041,7 +5099,8 @@ class AutoanswersRepository:
             "candidate_count": len(holds),
             "expected_affected_records": {
                 "uncertainty_holds_inserted": len(holds),
-                "audit_events_appended": len(holds),
+                "processing_jobs_terminalized": terminalizations,
+                "audit_events_appended": len(holds) + terminalizations,
                 "runtime_state_rows_updated": 1 if holds else 0,
                 "provider_calls_created": 0,
                 "cost_events_created": 0,
@@ -5051,15 +5110,18 @@ class AutoanswersRepository:
                 "provider_calls_unchanged": True,
                 "cost_events_unchanged": True,
                 "wb_writes_unchanged": True,
-                "reservation_and_job_evidence_unchanged": True,
+                "reservation_evidence_unchanged": True,
+                "non_target_jobs_unchanged": True,
+                "target_job_change_bounded_to_terminal_lifecycle": True,
             },
             "reversibility": {
-                "kind": "append_only_conservative_accounting",
+                "kind": "append_only_hold_and_exact_terminal_lifecycle",
                 "backup_required": False,
                 "reason": (
                     "The exact reservation/job evidence remains immutable; "
-                    "apply only appends conservative holds and audit, never "
-                    "deletes evidence or asserts actual provider cost."
+                    "apply appends conservative holds and audit and may "
+                    "terminalize only a proven orphaned processing lease. It "
+                    "never deletes evidence or asserts actual provider cost."
                 ),
             },
             "captured_at": iso_utc(self._now()),
@@ -5137,9 +5199,69 @@ class AutoanswersRepository:
         )
         if persisted_holds != len(hold_ids):
             return None
+        terminalized_jobs: list[str] = []
+        hold_rows = conn.execute(
+            f"""
+            SELECT processing_key,evidence_json
+            FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+            WHERE hold_id IN ({placeholders})
+            ORDER BY processing_key
+            """,
+            hold_ids,
+        ).fetchall()
+        for hold_row in hold_rows:
+            try:
+                evidence = json.loads(str(hold_row["evidence_json"] or "{}"))
+            except (TypeError, ValueError):
+                return None
+            if (
+                str(evidence.get("recovery_action") or "")
+                != "append_hold_and_terminalize_interrupted_processing"
+            ):
+                continue
+            key = str(hold_row["processing_key"])
+            job = conn.execute(
+                """
+                SELECT state,last_error_code,lease_owner,lease_until,completed_at
+                FROM sheet_vitrina_v1_wb_autoanswer_jobs
+                WHERE processing_key=?
+                """,
+                (key,),
+            ).fetchone()
+            terminal_audit = conn.execute(
+                """
+                SELECT 1
+                FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+                WHERE aggregate_type='processing_job'
+                  AND aggregate_id=?
+                  AND event_type='provider_boundary_interrupted_terminalized'
+                  AND json_extract(details_json,'$.plan_fingerprint')=?
+                LIMIT 1
+                """,
+                (key, expected_fingerprint),
+            ).fetchone()
+            publication = conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=? LIMIT 1",
+                (key,),
+            ).fetchone()
+            if (
+                job is None
+                or str(job["state"] or "") != STATE_TERMINAL_ERROR
+                or str(job["last_error_code"] or "")
+                != "provider_boundary_interrupted_unknown_result"
+                or job["lease_owner"] is not None
+                or job["lease_until"] is not None
+                or job["completed_at"] is None
+                or terminal_audit is None
+                or publication is not None
+            ):
+                return None
+            terminalized_jobs.append(key)
         return {
             "hold_count": len(hold_ids),
             "hold_ids": hold_ids,
+            "terminalized_job_count": len(terminalized_jobs),
+            "terminalized_processing_keys": terminalized_jobs,
             "confirmed_at": max(str(row["created_at"] or "") for row in matching),
         }
 
@@ -5171,6 +5293,7 @@ class AutoanswersRepository:
                     "previous_holds_appended": int(replay["hold_count"]),
                     "affected_records": {
                         "uncertainty_holds_inserted": 0,
+                        "processing_jobs_terminalized": 0,
                         "audit_events_appended": 0,
                         "runtime_state_rows_updated": 0,
                         "provider_calls_created": 0,
@@ -5200,11 +5323,9 @@ class AutoanswersRepository:
         with self.transaction() as conn:
             current = self._budget_uncertainty_candidates(conn)
             current_settings = conn.execute(
-                """
-                SELECT policy_epoch,max_reservation_per_review_usd
-                FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1
-                """
+                "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
             ).fetchone()
+            current_run_cap = self._budget_reconciliation_run_cap(conn)
             current_runtime = conn.execute(
                 """
                 SELECT stop_reason
@@ -5216,11 +5337,15 @@ class AutoanswersRepository:
                     "Autoanswers settings are missing",
                     code="settings_missing",
                 )
+            parsed_settings = _autoanswers_settings_from_row(
+                current_settings,
+                env=self.env,
+            )
             current_holds = [
                 {
                     **candidate,
                     "upper_bound_usd": str(
-                        _money(current_settings["max_reservation_per_review_usd"])
+                        _money(parsed_settings.max_reservation_per_review_usd)
                     ),
                     "upper_bound_kind": (
                         "conservative_contract_hold_not_actual_cost"
@@ -5231,10 +5356,12 @@ class AutoanswersRepository:
             ]
             identity = {
                 "contract": "wb_autoanswers_budget_reconciliation_v1",
-                "policy_epoch": int(current_settings["policy_epoch"]),
+                "policy_epoch": int(parsed_settings.policy_epoch),
+                "settings_revision": autoanswers_settings_revision(parsed_settings),
                 "max_reservation_per_review_usd": str(
-                    _money(current_settings["max_reservation_per_review_usd"])
+                    _money(parsed_settings.max_reservation_per_review_usd)
                 ),
+                "active_run_cap": current_run_cap,
                 "runtime_stop_reason": (
                     str(current_runtime["stop_reason"] or "")
                     if current_runtime is not None
@@ -5268,10 +5395,21 @@ class AutoanswersRepository:
                     for key in (
                         "provider_call_started_at",
                         "released_reason",
+                        "reservation_status",
+                        "reserved_usd",
+                        "reservation_actual_cost_usd",
                         "reservation_created_at",
                         "reservation_updated_at",
                         "last_error_code",
                         "attempts",
+                        "feedback_id",
+                        "content_version",
+                        "job_state",
+                        "lease_owner",
+                        "lease_until",
+                        "started_at",
+                        "completed_at",
+                        "recovery_action",
                         "upper_bound_kind",
                     )
                 }
@@ -5312,6 +5450,58 @@ class AutoanswersRepository:
                     },
                     at=now,
                 )
+                if (
+                    hold["recovery_action"]
+                    == "append_hold_and_terminalize_interrupted_processing"
+                ):
+                    cursor = conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
+                        SET state=?,lease_owner=NULL,lease_until=NULL,
+                            last_error_code=?,completed_at=?,updated_at=?
+                        WHERE processing_key=?
+                          AND state='processing'
+                          AND last_error_code IS NULL
+                          AND completed_at IS NULL
+                          AND lease_owner=?
+                          AND lease_until=?
+                        """,
+                        (
+                            STATE_TERMINAL_ERROR,
+                            "provider_boundary_interrupted_unknown_result",
+                            iso_utc(now),
+                            iso_utc(now),
+                            hold["processing_key"],
+                            hold["lease_owner"],
+                            hold["lease_until"],
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) != 1:
+                        raise AutoanswersRuntimeError(
+                            "interrupted provider-boundary job changed during apply",
+                            code="budget_reconciliation_stale",
+                        )
+                    self._audit(
+                        conn,
+                        aggregate_type="processing_job",
+                        aggregate_id=str(hold["processing_key"]),
+                        event_type="provider_boundary_interrupted_terminalized",
+                        actor_type="operator",
+                        actor_id=actor,
+                        details={
+                            "error_code": (
+                                "provider_boundary_interrupted_unknown_result"
+                            ),
+                            "plan_fingerprint": fingerprint,
+                            "provider_call_replayed": False,
+                            "wb_post_created": False,
+                            "actual_cost_asserted": False,
+                            "conservative_hold_id": hold_id,
+                        },
+                        at=now,
+                        previous_state=STATE_PROCESSING,
+                        next_state=STATE_TERMINAL_ERROR,
+                    )
             unresolved = self._budget_uncertainty_candidates(conn)
             if unresolved:
                 raise AutoanswersRuntimeError(
@@ -5324,6 +5514,12 @@ class AutoanswersRepository:
                 details={
                     "budget_reconciliation_fingerprint": fingerprint,
                     "conservative_holds_appended": len(current_holds),
+                    "interrupted_jobs_terminalized": sum(
+                        1
+                        for hold in current_holds
+                        if hold["recovery_action"]
+                        == "append_hold_and_terminalize_interrupted_processing"
+                    ),
                 },
                 at=now,
             )
@@ -5364,6 +5560,51 @@ class AutoanswersRepository:
                 ).fetchall()
             ]
             unresolved = self._budget_uncertainty_candidates(conn)
+            terminalized_interruptions = []
+            for row in conn.execute(
+                    """
+                    SELECT
+                        a.aggregate_id AS processing_key,
+                        a.details_json,
+                        a.created_at,
+                        j.state AS job_state,
+                        j.last_error_code,
+                        j.attempts,
+                        j.lease_owner,
+                        j.lease_until,
+                        j.completed_at,
+                        j.actual_cost_usd AS job_actual_cost_usd,
+                        r.status AS reservation_status,
+                        r.actual_cost_usd AS reservation_actual_cost_usd,
+                        r.released_reason,
+                        r.provider_call_started_at,
+                        (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                         WHERE h.processing_key=a.aggregate_id) AS hold_count,
+                        (SELECT COALESCE(SUM(CAST(h.upper_bound_usd AS REAL)),0)
+                         FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                         WHERE h.processing_key=a.aggregate_id) AS hold_upper_bound_usd,
+                        (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_cost_events c
+                         WHERE c.processing_key=a.aggregate_id) AS cost_event_count,
+                        (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events f
+                         WHERE f.processing_key=a.aggregate_id) AS failed_cost_event_count,
+                        (SELECT COUNT(*) FROM sheet_vitrina_v1_wb_publication_jobs p
+                         WHERE p.processing_key=a.aggregate_id) AS publication_job_count
+                    FROM sheet_vitrina_v1_wb_autoanswers_audit_events a
+                    JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+                      ON j.processing_key=a.aggregate_id
+                    LEFT JOIN sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+                      ON r.processing_key=a.aggregate_id
+                    WHERE a.aggregate_type='processing_job'
+                      AND a.event_type='provider_boundary_interrupted_terminalized'
+                    ORDER BY a.created_at,a.aggregate_id
+                    """
+                ).fetchall():
+                item = dict(row)
+                try:
+                    item["details"] = json.loads(str(item.pop("details_json") or "{}"))
+                except (TypeError, ValueError):
+                    item["details"] = {}
+                terminalized_interruptions.append(item)
             runtime = conn.execute(
                 "SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
             ).fetchone()
@@ -5375,6 +5616,9 @@ class AutoanswersRepository:
             "provider_attempt_hold_count": len(attempt_holds),
             "total_hold_count": len(holds) + len(attempt_holds),
             "unresolved_count": len(unresolved),
+            "unresolved": unresolved,
+            "terminalized_interruptions": terminalized_interruptions,
+            "terminalized_interruption_count": len(terminalized_interruptions),
             "stop_reason": str(runtime["stop_reason"] or "") if runtime else "",
             "confirmed": not unresolved
             and (runtime is None or str(runtime["stop_reason"] or "") != "budget_state_unknown"),

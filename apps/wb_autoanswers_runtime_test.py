@@ -2526,11 +2526,14 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(before["monthly_actual_usd"], 0)
         plan = self.repo.budget_reconciliation_plan()
         self.assertEqual(plan["candidate_count"], 1)
+        self.assertTrue(str(plan["settings_revision"]).startswith("sha256:"))
+        self.assertEqual(plan["active_run_cap"], {})
         self.assertEqual(plan["pre_change_digest"], plan["plan_fingerprint"])
         self.assertEqual(
             plan["expected_affected_records"],
             {
                 "uncertainty_holds_inserted": 1,
+                "processing_jobs_terminalized": 0,
                 "audit_events_appended": 1,
                 "runtime_state_rows_updated": 1,
                 "provider_calls_created": 0,
@@ -2544,7 +2547,9 @@ class RuntimeTest(unittest.TestCase):
                 "provider_calls_unchanged": True,
                 "cost_events_unchanged": True,
                 "wb_writes_unchanged": True,
-                "reservation_and_job_evidence_unchanged": True,
+                "reservation_evidence_unchanged": True,
+                "non_target_jobs_unchanged": True,
+                "target_job_change_bounded_to_terminal_lifecycle": True,
             },
         )
         self.assertFalse(plan["reversibility"]["backup_required"])
@@ -2610,6 +2615,87 @@ class RuntimeTest(unittest.TestCase):
         ):
             self.repo.apply_budget_reconciliation(
                 expected_fingerprint="sha256:" + "0" * 64,
+                actor_id="operator",
+            )
+
+    def test_budget_reconciliation_terminalizes_orphaned_provider_boundary_without_replay(self) -> None:
+        self.enable("auto_all")
+        self.insert_new("release-interrupted-provider")
+        job = self.repo.enqueue_processing(
+            "release-interrupted-provider",
+            trigger_source="steady_sync",
+            actor_id="sync",
+        )
+        claimed = self.repo.claim_processing_job(worker_id="worker-before-release")
+        self.assertEqual(claimed["processing_key"], job["processing_key"])
+        self.repo.mark_provider_call_started(
+            job["processing_key"], worker_id="worker-before-release"
+        )
+        self.clock.advance(301)
+        self.assertEqual(self.repo.reconcile_stale_reservations(), 1)
+
+        plan = self.repo.budget_reconciliation_plan()
+        self.assertEqual(plan["candidate_count"], 1)
+        self.assertEqual(
+            plan["holds"][0]["recovery_action"],
+            "append_hold_and_terminalize_interrupted_processing",
+        )
+        self.assertEqual(plan["holds"][0]["upper_bound_usd"], "0.10000000")
+        self.assertEqual(plan["expected_affected_records"]["processing_jobs_terminalized"], 1)
+        self.assertEqual(plan["expected_affected_records"]["audit_events_appended"], 2)
+
+        applied = self.repo.apply_budget_reconciliation(
+            expected_fingerprint=plan["plan_fingerprint"],
+            actor_id="release-recovery",
+        )
+        self.assertEqual(applied["status"], "reconciled")
+        detail = self.repo.get_feedback("release-interrupted-provider")
+        stored_job = detail["ai_jobs"][0]
+        self.assertEqual(stored_job["state"], "terminal_error")
+        self.assertEqual(
+            stored_job["last_error_code"],
+            "provider_boundary_interrupted_unknown_result",
+        )
+        self.assertEqual(stored_job["attempts"], 1)
+        self.assertIsNone(stored_job["lease_owner"])
+        self.assertIsNone(stored_job["lease_until"])
+        self.assertEqual(stored_job["actual_cost_usd"], "0")
+        self.assertEqual(detail["publications"], [])
+        status = self.repo.budget_reconciliation_status()
+        self.assertTrue(status["confirmed"])
+        self.assertEqual(status["unresolved_count"], 0)
+        self.assertEqual(status["terminalized_interruption_count"], 1)
+        self.assertEqual(self.repo.budget_status()["budget_state"], "conservative_unverified")
+
+        replay = self.repo.apply_budget_reconciliation(
+            expected_fingerprint=plan["plan_fingerprint"],
+            actor_id="release-recovery",
+        )
+        self.assertEqual(replay["status"], "already_reconciled")
+        self.assertEqual(replay["prior_apply"]["terminalized_job_count"], 1)
+        self.assertIsNone(self.repo.claim_processing_job(worker_id="worker-after-release"))
+
+    def test_budget_reconciliation_fingerprint_binds_complete_settings(self) -> None:
+        self.enable("manual")
+        self.insert_new("settings-bound-provider-cost")
+        job = self.repo.enqueue_manual_processing(
+            "settings-bound-provider-cost",
+            content_version=1,
+            actor_id="reviewer",
+        )
+        self.repo.claim_processing_job(worker_id="worker")
+        self.repo.mark_provider_call_started(job["processing_key"], worker_id="worker")
+        self.repo.record_processing_retry(
+            job["processing_key"],
+            error_code="node_process_exit_1",
+            retry_after_seconds=60,
+            worker_id="worker",
+        )
+        plan = self.repo.budget_reconciliation_plan()
+        self.repo.update_settings(warning_ratio=0.75, actor_id="admin")
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "evidence changed"):
+            self.repo.apply_budget_reconciliation(
+                expected_fingerprint=plan["plan_fingerprint"],
                 actor_id="operator",
             )
 

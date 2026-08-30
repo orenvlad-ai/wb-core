@@ -1,0 +1,52 @@
+{
+  "schema": "wb-core.production-apply-manifest/v2",
+  "operation_id": "wbc0010-autoanswers-budget-recovery-20260830",
+  "target_id": "wb_core_eu_hosted_runtime_active",
+  "deployed_sha_contract": "exact-merge-sha",
+  "dry_run_default": true,
+  "explicit_apply": true,
+  "bounded_scope": true,
+  "pre_change_digest": true,
+  "backup_evidence": true,
+  "expected_affected_records": true,
+  "non_target_invariants": true,
+  "idempotency_or_recovery": true,
+  "post_apply_readback": true,
+  "reconciliation": true,
+  "query_only_manifest_readback": true,
+  "pre_change_digest_value": "sha256:dfc47a5b2d85a578d4a084d5d5a7243fab7927a4de561bb830d2710447b8329f",
+  "backup_evidence_value": "Immutable exact job/reservation/provider-boundary evidence, append-only conservative hold and audit, exact target-row CAS, zero provider/WB replay and query-only terminal readback.",
+  "expected_affected_record_count": 5,
+  "non_target_invariant_ids": [
+    "autoanswers-owner-intent-policy-epoch-and-run-cap",
+    "all-non-target-autoanswers-jobs-reservations-cost-and-audit",
+    "all-existing-publications-and-wb-observations",
+    "vitrina-finance-fbs-warehouse-and-storage"
+  ],
+  "recovery_contract": {
+    "mode": "bounded-recovery",
+    "id": "wbc0010-exact-interrupted-provider-boundary-v1"
+  },
+  "commands": {
+    "dry_run": [
+      "python3",
+      "apps/wbc0010_autoanswers_budget_recovery.py",
+      "dry-run"
+    ],
+    "apply": [
+      "python3",
+      "apps/wbc0010_autoanswers_budget_recovery.py",
+      "apply"
+    ],
+    "readback": [
+      "python3",
+      "apps/wbc0010_autoanswers_budget_recovery.py",
+      "readback"
+    ],
+    "reconcile": [
+      "python3",
+      "apps/wbc0010_autoanswers_budget_recovery.py",
+      "reconcile"
+    ]
+  }
+}

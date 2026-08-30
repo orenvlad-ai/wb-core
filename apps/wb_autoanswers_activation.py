@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 
@@ -50,6 +51,8 @@ TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 BACKUP_FREE_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024
 BACKUP_OPERATIONAL_HEADROOM_BYTES = 256 * 1024 * 1024
 CAPACITY_HEARTBEAT_SECONDS = 20
+DEPLOYMENT_DRAIN_TIMEOUT_SECONDS = 300
+DEPLOYMENT_DRAIN_POLL_SECONDS = 1.0
 
 
 def _truthy(value: str | None) -> bool:
@@ -94,7 +97,7 @@ def _schema_preparation_lock(runtime_dir: Path) -> Any:
 
 @contextmanager
 def _deployment_quiesce() -> Any:
-    """Bound the one-time store split inside a repo-owned quiet window."""
+    """Close timer admission and drain oneshots without killing provider calls."""
 
     if not _truthy(os.environ.get("WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE")):
         yield {"applied": False, "units": []}
@@ -109,35 +112,116 @@ def _deployment_quiesce() -> Any:
     )
     registry_service = "wb-core-registry-http.service"
 
-    def active(unit: str) -> bool:
-        return (
-            subprocess.run(
-                ["systemctl", "is-active", "--quiet", unit],
-                check=False,
-                timeout=20,
-            ).returncode
-            == 0
+    def unit_state(unit: str) -> dict[str, Any]:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                unit,
+                "--property=LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,InvocationID",
+                "--no-pager",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
         )
+        values: dict[str, str] = {}
+        for line in str(result.stdout or "").splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+        required = {
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "Result",
+            "MainPID",
+            "ExecMainStatus",
+            "InvocationID",
+        }
+        if not required.issubset(values):
+            missing = ",".join(sorted(required - set(values)))
+            raise RuntimeError(f"systemd quiesce state is incomplete for {unit}: {missing}")
+        return {
+            "unit": unit,
+            "load_state": values["LoadState"],
+            "active_state": values["ActiveState"],
+            "sub_state": values["SubState"],
+            "result": values["Result"],
+            "main_pid": values["MainPID"],
+            "exec_main_status": values["ExecMainStatus"],
+            "invocation_id": values["InvocationID"],
+        }
 
-    active_timers = [unit for unit in timers if active(unit)]
-    registry_was_active = active(registry_service)
+    def is_active(state: dict[str, Any]) -> bool:
+        return str(state["active_state"]) in {
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+        }
+
+    timer_states_before = [unit_state(unit) for unit in timers]
+    active_timers = [state["unit"] for state in timer_states_before if is_active(state)]
+    service_states_before = [unit_state(unit) for unit in services]
+    registry_state_before = unit_state(registry_service)
+    registry_was_active = is_active(registry_state_before)
     stopped: list[str] = []
+    drain_samples: list[dict[str, Any]] = []
+    registry_stopped = False
+    started_at = time.monotonic()
     try:
-        for unit in (*timers, *services, registry_service):
+        for unit in active_timers:
             subprocess.run(
                 ["systemctl", "stop", unit],
                 check=True,
                 timeout=120,
             )
             stopped.append(unit)
+        deadline = started_at + DEPLOYMENT_DRAIN_TIMEOUT_SECONDS
+        while True:
+            states = [unit_state(unit) for unit in services]
+            drain_samples.append(
+                {
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                    "services": states,
+                }
+            )
+            if all(not is_active(state) for state in states):
+                break
+            if time.monotonic() >= deadline:
+                active_units = [
+                    state["unit"] for state in states if is_active(state)
+                ]
+                raise RuntimeError(
+                    "autoanswers deploy drain timed out without stopping active "
+                    "oneshots: " + ",".join(active_units)
+                )
+            time.sleep(DEPLOYMENT_DRAIN_POLL_SECONDS)
+        if registry_was_active:
+            subprocess.run(
+                ["systemctl", "stop", registry_service],
+                check=True,
+                timeout=120,
+            )
+            stopped.append(registry_service)
+            registry_stopped = True
         yield {
             "applied": True,
             "units": stopped,
             "registry_was_active": registry_was_active,
             "active_timers": active_timers,
+            "timer_states_before": timer_states_before,
+            "service_states_before": service_states_before,
+            "service_drain_samples": drain_samples,
+            "active_service_stop_submits": 0,
+            "drain_timeout_seconds": DEPLOYMENT_DRAIN_TIMEOUT_SECONDS,
+            "drained_elapsed_seconds": round(time.monotonic() - started_at, 3),
         }
     finally:
-        if registry_was_active:
+        if registry_stopped:
             subprocess.run(
                 ["systemctl", "start", registry_service],
                 check=True,
