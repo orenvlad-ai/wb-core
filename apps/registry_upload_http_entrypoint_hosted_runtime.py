@@ -7501,16 +7501,22 @@ def run_finance_daily_recovery_command(args: argparse.Namespace) -> int:
 def run_wbc0027_capital_recovery_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(args.target_file or resolve_target_file())
     action = str(args.wbc0027_capital_action)
-    plan_path = Path(str(args.plan_file)).resolve() if action in {"apply", "readback"} else None
-    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
-        raise ValueError("WBC0027 reviewed plan must stay outside the Git checkout")
     payload = _run_remote_wbc0027_capital_recovery(
         target,
         action=action,
-        plan_path=plan_path,
-        fingerprint=str(args.fingerprint or ""),
+        deployed_sha=str(args.deployed_sha or ""),
+        operation_id=str(args.operation_id or ""),
+        evidence_dir=str(args.evidence_dir or ""),
+        manifest_path=str(getattr(args, "manifest", "") or ""),
+        manifest_sha256=str(getattr(args, "manifest_sha256", "") or ""),
+        phase_operation_id=str(getattr(args, "phase_operation_id", "") or ""),
+        phase_fingerprint=str(getattr(args, "phase_fingerprint", "") or ""),
         approval_reference=str(args.approval_reference or ""),
         phase=str(getattr(args, "phase", "") or ""),
+        product_phase_operation_id=str(
+            getattr(args, "product_phase_operation_id", "") or ""
+        ),
+        no_create=bool(getattr(args, "no_create", False)),
     )
     output = str(args.output or "").strip()
     if output:
@@ -7534,10 +7540,17 @@ def _run_remote_wbc0027_capital_recovery(
     target: HostedRuntimeTarget,
     *,
     action: str,
-    plan_path: Path | None,
-    fingerprint: str,
+    deployed_sha: str,
+    operation_id: str,
+    evidence_dir: str,
+    manifest_path: str,
+    manifest_sha256: str,
+    phase_operation_id: str,
+    phase_fingerprint: str,
     approval_reference: str,
     phase: str,
+    product_phase_operation_id: str,
+    no_create: bool,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(target, action=f"wbc0027-capital-{action}")
     if action not in {"plan", "apply", "readback"}:
@@ -7547,8 +7560,22 @@ def _run_remote_wbc0027_capital_recovery(
     runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
     if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
         raise ValueError("WBC0027 recovery requires the canonical active runtime dir")
+    deployed_sha = deployed_sha.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
+        raise ValueError("WBC0027 recovery requires one exact deployed SHA")
+    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation_id) is None:
+        raise ValueError("WBC0027 recovery requires one fresh scope-goal operation")
+    if phase not in {"product", "economics"}:
+        raise ValueError("WBC0027 recovery phase is invalid")
+    normalized_evidence = posixpath.normpath(evidence_dir)
+    if (
+        not evidence_dir.startswith("/")
+        or normalized_evidence != evidence_dir
+        or posixpath.basename(evidence_dir) != operation_id
+        or posixpath.basename(posixpath.dirname(evidence_dir)) != "production-goals"
+    ):
+        raise ValueError("WBC0027 private evidence namespace is invalid")
     runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    expected_sha = ""
     runner_args = [
         "python3",
         "apps/wbc0027_capital_recovery.py",
@@ -7557,48 +7584,53 @@ def _run_remote_wbc0027_capital_recovery(
         "--deployed-sha-file",
         runtime_sha_path,
         "--expected-deployed-sha",
-        expected_sha,
+        deployed_sha,
+        "--profile",
+        "product-capital-qualified-economics",
+        "--target-id",
+        target.target_id,
+        "--operation-id",
+        operation_id,
+        "--evidence-dir",
+        evidence_dir,
         action,
+        "--phase",
+        phase,
     ]
-    reviewed_plan_json = ""
-    if action in {"apply", "readback"}:
-        if plan_path is None or not plan_path.is_file():
-            raise ValueError("WBC0027 apply/readback requires an existing reviewed plan")
-        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
-        reviewed = json.loads(reviewed_plan_json)
-        reviewed_deployed_sha = str(reviewed.get("deployed_sha") or "").lower()
-        if re.fullmatch(r"[0-9a-f]{40}", reviewed_deployed_sha) is None:
-            raise ValueError("WBC0027 reviewed plan lacks an exact deployed SHA")
-        runner_args[7] = reviewed_deployed_sha
-        product_counts = dict((reviewed.get("product_capital") or {}).get("counts") or {})
-        economics = dict(reviewed.get("functional_economics") or {})
+    if action == "plan":
+        if phase == "economics":
+            if re.fullmatch(r"recovery_[0-9a-f]{32}", product_phase_operation_id) is None:
+                raise ValueError("WBC0027 economics predecessor identity is invalid")
+            runner_args.extend(
+                ["--product-phase-operation-id", product_phase_operation_id]
+            )
+        if no_create:
+            runner_args.append("--no-create")
+    else:
         if (
-            reviewed.get("contract_name") != "wbc0027_capital_recovery_v1"
-            or product_counts.get("primary_row_count") != 936
-            or product_counts.get("primary_cell_count") != 19656
-            or product_counts.get("primary_mismatch_count") != 7655
-            or product_counts.get("event_path_mismatch_count") != 7639
-            or product_counts.get("separate_20260821_mismatch_count") != 16
-            or economics.get("logical_repair_count") != 298
-            or economics.get("persisted_repair_count") != 472
-            or len(economics.get("evidence_blocked") or []) != 12
+            posixpath.dirname(posixpath.normpath(manifest_path)) != evidence_dir
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256) is None
+            or re.fullmatch(r"recovery_[0-9a-f]{32}", phase_operation_id) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", phase_fingerprint) is None
         ):
-            raise ValueError("WBC0027 reviewed plan does not match the exact accepted scope")
-        runner_args.append("--reviewed-plan-stdin")
+            raise ValueError("WBC0027 reviewed phase binding is invalid")
+        runner_args.extend(
+            [
+                "--manifest",
+                manifest_path,
+                "--manifest-sha256",
+                manifest_sha256,
+                "--phase-operation-id",
+                phase_operation_id,
+                "--phase-fingerprint",
+                phase_fingerprint,
+            ]
+        )
         if action == "apply":
-            if str(reviewed.get("plan_fingerprint") or "") != fingerprint:
-                raise ValueError("WBC0027 reviewed fingerprint differs")
             if not approval_reference.strip():
                 raise ValueError("WBC0027 apply requires immutable approval reference")
             runner_args.extend(
-                [
-                    "--fingerprint",
-                    fingerprint,
-                    "--approval-reference",
-                    approval_reference.strip(),
-                    "--phase",
-                    phase,
-                ]
+                ["--approval-reference", approval_reference.strip()]
             )
     shell_command = " && ".join(
         [
@@ -7611,19 +7643,53 @@ def _run_remote_wbc0027_capital_recovery(
         _remote_shell_command(target, shell_command),
         text=True,
         capture_output=True,
-        input=reviewed_plan_json if reviewed_plan_json else None,
         cwd=ROOT,
         timeout=1800,
         check=False,
     )
-    if result.returncode != 0:
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"WBC0027 capital {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        ) from exc
+    if result.returncode != 0 and not (
+        isinstance(payload, dict)
+        and payload.get("status") in {"not_applied", "ambiguous"}
+    ):
         raise RuntimeError(
             f"WBC0027 capital {action} failed: "
             + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
         )
-    payload = json.loads(result.stdout)
     if not isinstance(payload, dict) or payload.get("status") == "blocked":
         raise RuntimeError("WBC0027 capital runner returned an incomplete result")
+    generation = payload.get("storage_generation")
+    if not (
+        payload.get("profile") == "product-capital-qualified-economics"
+        and payload.get("target_id") == target.target_id
+        and payload.get("goal_operation_id") == operation_id
+        and payload.get("phase") == phase
+        and (
+            payload.get("deployed_sha") == deployed_sha
+            or payload.get("status") in {"not_applied", "ambiguous"}
+        )
+        and (
+            action == "apply"
+            and payload.get("status") in {"not_applied", "ambiguous"}
+            or isinstance(generation, dict)
+            and str(generation.get("generation_id") or "").startswith("operational-")
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(generation.get("manifest_sha256") or ""),
+            )
+        )
+    ):
+        raise RuntimeError("WBC0027 capital runner binding drifted")
+    if action == "plan" and bool(
+        (payload.get("plan_persistence") or {}).get("no_create")
+    ) is not no_create:
+        raise RuntimeError("WBC0027 no-create persistence receipt drifted")
     return payload
 
 
@@ -12528,24 +12594,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     wbc0027_plan = subparsers.add_parser(
         "wbc0027-capital-recovery-plan",
-        help="Build the query-only exact WBC0027 product-capital/economics plan.",
+        help="Build one query-only JIT WBC0027 phase candidate.",
     )
-    wbc0027_plan.add_argument("--output", required=True)
+    wbc0027_plan.add_argument("--deployed-sha", required=True)
+    wbc0027_plan.add_argument("--operation-id", required=True)
+    wbc0027_plan.add_argument("--evidence-dir", required=True)
+    wbc0027_plan.add_argument("--phase", choices=("product", "economics"), required=True)
+    wbc0027_plan.add_argument("--product-phase-operation-id", default="")
+    wbc0027_plan.add_argument("--no-create", action="store_true")
+    wbc0027_plan.add_argument("--output", default="")
     wbc0027_plan.set_defaults(
         handler=run_wbc0027_capital_recovery_command,
         wbc0027_capital_action="plan",
-        plan_file="",
-        fingerprint="",
         approval_reference="",
-        phase="",
     )
 
     wbc0027_apply = subparsers.add_parser(
         "wbc0027-capital-recovery-apply",
-        help="Apply the two exact WBC0027 T1 operations once.",
+        help="Apply one exact reviewed WBC0027 phase once.",
     )
-    wbc0027_apply.add_argument("--plan-file", required=True)
-    wbc0027_apply.add_argument("--fingerprint", required=True)
+    wbc0027_apply.add_argument("--deployed-sha", required=True)
+    wbc0027_apply.add_argument("--operation-id", required=True)
+    wbc0027_apply.add_argument("--evidence-dir", required=True)
+    wbc0027_apply.add_argument("--manifest", required=True)
+    wbc0027_apply.add_argument("--manifest-sha256", required=True)
+    wbc0027_apply.add_argument("--phase-operation-id", required=True)
+    wbc0027_apply.add_argument("--phase-fingerprint", required=True)
     wbc0027_apply.add_argument("--approval-reference", required=True)
     wbc0027_apply.add_argument("--phase", choices=("product", "economics"), required=True)
     wbc0027_apply.add_argument("--output", default="")
@@ -12556,16 +12630,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     wbc0027_readback = subparsers.add_parser(
         "wbc0027-capital-recovery-readback",
-        help="Run query-only readback for both WBC0027 T1 operations.",
+        help="Run same-operation query-only readback for one WBC0027 phase.",
     )
-    wbc0027_readback.add_argument("--plan-file", required=True)
+    wbc0027_readback.add_argument("--deployed-sha", required=True)
+    wbc0027_readback.add_argument("--operation-id", required=True)
+    wbc0027_readback.add_argument("--evidence-dir", required=True)
+    wbc0027_readback.add_argument("--manifest", required=True)
+    wbc0027_readback.add_argument("--manifest-sha256", required=True)
+    wbc0027_readback.add_argument("--phase-operation-id", required=True)
+    wbc0027_readback.add_argument("--phase-fingerprint", required=True)
+    wbc0027_readback.add_argument("--phase", choices=("product", "economics"), required=True)
     wbc0027_readback.add_argument("--output", default="")
     wbc0027_readback.set_defaults(
         handler=run_wbc0027_capital_recovery_command,
         wbc0027_capital_action="readback",
-        fingerprint="",
         approval_reference="",
-        phase="",
+        product_phase_operation_id="",
+        no_create=False,
     )
 
     vitrina_incident_dry_run = subparsers.add_parser(

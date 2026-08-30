@@ -361,11 +361,29 @@ projection row.
 
 ## WBC0027 two-operation recovery
 
-The product-capital correction and qualified cost/Proxy correction are two
-independent T1 identities even when one production-mutation manifest
-orchestrates them. Each phase has its own exact before images, source/non-target
-digests, one-submit boundary and query-only reconciliation. Product-capital
-publication appends one recovery revision and supersedes current pointers; the
-economics phase CAS-updates only three qualified ready-snapshot rows. A
-transport ambiguity is read back by operation identity and never blindly
-resubmitted.
+The historical static production-mutation manifest and its two recovery IDs
+are superseded, non-runnable evidence. The active
+`product-capital-qualified-economics` scope-goal derives two fresh T1
+identities from deployed SHA, exact StoreRegistry generation, goal namespace,
+phase and normalized target material. Product and economics each have one
+submit boundary and same-operation query-only reconciliation; economics is
+not planned until product is retained and exact.
+
+Two consecutive target-semantic witnesses are required per phase, with at
+most three pre-submit regenerations. Ordinary non-target ready publication,
+outbox/event lifecycle and timestamps remain audit observations and may be
+rebased. Under the shared writer lock the phase builder re-reads the exact
+target before image and generation, writes the current T1 undo journal and
+performs full before-image CAS. Target/deployment/generation/schema drift is
+`not_applied`; any uncertainty after mutation start is `ambiguous` and permits
+only readback. Retained exact readback is `applied`. No phase ID, manifest SHA
+or authorization comment from the superseded operation is reusable.
+
+Private phase plans use a pre-existing mode-0700 goal directory, mode-0600
+files, root-storage admission, `O_EXCL` temporary creation, file fsync,
+atomic no-overwrite publication and directory fsync. Product publication
+appends one recovery revision over exactly 1,152 target rows. Economics CAS
+updates only the qualified ready-snapshot rows/cells. Finance, unrelated
+21-August Proxy V4, 30 August and later, and protected 26-August SKU
+`428853741` cost `117.537167` remain hard non-target/invariant evidence. A
+transport ambiguity is never blindly resubmitted.

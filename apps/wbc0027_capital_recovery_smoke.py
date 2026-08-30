@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Static one-submit/manifest smoke for WBC0027 release orchestration."""
+"""JIT, semantic-CAS, and private-persistence smoke for WBC0027."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -14,111 +16,203 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps import wbc0027_capital_recovery_release as operation  # noqa: E402
-from apps.release_protocol import validate_production_manifest  # noqa: E402
+from apps import wbc0027_capital_recovery as recovery  # noqa: E402
 
 
-def _plan() -> dict:
+GOAL = "production-goal-v1-" + "a" * 32
+PRODUCT_OPERATION = "recovery_" + "b" * 32
+DEPLOYED = "c" * 40
+GENERATION = {
+    "generation_id": "operational-smoke",
+    "manifest_sha256": "sha256:" + "d" * 64,
+    "schema_version": 172,
+}
+
+
+def _payload(*, ordinary: str, target: str) -> dict:
+    day = "2026-08-26"
     return {
-        "contract_name": "wbc0027_capital_recovery_v1",
-        "status": "ready",
-        "production_mutation_count": 0,
-        "deployed_sha": "a" * 40,
-        "storage_generation": {
-            "generation_id": "operational-smoke",
-            "manifest_sha256": "sha256:" + "c" * 64,
-            "schema_version": "operational_v1",
-            "operational_path": "/private/operational.sqlite3",
-        },
-        "plan_fingerprint": "sha256:" + "b" * 64,
-        "product_operation_id": "recovery_" + "1" * 32,
-        "economics_operation_id": "recovery_" + "2" * 32,
-        "product_capital": {
-            "before_target_digest": "sha256:0e29a9f06148b6fb9102f5f37db7522523b1202c7d36751023efe9831e56e94a",
-            "non_target_digest": "sha256:" + "d" * 64,
-            "counts": {
-                "primary_row_count": 936,
-                "primary_cell_count": 19656,
-                "primary_mismatch_count": 7655,
-                "event_path_mismatch_count": 7639,
-                "separate_20260821_mismatch_count": 16,
-                "secondary_mismatch_count": 1791,
+        "date_columns": [day],
+        "sheets": [
+            {
+                "sheet_name": "DATA_VITRINA",
+                "header": ["metric", "row_id", day],
+                "rows": [
+                    ["cost", "428853741|our_wb_unit_cost_rub", target],
+                    ["stock", "428853741|warehouse_stock_qty", "ordinary-cell"],
+                ],
             }
+        ],
+        "metadata": {
+            "ordinary_publication": ordinary,
+            "warehouse_history_coverage": {day: {"functional_version_id": "v1"}},
+            "functional_economics_backfill": {
+                "inventory_cost_publication": {"date_evidence": {day: {"exact": True}}}
+            },
         },
-        "functional_economics": {
-            "before_digest": "sha256:529850e0be1d1518f6f6de2f32f650206c6afbf73a093df81359cf42d3e21253",
-            "non_target_digest": "sha256:" + "e" * 64,
-            "logical_repair_count": 298,
-            "persisted_repair_count": 472,
-            "evidence_blocked": [f"blocked-{index}" for index in range(12)],
+    }
+
+
+def _economics(ordinary: str) -> dict:
+    before = _payload(ordinary=ordinary, target="")
+    after = _payload(ordinary=ordinary, target="117.537167")
+    return {
+        "target_dates": ["2026-08-26", "2026-08-29"],
+        "logical_repair_count": 298,
+        "persisted_repair_count": 472,
+        "patch_count": 1,
+        "source_operation_id": recovery.SOURCE_OPERATION_ID,
+        "source_digest": recovery.SOURCE_OPERATION_DIGEST,
+        "protected_invariant": {
+            "as_of_date": "2026-08-26",
+            "nm_id": 428853741,
+            "unit_cost_rub": "117.537167",
+            "status": "separate_exact_invariant_preserved",
         },
-        "ready_snapshot_digest": "sha256:" + "f" * 64,
-        "outbox_digest": "sha256:" + "0" * 64,
+        "evidence_blocked": [f"2026-08-26|blocked-{index}" for index in range(12)],
+        "patches": [
+            {
+                "identity": ["bundle", "2026-08-26", "snapshot"],
+                "business_dates": ["2026-08-26"],
+                "changed_cells": ["2026-08-26|428853741|our_wb_unit_cost_rub"],
+                "before_plan_json": json.dumps(before, sort_keys=True),
+                "after_plan_json": json.dumps(after, sort_keys=True),
+                "before_sha256": recovery._digest(before),
+                "after_sha256": recovery._digest(after),
+            }
+        ],
+        "before_digest": recovery._digest(before),
+        "after_digest": recovery._digest(after),
+        "non_target_digest": recovery._digest({"ordinary": ordinary}),
+    }
+
+
+def _candidate() -> dict:
+    economics = _economics("publication-a")
+    material = recovery._economics_material(
+        economics, product_phase_operation_id=PRODUCT_OPERATION
+    )
+    candidate = recovery._phase_envelope(
+        phase="economics",
+        goal_operation_id=GOAL,
+        deployed_sha=DEPLOYED,
+        generation=GENERATION,
+        material=material,
+    )
+    candidate.update(
+        {
+            "created_at": "2026-08-31T00:00:00+00:00",
+            "functional_economics": economics,
+            "product_predecessor": {
+                "operation_id": PRODUCT_OPERATION,
+                "reconciled": True,
+            },
+        }
+    )
+    return candidate
+
+
+def _admission(*, owner: str, destination: Path, predicted_output_bytes: int) -> dict:
+    return {
+        "owner": owner,
+        "destination": str(destination),
+        "destination_role": "backup",
+        "predicted_output_bytes": predicted_output_bytes,
+        "allowed": True,
     }
 
 
 def main() -> None:
-    manifest_path = ROOT / "release" / "production-mutations" / "wbc0027_capital_recovery.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    validation = validate_production_manifest(manifest)
-    assert validation["valid"], validation
-    assert manifest["operation_id"] == "wbc0027-product-capital-and-qualified-economics-v2"
-    assert manifest["expected_affected_record_count"] == 1155
+    assert recovery.EXPECTED_PRODUCT_ROWS == 1152
+    assert recovery.EXPECTED_PRODUCT_CELLS == 24192
+    assert recovery.EXPECTED_PRODUCT_MISMATCHES == 9446
+    assert recovery.EXPECTED_PRIMARY_MISMATCHES == 7655
+    assert recovery.EXPECTED_SECONDARY_MISMATCHES == 1791
+    assert recovery.EXPECTED_SPECIAL_NM_ID == 497413772
+    assert recovery.EXPECTED_SEPARATE_MISMATCHES == 16
 
-    with tempfile.TemporaryDirectory(prefix="wbc0027-release-smoke-") as temp:
-        original_temp = os.environ.get("RUNNER_TEMP")
-        original_run = operation._run
-        calls: list[tuple[str, str]] = []
-        completed: set[str] = set()
+    material_a = recovery._economics_material(
+        _economics("ordinary-publication-a"),
+        product_phase_operation_id=PRODUCT_OPERATION,
+    )
+    material_b = recovery._economics_material(
+        _economics("ordinary-publication-b"),
+        product_phase_operation_id=PRODUCT_OPERATION,
+    )
+    assert recovery._digest(material_a) == recovery._digest(material_b)
+    changed = _economics("ordinary-publication-b")
+    changed_payload = json.loads(changed["patches"][0]["after_plan_json"])
+    changed_payload["sheets"][0]["rows"][0][2] = "999.000000"
+    changed["patches"][0]["after_plan_json"] = json.dumps(changed_payload, sort_keys=True)
+    assert recovery._digest(
+        recovery._economics_material(
+            changed, product_phase_operation_id=PRODUCT_OPERATION
+        )
+    ) != recovery._digest(material_a)
 
-        def fake_run(arguments: list[str], *, allow_failure: bool = False) -> dict:
-            phase = arguments[arguments.index("--phase") + 1] if "--phase" in arguments else ""
-            calls.append((arguments[0], phase))
-            if arguments[0] == "wbc0027-capital-recovery-plan":
-                plan = _plan()
-                output = Path(arguments[arguments.index("--output") + 1])
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
-                return plan
-            if arguments[0] == "wbc0027-capital-recovery-apply":
-                assert allow_failure is True
-                completed.add(phase)
-                return {"status": "transport_ambiguous", "return_code": 255}
-            assert arguments[0] == "wbc0027-capital-recovery-readback"
-            product_exact = "product" in completed
-            economics_exact = "economics" in completed
-            return {
-                "status": "reconciled" if product_exact and economics_exact else "pending_reconciliation",
-                "query_only": True,
-                "product_operation_id": _plan()["product_operation_id"],
-                "economics_operation_id": _plan()["economics_operation_id"],
-                "product_exact": product_exact,
-                "economics_exact": economics_exact,
-                "product_recovery_lifecycle": "retained" if product_exact else "missing",
-                "economics_recovery_lifecycle": "retained" if economics_exact else "missing",
-            }
-
+    for legacy in recovery.LEGACY_RELEASE_OPERATION_IDS:
         try:
-            os.environ["RUNNER_TEMP"] = temp
-            operation._run = fake_run
-            dry = operation.dry_run()
-            assert dry["production_mutation_count"] == 0
-            assert dry["product_counts"]["primary_mismatch_count"] == 7655
-            assert dry["manifest_operation_id"].endswith("-v2")
-            assert dry["storage_generation"]["generation_id"] == "operational-smoke"
-            applied = operation.apply()
-            assert applied["status"] == "reconciled"
-            repeated = operation.apply()
-            assert repeated["status"] == "reconciled"
-            assert calls.count(("wbc0027-capital-recovery-apply", "product")) == 1, calls
-            assert calls.count(("wbc0027-capital-recovery-apply", "economics")) == 1, calls
-            assert calls.count(("wbc0027-capital-recovery-readback", "")) == 4, calls
-        finally:
-            operation._run = original_run
-            if original_temp is None:
-                os.environ.pop("RUNNER_TEMP", None)
-            else:
-                os.environ["RUNNER_TEMP"] = original_temp
+            recovery._validate_goal_namespace(legacy)
+        except recovery.Wbc0027RecoveryError:
+            pass
+        else:
+            raise AssertionError("legacy WBC0027 operation was accepted")
+
+    with tempfile.TemporaryDirectory(prefix="wbc0027-jit-smoke-") as raw:
+        root = Path(raw)
+        production_goals = root / "production-goals"
+        production_goals.mkdir(mode=0o700)
+        evidence_dir = production_goals / GOAL
+        candidate = _candidate()
+        simulated = recovery.publish_candidate(
+            candidate=candidate,
+            evidence_dir=evidence_dir,
+            no_create=True,
+            admission_factory=_admission,
+        )
+        assert simulated["status"] == "ready"
+        assert simulated["manifest_path"] == ""
+        assert simulated["plan_persistence"]["no_create"] is True
+        assert not evidence_dir.exists(), "no-create qualification created evidence state"
+
+        evidence_dir.mkdir(mode=0o700)
+
+        def writer(path: Path, payload: dict, **kwargs: object) -> dict:
+            return recovery._write_private(
+                path,
+                payload,
+                admission_factory=_admission,
+                **kwargs,
+            )
+
+        persisted = recovery.publish_candidate(
+            candidate=deepcopy(candidate),
+            evidence_dir=evidence_dir,
+            no_create=False,
+            writer=writer,
+        )
+        manifest = Path(persisted["manifest_path"])
+        assert manifest.is_file()
+        assert manifest.stat().st_mode & 0o777 == 0o600
+        assert evidence_dir.stat().st_mode & 0o777 == 0o700
+        receipt = persisted["plan_persistence"]
+        assert receipt["atomic_publish"] is True
+        assert receipt["no_overwrite"] is True
+        assert receipt["durable_file_fsync"] is True
+        assert receipt["durable_directory_fsync"] is True
+        assert persisted["manifest_sha256"] == recovery._file_digest(manifest)
+
+    wrapper = subprocess.run(
+        [sys.executable, str(ROOT / "apps/wbc0027_capital_recovery_release.py"), "apply"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "RUNNER_TEMP": ""},
+    )
+    blocked = json.loads(wrapper.stdout)
+    assert wrapper.returncode == 1
+    assert blocked["reason"] == "historical_superseded_non_runnable"
+    assert blocked["production_mutation_submit_count"] == 0
     print("wbc0027_capital_recovery_smoke: OK")
 
 

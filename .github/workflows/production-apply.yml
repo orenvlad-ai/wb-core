@@ -150,13 +150,14 @@ jobs:
           pypdf==6.4.1 reportlab==4.4.5
 
       - name: Validate exact task passport, qualify dynamic manifest and apply once
-        # WBC0013 is the sole exact two-phase exception: the runner enforces
-        # one dense-A submit, query-only A reconciliation, then one historical-B
-        # submit and query-only B reconciliation under the same goal passport.
+        # Exact two-phase profiles are closed and profile-specific: WBC0013 runs
+        # dense-A then historical-B; WBC0027 runs product then fresh economics.
+        # Each phase has one submit and must reconcile query-only before the next.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics
         run: >-
           python3 apps/production_apply_runner.py
           --authorization-mode "${{ inputs.authorization_mode }}"
