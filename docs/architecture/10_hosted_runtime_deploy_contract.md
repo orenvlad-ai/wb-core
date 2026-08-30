@@ -806,14 +806,19 @@ Archived MCP compatibility publication gate:
   exclusive migration lock and `BEGIN IMMEDIATE`, so an ordinary HTTP restart
   cannot lose startup to a concurrent bounded worker transaction;
 - canonical deploy sets `WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE=1` for
-  `prepare-deploy`. The repo-owned quiet window stops only the exact
-  Autoanswers timers/services and registry HTTP service, records their prior
-  state, migrates all Autoanswers tables from the main runtime DB into
+  `prepare-deploy`. The repo-owned quiet window records the exact timer/service
+  state and first stops only the Autoanswers timers that were active, closing
+  new worker/readonly admission. It boundedly waits for both paired oneshots to
+  become terminal and never issues `systemctl stop` to an active oneshot. A
+  timeout fails closed before registry or schema mutation and restores exactly
+  the previously active timers. Only after drain does it stop registry HTTP and
+  migrate all Autoanswers tables from the main runtime DB into
   `wb_autoanswers_runtime.sqlite3` from one query-only snapshot, verifies
   per-table counts/digests plus SQLite integrity/foreign keys/source
   `data_version`, atomically publishes a private manifest and restores the
   registry service and exactly the timers that were active before the quiet
-  window. Interrupted one-shot executions resume idempotently on those timers.
+  window. This prevents a deploy from killing an in-flight provider call
+  between provider entry and usage/cost readback.
   The legacy tables remain intact as rollback evidence; no ordinary worker or
   readonly-sync connection returns to them.
 - interrupted publication is fail-closed: the private `prepared` manifest is

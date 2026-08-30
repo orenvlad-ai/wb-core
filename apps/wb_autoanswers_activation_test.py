@@ -25,6 +25,7 @@ from apps.wb_autoanswers_activation import (
     _compress_verified_current_schema_backup,
     _create_current_compressed_schema_backup,
     _create_streamed_current_compressed_schema_backup,
+    _deployment_quiesce,
     _integrity_check,
     _prepare_backup_capacity,
     _schema_preparation_lock,
@@ -50,6 +51,182 @@ class ActivationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    @staticmethod
+    def _systemd_show_result(
+        command: list[str],
+        *,
+        active_state: str,
+        sub_state: str,
+        result: str = "success",
+        main_pid: str = "0",
+        exec_main_status: str = "0",
+        invocation_id: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        stdout = "\n".join(
+            (
+                "LoadState=loaded",
+                f"ActiveState={active_state}",
+                f"SubState={sub_state}",
+                f"Result={result}",
+                f"MainPID={main_pid}",
+                f"ExecMainStatus={exec_main_status}",
+                f"InvocationID={invocation_id}",
+            )
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    def test_deploy_quiesce_drains_active_provider_job_without_service_stop(self) -> None:
+        commands: list[list[str]] = []
+        worker_show_count = 0
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal worker_show_count
+            commands.append(command)
+            if command[:2] != ["systemctl", "show"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            unit = command[2]
+            if unit.endswith(".timer") or unit == "wb-core-registry-http.service":
+                return self._systemd_show_result(
+                    command,
+                    active_state="active",
+                    sub_state="waiting" if unit.endswith(".timer") else "running",
+                    main_pid="321" if unit == "wb-core-registry-http.service" else "0",
+                )
+            if unit == "wb-core-autoanswers-worker.service":
+                worker_show_count += 1
+                if worker_show_count < 3:
+                    return self._systemd_show_result(
+                        command,
+                        active_state="activating",
+                        sub_state="start",
+                        main_pid="456",
+                        invocation_id="provider-call-in-flight",
+                    )
+            return self._systemd_show_result(
+                command,
+                active_state="inactive",
+                sub_state="dead",
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"},
+                clear=False,
+            ),
+            patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+            patch("apps.wb_autoanswers_activation.time.sleep", return_value=None),
+        ):
+            with _deployment_quiesce() as evidence:
+                self.assertTrue(evidence["applied"])
+                self.assertEqual(evidence["active_service_stop_submits"], 0)
+                self.assertGreaterEqual(len(evidence["service_drain_samples"]), 2)
+
+        stopped_units = [command[2] for command in commands if command[:2] == ["systemctl", "stop"]]
+        self.assertIn("wb-core-autoanswers-worker.timer", stopped_units)
+        self.assertIn("wb-core-autoanswers-readonly-sync.timer", stopped_units)
+        self.assertIn("wb-core-registry-http.service", stopped_units)
+        self.assertNotIn("wb-core-autoanswers-worker.service", stopped_units)
+        self.assertNotIn("wb-core-autoanswers-readonly-sync.service", stopped_units)
+
+    def test_deploy_quiesce_timeout_restores_timers_without_killing_worker(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command[:2] != ["systemctl", "show"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            unit = command[2]
+            if unit == "wb-core-autoanswers-worker.service":
+                return self._systemd_show_result(
+                    command,
+                    active_state="activating",
+                    sub_state="start",
+                    main_pid="456",
+                    invocation_id="hung-provider-call",
+                )
+            if unit.endswith(".timer") or unit == "wb-core-registry-http.service":
+                return self._systemd_show_result(
+                    command,
+                    active_state="active",
+                    sub_state="waiting" if unit.endswith(".timer") else "running",
+                )
+            return self._systemd_show_result(
+                command,
+                active_state="inactive",
+                sub_state="dead",
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"},
+                clear=False,
+            ),
+            patch("apps.wb_autoanswers_activation.DEPLOYMENT_DRAIN_TIMEOUT_SECONDS", 0),
+            patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "drain timed out"):
+                with _deployment_quiesce():
+                    self.fail("timed-out quiesce must not enter the mutation body")
+
+        stopped_units = [command[2] for command in commands if command[:2] == ["systemctl", "stop"]]
+        started_units = [command[2] for command in commands if command[:2] == ["systemctl", "start"]]
+        self.assertNotIn("wb-core-autoanswers-worker.service", stopped_units)
+        self.assertNotIn("wb-core-registry-http.service", stopped_units)
+        self.assertEqual(
+            started_units,
+            [
+                "wb-core-autoanswers-worker.timer",
+                "wb-core-autoanswers-readonly-sync.timer",
+            ],
+        )
+
+    def test_deploy_quiesce_accepts_terminal_failed_oneshot_and_preserves_no_active_timer(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command[:2] != ["systemctl", "show"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            unit = command[2]
+            if unit == "wb-core-autoanswers-worker.timer":
+                return self._systemd_show_result(command, active_state="inactive", sub_state="dead")
+            if unit == "wb-core-autoanswers-readonly-sync.timer":
+                return self._systemd_show_result(command, active_state="active", sub_state="waiting")
+            if unit == "wb-core-registry-http.service":
+                return self._systemd_show_result(command, active_state="active", sub_state="running")
+            if unit == "wb-core-autoanswers-worker.service":
+                return self._systemd_show_result(
+                    command,
+                    active_state="failed",
+                    sub_state="failed",
+                    result="exit-code",
+                    exec_main_status="1",
+                )
+            return self._systemd_show_result(command, active_state="inactive", sub_state="dead")
+
+        with (
+            patch.dict(
+                os.environ,
+                {"WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"},
+                clear=False,
+            ),
+            patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+        ):
+            with _deployment_quiesce() as evidence:
+                self.assertEqual(
+                    evidence["active_timers"],
+                    ["wb-core-autoanswers-readonly-sync.timer"],
+                )
+
+        worker_timer_starts = [
+            command
+            for command in commands
+            if command == ["systemctl", "start", "wb-core-autoanswers-worker.timer"]
+        ]
+        self.assertEqual(worker_timer_starts, [])
 
     def test_capacity_heartbeat_keeps_long_remote_verification_observable(self) -> None:
         output = StringIO()
